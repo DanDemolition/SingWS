@@ -1,12 +1,26 @@
-# SingWS
+<div align="center">
+  <img src="singws-icon-transparent.png" width="120" alt="SingWS logo" />
+  <h1>SingWS</h1>
+  <p><strong>Professional karaoke host software for KJs and venues.</strong></p>
 
-**Professional karaoke host software for KJs and venues.**
+  ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+  ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
+  ![PyQt6](https://img.shields.io/badge/PyQt6-UI-41CD52?logo=qt&logoColor=white)
+  ![GStreamer](https://img.shields.io/badge/GStreamer-audio-orange)
+  ![License](https://img.shields.io/github/license/DanDemolition/SingWS)
+</div>
+
+---
 
 SingWS is a Python/PyQt desktop application that handles everything a live karaoke host needs: song playback with realtime key and tempo control, singer rotation management, and live song request intake from singers via a companion web app.
 
-![SingWS all screens](design/all-screens-mockup.png)
+<div align="center">
+  <img src="design/all-screens-mockup.png" alt="SingWS all screens" />
+</div>
 
-![SingWS main screen](design/main-screen-mockup.png)
+<div align="center">
+  <img src="design/main-screen-mockup.png" alt="SingWS main screen" />
+</div>
 
 ---
 
