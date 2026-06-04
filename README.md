@@ -4,6 +4,8 @@
 
 SingWS is a Python/PyQt desktop application that handles everything a live karaoke host needs: song playback with realtime key and tempo control, singer rotation management, and live song request intake from singers via a companion web app.
 
+![SingWS all screens](design/all-screens-mockup.png)
+
 ![SingWS main screen](design/main-screen-mockup.png)
 
 ---
