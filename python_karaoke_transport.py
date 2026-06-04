@@ -16,11 +16,6 @@ from PyQt6.QtMultimedia import QAudioFormat, QAudioSink
 
 import signalsmith_audio_native
 
-try:
-    from singws_eq import GraphicEQ as _SingWSGraphicEQ
-except Exception:  # pragma: no cover — EQ is optional
-    _SingWSGraphicEQ = None
-
 
 NS_PER_SECOND = 1_000_000_000
 CDG_WIDTH = 300
@@ -896,9 +891,19 @@ class PythonKaraokeTransport(QObject):
         self.video_reader = None
         self._sync_last_log_ns = 0
         self._sync_dropped_visual_packets = 0
+        self.visual_timer_interval_ms = 15
         self.timer = QTimer(self)
-        self.timer.setInterval(15)
+        self.timer.setInterval(self.visual_timer_interval_ms)
         self.timer.timeout.connect(self._tick)
+
+    def set_visual_timer_interval_ms(self, interval_ms: int):
+        """Throttle only visual/CDG/MP4 frame polling; audio remains the clock."""
+        try:
+            interval = max(15, min(80, int(interval_ms)))
+        except Exception:
+            interval = 15
+        self.visual_timer_interval_ms = interval
+        self.timer.setInterval(interval)
 
     def start(self, start_seconds: float = 0.0):
         self.seek(start_seconds)

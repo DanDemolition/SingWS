@@ -2422,6 +2422,8 @@ class BackgroundMusicPlayer(QObject):
             try:
                 parent = self.parent()
                 simple = bool(parent.settings.get("simple_audio_mode", True)) if (parent is not None and hasattr(parent, "settings")) else True
+                if parent is not None and not simple and hasattr(parent, "_ensure_eq_engines"):
+                    parent._ensure_eq_engines()
                 bgm_eq = getattr(parent, "bgm_eq", None) if parent is not None else None
                 if bgm_eq is not None and not simple:
                     self._bass_engine.set_eq(bgm_eq)
@@ -8022,9 +8024,12 @@ class VideoWindow(QWidget):
             if hasattr(self.ticker, "start_scrolling"):
                 self.ticker.start_scrolling()
             elif hasattr(self.ticker, "scroll_timer"):
-                self.ticker.scroll_timer.start(16)
+                interval = int(getattr(self.ticker, "_frame_interval_ms", 16) or 16)
+                self.ticker.scroll_timer.start(max(6, interval))
             if hasattr(self.ticker, "queue_update_timer"): self.ticker.queue_update_timer.start(5000)
-            if hasattr(self.ticker, "right_update_timer"): self.ticker.right_update_timer.start(300)
+            if hasattr(self.ticker, "right_update_timer"):
+                right_interval = 1000 if (owner and hasattr(owner, "_performance_mode") and owner._performance_mode()) else 300
+                self.ticker.right_update_timer.start(right_interval)
         else:
             # stop timers to save CPU while hidden
             if hasattr(self.ticker, "stop_scrolling"):
@@ -10211,52 +10216,13 @@ class KaraokeApp(QWidget):
         self.settings = self.load_settings()
         _had_perf_setting = "performance_mode" in self.settings
 
-        # --- 10-band graphic EQ instances (karaoke + BGM) ---
-        # Created up-front so the audio engines can attach them as they spin
-        # up, and so the EQ dialog can be opened/closed without losing state.
-        try:
-            from singws_eq import GraphicEQ
-            self.karaoke_eq = GraphicEQ(sample_rate=44100, channels=2)
-            self.bgm_eq = GraphicEQ(sample_rate=48000, channels=2)
-            # Apply any persisted band settings.
-            saved_k = self.settings.get("eq_karaoke", [])
-            saved_b = self.settings.get("eq_bgm", [])
-            if isinstance(saved_k, list) and saved_k:
-                self.karaoke_eq.set_all_gains_db(saved_k)
-            if isinstance(saved_b, list) and saved_b:
-                self.bgm_eq.set_all_gains_db(saved_b)
-            # Enabled if explicitly turned on previously OR if any band is
-            # non-zero (e.g. user moved sliders in an older build that
-            # never auto-enabled them).
-            def _auto_enable(eq_obj, enabled_key: str) -> bool:
-                if bool(self.settings.get(enabled_key, False)):
-                    return True
-                if not eq_obj.is_flat():
-                    self.settings[enabled_key] = True
-                    return True
-                return False
-
-            self.karaoke_eq.set_enabled(_auto_enable(self.karaoke_eq, "eq_karaoke_enabled"))
-            self.bgm_eq.set_enabled(_auto_enable(self.bgm_eq, "eq_bgm_enabled"))
-
-            # The BGM (BackgroundMusicPlayer) was constructed earlier in
-            # __init__, before self.bgm_eq existed.  Push the EQ into its
-            # already-running BASS engine now so the DSP callback gets
-            # registered.
-            try:
-                bg = getattr(self, "bg_music", None)
-                bass = getattr(bg, "_bass_engine", None) if bg is not None else None
-                if bass is not None and hasattr(bass, "set_eq"):
-                    bass.set_eq(self.bgm_eq)
-            except Exception:
-                pass
-        except Exception as _eq_init_err:
-            self.karaoke_eq = None
-            self.bgm_eq = None
-            try:
-                _diag(f"[EQ] init failed: {_eq_init_err}")
-            except Exception:
-                pass
+        # EQ is intentionally lazy. Importing scipy/numpy on every launch made
+        # Intel startup noticeably slower even when Simple Audio Mode bypassed
+        # EQ entirely. The engines are created only when advanced audio/EQ UI
+        # actually needs them.
+        self.karaoke_eq = None
+        self.bgm_eq = None
+        self._eq_init_error = None
 
         # --- Tooltip visibility (off by default; user opts in via Settings) ---
         # macOS Qt fires tooltips aggressively across our dense UI, which is
@@ -12179,9 +12145,60 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _ensure_eq_engines(self) -> bool:
+        """Create EQ engines only when advanced audio needs them.
+
+        This avoids importing scipy/numpy during normal Intel startup. Simple
+        Audio Mode keeps EQ truly bypassed with transport.eq = None.
+        """
+        if getattr(self, "karaoke_eq", None) is not None and getattr(self, "bgm_eq", None) is not None:
+            return True
+        try:
+            from singws_eq import GraphicEQ
+            self.karaoke_eq = GraphicEQ(sample_rate=44100, channels=2)
+            self.bgm_eq = GraphicEQ(sample_rate=48000, channels=2)
+
+            saved_k = self.settings.get("eq_karaoke", [])
+            saved_b = self.settings.get("eq_bgm", [])
+            if isinstance(saved_k, list) and saved_k:
+                self.karaoke_eq.set_all_gains_db(saved_k)
+            if isinstance(saved_b, list) and saved_b:
+                self.bgm_eq.set_all_gains_db(saved_b)
+
+            def _auto_enable(eq_obj, enabled_key: str) -> bool:
+                if bool(self.settings.get(enabled_key, False)):
+                    return True
+                if not eq_obj.is_flat():
+                    self.settings[enabled_key] = True
+                    return True
+                return False
+
+            self.karaoke_eq.set_enabled(_auto_enable(self.karaoke_eq, "eq_karaoke_enabled"))
+            self.bgm_eq.set_enabled(_auto_enable(self.bgm_eq, "eq_bgm_enabled"))
+
+            try:
+                bg = getattr(self, "bg_music", None)
+                bass = getattr(bg, "_bass_engine", None) if bg is not None else None
+                if bass is not None and hasattr(bass, "set_eq"):
+                    bass.set_eq(self.bgm_eq)
+            except Exception:
+                pass
+            self._eq_init_error = None
+            return True
+        except Exception as exc:
+            self.karaoke_eq = None
+            self.bgm_eq = None
+            self._eq_init_error = exc
+            try:
+                _diag(f"[EQ] lazy init failed: {exc}")
+            except Exception:
+                pass
+            return False
+
     def configure_eq(self):
         """Open the 10-band graphic EQ dialog with side-by-side
         Karaoke / BGM columns and shared presets."""
+        self._ensure_eq_engines()
         if getattr(self, "karaoke_eq", None) is None or getattr(self, "bgm_eq", None) is None:
             QMessageBox.warning(self, "EQ unavailable",
                                 "Could not initialise the EQ engine.  Check that "
@@ -13331,9 +13348,13 @@ class KaraokeApp(QWidget):
         # MP4 decode-resolution cap (downscale only).  Lower values keep
         # playback smooth on weak GPUs (Intel Macs); 0 = native resolution.
         try:
-            transport.max_video_height = int(self.settings.get("mp4_max_height", 720) or 0)
+            transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             transport.max_video_height = 720
+        try:
+            transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
+        except Exception:
+            pass
         transport.frame_ready.connect(self._on_python_karaoke_frame)
         transport.ended.connect(self._on_python_karaoke_ended)
         transport.set_modifiers(
@@ -13345,6 +13366,8 @@ class KaraokeApp(QWidget):
         # Audio Mode (default) leaves transport.eq = None, which truly removes
         # the EQ from the processing chain (no DSP), not just hides the UI.
         try:
+            if not simple_audio:
+                self._ensure_eq_engines()
             transport.eq = None if simple_audio else getattr(self, "karaoke_eq", None)
         except Exception:
             pass
@@ -15725,6 +15748,8 @@ class KaraokeApp(QWidget):
                 if bg is not None:
                     eng = getattr(bg, "_bass_engine", None)
                     if eng is not None and hasattr(eng, "set_eq"):
+                        if not checked:
+                            self._ensure_eq_engines()
                         eng.set_eq(None if checked else getattr(self, "bgm_eq", None))
                     bg._refresh_bg_normalize()
             except Exception:
@@ -15935,6 +15960,8 @@ class KaraokeApp(QWidget):
                     self.bg_music._refresh_bg_normalize()
                     eng = getattr(self.bg_music, "_bass_engine", None)
                     if eng is not None and hasattr(eng, "set_eq"):
+                        if not self._simple_audio_mode():
+                            self._ensure_eq_engines()
                         eng.set_eq(None if self._simple_audio_mode() else getattr(self, "bgm_eq", None))
                 self.update_queue_display()
             except Exception:
@@ -23130,6 +23157,35 @@ class KaraokeApp(QWidget):
             return "standard"
         return str(self.settings.get("cdg_quality_mode", "standard") or "standard").lower()
 
+    def _effective_mp4_max_height(self) -> int:
+        """MP4 decode cap; lower pixel throughput is a major Intel win."""
+        if self._safe_mode():
+            return 480
+        if self._performance_mode():
+            return 540
+        try:
+            return int(self.settings.get("mp4_max_height", 720) or 0)
+        except Exception:
+            return 720
+
+    def _effective_visual_timer_interval_ms(self) -> int:
+        """Throttle visual polling only. Audio timing remains authoritative."""
+        if self._safe_mode():
+            return 50
+        return 33 if self._performance_mode() else 15
+
+    def _effective_ticker_speed_px_per_sec(self, saved_speed=None) -> float:
+        try:
+            speed = float(saved_speed if saved_speed is not None else self.settings.get("ticker_speed_px_per_sec", TICKER_SPEED_DEFAULT))
+        except Exception:
+            speed = TICKER_SPEED_DEFAULT
+        speed = max(TICKER_SPEED_MIN, min(TICKER_SPEED_MAX, speed))
+        if self._safe_mode():
+            return min(speed, 30.0)
+        if self._performance_mode():
+            return min(speed, 45.0)
+        return speed
+
     def _apply_performance_mode_runtime(self):
         """Apply runtime-only performance governors without overwriting user choices."""
         try:
@@ -23138,6 +23194,20 @@ class KaraokeApp(QWidget):
                 self.video_window.video_area.set_cdg_quality_mode(quality)
             if hasattr(self, "preview_window") and hasattr(self.preview_window, "video_area"):
                 self.preview_window.video_area.set_cdg_quality_mode(quality)
+        except Exception:
+            pass
+        try:
+            ticker = getattr(getattr(self, "video_window", None), "ticker", None)
+            if ticker is not None and hasattr(ticker, "set_scroll_speed"):
+                ticker.set_scroll_speed(self._effective_ticker_speed_px_per_sec())
+        except Exception:
+            pass
+        try:
+            transport = getattr(self, "karaoke_transport", None)
+            if transport is not None and hasattr(transport, "set_visual_timer_interval_ms"):
+                transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
+                if hasattr(transport, "max_video_height"):
+                    transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             pass
 
@@ -27581,11 +27651,21 @@ class QmlTicker(QFrame):
 
     def set_scroll_speed(self, px_per_sec) -> None:
         """Live-update the marquee scroll speed (pixels/second)."""
-        self._scroll_speed_px_per_sec = self._clamp_scroll_speed(px_per_sec)
+        self._scroll_speed_px_per_sec = self._effective_scroll_speed(px_per_sec)
         try:
             self.bridge.set_speed(self._scroll_speed_px_per_sec)
         except Exception:
             pass
+
+    def _effective_scroll_speed(self, px_per_sec) -> float:
+        speed = self._clamp_scroll_speed(px_per_sec)
+        try:
+            owner = self._settings_owner()
+            if owner is not None and hasattr(owner, "_effective_ticker_speed_px_per_sec"):
+                return float(owner._effective_ticker_speed_px_per_sec(speed))
+        except Exception:
+            pass
+        return speed
 
     def _format_queue_text(self):
         custom_msg = ""
@@ -27775,7 +27855,7 @@ class Ticker(QFrame):
         # the size preset here, so changing size or reopening settings made the
         # ticker slow back down after a save.
         try:
-            pps = max(float(TICKER_SPEED_MIN), min(float(TICKER_SPEED_MAX), float(self._scroll_speed_px_per_sec)))
+            pps = self._effective_scroll_speed(self._scroll_speed_px_per_sec)
             self._frame_interval_ms = max(6, int(round(1000.0 / pps)))
         except Exception:
             self._frame_interval_ms = TICKER_SIZE_TICK_INTERVALS_MS[idx]
@@ -27796,7 +27876,7 @@ class Ticker(QFrame):
         controlled by the tick interval: interval_ms = 1000 / px_per_sec.
         """
         try:
-            pps = max(float(TICKER_SPEED_MIN), min(float(TICKER_SPEED_MAX), float(px_per_sec)))
+            pps = self._effective_scroll_speed(px_per_sec)
         except Exception:
             return
         self._scroll_speed_px_per_sec = pps
@@ -27804,6 +27884,19 @@ class Ticker(QFrame):
         self._frame_interval_ms = interval_ms
         if self.frame_timer.isActive():
             self.frame_timer.start(self._frame_interval_ms)
+
+    def _effective_scroll_speed(self, px_per_sec) -> float:
+        try:
+            pps = max(float(TICKER_SPEED_MIN), min(float(TICKER_SPEED_MAX), float(px_per_sec)))
+        except Exception:
+            pps = TICKER_SPEED_DEFAULT
+        try:
+            owner = self._settings_owner()
+            if owner is not None and hasattr(owner, "_effective_ticker_speed_px_per_sec"):
+                return float(owner._effective_ticker_speed_px_per_sec(pps))
+        except Exception:
+            pass
+        return pps
 
     def set_bold(self, enabled: bool):
         self._bold = bool(enabled)
