@@ -252,6 +252,7 @@ _setup_gstreamer_runtime_paths()
 import shutil
 import subprocess
 import json
+import hashlib
 import song_index  # local module (~/SingWS/singws.db)
 try:
     from mutagen import File as MutagenFile
@@ -1014,6 +1015,218 @@ class IndexBuildThread(QThread):
             self.done.emit(True, "Import Complete")
         except Exception as e:
             self.done.emit(False, f"Import failed: {e}")
+
+
+def _version_key(value: str) -> tuple:
+    parts = []
+    for part in re.split(r"[^0-9]+", str(value or "").lstrip("vV")):
+        if part == "":
+            continue
+        try:
+            parts.append(int(part))
+        except Exception:
+            parts.append(0)
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts[:6])
+
+
+def _is_newer_version(remote: str, current: str) -> bool:
+    return _version_key(remote) > _version_key(current)
+
+
+def _preferred_update_asset(assets: list) -> dict | None:
+    dmg_assets = [a for a in (assets or []) if str(a.get("name", "")).lower().endswith(".dmg")]
+    if not dmg_assets:
+        return None
+    machine = platform.machine().lower()
+    preferred_terms = []
+    if sys.platform == "darwin":
+        if machine in {"arm64", "aarch64"}:
+            preferred_terms = ["arm64", "universal"]
+        elif machine in {"x86_64", "amd64", "i386", "i686"}:
+            preferred_terms = ["x86_64", "intel", "universal"]
+    for term in preferred_terms:
+        for asset in dmg_assets:
+            if term in str(asset.get("name", "")).lower():
+                return asset
+    return dmg_assets[0]
+
+
+class GitHubUpdateWorker(QThread):
+    checked = pyqtSignal(dict)
+    progress = pyqtSignal(int, str)
+    downloaded = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, *, repo: str, current_version: str, manifest_url: str = "", download_dir: str = "", download: bool = False):
+        super().__init__()
+        self.repo = str(repo or "DanDemolition/SingWS").strip()
+        self.current_version = str(current_version or "")
+        self.manifest_url = str(manifest_url or "").strip()
+        self.download_dir = str(download_dir or "")
+        self.download = bool(download)
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+        try:
+            self.requestInterruption()
+        except Exception:
+            pass
+
+    def _default_download_dir(self) -> Path:
+        if self.download_dir.strip():
+            return Path(os.path.expanduser(self.download_dir.strip()))
+        return Path.home() / "Downloads" / "SingWS Updates"
+
+    def _fetch_latest_release(self) -> dict:
+        repo = self.repo.strip().strip("/")
+        if "/" not in repo:
+            repo = "DanDemolition/SingWS"
+        url = f"https://api.github.com/repos/{repo}/releases/latest"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"SingWS/{APP_VERSION}",
+        }
+        resp = requests.get(url, headers=headers, timeout=12)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _fetch_release_manifest(self) -> dict:
+        url = self.manifest_url.strip()
+        if not url:
+            raise RuntimeError("No update manifest URL configured")
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": f"SingWS/{APP_VERSION}",
+        }
+        resp = requests.get(url, headers=headers, timeout=12)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _release_info(self, release: dict) -> dict:
+        tag = str(release.get("tag_name") or release.get("name") or "").strip()
+        version = tag.lstrip("vV")
+        asset = _preferred_update_asset(release.get("assets") or [])
+        available = bool(version and _is_newer_version(version, self.current_version) and asset)
+        return {
+            "available": available,
+            "current_version": self.current_version,
+            "version": version,
+            "tag": tag,
+            "name": str(release.get("name") or tag or version),
+            "html_url": str(release.get("html_url") or ""),
+            "published_at": str(release.get("published_at") or ""),
+            "asset": asset or {},
+        }
+
+    def _manifest_info(self, manifest: dict) -> dict:
+        version = str(manifest.get("version") or "").strip().lstrip("vV")
+        downloads = manifest.get("downloads") or {}
+        asset = {}
+        keys = []
+        machine = platform.machine().lower()
+        if sys.platform == "darwin":
+            if machine in {"arm64", "aarch64"}:
+                keys = ["mac_arm64", "mac_universal"]
+            elif machine in {"x86_64", "amd64", "i386", "i686"}:
+                keys = ["mac_x86_64", "mac_universal"]
+        keys.append("mac_universal")
+        for key in keys:
+            item = downloads.get(key)
+            if isinstance(item, dict) and item.get("url"):
+                asset = {
+                    "name": str(item.get("filename") or f"SingWS-{version}.dmg"),
+                    "browser_download_url": str(item.get("url") or ""),
+                    "digest": f"sha256:{item.get('sha256')}" if item.get("sha256") else "",
+                }
+                break
+        available = bool(version and _is_newer_version(version, self.current_version) and asset)
+        return {
+            "available": available,
+            "current_version": self.current_version,
+            "version": version,
+            "tag": f"v{version}" if version else "",
+            "name": str(manifest.get("name") or f"SingWS {version}"),
+            "html_url": str(manifest.get("release_url") or ""),
+            "published_at": str(manifest.get("release_date") or ""),
+            "asset": asset,
+            "source": "manifest",
+        }
+
+    def _download_asset(self, info: dict) -> dict:
+        asset = dict(info.get("asset") or {})
+        url = str(asset.get("browser_download_url") or "")
+        name = str(asset.get("name") or f"SingWS-{info.get('version', 'update')}.dmg")
+        if not url:
+            raise RuntimeError("Release asset has no download URL")
+        out_dir = self._default_download_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / name
+        tmp_path = out_dir / f".{name}.download"
+        headers = {"User-Agent": f"SingWS/{APP_VERSION}"}
+        started = time.perf_counter()
+        with requests.get(url, headers=headers, stream=True, timeout=(12, 30)) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length") or asset.get("size") or 0)
+            done = 0
+            last_pct = -1
+            last_emit = 0.0
+            with open(tmp_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1024 * 256):
+                    if self._cancel or self.isInterruptionRequested():
+                        raise RuntimeError("Download cancelled")
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    done += len(chunk)
+                    if total > 0:
+                        pct = max(0, min(100, int(done * 100 / total)))
+                    else:
+                        pct = 0
+                    now = time.monotonic()
+                    if pct != last_pct and (pct >= last_pct + 1 or now - last_emit >= 0.5):
+                        last_pct = pct
+                        last_emit = now
+                        self.progress.emit(pct, f"Downloading {name} ({pct}%)")
+        digest = str(asset.get("digest") or "")
+        if digest.lower().startswith("sha256:"):
+            expected = digest.split(":", 1)[1].strip().lower()
+            h = hashlib.sha256()
+            with open(tmp_path, "rb") as fh:
+                for block in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(block)
+            actual = h.hexdigest().lower()
+            if expected and actual != expected:
+                raise RuntimeError("Downloaded update failed SHA-256 verification")
+        if out_path.exists():
+            out_path.unlink()
+        tmp_path.rename(out_path)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        _perf_log_if_slow("github_update_download", elapsed_ms)
+        info["download_path"] = str(out_path)
+        info["filename"] = name
+        return info
+
+    def run(self):
+        started = time.perf_counter()
+        try:
+            try:
+                manifest = self._fetch_release_manifest()
+                info = self._manifest_info(manifest)
+            except Exception as manifest_error:
+                release = self._fetch_latest_release()
+                info = self._release_info(release)
+                info["manifest_error"] = str(manifest_error)
+                info["source"] = "github_api"
+            _perf_log_if_slow("github_update_check", (time.perf_counter() - started) * 1000.0)
+            self.checked.emit(info)
+            if self.download and info.get("available"):
+                self.progress.emit(0, "Starting update download...")
+                self.downloaded.emit(self._download_asset(info))
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 class SongbookUploadThread(QThread):
@@ -1962,6 +2175,13 @@ DEFAULTS = {
     "safe_mode": False,              # isolate slow subsystems: no BGM/server scans/animations/fuzzy/HQ CDG
     "performance_debug_enabled": True, # emit periodic top bottleneck summaries to the log/terminal
     "performance_log_interval_sec": 15,
+    "auto_update_enabled": True,        # check GitHub Releases in the background at startup
+    "auto_update_download": True,       # automatically download a newer DMG after an auto-check
+    "auto_update_check_interval_hours": 12, # minimum hours between automatic GitHub checks
+    "auto_update_repo": "DanDemolition/SingWS",
+    "auto_update_manifest_url": "https://dandemolition.github.io/SingWS/release.json",
+    "auto_update_download_dir": "",     # blank = ~/Downloads/SingWS Updates
+    "auto_update_last_check": 0,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
     "cdg_quality_mode": "standard",  # standard=lower CPU, high=smoother scaling/text edges
     "cdg_timing_offset_ms": 500,     # CDG-only lyric timing nudge (-3000..+3000ms; +=lyrics earlier)
@@ -12094,6 +12314,8 @@ class KaraokeApp(QWidget):
             print("ℹ️ Network not configured - polling disabled")
             print("   Configure network settings (Settings > Network) to enable request polling")
 
+        QTimer.singleShot(9000, self._maybe_auto_check_for_updates)
+
         # DIAGNOSTIC: Freeze detector
         self.start_freeze_detector()
 
@@ -15159,6 +15381,131 @@ class KaraokeApp(QWidget):
 
         menu.exec(self.audio_output_button.mapToGlobal(self.audio_output_button.rect().bottomLeft()))
 
+    def _update_download_dir(self) -> str:
+        custom = str(self.settings.get("auto_update_download_dir", "") or "").strip()
+        if custom:
+            return os.path.expanduser(custom)
+        return str(Path.home() / "Downloads" / "SingWS Updates")
+
+    def _set_update_status_text(self, text: str):
+        self._last_update_status_text = str(text or "")
+        for label in list(getattr(self, "_update_status_labels", []) or []):
+            try:
+                label.setText(self._last_update_status_text)
+            except Exception:
+                pass
+
+    def _start_update_check(self, *, manual: bool = False, download: bool = False):
+        if self._safe_mode() and not manual:
+            return
+        try:
+            worker = getattr(self, "_github_update_worker", None)
+            if worker is not None and worker.isRunning():
+                if manual:
+                    self._set_update_status_text("Update check already running...")
+                return
+        except Exception:
+            pass
+        repo = str(self.settings.get("auto_update_repo", "DanDemolition/SingWS") or "DanDemolition/SingWS").strip()
+        if not repo:
+            repo = "DanDemolition/SingWS"
+        self._github_update_manual = bool(manual)
+        self._github_update_download_requested = bool(download)
+        self._set_update_status_text("Checking GitHub for updates...")
+        self._github_update_worker = GitHubUpdateWorker(
+            repo=repo,
+            current_version=APP_VERSION,
+            manifest_url=str(self.settings.get("auto_update_manifest_url", "") or ""),
+            download_dir=self._update_download_dir(),
+            download=bool(download),
+        )
+        self._github_update_worker.checked.connect(self._on_update_check_finished)
+        self._github_update_worker.progress.connect(self._on_update_download_progress)
+        self._github_update_worker.downloaded.connect(self._on_update_downloaded)
+        self._github_update_worker.failed.connect(self._on_update_failed)
+        self._github_update_worker.start()
+
+    def _maybe_auto_check_for_updates(self):
+        try:
+            if self._safe_mode() or not bool(self.settings.get("auto_update_enabled", True)):
+                return
+            now = int(time.time())
+            last = int(self.settings.get("auto_update_last_check", 0) or 0)
+            hours = max(1, int(float(self.settings.get("auto_update_check_interval_hours", 12) or 12)))
+            if last and (now - last) < hours * 3600:
+                return
+            self.settings["auto_update_last_check"] = now
+            self.save_settings()
+            self._start_update_check(manual=False, download=bool(self.settings.get("auto_update_download", True)))
+        except Exception as e:
+            print(f"[UPDATE] auto-check skipped: {e}")
+
+    def _on_update_check_finished(self, info: dict):
+        try:
+            version = str((info or {}).get("version") or "").strip()
+            if not version:
+                self._set_update_status_text("Could not read latest GitHub release.")
+                return
+            if info.get("available"):
+                asset_name = str(((info or {}).get("asset") or {}).get("name") or "installer")
+                self._set_update_status_text(f"SingWS {version} is available: {asset_name}")
+                if bool(getattr(self, "_github_update_manual", False)) and not bool(getattr(self, "_github_update_download_requested", False)):
+                    QMessageBox.information(
+                        self,
+                        "Update Available",
+                        f"SingWS {version} is available on GitHub.\n\nUse Download Latest Update to fetch the installer.",
+                    )
+            else:
+                self._set_update_status_text(f"SingWS is up to date ({APP_VERSION}).")
+                if bool(getattr(self, "_github_update_manual", False)):
+                    QMessageBox.information(self, "No Update Available", f"SingWS {APP_VERSION} is the latest release.")
+        except Exception as e:
+            self._set_update_status_text(f"Update check failed: {e}")
+
+    def _on_update_download_progress(self, pct: int, text: str):
+        self._set_update_status_text(str(text or f"Downloading update ({int(pct)}%)"))
+
+    def _on_update_downloaded(self, info: dict):
+        path = str((info or {}).get("download_path") or "")
+        version = str((info or {}).get("version") or "").strip()
+        if not path:
+            self._set_update_status_text("Update download finished, but no file path was returned.")
+            return
+        self.settings["auto_update_last_download_path"] = path
+        self.settings["auto_update_last_download_version"] = version
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        self._set_update_status_text(f"Downloaded SingWS {version}: {path}")
+        try:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Update Downloaded")
+            msg.setText(f"SingWS {version} has been downloaded.")
+            msg.setInformativeText("Open the downloaded DMG, then drag SingWS.app to Applications to install it.")
+            open_btn = msg.addButton("Show in Finder", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            if msg.clickedButton() == open_btn:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+        except Exception:
+            pass
+
+    def _on_update_failed(self, message: str):
+        text = f"Update failed: {message}"
+        self._set_update_status_text(text)
+        if bool(getattr(self, "_github_update_manual", False)):
+            try:
+                QMessageBox.warning(self, "Update Failed", text)
+            except Exception:
+                pass
+
+    def _open_github_releases_page(self):
+        repo = str(self.settings.get("auto_update_repo", "DanDemolition/SingWS") or "DanDemolition/SingWS").strip().strip("/")
+        if "/" not in repo:
+            repo = "DanDemolition/SingWS"
+        QDesktopServices.openUrl(QUrl(f"https://github.com/{repo}/releases"))
+
     def configure_settings(self):
         """App settings dialog (list text size + CDG display mode)."""
         from PyQt6.QtWidgets import (
@@ -15399,6 +15746,70 @@ class KaraokeApp(QWidget):
         perf_debug_cb.setToolTip("Prints periodic [PERF-SUMMARY] lines with slowest tasks, CPU, memory, and worker counts.")
         perf_debug_cb.setChecked(bool(self.settings.get("performance_debug_enabled", True)))
         v.addWidget(perf_debug_cb)
+
+        v = _section_card(tab_general, "App Updates",
+                          "Checks GitHub Releases for newer SingWS builds and downloads the matching macOS DMG in the background.")
+        auto_update_cb = QCheckBox("Automatically check GitHub for updates")
+        auto_update_cb.setChecked(bool(self.settings.get("auto_update_enabled", True)))
+        v.addWidget(auto_update_cb)
+
+        auto_update_download_cb = QCheckBox("Automatically download new versions")
+        auto_update_download_cb.setChecked(bool(self.settings.get("auto_update_download", True)))
+        v.addWidget(auto_update_download_cb)
+
+        update_repo_row = QHBoxLayout()
+        update_repo_row.addWidget(QLabel("GitHub repo:"))
+        update_repo_edit = QLineEdit(str(self.settings.get("auto_update_repo", "DanDemolition/SingWS") or "DanDemolition/SingWS"))
+        update_repo_edit.setPlaceholderText("owner/repo")
+        update_repo_row.addWidget(update_repo_edit, 1)
+        v.addLayout(update_repo_row)
+
+        update_manifest_row = QHBoxLayout()
+        update_manifest_row.addWidget(QLabel("Manifest URL:"))
+        update_manifest_edit = QLineEdit(str(self.settings.get("auto_update_manifest_url", "") or ""))
+        update_manifest_edit.setPlaceholderText("https://example.com/release.json")
+        update_manifest_row.addWidget(update_manifest_edit, 1)
+        v.addLayout(update_manifest_row)
+
+        update_interval_row = QHBoxLayout()
+        update_interval_row.addWidget(QLabel("Check every hours:"))
+        update_interval_spin = QSpinBox(dlg)
+        update_interval_spin.setRange(1, 168)
+        try:
+            update_interval_spin.setValue(max(1, min(168, int(float(self.settings.get("auto_update_check_interval_hours", 12) or 12)))))
+        except Exception:
+            update_interval_spin.setValue(12)
+        update_interval_row.addWidget(update_interval_spin)
+        update_interval_row.addStretch(1)
+        v.addLayout(update_interval_row)
+
+        update_dir_row = QHBoxLayout()
+        update_dir_row.addWidget(QLabel("Download folder:"))
+        update_dir_edit = QLineEdit(self._update_download_dir())
+        update_dir_row.addWidget(update_dir_edit, 1)
+        update_dir_browse_btn = QPushButton("Choose")
+        update_dir_row.addWidget(update_dir_browse_btn)
+        v.addLayout(update_dir_row)
+
+        update_status_label = QLabel(str(getattr(self, "_last_update_status_text", "") or f"Current version: SingWS {APP_VERSION}"))
+        update_status_label.setWordWrap(True)
+        try:
+            update_status_label.setStyleSheet(section_meta_css())
+        except Exception:
+            pass
+        self._update_status_labels = list(getattr(self, "_update_status_labels", []) or [])
+        self._update_status_labels.append(update_status_label)
+        v.addWidget(update_status_label)
+
+        update_actions_row = QHBoxLayout()
+        update_check_btn = QPushButton("Check Now")
+        update_download_btn = QPushButton("Download Latest Update")
+        update_releases_btn = QPushButton("Open GitHub Releases")
+        update_actions_row.addWidget(update_check_btn)
+        update_actions_row.addWidget(update_download_btn)
+        update_actions_row.addWidget(update_releases_btn)
+        update_actions_row.addStretch(1)
+        v.addLayout(update_actions_row)
 
         show_tooltips_cb = QCheckBox("Show tooltips on hover")
         show_tooltips_cb.setChecked(bool(self.settings.get("show_tooltips", False)))
@@ -15709,6 +16120,42 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        def on_auto_update_toggled(checked: bool):
+            self.settings["auto_update_enabled"] = bool(checked)
+            self.save_settings()
+            auto_update_download_cb.setEnabled(bool(checked))
+            update_interval_spin.setEnabled(bool(checked))
+
+        def on_auto_update_download_toggled(checked: bool):
+            self.settings["auto_update_download"] = bool(checked)
+            self.save_settings()
+
+        def on_update_repo_changed(text: str):
+            repo = str(text or "").strip().strip("/")
+            self.settings["auto_update_repo"] = repo or "DanDemolition/SingWS"
+            self.save_settings()
+
+        def on_update_manifest_changed(text: str):
+            self.settings["auto_update_manifest_url"] = str(text or "").strip()
+            self.save_settings()
+
+        def on_update_interval_changed(value: int):
+            self.settings["auto_update_check_interval_hours"] = max(1, min(168, int(value)))
+            self.save_settings()
+
+        def on_update_dir_changed(text: str):
+            self.settings["auto_update_download_dir"] = str(text or "").strip()
+            self.save_settings()
+
+        def choose_update_dir():
+            start = update_dir_edit.text().strip() or self._update_download_dir()
+            selected = QFileDialog.getExistingDirectory(dlg, "Choose Update Download Folder", start)
+            if selected:
+                update_dir_edit.setText(selected)
+
+        auto_update_download_cb.setEnabled(auto_update_cb.isChecked())
+        update_interval_spin.setEnabled(auto_update_cb.isChecked())
+
         def on_estimate_all_songs_toggled(checked: bool):
             self.settings["rotation_estimate_include_all_songs"] = bool(checked)
             self.save_settings()
@@ -15839,6 +16286,12 @@ class KaraokeApp(QWidget):
             performance_mode_cb.setChecked(False)
             safe_mode_cb.setChecked(False)
             perf_debug_cb.setChecked(True)
+            auto_update_cb.setChecked(True)
+            auto_update_download_cb.setChecked(True)
+            update_repo_edit.setText("DanDemolition/SingWS")
+            update_manifest_edit.setText("https://dandemolition.github.io/SingWS/release.json")
+            update_interval_spin.setValue(12)
+            update_dir_edit.setText(str(Path.home() / "Downloads" / "SingWS Updates"))
             cdg_stretch_cb.setChecked(False)
             cdg_quality_combo.setCurrentIndex(cdg_quality_combo.findData("standard"))
             show_tooltips_cb.setChecked(False)
@@ -15866,6 +16319,16 @@ class KaraokeApp(QWidget):
         performance_mode_cb.toggled.connect(on_performance_mode_toggled)
         safe_mode_cb.toggled.connect(on_safe_mode_toggled)
         perf_debug_cb.toggled.connect(on_perf_debug_toggled)
+        auto_update_cb.toggled.connect(on_auto_update_toggled)
+        auto_update_download_cb.toggled.connect(on_auto_update_download_toggled)
+        update_repo_edit.textChanged.connect(on_update_repo_changed)
+        update_manifest_edit.textChanged.connect(on_update_manifest_changed)
+        update_interval_spin.valueChanged.connect(on_update_interval_changed)
+        update_dir_edit.textChanged.connect(on_update_dir_changed)
+        update_dir_browse_btn.clicked.connect(choose_update_dir)
+        update_check_btn.clicked.connect(lambda: self._start_update_check(manual=True, download=False))
+        update_download_btn.clicked.connect(lambda: self._start_update_check(manual=True, download=True))
+        update_releases_btn.clicked.connect(self._open_github_releases_page)
         estimate_all_songs_cb.toggled.connect(on_estimate_all_songs_toggled)
         padding_spin.valueChanged.connect(on_padding_changed)
         queue_mode_combo.currentIndexChanged.connect(on_queue_mode_changed)
