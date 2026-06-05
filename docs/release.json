@@ -9,22 +9,22 @@
       "label": "Apple Silicon Mac",
       "filename": "SingWS-0.2.18.1-arm64-installer.dmg",
       "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.1-arm64-installer.dmg",
-      "size": "205 MB",
-      "sha256": "8199d764b617023e68cb0ce0eeb97bfe49058caa969d3b9baf7f7b311a6eb6fe"
+      "size": "213 MB",
+      "sha256": "713f71330ea0a53899d46424e3e3e788cdf723cca839a67778a2a5b1f71aed48"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
       "filename": "SingWS-0.2.18.1-x86_64-installer.dmg",
       "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.1-x86_64-installer.dmg",
-      "size": "286 MB",
-      "sha256": "d0d5a24490a323223ebdd4da81812f1480c94bbe9a161e3a249c491aac68cd82"
+      "size": "298 MB",
+      "sha256": "9f8579e25ed162e7d32b7ca2597fd6ba7d09d37aca480e0209925367ba329aaa"
     },
     "mac_universal": {
       "label": "Universal Mac",
       "filename": "SingWS-0.2.18.1-universal-installer.dmg",
       "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.1-universal-installer.dmg",
-      "size": "456 MB",
-      "sha256": "648d7962680259e685bf94ad888124b3489a6ffd0f82752ea1c2ffffac62cfe7"
+      "size": "476 MB",
+      "sha256": "8a4840f8ebc16b224944cd93cd1752b6580ff5faacc8d1afe82017c01a6d1bb0"
     }
   }
 }
