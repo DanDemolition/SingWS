@@ -1964,7 +1964,9 @@ DEFAULTS = {
     "performance_log_interval_sec": 15,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
     "cdg_quality_mode": "standard",  # standard=lower CPU, high=smoother scaling/text edges
-    "video_timing_offset_ms": 0,     # visual-only CDG/MP4 lyric timing nudge (-3000..+3000ms; +=lyrics earlier)
+    "cdg_timing_offset_ms": 500,     # CDG-only lyric timing nudge (-3000..+3000ms; +=lyrics earlier)
+    "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
+    "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "disc_id_priority": "",          # comma-separated prefixes for remote request matching (blank = no priority)
     "background_closed_image_path": "",   # optional background shown when requests are closed
     "background_slideshow_enabled": False, # rotate images while idle
@@ -2728,15 +2730,15 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             audiosink = Gst.ElementFactory.make("autoaudiosink", f"{pipeline_name}_audiosink")
 
-        # Meter branch (appsink) - optional visualizer input. Performance Mode
-        # removes this branch so background music playback has fewer live callbacks.
+        # Meter branch (appsink) - optional visualizer input. Keep it alive in
+        # Performance Mode so the show screen still visualizes BGM; Safe Mode
+        # disables it for subsystem isolation.
         try:
             parent = self.parent()
             meter_disabled = bool(
                 parent is not None
                 and (
-                    (hasattr(parent, "_performance_mode") and parent._performance_mode())
-                    or (hasattr(parent, "_safe_mode") and parent._safe_mode())
+                    (hasattr(parent, "_safe_mode") and parent._safe_mode())
                 )
             )
         except Exception:
@@ -7894,10 +7896,10 @@ class VideoWindow(QWidget):
                     self._idle_overlay_timer.start(target_interval)
             except Exception:
                 pass
-            if perf_mode or safe_mode:
+            if safe_mode:
                 should_draw = False
             try:
-                level = 0.0 if (perf_mode or safe_mode) else (float(getattr(bg, "_meter_level", 0.0)) if bg is not None else 0.0)
+                level = 0.0 if safe_mode else (float(getattr(bg, "_meter_level", 0.0)) if bg is not None else 0.0)
             except Exception:
                 level = 0.0
 
@@ -12905,6 +12907,14 @@ class KaraokeApp(QWidget):
 
             # Helper: format "0:04 / 2:56" from existing labels.
             def _elapsed_total() -> str:
+                try:
+                    pos = float(getattr(self, "_karaoke_last_pos", 0.0) or 0.0)
+                    dur = float(getattr(self, "_karaoke_last_dur", 0.0) or 0.0)
+                    if dur > 1.0:
+                        pos = max(0.0, min(dur, pos))
+                        return f"{self._fmt_karaoke_time(pos)} / {self._fmt_karaoke_time(dur)}"
+                except Exception:
+                    pass
                 e = str(getattr(self, "karaoke_elapsed_label", QLabel()).text() or "").strip()
                 r = str(getattr(self, "karaoke_remaining_label", QLabel()).text() or "").strip().lstrip("-")
                 if e and r:
@@ -13378,27 +13388,36 @@ class KaraokeApp(QWidget):
         try:
             if simple_audio:
                 transport.normalize_gain_db = trim_db
-                if abs(trim_db) > 0.05:
-                    _diag(f"[AUDIO] simple mode: trim {trim_db:+.1f}dB on {os.path.basename(audio_path)}")
+                _diag(f"[LOUDNESS] song_start_gain simple_mode gain={trim_db:+.1f}dB file={os.path.basename(audio_path)}")
             elif bool(self.settings.get("karaoke_normalize_enabled", True)):
                 gain = loudness_gain_db_cached(audio_path)
                 if gain is None:
                     analyze_loudness_async(audio_path)
                     transport.normalize_gain_db = trim_db
+                    _diag(f"[LOUDNESS] song_start_gain pending using_trim={trim_db:+.1f}dB file={os.path.basename(audio_path)}")
                 else:
                     transport.normalize_gain_db = float(gain) + trim_db
-                    _diag(f"[LOUDNESS] applying {float(gain):+.1f}dB (+trim {trim_db:+.1f}) to {os.path.basename(audio_path)}")
+                    _diag(f"[LOUDNESS] song_start_gain gain={float(gain):+.1f}dB trim={trim_db:+.1f}dB total={transport.normalize_gain_db:+.1f}dB file={os.path.basename(audio_path)}")
             else:
                 transport.normalize_gain_db = trim_db
+                _diag(f"[LOUDNESS] song_start_gain normalization_off gain={trim_db:+.1f}dB file={os.path.basename(audio_path)}")
         except Exception:
             transport.normalize_gain_db = 0.0
-        # Visual-only timing calibration (audio stays the master clock).
+        # Visual-only timing calibration (audio stays the master clock). CDG
+        # lyrics are calibrated separately because MP4 timing does not show the
+        # same display latency.
         try:
-            off = int(self.settings.get("video_timing_offset_ms", 0) or 0)
+            mode_l = str(mode or "").lower()
+            if mode_l == "cdg":
+                off = int(self.settings.get("cdg_timing_offset_ms", self.settings.get("video_timing_offset_ms", 500)) or 0)
+            elif mode_l == "mp4":
+                off = int(self.settings.get("mp4_timing_offset_ms", 0) or 0)
+            else:
+                off = 0
             if hasattr(transport, "set_video_offset_ms"):
                 transport.set_video_offset_ms(off)
             if off:
-                _diag(f"[VIDEO-OFFSET] applying {off:+d}ms visual offset")
+                _diag(f"[VIDEO-OFFSET] applying {off:+d}ms visual offset mode={mode}")
         except Exception:
             pass
         self._current_karaoke_audio_path = str(audio_path or "")
@@ -14038,7 +14057,7 @@ class KaraokeApp(QWidget):
         if self._safe_mode():
             print("[SAFE-MODE] Polling start ignored")
             return
-        base_url = self.settings.get("base_url", "https://singws.com")
+        base_url = self.settings.get("base_url", "https://beta.wskar.com")
         tenant   = self.settings.get("user", self.settings.get("tenant", ""))
 
         # Safety: ensure any previous thread is gone
@@ -15334,29 +15353,29 @@ class KaraokeApp(QWidget):
         cdg_quality_row.addStretch(1)
         v.addLayout(cdg_quality_row)
 
-        # --- Lyric / video timing offset (visual-only calibration backup) ---
-        v = _section_card(tab_display, "Lyric / Video Timing Offset",
-                          "Visual-only nudge if lyrics drift on a specific machine/file. "
-                          "Audio is unaffected. Negative = lyrics later, positive = lyrics earlier.")
+        # --- CDG lyric timing offset (visual-only calibration backup) ---
+        v = _section_card(tab_display, "CDG Lyric Timing Offset",
+                          "Visual-only nudge for CDG lyric latency. "
+                          "Audio and MP4 timing are unaffected. Positive = lyrics earlier.")
         vto_row = QHBoxLayout()
         vto_row.addWidget(QLabel("Offset (ms):"))
         video_offset_spin = QSpinBox(dlg)
         video_offset_spin.setRange(-3000, 3000)
         video_offset_spin.setSingleStep(50)
         try:
-            video_offset_spin.setValue(max(-3000, min(3000, int(self.settings.get("video_timing_offset_ms", 0) or 0))))
+            video_offset_spin.setValue(max(-3000, min(3000, int(self.settings.get("cdg_timing_offset_ms", 500) or 0))))
         except Exception:
             video_offset_spin.setValue(0)
         vto_row.addWidget(video_offset_spin)
-        video_offset_reset_btn = QPushButton("Reset to 0")
+        video_offset_reset_btn = QPushButton("Reset to +500")
         vto_row.addWidget(video_offset_reset_btn)
         vto_row.addStretch(1)
         v.addLayout(vto_row)
 
         def on_video_offset_changed(val: int):
-            self.set_video_timing_offset_ms(int(val))
+            self.set_cdg_timing_offset_ms(int(val))
         video_offset_spin.valueChanged.connect(on_video_offset_changed)
-        video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(0))
+        video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(500))
 
         v = _section_card(tab_general, "General")  # ---- General ----
         performance_mode_cb = QCheckBox("Performance Mode")
@@ -15955,7 +15974,7 @@ class KaraokeApp(QWidget):
                 self._apply_tooltip_visibility()
                 self._transition_gap_sec = max(-3.0, min(3.0, float(self.settings.get("bg_to_karaoke_gap_sec", 0.0))))
                 self._apply_performance_mode_runtime()
-                self.set_video_timing_offset_ms(int(self.settings.get("video_timing_offset_ms", 0) or 0))
+                self.set_cdg_timing_offset_ms(int(self.settings.get("cdg_timing_offset_ms", 500) or 0))
                 if hasattr(self, "bg_music") and self.bg_music is not None:
                     self.bg_music._refresh_bg_normalize()
                     eng = getattr(self.bg_music, "_bass_engine", None)
@@ -18512,7 +18531,7 @@ class KaraokeApp(QWidget):
             v.addWidget(connection_title)
             row1 = QHBoxLayout()
             row1.addWidget(QLabel("Base URL:"))
-            base_edit = QLineEdit(self.settings.get("base_url", "https://singws.com"))
+            base_edit = QLineEdit(self.settings.get("base_url", "https://beta.wskar.com"))
             row1.addWidget(base_edit)
             v.addLayout(row1)
     
@@ -18769,13 +18788,25 @@ class KaraokeApp(QWidget):
                     return
                 
                 update_connection_indicator("checking")
-                st = self._net_fetch_accepting(base, user_id)
-                
-                if st is None:
-                    update_connection_indicator("error", "Cannot reach server")
-                else:
-                    update_connection_indicator("connected")
-                    update_accepting_button(bool(st))
+
+                def worker():
+                    started = time.monotonic()
+                    st = self._net_fetch_accepting(base, user_id)
+                    elapsed_ms = (time.monotonic() - started) * 1000.0
+                    if elapsed_ms >= 50.0:
+                        _perf_log_if_slow("network_accepting_check", elapsed_ms)
+
+                    def finish():
+                        if st is None:
+                            update_connection_indicator("error", "Cannot reach server")
+                        else:
+                            update_connection_indicator("connected")
+                            update_accepting_button(bool(st))
+
+                    QTimer.singleShot(0, self, finish)
+
+                print("[PERF] main_thread_blocking_call removed task=network_accepting_check worker=thread")
+                threading.Thread(target=worker, daemon=True).start()
 
             def preview_header_qr():
                 self._set_header_qr_url(qr_edit.text().strip())
@@ -18796,22 +18827,33 @@ class KaraokeApp(QWidget):
                     return
                 
                 # Toggle to opposite state
-                new_state = not accepting_state[0]
+                previous_state = accepting_state[0]
+                new_state = not previous_state
                 update_accepting_button(new_state, is_syncing=True)
-                
-                ok, error_msg = self._net_set_accepting(base, user_id, api_key, new_state)
-                
-                if ok:
-                    update_accepting_button(new_state)
-                else:
-                    # Revert to previous state on error
-                    update_accepting_button(accepting_state[0])
-                    QMessageBox.warning(
-                        dlg,
-                        "Update Failed",
-                        f"Could not update accepting status:\n\n{error_msg or 'Unknown error'}\n\n"
-                        "Check your Base URL, User ID, and API Key."
-                    )
+
+                def worker():
+                    started = time.monotonic()
+                    ok, error_msg = self._net_set_accepting(base, user_id, api_key, new_state)
+                    elapsed_ms = (time.monotonic() - started) * 1000.0
+                    if elapsed_ms >= 50.0:
+                        _perf_log_if_slow("network_accepting_toggle", elapsed_ms)
+
+                    def finish():
+                        if ok:
+                            update_accepting_button(new_state)
+                        else:
+                            update_accepting_button(previous_state)
+                            QMessageBox.warning(
+                                dlg,
+                                "Update Failed",
+                                f"Could not update accepting status:\n\n{error_msg or 'Unknown error'}\n\n"
+                                "Check your Base URL, User ID, and API Key."
+                            )
+
+                    QTimer.singleShot(0, self, finish)
+
+                print("[PERF] main_thread_blocking_call removed task=network_accepting_toggle worker=thread")
+                threading.Thread(target=worker, daemon=True).start()
 
             def upload_songbook():
                 base = base_edit.text().strip().rstrip("/")
@@ -18893,7 +18935,7 @@ class KaraokeApp(QWidget):
     
             def accept():
                 # Save new values
-                self.settings["base_url"] = (base_edit.text().strip() or "https://singws.com")
+                self.settings["base_url"] = (base_edit.text().strip() or "https://beta.wskar.com")
                 uid = user_edit.text().strip()
                 if uid:
                     self.settings["user"] = uid
@@ -18922,17 +18964,34 @@ class KaraokeApp(QWidget):
                     self.settings["session_location_session_id"] = uuid.uuid4().hex
                 self.save_settings()
                 try:
-                    ok, msg = self._net_set_host_controls(
-                        self.settings["base_url"],
-                        self.settings.get("user", self.settings.get("tenant", "")),
-                        self.settings.get("api_key", ""),
-                        self.settings.get("host_controls_pin", ""),
-                        bool(self.settings.get("host_controls_lan_only", False)),
-                    )
-                    if not ok:
-                        _diag(f"[HOST-CONTROLS] settings sync failed: {msg}")
+                    base_for_host = self.settings["base_url"]
+                    user_for_host = self.settings.get("user", self.settings.get("tenant", ""))
+                    key_for_host = self.settings.get("api_key", "")
+                    pin_for_host = self.settings.get("host_controls_pin", "")
+                    lan_for_host = bool(self.settings.get("host_controls_lan_only", False))
+
+                    def sync_host_controls_worker():
+                        started = time.monotonic()
+                        try:
+                            ok, msg = self._net_set_host_controls(
+                                base_for_host,
+                                user_for_host,
+                                key_for_host,
+                                pin_for_host,
+                                lan_for_host,
+                            )
+                            if not ok:
+                                _diag(f"[HOST-CONTROLS] settings sync failed: {msg}")
+                        except Exception as e:
+                            _diag(f"[HOST-CONTROLS] settings sync failed: {e}")
+                        elapsed_ms = (time.monotonic() - started) * 1000.0
+                        if elapsed_ms >= 50.0:
+                            _perf_log_if_slow("host_controls_settings_sync", elapsed_ms)
+
+                    print("[PERF] main_thread_blocking_call removed task=host_controls_settings_sync worker=thread")
+                    threading.Thread(target=sync_host_controls_worker, daemon=True).start()
                 except Exception as e:
-                    _diag(f"[HOST-CONTROLS] settings sync failed: {e}")
+                    _diag(f"[HOST-CONTROLS] settings sync schedule failed: {e}")
                 self._refresh_header_status()
                 self.sync_session_location(active=True)
     
@@ -19296,7 +19355,7 @@ class KaraokeApp(QWidget):
                 return
             # Create completely new thread and worker
             self.poll_thread = QThread()
-            base_url = self.settings.get("base_url", "https://singws.com")
+            base_url = self.settings.get("base_url", "https://beta.wskar.com")
             tenant = self.settings.get("user", self.settings.get("tenant", ""))
             api_key = self.settings.get("api_key", "")
 
@@ -21847,16 +21906,39 @@ class KaraokeApp(QWidget):
                 QMessageBox.warning(dlg, "Direct Message Singer", "Please enter a message.")
                 return
 
-            ok, error_msg = self._net_send_direct_message(singer_name, message)
-            if ok:
-                dlg.accept()
-                QMessageBox.information(self, "Direct Message Singer", f"Message sent to {singer_name}.")
-            else:
-                QMessageBox.warning(
-                    dlg,
-                    "Direct Message Singer",
-                    error_msg or "Could not send the message."
-                )
+            send_btn.setEnabled(False)
+            send_btn.setText("Sending...")
+
+            def worker():
+                started = time.monotonic()
+                ok, error_msg = self._net_send_direct_message(singer_name, message)
+                elapsed_ms = (time.monotonic() - started) * 1000.0
+                if elapsed_ms >= 50.0:
+                    _perf_log_if_slow("direct_message_http", elapsed_ms)
+
+                def finish():
+                    try:
+                        send_btn.setEnabled(True)
+                        send_btn.setText("Send")
+                    except Exception:
+                        pass
+                    if ok:
+                        try:
+                            dlg.accept()
+                        except Exception:
+                            pass
+                        QMessageBox.information(self, "Direct Message Singer", f"Message sent to {singer_name}.")
+                    else:
+                        QMessageBox.warning(
+                            dlg,
+                            "Direct Message Singer",
+                            error_msg or "Could not send the message."
+                        )
+
+                QTimer.singleShot(0, self, finish)
+
+            print("[PERF] main_thread_blocking_call removed task=direct_message_http worker=thread")
+            threading.Thread(target=worker, daemon=True).start()
 
         send_btn.clicked.connect(handle_send)
         btns.rejected.connect(dlg.reject)
@@ -23106,10 +23188,32 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         try:
-            t = getattr(self, "karaoke_transport", None)
-            if t is not None and hasattr(t, "set_video_offset_ms"):
-                t.set_video_offset_ms(ms)
-                _diag(f"[VIDEO-OFFSET] live offset set to {ms:+d}ms")
+            if str(getattr(self, "_current_karaoke_mode", "") or "").lower() != "cdg":
+                t = getattr(self, "karaoke_transport", None)
+                if t is not None and hasattr(t, "set_video_offset_ms"):
+                    t.set_video_offset_ms(ms)
+                    _diag(f"[VIDEO-OFFSET] live offset set to {ms:+d}ms")
+        except Exception:
+            pass
+
+    def set_cdg_timing_offset_ms(self, ms: int):
+        """Save the CDG-only lyric timing offset. Positive values advance the
+        CDG renderer against the audio clock; MP4 remains unmodified."""
+        try:
+            ms = max(-3000, min(3000, int(ms)))
+        except Exception:
+            ms = 500
+        self.settings["cdg_timing_offset_ms"] = ms
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        try:
+            if str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg":
+                t = getattr(self, "karaoke_transport", None)
+                if t is not None and hasattr(t, "set_video_offset_ms"):
+                    t.set_video_offset_ms(ms)
+                    _diag(f"[VIDEO-OFFSET] live CDG offset set to {ms:+d}ms")
         except Exception:
             pass
 
@@ -23180,10 +23284,6 @@ class KaraokeApp(QWidget):
         except Exception:
             speed = TICKER_SPEED_DEFAULT
         speed = max(TICKER_SPEED_MIN, min(TICKER_SPEED_MAX, speed))
-        if self._safe_mode():
-            return min(speed, 30.0)
-        if self._performance_mode():
-            return min(speed, 45.0)
         return speed
 
     def _apply_performance_mode_runtime(self):
@@ -24945,6 +25045,12 @@ class KaraokeApp(QWidget):
         if path in self._silence_cache:
             self._next_silence_path = path
             self._next_silence_offset = float(self._silence_cache.get(path, 0.0))
+            try:
+                if (not self._simple_audio_mode()) and bool(self.settings.get("karaoke_normalize_enabled", True)):
+                    if loudness_gain_db_cached(path) is None:
+                        analyze_loudness_async(path)
+            except Exception:
+                pass
             return
 
         print(f"[SILENCE] prescan start: {Path(path).name}")
@@ -24967,6 +25073,13 @@ class KaraokeApp(QWidget):
                     offset = float(self._silence_cache.get(resolved, 0.0))
                 else:
                     offset = detect_lead_silence(resolved)
+                try:
+                    if (not self._simple_audio_mode()) and bool(self.settings.get("karaoke_normalize_enabled", True)):
+                        if loudness_gain_db_cached(resolved) is None:
+                            analyze_loudness_async(resolved)
+                            _diag(f"[LOUDNESS] queued next-up analysis for {Path(resolved).name}")
+                except Exception:
+                    pass
             except Exception:
                 offset = 0.0
                 resolved = scan_path
@@ -25932,8 +26045,16 @@ class KaraokeApp(QWidget):
             return
         if request_id <= 0:
             return
+        try:
+            removed = getattr(self, "_remote_removed_request_ids", None)
+            if not isinstance(removed, set):
+                removed = set()
+                self._remote_removed_request_ids = removed
+            removed.add(request_id)
+        except Exception:
+            pass
         base_url = str(self.settings.get("base_url", "") or "").rstrip("/")
-        tenant = str(self.settings.get("tenant", "") or "").strip()
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
         if not base_url or not tenant or not api_key:
             return
@@ -25941,11 +26062,26 @@ class KaraokeApp(QWidget):
         import threading, requests
 
         def send():
+            headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/remove-request"}
+            try:
+                # First mark the request non-pending. This prevents the next
+                # sync poll from resurrecting a remotely-added song while the
+                # cleanup/delete request is still in flight.
+                mark = requests.post(
+                    f"{base_url}/api/v1/complete_remote_request.php",
+                    data={"user": tenant, "request_id": request_id, "state": "removed"},
+                    headers=headers,
+                    timeout=5,
+                )
+                if not (200 <= mark.status_code < 300):
+                    print(f"[REMOTE-DELETE] mark removed HTTP {mark.status_code}: {mark.text[:160]}")
+            except Exception as e:
+                print(f"[REMOTE-DELETE] Failed to mark request {request_id} removed: {e}")
             try:
                 requests.post(
                     f"{base_url}/api/v1/delete_remote_request.php",
                     data={"user": tenant, "request_id": request_id},
-                    headers={"X-API-Key": api_key},
+                    headers=headers,
                     timeout=5,
                 )
             except Exception as e:
@@ -26145,6 +26281,12 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         normalized = []
+        try:
+            removed_ids = getattr(self, "_remote_removed_request_ids", set())
+            if not isinstance(removed_ids, set):
+                removed_ids = set()
+        except Exception:
+            removed_ids = set()
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue
@@ -26155,6 +26297,8 @@ class KaraokeApp(QWidget):
             except Exception:
                 request_id = 0
             if request_id <= 0:
+                continue
+            if request_id in removed_ids:
                 continue
             singer = str(req.get("singer", "") or "").strip()
             if not singer:
@@ -26628,7 +26772,7 @@ class KaraokeApp(QWidget):
         import threading, requests, json as _json
 
         def send():
-            base_url = str(self.settings.get("base_url", "https://singws.com")).rstrip("/")
+            base_url = str(self.settings.get("base_url", "https://beta.wskar.com")).rstrip("/")
             tenant   = str(self.settings.get("tenant", "")).strip()
 
             # Upload via get_requests.php
