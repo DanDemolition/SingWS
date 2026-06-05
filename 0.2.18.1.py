@@ -16769,6 +16769,18 @@ class KaraokeApp(QWidget):
         top_row.addWidget(self.singer_history_delete_singer_button)
         details_layout.addLayout(top_row)
 
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(7)
+        brand_label = QLabel("Preferred Brand:")
+        brand_label.setStyleSheet(section_meta_css())
+        brand_row.addWidget(brand_label)
+        self.singer_history_brand_combo = QComboBox()
+        self.singer_history_brand_combo.setMinimumWidth(160)
+        self.singer_history_brand_combo.setStyleSheet(combo_box_css())
+        self.singer_history_brand_combo.currentIndexChanged.connect(self._on_singer_history_brand_combo_changed)
+        brand_row.addWidget(self.singer_history_brand_combo, 1)
+        details_layout.addLayout(brand_row)
+
         summary_card = QFrame()
         summary_card.setObjectName("singerHistorySummaryCard")
         summary_card.setStyleSheet(content_card_css("singerHistorySummaryCard", radius=10))
@@ -16967,6 +16979,14 @@ class KaraokeApp(QWidget):
             self.singer_history_summary_label.setText("No singer selected.")
             self.singer_history_rename_button.setEnabled(False)
             self.singer_history_brand_button.setEnabled(False)
+            try:
+                self.singer_history_brand_combo.blockSignals(True)
+                self.singer_history_brand_combo.clear()
+                self.singer_history_brand_combo.addItem("No preferred brand", "")
+                self.singer_history_brand_combo.setEnabled(False)
+                self.singer_history_brand_combo.blockSignals(False)
+            except Exception:
+                pass
             self.singer_history_delete_singer_button.setEnabled(False)
             self.singer_history_add_song_button.setEnabled(False)
             self.singer_history_edit_song_button.setEnabled(False)
@@ -16989,6 +17009,7 @@ class KaraokeApp(QWidget):
         self.singer_history_summary_label.setText(summary)
         self.singer_history_rename_button.setEnabled(True)
         self.singer_history_brand_button.setEnabled(True)
+        self._refresh_singer_history_brand_combo(pref)
         self.singer_history_delete_singer_button.setEnabled(True)
         self.singer_history_add_song_button.setEnabled(True)
         self.singer_history_songs_list.clear()
@@ -17007,6 +17028,55 @@ class KaraokeApp(QWidget):
         self.singer_history_delete_song_button.setEnabled(bool(songs))
         if songs:
             self.singer_history_songs_list.setCurrentRow(0)
+
+    def _history_brand_choices(self) -> list[str]:
+        brands = set()
+        try:
+            for t in getattr(self, "tracks", []) or []:
+                disc = str((t or {}).get("disc_id", "") or "").strip()
+                if disc:
+                    brands.add(disc.upper())
+        except Exception:
+            pass
+        return sorted(brands)
+
+    def _refresh_singer_history_brand_combo(self, current_pref: str = ""):
+        combo = getattr(self, "singer_history_brand_combo", None)
+        if combo is None:
+            return
+        current_pref = ", ".join(normalize_disc_priority(current_pref, max_items=10))
+        choices = self._history_brand_choices()
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("No preferred brand", "")
+            for brand in choices:
+                combo.addItem(brand, brand)
+            if current_pref and current_pref not in choices:
+                combo.addItem(current_pref, current_pref)
+            idx = combo.findData(current_pref)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.setEnabled(True)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_singer_history_brand_combo_changed(self, _index: int):
+        combo = getattr(self, "singer_history_brand_combo", None)
+        singer_key = self._selected_singer_history_key()
+        record = self.singer_history.get("singers", {}).get(singer_key)
+        if combo is None or not isinstance(record, dict):
+            return
+        singer_name = str(record.get("name", "") or singer_key)
+        value = ", ".join(normalize_disc_priority(combo.currentData() or "", max_items=10))
+        current = ", ".join(normalize_disc_priority(record.get("preferred_disc_priority", ""), max_items=10))
+        if value == current:
+            return
+        if value:
+            self._set_singer_preference(singer_name, "preferred_disc_priority", value)
+            self._commit_singer_history_change("history_brand_quick_select")
+        else:
+            self._clear_singer_preference(singer_name, "preferred_disc_priority")
+            self._commit_singer_history_change("history_brand_quick_clear")
 
     def _apply_singer_history_preferences_to_queue(self):
         try:
@@ -17580,10 +17650,18 @@ class KaraokeApp(QWidget):
         return _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
 
     def save_settings(self):
+        _perf_t0 = time.perf_counter()
         try:
             _save_json_atomic(SETTINGS_PATH, self.settings)
         except Exception as e:
             print(f"Could not save settings: {e}")
+        finally:
+            try:
+                elapsed_ms = (time.perf_counter() - _perf_t0) * 1000.0
+                if bool(getattr(self, "karaoke_playing", False)) and elapsed_ms >= 50.0:
+                    _perf_log_if_slow("settings_save_during_playback", elapsed_ms)
+            except Exception:
+                pass
 
     def _setup_operator_splitters(self):
         splitters = (
