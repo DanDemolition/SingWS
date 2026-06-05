@@ -16776,7 +16776,7 @@ class KaraokeApp(QWidget):
         brand_row.addWidget(brand_label)
         self.singer_history_brand_combo = QComboBox()
         self.singer_history_brand_combo.setMinimumWidth(160)
-        self.singer_history_brand_combo.setStyleSheet(combo_box_css())
+        self.singer_history_brand_combo.setStyleSheet(SINGWS_THEME.combo_css() if SINGWS_THEME is not None else "")
         self.singer_history_brand_combo.currentIndexChanged.connect(self._on_singer_history_brand_combo_changed)
         brand_row.addWidget(self.singer_history_brand_combo, 1)
         details_layout.addLayout(brand_row)
@@ -16976,7 +16976,8 @@ class KaraokeApp(QWidget):
         record = self.singer_history.get("singers", {}).get(singer_key, {}) if singer_key else {}
         if not isinstance(record, dict) or not singer_key:
             self.singer_history_name_label.setText("Select a singer")
-            self.singer_history_summary_label.setText("No singer selected.")
+            if hasattr(self, "singer_history_summary_label"):
+                self.singer_history_summary_label.setText("No singer selected.")
             self.singer_history_rename_button.setEnabled(False)
             self.singer_history_brand_button.setEnabled(False)
             try:
@@ -17006,7 +17007,8 @@ class KaraokeApp(QWidget):
         summary = f"{total} total performances  ·  {unique} songs  ·  Last seen {last_seen}"
         if pref:
             summary += f"  ·  Preferred brand {pref}"
-        self.singer_history_summary_label.setText(summary)
+        if hasattr(self, "singer_history_summary_label"):
+            self.singer_history_summary_label.setText(summary)
         self.singer_history_rename_button.setEnabled(True)
         self.singer_history_brand_button.setEnabled(True)
         self._refresh_singer_history_brand_combo(pref)
