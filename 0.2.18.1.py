@@ -1000,15 +1000,9 @@ from PyQt6.QtWidgets import (
     QTextEdit
 )
 from PyQt6.QtGui import QFont, QPalette, QColor, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QByteArray, pyqtProperty, QMetaObject, pyqtSlot, QPoint
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, pyqtProperty, QMetaObject, pyqtSlot, QPoint, QPointF
 from PyQt6.QtWidgets import QDialog, QDialogButtonBox
 from PyQt6.QtCore import QUrl, QItemSelectionModel
-try:
-    from PyQt6.QtQuickWidgets import QQuickWidget
-    QML_TICKER_AVAILABLE = True
-except Exception:
-    QQuickWidget = None
-    QML_TICKER_AVAILABLE = False
 
 
 # --- SQLite search/index workers (no UI-thread blocking) ---
@@ -2535,16 +2529,6 @@ TICKER_SIZE_PRESETS = [
     (72, 50, 50, 39, 21, 10),
     (84, 60, 60, 46, 26, 12),
 ]
-# One tick interval per ticker size preset. Each tick moves exactly 1 pixel,
-# avoiding fractional-position rounding jitter while keeping larger text a
-# touch slower and easier to read.
-TICKER_SIZE_TICK_INTERVALS_MS = [
-    10,
-    11,
-    13,
-    15,
-    17,
-]
 TICKER_SIZE_DEFAULT_INDEX = 2
 
 # Marquee scroll speed (pixels/second). Operator-adjustable so the ticker can be
@@ -2552,6 +2536,33 @@ TICKER_SIZE_DEFAULT_INDEX = 2
 TICKER_SPEED_MIN = 20.0
 TICKER_SPEED_MAX = 320.0
 TICKER_SPEED_DEFAULT = 78.0
+
+# The native ticker advances by (px_per_sec * elapsed_seconds) each frame, so
+# scroll speed is independent of the timer cadence. The timer just paces
+# repaints. Older builds encoded speed AS the tick interval (1 px/tick), which
+# (a) clamped everything above ~167 px/s to a 6 ms floor and (b) lost speed
+# permanently whenever video rendering starved the GUI timer.
+#
+# Cadence targets the display's refresh rate (so motion lands on vsync), capped
+# to [60, 120] FPS: ProMotion / 120 Hz panels get ~120 FPS, ordinary 60 Hz
+# panels get 60. Because movement is time-based, a starved timer never changes
+# the speed — it just drops to however many frames the system can deliver, which
+# is the graceful fallback.
+TICKER_TARGET_FPS_MIN = 60.0
+TICKER_TARGET_FPS_MAX = 120.0
+TICKER_FRAME_INTERVAL_MS = 16  # 60 FPS default until the live refresh rate is known
+
+
+def ticker_frame_interval_ms_for_refresh(refresh_hz) -> int:
+    """Frame interval (ms) for a display refresh rate, clamped to [60, 120] FPS."""
+    try:
+        hz = float(refresh_hz)
+    except Exception:
+        hz = 0.0
+    if hz <= 0.0:
+        hz = TICKER_TARGET_FPS_MIN
+    target = max(TICKER_TARGET_FPS_MIN, min(TICKER_TARGET_FPS_MAX, hz))
+    return max(1, int(round(1000.0 / target)))
 
 # ... imports and constants ...
 
@@ -8805,9 +8816,8 @@ class VideoWindow(QWidget):
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
 
-        # Ticker widget at bottom: native pre-rendered ticker gives smoother,
-        # pixel-perfect motion than the older QML/property-animation path.
-        self.ticker_backend = "native"
+        # Native pre-rendered ticker at the bottom: time-based pixel-perfect
+        # scrolling (no QML / QPropertyAnimation).
         self.ticker = Ticker(
             get_singer_list_callback,
             self,
@@ -8819,8 +8829,7 @@ class VideoWindow(QWidget):
         layout.setStretch(1, 0)
 
         _diag(
-            f"[TICKER] init title={title} winId={int(self.video_area.winId())} "
-            f"backend={self.ticker_backend} qml_available={bool(QML_TICKER_AVAILABLE)}"
+            f"[TICKER] init title={title} winId={int(self.video_area.winId())} backend=native"
         )
 
         # Keep idle BG overlay repainting even when this window is not focused.
@@ -29265,378 +29274,6 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-    from PyQt6.QtWidgets import QLabel, QFrame
-    from PyQt6.QtCore import Qt, QTimer
-
-QML_TICKER_SOURCE = """
-import QtQuick
-
-Rectangle {
-    id: root
-    color: "black"
-    clip: true
-
-    property string displayText: ""
-    property string pendingText: ""
-    property real speedPxPerSec: 78
-    property real rightMargin: 32
-    property real gap: 16
-    property real timerPad: 8
-    property int namesPx: 18
-    property int timerPx: 18
-    property color tickerColor: "#FBD000"
-    property bool tickerBold: false
-    property bool running: true
-
-    readonly property real timerWidth: Math.max(1, timerText.contentWidth + (timerPad * 2))
-    readonly property real startX: Math.max(0, width - timerWidth - rightMargin - gap)
-    readonly property real endX: -nameText.contentWidth
-
-    // Frame-paced marquee: position is advanced once per display frame by
-    // (speed * frameTime), so motion is locked to vsync and perfectly smooth,
-    // and live speed/size changes apply seamlessly with no restart hitch.
-    function applyPending() {
-        if (pendingText !== "") {
-            displayText = pendingText
-            pendingText = ""
-        }
-    }
-
-    function resetScroll() {
-        nameText.x = startX
-    }
-
-    Rectangle {
-        id: leftClip
-        x: 0
-        y: 0
-        width: Math.max(0, root.width - root.timerWidth - root.rightMargin - root.gap)
-        height: root.height
-        clip: true
-        color: "transparent"
-
-        Text {
-            id: nameText
-            text: root.displayText
-            color: root.tickerColor
-            font.pixelSize: root.namesPx
-            font.bold: root.tickerBold
-            renderType: Text.QtRendering
-            antialiasing: true
-            y: Math.round((leftClip.height - height) / 2)
-            x: root.startX
-        }
-    }
-
-    Text {
-        id: timerText
-        text: tickerBridge ? tickerBridge.rightText : "--:--"
-        color: root.tickerColor
-        font.pixelSize: root.timerPx
-        font.bold: root.tickerBold
-        renderType: Text.QtRendering
-        x: Math.max(0, root.width - root.timerWidth - root.rightMargin + root.timerPad)
-        y: Math.round((root.height - height) / 2)
-        horizontalAlignment: Text.AlignRight
-    }
-
-    FrameAnimation {
-        id: scroller
-        running: root.running && root.displayText !== ""
-        onTriggered: {
-            if (!root.running || root.displayText === "")
-                return
-            var dt = smoothFrameTime
-            if (dt <= 0 || dt > 0.1)
-                dt = 0.1
-            nameText.x = nameText.x - (root.speedPxPerSec * dt)
-            if (nameText.x <= root.endX) {
-                root.applyPending()
-                nameText.x = root.startX
-            }
-        }
-    }
-
-    Connections {
-        target: tickerBridge
-        ignoreUnknownSignals: true
-        function onQueueTextChanged(text) {
-            // Always ignore exact no-op updates.
-            if (text === root.displayText) return
-
-            // Empty update must NOT be dropped (clear queue/remove last singer).
-            if (text === "") {
-                root.displayText = ""
-                root.pendingText = ""
-                root.resetScroll()
-                return
-            }
-
-            // Ignore duplicate pending updates only when non-empty.
-            if (text === root.pendingText && text !== "") return
-
-            if (root.displayText === "") {
-                root.displayText = text
-                root.resetScroll()
-            } else {
-                root.pendingText = text
-            }
-        }
-        function onRightTextChanged(text) {
-            timerText.text = text
-        }
-        function onColorChanged(hex) {
-            root.tickerColor = hex
-        }
-        function onBoldChanged(enabled) {
-            root.tickerBold = enabled
-        }
-        function onSizeChanged(heightPx, namesPx, timerPx, rightMarginPx, gapPx, timerPadPx) {
-            root.namesPx = namesPx
-            root.timerPx = timerPx
-            root.rightMargin = rightMarginPx
-            root.gap = gapPx
-            root.timerPad = timerPadPx
-        }
-        function onRunStateChanged(enabled) {
-            root.running = enabled
-        }
-        function onSpeedChanged(speed) {
-            root.speedPxPerSec = speed
-        }
-    }
-
-    onWidthChanged: if (root.displayText === "") root.resetScroll()
-    onHeightChanged: {}
-}
-"""
-
-
-class QmlTickerBridge(QObject):
-    queueTextChanged = pyqtSignal(str)
-    rightTextChanged = pyqtSignal(str)
-    colorChanged = pyqtSignal(str)
-    boldChanged = pyqtSignal(bool)
-    sizeChanged = pyqtSignal(int, int, int, int, int, int)
-    runStateChanged = pyqtSignal(bool)
-    speedChanged = pyqtSignal(float)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._right_text = "--:--"
-
-    @pyqtProperty(str, notify=rightTextChanged)
-    def rightText(self):
-        return self._right_text
-
-    def set_queue_text(self, text: str):
-        self.queueTextChanged.emit(str(text or ""))
-
-    def set_right_text(self, text: str):
-        txt = str(text or "--:--")
-        if txt != self._right_text:
-            self._right_text = txt
-            self.rightTextChanged.emit(txt)
-
-    def set_color(self, hex_color: str):
-        self.colorChanged.emit(str(hex_color or "#FBD000"))
-
-    def set_bold(self, enabled: bool):
-        self.boldChanged.emit(bool(enabled))
-
-    def set_size(self, h, names_px, timer_px, right_margin, gap, timer_pad):
-        self.sizeChanged.emit(int(h), int(names_px), int(timer_px), int(right_margin), int(gap), int(timer_pad))
-
-    def set_running(self, enabled: bool):
-        self.runStateChanged.emit(bool(enabled))
-
-    def set_speed(self, px_per_sec: float):
-        self.speedChanged.emit(float(px_per_sec))
-
-
-class QmlTicker(QFrame):
-    def __init__(self, get_singer_list_callback, parent=None, get_time_left_callback=None):
-        super().__init__(parent)
-        if not QML_TICKER_AVAILABLE:
-            raise RuntimeError("Qt Quick is not available")
-
-        self.get_singer_list_callback = get_singer_list_callback
-        self.get_time_left_callback = get_time_left_callback
-        self.setStyleSheet("background-color: black;")
-        self.setContentsMargins(0, 0, 0, 0)
-
-        self._scroll_speed_px_per_sec = 78.0
-        self._right_text = "--:--"
-        self._last_queue_text = ""
-        self._size_idx = TICKER_SIZE_DEFAULT_INDEX
-
-        self.bridge = QmlTickerBridge(self)
-        self.quick = QQuickWidget(self)
-        self.quick.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
-        self.quick.setClearColor(QColor("black"))
-        self.quick.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, False)
-
-        ctx = self.quick.rootContext()
-        ctx.setContextProperty("tickerBridge", self.bridge)
-
-        # Load via a temp .qml file (more reliable than inline component parsing on some macOS setups).
-        self._qml_temp_path = None
-        try:
-            fd, qml_path = tempfile.mkstemp(prefix="singws_ticker_", suffix=".qml")
-            self._qml_temp_path = qml_path
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(QML_TICKER_SOURCE)
-        except Exception as e:
-            raise RuntimeError(f"Failed to create temporary QML file: {e}")
-
-        self.quick.setSource(QUrl.fromLocalFile(self._qml_temp_path))
-        if self.quick.status() == QQuickWidget.Status.Error:
-            errs = []
-            try:
-                for er in self.quick.errors():
-                    try:
-                        errs.append(er.toString())
-                    except Exception:
-                        errs.append(str(er))
-            except Exception:
-                pass
-            detail = " | ".join(errs) if errs else "unknown QML error"
-            raise RuntimeError(f"QML load error: {detail}")
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(self.quick)
-
-        self.queue_update_timer = QTimer(self)
-        self.queue_update_timer.timeout.connect(self.update_queue_text)
-        self.queue_update_timer.start(5000)
-
-        self.right_update_timer = QTimer(self)
-        self.right_update_timer.timeout.connect(self.update_right_text)
-        self.right_update_timer.start(300)
-
-        size_idx = TICKER_SIZE_DEFAULT_INDEX
-        bold = False
-        try:
-            owner = self._settings_owner()
-            if owner is not None and hasattr(owner, "settings"):
-                size_idx = int(owner.settings.get("ticker_size_index", TICKER_SIZE_DEFAULT_INDEX))
-                bold = bool(owner.settings.get("ticker_bold", False))
-                self._scroll_speed_px_per_sec = self._clamp_scroll_speed(
-                    owner.settings.get("ticker_speed_px_per_sec", self._scroll_speed_px_per_sec)
-                )
-        except Exception:
-            size_idx = TICKER_SIZE_DEFAULT_INDEX
-        self.set_size_preset(size_idx)
-        self.set_bold(bold)
-        self.bridge.set_speed(self._scroll_speed_px_per_sec)
-        self.update_queue_text()
-        self.update_right_text()
-        self.start_scrolling()
-
-    def _settings_owner(self):
-        try:
-            owner = getattr(self, "_external_settings_owner", None)
-            if owner is not None and hasattr(owner, "settings"):
-                return owner
-        except Exception:
-            pass
-        w = self.parent()
-        while w is not None:
-            if hasattr(w, "settings"):
-                return w
-            w = w.parent()
-        return None
-
-    @staticmethod
-    def _clamp_scroll_speed(value) -> float:
-        try:
-            v = float(value)
-        except Exception:
-            v = 78.0
-        return max(TICKER_SPEED_MIN, min(TICKER_SPEED_MAX, v))
-
-    def set_scroll_speed(self, px_per_sec) -> None:
-        """Live-update the marquee scroll speed (pixels/second)."""
-        self._scroll_speed_px_per_sec = self._effective_scroll_speed(px_per_sec)
-        try:
-            self.bridge.set_speed(self._scroll_speed_px_per_sec)
-        except Exception:
-            pass
-
-    def _effective_scroll_speed(self, px_per_sec) -> float:
-        speed = self._clamp_scroll_speed(px_per_sec)
-        try:
-            owner = self._settings_owner()
-            if owner is not None and hasattr(owner, "_effective_ticker_speed_px_per_sec"):
-                return float(owner._effective_ticker_speed_px_per_sec(speed))
-        except Exception:
-            pass
-        return speed
-
-    def _format_queue_text(self):
-        custom_msg = ""
-        singer_list = []
-        try:
-            res = self.get_singer_list_callback()
-            if isinstance(res, tuple) and len(res) == 2:
-                singer_list, custom_msg = res
-            elif isinstance(res, dict):
-                singer_list = res.get("singers", []) or []
-                custom_msg = (res.get("message", "") or "").strip()
-            else:
-                singer_list = res or []
-        except Exception:
-            singer_list = []
-            custom_msg = ""
-
-        singer_list = singer_list or []
-        custom_msg = (custom_msg or "").strip()
-        formatted_singers = "   |   ".join([f"{idx + 1}. {name}" for idx, name in enumerate(singer_list)])
-        if custom_msg:
-            return f"{custom_msg}   |   {formatted_singers}" if formatted_singers else custom_msg
-        return formatted_singers
-
-    def set_size_preset(self, idx: int):
-        idx = max(0, min(len(TICKER_SIZE_PRESETS) - 1, int(idx)))
-        self._size_idx = idx
-        h, names_px, timer_px, right_margin, gap, timer_pad = TICKER_SIZE_PRESETS[idx]
-        self.setFixedHeight(int(h))
-        self.bridge.set_size(h, names_px, timer_px, right_margin, gap, timer_pad)
-
-    def set_color(self, hex_color: str):
-        self.bridge.set_color(hex_color or "#FBD000")
-
-    def set_bold(self, enabled: bool):
-        self.bridge.set_bold(bool(enabled))
-
-    def update_queue_text(self):
-        txt = self._format_queue_text()
-        if txt != self._last_queue_text:
-            self._last_queue_text = txt
-            self.bridge.set_queue_text(txt)
-
-    def update_right_text(self):
-        if self.get_time_left_callback:
-            self._right_text = self.get_time_left_callback() or "--:--"
-            self.bridge.set_right_text(self._right_text)
-
-    def start_scrolling(self):
-        self.bridge.set_running(True)
-
-    def stop_scrolling(self):
-        self.bridge.set_running(False)
-
-    def force_refresh_now(self):
-        self._last_queue_text = ""
-        # Clear first so next update is applied immediately (not on wrap).
-        self.bridge.set_queue_text("")
-        self.update_queue_text()
-        # Restart QML animation pass from current layout state.
-        self.bridge.set_running(False)
-        self.bridge.set_running(True)
-
 
 class Ticker(QFrame):
     """Fast in-process ticker: pre-rendered text strip + elapsed-time scrolling.
@@ -29687,16 +29324,20 @@ class Ticker(QFrame):
         self._right_text = "--:--"
         self._right_width = 0
 
-        # Pixel-perfect step-per-tick scrolling: every timer fire moves
-        # exactly 1 pixel. Speed is controlled by tick interval, not by
-        # multiplying by elapsed time. This is what gives the rotation
-        # view its visual smoothness — we use the same approach here.
+        # Time-based scrolling: each frame moves (px_per_sec * real elapsed
+        # seconds), so speed is set by _scroll_speed_px_per_sec, NOT by the tick
+        # interval. The cadence targets the display refresh rate (60-120 FPS) so
+        # frames land on vsync; if a frame is delayed by heavy video rendering,
+        # the next frame moves proportionally farther so the configured speed is
+        # preserved and the worst case is simply fewer frames (graceful fallback).
         self._scroll_x = 0.0
-        self._frame_interval_ms = TICKER_SIZE_TICK_INTERVALS_MS[TICKER_SIZE_DEFAULT_INDEX]
+        self._last_frame_ts = None  # monotonic timestamp of previous frame
+        self._frame_dt_ema = None   # smoothed real frame interval, for backoff
+        self._frame_interval_ms = TICKER_FRAME_INTERVAL_MS
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.timeout.connect(self._on_frame)
-        self.frame_timer.start(self._frame_interval_ms)
+        self._apply_refresh_rate_cadence()
 
         # Refresh queue text occasionally; direct queue edits also call this via debounce.
         self.queue_update_timer = QTimer(self)
@@ -29759,17 +29400,10 @@ class Ticker(QFrame):
         self._timer_fm = QFontMetrics(self._timer_font)
         self.setFixedHeight(int(h))
 
-        # Preserve the operator's saved speed. Older builds reset the timer to
-        # the size preset here, so changing size or reopening settings made the
-        # ticker slow back down after a save.
-        try:
-            pps = self._effective_scroll_speed(self._scroll_speed_px_per_sec)
-            self._frame_interval_ms = max(6, int(round(1000.0 / pps)))
-        except Exception:
-            self._frame_interval_ms = TICKER_SIZE_TICK_INTERVALS_MS[idx]
-        if self.frame_timer.isActive():
-            self.frame_timer.start(self._frame_interval_ms)
-
+        # Size only affects fonts/height — never the timer cadence or speed.
+        # The frame timer is paced to the display refresh rate (see
+        # _apply_refresh_rate_cadence); scroll speed is applied as pixels/second
+        # in _on_frame, so changing size never alters how fast the ticker moves.
         self._recompute_widths()
         self._rebuild_active_strip()
         # Preserve current position when possible; only reset if this is initial setup.
@@ -29780,18 +29414,85 @@ class Ticker(QFrame):
     def set_scroll_speed(self, px_per_sec) -> None:
         """Live-update the marquee scroll speed (pixels/second).
 
-        The native ticker moves exactly 1 px per timer tick, so speed is
-        controlled by the tick interval: interval_ms = 1000 / px_per_sec.
+        Speed is applied as pixels/second in _on_frame (time-based), so this
+        only stores the value — it takes effect on the very next frame with no
+        restart required. The timer keeps its fixed ~60 FPS cadence.
         """
         try:
             pps = self._effective_scroll_speed(px_per_sec)
         except Exception:
             return
         self._scroll_speed_px_per_sec = pps
-        interval_ms = max(6, int(round(1000.0 / pps)))
-        self._frame_interval_ms = interval_ms
-        if self.frame_timer.isActive():
-            self.frame_timer.start(self._frame_interval_ms)
+        self._log_ticker_state("set_scroll_speed", requested=px_per_sec)
+
+    def _log_ticker_state(self, reason: str, requested=None) -> None:
+        """Emit the [TICKER] diagnostic block requested for speed debugging."""
+        try:
+            owner = self._settings_owner()
+            saved = None
+            if owner is not None and hasattr(owner, "settings"):
+                saved = owner.settings.get("ticker_speed_px_per_sec", TICKER_SPEED_DEFAULT)
+            pps = float(self._scroll_speed_px_per_sec)
+            # Time to traverse one full strip width at the current speed.
+            anim_ms = (float(self._active_width) / pps * 1000.0) if pps > 0 and self._active_width > 0 else 0.0
+            try:
+                window = self.window().windowTitle() or self.__class__.__name__
+            except Exception:
+                window = self.__class__.__name__
+            _diag(
+                "[TICKER] "
+                f"reason={reason} "
+                f"Saved Speed={saved} "
+                f"Loaded Speed={pps:.1f} "
+                f"Requested={requested} "
+                f"Frame Interval={self._frame_interval_ms}ms "
+                f"Animation Duration={anim_ms:.0f}ms "
+                f"Pixels Per Second={pps:.1f} "
+                f"Strip Width={int(self._active_width)} "
+                f"Target FPS={1000.0 / max(1, self._frame_interval_ms):.0f} "
+                f"Display Window={window!r}"
+            )
+        except Exception:
+            pass
+
+    def _screen_refresh_hz(self) -> float:
+        """Best-effort current-display refresh rate in Hz (0.0 if unknown)."""
+        try:
+            scr = self.screen()
+            if scr is None:
+                win = self.window()
+                handle = win.windowHandle() if win is not None else None
+                scr = handle.screen() if handle is not None else None
+            if scr is None:
+                scr = QApplication.primaryScreen()
+            if scr is not None:
+                return float(scr.refreshRate())
+        except Exception:
+            pass
+        return 0.0
+
+    def _apply_refresh_rate_cadence(self):
+        """Pace the frame timer to the display refresh rate, capped to 60-120 FPS.
+
+        Time-based movement means this only affects smoothness, never speed.
+        """
+        hz = self._screen_refresh_hz()
+        interval = ticker_frame_interval_ms_for_refresh(hz)
+        changed = (interval != getattr(self, "_frame_interval_ms", None)) or not self.frame_timer.isActive()
+        self._frame_interval_ms = interval
+        self._frame_dt_ema = None  # let the new cadence re-prove itself
+        if changed:
+            self.frame_timer.start(interval)
+            _diag(
+                f"[TICKER] cadence refresh_hz={hz:.1f} "
+                f"target_fps={1000.0 / max(1, interval):.0f} interval={interval}ms"
+            )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Fullscreen toggles re-show the window and can move it to another
+        # display; re-evaluate the refresh-rate cadence each time.
+        self._apply_refresh_rate_cadence()
 
     def _effective_scroll_speed(self, px_per_sec) -> float:
         try:
@@ -29822,22 +29523,45 @@ class Ticker(QFrame):
         txt = str(text or "")
         if not txt:
             return QPixmap()
+        # Logical dimensions (what the scroll math and layout use).
         w = max(1, self._names_fm.horizontalAdvance(txt))
         h = max(1, self._names_fm.height() + 2)
-        pm = QPixmap(w, h)
+        # Render the strip at the display's device-pixel ratio so text stays
+        # crisp on 1080p/Retina/HiDPI panels instead of being upscaled from a
+        # logical-size bitmap. Painting still uses logical coordinates.
+        try:
+            dpr = float(self.devicePixelRatioF()) or 1.0
+        except Exception:
+            dpr = 1.0
+        dpr = max(1.0, dpr)
+        pm = QPixmap(int(round(w * dpr)), int(round(h * dpr)))
+        pm.setDevicePixelRatio(dpr)
         pm.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(self._color)
         painter.setFont(self._names_font)
         painter.drawText(0, self._names_fm.ascent() + 1, txt)
         painter.end()
         return pm
 
+    @staticmethod
+    def _strip_logical_size(pm: QPixmap) -> tuple[int, int]:
+        """Logical (DPR-independent) width/height of a rendered strip."""
+        if pm is None or pm.isNull():
+            return 0, 0
+        try:
+            dpr = float(pm.devicePixelRatio()) or 1.0
+        except Exception:
+            dpr = 1.0
+        dpr = max(1.0, dpr)
+        return int(round(pm.width() / dpr)), int(round(pm.height() / dpr))
+
     def _rebuild_active_strip(self):
         if self._active_text:
             self._active_strip = self._build_text_strip(self._active_text)
-            self._active_width = 0 if self._active_strip.isNull() else self._active_strip.width()
+            self._active_width = self._strip_logical_size(self._active_strip)[0]
         else:
             self._active_strip = QPixmap()
             self._active_width = 0
@@ -29864,7 +29588,7 @@ class Ticker(QFrame):
     def _activate_text(self, text: str):
         self._active_text = str(text or "")
         self._active_strip = self._build_text_strip(self._active_text)
-        self._active_width = 0 if self._active_strip.isNull() else self._active_strip.width()
+        self._active_width = self._strip_logical_size(self._active_strip)[0]
         self._reset_cycle(start_from_edge=True)
 
     def _activate_pending_text(self):
@@ -29874,23 +29598,55 @@ class Ticker(QFrame):
             self._activate_text(text)
 
     def _on_frame(self):
+        now = time.monotonic()
+        last = self._last_frame_ts
+        self._last_frame_ts = now
         if not self._is_scrolling_enabled or not self.isVisible() or self._active_width <= 0:
+            # Drop the stale timestamp so a long pause can't cause a leap when
+            # scrolling resumes.
+            self._last_frame_ts = None
             return
-        # Move exactly 1 pixel per tick. Speed is controlled by the timer
-        # interval, set per size preset. No fractional positions means no
-        # rounding jitter — every paint shifts exactly 1 pixel, like the
-        # rotation view. If a tick is missed under load, the next tick
-        # still moves 1 pixel: the scroll briefly slows, never jumps.
-        self._scroll_x -= 1.0
+        if last is None:
+            # First frame after (re)start: establish the clock, move next time.
+            return
+        # Time-based movement: distance = speed * real elapsed seconds. Clamp dt
+        # so a stalled event loop (e.g. a big fullscreen toggle) cannot fling the
+        # text across the screen in one jump; under normal load the next frame
+        # simply moves a little farther, preserving the configured speed.
+        dt = now - last
+        if dt > 0.25:
+            dt = 0.25
+        self._scroll_x -= float(self._scroll_speed_px_per_sec) * dt
         if self._scroll_x <= -float(self._active_width):
             if self._pending_text != "":
                 self._activate_pending_text()
             else:
                 self._reset_cycle(start_from_edge=True)
+        self._maybe_back_off_cadence(dt)
         self.update()
+
+    def _maybe_back_off_cadence(self, dt: float) -> None:
+        """If we're targeting >60 FPS but the loop can't sustain it (e.g. an
+        Intel Mac busy with CDG/MP4), drop to 60 FPS once so we stop oversampling.
+        One-directional; a move to a faster display re-evaluates via showEvent."""
+        if dt <= 0:
+            return
+        ema = self._frame_dt_ema
+        self._frame_dt_ema = dt if ema is None else (ema * 0.9 + dt * 0.1)
+        # interval < 12 ms means we asked for ~120 FPS; 0.0135 s ~= 74 FPS.
+        if self._frame_interval_ms < 12 and self._frame_dt_ema > 0.0135:
+            fallback = ticker_frame_interval_ms_for_refresh(TICKER_TARGET_FPS_MIN)
+            self._frame_interval_ms = fallback
+            self.frame_timer.start(fallback)
+            self._frame_dt_ema = None
+            _diag(
+                f"[TICKER] cadence backoff to {1000.0 / fallback:.0f} FPS "
+                f"(sustained frame time too high for 120 FPS)"
+            )
 
     def start_scrolling(self):
         self._is_scrolling_enabled = True
+        self._last_frame_ts = None  # re-establish the clock on next frame
         if not self.frame_timer.isActive():
             self.frame_timer.start(self._frame_interval_ms)
         if self._active_width <= 0:
@@ -29965,6 +29721,11 @@ class Ticker(QFrame):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        # Smooth subpixel blitting + anti-aliased text so fractional scroll
+        # positions render as fluid motion rather than 1 px stair-steps.
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.fillRect(self.rect(), QColor("black"))
 
         right_x = max(0, self.width() - self._right_width - self._right_margin)
@@ -29974,8 +29735,12 @@ class Ticker(QFrame):
         painter.save()
         painter.setClipRect(left_clip)
         if not self._active_strip.isNull():
-            y_strip = max(0, (self.height() - self._active_strip.height()) // 2)
-            painter.drawPixmap(int(round(self._scroll_x)), y_strip, self._active_strip)
+            _sw, strip_h = self._strip_logical_size(self._active_strip)
+            y_strip = max(0.0, (self.height() - strip_h) / 2.0)
+            # Float position (QPointF) keeps the subpixel offset instead of
+            # rounding to whole pixels, which is what removes the jagged/jumpy
+            # look on HD/fullscreen displays.
+            painter.drawPixmap(QPointF(self._scroll_x, y_strip), self._active_strip)
         painter.restore()
 
         painter.setPen(self._color)
