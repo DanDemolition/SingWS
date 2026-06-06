@@ -2534,7 +2534,7 @@ TICKER_SIZE_DEFAULT_INDEX = 2
 # Marquee scroll speed (pixels/second). Operator-adjustable so the ticker can be
 # sped up live when it reads too slowly for a room.
 TICKER_SPEED_MIN = 20.0
-TICKER_SPEED_MAX = 320.0
+TICKER_SPEED_MAX = 900.0
 TICKER_SPEED_DEFAULT = 78.0
 
 # The native ticker advances by (px_per_sec * elapsed_seconds) each frame, so

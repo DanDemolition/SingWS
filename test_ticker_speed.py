@@ -41,6 +41,9 @@ class TickerSpeedTests(unittest.TestCase):
         t = self.singws.Ticker.__new__(self.singws.Ticker)
         t._is_scrolling_enabled = True
         t._active_width = 1000
+        t._right_width = 80
+        t._right_margin = 32
+        t._gap = 16
         t._scroll_x = 1000.0
         t._pending_text = ""
         t._last_frame_ts = None
@@ -50,6 +53,7 @@ class TickerSpeedTests(unittest.TestCase):
         t._external_settings_owner = FakeOwner(speed)
         # Stub the Qt bits _on_frame / backoff would otherwise call.
         t.isVisible = lambda: True
+        t.width = lambda: 1280
         t.update = lambda: None
         t._reset_cycle = lambda start_from_edge=True: None
         t.frame_timer = types.SimpleNamespace(start=lambda *a: None, isActive=lambda: True)
@@ -98,14 +102,16 @@ class TickerSpeedTests(unittest.TestCase):
         fast = self.distance_over(self.singws.TICKER_SPEED_MAX, dt, FakeClock())
         self.assertAlmostEqual(slow, 20.0 * dt, places=3)
         self.assertAlmostEqual(mid, 170.0 * dt, places=3)
-        self.assertAlmostEqual(fast, 320.0 * dt, places=3)
+        self.assertAlmostEqual(fast, self.singws.TICKER_SPEED_MAX * dt, places=3)
         # Max must be meaningfully faster than mid (this was broken before).
         self.assertGreater(fast, mid * 1.5)
+        # Fullscreen needs a real "extreme fast" setting, not just a modest bump.
+        self.assertGreaterEqual(self.singws.TICKER_SPEED_MAX, 900.0)
 
     def test_large_dt_is_clamped_to_avoid_leaps(self):
         # A stalled event loop should not fling the text across the screen.
-        moved = self.distance_over(320.0, 5.0, FakeClock())
-        self.assertAlmostEqual(moved, 320.0 * 0.25, places=3)  # dt capped at 0.25s
+        moved = self.distance_over(self.singws.TICKER_SPEED_MAX, 5.0, FakeClock())
+        self.assertAlmostEqual(moved, self.singws.TICKER_SPEED_MAX * 0.25, places=3)  # dt capped at 0.25s
 
     def test_set_scroll_speed_does_not_change_timer_interval(self):
         t = self.make_ticker(78.0)
@@ -190,6 +196,33 @@ class TickerSpeedTests(unittest.TestCase):
         finally:
             time_mod.monotonic = original
         self.assertAlmostEqual(moved_one_big, moved_two_small, places=4)
+
+    def test_speed_is_independent_of_fullscreen_width(self):
+        # Width changes affect where a cycle starts, not px/sec movement.
+        clock = FakeClock()
+        t = self.make_ticker(500.0)
+        import importlib
+        time_mod = importlib.import_module("time")
+        original = time_mod.monotonic
+        time_mod.monotonic = clock
+        try:
+            t.width = lambda: 1280
+            t._on_frame()
+            start = t._scroll_x
+            clock.advance(0.1)
+            t._on_frame()
+            moved_normal = start - t._scroll_x
+
+            t.width = lambda: 3840
+            t._last_frame_ts = None
+            t._on_frame()
+            start = t._scroll_x
+            clock.advance(0.1)
+            t._on_frame()
+            moved_fullscreen = start - t._scroll_x
+        finally:
+            time_mod.monotonic = original
+        self.assertAlmostEqual(moved_normal, moved_fullscreen, places=4)
 
     def test_cadence_backs_off_from_120_when_loop_is_slow(self):
         t = self.make_ticker(100.0)
