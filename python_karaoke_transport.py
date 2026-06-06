@@ -490,9 +490,13 @@ class FfmpegVideoReader:
         self.frame_index = 0
         self.latest_image = None
         self.dropped_frames = 0
+        self.frames_decoded = 0
+        self.frames_delivered = 0
         self._dropped_since_log = 0
         self._last_drop_log_ts = 0.0
         self._last_queue_log_ts = 0.0
+        self._started_ts = time.monotonic()
+        self._hwaccel_checked = False
         # Whether VideoToolbox decode is usable for this file.  Decided inside
         # the worker thread (the probe spawns ffmpeg and must NOT block the GUI
         # thread that constructs this reader when a song starts).
@@ -596,6 +600,7 @@ class FfmpegVideoReader:
                 self.width * 3,
                 QImage.Format.Format_RGB888,
             ).copy()
+            self.frames_delivered += 1
             _perf_log_if_slow("qimage_convert", (time.perf_counter() - convert_started) * 1000.0, 4.0)
         if dropped:
             self.dropped_frames += dropped
@@ -613,6 +618,23 @@ class FfmpegVideoReader:
                 return len(self.frames)
         except Exception:
             return 0
+
+    def stats(self) -> dict:
+        elapsed = max(0.001, time.monotonic() - float(self._started_ts or time.monotonic()))
+        return {
+            "decoder": "ffmpeg/rawvideo",
+            "hardware_acceleration": "videotoolbox" if self.use_hwaccel else "none",
+            "hardware_acceleration_checked": bool(self._hwaccel_checked),
+            "source_size": f"{self.src_width}x{self.src_height}" if self.src_width and self.src_height else "",
+            "output_size": f"{self.width}x{self.height}" if self.width and self.height else "",
+            "fps": float(self.fps),
+            "delivered_fps": float(self.frames_delivered) / elapsed,
+            "queue_size": self.queue_size(),
+            "decoded_frames": int(self.frames_decoded),
+            "delivered_frames": int(self.frames_delivered),
+            "dropped_frames": int(self.dropped_frames),
+            "max_buffered_frames": int(self.MAX_BUFFERED_FRAMES),
+        }
 
     def _probe_dimensions(self) -> tuple[int, int]:
         t0 = time.perf_counter()
@@ -653,6 +675,7 @@ class FfmpegVideoReader:
         # the GUI thread that created the reader.
         if not self.stop_event.is_set():
             self.use_hwaccel = self._hwaccel_supported()
+            self._hwaccel_checked = True
         command = [
             _ffmpeg_path("ffmpeg"),
             "-hide_banner",
@@ -711,6 +734,7 @@ class FfmpegVideoReader:
                     break
                 timestamp = self.start_seconds + (self.frame_index / self.fps)
                 self.frame_index += 1
+                self.frames_decoded += 1
                 with self.lock:
                     self.frames.append((timestamp, raw))
                     if len(self.frames) >= self.MAX_BUFFERED_FRAMES and (time.monotonic() - self._last_queue_log_ts) >= 2.0:
@@ -789,6 +813,8 @@ class _PcmFeeder(QIODevice):
             t._pcm_lock.notify_all()
         if len(out) < n:
             # Underrun: pad with silence so the output device never stalls.
+            t._audio_underrun_count += 1
+            t._audio_underrun_bytes += int(n - len(out))
             out += b"\x00" * (n - len(out))
         return bytes(out)
 
@@ -831,6 +857,14 @@ class PythonKaraokeTransport(QObject):
         self.last_level_db = None
         self.last_level_ts = 0.0
         self.decoder_error = ""
+        self._audio_underrun_count = 0
+        self._audio_underrun_bytes = 0
+        self._visual_tick_count = 0
+        self._visual_emit_count = 0
+        self._visual_render_total_ms = 0.0
+        self._visual_render_max_ms = 0.0
+        self._visual_started_ts = time.monotonic()
+        self._last_sync_render_ms = 0.0
         self._pcm_chunks = deque()
         self._pcm_bytes = 0
         self._pcm_lock = threading.Condition()
@@ -1041,6 +1075,31 @@ class PythonKaraokeTransport(QObject):
     def query_times_ns(self) -> tuple[int | None, int | None]:
         duration = int(self.duration_seconds * NS_PER_SECOND) if self.duration_seconds > 0.0 else None
         return duration, int(self.position_seconds() * NS_PER_SECOND)
+
+    def diagnostics(self) -> dict:
+        elapsed = max(0.001, time.monotonic() - float(self._visual_started_ts or time.monotonic()))
+        with self._pcm_lock:
+            buffered = self._pcm_bytes + len(self._pending_output)
+        video = self.video_reader.stats() if self.video_reader is not None and hasattr(self.video_reader, "stats") else {}
+        return {
+            "media_type": self.mode.upper(),
+            "position_seconds": float(self.position_seconds()),
+            "duration_seconds": float(self.duration_seconds or 0.0),
+            "audio_latency_ms": float(buffered) / max(1.0, float(self.sample_rate * self.channels * 4)) * 1000.0,
+            "audio_buffer_bytes": int(buffered),
+            "audio_underruns": int(self._audio_underrun_count),
+            "audio_underrun_bytes": int(self._audio_underrun_bytes),
+            "visual_timer_ms": int(self.visual_timer_interval_ms),
+            "visual_ticks": int(self._visual_tick_count),
+            "visual_emits": int(self._visual_emit_count),
+            "visual_emit_fps": float(self._visual_emit_count) / elapsed,
+            "visual_render_avg_ms": float(self._visual_render_total_ms) / max(1, int(self._visual_tick_count)),
+            "visual_render_max_ms": float(self._visual_render_max_ms),
+            "last_visual_render_ms": float(self._last_sync_render_ms),
+            "sync_dropped_visual_packets": int(self._sync_dropped_visual_packets),
+            "video": video,
+            "decoder_error": str(self.decoder_error or ""),
+        }
 
     def cdg_sectors_remaining(self) -> float | None:
         if self.cdg is None:
@@ -1276,6 +1335,7 @@ class PythonKaraokeTransport(QObject):
         # Audio is pulled by Qt's audio thread (the _PcmFeeder), so the UI tick
         # no longer drains PCM — it only drives the video frame + end detection.
         position = self.position_seconds()
+        self._visual_tick_count += 1
         # Visual-only calibration: the frame is rendered at position + offset so
         # the host can nudge lyric/video timing without affecting the audio clock
         # or end detection (both keep using the true `position`).
@@ -1289,6 +1349,9 @@ class PythonKaraokeTransport(QObject):
             render_start_ns = time.monotonic_ns()
             image = self.cdg.frame_at(frame_pos)
             render_ms = (time.monotonic_ns() - render_start_ns) / 1_000_000.0
+            self._last_sync_render_ms = render_ms
+            self._visual_render_total_ms += render_ms
+            self._visual_render_max_ms = max(float(self._visual_render_max_ms), render_ms)
             _perf_log_if_slow("frame_decode", render_ms, 8.0)
             after_packet = int(getattr(self.cdg, "_packet_index", before_packet) or before_packet)
             skipped_packets = max(0, after_packet - before_packet - 8)
@@ -1297,14 +1360,19 @@ class PythonKaraokeTransport(QObject):
             self._maybe_log_sync_diag(position, render_ms, skipped_packets)
             if self.cdg.generation != self._last_cdg_generation:
                 self._last_cdg_generation = self.cdg.generation
+                self._visual_emit_count += 1
                 self.frame_ready.emit(image)
         elif self.video_reader is not None:
             render_start_ns = time.monotonic_ns()
             image = self.video_reader.image_at(frame_pos)
             render_ms = (time.monotonic_ns() - render_start_ns) / 1_000_000.0
+            self._last_sync_render_ms = render_ms
+            self._visual_render_total_ms += render_ms
+            self._visual_render_max_ms = max(float(self._visual_render_max_ms), render_ms)
             _perf_log_if_slow("frame_render", render_ms, 12.0)
             self._maybe_log_sync_diag(position, render_ms, 0)
             if image is not None:
+                self._visual_emit_count += 1
                 self.frame_ready.emit(image)
         if self._decoder_done:
             with self._pcm_lock:

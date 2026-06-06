@@ -346,6 +346,71 @@ def subtle_button_css(*, padding: str = "6px 12px", radius: int = 8) -> str:
     r = min(8, max(0, int(radius)))
     return f"QPushButton, QToolButton {{ background:rgba(255,255,255,0.030); color:{_v('text')}; border:1px solid {_v('border')}; border-radius:{r}px; padding:{padding}; }}"
 
+def warning_button_css(*, padding: str = "8px 12px", radius: int = 8) -> str:
+    r = min(8, max(0, int(radius)))
+    return f"""
+        QPushButton, QToolButton {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(245,200,75,0.92),
+                stop:1 rgba(185,129,22,0.94));
+            color: #1F1604;
+            border: 1px solid rgba(255,222,116,0.72);
+            border-radius: {r}px;
+            padding: {padding};
+            font-size: 13px;
+            font-weight: 800;
+        }}
+        QPushButton:hover, QToolButton:hover {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(255,218,92,0.98),
+                stop:1 rgba(210,148,28,0.98));
+            border-color: rgba(255,237,158,0.90);
+            color: #171004;
+        }}
+        QPushButton:pressed, QToolButton:pressed {{
+            background-color: rgba(145,95,10,0.98);
+            border-color: rgba(255,222,116,0.68);
+            color: #120C02;
+        }}
+        QPushButton:disabled, QToolButton:disabled {{
+            background: rgba(245,200,75,0.10);
+            color: rgba(245,200,75,0.45);
+            border-color: rgba(245,200,75,0.16);
+        }}
+    """
+
+def danger_button_css(*, padding: str = "8px 12px", radius: int = 8) -> str:
+    r = min(8, max(0, int(radius)))
+    return f"""
+        QPushButton, QToolButton {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(229,72,77,0.22),
+                stop:1 rgba(229,72,77,0.12));
+            color: #ffb4b7;
+            border: 1px solid rgba(229,72,77,0.36);
+            border-radius: {r}px;
+            padding: {padding};
+            font-size: 13px;
+            font-weight: 800;
+        }}
+        QPushButton:hover, QToolButton:hover {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(229,72,77,0.44),
+                stop:1 rgba(229,72,77,0.28));
+            border-color: rgba(255,140,143,0.62);
+            color: #ffffff;
+        }}
+        QPushButton:pressed, QToolButton:pressed {{
+            background-color: rgba(150,30,34,0.84);
+            border-color: rgba(255,140,143,0.72);
+        }}
+        QPushButton:disabled, QToolButton:disabled {{
+            background: rgba(229,72,77,0.06);
+            color: rgba(255,180,183,0.35);
+            border-color: rgba(229,72,77,0.14);
+        }}
+    """
+
 
 def soundboard_pad_css(state: str = "loaded") -> str:
     """Polished soundboard-pad styling.
@@ -1235,7 +1300,7 @@ class SongbookUploadThread(QThread):
 
     def __init__(self, base_url: str, tenant: str, api_key: str, tracks: list):
         super().__init__()
-        self.base_url = (base_url or "").rstrip("/")
+        self.base_url = _network_normalize_base_url(base_url)
         self.tenant = (tenant or "").strip()
         self.api_key = (api_key or "").strip()
         self.tracks = list(tracks or [])
@@ -1380,25 +1445,29 @@ def _show_gst_error_and_exit(exc: Exception):
         print(generic_hint, file=sys.stderr)
     sys.exit(1)
 
-try:
-    import gi
-    gi.require_version("Gst", "1.0")
-    gi.require_version("GstVideo", "1.0")
-    from gi.repository import Gst, GstVideo
+if os.environ.get("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS") == "1":
+    Gst = None
+    GstVideo = None
+else:
+    try:
+        import gi
+        gi.require_version("Gst", "1.0")
+        gi.require_version("GstVideo", "1.0")
+        from gi.repository import Gst, GstVideo
 
-    # Initialize GStreamer
-    # PyGObject 3.50+ disallows None here; pass an empty list which behaves
-    # identically.  3.46 and earlier accepted both.
-    Gst.init([])
+        # Initialize GStreamer
+        # PyGObject 3.50+ disallows None here; pass an empty list which behaves
+        # identically.  3.46 and earlier accepted both.
+        Gst.init([])
 
-    # Sanity-check a couple of core plugins your app needs
-    if not Gst.ElementFactory.find("playbin"):
-        raise RuntimeError("Required GStreamer plugin 'playbin' is missing.")
-    if not Gst.ElementFactory.find("autoaudiosink"):
-        raise RuntimeError("Required GStreamer plugin 'autoaudiosink' is missing.")
+        # Sanity-check a couple of core plugins your app needs
+        if not Gst.ElementFactory.find("playbin"):
+            raise RuntimeError("Required GStreamer plugin 'playbin' is missing.")
+        if not Gst.ElementFactory.find("autoaudiosink"):
+            raise RuntimeError("Required GStreamer plugin 'autoaudiosink' is missing.")
 
-except Exception as e:
-    _show_gst_error_and_exit(e)
+    except Exception as e:
+        _show_gst_error_and_exit(e)
 
 try:
     from python_karaoke_transport import NS_PER_SECOND, PythonKaraokeTransport
@@ -1760,6 +1829,7 @@ QUEUE_PATH = APP_USER_DIR / "queue.json"
 TRACKS_PATH = APP_USER_DIR / "tracks.json"
 SINGER_PREFS_PATH = APP_USER_DIR / "singer_preferences.json"
 SINGER_HISTORY_PATH = APP_USER_DIR / "singer_history.json"
+REMOTE_REQUEST_TOMBSTONES_PATH = APP_USER_DIR / "remote_request_tombstones.json"
 IMAGES_DIR = APP_USER_DIR / "images"
 IMAGES_DIR.mkdir(exist_ok=True)
 
@@ -2059,6 +2129,223 @@ def _diag(msg: str):
     except Exception:
         pass
 
+def _network_log(msg: str):
+    _diag(f"[NETWORK-SYNC] {msg}")
+
+def _network_safe_body(resp, limit: int = 300) -> str:
+    try:
+        return str(getattr(resp, "text", "") or "")[:limit]
+    except Exception:
+        return ""
+
+def _network_normalize_base_url(base_url: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    if base and "://" not in base:
+        base = "https://" + base
+    return base
+
+def remote_request_song_key(singer: str = "", artist: str = "", title: str = "") -> str:
+    """Stable loose key used only to prevent stale server requests resurrecting."""
+    def norm(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    parts = [norm(singer), norm(artist), norm(title)]
+    return "|".join(parts)
+
+def probe_network_sync_status(
+    base_url: str,
+    tenant: str,
+    api_key: str = "",
+    *,
+    timeout_sec: float = 6.0,
+    requests_module=None,
+) -> dict:
+    """Probe the request-server endpoints used by desktop sync/status.
+
+    The live request intake endpoint is authoritative for "connected" because
+    that is the path singers depend on. Other endpoints are reported as partial
+    sync details so the UI can stop spinning and show the real failing piece.
+    """
+    req = requests_module or requests
+    base = _network_normalize_base_url(base_url)
+    user = str(tenant or "").strip()
+    key = str(api_key or "").strip()
+    timeout = max(1.0, float(timeout_sec or 6.0))
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "SingWS/network-sync",
+    }
+    if key:
+        headers["X-API-Key"] = key
+
+    result = {
+        "ok": False,
+        "connected": False,
+        "partial": False,
+        "message": "",
+        "base_url": base,
+        "tenant": user,
+        "accepting": None,
+        "checks": {},
+        "errors": [],
+        "endpoints": {
+            "request_intake": f"{base}/get_requests.php" if base else "",
+            "accepting": f"{base}/tenants/{user}/accepting.txt" if base else "",
+            "host_controls": f"{base}/api/v1/host_commands.php" if base else "",
+            "singer_history": f"{base}/api/v1/singer_history_sync.php" if base else "",
+            "rotation": f"{base}/post_rotation.php" if base else "",
+            "queue_clear": f"{base}/api/v1/clear_remote_queue.php" if base else "",
+            "queue_order": f"{base}/api/v1/set_remote_request_order.php" if base else "",
+        },
+    }
+
+    def record(name: str, ok: bool, status=None, message: str = "", *, body: str = "", skipped: bool = False):
+        check = {
+            "ok": bool(ok),
+            "status": status,
+            "message": str(message or ""),
+            "body": str(body or ""),
+            "skipped": bool(skipped),
+        }
+        result["checks"][name] = check
+        if skipped:
+            _network_log(f"{name}: skipped {message}")
+        elif ok:
+            _network_log(f"{name}: ok status={status} {message}")
+        else:
+            detail = f"{name}: failed status={status} {message}".strip()
+            if body:
+                detail += f" body={body!r}"
+            result["errors"].append(detail)
+            _network_log(detail)
+        return check
+
+    if not base or not base.startswith(("http://", "https://")):
+        record("config", False, message="Missing or invalid Base URL")
+        result["message"] = "Missing or invalid Base URL"
+        return result
+    if not user:
+        record("config", False, message="Missing User ID")
+        result["message"] = "Missing User ID"
+        return result
+
+    host = ""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(base).hostname or "").lower()
+    except Exception:
+        host = ""
+    if host == "wskar.com":
+        _network_log("base_url host is wskar.com; beta deployments should use https://beta.wskar.com")
+    _network_log(f"sync requested base_url={base} tenant={user} api_key={'set' if key else 'missing'} timeout={timeout:.1f}s")
+
+    request_url = result["endpoints"]["request_intake"]
+    try:
+        _network_log(f"request sent name=request_intake method=GET url={request_url}")
+        resp = req.get(
+            request_url,
+            params={"user": user, "sync": "1"},
+            headers=headers,
+            timeout=timeout,
+        )
+        body = _network_safe_body(resp)
+        status = getattr(resp, "status_code", None)
+        _network_log(f"response name=request_intake status={status}")
+        if status == 200:
+            try:
+                resp.json()
+                record("request_intake", True, status, "request intake reachable")
+            except Exception as e:
+                record("request_intake", False, status, f"invalid JSON: {e}", body=body)
+        elif status in (401, 403):
+            record("request_intake", False, status, "request intake rejected credentials", body=body)
+        else:
+            record("request_intake", False, status, "request intake failed", body=body)
+    except requests.exceptions.Timeout as e:
+        record("request_intake", False, message=f"timeout after {timeout:.1f}s: {e}")
+    except requests.exceptions.ConnectionError as e:
+        record("request_intake", False, message=f"connection error: {e}")
+    except Exception as e:
+        record("request_intake", False, message=f"{type(e).__name__}: {e}")
+
+    accepting_url = result["endpoints"]["accepting"]
+    try:
+        _network_log(f"request sent name=accepting method=GET url={accepting_url}")
+        resp = req.get(accepting_url, params={"_": int(time.time())}, timeout=min(timeout, 5.0))
+        body = _network_safe_body(resp)
+        status = getattr(resp, "status_code", None)
+        _network_log(f"response name=accepting status={status}")
+        if status == 200:
+            txt = body.strip()
+            if txt in ("0", "1"):
+                result["accepting"] = (txt == "1")
+                record("accepting", True, status, f"accepting={txt}")
+            else:
+                record("accepting", False, status, "unexpected accepting.txt body", body=body)
+        else:
+            record("accepting", False, status, "accepting state unavailable", body=body)
+    except requests.exceptions.Timeout as e:
+        record("accepting", False, message=f"timeout after {min(timeout, 5.0):.1f}s: {e}")
+    except Exception as e:
+        record("accepting", False, message=f"{type(e).__name__}: {e}")
+
+    if key:
+        host_url = result["endpoints"]["host_controls"]
+        try:
+            _network_log(f"request sent name=host_controls method=GET url={host_url}")
+            resp = req.get(
+                host_url,
+                params={"user": user, "action": "poll"},
+                headers=headers,
+                timeout=min(timeout, 4.0),
+            )
+            status = getattr(resp, "status_code", None)
+            body = _network_safe_body(resp)
+            _network_log(f"response name=host_controls status={status}")
+            record("host_controls", status == 200, status, "host controls poll", body="" if status == 200 else body)
+        except requests.exceptions.Timeout as e:
+            record("host_controls", False, message=f"timeout after {min(timeout, 4.0):.1f}s: {e}")
+        except Exception as e:
+            record("host_controls", False, message=f"{type(e).__name__}: {e}")
+    else:
+        record("host_controls", True, message="API key not configured", skipped=True)
+
+    # Read-only reachability probes. 400/405 still prove the endpoint exists but
+    # does not support GET, which is enough for a sync status check.
+    for name, url in (
+        ("singer_history", result["endpoints"]["singer_history"]),
+        ("rotation", result["endpoints"]["rotation"]),
+    ):
+        try:
+            _network_log(f"request sent name={name} method=GET url={url}")
+            resp = req.get(url, params={"user": user, "_probe": "1"}, headers=headers, timeout=min(timeout, 4.0))
+            status = getattr(resp, "status_code", None)
+            body = _network_safe_body(resp)
+            _network_log(f"response name={name} status={status}")
+            ok = status in (200, 400, 405)
+            record(name, ok, status, "endpoint reachable" if ok else "endpoint unavailable", body="" if ok else body)
+        except requests.exceptions.Timeout as e:
+            record(name, False, message=f"timeout after {min(timeout, 4.0):.1f}s: {e}")
+        except Exception as e:
+            record(name, False, message=f"{type(e).__name__}: {e}")
+
+    request_ok = bool(result["checks"].get("request_intake", {}).get("ok"))
+    result["connected"] = request_ok
+    result["ok"] = request_ok
+    supporting_failures = [
+        name for name, check in result["checks"].items()
+        if name != "request_intake" and not check.get("ok") and not check.get("skipped")
+    ]
+    result["partial"] = bool(request_ok and supporting_failures)
+    if request_ok and supporting_failures:
+        result["message"] = "Connected; partial sync issue: " + ", ".join(supporting_failures)
+    elif request_ok:
+        result["message"] = "Connected / Synced"
+    else:
+        first = result["errors"][0] if result["errors"] else "Sync failed"
+        result["message"] = first
+    _network_log(f"final UI state ok={result['ok']} partial={result['partial']} message={result['message']}")
+    return result
+
 def _load_json_file(path: Path, default, *, expected_type=None, label: str = "JSON"):
     try:
         if not path.exists():
@@ -2275,8 +2562,32 @@ DISC_ID_PRIORITY = [
     "KV",
     "SBI",
     "ME",
-    "CB"
+    "CB",
 ]
+
+DISC_BRAND_ALIASES = {
+    "KV": ["KV", "KARAOKE VERSION", "KARAOKEVERSION", "KARAOKE-VERSION", "KARAOKE_VERSION"],
+    "ZM": ["ZM", "ZOOM", "ZDL", "ZOOM DL", "ZOOMDL", "ZOOM KARAOKE"],
+    "SC": ["SC", "SOUNDCHOICE", "SOUND CHOICE", "SOUND-CHOICE", "SOUND_CHOICE"],
+    "CC": ["CC"],  # Chris Call Karaoke — always labeled just "CC" (no name variants / code prefixes)
+    "CB": ["CB", "CHARTBUSTER", "CHART BUSTER", "CHART-BUSTER", "CHART_BUSTER"],
+    "PT": ["PT", "PARTY TYME", "PARTYTYME", "PARTY-TYME", "PARTY_TYME", "PARTY TIME", "PARTYTIME"],
+    "SF": ["SF", "SUNFLY", "SUN FLY", "SUN-FLY", "SUN_FLY"],
+    "SBI": ["SBI", "SBI KARAOKE"],
+    "KARAFUN": ["KARAFUN", "KARA FUN", "KARA-FUN", "KARA_FUN"],
+    "ME": ["ME", "MR ENTERTAINER", "MRENTERTAINER", "MR-ENTERTAINER"],
+}
+
+_DISC_BRAND_CANONICAL_BY_KEY = {}
+_DISC_BRAND_ALIAS_KEYS_BY_CANONICAL = {}
+for _canonical_brand, _aliases in DISC_BRAND_ALIASES.items():
+    _keys = set()
+    for _alias in [_canonical_brand] + list(_aliases):
+        _key = re.sub(r"[^A-Z0-9]+", "", str(_alias or "").upper())
+        if _key:
+            _DISC_BRAND_CANONICAL_BY_KEY[_key] = _canonical_brand
+            _keys.add(_key)
+    _DISC_BRAND_ALIAS_KEYS_BY_CANONICAL[_canonical_brand] = _keys
 
 def build_bg_index(roots, out_path=BG_MUSIC_INDEX_PATH, max_workers=8, fast_only=True):
     """
@@ -2371,8 +2682,89 @@ def build_bg_index(roots, out_path=BG_MUSIC_INDEX_PATH, max_workers=8, fast_only
     print(f"BG index written: {out_path} ({len(tracks)} tracks)")
     return data
 
+def _disc_brand_key(value) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+
+def _disc_brand_prefix_key(value) -> str:
+    key = _disc_brand_key(value)
+    m = re.match(r"([A-Z]+)", key)
+    return m.group(1) if m else key[:8]
+
+def _disc_brand_value_segments(value) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    values = [raw]
+    try:
+        stem = Path(raw).stem if any(ch in raw for ch in ("/", "\\")) else raw
+    except Exception:
+        stem = raw
+    for part in re.split(r"\s+-\s+|[|/\\()\[\]{}]+", stem):
+        part = str(part or "").strip()
+        if part and part not in values:
+            values.append(part)
+    return values
+
+def karaoke_brand_match_info(value) -> dict:
+    """Return canonical karaoke brand match metadata for a raw disc/company value."""
+    raw = str(value or "").strip()
+    key = _disc_brand_key(raw)
+    info = {
+        "raw": raw,
+        "normalized": key,
+        "canonical": "",
+        "confidence": 0,
+        "matched_alias": "",
+        "match_type": "unknown",
+    }
+    if not key:
+        info["match_type"] = "empty"
+        return info
+
+    known = _DISC_BRAND_CANONICAL_BY_KEY.get(key)
+    if known:
+        info.update({
+            "canonical": known,
+            "confidence": 100,
+            "matched_alias": key,
+            "match_type": "alias_exact",
+        })
+        return info
+
+    candidates = []
+    for canonical, alias_keys in _DISC_BRAND_ALIAS_KEYS_BY_CANONICAL.items():
+        for alias_key in alias_keys:
+            if not alias_key or not key.startswith(alias_key):
+                continue
+            remainder = key[len(alias_key):]
+            long_alias = len(alias_key) >= 4
+            coded_suffix = bool(re.match(r"^[0-9]", remainder or ""))
+            separator_free_text = long_alias and bool(remainder)
+            if not remainder or coded_suffix or separator_free_text:
+                confidence = 94 if coded_suffix else (90 if separator_free_text else 88)
+                candidates.append((confidence, len(alias_key), canonical, alias_key))
+    if candidates:
+        confidence, _alias_len, canonical, alias_key = max(candidates)
+        info.update({
+            "canonical": canonical,
+            "confidence": confidence,
+            "matched_alias": alias_key,
+            "match_type": "alias_prefix",
+        })
+    return info
+
+def canonical_disc_brand(value, allow_unknown: bool = True) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    for segment in _disc_brand_value_segments(raw):
+        info = karaoke_brand_match_info(segment)
+        if info.get("canonical"):
+            return str(info.get("canonical") or "")
+    return raw.upper() if allow_unknown else ""
+
 def normalize_disc_priority(value, max_items: int = 10):
-    """Normalize user priority input into an ordered uppercase list (max 10)."""
+    """Normalize user priority input into canonical disc/brand prefixes (max 10)."""
     out = []
     seen = set()
     try:
@@ -2383,7 +2775,7 @@ def normalize_disc_priority(value, max_items: int = 10):
         else:
             parts = []
         for raw in parts:
-            p = str(raw or "").strip().upper()
+            p = canonical_disc_brand(raw, allow_unknown=True)
             if not p or p in seen:
                 continue
             seen.add(p)
@@ -2394,13 +2786,180 @@ def normalize_disc_priority(value, max_items: int = 10):
         return []
     return out
 
+def normalize_singer_selected_disc_brand(value) -> str:
+    """Return a known singer-selected brand alias, or blank for unknown/empty input."""
+    return canonical_disc_brand(value, allow_unknown=False)
+
+def disc_value_matches_brand(value, brand) -> bool:
+    canonical = canonical_disc_brand(brand, allow_unknown=True)
+    if not canonical:
+        return False
+    for segment in _disc_brand_value_segments(value):
+        info = karaoke_brand_match_info(segment)
+        if info.get("canonical") == canonical:
+            return True
+        if not info.get("canonical") and _disc_brand_key(segment).startswith(_disc_brand_key(canonical)):
+            return True
+    return False
+
+def disc_id_matches_brand(disc_id, brand) -> bool:
+    return disc_value_matches_brand(disc_id, brand)
+
+def disc_brand_candidate_values(track) -> list[str]:
+    if not isinstance(track, dict):
+        return []
+    values = []
+    for key in ("disc_id", "discid", "DiscID", "Vendor", "vendor"):
+        value = str(track.get(key) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    for key in ("display", "filename", "file", "path"):
+        value = str(track.get(key) or "").strip()
+        if not value:
+            continue
+        if key == "path":
+            try:
+                value = Path(value).name
+            except Exception:
+                value = os.path.basename(value)
+        for segment in _disc_brand_value_segments(value):
+            if segment and segment not in values:
+                values.append(segment)
+    return values
+
+def _best_unknown_disc_brand_value(candidates: list[str]) -> str:
+    for value in candidates or []:
+        key = _disc_brand_key(value)
+        if re.match(r"^[A-Z]{1,10}[0-9]", key):
+            return value
+    return candidates[0] if candidates else ""
+
+def track_matches_disc_brand(track, brand) -> bool:
+    return any(disc_value_matches_brand(value, brand) for value in disc_brand_candidate_values(track))
+
+def effective_disc_priority(host_priority, singer_brand_raw="", singer_override=None, max_items: int = 10):
+    host = normalize_disc_priority(host_priority, max_items=max_items)
+    override = normalize_disc_priority(singer_override or [], max_items=max_items)
+    selected_raw = str(singer_brand_raw or "").strip()
+    selected = normalize_singer_selected_disc_brand(selected_raw)
+    source = "request" if selected_raw else ""
+
+    if not selected and not selected_raw and override:
+        selected = override[0]
+        selected_raw = selected
+        source = "singer_history"
+
+    if selected:
+        effective = [selected] + [p for p in host if p != selected]
+    else:
+        effective = list(host)
+    return {
+        "host": host,
+        "singer_raw": selected_raw,
+        "singer_normalized": selected,
+        "singer_source": source,
+        "effective": effective,
+        "unknown_ignored": bool(selected_raw and not selected),
+    }
+
+def disc_priority_available_versions(matches):
+    versions = []
+    for m in matches or []:
+        if not isinstance(m, dict):
+            continue
+        disc = str(m.get("disc_id") or m.get("discid") or "").strip()
+        if disc and disc not in versions:
+            versions.append(disc)
+    return versions
+
+def build_disc_brand_scan_report(tracks, max_unknowns: int = 50) -> dict:
+    report = {
+        "track_count": 0,
+        "raw_values": [],
+        "canonical_counts": {},
+        "unknown_prefixes": [],
+    }
+    raw_stats = {}
+    unknown_stats = {}
+    for track in tracks or []:
+        if not isinstance(track, dict):
+            continue
+        report["track_count"] += 1
+        candidates = disc_brand_candidate_values(track)
+        chosen = ""
+        chosen_info = None
+        for value in candidates:
+            info = karaoke_brand_match_info(value)
+            if info.get("canonical"):
+                chosen = value
+                chosen_info = info
+                break
+        if chosen_info is None:
+            chosen = _best_unknown_disc_brand_value(candidates)
+            chosen_info = karaoke_brand_match_info(chosen)
+
+        raw_key = chosen or "(blank)"
+        stat = raw_stats.setdefault(raw_key, {
+            "raw": raw_key,
+            "normalized": chosen_info.get("normalized", ""),
+            "canonical": chosen_info.get("canonical", ""),
+            "confidence": int(chosen_info.get("confidence", 0) or 0),
+            "count": 0,
+            "matched_alias": chosen_info.get("matched_alias", ""),
+            "match_type": chosen_info.get("match_type", "unknown"),
+        })
+        stat["count"] += 1
+
+        canonical = str(chosen_info.get("canonical") or "")
+        if canonical:
+            report["canonical_counts"][canonical] = report["canonical_counts"].get(canonical, 0) + 1
+        else:
+            prefix = _disc_brand_prefix_key(chosen)
+            if prefix:
+                unk = unknown_stats.setdefault(prefix, {"prefix": prefix, "count": 0, "examples": []})
+                unk["count"] += 1
+                if chosen and chosen not in unk["examples"] and len(unk["examples"]) < 5:
+                    unk["examples"].append(chosen)
+
+    report["raw_values"] = sorted(raw_stats.values(), key=lambda item: (-item["count"], item["raw"]))[:200]
+    report["unknown_prefixes"] = sorted(unknown_stats.values(), key=lambda item: (-item["count"], item["prefix"]))[:int(max_unknowns or 50)]
+    return report
+
+def request_preferred_disc_brand(req):
+    if not isinstance(req, dict):
+        return ""
+    keys = (
+        "preferred_brand",
+        "preferred_version",
+        "preferred_disc",
+        "preferred_disc_id",
+        "preferred_disc_priority",
+        "brand",
+        "version",
+        "disc_id",
+        "discid",
+    )
+    for key in keys:
+        value = req.get(key)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else ""
+        value = str(value or "").strip()
+        if key == "preferred_disc_priority" and "," in value:
+            value = next((part.strip() for part in value.split(",") if part.strip()), "")
+        if value:
+            return value
+    return ""
+
 def pick_by_disc_priority(matches, priority_list=None):
     priorities = normalize_disc_priority(priority_list if priority_list is not None else DISC_ID_PRIORITY)
     if not priorities:
         return matches[0]
     for prefix in priorities:
         # Handle both 'disc_id' and 'discid' field names
-        prefix_matches = [m for m in matches if (m.get('disc_id') or m.get('discid') or '').upper().startswith(prefix)]
+        prefix_matches = [
+            m for m in matches
+            if track_matches_disc_brand(m, prefix)
+        ]
         if prefix_matches:
             return prefix_matches[0]
     return matches[0]
@@ -2559,6 +3118,7 @@ def detect_lead_silence(path, noise_db=-50.0, min_silence=0.5) -> float:
 BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
 BG_SILENCE_MIN_S = 1.2      # sustained silence required before advancing
 BG_SILENCE_TAIL_WINDOW = 45.0  # only act within this many seconds of the track end
+BGM_UNKNOWN_ANALYSIS_PREGAIN = 0.75  # only when BG normalization is enabled and cache misses
 
 
 class BackgroundMusicPlayer(QObject):
@@ -2624,7 +3184,103 @@ class BackgroundMusicPlayer(QObject):
         self._bass_engine = None
         self._bass_fade_generation = 0
         self._bass_crossfade_generation = 0
+        self._bg_first_play_logged = False
+        self._bg_volume_probe_generation = 0
+        self._bg_last_volume_source = "default"
         self._init_bass_engine()
+
+    def _platform_audio_label(self) -> str:
+        try:
+            machine = platform.machine() or ""
+        except Exception:
+            machine = ""
+        if sys.platform == "darwin" and machine.lower() in {"x86_64", "amd64"}:
+            return "macOS Intel"
+        if sys.platform == "darwin" and machine.lower() in {"arm64", "aarch64"}:
+            return "macOS Apple Silicon"
+        return f"{sys.platform} {machine}".strip()
+
+    def _simple_audio_enabled(self) -> bool:
+        try:
+            host = self.parent()
+            return bool(host is None or not hasattr(host, "settings") or host.settings.get("simple_audio_mode", True))
+        except Exception:
+            return True
+
+    def _bg_volume_diag(self, stage: str, path: str | None = None, extra: str = ""):
+        try:
+            engine = getattr(self, "_bass_engine", None)
+            backend = "BASS" if engine is not None else "GStreamer"
+            master = ""
+            if engine is not None:
+                try:
+                    master = f" engine_master={float(engine.master_volume):.3f}"
+                except Exception:
+                    master = ""
+            track = Path(path).name if path else ""
+            suffix = f" {extra}" if extra else ""
+            _diag(
+                f"[BG-VOLUME] stage={stage} platform={self._platform_audio_label()} "
+                f"backend={backend} simple_audio={int(self._simple_audio_enabled())} "
+                f"normalize={int(self._bg_normalize_active())} eq_bypassed={int(self._simple_audio_enabled())} "
+                f"saved_or_ui={float(self.volume):.3f}{master} playing={int(bool(self.is_playing))} "
+                f"track={track!r}{suffix}"
+            )
+        except Exception:
+            pass
+
+    def _sync_volume_from_ui_or_settings(self, reason: str) -> float:
+        target = self._target_volume_from_ui()
+        try:
+            target = max(0.0, min(1.0, float(target)))
+        except Exception:
+            target = 0.8
+        self.volume = target
+        self._bg_last_volume_source = reason
+        engine = getattr(self, "_bass_engine", None)
+        if engine is not None:
+            try:
+                engine.set_master_volume(target)
+            except Exception:
+                pass
+        self._bg_volume_diag(f"sync-target:{reason}", extra=f"target={target:.3f}")
+        return target
+
+    def _schedule_volume_state_probe(self, reason: str):
+        self._bg_volume_probe_generation += 1
+        generation = int(self._bg_volume_probe_generation)
+
+        def _probe(label: str):
+            if generation != int(getattr(self, "_bg_volume_probe_generation", 0) or 0):
+                return
+            path = self.get_active_track_path()
+            extra = ""
+            try:
+                pos, dur = self.get_playback_times()
+                extra = f"reason={reason} pos={pos:.2f}s dur={dur:.2f}s"
+            except Exception:
+                extra = f"reason={reason}"
+            self._bg_volume_diag(label, path, extra)
+
+        for ms, label in (
+            (0, "play+0s"),
+            (1000, "play+1s"),
+            (2000, "play+2s"),
+            (3000, "play+3s"),
+            (4000, "play+4s"),
+            (5000, "play+5s"),
+        ):
+            QTimer.singleShot(ms, lambda l=label: _probe(l))
+
+    def initialize_startup_volume(self):
+        target = self._sync_volume_from_ui_or_settings("app-launch")
+        engine = getattr(self, "_bass_engine", None)
+        if engine is not None:
+            try:
+                engine.set_master_volume(target)
+            except Exception:
+                pass
+        self._bg_volume_diag("app-launch-init", extra=f"target={target:.3f}")
 
     def _init_bass_engine(self, output_name: str | None = None) -> bool:
         try:
@@ -2638,7 +3294,7 @@ class BackgroundMusicPlayer(QObject):
                 self._bass_engine = None
             
             self._bass_engine = BassBackgroundEngine(output_name=output_name)
-            _diag("[BG-BASS] BASSmix background engine ready")
+            _diag(f"[BG-BASS] BASSmix background engine ready platform={self._platform_audio_label()}")
             # Attach the BGM 10-band graphic EQ ONLY in advanced mode. Simple
             # Audio Mode (default) leaves the EQ out of the chain entirely.
             try:
@@ -2651,6 +3307,7 @@ class BackgroundMusicPlayer(QObject):
                     self._bass_engine.set_eq(bgm_eq)
                 elif hasattr(self._bass_engine, "set_eq"):
                     self._bass_engine.set_eq(None)
+                _diag(f"[BG-BASS] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
             except Exception:
                 pass
             return True
@@ -3136,7 +3793,15 @@ class BackgroundMusicPlayer(QObject):
             return None
         info = loudness_info_cached(path)
         if info is None:
+            _diag(f"[BG-AUDIO] normalization cache miss track={Path(path).name} action=analyze_async")
             analyze_loudness_async(path)
+        else:
+            try:
+                gain_db = float(info.get("gain_db", 0.0) or 0.0)
+                gain_linear = float(info.get("gain_linear", 1.0) or 1.0)
+                _diag(f"[BG-AUDIO] normalization cache hit track={Path(path).name} gain_db={gain_db:+.1f} gain_linear={gain_linear:.3f}")
+            except Exception:
+                _diag(f"[BG-AUDIO] normalization cache hit track={Path(path).name}")
         return info
 
     def _bg_dsp_chain_label(self, path: str | None, info: dict | None) -> str:
@@ -3195,7 +3860,11 @@ class BackgroundMusicPlayer(QObject):
             return 1.0, None
         info = self._bg_loudness_info_for_path(path)
         if info is None:
-            return 1.0, None
+            _diag(
+                f"[BG-AUDIO] normalization cache miss safe pre-gain track={Path(path).name} "
+                f"gain_linear={BGM_UNKNOWN_ANALYSIS_PREGAIN:.3f}"
+            )
+            return BGM_UNKNOWN_ANALYSIS_PREGAIN, None
         try:
             return max(0.05, min(4.0, float(info.get("gain_linear", 1.0) or 1.0))), info
         except Exception:
@@ -3234,12 +3903,18 @@ class BackgroundMusicPlayer(QObject):
                 return None
             info = self._bg_loudness_info_for_path(path)
             if info is None:
+                factor = BGM_UNKNOWN_ANALYSIS_PREGAIN
+                _diag(f"[BG-AUDIO] calculated gain unavailable deck={deck} track={Path(path).name}; using safe pre-gain={factor:.3f}")
                 if deck == "secondary" and hasattr(engine, "set_secondary_normalize_gain"):
-                    engine.set_secondary_normalize_gain(1.0)
+                    engine.set_secondary_normalize_gain(factor)
                 elif hasattr(engine, "set_primary_normalize_gain"):
-                    engine.set_primary_normalize_gain(1.0)
+                    engine.set_primary_normalize_gain(factor)
             else:
                 factor = float(info.get("gain_linear", 1.0) or 1.0)
+                try:
+                    _diag(f"[BG-AUDIO] calculated gain deck={deck} track={Path(path).name} gain_db={float(info.get('gain_db', 0.0)):+.1f} gain_linear={factor:.3f}")
+                except Exception:
+                    _diag(f"[BG-AUDIO] calculated gain deck={deck} track={Path(path).name} gain_linear={factor:.3f}")
                 if deck == "secondary" and hasattr(engine, "set_secondary_normalize_gain"):
                     engine.set_secondary_normalize_gain(factor)
                 elif hasattr(engine, "set_primary_normalize_gain"):
@@ -3453,6 +4128,7 @@ class BackgroundMusicPlayer(QObject):
         if self._bass_ready():
             if self.crossfade_active or not self.playlist:
                 return
+            self._sync_volume_from_ui_or_settings("crossfade-start")
             next_index = (self.current_index + 1) % len(self.playlist)
             next_file = self.playlist[next_index]
             try:
@@ -3475,6 +4151,7 @@ class BackgroundMusicPlayer(QObject):
             return
         if self.crossfade_active or not self.playlist:
             return
+        self._sync_volume_from_ui_or_settings("crossfade-start")
             
         # Get next track
         next_index = (self.current_index + 1) % len(self.playlist)
@@ -3629,12 +4306,18 @@ class BackgroundMusicPlayer(QObject):
             if not self.playlist:
                 return False
             if self._bass_engine.primary is not None:
+                self._sync_volume_from_ui_or_settings("preload-existing")
                 return True
             try:
                 current_file = self.playlist[self.current_index]
+                self._bg_volume_diag("preload-before-media-load", current_file)
+                target = self._sync_volume_from_ui_or_settings("preload")
+                self._bass_engine.set_master_volume(0.0)
                 self._bass_engine.load(current_file, paused=True, volume=self.volume)
+                self._bass_engine.set_master_volume(target)
                 self._refresh_bg_normalize(current_file, deck="primary")
                 self.is_playing = False
+                self._bg_volume_diag("preload-after-media-load", current_file, extra=f"target={target:.3f}")
                 print(f"[BG-BASS] Preloaded track (paused): {Path(current_file).name}")
                 return True
             except Exception as e:
@@ -3643,10 +4326,19 @@ class BackgroundMusicPlayer(QObject):
         if not self.playlist:
             return False
         if self.gst_bg_pipeline is not None:
+            self._sync_volume_from_ui_or_settings("preload-existing")
             return True
         try:
             current_file = self.playlist[self.current_index]
+            self._bg_volume_diag("preload-before-media-load", current_file)
+            self._sync_volume_from_ui_or_settings("preload")
             self.gst_bg_pipeline = self._create_bg_pipeline(current_file, "bg_music")
+            try:
+                volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
+                if volume_element:
+                    volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
+            except Exception:
+                pass
             ret = self.gst_bg_pipeline.set_state(Gst.State.PAUSED)
             if ret == Gst.StateChangeReturn.FAILURE:
                 print("[BG] Preload failed (PAUSED)")
@@ -3657,6 +4349,7 @@ class BackgroundMusicPlayer(QObject):
                 self.gst_bg_pipeline = None
                 return False
             self.is_playing = False
+            self._bg_volume_diag("preload-after-media-load", current_file)
             print(f"[BG] Preloaded track (paused): {Path(current_file).name}")
             return True
         except Exception as e:
@@ -3784,18 +4477,27 @@ class BackgroundMusicPlayer(QObject):
             if self._pipeline_realign_needed and self._bass_engine.primary is not None and not self.is_playing:
                 self._bass_engine.stop()
             self._pipeline_realign_needed = False
+            target_volume = self._sync_volume_from_ui_or_settings("play")
             if self.volume <= 0.001:
-                self.volume = self._target_volume_from_ui()
+                self.volume = target_volume
                 print(f"[BG-BASS] Play sanity: using desired volume {self.volume}")
             try:
+                current_file = self.playlist[self.current_index]
+                if not self._bg_first_play_logged:
+                    self._bg_first_play_logged = True
+                    _diag(f"[BG-VOLUME] first BGM file selected={Path(current_file).name!r}")
                 if self._bass_engine.primary is None and not self.preload_current_track_paused():
                     return
                 self._refresh_bg_normalize()
-                self._bass_engine.set_master_volume(self.volume)
+                self._bg_volume_diag("play-before-BASS_ChannelPlay", current_file)
+                self._bass_engine.set_master_volume(target_volume)
                 if not self._bass_engine.play():
                     print("[BG-BASS] Failed to start background mixer")
                     return
+                self._bass_engine.set_master_volume(target_volume)
                 self.is_playing = True
+                self._bg_volume_diag("play-after-BASS_ChannelPlay", current_file)
+                self._schedule_volume_state_probe("bass-play")
                 print(f"Playing BASSmix background music: {Path(self.playlist[self.current_index]).name}")
             except Exception as e:
                 print(f"[BG-BASS] play failed: {e}")
@@ -3810,14 +4512,26 @@ class BackgroundMusicPlayer(QObject):
         self._pipeline_realign_needed = False
         
         # Ensure we aren't stuck at zero from a prior fade-out
+        target_volume = self._sync_volume_from_ui_or_settings("play")
         if self.volume <= 0.001:
-            self.volume = self._target_volume_from_ui()
+            self.volume = target_volume
             print(f"[BG] Play sanity: using desired volume {self.volume}")
 
         def _start_fresh_pipeline():
             current_file = self.playlist[self.current_index]
+            if not self._bg_first_play_logged:
+                self._bg_first_play_logged = True
+                _diag(f"[BG-VOLUME] first BGM file selected={Path(current_file).name!r}")
             print(f"Creating new background music pipeline for: {current_file}")
+            self._bg_volume_diag("play-before-media-load", current_file)
             self.gst_bg_pipeline = self._create_bg_pipeline(current_file, "bg_music")
+            try:
+                volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
+                if volume_element:
+                    volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
+            except Exception:
+                pass
+            self._bg_volume_diag("play-after-media-load", current_file)
             # Preroll in PAUSED first, then switch to PLAYING shortly after.
             # This reduces first-frame/startup skips on some systems.
             ret = self.gst_bg_pipeline.set_state(Gst.State.PAUSED)
@@ -3834,6 +4548,13 @@ class BackgroundMusicPlayer(QObject):
             def _go_playing():
                 if self.gst_bg_pipeline is None:
                     return
+                try:
+                    volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
+                    if volume_element:
+                        volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
+                except Exception:
+                    pass
+                self._bg_volume_diag("play-before-GStreamer-PLAYING", current_file)
                 ret_play = self.gst_bg_pipeline.set_state(Gst.State.PLAYING)
                 if ret_play == Gst.StateChangeReturn.FAILURE:
                     print("[BG] Failed to start new pipeline from preroll")
@@ -3844,6 +4565,8 @@ class BackgroundMusicPlayer(QObject):
                     self.gst_bg_pipeline = None
                     self.is_playing = False
                     return
+                self._bg_volume_diag("play-after-GStreamer-PLAYING", current_file)
+                self._schedule_volume_state_probe("gst-play")
                 # Ensure desired volume is re-applied after state change.
                 QTimer.singleShot(70, self._ensure_volume_set)
 
@@ -3854,6 +4577,8 @@ class BackgroundMusicPlayer(QObject):
             # Resume existing pipeline
             print("Resuming existing background music pipeline")
             paused_pos, _paused_dur = self.get_playback_times()
+            self._ensure_volume_set()
+            self._bg_volume_diag("resume-before-GStreamer-PLAYING", self.get_active_track_path())
             ret_main = self.gst_bg_pipeline.set_state(Gst.State.PLAYING)
             if ret_main == Gst.StateChangeReturn.FAILURE:
                 print("[BG] Resume failed; recreating pipeline")
@@ -3875,6 +4600,8 @@ class BackgroundMusicPlayer(QObject):
                         # Defensive recovery: clear stale crossfade state.
                         self.crossfade_active = False
                         self.crossfade_progress = 0.0
+                self._bg_volume_diag("resume-after-GStreamer-PLAYING", self.get_active_track_path())
+                self._schedule_volume_state_probe("gst-resume")
                 QTimer.singleShot(100, self._ensure_volume_set)
                 # Some sinks can report PLAYING but never advance after unpause.
                 # Verify movement once, then self-heal by rebuilding at same position.
@@ -4087,14 +4814,17 @@ class BackgroundMusicPlayer(QObject):
 
     def _ensure_volume_set(self):
         """Ensure volume is properly set on the pipeline"""
+        self._sync_volume_from_ui_or_settings("ensure-volume")
         if self._bass_ready():
             self._bass_engine.set_master_volume(self.volume)
+            self._bg_volume_diag("ensure-volume-applied", self.get_active_track_path())
             return
         if self.gst_bg_pipeline:
             volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
             if volume_element:
                 print(f"Setting background music volume to {self.volume}")
                 volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
+                self._bg_volume_diag("ensure-volume-applied", self.get_active_track_path())
             else:
                 print("Warning: Could not find volume element in background music pipeline")  
 
@@ -4249,17 +4979,25 @@ class BackgroundMusicPlayer(QObject):
         if self._bass_ready():
             try:
                 target_volume = max(0.0, min(1.0, float(target_volume)))
+                self.volume = target_volume
+                current_file = self.playlist[self.current_index] if self.playlist else ""
+                if current_file and not self._bg_first_play_logged:
+                    self._bg_first_play_logged = True
+                    _diag(f"[BG-VOLUME] first BGM file selected={Path(current_file).name!r}")
+                self._bg_volume_diag("fade-in-before-preload", current_file, extra=f"target={target_volume:.3f}")
                 if self._bass_engine.primary is None and not self.preload_current_track_paused():
                     return
                 self._bass_fade_generation += 1
-                self.volume = target_volume
                 self._refresh_bg_normalize(deck="primary")
                 self._bass_engine.set_master_volume(0.0)
+                self._bg_volume_diag("fade-in-before-BASS_ChannelPlay", current_file, extra=f"target={target_volume:.3f}")
                 if not self._bass_engine.play():
                     print("[BG-BASS] fade_in start failed")
                     return
                 self.is_playing = True
                 self._bass_engine.slide_master_volume(target_volume, duration_ms)
+                self._bg_volume_diag("fade-in-after-BASS_ChannelPlay", current_file, extra=f"target={target_volume:.3f} duration_ms={int(duration_ms)}")
+                self._schedule_volume_state_probe("bass-fade-in")
                 print(f"Starting BASSmix fade in to volume {target_volume}")
             except Exception as e:
                 print(f"[BG-BASS] fade in failed: {e}")
@@ -4282,6 +5020,7 @@ class BackgroundMusicPlayer(QObject):
                     _ve.set_property("volume", 0.0)
             except Exception:
                 pass
+            self._bg_volume_diag("fade-in-before-GStreamer-PLAYING", self.get_active_track_path(), extra=f"target={float(target_volume):.3f}")
 
             ret = self.gst_bg_pipeline.set_state(Gst.State.PLAYING)
             if ret == Gst.StateChangeReturn.FAILURE:
@@ -4295,6 +5034,8 @@ class BackgroundMusicPlayer(QObject):
                 return
 
             self.is_playing = True
+            self._bg_volume_diag("fade-in-after-GStreamer-PLAYING", self.get_active_track_path(), extra=f"target={float(target_volume):.3f}")
+            self._schedule_volume_state_probe("gst-fade-in")
             # Let playback settle very briefly, then ramp up.
             QTimer.singleShot(60, lambda: self._do_fade_in(target_volume, duration_ms))
         else:
@@ -5939,6 +6680,7 @@ class BackgroundMusicManager(QMainWindow):
         self.remove_selected_button.setObjectName("remove_selected_button")
         for b in (self.playlist_up_button, self.playlist_down_button, self.remove_selected_button):
             b.setStyleSheet(subtle_button_css(padding="6px 9px", radius=8))
+        self.remove_selected_button.setStyleSheet(warning_button_css(padding="6px 9px", radius=8))
 
         # Create but hide Save/Load until re-done
         self.save_playlist_button = QPushButton("Save Playlist")
@@ -7563,7 +8305,7 @@ class SimplePollWorker(QObject):
 
     def __init__(self, base_url, user_id, api_key, interval_sec=2, host_interval_sec=2):
         super().__init__()
-        self.base_url = (base_url or "").rstrip("/")
+        self.base_url = _network_normalize_base_url(base_url)
         self.user_id = (user_id or "").strip() or "default"
         self.api_key = (api_key or "").strip()
         self.normal_interval = interval_sec
@@ -10416,6 +11158,25 @@ class KaraokeApp(QWidget):
         self._preview_overlay_refresh_timer.setSingleShot(True)
         self._preview_overlay_refresh_timer.timeout.connect(self._refresh_preview_overlay_binding)
         self._preview_overlay_refresh_recreate = False
+        self._perf_debug_overlay = QLabel(self)
+        self._perf_debug_overlay.setObjectName("perfDebugOverlay")
+        self._perf_debug_overlay.setStyleSheet(
+            "QLabel#perfDebugOverlay {"
+            "background: rgba(6,9,18,0.88);"
+            "color: #F4F7FF;"
+            "border: 1px solid rgba(245,200,75,0.46);"
+            "border-radius: 8px;"
+            "padding: 8px 10px;"
+            "font-family: Menlo, Consolas, monospace;"
+            "font-size: 11px;"
+            "font-weight: 700;"
+            "}"
+        )
+        self._perf_debug_overlay.setVisible(False)
+        self._perf_debug_overlay_last_log_ts = 0.0
+        self._perf_debug_overlay_timer = QTimer(self)
+        self._perf_debug_overlay_timer.timeout.connect(self._tick_perf_debug_overlay)
+        self._perf_debug_overlay_timer.start(1000)
 
         self.kc_active = False     # is a job running?
         self.zip_cache = ZipCache()
@@ -10437,6 +11198,7 @@ class KaraokeApp(QWidget):
         # --- Settings for background image ---
         self.settings = self.load_settings()
         _had_perf_setting = "performance_mode" in self.settings
+        self._remote_request_tombstones = self._load_remote_request_tombstones()
 
         # EQ is intentionally lazy. Importing scipy/numpy on every launch made
         # Intel startup noticeably slower even when Simple Audio Mode bypassed
@@ -10587,6 +11349,13 @@ class KaraokeApp(QWidget):
         try:
             bg_vol = float(self.settings.get("bg_volume", 0.8))
             self.bg_music.set_volume(bg_vol)
+            self.bg_music.initialize_startup_volume()
+            _diag(
+                f"[BG-VOLUME] app launch BGM init saved_bg_volume={bg_vol:.3f} "
+                f"simple_audio={int(bool(self.settings.get('simple_audio_mode', True)))} "
+                f"bg_normalize_enabled={int(bool(self.settings.get('bg_normalize_enabled', True)))} "
+                f"platform={self.bg_music._platform_audio_label()}"
+            )
         except Exception:
             pass
 
@@ -11316,44 +12085,13 @@ class KaraokeApp(QWidget):
                 border-color: rgba(115,144,180,0.10);
             }}
         """
-        # Distinct "danger" treatment for the destructive Remove action.
-        _remove_btn_css = f"""
-            QPushButton {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(229,72,77,0.20),
-                    stop:1 rgba(229,72,77,0.10));
-                color: #ffb4b7;
-                border: 1px solid rgba(229,72,77,0.34);
-                border-radius: 9px;
-                padding: 9px 12px;
-                font-size: 12px;
-                font-weight: 700;
-                letter-spacing: 0.3px;
-            }}
-            QPushButton:hover {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(229,72,77,0.42),
-                    stop:1 rgba(229,72,77,0.26));
-                border-color: rgba(255,140,143,0.60);
-                color: #ffffff;
-            }}
-            QPushButton:pressed {{
-                background-color: rgba(150,30,34,0.82);
-                border-color: rgba(255,140,143,0.70);
-            }}
-            QPushButton:disabled {{
-                background: rgba(229,72,77,0.06);
-                color: rgba(255,180,183,0.35);
-                border-color: rgba(229,72,77,0.14);
-            }}
-        """
         for b in (self.move_up_button, self.move_down_button):
             b.setMinimumHeight(38)
             b.setStyleSheet(_reorder_btn_css)
         self.remove_button.setMinimumHeight(38)
-        self.remove_button.setStyleSheet(_remove_btn_css)
+        self.remove_button.setStyleSheet(warning_button_css(padding="9px 12px", radius=8))
         self.clear_queue_button.setMinimumHeight(38)
-        self.clear_queue_button.setStyleSheet(_remove_btn_css)
+        self.clear_queue_button.setStyleSheet(danger_button_css(padding="9px 12px", radius=8))
 
         # LEFT SHELL CONTENT: search library and rotation share a draggable boundary.
         self.library_rotation_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -12297,7 +13035,7 @@ class KaraokeApp(QWidget):
         if self._safe_mode():
             print("[SAFE-MODE] Server polling disabled")
         elif self.is_network_configured():
-            base_url = self.settings.get("base_url", "")
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
             api_key = self.settings.get("api_key", "")
             
@@ -13701,6 +14439,20 @@ class KaraokeApp(QWidget):
         self._prepare_python_karaoke_start(song_path)
         self._current_karaoke_mode = "mp4"
         self._current_karaoke_semitones = int(semitones or 0)
+        try:
+            machine = platform.machine() or ""
+        except Exception:
+            machine = ""
+        try:
+            _diag(
+                "[MP4-PERF] start "
+                f"media_type=MP4 file={Path(song_path).name!r} "
+                f"platform={sys.platform}/{machine} max_video_height={self._effective_mp4_max_height()} "
+                f"visual_timer_ms={self._effective_visual_timer_interval_ms()} "
+                f"workers={self._active_worker_snapshot()}"
+            )
+        except Exception:
+            pass
         self._start_python_karaoke_transport(
             audio_path=song_path,
             video_path=song_path,
@@ -14221,6 +14973,84 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print(f"[PERF-SUMMARY] failed: {e}")
 
+    def _perf_process_snapshot(self) -> tuple[str, str]:
+        cpu = "n/a"
+        mem = "n/a"
+        if PSUTIL_AVAILABLE:
+            try:
+                proc = psutil.Process(os.getpid())
+                cpu = f"{proc.cpu_percent(interval=None):.1f}%"
+                mem = f"{proc.memory_info().rss / (1024 * 1024):.0f}MB"
+            except Exception:
+                pass
+        return cpu, mem
+
+    def _format_karaoke_perf_overlay(self, diag: dict) -> str:
+        video = diag.get("video") if isinstance(diag.get("video"), dict) else {}
+        cpu, mem = self._perf_process_snapshot()
+        return "\n".join([
+            f"CPU {cpu}   RAM {mem}   {diag.get('media_type', '')}",
+            f"DEC {video.get('decoder', 'n/a')}   HW {video.get('hardware_acceleration', 'n/a')}",
+            f"SRC {video.get('source_size', '') or 'n/a'} -> {video.get('output_size', '') or 'n/a'}",
+            f"FPS src {float(video.get('fps', 0.0) or 0.0):.1f} out {float(video.get('delivered_fps', 0.0) or 0.0):.1f}",
+            f"Q {int(video.get('queue_size', 0) or 0)}/{int(video.get('max_buffered_frames', 0) or 0)}   drops {int(video.get('dropped_frames', 0) or 0)}",
+            f"render {float(diag.get('last_visual_render_ms', 0.0) or 0.0):.1f}ms avg {float(diag.get('visual_render_avg_ms', 0.0) or 0.0):.1f} max {float(diag.get('visual_render_max_ms', 0.0) or 0.0):.1f}",
+            f"audio latency {float(diag.get('audio_latency_ms', 0.0) or 0.0):.0f}ms underruns {int(diag.get('audio_underruns', 0) or 0)}",
+        ])
+
+    def _position_perf_debug_overlay(self):
+        overlay = getattr(self, "_perf_debug_overlay", None)
+        if overlay is None:
+            return
+        try:
+            overlay.adjustSize()
+            margin = 14
+            x = max(margin, self.width() - overlay.width() - margin)
+            y = margin
+            overlay.move(x, y)
+            overlay.raise_()
+        except Exception:
+            pass
+
+    def _tick_perf_debug_overlay(self):
+        overlay = getattr(self, "_perf_debug_overlay", None)
+        if overlay is None:
+            return
+        try:
+            enabled = bool(self.settings.get("performance_debug_enabled", True))
+            transport = getattr(self, "karaoke_transport", None)
+            active = bool(enabled and transport is not None and getattr(self, "karaoke_playing", False))
+            if not active or not hasattr(transport, "diagnostics"):
+                overlay.setVisible(False)
+                return
+            diag = transport.diagnostics()
+            overlay.setText(self._format_karaoke_perf_overlay(diag))
+            self._position_perf_debug_overlay()
+            overlay.setVisible(True)
+            now = time.monotonic()
+            if now - float(getattr(self, "_perf_debug_overlay_last_log_ts", 0.0) or 0.0) >= 5.0:
+                self._perf_debug_overlay_last_log_ts = now
+                video = diag.get("video") if isinstance(diag.get("video"), dict) else {}
+                _diag(
+                    "[MP4-PERF] "
+                    f"media={diag.get('media_type')} decoder={video.get('decoder', 'n/a')} "
+                    f"hw={video.get('hardware_acceleration', 'n/a')} hw_checked={int(bool(video.get('hardware_acceleration_checked')))} "
+                    f"src={video.get('source_size', '')} out={video.get('output_size', '')} "
+                    f"fps={float(video.get('delivered_fps', 0.0) or 0.0):.1f}/{float(video.get('fps', 0.0) or 0.0):.1f} "
+                    f"queue={int(video.get('queue_size', 0) or 0)}/{int(video.get('max_buffered_frames', 0) or 0)} "
+                    f"drops={int(video.get('dropped_frames', 0) or 0)} "
+                    f"render_ms={float(diag.get('last_visual_render_ms', 0.0) or 0.0):.1f} "
+                    f"render_max_ms={float(diag.get('visual_render_max_ms', 0.0) or 0.0):.1f} "
+                    f"audio_latency_ms={float(diag.get('audio_latency_ms', 0.0) or 0.0):.0f} "
+                    f"underruns={int(diag.get('audio_underruns', 0) or 0)}"
+                )
+        except Exception as e:
+            try:
+                overlay.setVisible(False)
+            except Exception:
+                pass
+            print(f"[MP4-PERF] overlay failed: {e}")
+
     def configure_crossfade(self):
         """Configure crossfade settings"""
         current_duration = self.bg_music.crossfade_duration_ms / 1000.0
@@ -14241,7 +15071,7 @@ class KaraokeApp(QWidget):
 
     def is_network_configured(self) -> bool:
         """Check if network settings are properly configured for polling"""
-        base_url = (self.settings.get("base_url", "") or "").strip()
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         user_id = (self.settings.get("user", "") or self.settings.get("tenant", "") or "").strip()
         
         # Must have both URL and user ID, and URL must start with http
@@ -14249,37 +15079,35 @@ class KaraokeApp(QWidget):
 
     def test_server_connection_quick(self, base_url: str, user_id: str = "", api_key: str = ""):
         """Quick connection test with short timeout. Returns (success, message)"""
+        status = probe_network_sync_status(base_url, user_id, api_key, timeout_sec=3.0)
+        return bool(status.get("ok")), str(status.get("message") or "Sync failed")
+
+    def debug_network_sync_status(self, timeout_sec: float = 6.0) -> dict:
+        """Return the same sync-status probe used by the Network dialog."""
+        base_url = self.settings.get("base_url", "")
+        user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
+        api_key = self.settings.get("api_key", "")
+        return probe_network_sync_status(base_url, user_id, api_key, timeout_sec=timeout_sec)
+
+    def debug_disc_brand_scan_report(self, max_unknowns: int = 50) -> dict:
+        """Scan loaded library metadata/filenames and report disc-company alias coverage."""
+        report = build_disc_brand_scan_report(getattr(self, "tracks", []) or [], max_unknowns=max_unknowns)
         try:
-            headers = {"X-API-Key": api_key} if api_key else {}
-            # Avoid testing against the real tenant queue; connectivity checks should not
-            # touch live request delivery.
-            test_user = "connectiontest"
-            
-            resp = requests.get(
-                f"{base_url}/get_requests.php", 
-                params={"user": test_user}, 
-                headers=headers, 
-                timeout=3  # Short timeout for quick test
+            _diag(
+                "[DISC-BRAND] scan "
+                f"tracks={report.get('track_count', 0)} "
+                f"canonical_counts={report.get('canonical_counts', {})} "
+                f"unknown_prefixes={report.get('unknown_prefixes', [])}"
             )
-            # 200, 401, or 404 all mean server is reachable
-            # 401 = unauthorized but server responded (credentials issue, not connection issue)
-            # 404 = no requests found (normal)
-            # 200 = success
-            if resp.status_code in (200, 401, 404):
-                return True, "Connected"
-            return False, f"Server error {resp.status_code}"
-        except requests.exceptions.Timeout:
-            return False, "Connection timeout"
-        except requests.exceptions.ConnectionError:
-            return False, "Cannot reach server"
-        except Exception as e:
-            return False, f"Error: {str(e)[:50]}"
+        except Exception:
+            pass
+        return report
 
     def start_request_polling(self):
         if self._safe_mode():
             print("[SAFE-MODE] Polling start ignored")
             return
-        base_url = self.settings.get("base_url", "https://beta.wskar.com")
+        base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
         tenant   = self.settings.get("user", self.settings.get("tenant", ""))
 
         # Safety: ensure any previous thread is gone
@@ -14307,6 +15135,10 @@ class KaraokeApp(QWidget):
 
         self.poll_thread.start()
         print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
+        try:
+            QTimer.singleShot(250, lambda: self._sync_remote_removal_tombstones_async("poll_start"))
+        except Exception:
+            pass
 
     def stop_request_polling(self):
         t = getattr(self, "poll_thread", None)
@@ -14341,7 +15173,7 @@ class KaraokeApp(QWidget):
         
         # Only restart if network is properly configured
         if self.is_network_configured():
-            base_url = self.settings.get("base_url", "")
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
             api_key = self.settings.get("api_key", "")
             
@@ -16580,6 +17412,10 @@ class KaraokeApp(QWidget):
         if reqs is None:
             return
         try:
+            self._sync_remote_removal_tombstones_async("poll")
+        except Exception:
+            pass
+        try:
             if reqs and time_module.time() < float(getattr(self, "_remote_clear_in_progress_until", 0.0) or 0.0):
                 _diag(f"[REMOTE-CLEAR] ignoring stale poll during clear window ({len(reqs)} request(s))")
                 return
@@ -16770,7 +17606,7 @@ class KaraokeApp(QWidget):
             self._sync_host_control_state_now()
 
     def _sync_host_control_state_now(self):
-        base_url = str(self.settings.get("base_url", "") or "").rstrip("/")
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
         if not base_url or not tenant or not api_key:
@@ -16888,7 +17724,7 @@ class KaraokeApp(QWidget):
     def _ack_host_control_command(self, command_id: int, ok: bool, message: str):
         if command_id <= 0:
             return
-        base_url = str(self.settings.get("base_url", "") or "").rstrip("/")
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
         if not base_url or not tenant or not api_key:
@@ -17179,7 +18015,7 @@ class KaraokeApp(QWidget):
         for b in (self.history_clear_all_button, self.history_clear_small_button, self.history_clear_inactive_button):
             b.setMinimumHeight(30)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            b.setStyleSheet(subtle_button_css(padding="6px 8px", radius=8).replace("font-size: 13px;", "font-size: 12px;"))
+            b.setStyleSheet(danger_button_css(padding="6px 8px", radius=8).replace("font-size: 13px;", "font-size: 12px;"))
         self.history_clear_all_button.clicked.connect(self._clear_all_singer_history)
         self.history_clear_small_button.clicked.connect(self._clear_small_singer_history)
         self.history_clear_inactive_button.clicked.connect(self._clear_inactive_singer_history)
@@ -17222,12 +18058,7 @@ class KaraokeApp(QWidget):
         top_row.addWidget(self.singer_history_brand_button)
         top_row.addSpacing(4)
         self.singer_history_delete_singer_button = QPushButton("Delete Singer")
-        self.singer_history_delete_singer_button.setStyleSheet(
-            history_button_css.replace(
-                "background: rgba(255,255,255,0.02);",
-                "background: rgba(190,62,62,0.10);"
-            )
-        )
+        self.singer_history_delete_singer_button.setStyleSheet(danger_button_css(padding="6px 9px", radius=8).replace("font-size: 13px;", "font-size: 12px;"))
         self.singer_history_delete_singer_button.clicked.connect(self._delete_selected_singer_history)
         top_row.addWidget(self.singer_history_delete_singer_button)
         details_layout.addLayout(top_row)
@@ -17298,8 +18129,9 @@ class KaraokeApp(QWidget):
         self.singer_history_add_song_button = QPushButton("Add Song")
         self.singer_history_edit_song_button = QPushButton("Edit Song")
         self.singer_history_delete_song_button = QPushButton("Delete Song")
-        for b in (self.singer_history_add_song_button, self.singer_history_edit_song_button, self.singer_history_delete_song_button):
+        for b in (self.singer_history_add_song_button, self.singer_history_edit_song_button):
             b.setStyleSheet(history_button_css)
+        self.singer_history_delete_song_button.setStyleSheet(danger_button_css(padding="6px 9px", radius=8).replace("font-size: 13px;", "font-size: 12px;"))
         self.singer_history_add_song_button.clicked.connect(self._add_song_to_selected_singer_history)
         self.singer_history_edit_song_button.clicked.connect(self._edit_selected_singer_history_song)
         self.singer_history_delete_song_button.clicked.connect(self._delete_selected_singer_history_song)
@@ -17813,9 +18645,13 @@ class KaraokeApp(QWidget):
             if exact_disc:
                 matches = exact_disc
 
-        runtime_priority = self._singer_disc_priority_override(singer_name)
-        if not runtime_priority:
-            runtime_priority = normalize_disc_priority(self.settings.get("disc_id_priority", ""), max_items=10)
+        host_priority = normalize_disc_priority(self.settings.get("disc_id_priority", ""), max_items=10)
+        runtime_info = effective_disc_priority(
+            host_priority,
+            singer_override=self._singer_disc_priority_override(singer_name),
+            max_items=10,
+        )
+        runtime_priority = runtime_info.get("effective", [])
         try:
             return pick_by_disc_priority(matches, runtime_priority)
         except Exception:
@@ -18546,7 +19382,7 @@ class KaraokeApp(QWidget):
 
     def _default_header_qr_url_from_network(self) -> str:
         try:
-            base_url = str(self.settings.get("base_url", "") or "").strip().rstrip("/")
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         except Exception:
             return ""
@@ -19199,9 +20035,9 @@ class KaraokeApp(QWidget):
 
             update_location_status()
 
-            # Server Connection row
+            # Server Connectivity / Sync row
             conn_row = QHBoxLayout()
-            conn_row.addWidget(QLabel("Server Connection:"))
+            conn_row.addWidget(QLabel("Server Sync:"))
             
             conn_indicator = QLabel("●")
             conn_indicator.setStyleSheet(_network_indicator_css(_v("text_soft")))
@@ -19213,7 +20049,7 @@ class KaraokeApp(QWidget):
             
             conn_refresh_btn = QPushButton("↻")
             conn_refresh_btn.setMaximumWidth(40)
-            conn_refresh_btn.setToolTip("Check server connection")
+            conn_refresh_btn.setToolTip("Check server connectivity and sync endpoints")
             conn_row.addWidget(conn_refresh_btn)
             
             conn_row.addStretch(1)
@@ -19223,17 +20059,17 @@ class KaraokeApp(QWidget):
             v.addSpacing(10)
 
             # Song Requests section
-            requests_label = QLabel("Song Requests:")
+            requests_label = QLabel("Accepting Requests:")
             requests_label.setStyleSheet(section_title_css())
             v.addWidget(requests_label)
             
             # Accepting toggle button
-            accepting_btn = QPushButton("🔴 NOT ACCEPTING")
+            accepting_btn = QPushButton("Accepting Requests: Off")
             accepting_btn.setMinimumHeight(44)
             accepting_btn.setStyleSheet(_network_state_button_css("closed"))
             v.addWidget(accepting_btn)
             
-            hint_label = QLabel("(click to toggle accepting on/off)")
+            hint_label = QLabel("Controls new public submissions only. Sync remains active.")
             hint_label.setStyleSheet(_network_label_css())
             v.addWidget(hint_label)
 
@@ -19290,15 +20126,15 @@ class KaraokeApp(QWidget):
                     except Exception:
                         pass
                 if is_syncing:
-                    accepting_btn.setText("⏳ SYNCING...")
+                    accepting_btn.setText("Accepting Requests: Syncing...")
                     accepting_btn.setEnabled(False)
                     accepting_btn.setStyleSheet(_network_state_button_css("sync"))
                 elif is_accepting:
-                    accepting_btn.setText("🟢 ACCEPTING REQUESTS")
+                    accepting_btn.setText("Accepting Requests: On")
                     accepting_btn.setEnabled(True)
                     accepting_btn.setStyleSheet(_network_state_button_css("accepting"))
                 else:
-                    accepting_btn.setText("🔴 NOT ACCEPTING")
+                    accepting_btn.setText("Accepting Requests: Off")
                     accepting_btn.setEnabled(True)
                     accepting_btn.setStyleSheet(_network_state_button_css("closed"))
             
@@ -19311,7 +20147,11 @@ class KaraokeApp(QWidget):
                 elif state == "connected":
                     conn_indicator.setStyleSheet(_network_indicator_css(_v("success")))
                     conn_label.setStyleSheet(_network_state_label_css(_v("success")))
-                    conn_label.setText("Connected")
+                    conn_label.setText(message or "Connected / Synced")
+                elif state == "partial":
+                    conn_indicator.setStyleSheet(_network_indicator_css(_v("warning")))
+                    conn_label.setStyleSheet(_network_state_label_css(_v("warning")))
+                    conn_label.setText(message or "Connected; partial sync issue")
                 elif state == "error":
                     conn_indicator.setStyleSheet(_network_indicator_css(_v("danger")))
                     conn_label.setStyleSheet(_network_state_label_css(_v("danger")))
@@ -19323,32 +20163,45 @@ class KaraokeApp(QWidget):
             
             def check_connection():
                 """Check server connection and load accepting state."""
-                base = base_edit.text().strip().rstrip("/")
+                base = _network_normalize_base_url(base_edit.text())
                 user_id = user_edit.text().strip()
+                api_key = key_edit.text().strip()
+                _network_log("sync button clicked")
                 
                 if not base or not user_id:
                     update_connection_indicator("error", "Missing URL/User ID")
                     return
                 
                 update_connection_indicator("checking")
+                conn_refresh_btn.setEnabled(False)
+                conn_refresh_btn.setText("…")
 
                 def worker():
                     started = time.monotonic()
-                    st = self._net_fetch_accepting(base, user_id)
+                    status = probe_network_sync_status(base, user_id, api_key, timeout_sec=6.0)
                     elapsed_ms = (time.monotonic() - started) * 1000.0
                     if elapsed_ms >= 50.0:
-                        _perf_log_if_slow("network_accepting_check", elapsed_ms)
+                        _perf_log_if_slow("network_sync_check", elapsed_ms)
 
                     def finish():
-                        if st is None:
-                            update_connection_indicator("error", "Cannot reach server")
+                        conn_refresh_btn.setEnabled(True)
+                        conn_refresh_btn.setText("↻")
+                        msg = str(status.get("message") or "")
+                        accepting_value = status.get("accepting")
+                        if status.get("ok"):
+                            if status.get("partial"):
+                                update_connection_indicator("partial", msg)
+                            else:
+                                update_connection_indicator("connected", msg)
+                            if accepting_value is not None:
+                                update_accepting_button(bool(accepting_value))
                         else:
-                            update_connection_indicator("connected")
-                            update_accepting_button(bool(st))
+                            update_connection_indicator("error", msg or "Cannot reach server")
+                        _network_log(f"final UI state label={conn_label.text()!r} accepting={accepting_value!r}")
 
                     QTimer.singleShot(0, self, finish)
 
-                print("[PERF] main_thread_blocking_call removed task=network_accepting_check worker=thread")
+                print("[PERF] main_thread_blocking_call removed task=network_sync_check worker=thread")
                 threading.Thread(target=worker, daemon=True).start()
 
             def preview_header_qr():
@@ -19357,7 +20210,7 @@ class KaraokeApp(QWidget):
 
             def toggle_accepting():
                 """Toggle accepting state on the server."""
-                base = base_edit.text().strip().rstrip("/")
+                base = _network_normalize_base_url(base_edit.text())
                 user_id = user_edit.text().strip()
                 api_key = key_edit.text().strip()
                 
@@ -19399,7 +20252,7 @@ class KaraokeApp(QWidget):
                 threading.Thread(target=worker, daemon=True).start()
 
             def upload_songbook():
-                base = base_edit.text().strip().rstrip("/")
+                base = _network_normalize_base_url(base_edit.text())
                 user_id = user_edit.text().strip()
                 api_key = key_edit.text().strip()
 
@@ -19478,7 +20331,7 @@ class KaraokeApp(QWidget):
     
             def accept():
                 # Save new values
-                self.settings["base_url"] = (base_edit.text().strip() or "https://beta.wskar.com")
+                self.settings["base_url"] = _network_normalize_base_url(base_edit.text() or "https://beta.wskar.com")
                 uid = user_edit.text().strip()
                 if uid:
                     self.settings["user"] = uid
@@ -19645,7 +20498,7 @@ class KaraokeApp(QWidget):
             return None, f"Auto-detect failed: {e}"
 
     def _session_location_payload(self, allow_auto_detect: bool = True):
-        base_url = (self.settings.get("base_url", "") or "").strip().rstrip("/")
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = (self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = (self.settings.get("api_key", "") or "").strip()
         lat_raw = str(self.settings.get("session_location_latitude", "") or "").strip()
@@ -19757,7 +20610,7 @@ class KaraokeApp(QWidget):
     def _net_fetch_accepting(self, base_url: str, tenant: str):
         """Return True/False if server value can be read, or None if unknown."""
         try:
-            base = (base_url or "").rstrip("/")
+            base = _network_normalize_base_url(base_url)
             t = (tenant or "").strip() or "default"
             url = f"{base}/tenants/{t}/accepting.txt"
             r = requests.get(url, params={"_": int(time.time())}, timeout=5)
@@ -19779,7 +20632,7 @@ class KaraokeApp(QWidget):
     def _net_set_accepting(self, base_url: str, tenant: str, api_key: str, accepting: bool) -> tuple[bool, str]:
         """Set server accepting state via API endpoint. Returns (success, error_msg)."""
         try:
-            base = (base_url or "").rstrip("/")
+            base = _network_normalize_base_url(base_url)
             t = (tenant or "").strip() or "default"
             url = f"{base}/api/v1/set_accepting.php"
 
@@ -19792,7 +20645,9 @@ class KaraokeApp(QWidget):
             else:
                 data["accepting"] = "0"
 
+            _network_log(f"request sent name=set_accepting method=POST url={url}")
             r = requests.post(url, data=data, timeout=10)
+            _network_log(f"response name=set_accepting status={r.status_code}")
             
             if r.status_code == 200:
                 try:
@@ -19808,7 +20663,7 @@ class KaraokeApp(QWidget):
                     print(f"⚠️ Failed to parse JSON response: {e}")
                     return False, f"Invalid response from server: {e}"
             else:
-                print(f"⚠️ accepting set HTTP {r.status_code}")
+                print(f"⚠️ accepting set HTTP {r.status_code}: {(r.text or '')[:200]}")
                 return False, f"Server returned HTTP {r.status_code}"
                 
         except requests.exceptions.Timeout:
@@ -19824,7 +20679,7 @@ class KaraokeApp(QWidget):
     def _net_set_host_controls(self, base_url: str, tenant: str, api_key: str, pin: str, lan_only: bool) -> tuple[bool, str]:
         """Push host-control auth settings to the request server."""
         try:
-            base = (base_url or "").rstrip("/")
+            base = _network_normalize_base_url(base_url)
             t = (tenant or "").strip() or "default"
             key = (api_key or "").strip()
             if not base or not t or not key:
@@ -19898,7 +20753,7 @@ class KaraokeApp(QWidget):
                 return
             # Create completely new thread and worker
             self.poll_thread = QThread()
-            base_url = self.settings.get("base_url", "https://beta.wskar.com")
+            base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
             tenant = self.settings.get("user", self.settings.get("tenant", ""))
             api_key = self.settings.get("api_key", "")
 
@@ -19999,6 +20854,7 @@ class KaraokeApp(QWidget):
         self._schedule_preview_overlay_refresh(0)
         self._schedule_preview_overlay_refresh(120, recreate_surface=True)
         self._schedule_preview_overlay_refresh(240)
+        self._position_perf_debug_overlay()
         # Re-elide current Now Singing on resize (keep 3-line format stable)
         try:
             parts = getattr(self, "_now_singing_parts", None)
@@ -22283,7 +23139,7 @@ class KaraokeApp(QWidget):
 
     def _sync_singer_history_async(self, reason: str = "manual"):
         try:
-            base_url = (self.settings.get("base_url", "") or "").strip().rstrip("/")
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             tenant = (self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
             api_key = (self.settings.get("api_key", "") or "").strip()
             if not base_url or not tenant or not api_key:
@@ -22490,7 +23346,7 @@ class KaraokeApp(QWidget):
 
     def _net_send_direct_message(self, singer_name: str, message: str) -> tuple[bool, str]:
         try:
-            base_url = (self.settings.get("base_url", "") or "").strip().rstrip("/")
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             tenant = (self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
             api_key = (self.settings.get("api_key", "") or "").strip()
 
@@ -22540,7 +23396,7 @@ class KaraokeApp(QWidget):
 
     def _net_send_stage_notification(self, singer_name: str, stage: str, message: str) -> tuple[bool, str]:
         try:
-            base_url = (self.settings.get("base_url", "") or "").strip().rstrip("/")
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             tenant = (self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
             api_key = (self.settings.get("api_key", "") or "").strip()
 
@@ -25443,6 +26299,19 @@ class KaraokeApp(QWidget):
             self._remote_clear_in_progress_until = time.time() + 20.0
         except Exception:
             pass
+        try:
+            for singer in list(self.queue or []):
+                for entry in list((singer or {}).get("songs", []) or []):
+                    remote_request_id = self._queue_entry_remote_request_id(entry)
+                    if remote_request_id is not None:
+                        self._record_remote_request_tombstone(
+                            remote_request_id,
+                            entry=entry,
+                            singer_name=str((singer or {}).get("name", "") or ""),
+                            reason="host_clear_queue",
+                        )
+        except Exception as e:
+            _diag(f"[REMOTE-TOMBSTONE] clear queue tombstone pass failed: {e}")
         self.queue = []
         self._pending_remote_order_syncs = {}
         # Monotonic revision bumped on every host reorder. The app is the source
@@ -25483,6 +26352,19 @@ class KaraokeApp(QWidget):
         if re.match(r"^\d+\.\s", item_text):
             singer_idx = self.get_singer_index_by_row(index)
             if singer_idx != -1:
+                try:
+                    singer = self.queue[singer_idx]
+                    for entry in list(singer.get("songs", []) or []):
+                        remote_request_id = self._queue_entry_remote_request_id(entry)
+                        if remote_request_id is not None:
+                            self._delete_remote_request(
+                                remote_request_id,
+                                entry=entry,
+                                singer_name=str(singer.get("name", "") or ""),
+                                reason="host_remove_singer",
+                            )
+                except Exception:
+                    pass
                 was_marker = bool(self.queue[singer_idx].get("rotation_marker", False)) if self._is_rotation_mode() else False
                 del self.queue[singer_idx]
                 if self._is_rotation_mode() and was_marker:
@@ -25498,7 +26380,12 @@ class KaraokeApp(QWidget):
                     entry = self.queue[singer_idx]["songs"][song_idx]
                     remote_request_id = self._queue_entry_remote_request_id(entry)
                     if remote_request_id is not None:
-                        self._delete_remote_request(remote_request_id)
+                        self._delete_remote_request(
+                            remote_request_id,
+                            entry=entry,
+                            singer_name=str(self.queue[singer_idx].get("name", "") or ""),
+                            reason="host_remove_song",
+                        )
                 except Exception:
                     pass
                 del self.queue[singer_idx]["songs"][song_idx]
@@ -26024,7 +26911,12 @@ class KaraokeApp(QWidget):
             try:
                 remote_request_id = self._queue_entry_remote_request_id(entry)
                 if remote_request_id is not None:
-                    self._delete_remote_request(remote_request_id)
+                    self._delete_remote_request(
+                        remote_request_id,
+                        entry=entry,
+                        singer_name=str(singer.get("name", "") or ""),
+                        reason="song_completed",
+                    )
             except Exception:
                 pass
 
@@ -26581,13 +27473,118 @@ class KaraokeApp(QWidget):
             pass
         return None
 
-    def _delete_remote_request(self, request_id: int):
+    def _load_remote_request_tombstones(self) -> dict:
+        try:
+            if not REMOTE_REQUEST_TOMBSTONES_PATH.exists():
+                return {"requests": {}, "generated_at": int(time.time()), "version": 1}
+            with open(REMOTE_REQUEST_TOMBSTONES_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {"requests": {}, "generated_at": int(time.time()), "version": 1}
+            requests_map = data.get("requests")
+            if not isinstance(requests_map, dict):
+                requests_map = {}
+            data["requests"] = requests_map
+            data.setdefault("version", 1)
+            return data
+        except Exception as e:
+            _diag(f"[REMOTE-TOMBSTONE] load failed: {e}")
+            return {"requests": {}, "generated_at": int(time.time()), "version": 1}
+
+    def _save_remote_request_tombstones(self, payload: dict | None = None) -> None:
+        try:
+            data = payload if isinstance(payload, dict) else getattr(self, "_remote_request_tombstones", None)
+            if not isinstance(data, dict):
+                data = {"requests": {}, "generated_at": int(time.time()), "version": 1}
+            data["generated_at"] = int(time.time())
+            with open(REMOTE_REQUEST_TOMBSTONES_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, sort_keys=True)
+        except Exception as e:
+            _diag(f"[REMOTE-TOMBSTONE] save failed: {e}")
+
+    def _ensure_remote_request_tombstones(self) -> dict:
+        try:
+            data = self.__dict__.get("_remote_request_tombstones")
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            data = self._load_remote_request_tombstones()
+            self._remote_request_tombstones = data
+        data.setdefault("requests", {})
+        self._prune_remote_request_tombstones(data)
+        return data
+
+    def _prune_remote_request_tombstones(self, data: dict | None = None) -> None:
+        if not isinstance(data, dict):
+            try:
+                data = self.__dict__.get("_remote_request_tombstones")
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            return
+        items = data.setdefault("requests", {})
+        if not isinstance(items, dict):
+            data["requests"] = {}
+            return
+        now = time.time()
+        ttl = 48 * 3600
+        changed = False
+        for key, tombstone in list(items.items()):
+            try:
+                removed_at = float((tombstone or {}).get("removed_at") or 0)
+            except Exception:
+                removed_at = 0
+            if removed_at and now - removed_at > ttl:
+                items.pop(key, None)
+                changed = True
+        if changed:
+            self._save_remote_request_tombstones(data)
+
+    def _queue_entry_artist_title_for_tombstone(self, entry) -> tuple[str, str]:
+        if isinstance(entry, dict):
+            artist = str(entry.get("artist") or "").strip()
+            title = str(entry.get("title") or "").strip()
+            if artist or title:
+                return artist, title
+            display = str(entry.get("display_name") or "").strip()
+            if "•" in display:
+                left, right = display.split("•", 1)
+                return left.strip(), right.strip()
+            if "-" in display:
+                left, right = display.split("-", 1)
+                return left.strip(), right.strip()
+        return "", ""
+
+    def _record_remote_request_tombstone(self, request_id: int, *, entry=None, singer_name: str = "", reason: str = "host_remove") -> dict | None:
         try:
             request_id = int(request_id or 0)
         except Exception:
-            return
+            request_id = 0
         if request_id <= 0:
-            return
+            return None
+        artist, title = self._queue_entry_artist_title_for_tombstone(entry)
+        singer_name = str(singer_name or "").strip()
+        try:
+            self._queue_revision = int(getattr(self, "_queue_revision", 0)) + 1
+        except Exception:
+            self._queue_revision = 1
+        now = time.time()
+        tombstone = {
+            "request_id": request_id,
+            "singer_name": singer_name,
+            "artist": artist,
+            "title": title,
+            "song_key": remote_request_song_key(singer_name, artist, title),
+            "removed_at": now,
+            "removed_by": "host",
+            "removal_reason": str(reason or "host_remove"),
+            "local_revision": int(getattr(self, "_queue_revision", 0) or 0),
+            "server_synced_at": None,
+            "status": "removed",
+        }
+        data = self._ensure_remote_request_tombstones()
+        data.setdefault("requests", {})[str(request_id)] = tombstone
+        self._save_remote_request_tombstones(data)
         try:
             removed = getattr(self, "_remote_removed_request_ids", None)
             if not isinstance(removed, set):
@@ -26596,10 +27593,146 @@ class KaraokeApp(QWidget):
             removed.add(request_id)
         except Exception:
             pass
-        base_url = str(self.settings.get("base_url", "") or "").rstrip("/")
+        _diag(
+            "[REMOTE-TOMBSTONE] created "
+            f"request_id={request_id} singer={singer_name!r} title={title!r} "
+            f"artist={artist!r} reason={reason} revision={tombstone['local_revision']} "
+            f"accepting_requests={int(self._is_requests_accepting_cached())}"
+        )
+        return tombstone
+
+    def _remote_request_matches_tombstone(self, req: dict) -> dict | None:
+        if not isinstance(req, dict):
+            return None
+        data = self._ensure_remote_request_tombstones()
+        items = data.get("requests") if isinstance(data, dict) else {}
+        if not isinstance(items, dict):
+            return None
+        try:
+            rid = int(req.get("request_id", 0) or 0)
+        except Exception:
+            rid = 0
+        if rid > 0:
+            tombstone = items.get(str(rid))
+            if isinstance(tombstone, dict):
+                return tombstone
+        song_key = remote_request_song_key(req.get("singer", ""), req.get("artist", ""), req.get("title", ""))
+        if not song_key or song_key == "||":
+            return None
+        for tombstone in items.values():
+            if isinstance(tombstone, dict) and tombstone.get("song_key") == song_key:
+                return tombstone
+        return None
+
+    def _sync_remote_removal_tombstones_async(self, reason: str = "manual") -> None:
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
         if not base_url or not tenant or not api_key:
+            return
+        try:
+            now = time.time()
+            if now - float(getattr(self, "_remote_tombstone_sync_last_ts", 0.0) or 0.0) < 2.0:
+                return
+            if bool(getattr(self, "_remote_tombstone_sync_active", False)):
+                return
+            self._remote_tombstone_sync_last_ts = now
+            self._remote_tombstone_sync_active = True
+        except Exception:
+            pass
+        data = self._ensure_remote_request_tombstones()
+        pending = [
+            dict(item)
+            for item in (data.get("requests") or {}).values()
+            if isinstance(item, dict) and item.get("request_id") and not item.get("server_synced_at")
+        ]
+        if not pending:
+            try:
+                self._remote_tombstone_sync_active = False
+            except Exception:
+                pass
+            return
+
+        import threading, requests
+
+        def send():
+            headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/removal-sync"}
+            synced = []
+            try:
+                for tombstone in pending:
+                    rid = int(tombstone.get("request_id") or 0)
+                    payload = {
+                        "user": tenant,
+                        "request_id": rid,
+                        "state": "removed",
+                        "status": "removed",
+                        "singer_name": tombstone.get("singer_name", ""),
+                        "artist": tombstone.get("artist", ""),
+                        "title": tombstone.get("title", ""),
+                        "removed_at": int(float(tombstone.get("removed_at") or time.time())),
+                        "removed_by": tombstone.get("removed_by", "host"),
+                        "removal_reason": tombstone.get("removal_reason", reason),
+                        "local_revision": tombstone.get("local_revision", ""),
+                    }
+                    _diag(
+                        "[REMOTE-TOMBSTONE] push "
+                        f"request_id={rid} reason={reason} accepting_requests={int(self._is_requests_accepting_cached())} "
+                        f"sync_connected=1 url={base_url}/api/v1/complete_remote_request.php"
+                    )
+                    resp = requests.post(
+                        f"{base_url}/api/v1/complete_remote_request.php",
+                        data=payload,
+                        headers=headers,
+                        timeout=6,
+                    )
+                    if 200 <= resp.status_code < 300:
+                        synced.append(rid)
+                        _diag(f"[REMOTE-TOMBSTONE] server acknowledged removal request_id={rid} status={resp.status_code}")
+                    else:
+                        _diag(f"[REMOTE-TOMBSTONE] push failed request_id={rid} status={resp.status_code} body={(resp.text or '')[:180]!r}")
+            except Exception as e:
+                _diag(f"[REMOTE-TOMBSTONE] sync failed reason={reason}: {e}")
+            finally:
+                try:
+                    if synced:
+                        latest = self._ensure_remote_request_tombstones()
+                        changed = False
+                        for rid in synced:
+                            item = latest.get("requests", {}).get(str(rid))
+                            if isinstance(item, dict) and not item.get("server_synced_at"):
+                                item["server_synced_at"] = time.time()
+                                changed = True
+                        if changed:
+                            self._save_remote_request_tombstones(latest)
+                finally:
+                    try:
+                        self._remote_tombstone_sync_active = False
+                    except Exception:
+                        pass
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def _delete_remote_request(self, request_id: int, *, entry=None, singer_name: str = "", reason: str = "host_remove"):
+        try:
+            request_id = int(request_id or 0)
+        except Exception:
+            return
+        if request_id <= 0:
+            return
+        tombstone = self._record_remote_request_tombstone(request_id, entry=entry, singer_name=singer_name, reason=reason)
+        try:
+            removed = getattr(self, "_remote_removed_request_ids", None)
+            if not isinstance(removed, set):
+                removed = set()
+                self._remote_removed_request_ids = removed
+            removed.add(request_id)
+        except Exception:
+            pass
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        if not base_url or not tenant or not api_key:
+            _diag(f"[REMOTE-TOMBSTONE] queued unsynced request_id={request_id} reason=network_not_configured")
             return
 
         import threading, requests
@@ -26612,11 +27745,30 @@ class KaraokeApp(QWidget):
                 # cleanup/delete request is still in flight.
                 mark = requests.post(
                     f"{base_url}/api/v1/complete_remote_request.php",
-                    data={"user": tenant, "request_id": request_id, "state": "removed"},
+                    data={
+                        "user": tenant,
+                        "request_id": request_id,
+                        "state": "removed",
+                        "status": "removed",
+                        "singer_name": singer_name,
+                        "artist": (tombstone or {}).get("artist", ""),
+                        "title": (tombstone or {}).get("title", ""),
+                        "removed_at": int(float((tombstone or {}).get("removed_at") or time.time())),
+                        "removed_by": "host",
+                        "removal_reason": reason,
+                        "local_revision": (tombstone or {}).get("local_revision", ""),
+                    },
                     headers=headers,
                     timeout=5,
                 )
-                if not (200 <= mark.status_code < 300):
+                if 200 <= mark.status_code < 300:
+                    latest = self._ensure_remote_request_tombstones()
+                    item = latest.get("requests", {}).get(str(request_id))
+                    if isinstance(item, dict):
+                        item["server_synced_at"] = time.time()
+                        self._save_remote_request_tombstones(latest)
+                    _diag(f"[REMOTE-TOMBSTONE] server acknowledged removal request_id={request_id} status={mark.status_code}")
+                else:
                     print(f"[REMOTE-DELETE] mark removed HTTP {mark.status_code}: {mark.text[:160]}")
             except Exception as e:
                 print(f"[REMOTE-DELETE] Failed to mark request {request_id} removed: {e}")
@@ -26656,7 +27808,7 @@ class KaraokeApp(QWidget):
         servers, fall back to deleting known remote request ids one by one and
         posting an empty public rotation so stale display data disappears.
         """
-        base_url = str(self.settings.get("base_url", "") or "").rstrip("/")
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
         ids = []
@@ -26792,8 +27944,8 @@ class KaraokeApp(QWidget):
         _diag(f"[REORDER] singer={singer.get('name','')!r} order={request_ids} "
               f"queue_revision={rev} (host is authoritative)")
 
-        base_url = str(self.settings.get("base_url", "") or "").rstrip("/")
-        tenant = str(self.settings.get("tenant", "") or "").strip()
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
         if not base_url or not tenant or not api_key:
             return
@@ -26830,6 +27982,12 @@ class KaraokeApp(QWidget):
                 removed_ids = set()
         except Exception:
             removed_ids = set()
+        accepting_requests = self._is_requests_accepting_cached()
+        _diag(
+            "[REMOTE-SYNC] reconcile "
+            f"count={len(reqs or [])} accepting_requests={int(accepting_requests)} "
+            f"sync_connected={int(self.is_network_configured())}"
+        )
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue
@@ -26842,6 +28000,25 @@ class KaraokeApp(QWidget):
             if request_id <= 0:
                 continue
             if request_id in removed_ids:
+                _diag(f"[REMOTE-TOMBSTONE] poll old request ignored request_id={request_id} reason=in_memory_removed")
+                try:
+                    self._sync_remote_removal_tombstones_async("stale_poll_repush")
+                except Exception:
+                    pass
+                continue
+            tombstone = self._remote_request_matches_tombstone(req)
+            if tombstone is not None:
+                _diag(
+                    "[REMOTE-TOMBSTONE] poll old request ignored "
+                    f"request_id={request_id} singer={req.get('singer', '')!r} "
+                    f"title={req.get('title', '')!r} reason=tombstone; re-push removed status"
+                )
+                try:
+                    removed_ids.add(request_id)
+                    self._remote_removed_request_ids = removed_ids
+                    self._sync_remote_removal_tombstones_async("stale_poll_repush")
+                except Exception:
+                    pass
                 continue
             singer = str(req.get("singer", "") or "").strip()
             if not singer:
@@ -26929,6 +28106,12 @@ class KaraokeApp(QWidget):
         for req in normalized:
             rid = req["request_id"]
             if rid in existing_ids or rid in failed:
+                continue
+            if not accepting_requests:
+                _diag(
+                    "[REMOTE-SYNC] new request not imported because accepting_requests=0 "
+                    f"request_id={rid} singer={req.get('singer', '')!r} title={req.get('title', '')!r}"
+                )
                 continue
             if not self.process_external_request(req):
                 failed.add(rid)
@@ -27125,10 +28308,48 @@ class KaraokeApp(QWidget):
 
         # Only log requests we actually resolve and queue.
         SingWSLogger.log_external_request(artist, title, singer, key)
-        runtime_priority = self._singer_disc_priority_override(singer)
-        if not runtime_priority:
-            runtime_priority = normalize_disc_priority(self.settings.get("disc_id_priority", ""), max_items=10)
+        host_priority = normalize_disc_priority(self.settings.get("disc_id_priority", ""), max_items=10)
+        singer_brand_raw = request_preferred_disc_brand(req)
+        singer_override = self._singer_disc_priority_override(singer)
+        runtime_info = effective_disc_priority(
+            host_priority,
+            singer_brand_raw=singer_brand_raw,
+            singer_override=singer_override,
+            max_items=10,
+        )
+        runtime_priority = runtime_info.get("effective", [])
+        available_versions = disc_priority_available_versions(matches)
+        selected_brand = runtime_info.get("singer_normalized", "")
+        selected_available = any(track_matches_disc_brand(m, selected_brand) for m in matches) if selected_brand else False
+        fallback_reason = ""
+        if runtime_info.get("unknown_ignored"):
+            fallback_reason = "unknown singer brand ignored"
+        elif selected_brand and not selected_available:
+            fallback_reason = f"{selected_brand} unavailable for matched song"
+        brand_log = (
+            "[REMOTE-BRAND] "
+            f"singer={singer!r} raw={runtime_info.get('singer_raw', '')!r} "
+            f"source={runtime_info.get('singer_source', '') or 'none'} "
+            f"normalized={selected_brand!r} host_priority={runtime_info.get('host', [])} "
+            f"effective_priority={runtime_priority} available_versions={available_versions}"
+        )
+        try:
+            logging.info(brand_log)
+        except Exception:
+            pass
+        print(brand_log)
         chosen = pick_by_disc_priority(matches, runtime_priority)
+        chosen_brand = str(chosen.get("disc_id") or chosen.get("discid") or "").strip()
+        final_log = (
+            "[REMOTE-BRAND] "
+            f"final_selected={chosen_brand!r} display={chosen.get('display', '')!r} "
+            f"fallback_reason={fallback_reason!r}"
+        )
+        try:
+            logging.info(final_log)
+        except Exception:
+            pass
+        print(final_log)
         print(f"Matched: {chosen['display']} for {singer}")
 
         base, ext = os.path.splitext(chosen['path'])
@@ -27315,8 +28536,8 @@ class KaraokeApp(QWidget):
         import threading, requests, json as _json
 
         def send():
-            base_url = str(self.settings.get("base_url", "https://beta.wskar.com")).rstrip("/")
-            tenant   = str(self.settings.get("tenant", "")).strip()
+            base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
+            tenant   = str(self.settings.get("user", self.settings.get("tenant", ""))).strip()
 
             # Upload via get_requests.php
             url = f"{base_url}/post_rotation.php"
@@ -28811,6 +30032,10 @@ class ManageFoldersDialog(QDialog):
         remove_btn = QPushButton("Remove")
         up_btn = QPushButton("Move Up")
         down_btn = QPushButton("Move Down")
+        try:
+            remove_btn.setStyleSheet(warning_button_css(padding="6px 12px", radius=8))
+        except Exception:
+            pass
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(add_btn)
