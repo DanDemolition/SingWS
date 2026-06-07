@@ -10,6 +10,10 @@ echo "========================================"
 echo " BUILD START $(date)"
 echo "========================================"
 
+# Re-apply the DMG helper's custom icon + hidden extension (filesystem metadata
+# that git doesn't track) so every DMG ships the styled "Open Me First" helper.
+.venv/bin/python tools/make_dmg_assets.py --style-only
+
 # ---- arm64 ----
 echo ">>> [1/4] arm64 PyInstaller"
 rm -rf build dist

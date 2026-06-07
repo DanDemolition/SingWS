@@ -44,7 +44,7 @@ sidebar_width = 180
 # Window outer size: 600x430.  macOS title bar takes ~28px, so the visible
 # content area becomes ~600x402 — just enough to show the full 600x400
 # background without clipping the waveform along the bottom.
-window_rect = ((200, 140), (600, 610))
+window_rect = ((180, 60), (600, 674))
 
 # Icon presentation
 default_view = "icon-view"
@@ -66,7 +66,7 @@ icon_locations = {
     "Applications": (450, 265),
     # Helper lives in the strip below the original art (clear of the logo),
     # under the baked-in "First time?" instruction + arrow.
-    "Open Me First.command": (300, 498),
+    "Open Me First.command": (300, 558),
 }
 
 # Volume properties

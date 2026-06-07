@@ -5,6 +5,8 @@ cd /Users/daniel/Documents/SingWS
 VER="$(grep -E '^APP_VERSION' 0.2.18.1.py | sed -E 's/.*"([^"]+)".*/\1/')"
 GST="/Library/Frameworks/GStreamer.framework/Versions/1.0"
 echo ">>> UNIVERSAL build start $(date) (v${VER})"
+# Re-apply the DMG helper's custom icon + hidden extension (git can't track it).
+.venv/bin/python tools/make_dmg_assets.py --style-only
 rm -rf build dist
 export GI_TYPELIB_PATH="${GST}/lib/girepository-1.0"
 export DYLD_FALLBACK_LIBRARY_PATH="${GST}/lib"
