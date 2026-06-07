@@ -20,7 +20,10 @@ filesystem = "HFS+"
 size = None  # let dmgbuild size it automatically
 
 # Contents of the DMG
-files = [str(APP_PATH)]
+# "Open Me First.command" strips the macOS quarantine flag from the installed
+# app (unsigned/un-notarized builds get flagged on download) and launches it.
+HELPER_PATH = ROOT / "installer" / "Open Me First.command"
+files = [str(APP_PATH), str(HELPER_PATH)]
 symlinks = {"Applications": "/Applications"}
 
 # Volume icon (shown when the DMG mounts)
@@ -58,6 +61,10 @@ icon_size = 128
 icon_locations = {
     "SingWS.app": (150, 265),
     "Applications": (450, 265),
+    # Helper sits centered above the app/Applications row. The background art
+    # was drawn for the two-icon layout, so you may want to add a label/arrow
+    # for this in design/dmg_background.tiff; functionally it works as-is.
+    "Open Me First.command": (300, 95),
 }
 
 # Volume properties
