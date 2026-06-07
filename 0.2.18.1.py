@@ -20541,6 +20541,9 @@ class KaraokeApp(QWidget):
             
             def check_connection():
                 """Check server connection and load accepting state."""
+                if bool(getattr(self, "_network_sync_check_active", False)):
+                    _network_log("sync button ignored; check already running")
+                    return
                 base = _network_normalize_base_url(base_edit.text())
                 user_id = user_edit.text().strip()
                 api_key = key_edit.text().strip()
@@ -20553,29 +20556,36 @@ class KaraokeApp(QWidget):
                 update_connection_indicator("checking")
                 conn_refresh_btn.setEnabled(False)
                 conn_refresh_btn.setText("Testing...")
+                self._network_sync_check_active = True
 
                 def worker():
                     started = time.monotonic()
-                    status = probe_network_sync_status(base, user_id, api_key, timeout_sec=6.0)
-                    elapsed_ms = (time.monotonic() - started) * 1000.0
-                    if elapsed_ms >= 50.0:
-                        _perf_log_if_slow("network_sync_check", elapsed_ms)
+                    try:
+                        status = probe_network_sync_status(base, user_id, api_key, timeout_sec=6.0)
+                        elapsed_ms = (time.monotonic() - started) * 1000.0
+                        if elapsed_ms >= 50.0:
+                            _perf_log_if_slow("network_sync_check", elapsed_ms)
+                    except Exception as e:
+                        status = {"ok": False, "message": f"Sync check failed: {e}", "accepting": None}
 
                     def finish():
-                        conn_refresh_btn.setEnabled(True)
-                        conn_refresh_btn.setText("Test Sync")
-                        msg = str(status.get("message") or "")
-                        accepting_value = status.get("accepting")
-                        if status.get("ok"):
-                            if status.get("partial"):
-                                update_connection_indicator("partial", msg)
+                        try:
+                            conn_refresh_btn.setEnabled(True)
+                            conn_refresh_btn.setText("Test Sync")
+                            msg = str(status.get("message") or "")
+                            accepting_value = status.get("accepting")
+                            if status.get("ok"):
+                                if status.get("partial"):
+                                    update_connection_indicator("partial", msg)
+                                else:
+                                    update_connection_indicator("connected", msg)
+                                if accepting_value is not None:
+                                    update_accepting_button(bool(accepting_value))
                             else:
-                                update_connection_indicator("connected", msg)
-                            if accepting_value is not None:
-                                update_accepting_button(bool(accepting_value))
-                        else:
-                            update_connection_indicator("error", msg or "Cannot reach server")
-                        _network_log(f"final UI state label={conn_label.text()!r} accepting={accepting_value!r}")
+                                update_connection_indicator("error", msg or "Cannot reach server")
+                            _network_log(f"final UI state label={conn_label.text()!r} accepting={accepting_value!r}")
+                        finally:
+                            self._network_sync_check_active = False
 
                     self._run_on_ui_thread(finish)
 
