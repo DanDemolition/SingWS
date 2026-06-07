@@ -35,5 +35,8 @@ openkj.sqlite
 *.iconset.bak*/
 
 # Current PyInstaller specs are source for the active release builders.
+# Stable (version-agnostic) names so the version lives only in APP_VERSION.
 *.spec
-!SingWS-0.2.18.1*.spec
+!SingWS-universal.spec
+!SingWS-x86_64.spec
+!SingWS-arm64.spec
