@@ -27976,6 +27976,30 @@ class KaraokeApp(QWidget):
             request_id = 0
         if request_id <= 0:
             return None
+        data = self._ensure_remote_request_tombstones()
+        existing = (data.get("requests") or {}).get(str(request_id)) if isinstance(data, dict) else None
+        if isinstance(existing, dict):
+            try:
+                removed = getattr(self, "_remote_removed_request_ids", None)
+                if not isinstance(removed, set):
+                    removed = set()
+                    self._remote_removed_request_ids = removed
+                removed.add(request_id)
+            except Exception:
+                pass
+            try:
+                last_log = getattr(self, "_remote_tombstone_duplicate_log_ts", {})
+                if not isinstance(last_log, dict):
+                    last_log = {}
+                    self._remote_tombstone_duplicate_log_ts = last_log
+                now_log = time.time()
+                prev = float(last_log.get(request_id, 0.0) or 0.0)
+                if now_log - prev > 30.0:
+                    _diag(f"[REMOTE-TOMBSTONE] duplicate create ignored request_id={request_id} reason={reason}")
+                    last_log[request_id] = now_log
+            except Exception:
+                pass
+            return existing
         artist, title = self._queue_entry_artist_title_for_tombstone(entry)
         singer_name = str(singer_name or "").strip()
         try:
@@ -27996,7 +28020,6 @@ class KaraokeApp(QWidget):
             "server_synced_at": None,
             "status": "removed",
         }
-        data = self._ensure_remote_request_tombstones()
         data.setdefault("requests", {})[str(request_id)] = tombstone
         self._save_remote_request_tombstones(data)
         try:
