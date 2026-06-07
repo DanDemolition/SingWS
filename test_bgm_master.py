@@ -29,11 +29,37 @@ class FakeBass:
         self.remove_calls.append((mixer, handle))
         return 1
 
+    def BASS_ChannelSetDSP(self, mixer, proc, user, prio):
+        self._h += 1
+        self.set_calls.append((mixer, "DSP", prio))
+        return self._h
+
+    def BASS_ChannelRemoveDSP(self, mixer, handle):
+        self.remove_calls.append((mixer, handle))
+        return 1
+
+
+class FakeProc:
+    """Minimal MasterAudioProcessor stand-in for engine DSP wiring tests."""
+    def __init__(self):
+        self.configured = None
+
+    def configure_stream(self, sr, ch):
+        self.configured = (sr, ch)
+
+    def process_f32_array(self, frames):
+        return frames
+
 
 def bare_engine():
     eng = bbe.BassBackgroundEngine.__new__(bbe.BassBackgroundEngine)
     eng._master_params = None
     eng._master_fx_handle = 0
+    eng._master_proc = None
+    eng._master_dsp_handle = 0
+    eng._master_dsp_callback = None
+    eng._master_proc_ref = {"proc": None}
+    eng.sample_rate = 44100
     eng.bass = FakeBass()
     eng.mixer = 0xABCD
     # Attrs touched by __del__/close()/stop() during GC of this bare instance.
@@ -77,12 +103,54 @@ class EngineCompressorTests(unittest.TestCase):
         self.assertNotEqual(eng._master_fx_handle, 0)
 
 
+class EngineMasterDspTests(unittest.TestCase):
+    def test_attach_configures_and_sets_dsp(self):
+        eng = bare_engine()
+        proc = FakeProc()
+        eng.set_master_processor(proc)
+        self.assertNotEqual(eng._master_dsp_handle, 0)
+        self.assertIs(eng._master_proc, proc)
+        self.assertIs(eng._master_proc_ref["proc"], proc)
+        self.assertEqual(proc.configured, (44100, 2))
+        # Master DSP runs after the EQ (priority 0), so it uses a lower priority.
+        self.assertEqual(eng.bass.set_calls[-1], (eng.mixer, "DSP", -1))
+
+    def test_detach_removes_dsp(self):
+        eng = bare_engine()
+        eng.set_master_processor(FakeProc())
+        handle = eng._master_dsp_handle
+        eng.set_master_processor(None)
+        self.assertEqual(eng._master_dsp_handle, 0)
+        self.assertIsNone(eng._master_proc)
+        self.assertIsNone(eng._master_proc_ref["proc"])
+        self.assertIn((eng.mixer, handle), eng.bass.remove_calls)
+
+    def test_same_instance_is_noop(self):
+        eng = bare_engine()
+        proc = FakeProc()
+        eng.set_master_processor(proc)
+        handle = eng._master_dsp_handle
+        calls_before = len(eng.bass.set_calls)
+        eng.set_master_processor(proc)  # same instance -> no re-wire
+        self.assertEqual(eng._master_dsp_handle, handle)
+        self.assertEqual(len(eng.bass.set_calls), calls_before)
+
+    def test_ensure_mixer_reattaches_when_configured(self):
+        eng = bare_engine()
+        eng.mixer = 0  # mixer not yet created
+        eng.set_master_processor(FakeProc())  # stores proc, can't attach yet
+        self.assertEqual(eng._master_dsp_handle, 0)
+        eng.mixer = 0x1234
+        eng._attach_master_dsp()
+        self.assertNotEqual(eng._master_dsp_handle, 0)
+
+
 class FakeEngine:
     def __init__(self):
         self.calls = []
 
-    def set_master_compressor(self, params):
-        self.calls.append(params)
+    def set_master_processor(self, processor):
+        self.calls.append(processor)
 
 
 class HostBgmGatingTests(unittest.TestCase):
@@ -95,22 +163,33 @@ class HostBgmGatingTests(unittest.TestCase):
         base = {"performance_mode": False, "master_audio_enabled": False, "master_audio_params": {}}
         base.update(settings)
         app.settings = base
+        app.bgm_master = None
         bg = type("Bg", (), {})()
         bg._bass_engine = FakeEngine()
         app.bg_music = bg
         return app
 
-    def test_params_default_and_override(self):
-        app = self.make_app(master_audio_params={"comp_ratio": 3.0, "comp_makeup_db": 2.0})
-        p = app._bgm_master_compressor_params()
-        self.assertEqual(p["ratio"], 3.0)
-        self.assertEqual(p["gain_db"], 2.0)
-        self.assertEqual(p["threshold_db"], -20.0)  # untouched default
+    def test_processor_carries_full_chain_params(self):
+        # The BGM processor is built from the same params as karaoke, so tilt /
+        # exciter / limiter all flow through — not just the compressor.
+        app = self.make_app(
+            master_audio_enabled=True,
+            master_audio_exciter_enabled=True,
+            master_audio_params={"comp_ratio": 3.0, "exciter_mix": 0.4, "limiter_ceiling_db": -2.0},
+        )
+        proc = app._ensure_bgm_master_processor()
+        self.assertIsNotNone(proc)
+        p = proc.params()
+        self.assertEqual(p["comp_ratio"], 3.0)
+        self.assertEqual(p["exciter_mix"], 0.4)
+        self.assertEqual(p["limiter_ceiling_db"], -2.0)
 
-    def test_apply_attaches_when_active(self):
+    def test_apply_attaches_processor_when_active(self):
         app = self.make_app(master_audio_enabled=True)
         app._apply_bgm_master_processing()
-        self.assertIsNotNone(app.bg_music._bass_engine.calls[-1])
+        attached = app.bg_music._bass_engine.calls[-1]
+        self.assertIsNotNone(attached)
+        self.assertTrue(attached.enabled())
 
     def test_apply_detaches_when_disabled(self):
         app = self.make_app(master_audio_enabled=False)

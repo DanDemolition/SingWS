@@ -3338,15 +3338,16 @@ class BackgroundMusicPlayer(QObject):
                 _diag(f"[BG-BASS] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
             except Exception:
                 pass
-            # Master "mix bus" compressor (independent of Simple/Advanced; off in
-            # Performance Mode) so BGM is leveled in tandem with karaoke songs.
+            # Full master chain (gate/tilt EQ/exciter/compressor/limiter;
+            # independent of Simple/Advanced; off in Performance Mode) so BGM is
+            # processed in tandem with karaoke songs.
             try:
                 if (parent is not None and hasattr(parent, "_bgm_master_active")
-                        and hasattr(self._bass_engine, "set_master_compressor")):
+                        and hasattr(self._bass_engine, "set_master_processor")):
                     if parent._bgm_master_active():
-                        self._bass_engine.set_master_compressor(parent._bgm_master_compressor_params())
+                        self._bass_engine.set_master_processor(parent._ensure_bgm_master_processor())
                     else:
-                        self._bass_engine.set_master_compressor(None)
+                        self._bass_engine.set_master_processor(None)
             except Exception:
                 pass
             return True
@@ -11321,6 +11322,9 @@ class KaraokeApp(QWidget):
         # Performance Mode. None = fully bypassed.
         self.karaoke_master = None
         self._master_init_error = None
+        # Separate processor instance for the BGM mixer (own filter/compressor
+        # state) so background music gets the identical chain as karaoke.
+        self.bgm_master = None
 
         # --- Tooltip visibility (off by default; user opts in via Settings) ---
         # macOS Qt fires tooltips aggressively across our dense UI, which is
@@ -13358,40 +13362,51 @@ class KaraokeApp(QWidget):
                 pass
             return None
 
-    def _bgm_master_compressor_params(self) -> dict:
-        """DX8-compressor params for the BGM mixer, derived from the same
-        compressor settings as the karaoke chain so both buses match."""
-        p = self._compute_master_audio_params()
-        return {
-            "threshold_db": float(p.get("comp_threshold_db", -20.0)),
-            "ratio": float(p.get("comp_ratio", 2.0)),
-            "gain_db": float(p.get("comp_makeup_db", 4.0)),
-            "attack_ms": 18.0,
-            "release_ms": 180.0,
-            "predelay_ms": 2.0,
-        }
+    def _ensure_bgm_master_processor(self):
+        """Create/refresh a SEPARATE MasterAudioProcessor for the BGM mixer so
+        background music gets the identical gate/tilt/exciter/compressor/limiter
+        chain as karaoke. Kept distinct from karaoke_master because each stream
+        needs its own filter/compressor state. Returns it or None."""
+        if not self._master_processing_active():
+            try:
+                if getattr(self, "bgm_master", None) is not None:
+                    self.bgm_master.set_enabled(False)
+            except Exception:
+                pass
+            return None
+        try:
+            if getattr(self, "bgm_master", None) is None:
+                from singws_master_audio import MasterAudioProcessor
+                self.bgm_master = MasterAudioProcessor(sample_rate=44100, channels=2)
+            self.bgm_master.set_params(self._compute_master_audio_params())
+            self.bgm_master.set_enabled(True)
+            return self.bgm_master
+        except Exception as exc:
+            self.bgm_master = None
+            try:
+                _diag(f"[MASTER-AUDIO] BGM processor init failed: {exc}")
+            except Exception:
+                pass
+            return None
 
     def _bgm_master_active(self) -> bool:
-        """BGM mirrors only what BASS supports natively: the compressor stage."""
-        try:
-            return bool(self._master_processing_active()
-                        and self.settings.get("master_audio_comp_enabled", True))
-        except Exception:
-            return False
+        """BGM now runs the full master chain via a Python DSP, so it's active
+        whenever master processing is active — exactly like karaoke."""
+        return self._master_processing_active()
 
     def _apply_bgm_master_processing(self):
-        """Attach/detach the BGM mixer compressor to match the compressor stage's
-        enable + Performance Mode — in tandem with the karaoke chain."""
+        """Attach/detach the full BGM master processor to match the karaoke
+        chain + Performance Mode — in tandem with the karaoke chain."""
         try:
             bg = getattr(self, "bg_music", None)
             engine = getattr(bg, "_bass_engine", None) if bg is not None else None
-            if engine is None or not hasattr(engine, "set_master_compressor"):
+            if engine is None or not hasattr(engine, "set_master_processor"):
                 return
             if self._bgm_master_active():
-                engine.set_master_compressor(self._bgm_master_compressor_params())
-                _diag("[MASTER-AUDIO] BGM compressor attached")
+                engine.set_master_processor(self._ensure_bgm_master_processor())
+                _diag("[MASTER-AUDIO] BGM master processor attached")
             else:
-                engine.set_master_compressor(None)
+                engine.set_master_processor(None)
         except Exception as exc:
             try:
                 _diag(f"[MASTER-AUDIO] BGM apply failed: {exc}")
@@ -13403,6 +13418,11 @@ class KaraokeApp(QWidget):
         try:
             if getattr(self, "karaoke_master", None) is not None and self._master_processing_active():
                 self.karaoke_master.set_params(self._compute_master_audio_params())
+        except Exception:
+            pass
+        try:
+            if getattr(self, "bgm_master", None) is not None and self._master_processing_active():
+                self.bgm_master.set_params(self._compute_master_audio_params())
         except Exception:
             pass
         try:

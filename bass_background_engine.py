@@ -137,6 +137,14 @@ class BassBackgroundEngine:
         # thread, so it's stable on Intel and Apple Silicon.
         self._master_params: dict | None = None
         self._master_fx_handle = 0
+        # Optional full master processor (gate/tilt EQ/exciter/compressor/
+        # limiter) applied to the mixer output via a Python DSP, giving BGM the
+        # identical chain as karaoke. None = disabled. Heavier than the native
+        # compressor above but the only way to match the exciter/limiter stages.
+        self._master_proc = None
+        self._master_dsp_handle = 0
+        self._master_dsp_callback = None  # keep CFUNCTYPE alive to avoid GC
+        self._master_proc_ref = {"proc": None}
         self._load_runtime()
         self._init_output()
 
@@ -312,6 +320,12 @@ class BassBackgroundEngine:
                 self._attach_master_fx()
             except Exception:
                 pass
+        # Re-attach the full master processor DSP if one is configured.
+        if self._master_proc is not None and self._master_dsp_handle == 0:
+            try:
+                self._attach_master_dsp()
+            except Exception:
+                pass
 
     def _eq_should_attach(self) -> bool:
         try:
@@ -441,6 +455,85 @@ class BassBackgroundEngine:
             return True
         except Exception:
             return False
+
+    # ---------------- master "mix bus" full processor (Python DSP) ----------
+
+    def set_master_processor(self, processor) -> None:
+        """Attach (a MasterAudioProcessor-like object exposing
+        process_f32_array / configure_stream) or detach (None) the full master
+        chain on the mixer output via a Python DSP. The processor is stored so a
+        mixer rebuilt between songs re-attaches automatically (see
+        _ensure_mixer). Passing the already-attached instance is a no-op so live
+        param tweaks (made on the processor itself) never glitch the DSP."""
+        if processor is not None and processor is self._master_proc and self._master_dsp_handle:
+            self._master_proc_ref["proc"] = processor
+            return
+        self._detach_master_dsp()
+        self._master_proc = processor if processor is not None else None
+        if self._master_proc is not None and self.mixer:
+            try:
+                self._attach_master_dsp()
+            except Exception:
+                pass
+
+    def _detach_master_dsp(self) -> None:
+        if self._master_dsp_handle and self.mixer:
+            try:
+                self.bass.BASS_ChannelRemoveDSP(self.mixer, self._master_dsp_handle)
+            except Exception:
+                pass
+        self._master_dsp_handle = 0
+        self._master_proc_ref["proc"] = None
+
+    def _attach_master_dsp(self) -> None:
+        if not self.mixer or self._master_proc is None:
+            return
+        # Build the C callback only once and stash it on self to keep the
+        # ctypes object alive — if it's GC'd while BASS still holds the
+        # pointer, the audio thread crashes.
+        if self._master_dsp_callback is None:
+            import numpy as _np
+            DSPPROC = ctypes.CFUNCTYPE(
+                None, DWORD, DWORD, ctypes.c_void_p, DWORD, ctypes.c_void_p,
+            )
+            channels = 2  # the mixer is stereo float
+            proc_ref = self._master_proc_ref
+
+            def _dsp_proc(handle, channel, buffer_ptr, length, user):
+                proc = proc_ref["proc"]
+                if proc is None or buffer_ptr == 0 or length == 0:
+                    return
+                try:
+                    # length is in bytes; mixer is float32 stereo.
+                    n_floats = int(length) // 4
+                    if n_floats <= 0 or n_floats % channels != 0:
+                        return
+                    arr_t = (ctypes.c_float * n_floats).from_address(int(buffer_ptr))
+                    view = _np.ctypeslib.as_array(arr_t)  # zero-copy view
+                    frames = view.reshape(-1, channels)
+                    processed = proc.process_f32_array(frames)
+                    if processed is not frames:
+                        view[:] = processed.ravel()
+                except Exception:
+                    # Audio thread: swallow exceptions so we never crash BASS.
+                    pass
+
+            self._master_dsp_callback = DSPPROC(_dsp_proc)
+
+        # Mixer format is fixed (stereo float at self.sample_rate), so configure
+        # the processor's filters once here rather than per DSP block.
+        try:
+            self._master_proc.configure_stream(self.sample_rate, 2)
+        except Exception:
+            pass
+        self._master_proc_ref["proc"] = self._master_proc
+        # Priority below the EQ (which uses 0) so the chain is EQ -> master,
+        # matching the karaoke transport order. BASS applies higher priorities
+        # first, so -1 runs the master stage after the EQ.
+        self._master_dsp_handle = int(self.bass.BASS_ChannelSetDSP(
+            self.mixer, ctypes.cast(self._master_dsp_callback, ctypes.c_void_p),
+            None, -1,
+        ))
 
     def _attach_eq_dsp(self) -> None:
         if not self.mixer or self._eq is None:

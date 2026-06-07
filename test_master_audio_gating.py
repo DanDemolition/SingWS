@@ -108,13 +108,18 @@ class PerStageMappingTests(unittest.TestCase):
         self.assertEqual(off["exciter_mix"], 0.0)
         self.assertGreater(on["exciter_mix"], 0.0)
 
-    def test_bgm_active_requires_compressor_stage(self):
+    def test_bgm_active_follows_master_processing(self):
+        # BGM now runs the full chain (Python DSP), so it tracks master
+        # processing as a whole — not just the compressor stage — and stays off
+        # in Performance Mode. Disabling a single stage (e.g. compressor) keeps
+        # BGM active; that stage is simply bypassed inside the processor.
         on = make_app(self.singws, master_audio_enabled=True, master_audio_comp_enabled=True)
-        off = make_app(self.singws, master_audio_enabled=True, master_audio_comp_enabled=False)
-        perf = make_app(self.singws, master_audio_enabled=True, master_audio_comp_enabled=True,
-                        performance_mode=True)
+        comp_off = make_app(self.singws, master_audio_enabled=True, master_audio_comp_enabled=False)
+        disabled = make_app(self.singws, master_audio_enabled=False)
+        perf = make_app(self.singws, master_audio_enabled=True, performance_mode=True)
         self.assertTrue(on._bgm_master_active())
-        self.assertFalse(off._bgm_master_active())
+        self.assertTrue(comp_off._bgm_master_active())
+        self.assertFalse(disabled._bgm_master_active())
         self.assertFalse(perf._bgm_master_active())
 
 
