@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.2.18.1",
+  "version": "0.2.18.2",
   "release_date": "2026-06-07",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.2.18.1-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.1-arm64-installer.dmg",
+      "filename": "SingWS-0.2.18.2-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.2-arm64-installer.dmg",
       "size": "179 MB",
-      "sha256": "989666f7869d7b0f8aa4e16a128b89dfaa07df04706acc21b607f1af550be0bb"
+      "sha256": "127ee41473d1fe79ede0b9ec95e2f07bd095b1aba3aba2d31a0752f51194fc6e"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.2.18.1-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.1-x86_64-installer.dmg",
+      "filename": "SingWS-0.2.18.2-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.2-x86_64-installer.dmg",
       "size": "256 MB",
-      "sha256": "1327f3a56b08557eedbf71272695723bae131c15f21e6deecc692b61e650f72c"
+      "sha256": "39f67e516729c2a4944f04fab6c42251c4dff80f1daa8c028698b9d01e64edb5"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.2.18.1-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.1-universal-installer.dmg",
+      "filename": "SingWS-0.2.18.2-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.2-universal-installer.dmg",
       "size": "402 MB",
-      "sha256": "36c6934ffb9f8b550a8ef30e65aa107ed5b84a12ef8c3c226e0cf19b799b7531"
+      "sha256": "ce5fe582246ffb97afc5087343639ce440fdb349ac8b209ec3cd51a9af5e73dd"
     }
   }
 }
