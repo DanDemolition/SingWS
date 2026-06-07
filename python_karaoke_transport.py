@@ -889,6 +889,12 @@ class PythonKaraokeTransport(QObject):
         # zero-cost passthrough.
         self.eq = None  # GraphicEQ instance or None
         self._eq_config_signature = None
+        # Optional master "mix bus" processing (gate/comp/limiter/EQ) applied to
+        # the song PCM right after the EQ. Owner code attaches an externally
+        # managed MasterAudioProcessor; absent/disabled = zero-cost passthrough.
+        # Performance Mode simply never attaches one, so it is fully bypassed.
+        self.master = None  # MasterAudioProcessor instance or None
+        self._master_config_signature = None
         self.audio_sink = None
         self.audio_device = None
         self._feeder = None  # pull-mode QIODevice feeding the sink
@@ -978,6 +984,12 @@ class PythonKaraokeTransport(QObject):
             try:
                 self.eq.reset_state()
                 self._eq_config_signature = None
+            except Exception:
+                pass
+        if self.master is not None:
+            try:
+                self.master.reset_state()
+                self._master_config_signature = None
             except Exception:
                 pass
         self._start_audio(target)
@@ -1078,17 +1090,33 @@ class PythonKaraokeTransport(QObject):
 
     def diagnostics(self) -> dict:
         elapsed = max(0.001, time.monotonic() - float(self._visual_started_ts or time.monotonic()))
+        frame_bytes = max(1, int(self.channels) * 4)
+        byte_rate = max(1, int(self.sample_rate) * frame_bytes)
         with self._pcm_lock:
             buffered = self._pcm_bytes + len(self._pending_output)
+            audible_output_bytes = int(self._audible_output_bytes)
+        audio_buffer_ms = float(buffered) / float(byte_rate) * 1000.0
+        audible_delta_seconds = max(0.0, float(audible_output_bytes) / float(byte_rate)) * float(self.tempo_ratio)
+        audible_position_seconds = float(self.position_seconds())
+        video_offset_ms = float(getattr(self, "video_offset_seconds", 0.0) or 0.0) * 1000.0
+        display_position_seconds = max(0.0, audible_position_seconds + (video_offset_ms / 1000.0))
         video = self.video_reader.stats() if self.video_reader is not None and hasattr(self.video_reader, "stats") else {}
         return {
             "media_type": self.mode.upper(),
-            "position_seconds": float(self.position_seconds()),
+            "position_seconds": audible_position_seconds,
+            "audible_position_seconds": audible_position_seconds,
+            "display_position_seconds": display_position_seconds,
+            "audio_clock_source_seconds": float(self._clock_source_seconds),
+            "audio_clock_delta_seconds": audible_delta_seconds,
             "duration_seconds": float(self.duration_seconds or 0.0),
-            "audio_latency_ms": float(buffered) / max(1.0, float(self.sample_rate * self.channels * 4)) * 1000.0,
+            # This is queued PCM depth, not measured hardware/output latency.
+            "audio_buffer_ms": audio_buffer_ms,
+            "audio_latency_ms": audio_buffer_ms,
             "audio_buffer_bytes": int(buffered),
+            "audio_audible_output_bytes": audible_output_bytes,
             "audio_underruns": int(self._audio_underrun_count),
             "audio_underrun_bytes": int(self._audio_underrun_bytes),
+            "video_offset_ms": video_offset_ms,
             "visual_timer_ms": int(self.visual_timer_interval_ms),
             "visual_ticks": int(self._visual_tick_count),
             "visual_emits": int(self._visual_emit_count),
@@ -1307,6 +1335,19 @@ class PythonKaraokeTransport(QObject):
                     eq.configure_stream(self.sample_rate, self.channels)
                     self._eq_config_signature = signature
                 data = eq.process_f32_bytes(data)
+            except Exception:
+                pass
+        # Master "mix bus" processing runs after the EQ and after the upstream
+        # loudness-normalization gain (already baked in by the decoder), so it
+        # polishes the normalized signal rather than fighting it.
+        master = self.master
+        if master is not None:
+            try:
+                signature = (id(master), int(self.sample_rate), int(self.channels))
+                if signature != self._master_config_signature:
+                    master.configure_stream(self.sample_rate, self.channels)
+                    self._master_config_signature = signature
+                data = master.process_f32_bytes(data)
             except Exception:
                 pass
         with self._pcm_lock:

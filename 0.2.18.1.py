@@ -351,10 +351,10 @@ def warning_button_css(*, padding: str = "8px 12px", radius: int = 8) -> str:
     return f"""
         QPushButton, QToolButton {{
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 rgba(245,200,75,0.92),
-                stop:1 rgba(185,129,22,0.94));
+                stop:0 rgba(200,150,58,0.82),
+                stop:1 rgba(140,96,18,0.86));
             color: #1F1604;
-            border: 1px solid rgba(255,222,116,0.72);
+            border: 1px solid rgba(214,176,96,0.50);
             border-radius: {r}px;
             padding: {padding};
             font-size: 13px;
@@ -362,20 +362,20 @@ def warning_button_css(*, padding: str = "8px 12px", radius: int = 8) -> str:
         }}
         QPushButton:hover, QToolButton:hover {{
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 rgba(255,218,92,0.98),
-                stop:1 rgba(210,148,28,0.98));
-            border-color: rgba(255,237,158,0.90);
+                stop:0 rgba(216,166,72,0.90),
+                stop:1 rgba(158,110,26,0.92));
+            border-color: rgba(230,196,120,0.62);
             color: #171004;
         }}
         QPushButton:pressed, QToolButton:pressed {{
-            background-color: rgba(145,95,10,0.98);
-            border-color: rgba(255,222,116,0.68);
+            background-color: rgba(120,80,12,0.94);
+            border-color: rgba(214,176,96,0.55);
             color: #120C02;
         }}
         QPushButton:disabled, QToolButton:disabled {{
-            background: rgba(245,200,75,0.10);
-            color: rgba(245,200,75,0.45);
-            border-color: rgba(245,200,75,0.16);
+            background: rgba(200,150,58,0.10);
+            color: rgba(200,150,58,0.42);
+            border-color: rgba(200,150,58,0.16);
         }}
     """
 
@@ -2189,6 +2189,7 @@ def probe_network_sync_status(
             "rotation": f"{base}/post_rotation.php" if base else "",
             "queue_clear": f"{base}/api/v1/clear_remote_queue.php" if base else "",
             "queue_order": f"{base}/api/v1/set_remote_request_order.php" if base else "",
+            "request_modifiers": f"{base}/api/v1/set_remote_request_modifiers.php" if base else "",
         },
     }
 
@@ -2490,6 +2491,22 @@ DEFAULTS = {
     # A live engineer / personal mixer handles tone shaping. Turn OFF to enable the
     # experimental advanced processing below.
     "simple_audio_mode": True,
+    # Master "mix bus" processing (gate/comp/limiter/EQ) for a more consistent,
+    # polished song output. Opt-in; conservative defaults live in
+    # singws_master_audio.DEFAULT_PARAMS. Never runs in Performance Mode.
+    "master_audio_enabled": False,
+    # Per-stage enables (each independently toggleable in Settings).
+    "master_audio_gate_enabled": False,
+    "master_audio_eq_enabled": True,
+    "master_audio_comp_enabled": True,
+    "master_audio_limiter_enabled": True,
+    "master_audio_exciter_enabled": False,
+    # Friendly "key knob" amounts (UI-level; mapped to engine params).
+    "master_audio_comp_amount": 50,        # 0..100  (more = stronger leveling)
+    "master_audio_tilt": 25,               # -100..100 (− warmer / + brighter air)
+    "master_audio_exciter_mix": 20,        # 0..100  (subtle high harmonic air)
+    "master_audio_ceiling_db": -1.0,       # limiter/output ceiling, dB
+    "master_audio_params": {},             # advanced raw overrides (merged last)
     "karaoke_track_trims": {},             # {track_path_or_id: gain_db} manual per-track playback trim
     "karaoke_normalize_enabled": True,     # [advanced only] Loudness-normalize karaoke songs
     "bg_normalize_enabled": True,          # [advanced only] Loudness-normalize background music
@@ -3321,6 +3338,17 @@ class BackgroundMusicPlayer(QObject):
                 _diag(f"[BG-BASS] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
             except Exception:
                 pass
+            # Master "mix bus" compressor (independent of Simple/Advanced; off in
+            # Performance Mode) so BGM is leveled in tandem with karaoke songs.
+            try:
+                if (parent is not None and hasattr(parent, "_bgm_master_active")
+                        and hasattr(self._bass_engine, "set_master_compressor")):
+                    if parent._bgm_master_active():
+                        self._bass_engine.set_master_compressor(parent._bgm_master_compressor_params())
+                    else:
+                        self._bass_engine.set_master_compressor(None)
+            except Exception:
+                pass
             return True
         except BassBackgroundError as e:
             self._bass_engine = None
@@ -3887,6 +3915,45 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             return 1.0
 
+    def _schedule_bg_normalize_retry(self, path: str, deck: str):
+        """Retry normalization shortly, to catch the async loudness result for a
+        track that started before its analysis finished (the classic 'first BGM
+        track not normalized' case). Bounded and cancelled if the track changes."""
+        try:
+            counts = getattr(self, "_bg_norm_retry", None)
+            if not isinstance(counts, dict):
+                counts = {}
+                self._bg_norm_retry = counts
+            key = (deck, path)
+            n = int(counts.get(key, 0))
+            if n >= 12:  # ~18s of grace at 1.5s spacing, then give up
+                return
+            counts[key] = n + 1
+            gen = getattr(self, "_bg_norm_gen", {})
+            token = int(gen.get(deck, 0)) if isinstance(gen, dict) else 0
+
+            def _retry():
+                try:
+                    cur_gen = getattr(self, "_bg_norm_gen", {})
+                    if isinstance(cur_gen, dict) and int(cur_gen.get(deck, 0)) != token:
+                        return  # a newer track/refresh superseded this retry
+                    if not self._bg_normalize_active():
+                        return
+                    # For the primary deck, only re-apply if this is still the
+                    # current track (secondary is short-lived; allow it).
+                    if deck == "primary" and self.playlist and 0 <= int(self.current_index) < len(self.playlist):
+                        if self.playlist[int(self.current_index)] != path:
+                            return
+                    # Re-run: applies the real gain if analysis landed, else
+                    # re-arms another bounded retry.
+                    self._refresh_bg_normalize(path, deck)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(1500, _retry)
+        except Exception:
+            pass
+
     def _refresh_bg_normalize(self, path: str | None = None, deck: str = "primary"):
         """Apply per-track loudness normalization to the BASS engine so each BG
         track plays at a consistent level. The gain is per source deck; the
@@ -3895,6 +3962,13 @@ class BackgroundMusicPlayer(QObject):
             engine = getattr(self, "_bass_engine", None)
             if engine is None:
                 return None
+            # Bump this deck's generation token so any pending re-apply retry
+            # scheduled for an earlier track/refresh cancels itself.
+            gen = getattr(self, "_bg_norm_gen", None)
+            if not isinstance(gen, dict):
+                gen = {}
+                self._bg_norm_gen = gen
+            gen[deck] = int(gen.get(deck, 0)) + 1
             enabled = self._bg_normalize_active()
             if not enabled:
                 if deck == "secondary" and hasattr(engine, "set_secondary_normalize_gain"):
@@ -3920,6 +3994,10 @@ class BackgroundMusicPlayer(QObject):
                     engine.set_secondary_normalize_gain(factor)
                 elif hasattr(engine, "set_primary_normalize_gain"):
                     engine.set_primary_normalize_gain(factor)
+                # The loudness measurement is still running in the background.
+                # Re-apply the proper gain once it lands so the FIRST track of a
+                # session isn't stuck at the safe pre-gain for its whole play.
+                self._schedule_bg_normalize_retry(path, deck)
             else:
                 factor = float(info.get("gain_linear", 1.0) or 1.0)
                 try:
@@ -8402,6 +8480,10 @@ class SimplePollWorker(QObject):
                         txt = (resp.text or "")[:200]
                         print(f"Poll failed: HTTP {resp.status_code} - {txt!r}")
                         self.consecutive_failures += 1
+                        if resp.status_code in (401, 403):
+                            if self.last_status != "auth_failed":
+                                self.connection_status_changed.emit(False, f"Request sync auth failed: HTTP {resp.status_code}")
+                                self.last_status = "auth_failed"
 
                 except Exception as e:
                     elapsed = time_module.time() - start_time if 'start_time' in locals() else 0
@@ -11067,6 +11149,33 @@ class SoundboardStrip(QWidget):
 
 
 class KaraokeApp(QWidget):
+    _ui_call_requested = pyqtSignal(object)
+
+    def _dispatch_ui_call(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            try:
+                print(f"⚠️ UI callback failed: {e}")
+            except Exception:
+                pass
+
+    def _run_on_ui_thread(self, fn):
+        """Run a callable on the Qt GUI thread from any worker thread."""
+        try:
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() == app.thread():
+                self._dispatch_ui_call(fn)
+            else:
+                self._ui_call_requested.emit(fn)
+        except RuntimeError:
+            # App/window is being torn down.
+            pass
+        except Exception as e:
+            try:
+                print(f"⚠️ could not queue UI callback: {e}")
+            except Exception:
+                pass
 
     def _normalize_fonts(self):
         """Normalize fonts across the whole UI to the current QApplication font."""
@@ -11111,6 +11220,10 @@ class KaraokeApp(QWidget):
     def __init__(self):
         super().__init__()
         from PyQt6.QtCore import Qt
+        self._ui_call_requested.connect(
+            self._dispatch_ui_call,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self.setObjectName("central_bg")
         self.setStyleSheet(f"#central_bg {{ background-color: {_v('canvas')}; }}")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -11167,25 +11280,12 @@ class KaraokeApp(QWidget):
         self._preview_overlay_refresh_timer.setSingleShot(True)
         self._preview_overlay_refresh_timer.timeout.connect(self._refresh_preview_overlay_binding)
         self._preview_overlay_refresh_recreate = False
-        self._perf_debug_overlay = QLabel(self)
-        self._perf_debug_overlay.setObjectName("perfDebugOverlay")
-        self._perf_debug_overlay.setStyleSheet(
-            "QLabel#perfDebugOverlay {"
-            "background: rgba(6,9,18,0.88);"
-            "color: #F4F7FF;"
-            "border: 1px solid rgba(245,200,75,0.46);"
-            "border-radius: 8px;"
-            "padding: 8px 10px;"
-            "font-family: Menlo, Consolas, monospace;"
-            "font-size: 11px;"
-            "font-weight: 700;"
-            "}"
-        )
-        self._perf_debug_overlay.setVisible(False)
+        # Performance diagnostics are written to the log only ([MP4-PERF]); there
+        # is no on-screen FPS/debug overlay.
         self._perf_debug_overlay_last_log_ts = 0.0
         self._perf_debug_overlay_timer = QTimer(self)
         self._perf_debug_overlay_timer.timeout.connect(self._tick_perf_debug_overlay)
-        self._perf_debug_overlay_timer.start(1000)
+        self._perf_debug_overlay_timer.start(5000)
 
         self.kc_active = False     # is a job running?
         self.zip_cache = ZipCache()
@@ -11216,6 +11316,11 @@ class KaraokeApp(QWidget):
         self.karaoke_eq = None
         self.bgm_eq = None
         self._eq_init_error = None
+        # Optional master "mix bus" processor (gate/comp/limiter/EQ). Built
+        # lazily only when Master Audio Processing is enabled and not in
+        # Performance Mode. None = fully bypassed.
+        self.karaoke_master = None
+        self._master_init_error = None
 
         # --- Tooltip visibility (off by default; user opts in via Settings) ---
         # macOS Qt fires tooltips aggressively across our dense UI, which is
@@ -13166,6 +13271,151 @@ class KaraokeApp(QWidget):
                 pass
             return False
 
+    def _master_processing_active(self) -> bool:
+        """Master Audio Processing runs only when the user enabled it AND we're
+        not in Performance Mode (which bypasses everything but core playback)."""
+        try:
+            if self._performance_mode():
+                return False
+            return bool(self.settings.get("master_audio_enabled", False))
+        except Exception:
+            return False
+
+    def _compute_master_audio_params(self) -> dict:
+        """Translate the friendly per-stage toggles + key knobs in settings into
+        engine params (singws_master_audio keys). Advanced settings['master_audio_params']
+        raw overrides are merged last so power users can still fine-tune."""
+        s = self.settings
+
+        def g(key, default):
+            try:
+                return s.get(key, default)
+            except Exception:
+                return default
+
+        comp_amt = max(0.0, min(100.0, float(g("master_audio_comp_amount", 50)))) / 100.0
+        tilt = max(-100.0, min(100.0, float(g("master_audio_tilt", 25)))) / 100.0
+        exc = max(0.0, min(100.0, float(g("master_audio_exciter_mix", 20)))) / 100.0
+        ceiling = max(-6.0, min(-0.1, float(g("master_audio_ceiling_db", -1.0))))
+        exciter_on = bool(g("master_audio_exciter_enabled", False))
+
+        params = {
+            "gate_enabled": 1.0 if bool(g("master_audio_gate_enabled", False)) else 0.0,
+            "eq_enabled": 1.0 if bool(g("master_audio_eq_enabled", True)) else 0.0,
+            "comp_enabled": 1.0 if bool(g("master_audio_comp_enabled", True)) else 0.0,
+            "limiter_enabled": 1.0 if bool(g("master_audio_limiter_enabled", True)) else 0.0,
+            # Compressor "amount" -> gentle ratio + makeup curve.
+            "comp_threshold_db": -20.0,
+            "comp_ratio": 1.5 + comp_amt * 1.5,     # 1.5 .. 3.0
+            "comp_makeup_db": comp_amt * 8.0,       # 0 .. 8 dB
+            # Tilt: + brighter air, - warmer body.
+            "high_shelf_db": tilt * 4.0,
+            "presence_db": tilt * 1.5,
+            "low_shelf_db": 1.0 - tilt * 2.0,
+            # Exciter: subtle (capped at 0.5) and only when its stage is on.
+            "exciter_mix": (exc * 0.5) if exciter_on else 0.0,
+            # User ceiling drives the limiter; the hard clip stays a fixed safety.
+            "limiter_ceiling_db": ceiling,
+            "output_ceiling_db": -0.1,
+        }
+        try:
+            ov = s.get("master_audio_params", {})
+            if isinstance(ov, dict):
+                for k, v in ov.items():
+                    params[k] = v
+        except Exception:
+            pass
+        return params
+
+    def _ensure_master_processor(self):
+        """Create/refresh the master processor when active; returns it or None.
+
+        Built lazily (imports numpy/scipy) so machines that never enable it pay
+        nothing. Per-stage toggles + knobs come from _compute_master_audio_params.
+        """
+        if not self._master_processing_active():
+            # Make sure any existing instance is muted so it can't process.
+            try:
+                if getattr(self, "karaoke_master", None) is not None:
+                    self.karaoke_master.set_enabled(False)
+            except Exception:
+                pass
+            return None
+        try:
+            if getattr(self, "karaoke_master", None) is None:
+                from singws_master_audio import MasterAudioProcessor
+                self.karaoke_master = MasterAudioProcessor(sample_rate=44100, channels=2)
+            self.karaoke_master.set_params(self._compute_master_audio_params())
+            self.karaoke_master.set_enabled(True)
+            self._master_init_error = None
+            return self.karaoke_master
+        except Exception as exc:
+            self.karaoke_master = None
+            self._master_init_error = exc
+            try:
+                _diag(f"[MASTER-AUDIO] lazy init failed: {exc}")
+            except Exception:
+                pass
+            return None
+
+    def _bgm_master_compressor_params(self) -> dict:
+        """DX8-compressor params for the BGM mixer, derived from the same
+        compressor settings as the karaoke chain so both buses match."""
+        p = self._compute_master_audio_params()
+        return {
+            "threshold_db": float(p.get("comp_threshold_db", -20.0)),
+            "ratio": float(p.get("comp_ratio", 2.0)),
+            "gain_db": float(p.get("comp_makeup_db", 4.0)),
+            "attack_ms": 18.0,
+            "release_ms": 180.0,
+            "predelay_ms": 2.0,
+        }
+
+    def _bgm_master_active(self) -> bool:
+        """BGM mirrors only what BASS supports natively: the compressor stage."""
+        try:
+            return bool(self._master_processing_active()
+                        and self.settings.get("master_audio_comp_enabled", True))
+        except Exception:
+            return False
+
+    def _apply_bgm_master_processing(self):
+        """Attach/detach the BGM mixer compressor to match the compressor stage's
+        enable + Performance Mode — in tandem with the karaoke chain."""
+        try:
+            bg = getattr(self, "bg_music", None)
+            engine = getattr(bg, "_bass_engine", None) if bg is not None else None
+            if engine is None or not hasattr(engine, "set_master_compressor"):
+                return
+            if self._bgm_master_active():
+                engine.set_master_compressor(self._bgm_master_compressor_params())
+                _diag("[MASTER-AUDIO] BGM compressor attached")
+            else:
+                engine.set_master_compressor(None)
+        except Exception as exc:
+            try:
+                _diag(f"[MASTER-AUDIO] BGM apply failed: {exc}")
+            except Exception:
+                pass
+
+    def _refresh_master_audio_runtime(self):
+        """Re-apply current master-audio settings live to karaoke + BGM."""
+        try:
+            if getattr(self, "karaoke_master", None) is not None and self._master_processing_active():
+                self.karaoke_master.set_params(self._compute_master_audio_params())
+        except Exception:
+            pass
+        try:
+            transport = getattr(self, "karaoke_transport", None)
+            if transport is not None and hasattr(transport, "master"):
+                transport.master = self._ensure_master_processor()
+        except Exception:
+            pass
+        try:
+            self._apply_bgm_master_processing()
+        except Exception:
+            pass
+
     def configure_eq(self):
         """Open the 10-band graphic EQ dialog with side-by-side
         Karaoke / BGM columns and shared presets."""
@@ -13764,6 +14014,12 @@ class KaraokeApp(QWidget):
         except Exception:
             key = 0
 
+        tempo_percent = entry.get("tempo_percent")
+        try:
+            tempo_percent = int(tempo_percent) if tempo_percent is not None else None
+        except Exception:
+            tempo_percent = None
+
         right_parts = []
         if duet_display:
             # Bare "DUET" marker only — the badge delegate renders it as a chip.
@@ -13777,6 +14033,8 @@ class KaraokeApp(QWidget):
             right_parts.append(dur_txt)
         if key != 0:
             right_parts.append(f"KEY {key:+d}")
+        if tempo_percent is not None and tempo_percent != 100:
+            right_parts.append(f"SPD {tempo_percent}%")
 
         right = "  ".join([p for p in right_parts if p])
 
@@ -13790,6 +14048,8 @@ class KaraokeApp(QWidget):
             detail_parts.append(f"Duration: {dur_txt}")
         if key != 0:
             detail_parts.append(f"Key: {key:+d}")
+        if tempo_percent is not None and tempo_percent != 100:
+            detail_parts.append(f"Speed: {tempo_percent}%")
         if detail_parts:
             tooltip_parts.append("  ".join(detail_parts))
         tooltip = "\n".join([p for p in tooltip_parts if p])
@@ -14350,15 +14610,29 @@ class KaraokeApp(QWidget):
             transport.eq = None if simple_audio else getattr(self, "karaoke_eq", None)
         except Exception:
             pass
-        # Gain staging. Simple Audio Mode uses ONLY the host's clean per-track
-        # trim (a plain volume offset, no DSP) so the app never "botches" the
-        # sound. Advanced mode adds measured loudness normalization on top.
-        trim_db = self._track_trim_db(audio_path)
+        # Master "mix bus" processing is an independent opt-in (works in either
+        # Simple or Advanced mode). It is fully bypassed when disabled or in
+        # Performance Mode — _ensure_master_processor() returns None there.
         try:
-            if simple_audio:
+            transport.master = self._ensure_master_processor()
+        except Exception:
+            transport.master = None
+        master_active = getattr(transport, "master", None) is not None
+        # Gain staging. Simple Audio Mode normally uses ONLY the host's clean
+        # per-track trim (a plain volume offset, no DSP). Measured loudness
+        # normalization is applied in Advanced mode, OR whenever Master Audio
+        # Processing is on — the compressor/limiter want a consistent input
+        # level, so master processing and normalization work together.
+        trim_db = self._track_trim_db(audio_path)
+        want_normalize = (
+            bool(self.settings.get("karaoke_normalize_enabled", True))
+            and (not simple_audio or master_active)
+        )
+        try:
+            if not want_normalize:
                 transport.normalize_gain_db = trim_db
-                _diag(f"[LOUDNESS] song_start_gain simple_mode gain={trim_db:+.1f}dB file={os.path.basename(audio_path)}")
-            elif bool(self.settings.get("karaoke_normalize_enabled", True)):
+                _diag(f"[LOUDNESS] song_start_gain clean gain={trim_db:+.1f}dB master={int(master_active)} file={os.path.basename(audio_path)}")
+            else:
                 gain = loudness_gain_db_cached(audio_path)
                 if gain is None:
                     analyze_loudness_async(audio_path)
@@ -14367,9 +14641,6 @@ class KaraokeApp(QWidget):
                 else:
                     transport.normalize_gain_db = float(gain) + trim_db
                     _diag(f"[LOUDNESS] song_start_gain gain={float(gain):+.1f}dB trim={trim_db:+.1f}dB total={transport.normalize_gain_db:+.1f}dB file={os.path.basename(audio_path)}")
-            else:
-                transport.normalize_gain_db = trim_db
-                _diag(f"[LOUDNESS] song_start_gain normalization_off gain={trim_db:+.1f}dB file={os.path.basename(audio_path)}")
         except Exception:
             transport.normalize_gain_db = 0.0
         # Visual-only timing calibration (audio stays the master clock). CDG
@@ -14994,48 +15265,16 @@ class KaraokeApp(QWidget):
                 pass
         return cpu, mem
 
-    def _format_karaoke_perf_overlay(self, diag: dict) -> str:
-        video = diag.get("video") if isinstance(diag.get("video"), dict) else {}
-        cpu, mem = self._perf_process_snapshot()
-        return "\n".join([
-            f"CPU {cpu}   RAM {mem}   {diag.get('media_type', '')}",
-            f"DEC {video.get('decoder', 'n/a')}   HW {video.get('hardware_acceleration', 'n/a')}",
-            f"SRC {video.get('source_size', '') or 'n/a'} -> {video.get('output_size', '') or 'n/a'}",
-            f"FPS src {float(video.get('fps', 0.0) or 0.0):.1f} out {float(video.get('delivered_fps', 0.0) or 0.0):.1f}",
-            f"Q {int(video.get('queue_size', 0) or 0)}/{int(video.get('max_buffered_frames', 0) or 0)}   drops {int(video.get('dropped_frames', 0) or 0)}",
-            f"render {float(diag.get('last_visual_render_ms', 0.0) or 0.0):.1f}ms avg {float(diag.get('visual_render_avg_ms', 0.0) or 0.0):.1f} max {float(diag.get('visual_render_max_ms', 0.0) or 0.0):.1f}",
-            f"audio latency {float(diag.get('audio_latency_ms', 0.0) or 0.0):.0f}ms underruns {int(diag.get('audio_underruns', 0) or 0)}",
-        ])
-
-    def _position_perf_debug_overlay(self):
-        overlay = getattr(self, "_perf_debug_overlay", None)
-        if overlay is None:
-            return
-        try:
-            overlay.adjustSize()
-            margin = 14
-            x = max(margin, self.width() - overlay.width() - margin)
-            y = margin
-            overlay.move(x, y)
-            overlay.raise_()
-        except Exception:
-            pass
-
     def _tick_perf_debug_overlay(self):
-        overlay = getattr(self, "_perf_debug_overlay", None)
-        if overlay is None:
-            return
+        """Periodically log playback diagnostics ([MP4-PERF]) to the log file.
+        There is no on-screen overlay; this is invisible during normal use."""
         try:
             enabled = bool(self.settings.get("performance_debug_enabled", True))
             transport = getattr(self, "karaoke_transport", None)
             active = bool(enabled and transport is not None and getattr(self, "karaoke_playing", False))
             if not active or not hasattr(transport, "diagnostics"):
-                overlay.setVisible(False)
                 return
             diag = transport.diagnostics()
-            overlay.setText(self._format_karaoke_perf_overlay(diag))
-            self._position_perf_debug_overlay()
-            overlay.setVisible(True)
             now = time.monotonic()
             if now - float(getattr(self, "_perf_debug_overlay_last_log_ts", 0.0) or 0.0) >= 5.0:
                 self._perf_debug_overlay_last_log_ts = now
@@ -15050,15 +15289,17 @@ class KaraokeApp(QWidget):
                     f"drops={int(video.get('dropped_frames', 0) or 0)} "
                     f"render_ms={float(diag.get('last_visual_render_ms', 0.0) or 0.0):.1f} "
                     f"render_max_ms={float(diag.get('visual_render_max_ms', 0.0) or 0.0):.1f} "
-                    f"audio_latency_ms={float(diag.get('audio_latency_ms', 0.0) or 0.0):.0f} "
+                    f"audible_time_s={float(diag.get('audible_position_seconds', diag.get('position_seconds', 0.0)) or 0.0):.3f} "
+                    f"display_time_s={float(diag.get('display_position_seconds', diag.get('position_seconds', 0.0)) or 0.0):.3f} "
+                    f"clock_source_s={float(diag.get('audio_clock_source_seconds', 0.0) or 0.0):.3f} "
+                    f"clock_delta_s={float(diag.get('audio_clock_delta_seconds', 0.0) or 0.0):.3f} "
+                    f"audio_buffer_bytes={int(diag.get('audio_buffer_bytes', 0) or 0)} "
+                    f"audio_buffer_ms={float(diag.get('audio_buffer_ms', diag.get('audio_latency_ms', 0.0)) or 0.0):.0f} "
+                    f"video_offset_ms={float(diag.get('video_offset_ms', 0.0) or 0.0):+.0f} "
                     f"underruns={int(diag.get('audio_underruns', 0) or 0)}"
                 )
         except Exception as e:
-            try:
-                overlay.setVisible(False)
-            except Exception:
-                pass
-            print(f"[MP4-PERF] overlay failed: {e}")
+            print(f"[MP4-PERF] diagnostics log failed: {e}")
 
     def configure_crossfade(self):
         """Configure crossfade settings"""
@@ -15174,27 +15415,22 @@ class KaraokeApp(QWidget):
         self.poll_thread = None
 
     def restart_request_polling(self):
-        """Stop and restart polling, but only if network is configured and connected"""
+        """Stop and restart request polling when network settings are present.
+
+        The core show-night path is /get_requests.php.  Do not gate polling on
+        optional sync probes such as host controls or singer history; those can
+        be partial or temporarily unavailable while request intake still works.
+        """
         self.stop_request_polling()
         if self._safe_mode():
             print("[SAFE-MODE] Polling restart ignored")
             return
         
-        # Only restart if network is properly configured
         if self.is_network_configured():
             base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
-            api_key = self.settings.get("api_key", "")
-            
-            # Quick connection test
-            success, msg = self.test_server_connection_quick(base_url, user_id, api_key)
-            
-            if success:
-                self.start_request_polling()
-                print(f"✅ Polling restarted - {msg}")
-            else:
-                print(f"⚠️ {msg} - Polling not started")
-                print("   Will auto-retry when connection is available")
+            self.start_request_polling()
+            print(f"✅ Polling restarted for request intake: {base_url}/get_requests.php (tenant={user_id})")
         else:
             print("ℹ️ Network not fully configured - polling disabled")
 
@@ -16755,6 +16991,109 @@ class KaraokeApp(QWidget):
         bg_normalize_cb.setChecked(bool(self.settings.get("bg_normalize_enabled", True)))
         v.addWidget(bg_normalize_cb)
 
+        master_audio_cb = QCheckBox("Master Audio Processing — consistent, polished sound (compressor / limiter / EQ)")
+        master_audio_cb.setToolTip(
+            "A light 'mix bus' chain (in the spirit of a dbx 266 + BBE Sonic Maximizer)\n"
+            "for a steadier perceived volume. Each stage can be toggled below.\n"
+            "Pairs with loudness normalization. Always bypassed in Performance Mode."
+        )
+        master_audio_cb.setChecked(bool(self.settings.get("master_audio_enabled", False)))
+        v.addWidget(master_audio_cb)
+
+        # Per-stage enables.
+        gate_cb = QCheckBox("Noise gate / expander (clean up quiet hiss)")
+        gate_cb.setChecked(bool(self.settings.get("master_audio_gate_enabled", False)))
+        eq_cb = QCheckBox("Tilt EQ / enhance (tone + air)")
+        eq_cb.setChecked(bool(self.settings.get("master_audio_eq_enabled", True)))
+        comp_cb = QCheckBox("Compressor (level/consistency) — also applies to background music")
+        comp_cb.setChecked(bool(self.settings.get("master_audio_comp_enabled", True)))
+        limiter_cb = QCheckBox("Limiter (prevent clipping)")
+        limiter_cb.setChecked(bool(self.settings.get("master_audio_limiter_enabled", True)))
+        exciter_cb = QCheckBox("Exciter (subtle high-frequency air)")
+        exciter_cb.setChecked(bool(self.settings.get("master_audio_exciter_enabled", False)))
+        for _cb in (gate_cb, eq_cb, comp_cb, limiter_cb, exciter_cb):
+            v.addWidget(_cb)
+
+        def _knob_row(label_text: str, lo: int, hi: int, value: int) -> tuple:
+            row = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setMinimumWidth(150)
+            row.addWidget(lbl)
+            sld = QSlider(Qt.Orientation.Horizontal)
+            sld.setRange(lo, hi)
+            sld.setValue(max(lo, min(hi, int(value))))
+            row.addWidget(sld, 1)
+            val = QLabel("")
+            val.setMinimumWidth(78)
+            val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(val)
+            v.addLayout(row)
+            return sld, val
+
+        comp_amount_slider, comp_amount_val = _knob_row(
+            "Compressor amount", 0, 100, int(self.settings.get("master_audio_comp_amount", 50)))
+        tilt_slider, tilt_val = _knob_row(
+            "EQ tilt (warm ↔ bright)", -100, 100, int(self.settings.get("master_audio_tilt", 25)))
+        exciter_mix_slider, exciter_mix_val = _knob_row(
+            "Exciter mix", 0, 100, int(self.settings.get("master_audio_exciter_mix", 20)))
+        try:
+            _ceil0 = int(round(float(self.settings.get("master_audio_ceiling_db", -1.0)) * 10))
+        except Exception:
+            _ceil0 = -10
+        ceiling_slider, ceiling_val = _knob_row("Limiter ceiling", -60, -1, _ceil0)
+
+        master_sub_widgets = [
+            gate_cb, eq_cb, comp_cb, limiter_cb, exciter_cb,
+            comp_amount_slider, tilt_slider, exciter_mix_slider, ceiling_slider,
+        ]
+
+        def _tilt_text(val: int) -> str:
+            if val > 4:
+                return f"+{val} bright"
+            if val < -4:
+                return f"{val} warm"
+            return "flat"
+
+        def _sync_master_enabled():
+            on = master_audio_cb.isChecked()
+            for w in master_sub_widgets:
+                w.setEnabled(on)
+            # Exciter amount only matters when the exciter stage is on.
+            exciter_mix_slider.setEnabled(on and exciter_cb.isChecked())
+
+        def _update_master_value_labels():
+            comp_amount_val.setText(f"{comp_amount_slider.value()}%")
+            tilt_val.setText(_tilt_text(tilt_slider.value()))
+            exciter_mix_val.setText(f"{exciter_mix_slider.value()}%")
+            ceiling_val.setText(f"{ceiling_slider.value() / 10.0:+.1f} dB")
+
+        def push_master_settings(*_):
+            self.settings["master_audio_enabled"] = bool(master_audio_cb.isChecked())
+            self.settings["master_audio_gate_enabled"] = bool(gate_cb.isChecked())
+            self.settings["master_audio_eq_enabled"] = bool(eq_cb.isChecked())
+            self.settings["master_audio_comp_enabled"] = bool(comp_cb.isChecked())
+            self.settings["master_audio_limiter_enabled"] = bool(limiter_cb.isChecked())
+            self.settings["master_audio_exciter_enabled"] = bool(exciter_cb.isChecked())
+            self.settings["master_audio_comp_amount"] = int(comp_amount_slider.value())
+            self.settings["master_audio_tilt"] = int(tilt_slider.value())
+            self.settings["master_audio_exciter_mix"] = int(exciter_mix_slider.value())
+            self.settings["master_audio_ceiling_db"] = round(ceiling_slider.value() / 10.0, 1)
+            _update_master_value_labels()
+            _sync_master_enabled()
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._refresh_master_audio_runtime()
+
+        _update_master_value_labels()
+        _sync_master_enabled()
+        master_audio_cb.toggled.connect(push_master_settings)
+        for _cb in (gate_cb, eq_cb, comp_cb, limiter_cb, exciter_cb):
+            _cb.toggled.connect(push_master_settings)
+        for _sld in (comp_amount_slider, tilt_slider, exciter_mix_slider, ceiling_slider):
+            _sld.valueChanged.connect(push_master_settings)
+
         # The advanced (normalize/EQ) controls only apply when Simple Audio Mode
         # is off; grey them out while it's on so it's clear they're bypassed.
         def _sync_advanced_audio_enabled():
@@ -17149,6 +17488,16 @@ class KaraokeApp(QWidget):
             bg_end_silence_cb.setChecked(False)
             normalize_cb.setChecked(True)
             bg_normalize_cb.setChecked(True)
+            master_audio_cb.setChecked(False)
+            gate_cb.setChecked(False)
+            eq_cb.setChecked(True)
+            comp_cb.setChecked(True)
+            limiter_cb.setChecked(True)
+            exciter_cb.setChecked(False)
+            comp_amount_slider.setValue(50)
+            tilt_slider.setValue(25)
+            exciter_mix_slider.setValue(20)
+            ceiling_slider.setValue(-10)
             mp4_quality_combo.setCurrentIndex(mp4_quality_combo.findData(720))
             self._set_audio_output_id("default")
             _populate_audio_combo("default")
@@ -20056,9 +20405,9 @@ class KaraokeApp(QWidget):
             conn_label.setStyleSheet(_network_label_css())
             conn_row.addWidget(conn_label)
             
-            conn_refresh_btn = QPushButton("↻")
-            conn_refresh_btn.setMaximumWidth(40)
-            conn_refresh_btn.setToolTip("Check server connectivity and sync endpoints")
+            conn_refresh_btn = QPushButton("Test Sync")
+            conn_refresh_btn.setMinimumWidth(96)
+            conn_refresh_btn.setToolTip("Check request intake and sync endpoints")
             conn_row.addWidget(conn_refresh_btn)
             
             conn_row.addStretch(1)
@@ -20183,7 +20532,7 @@ class KaraokeApp(QWidget):
                 
                 update_connection_indicator("checking")
                 conn_refresh_btn.setEnabled(False)
-                conn_refresh_btn.setText("…")
+                conn_refresh_btn.setText("Testing...")
 
                 def worker():
                     started = time.monotonic()
@@ -20194,7 +20543,7 @@ class KaraokeApp(QWidget):
 
                     def finish():
                         conn_refresh_btn.setEnabled(True)
-                        conn_refresh_btn.setText("↻")
+                        conn_refresh_btn.setText("Test Sync")
                         msg = str(status.get("message") or "")
                         accepting_value = status.get("accepting")
                         if status.get("ok"):
@@ -20208,7 +20557,7 @@ class KaraokeApp(QWidget):
                             update_connection_indicator("error", msg or "Cannot reach server")
                         _network_log(f"final UI state label={conn_label.text()!r} accepting={accepting_value!r}")
 
-                    QTimer.singleShot(0, self, finish)
+                    self._run_on_ui_thread(finish)
 
                 print("[PERF] main_thread_blocking_call removed task=network_sync_check worker=thread")
                 threading.Thread(target=worker, daemon=True).start()
@@ -20255,7 +20604,7 @@ class KaraokeApp(QWidget):
                                 "Check your Base URL, User ID, and API Key."
                             )
 
-                    QTimer.singleShot(0, self, finish)
+                    self._run_on_ui_thread(finish)
 
                 print("[PERF] main_thread_blocking_call removed task=network_accepting_toggle worker=thread")
                 threading.Thread(target=worker, daemon=True).start()
@@ -20863,7 +21212,6 @@ class KaraokeApp(QWidget):
         self._schedule_preview_overlay_refresh(0)
         self._schedule_preview_overlay_refresh(120, recreate_surface=True)
         self._schedule_preview_overlay_refresh(240)
-        self._position_perf_debug_overlay()
         # Re-elide current Now Singing on resize (keep 3-line format stable)
         try:
             parts = getattr(self, "_now_singing_parts", None)
@@ -22570,11 +22918,96 @@ class KaraokeApp(QWidget):
             menu.addSeparator()
             change_disc_action = menu.addAction("Change Disc ID...")
             change_disc_action.triggered.connect(lambda: self.open_change_discid_dialog(singer_idx, song_idx))
-            trim_action = menu.addAction("Set Volume Trim…")
-            trim_action.triggered.connect(lambda: self.open_track_trim_dialog(singer_idx, song_idx))
+            menu.addSeparator()
+            key_action = menu.addAction("Change Key…")
+            key_action.triggered.connect(lambda: self.open_song_key_dialog(singer_idx, song_idx))
+            speed_action = menu.addAction("Change Speed / Tempo…")
+            speed_action.triggered.connect(lambda: self.open_song_tempo_dialog(singer_idx, song_idx))
 
         if not menu.isEmpty():
             menu.exec(self.queue_display.viewport().mapToGlobal(position))
+
+    def _queue_song_entry(self, singer_idx: int, song_idx: int):
+        """Return the dict entry for a queue song row, or None for legacy/invalid."""
+        try:
+            entry = self.queue[singer_idx]["songs"][song_idx]
+        except Exception:
+            return None
+        return entry if isinstance(entry, dict) else None
+
+    def _persist_song_modifier_change(self, message: str = ""):
+        """Save + refresh after editing a per-song key/tempo override."""
+        try:
+            self.save_data()
+        except Exception:
+            pass
+        try:
+            self.update_queue_display()
+        except Exception:
+            pass
+        if message:
+            try:
+                self._set_processing_text(message)
+            except Exception:
+                pass
+
+    def open_song_key_dialog(self, singer_idx: int, song_idx: int):
+        """Set a per-song key change (semitones). Applies only to this entry and
+        is read back at playback time (see play-next dispatch)."""
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            return
+        if not bool(getattr(self, "_karaoke_pitch_supported", True)):
+            try:
+                QMessageBox.information(self, "Change Key", "Key change is not supported on this system.")
+            except Exception:
+                pass
+            return
+        try:
+            current = int(entry.get("key") or 0)
+        except Exception:
+            current = 0
+        current = max(-5, min(5, current))
+        name = str(entry.get("display_name") or "this song")
+        val, ok = QInputDialog.getInt(
+            self,
+            "Change Key",
+            f"Key change for:\n{name}\n\nSemitones (− = lower, + = higher):",
+            current, -5, 5, 1,
+        )
+        if not ok:
+            return
+        entry["key"] = int(val)
+        self._push_remote_request_modifiers(entry)
+        self._persist_song_modifier_change(
+            f"Key {int(val):+d} set for {name}" if val else f"Key reset for {name}"
+        )
+
+    def open_song_tempo_dialog(self, singer_idx: int, song_idx: int):
+        """Set a per-song speed/tempo (% of normal). Applies only to this entry
+        and never alters the source file — playback is time-stretched in realtime."""
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            return
+        try:
+            current = int(entry.get("tempo_percent") or 100)
+        except Exception:
+            current = 100
+        current = max(70, min(130, current))
+        name = str(entry.get("display_name") or "this song")
+        val, ok = QInputDialog.getInt(
+            self,
+            "Change Speed / Tempo",
+            f"Playback speed for:\n{name}\n\nPercent of normal (lower = slower, higher = faster):",
+            current, 70, 130, 1,
+        )
+        if not ok:
+            return
+        entry["tempo_percent"] = int(val)
+        self._push_remote_request_modifiers(entry)
+        self._persist_song_modifier_change(
+            f"Speed {int(val)}% set for {name}" if int(val) != 100 else f"Speed reset for {name}"
+        )
 
     def rename_singer_dialog(self, singer_idx: int):
         if singer_idx < 0 or singer_idx >= len(self.queue):
@@ -23343,7 +23776,7 @@ class KaraokeApp(QWidget):
                             error_msg or "Could not send the message."
                         )
 
-                QTimer.singleShot(0, self, finish)
+                self._run_on_ui_thread(finish)
 
             print("[PERF] main_thread_blocking_call removed task=direct_message_http worker=thread")
             threading.Thread(target=worker, daemon=True).start()
@@ -24718,6 +25151,18 @@ class KaraokeApp(QWidget):
                     transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             pass
+        # Performance Mode bypasses master processing; toggling it (or the master
+        # setting) live re-evaluates the attachment for the current song.
+        try:
+            transport = getattr(self, "karaoke_transport", None)
+            if transport is not None and hasattr(transport, "master"):
+                transport.master = self._ensure_master_processor()
+        except Exception:
+            pass
+        try:
+            self._apply_bgm_master_processing()
+        except Exception:
+            pass
 
     def _track_trim_db(self, path: str) -> float:
         """Host-set per-track playback trim in dB (plain gain, no DSP). 0 if unset."""
@@ -24729,76 +25174,6 @@ class KaraokeApp(QWidget):
             return max(-24.0, min(24.0, float(v)))
         except Exception:
             return 0.0
-
-    def set_track_trim_db(self, path: str, db: float):
-        """Save a per-track trim (clean gain) and apply it live if it's playing."""
-        path = str(path or "")
-        if not path:
-            return
-        db = max(-24.0, min(24.0, float(db or 0.0)))
-        try:
-            trims = dict(self.settings.get("karaoke_track_trims", {}) or {})
-            if abs(db) < 0.05:
-                trims.pop(path, None)
-            else:
-                trims[path] = round(db, 1)
-            self.settings["karaoke_track_trims"] = trims
-            self.save_settings()
-        except Exception:
-            pass
-        # Apply live if this track is the one currently playing.
-        try:
-            cur = str(getattr(self, "_current_karaoke_audio_path", "") or "")
-            transport = getattr(self, "karaoke_transport", None)
-            if transport is not None and cur == path:
-                base = 0.0
-                if not self._simple_audio_mode() and bool(self.settings.get("karaoke_normalize_enabled", True)):
-                    g = loudness_gain_db_cached(path)
-                    base = float(g) if g is not None else 0.0
-                transport.normalize_gain_db = base + db
-                _diag(f"[AUDIO] live trim {db:+.1f}dB applied to {os.path.basename(path)}")
-        except Exception:
-            pass
-
-    def _resolve_audio_path(self, song_path: str) -> str:
-        """Map a library song path to the actual audio file used for gain
-        (the trim key). CDG -> its paired .mp3; everything else -> the file."""
-        p = str(song_path or "")
-        if p.lower().endswith(".cdg"):
-            base, _ = os.path.splitext(p)
-            for cand in (base + ".mp3", base + ".MP3"):
-                if os.path.exists(cand):
-                    return cand
-            return base + ".mp3"
-        return p
-
-    def open_track_trim_dialog(self, singer_idx: int, song_idx: int):
-        """Let the host set a clean per-track playback trim (dB), saved by file."""
-        try:
-            song = self.queue[singer_idx]["songs"][song_idx]
-        except Exception:
-            return
-        song_info = song.get("song_info") if isinstance(song, dict) else (song[0] if isinstance(song, (tuple, list)) else song)
-        song_path = self._song_info_primary_path(song_info)
-        if not song_path:
-            return
-        audio_path = self._resolve_audio_path(song_path)
-        current = self._track_trim_db(audio_path)
-        name = os.path.basename(song_path)
-        val, ok = QInputDialog.getDouble(
-            self,
-            "Volume Trim",
-            f"Playback trim for:\n{name}\n\nClean gain in dB (negative = quieter, positive = louder).\n"
-            f"This is plain volume only — no EQ or compression.",
-            float(current), -24.0, 24.0, 1,
-        )
-        if not ok:
-            return
-        self.set_track_trim_db(audio_path, float(val))
-        try:
-            self._set_processing_text(f"Trim {float(val):+.1f}dB saved for {name}")
-        except Exception:
-            pass
 
     def _get_duration_secs(self, song_path: str) -> int | None:
         p = str(song_path)
@@ -25199,7 +25574,7 @@ class KaraokeApp(QWidget):
             from PyQt6.QtCore import QThread as _QThread
             _qapp = QApplication.instance()
             if _qapp is not None and _QThread.currentThread() != _qapp.thread():
-                QTimer.singleShot(0, self, lambda: self._apply_db_search_results(job_id, rows))
+                self._run_on_ui_thread(lambda: self._apply_db_search_results(job_id, rows))
                 return
         except Exception:
             pass
@@ -25864,7 +26239,7 @@ class KaraokeApp(QWidget):
             from PyQt6.QtCore import QThread as _QThread
             _qapp = QApplication.instance()
             if _qapp is not None and _QThread.currentThread() != _qapp.thread():
-                QTimer.singleShot(0, self, self.update_queue_display)
+                self._run_on_ui_thread(self.update_queue_display)
                 return
         except Exception:
             pass
@@ -26125,7 +26500,7 @@ class KaraokeApp(QWidget):
             self._queue_display_busy = False
             if getattr(self, "_queue_display_dirty", False):
                 self._queue_display_dirty = False
-                QTimer.singleShot(0, self, self.update_queue_display)
+                self._run_on_ui_thread(self.update_queue_display)
         except Exception:
             self._queue_display_busy = False
         _perf_log_if_slow("ui_update_queue_display", (time.perf_counter() - _perf_t0) * 1000.0)
@@ -27793,6 +28168,69 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=send, daemon=True).start()
 
+    def _push_remote_request_modifiers(self, entry):
+        """Host-wins: when the operator changes a song's key/tempo, push it to the
+        server so the website reflects the host value instead of overwriting it.
+        No-op for locally-added songs (no remote_request_id)."""
+        request_id = self._queue_entry_remote_request_id(entry)
+        if request_id is None:
+            return
+        try:
+            song_key = int(entry.get("key") or 0)
+        except Exception:
+            song_key = 0
+        try:
+            tempo_offset = int((entry.get("tempo_percent") or 100)) - 100
+        except Exception:
+            tempo_offset = 0
+
+        # Remember the host's value so an in-flight sync poll doesn't momentarily
+        # revert the row before the server reflects the change (see reconcile).
+        try:
+            pending = getattr(self, "_pending_remote_modifier_pushes", None)
+            if not isinstance(pending, dict):
+                pending = {}
+                self._pending_remote_modifier_pushes = pending
+            pending[int(request_id)] = {
+                "key": song_key,
+                "tempo": tempo_offset,
+                "expires_at": time.time() + 20.0,
+            }
+        except Exception:
+            pass
+
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        if not base_url or not tenant or not api_key:
+            _diag(f"[REMOTE-MODIFIER] queued unsynced request_id={request_id} reason=network_not_configured")
+            return
+
+        import threading, requests
+
+        def send():
+            headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/set-modifiers"}
+            try:
+                resp = requests.post(
+                    f"{base_url}/api/v1/set_remote_request_modifiers.php",
+                    data={
+                        "user": tenant,
+                        "request_id": int(request_id),
+                        "song_key": int(song_key),
+                        "tempo": int(tempo_offset),
+                    },
+                    headers=headers,
+                    timeout=5,
+                )
+                if 200 <= resp.status_code < 300:
+                    _diag(f"[REMOTE-MODIFIER] server accepted request_id={request_id} key={song_key:+d} tempo={tempo_offset:+d}")
+                else:
+                    print(f"[REMOTE-MODIFIER] HTTP {resp.status_code}: {resp.text[:160]}")
+            except Exception as e:
+                print(f"[REMOTE-MODIFIER] Failed to push modifiers for request {request_id}: {e}")
+
+        threading.Thread(target=send, daemon=True).start()
+
     def _queue_remote_request_ids(self) -> list[int]:
         ids = []
         for singer in getattr(self, "queue", []) or []:
@@ -27910,8 +28348,8 @@ class KaraokeApp(QWidget):
                 print(f"[REMOTE-CLEAR] public rotation clear failed: {e}")
 
             try:
-                QTimer.singleShot(0, self, lambda: self.handle_requests_from_thread([]))
-                QTimer.singleShot(1200, self, self.restart_request_polling)
+                self._run_on_ui_thread(lambda: self.handle_requests_from_thread([]))
+                self._run_on_ui_thread(lambda: QTimer.singleShot(1200, self.restart_request_polling))
                 print("[REMOTE-CLEAR] sync refresh scheduled")
             except Exception:
                 pass
@@ -28156,6 +28594,22 @@ class KaraokeApp(QWidget):
         # the server must never reshuffle it. New requests are appended by
         # process_external_request and dropped ones were removed above; the
         # host-set order of everything else is preserved exactly.
+        # Host-wins: a key/tempo edit the operator just pushed must not be
+        # reverted by a poll that raced ahead of the server commit. We keep the
+        # pending host value until the server reports the same thing (or the
+        # short window expires).
+        try:
+            pending_mods = getattr(self, "_pending_remote_modifier_pushes", None)
+        except Exception:
+            pending_mods = None
+        if not isinstance(pending_mods, dict):
+            pending_mods = {}
+        now_ts = time.time()
+        for rid in list(pending_mods.keys()):
+            item = pending_mods.get(rid) or {}
+            if float(item.get("expires_at") or 0.0) < now_ts:
+                pending_mods.pop(rid, None)
+
         entry_by_id = {}
         for singer in self.queue:
             for entry in singer.get("songs", []):
@@ -28164,8 +28618,20 @@ class KaraokeApp(QWidget):
                     continue
                 entry_by_id[remote_id] = entry
                 if isinstance(entry, dict):
-                    entry["key"] = key_by_id.get(remote_id, entry.get("key", 0))
-                    entry["tempo_percent"] = 100 + tempo_by_id.get(remote_id, int((entry.get("tempo_percent") or 100) - 100))
+                    server_key = key_by_id.get(remote_id, entry.get("key", 0))
+                    server_tempo = tempo_by_id.get(remote_id, int((entry.get("tempo_percent") or 100) - 100))
+                    pending = pending_mods.get(remote_id)
+                    if pending is not None:
+                        want_key = int(pending.get("key", server_key))
+                        want_tempo = int(pending.get("tempo", server_tempo))
+                        # Once the server echoes the host value, the override is
+                        # confirmed and can be dropped.
+                        if int(server_key) == want_key and int(server_tempo) == want_tempo:
+                            pending_mods.pop(remote_id, None)
+                        server_key = want_key
+                        server_tempo = want_tempo
+                    entry["key"] = server_key
+                    entry["tempo_percent"] = 100 + server_tempo
         # (Intentionally no per-singer song reordering here — see note above.)
         _ = desired_by_singer  # retained for the order-push handshake only
 

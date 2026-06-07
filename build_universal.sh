@@ -7,7 +7,7 @@ rm -rf build dist
 export GI_TYPELIB_PATH="${GST}/lib/girepository-1.0"
 export DYLD_FALLBACK_LIBRARY_PATH="${GST}/lib"
 export PKG_CONFIG_PATH="${GST}/lib/pkgconfig"
-.venv-universal/bin/pyinstaller --noconfirm "SingWS-0.2.18.0-universal.spec"
+.venv-universal/bin/pyinstaller --noconfirm "SingWS-${VER}-universal.spec"
 echo ">>> universal app arch:"; file dist/SingWS.app/Contents/MacOS/SingWS | sed 's/^/    /'
 lipo -info dist/SingWS.app/Contents/MacOS/SingWS 2>/dev/null | sed 's/^/    /' || true
 rm -f "SingWS-${VER}-universal-installer.dmg"

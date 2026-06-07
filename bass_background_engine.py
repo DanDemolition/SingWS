@@ -29,6 +29,7 @@ BASS_ATTRIB_VOL = 2
 BASS_LEVEL_STEREO = 2
 BASS_LEVEL_RMS = 4
 BASS_LEVEL_VOLPAN = 8
+BASS_FX_DX8_COMPRESSOR = 1
 BASS_FX_DX8_PARAMEQ = 7
 
 BASS_DEVICE_ENABLED = 1
@@ -54,6 +55,18 @@ class _BassDx8ParamEq(ctypes.Structure):
         ("fCenter", ctypes.c_float),
         ("fBandwidth", ctypes.c_float),
         ("fGain", ctypes.c_float),
+    ]
+
+
+class _BassDx8Compressor(ctypes.Structure):
+    # Matches the DirectX8 BASS_DX8_COMPRESSOR parameter struct.
+    _fields_ = [
+        ("fGain", ctypes.c_float),       # output makeup gain, dB  [-60..60]
+        ("fAttack", ctypes.c_float),     # ms  [0.01..500]
+        ("fRelease", ctypes.c_float),    # ms  [50..3000]
+        ("fThreshold", ctypes.c_float),  # dB  [-60..0]
+        ("fRatio", ctypes.c_float),      # n:1 [1..100]
+        ("fPredelay", ctypes.c_float),   # ms  [0..4]
     ]
 
 
@@ -119,6 +132,11 @@ class BassBackgroundEngine:
         self._eq_dsp_handle = 0
         self._eq_dsp_callback = None  # keep CFUNCTYPE alive to avoid GC
         self._eq_fx_handles: list[int] = []
+        # Optional master "mix bus" compressor (native DX8 FX) on the mixer
+        # output. None = disabled. Native FX keep this off the Python audio
+        # thread, so it's stable on Intel and Apple Silicon.
+        self._master_params: dict | None = None
+        self._master_fx_handle = 0
         self._load_runtime()
         self._init_output()
 
@@ -288,6 +306,12 @@ class BassBackgroundEngine:
                     self._attach_eq_dsp()
             except Exception:
                 pass
+        # Re-attach the master compressor if one is configured (mixer recreated).
+        if self._master_should_attach() and self._master_fx_handle == 0:
+            try:
+                self._attach_master_fx()
+            except Exception:
+                pass
 
     def _eq_should_attach(self) -> bool:
         try:
@@ -357,6 +381,66 @@ class BassBackgroundEngine:
             return False
         self._eq_fx_handles = handles
         return True
+
+    # ---------------- master "mix bus" compressor ----------------
+
+    def set_master_compressor(self, params: dict | None) -> None:
+        """Attach (dict of params) or detach (None) a native DX8 compressor on
+        the mixer output. Params are stored so a mixer rebuilt between songs
+        re-attaches automatically (see _ensure_mixer)."""
+        self._detach_master_fx()
+        self._master_params = dict(params) if isinstance(params, dict) and params else None
+        if self._master_params and self.mixer:
+            try:
+                self._attach_master_fx()
+            except Exception:
+                pass
+
+    def _detach_master_fx(self) -> None:
+        if self.mixer and self._master_fx_handle:
+            try:
+                self.bass.BASS_ChannelRemoveFX(self.mixer, self._master_fx_handle)
+            except Exception:
+                pass
+        self._master_fx_handle = 0
+
+    def _master_should_attach(self) -> bool:
+        return bool(self._master_params)
+
+    def _attach_master_fx(self) -> bool:
+        if not self.mixer or not self._master_params:
+            return False
+        if not all(hasattr(self.bass, name) for name in ("BASS_ChannelSetFX", "BASS_FXSetParameters", "BASS_ChannelRemoveFX")):
+            return False
+        p = self._master_params
+
+        def _clamp(v, lo, hi, default):
+            try:
+                return max(lo, min(hi, float(v)))
+            except Exception:
+                return default
+
+        try:
+            # Priority below the EQ (which uses 0) so the chain is EQ -> comp;
+            # BASS applies higher-priority FX first.
+            handle = int(self.bass.BASS_ChannelSetFX(self.mixer, BASS_FX_DX8_COMPRESSOR, -1))
+            if not handle:
+                return False
+            params = _BassDx8Compressor(
+                ctypes.c_float(_clamp(p.get("gain_db", 4.0), -60.0, 60.0, 4.0)),
+                ctypes.c_float(_clamp(p.get("attack_ms", 18.0), 0.01, 500.0, 18.0)),
+                ctypes.c_float(_clamp(p.get("release_ms", 180.0), 50.0, 3000.0, 180.0)),
+                ctypes.c_float(_clamp(p.get("threshold_db", -20.0), -60.0, 0.0, -20.0)),
+                ctypes.c_float(_clamp(p.get("ratio", 2.0), 1.0, 100.0, 2.0)),
+                ctypes.c_float(_clamp(p.get("predelay_ms", 2.0), 0.0, 4.0, 2.0)),
+            )
+            if not self.bass.BASS_FXSetParameters(handle, ctypes.byref(params)):
+                self.bass.BASS_ChannelRemoveFX(self.mixer, handle)
+                return False
+            self._master_fx_handle = handle
+            return True
+        except Exception:
+            return False
 
     def _attach_eq_dsp(self) -> None:
         if not self.mixer or self._eq is None:
@@ -503,6 +587,11 @@ class BassBackgroundEngine:
                 except Exception:
                     pass
             self._plugin_handles.clear()
+
+        try:
+            self._detach_master_fx()
+        except Exception:
+            pass
 
         # decrement global refcount and free shared BASS when last user closes
         if BassBackgroundEngine._bass_init_done:
