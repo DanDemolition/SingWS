@@ -31,6 +31,8 @@ for helper in (
     "python_karaoke_transport.py",
     "bass_background_engine.py",
     "song_index.py",
+    "singws_eq.py",
+    "singws_master_audio.py",
 ):
     helper_path = project_root / helper
     if helper_path.exists():
@@ -70,6 +72,13 @@ a = Analysis(
         'python_karaoke_transport',
         'bass_background_engine',
         'song_index',
+        'singws_eq',
+        'singws_master_audio',
+        'numpy',
+        'scipy',
+        'scipy.signal',
+        'scipy.signal._sosfilt',
+        'scipy.signal._signaltools',
     ],
     hookspath=[],
     hooksconfig={},
