@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.2.18.2",
+  "version": "0.2.18.3",
   "release_date": "2026-06-07",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.2.18.2-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.2-arm64-installer.dmg",
+      "filename": "SingWS-0.2.18.3-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.3-arm64-installer.dmg",
       "size": "179 MB",
-      "sha256": "127ee41473d1fe79ede0b9ec95e2f07bd095b1aba3aba2d31a0752f51194fc6e"
+      "sha256": "00687fac8170633645e5bd75e4dd6ff9d5bbbac4a0a77ea0a37407e798c9e535"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.2.18.2-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.2-x86_64-installer.dmg",
+      "filename": "SingWS-0.2.18.3-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.3-x86_64-installer.dmg",
       "size": "256 MB",
-      "sha256": "39f67e516729c2a4944f04fab6c42251c4dff80f1daa8c028698b9d01e64edb5"
+      "sha256": "e2cdfa57cb7ac51fea0d583c2d2984dc939c14927ba0aac999c3c59914a67a58"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.2.18.2-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.2-universal-installer.dmg",
+      "filename": "SingWS-0.2.18.3-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.2.18.3-universal-installer.dmg",
       "size": "402 MB",
-      "sha256": "ce5fe582246ffb97afc5087343639ce440fdb349ac8b209ec3cd51a9af5e73dd"
+      "sha256": "c0b0c1441427c391f173778e40c08c357f7fab1dfa5c60e303d4a1249952715f"
     }
   }
 }
