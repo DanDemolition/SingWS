@@ -9243,6 +9243,129 @@ class ConfirmInterruptDialog(QDialog):
         layout.addLayout(buttons)
 
 
+class WaveformDecodeWorker(QObject):
+    """Decodes a song to a waveform peak envelope (and a suggested start) off the
+    UI thread. Emits (peaks_ndarray_or_None, suggested_seconds_or_-1)."""
+    done = pyqtSignal(object, float)
+
+    def __init__(self, audio_path: str, n_cols: int, bpm=None):
+        super().__init__()
+        self.audio_path = str(audio_path or "")
+        self.n_cols = int(n_cols)
+        self.bpm = bpm
+
+    def run(self):
+        peaks = None
+        suggested = -1.0
+        try:
+            import phrase_detect
+            pcm = phrase_detect.decode_pcm_mono(self.audio_path)
+            peaks = phrase_detect.peaks(pcm, self.n_cols)
+            sr = 8000
+            s = phrase_detect.suggest_start(pcm, sr, bpm=self.bpm)
+            if s is not None:
+                suggested = float(s)
+        except Exception as e:
+            try:
+                _diag(f"[PHRASE-WAVEFORM] decode failed: {e}")
+            except Exception:
+                pass
+        self.done.emit(peaks, suggested)
+
+
+class PhraseWaveformWidget(QWidget):
+    """Draws the decoded waveform with vertical, labeled marker lines and a
+    playhead. Clicking maps the x position to a time and calls the callback."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(96)
+        self.setMinimumWidth(480)
+        self._peaks = None          # (n,2) min/max in [-1,1]
+        self._duration = 0.0
+        self._markers = []          # [{seconds,label,kind}]
+        self._playhead = None
+        self._on_click = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_peaks(self, peaks):
+        self._peaks = peaks
+        self.update()
+
+    def set_duration(self, seconds):
+        self._duration = max(0.0, float(seconds or 0.0))
+        self.update()
+
+    def set_markers(self, markers):
+        self._markers = list(markers or [])
+        self.update()
+
+    def set_playhead(self, seconds):
+        self._playhead = None if seconds is None else max(0.0, float(seconds))
+        self.update()
+
+    def set_position_callback(self, cb):
+        self._on_click = cb
+
+    def _x_for_seconds(self, seconds):
+        if self._duration <= 0:
+            return 0
+        return int((float(seconds) / self._duration) * self.width())
+
+    def mousePressEvent(self, event):
+        if self._duration > 0 and self.width() > 0 and callable(self._on_click):
+            frac = max(0.0, min(1.0, event.position().x() / self.width()))
+            self._on_click(frac * self._duration)
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QColor, QPen, QFont
+        p = QPainter(self)
+        try:
+            w, h = self.width(), self.height()
+            mid = h / 2.0
+            p.fillRect(0, 0, w, h, QColor(20, 20, 28))
+            # waveform
+            if self._peaks is not None and len(self._peaks) > 0:
+                n = len(self._peaks)
+                p.setPen(QPen(QColor(120, 130, 170), 1))
+                for x in range(w):
+                    i = int(x / max(1, w) * n)
+                    if i >= n:
+                        i = n - 1
+                    mn = float(self._peaks[i][0])
+                    mx = float(self._peaks[i][1])
+                    y1 = mid - mx * (mid - 4)
+                    y2 = mid - mn * (mid - 4)
+                    p.drawLine(x, int(y1), x, int(y2))
+            else:
+                p.setPen(QColor(110, 110, 120))
+                p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Decoding waveform…")
+            # markers
+            colors = {"bar4": QColor(90, 200, 250), "bar8": QColor(90, 200, 250),
+                      "bar16": QColor(90, 200, 250), "custom": QColor(255, 180, 60),
+                      "suggested": QColor(120, 230, 140)}
+            font = QFont()
+            font.setPointSize(8)
+            p.setFont(font)
+            for m in self._markers:
+                try:
+                    x = self._x_for_seconds(m.get("seconds", 0.0))
+                except Exception:
+                    continue
+                col = colors.get(m.get("kind", "custom"), QColor(255, 180, 60))
+                p.setPen(QPen(col, 2))
+                p.drawLine(x, 0, x, h)
+                p.setPen(col)
+                p.drawText(x + 3, 12, str(m.get("label", "")))
+            # playhead
+            if self._playhead is not None and self._duration > 0:
+                x = self._x_for_seconds(self._playhead)
+                p.setPen(QPen(QColor(245, 245, 250), 1))
+                p.drawLine(x, 0, x, h)
+        finally:
+            p.end()
+
+
 class PhraseStartDialog(QDialog):
     """Phrase-Aligned Song Start — lightweight marker editor / preview.
 
@@ -9296,9 +9419,17 @@ class PhraseStartDialog(QDialog):
         bpm_row.addWidget(recompute_btn)
         layout.addLayout(bpm_row)
 
-        # Marker list
-        layout.addWidget(QLabel("Markers (click to set position & preview):"))
+        # Waveform with marker lines (click to set position & preview)
+        self.waveform = PhraseWaveformWidget()
+        self.waveform.set_duration(self.duration)
+        self.waveform.set_position_callback(self._on_waveform_click)
+        layout.addWidget(self.waveform)
+        self._suggested_seconds = None
+
+        # Marker list (edit/delete)
+        layout.addWidget(QLabel("Markers (click waveform or a row to set position & preview):"))
         self.marker_list = QListWidget()
+        self.marker_list.setMaximumHeight(140)
         self.marker_list.itemClicked.connect(self._on_marker_clicked)
         layout.addWidget(self.marker_list, 1)
 
@@ -9328,6 +9459,11 @@ class PhraseStartDialog(QDialog):
         del_btn = QPushButton("Delete selected")
         del_btn.clicked.connect(self._delete_selected)
         actions.addWidget(del_btn)
+        self.suggest_btn = QPushButton("Use suggestion")
+        self.suggest_btn.setEnabled(False)
+        self.suggest_btn.setToolTip("Analyzing…")
+        self.suggest_btn.clicked.connect(self._use_suggestion)
+        actions.addWidget(self.suggest_btn)
         layout.addLayout(actions)
 
         bottom = QHBoxLayout()
@@ -9348,6 +9484,54 @@ class PhraseStartDialog(QDialog):
         if current_start is not None and current_start > 0:
             self._set_position(float(current_start))
         self._reload_markers()
+        self._start_waveform_decode()
+
+    def _start_waveform_decode(self):
+        """Decode the waveform + compute a suggested start off the UI thread."""
+        try:
+            self._wf_thread = QThread(self)
+            self._wf_worker = WaveformDecodeWorker(self.audio_path, 1200, bpm=self._parsed_bpm())
+            self._wf_worker.moveToThread(self._wf_thread)
+            self._wf_thread.started.connect(self._wf_worker.run)
+            self._wf_worker.done.connect(self._on_waveform_ready)
+            self._wf_worker.done.connect(self._wf_thread.quit)
+            self._wf_worker.done.connect(self._wf_worker.deleteLater)
+            self._wf_thread.finished.connect(self._wf_thread.deleteLater)
+            self._wf_thread.start()
+        except Exception as e:
+            _diag(f"[PHRASE-WAVEFORM] could not start decode: {e}")
+
+    def _on_waveform_ready(self, peaks, suggested):
+        try:
+            if peaks is not None:
+                self.waveform.set_peaks(peaks)
+            if suggested is not None and suggested >= 0:
+                self._suggested_seconds = float(suggested)
+                self.suggest_btn.setEnabled(True)
+                self.suggest_btn.setToolTip(f"Suggested start ~{self.app._fmt_mmss(suggested)}")
+            else:
+                self.suggest_btn.setToolTip("No clear intro to skip")
+            self._reload_markers()
+        except Exception as e:
+            _diag(f"[PHRASE-WAVEFORM] ready handler failed: {e}")
+
+    def _on_waveform_click(self, seconds):
+        self._set_position(seconds)
+        self._preview(seconds)
+
+    def _use_suggestion(self):
+        if self._suggested_seconds is None:
+            return
+        self._set_position(self._suggested_seconds)
+        try:
+            phrase_markers.upsert_marker(
+                self.primary_path, kind="custom", seconds=float(self._suggested_seconds),
+                label="Suggested", source="detected", song_key=self.song_key,
+            )
+            self.app._sync_push_phrase_markers()
+        except Exception:
+            pass
+        self._reload_markers()
 
     # ── helpers ──
     def _parsed_bpm(self):
@@ -9365,6 +9549,10 @@ class PhraseStartDialog(QDialog):
         self.pos_slider.setValue(int(seconds * 100))
         self.pos_spin.blockSignals(False)
         self.pos_slider.blockSignals(False)
+        try:
+            self.waveform.set_playhead(seconds)
+        except Exception:
+            pass
 
     def _on_spin_changed(self, val):
         self.pos_slider.blockSignals(True)
@@ -9393,11 +9581,19 @@ class PhraseStartDialog(QDialog):
                                  "kind": "custom", "id": m.get("id")})
         except Exception:
             pass
+        if self._suggested_seconds is not None and self._suggested_seconds > 0:
+            rows.append({"label": "Suggested", "seconds": float(self._suggested_seconds),
+                         "kind": "suggested", "id": None})
         rows.sort(key=lambda r: r["seconds"])
         for r in rows:
             item = QListWidgetItem(f"{r['label']}  —  {self.app._fmt_mmss(r['seconds'])}")
             item.setData(Qt.ItemDataRole.UserRole, r)
             self.marker_list.addItem(item)
+        # Mirror the markers onto the waveform overlay.
+        try:
+            self.waveform.set_markers(rows)
+        except Exception:
+            pass
 
     def _on_marker_clicked(self, item):
         r = item.data(Qt.ItemDataRole.UserRole) or {}
@@ -9423,6 +9619,7 @@ class PhraseStartDialog(QDialog):
                 )
             except Exception:
                 pass
+        self.app._sync_push_phrase_markers()
         self._reload_markers()
 
     def _save_custom(self):
@@ -9435,6 +9632,7 @@ class PhraseStartDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Phrase Start", f"Could not save marker:\n{e}")
             return
+        self.app._sync_push_phrase_markers()
         self._reload_markers()
 
     def _delete_selected(self):
@@ -9449,6 +9647,7 @@ class PhraseStartDialog(QDialog):
             phrase_markers.delete_marker(int(r["id"]))
         except Exception:
             pass
+        self.app._sync_push_phrase_markers()
         self._reload_markers()
 
     def _preview(self, seconds):
@@ -9469,6 +9668,7 @@ class PhraseStartDialog(QDialog):
                 source="manual", song_key=self.song_key, make_default=True,
             )
             phrase_markers.set_default_marker(self.primary_path, mid)
+            self.app._sync_push_phrase_markers()
         except Exception:
             pass
         self.accept()
@@ -15650,6 +15850,15 @@ class KaraokeApp(QWidget):
 
         self.poll_thread.start()
         print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
+
+        # Pull cloud phrase markers once when networking comes up, and push any
+        # local changes that haven't been backed up yet. Both run in background
+        # threads and never block playback.
+        try:
+            self._pull_phrase_markers()
+            self._sync_push_phrase_markers()
+        except Exception as e:
+            _diag(f"[PHRASE-SYNC] startup sync skipped: {e}")
         try:
             QTimer.singleShot(250, lambda: self._sync_remote_removal_tombstones_async("poll_start"))
         except Exception:
@@ -17431,10 +17640,17 @@ class KaraokeApp(QWidget):
         logs_btn = QPushButton("Logs")
         logs_btn.setToolTip(f"Open logs folder: {LOGS_DIR}")
 
+        export_markers_btn = QPushButton("Export Phrase Markers")
+        import_markers_btn = QPushButton("Import Phrase Markers")
+        export_markers_btn.clicked.connect(self.export_phrase_markers)
+        import_markers_btn.clicked.connect(self.import_phrase_markers)
+
         _search_actions_card = _section_card(tab_search, "Library Tools")
         _search_actions = QHBoxLayout()
         _search_actions.addWidget(scan_folder_btn)
         _search_actions.addWidget(export_csv_btn)
+        _search_actions.addWidget(export_markers_btn)
+        _search_actions.addWidget(import_markers_btn)
         _search_actions.addStretch(1)
         _search_actions_card.addLayout(_search_actions)
 
@@ -23443,10 +23659,110 @@ class KaraokeApp(QWidget):
                 )
         except Exception as e:
             _diag(f"[PHRASE-START] could not save bar marker: {e}")
+        self._sync_push_phrase_markers()
         name = str(entry.get("display_name") or "this song")
         self._persist_song_modifier_change(
             f"Phrase start: {bars} bars ({self._fmt_mmss(seconds)}) for {name}"
         )
+
+    # ── marker cloud sync + file backup ──────────────────────────────────────
+    def _phrase_sync_config(self):
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        return base_url, tenant, api_key
+
+    def _sync_push_phrase_markers(self):
+        """Push markers changed since the last successful push to the server
+        (cloud backup). Background thread; never blocks the UI/playback."""
+        base_url, tenant, api_key = self._phrase_sync_config()
+        if not base_url or not tenant or not api_key:
+            return
+        try:
+            since = float(self.settings.get("phrase_markers_pushed_at", 0) or 0)
+            changed = phrase_markers.changed_since(since)
+        except Exception as e:
+            _diag(f"[PHRASE-SYNC] changed_since failed: {e}")
+            return
+        if not changed:
+            return
+        import threading, requests, json as _json
+
+        def send():
+            try:
+                resp = requests.post(
+                    f"{base_url}/api/v1/set_phrase_markers.php",
+                    data={"user": tenant, "markers": _json.dumps(changed)},
+                    headers={"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/phrase-markers"},
+                    timeout=8,
+                )
+                if 200 <= resp.status_code < 300:
+                    maxupd = max(int(m.get("updated_at") or 0) for m in changed)
+                    self.settings["phrase_markers_pushed_at"] = maxupd
+                    _diag(f"[PHRASE-SYNC] pushed {len(changed)} marker(s) up to {maxupd}")
+                else:
+                    print(f"[PHRASE-SYNC] push HTTP {resp.status_code}: {resp.text[:160]}")
+            except Exception as e:
+                print(f"[PHRASE-SYNC] push failed: {e}")
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def _pull_phrase_markers(self):
+        """Pull server markers changed since our watermark and merge them
+        (last-write-wins). Runs once at startup. Background thread."""
+        base_url, tenant, api_key = self._phrase_sync_config()
+        if not base_url or not tenant or not api_key:
+            return
+        try:
+            since = int(self.settings.get("phrase_markers_synced_at", 0) or 0)
+        except Exception:
+            since = 0
+        import threading, requests
+
+        def fetch():
+            try:
+                resp = requests.get(
+                    f"{base_url}/api/v1/get_phrase_markers.php",
+                    params={"user": tenant, "since": since},
+                    headers={"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/phrase-markers"},
+                    timeout=8,
+                )
+                if 200 <= resp.status_code < 300:
+                    data = resp.json()
+                    markers = data.get("markers", []) or []
+                    if markers:
+                        applied = phrase_markers.apply_remote(markers)
+                        _diag(f"[PHRASE-SYNC] pulled {len(markers)} marker(s), applied {applied}")
+                    self.settings["phrase_markers_synced_at"] = int(data.get("now") or since)
+                else:
+                    print(f"[PHRASE-SYNC] pull HTTP {resp.status_code}: {resp.text[:160]}")
+            except Exception as e:
+                print(f"[PHRASE-SYNC] pull failed: {e}")
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def export_phrase_markers(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(self, "Export Phrase Markers", "phrase_markers.json", "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            count = phrase_markers.export_to_json(path)
+            self._set_processing_text(f"Exported {count} phrase marker(s).")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Phrase Markers", f"Could not export:\n{e}")
+
+    def import_phrase_markers(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Import Phrase Markers", "", "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            applied = phrase_markers.import_from_json(path)
+            self._sync_push_phrase_markers()
+            self._set_processing_text(f"Imported {applied} phrase marker(s).")
+        except Exception as e:
+            QMessageBox.warning(self, "Import Phrase Markers", f"Could not import:\n{e}")
 
     def _phrase_song_key(self, entry) -> str:
         try:

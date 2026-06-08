@@ -16,8 +16,10 @@ seconds = beats * 60 / bpm
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
+import uuid as _uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -153,8 +155,19 @@ def init_schema(con: sqlite3.Connection) -> None:
         )
         """
     )
+    # Phase 2 migration (idempotent): a cross-machine stable id for sync, and a
+    # soft-delete tombstone so deletions can propagate through last-write-wins.
+    existing = {r[1] for r in con.execute("PRAGMA table_info(markers)").fetchall()}
+    if "uuid" not in existing:
+        con.execute("ALTER TABLE markers ADD COLUMN uuid TEXT")
+    if "deleted_at" not in existing:
+        con.execute("ALTER TABLE markers ADD COLUMN deleted_at INTEGER")
+    # Backfill uuids for any pre-Phase-2 rows.
+    for row in con.execute("SELECT id FROM markers WHERE uuid IS NULL OR uuid = ''").fetchall():
+        con.execute("UPDATE markers SET uuid=? WHERE id=?", (_uuid.uuid4().hex, row[0]))
     con.execute("CREATE INDEX IF NOT EXISTS idx_markers_path ON markers(song_path)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_markers_key ON markers(song_key)")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_markers_uuid ON markers(uuid)")
     con.commit()
 
 
@@ -168,13 +181,15 @@ def list_markers(path: str, song_key: str = "", *, dbfile: Optional[Path] = None
     try:
         if path:
             rows = con.execute(
-                "SELECT * FROM markers WHERE song_path = ? ORDER BY seconds ASC", (str(path),)
+                "SELECT * FROM markers WHERE song_path = ? AND deleted_at IS NULL ORDER BY seconds ASC",
+                (str(path),),
             ).fetchall()
             if rows:
                 return [_row_to_dict(r) for r in rows]
         if song_key:
             rows = con.execute(
-                "SELECT * FROM markers WHERE song_key = ? ORDER BY seconds ASC", (str(song_key),)
+                "SELECT * FROM markers WHERE song_key = ? AND deleted_at IS NULL ORDER BY seconds ASC",
+                (str(song_key),),
             ).fetchall()
             return [_row_to_dict(r) for r in rows]
         return []
@@ -215,18 +230,20 @@ def upsert_marker(
                 existing_id = int(row["id"])
 
         if existing_id is not None:
+            # Re-activate if it was a tombstone being overwritten.
             con.execute(
                 """UPDATE markers SET song_key=?, kind=?, seconds=?, bars=?, bpm=?, label=?,
-                          source=?, updated_at=? WHERE id=?""",
+                          source=?, updated_at=?, deleted_at=NULL WHERE id=?""",
                 (song_key, kind, seconds, bars, bpm, label, source, now, existing_id),
             )
             mid = existing_id
         else:
             cur = con.execute(
                 """INSERT INTO markers (song_path, song_key, kind, seconds, bars, bpm, label,
-                          source, is_default, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,0,?,?)""",
-                (str(path), song_key, kind, seconds, bars, bpm, label, source, now, now),
+                          source, is_default, uuid, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,0,?,?,?)""",
+                (str(path), song_key, kind, seconds, bars, bpm, label, source,
+                 _uuid.uuid4().hex, now, now),
             )
             mid = int(cur.lastrowid)
 
@@ -262,9 +279,14 @@ def clear_default(path: str, *, dbfile: Optional[Path] = None) -> None:
 
 
 def delete_marker(marker_id: int, *, dbfile: Optional[Path] = None) -> None:
+    """Soft-delete (tombstone) so the deletion can propagate through sync."""
     con = _connect(dbfile)
     try:
-        con.execute("DELETE FROM markers WHERE id=?", (int(marker_id),))
+        now = int(time.time())
+        con.execute(
+            "UPDATE markers SET deleted_at=?, updated_at=?, is_default=0 WHERE id=?",
+            (now, now, int(marker_id)),
+        )
         con.commit()
     finally:
         con.close()
@@ -273,23 +295,25 @@ def delete_marker(marker_id: int, *, dbfile: Optional[Path] = None) -> None:
 def default_marker(path: str, song_key: str = "", *, dbfile: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """The marker to reuse automatically when a queued song has no per-instance
     choice: the explicitly-flagged default, else the most recently updated one.
+    Tombstoned markers are ignored.
     """
     con = _connect(dbfile)
     try:
         row = con.execute(
-            "SELECT * FROM markers WHERE song_path=? AND is_default=1 ORDER BY updated_at DESC LIMIT 1",
+            "SELECT * FROM markers WHERE song_path=? AND is_default=1 AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
             (str(path),),
         ).fetchone()
         if row:
             return _row_to_dict(row)
         row = con.execute(
-            "SELECT * FROM markers WHERE song_path=? ORDER BY updated_at DESC LIMIT 1", (str(path),)
+            "SELECT * FROM markers WHERE song_path=? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+            (str(path),),
         ).fetchone()
         if row:
             return _row_to_dict(row)
         if song_key:
             row = con.execute(
-                "SELECT * FROM markers WHERE song_key=? ORDER BY is_default DESC, updated_at DESC LIMIT 1",
+                "SELECT * FROM markers WHERE song_key=? AND deleted_at IS NULL ORDER BY is_default DESC, updated_at DESC LIMIT 1",
                 (str(song_key),),
             ).fetchone()
             if row:
@@ -297,6 +321,115 @@ def default_marker(path: str, song_key: str = "", *, dbfile: Optional[Path] = No
         return None
     finally:
         con.close()
+
+
+# ──────────────────────── sync + file backup (Phase 2) ───────────────────────
+# Wire/file record shape mirrors the table columns. Sync identity is `uuid`;
+# `song_key` is how the same song is matched across machines (paths differ).
+
+_SYNC_FIELDS = ("uuid", "song_path", "song_key", "kind", "seconds", "bars", "bpm",
+                "label", "source", "is_default", "deleted_at", "created_at", "updated_at")
+
+
+def export_all(*, include_deleted: bool = True, dbfile: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Every marker as plain dicts (for sync push / file export)."""
+    con = _connect(dbfile)
+    try:
+        sql = "SELECT * FROM markers"
+        if not include_deleted:
+            sql += " WHERE deleted_at IS NULL"
+        return [_row_to_dict(r) for r in con.execute(sql).fetchall()]
+    finally:
+        con.close()
+
+
+def changed_since(ts: float, *, dbfile: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Markers (incl. tombstones) updated after `ts` — the sync push delta."""
+    con = _connect(dbfile)
+    try:
+        rows = con.execute(
+            "SELECT * FROM markers WHERE updated_at > ? ORDER BY updated_at ASC", (int(ts or 0),)
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def apply_remote(records: List[Dict[str, Any]], *, dbfile: Optional[Path] = None) -> int:
+    """Merge incoming marker records (from server pull or file import) by uuid,
+    last-write-wins on `updated_at`. Tombstones (deleted_at set) win the same
+    way. Returns the number of rows inserted/updated."""
+    if not records:
+        return 0
+    con = _connect(dbfile)
+    applied = 0
+    try:
+        for rec in records:
+            uid = str(rec.get("uuid") or "").strip()
+            if not uid:
+                uid = _uuid.uuid4().hex
+            try:
+                incoming_upd = int(rec.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                incoming_upd = 0
+            existing = con.execute(
+                "SELECT id, updated_at FROM markers WHERE uuid=?", (uid,)
+            ).fetchone()
+            if existing is not None and int(existing["updated_at"] or 0) >= incoming_upd:
+                continue  # ours is newer-or-equal → keep it
+            vals = {
+                "uuid": uid,
+                "song_path": str(rec.get("song_path") or ""),
+                "song_key": str(rec.get("song_key") or ""),
+                "kind": str(rec.get("kind") or "custom"),
+                "seconds": float(rec.get("seconds") or 0.0),
+                "bars": rec.get("bars"),
+                "bpm": rec.get("bpm"),
+                "label": rec.get("label"),
+                "source": rec.get("source") or "manual",
+                "is_default": int(rec.get("is_default") or 0),
+                "deleted_at": rec.get("deleted_at"),
+                "created_at": int(rec.get("created_at") or incoming_upd or time.time()),
+                "updated_at": incoming_upd or int(time.time()),
+            }
+            if existing is not None:
+                con.execute(
+                    """UPDATE markers SET song_path=:song_path, song_key=:song_key, kind=:kind,
+                       seconds=:seconds, bars=:bars, bpm=:bpm, label=:label, source=:source,
+                       is_default=:is_default, deleted_at=:deleted_at, updated_at=:updated_at
+                       WHERE uuid=:uuid""",
+                    vals,
+                )
+            else:
+                con.execute(
+                    """INSERT INTO markers (uuid, song_path, song_key, kind, seconds, bars, bpm,
+                       label, source, is_default, deleted_at, created_at, updated_at)
+                       VALUES (:uuid,:song_path,:song_key,:kind,:seconds,:bars,:bpm,:label,
+                       :source,:is_default,:deleted_at,:created_at,:updated_at)""",
+                    vals,
+                )
+            applied += 1
+        con.commit()
+        return applied
+    finally:
+        con.close()
+
+
+def export_to_json(path: str, *, dbfile: Optional[Path] = None) -> int:
+    """Write all markers to a JSON backup file. Returns the count."""
+    records = export_all(include_deleted=True, dbfile=dbfile)
+    payload = {"version": 1, "exported_at": int(time.time()), "markers": records}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return len(records)
+
+
+def import_from_json(path: str, *, dbfile: Optional[Path] = None) -> int:
+    """Merge a JSON backup file (last-write-wins). Returns rows applied."""
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    records = payload.get("markers", payload) if isinstance(payload, dict) else payload
+    return apply_remote(records, dbfile=dbfile)
 
 
 # ───────────────────────────── start resolution ─────────────────────────────

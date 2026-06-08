@@ -121,6 +121,89 @@ class MarkersDbTests(unittest.TestCase):
         self.assertIsNotNone(pm.default_marker("/nonexistent.mp3", song_key=key, dbfile=self.db))
 
 
+class SyncTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db = Path(self.tmp.name)
+
+    def tearDown(self):
+        for p in (self.tmp.name,):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+    def test_uuid_assigned_on_insert(self):
+        mid = pm.upsert_marker("/s/a.mp3", kind="custom", seconds=5.0, label="Custom", dbfile=self.db)
+        rows = pm.export_all(dbfile=self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["uuid"])
+
+    def test_soft_delete_hides_but_keeps_tombstone(self):
+        mid = pm.upsert_marker("/s/b.mp3", kind="custom", seconds=9.0, label="Custom", dbfile=self.db)
+        pm.delete_marker(mid, dbfile=self.db)
+        self.assertEqual(len(pm.list_markers("/s/b.mp3", dbfile=self.db)), 0)
+        allrows = pm.export_all(include_deleted=True, dbfile=self.db)
+        self.assertEqual(len(allrows), 1)
+        self.assertIsNotNone(allrows[0]["deleted_at"])
+
+    def test_apply_remote_last_write_wins(self):
+        uid = "fixed-uuid-1"
+        # incoming newer than nothing -> inserts
+        n = pm.apply_remote([{ "uuid": uid, "song_path": "/s/c.mp3", "song_key": "c",
+                               "kind": "custom", "seconds": 10.0, "label": "Custom",
+                               "source": "manual", "updated_at": 100, "created_at": 100 }], dbfile=self.db)
+        self.assertEqual(n, 1)
+        # older update is ignored
+        pm.apply_remote([{ "uuid": uid, "seconds": 99.0, "updated_at": 50 }], dbfile=self.db)
+        rows = pm.list_markers("/s/c.mp3", dbfile=self.db)
+        self.assertAlmostEqual(rows[0]["seconds"], 10.0)
+        # newer update wins
+        pm.apply_remote([{ "uuid": uid, "song_path": "/s/c.mp3", "song_key": "c", "kind": "custom",
+                           "seconds": 22.0, "updated_at": 200 }], dbfile=self.db)
+        rows = pm.list_markers("/s/c.mp3", dbfile=self.db)
+        self.assertAlmostEqual(rows[0]["seconds"], 22.0)
+
+    def test_apply_remote_tombstone_propagates(self):
+        uid = "fixed-uuid-2"
+        pm.apply_remote([{ "uuid": uid, "song_path": "/s/d.mp3", "song_key": "d", "kind": "custom",
+                           "seconds": 10.0, "updated_at": 100 }], dbfile=self.db)
+        self.assertEqual(len(pm.list_markers("/s/d.mp3", dbfile=self.db)), 1)
+        pm.apply_remote([{ "uuid": uid, "deleted_at": 150, "updated_at": 150 }], dbfile=self.db)
+        self.assertEqual(len(pm.list_markers("/s/d.mp3", dbfile=self.db)), 0)
+
+    def test_changed_since(self):
+        pm.apply_remote([{ "uuid": "u-old", "song_path": "/s/e.mp3", "kind": "custom",
+                           "seconds": 1.0, "updated_at": 100 }], dbfile=self.db)
+        pm.apply_remote([{ "uuid": "u-new", "song_path": "/s/e.mp3", "kind": "custom",
+                           "seconds": 2.0, "updated_at": 300 }], dbfile=self.db)
+        delta = pm.changed_since(200, dbfile=self.db)
+        self.assertEqual({r["uuid"] for r in delta}, {"u-new"})
+
+    def test_json_round_trip(self):
+        pm.upsert_marker("/s/f.mp3", kind="custom", seconds=12.0, label="Custom", dbfile=self.db)
+        pm.upsert_marker("/s/f.mp3", kind="bar8", seconds=16.0, bars=8, bpm=120, label="8 Bar",
+                         source="bpm", dbfile=self.db)
+        backup = self.db.with_suffix(".json")
+        try:
+            count = pm.export_to_json(str(backup), dbfile=self.db)
+            self.assertEqual(count, 2)
+            # import into a fresh db
+            tmp2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+            tmp2.close()
+            db2 = Path(tmp2.name)
+            applied = pm.import_from_json(str(backup), dbfile=db2)
+            self.assertEqual(applied, 2)
+            self.assertEqual(len(pm.list_markers("/s/f.mp3", dbfile=db2)), 2)
+            os.unlink(tmp2.name)
+        finally:
+            try:
+                os.unlink(str(backup))
+            except OSError:
+                pass
+
+
 class ResolvePhraseStartIntegrationTests(unittest.TestCase):
     """Exercises the KaraokeApp._resolve_phrase_start glue against the real module.
     Requires SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS=1 (set by the test runner)."""
@@ -151,6 +234,23 @@ class ResolvePhraseStartIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(app._resolve_phrase_start("/x.mp3", {}, 100), 98.0)  # clamp to dur-2
         with _patched_default(self.mod, None):
             self.assertEqual(app._resolve_phrase_start("/x.mp3", {}, 300), 0.0)
+
+    def test_sync_config_and_noop_without_network(self):
+        app = self._app()
+        # missing base_url/api_key -> config empty, push is a guarded no-op (no raise)
+        app.settings = {"user": "demo"}
+        base, tenant, key = app._phrase_sync_config()
+        self.assertEqual(tenant, "demo")
+        self.assertEqual(key, "")
+        app._sync_push_phrase_markers()   # must not raise
+        app._pull_phrase_markers()        # must not raise
+
+    def test_sync_methods_exist(self):
+        app = self._app()
+        for name in ("export_phrase_markers", "import_phrase_markers",
+                     "_sync_push_phrase_markers", "_pull_phrase_markers",
+                     "_phrase_preview_at", "open_phrase_start_dialog"):
+            self.assertTrue(callable(getattr(app, name, None)), name)
 
     def test_never_raises(self):
         app = self._app()
