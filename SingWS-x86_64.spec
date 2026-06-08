@@ -112,7 +112,16 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(project_root / 'singws_pyinstaller_runtime.py')],
-    excludes=[],
+    excludes=[
+        # The bundled GStreamer.framework ships an older glib whose typelib set
+        # predates the GLibUnix/GioUnix split (glib 2.80). PyGObject references
+        # them, so PyInstaller's gi hook logs a "Typelib not found" GError while
+        # querying them. The app never had these typelibs and PyGObject degrades
+        # gracefully without them, so exclude them to keep the build log clean.
+        # (The arm64 spec must NOT exclude these — homebrew glib provides them.)
+        'gi.repository.GLibUnix',
+        'gi.repository.GioUnix',
+    ],
     noarchive=False,
     optimize=0,
 )
