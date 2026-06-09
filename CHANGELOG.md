@@ -12,8 +12,12 @@
     lines (4 Bar / 8 Bar / 16 Bar / Custom / Suggested), a position slider, and
     click-to-preview.
   - **Suggested** intro-skip point from a lightweight energy/onset heuristic
-    (numpy/scipy, snapped to the nearest bar). Generic suggestion only — not
-    section-type labels.
+    (numpy/scipy, snapped to the nearest bar).
+  - **Section detection** — structural boundaries (self-similarity matrix +
+    Foote novelty, pure numpy/scipy, no new dependencies) shown as labeled
+    waveform markers for the transitions (Intro→Verse, Verse→Chorus,
+    Chorus→Verse, Instrumental→Vocal). Boundaries are reliable; section labels
+    are best-effort **estimates** the host can rename/correct.
   - Markers persist per song and are **reused automatically**; **JSON
     export/import** for backup; **cloud backup/restore per tenant** (pushes on
     change, pulls on startup) so markers survive a reinstall / new machine.

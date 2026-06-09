@@ -9246,9 +9246,10 @@ class ConfirmInterruptDialog(QDialog):
 
 
 class WaveformDecodeWorker(QObject):
-    """Decodes a song to a waveform peak envelope (and a suggested start) off the
-    UI thread. Emits (peaks_ndarray_or_None, suggested_seconds_or_-1)."""
-    done = pyqtSignal(object, float)
+    """Decodes a song off the UI thread and computes the waveform envelope, a
+    single suggested start, and the structural section boundaries.
+    Emits (peaks_ndarray_or_None, suggested_seconds_or_-1, sections_list)."""
+    done = pyqtSignal(object, float, object)
 
     def __init__(self, audio_path: str, n_cols: int, bpm=None):
         super().__init__()
@@ -9259,20 +9260,26 @@ class WaveformDecodeWorker(QObject):
     def run(self):
         peaks = None
         suggested = -1.0
+        sections = []
         try:
             import phrase_detect
-            pcm = phrase_detect.decode_pcm_mono(self.audio_path)
+            sr = 16000  # enough spectral resolution for chroma/timbre features
+            pcm = phrase_detect.decode_pcm_mono(self.audio_path, sr=sr)
             peaks = phrase_detect.peaks(pcm, self.n_cols)
-            sr = 8000
             s = phrase_detect.suggest_start(pcm, sr, bpm=self.bpm)
             if s is not None:
                 suggested = float(s)
+            try:
+                sections = phrase_detect.detect_sections(pcm, sr, bpm=self.bpm)
+            except Exception as e:
+                _diag(f"[PHRASE-WAVEFORM] section detection failed: {e}")
+                sections = []
         except Exception as e:
             try:
                 _diag(f"[PHRASE-WAVEFORM] decode failed: {e}")
             except Exception:
                 pass
-        self.done.emit(peaks, suggested)
+        self.done.emit(peaks, suggested, sections)
 
 
 class PhraseWaveformWidget(QWidget):
@@ -9345,7 +9352,7 @@ class PhraseWaveformWidget(QWidget):
             # markers
             colors = {"bar4": QColor(90, 200, 250), "bar8": QColor(90, 200, 250),
                       "bar16": QColor(90, 200, 250), "custom": QColor(255, 180, 60),
-                      "suggested": QColor(120, 230, 140)}
+                      "suggested": QColor(120, 230, 140), "detected": QColor(200, 140, 255)}
             font = QFont()
             font.setPointSize(8)
             p.setFont(font)
@@ -9425,8 +9432,10 @@ class PhraseStartDialog(QDialog):
         self.waveform = PhraseWaveformWidget()
         self.waveform.set_duration(self.duration)
         self.waveform.set_position_callback(self._on_waveform_click)
+        self.waveform.setToolTip("Detected section labels (Intro/Verse/Chorus…) are estimates — rename or delete any marker.")
         layout.addWidget(self.waveform)
         self._suggested_seconds = None
+        self._detected_sections = []
 
         # Marker list (edit/delete)
         layout.addWidget(QLabel("Markers (click waveform or a row to set position & preview):"))
@@ -9503,7 +9512,7 @@ class PhraseStartDialog(QDialog):
         except Exception as e:
             _diag(f"[PHRASE-WAVEFORM] could not start decode: {e}")
 
-    def _on_waveform_ready(self, peaks, suggested):
+    def _on_waveform_ready(self, peaks, suggested, sections=None):
         try:
             if peaks is not None:
                 self.waveform.set_peaks(peaks)
@@ -9513,6 +9522,8 @@ class PhraseStartDialog(QDialog):
                 self.suggest_btn.setToolTip(f"Suggested start ~{self.app._fmt_mmss(suggested)}")
             else:
                 self.suggest_btn.setToolTip("No clear intro to skip")
+            # Detected section/transition boundaries (labels are estimates).
+            self._detected_sections = list(sections or [])
             self._reload_markers()
         except Exception as e:
             _diag(f"[PHRASE-WAVEFORM] ready handler failed: {e}")
@@ -9586,6 +9597,16 @@ class PhraseStartDialog(QDialog):
         if self._suggested_seconds is not None and self._suggested_seconds > 0:
             rows.append({"label": "Suggested", "seconds": float(self._suggested_seconds),
                          "kind": "suggested", "id": None})
+        # Detected section/transition boundaries (labels are estimates).
+        for sec in (self._detected_sections or []):
+            try:
+                s = float(sec.get("seconds") or 0.0)
+            except Exception:
+                continue
+            if s <= 0:
+                continue
+            rows.append({"label": str(sec.get("label") or "Section"), "seconds": s,
+                         "kind": "detected", "id": None})
         rows.sort(key=lambda r: r["seconds"])
         for r in rows:
             item = QListWidgetItem(f"{r['label']}  —  {self.app._fmt_mmss(r['seconds'])}")
