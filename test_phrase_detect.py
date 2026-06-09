@@ -117,5 +117,35 @@ class DetectSectionsTests(unittest.TestCase):
         self.assertEqual(pd.detect_sections(np.zeros(self.SR * 30, dtype=np.float32), self.SR), [])
 
 
+class EstimateBpmTests(unittest.TestCase):
+    SR = 16000
+
+    def _click_track(self, bpm, secs=20.0):
+        n = int(self.SR * secs)
+        sig = np.zeros(n, dtype=np.float32)
+        period = int(self.SR * 60.0 / bpm)
+        click = np.exp(-np.linspace(0, 8, int(self.SR * 0.03))).astype(np.float32)
+        for start in range(0, n - click.size, period):
+            sig[start:start + click.size] += click
+        return sig
+
+    def test_estimates_known_tempo(self):
+        for bpm in (90, 120, 140):
+            est = pd.estimate_bpm(self._click_track(bpm), self.SR)
+            self.assertIsNotNone(est)
+            # accept the exact tempo or a clean octave (half/double), within 4%
+            ratios = [est / bpm, est / (bpm / 2.0), est / (bpm * 2.0)]
+            self.assertTrue(any(abs(r - 1.0) < 0.04 for r in ratios),
+                            f"bpm={bpm} est={est}")
+
+    def test_silence_and_short(self):
+        self.assertIsNone(pd.estimate_bpm(np.zeros(self.SR * 10, dtype=np.float32), self.SR))
+        self.assertIsNone(pd.estimate_bpm(np.zeros(self.SR * 2, dtype=np.float32), self.SR))
+
+    def test_deterministic(self):
+        ct = self._click_track(128)
+        self.assertEqual(pd.estimate_bpm(ct, self.SR), pd.estimate_bpm(ct, self.SR))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -350,3 +350,52 @@ def detect_sections(pcm: np.ndarray, sr: int, bpm: Optional[float] = None,
             continue
         deduped.append(r)
     return deduped
+
+
+# ───────────────────────────── tempo (BPM) estimate ─────────────────────────
+def estimate_bpm(pcm: np.ndarray, sr: int,
+                 min_bpm: float = 70.0, max_bpm: float = 180.0) -> Optional[float]:
+    """Estimate tempo (BPM) from the audio — no tags needed. Pure numpy/scipy.
+
+    Onset-strength envelope (positive spectral flux) → FFT autocorrelation →
+    pick the strongest lag in the plausible tempo range, weighted by a soft
+    prior around 120 BPM to suppress half/double-tempo octave errors. Returns a
+    rounded BPM, or None when the audio is too short / has no clear pulse.
+    """
+    pcm = np.asarray(pcm, dtype=np.float32)
+    if pcm.size < sr * 5:
+        return None
+    n_fft = 1024
+    hop = max(1, int(sr * 0.01))  # 10 ms
+    mag = _stft_mag(pcm, n_fft, hop)
+    if mag.shape[0] < 16:
+        return None
+
+    flux = np.diff(mag, axis=0)
+    flux[flux < 0] = 0.0
+    onset = flux.sum(axis=1).astype(np.float32)
+    onset -= _smooth(onset, 16)  # high-pass the envelope (drop slow drift)
+    onset[onset < 0] = 0.0
+    if onset.max() <= 0:
+        return None
+    onset = onset / onset.max()
+
+    fps = sr / float(hop)
+    n = onset.size
+    spec = np.fft.rfft(onset, n=2 * n)
+    ac = np.fft.irfft(spec * np.conj(spec))[:n].real
+    if ac.max() <= 0:
+        return None
+
+    min_lag = max(1, int(fps * 60.0 / max_bpm))
+    max_lag = min(n - 1, int(fps * 60.0 / min_bpm))
+    if max_lag <= min_lag:
+        return None
+    lags = np.arange(min_lag, max_lag + 1)
+    bpms = 60.0 * fps / lags
+    prior = np.exp(-0.5 * (np.log2(bpms / 120.0) / 0.9) ** 2)
+    strength = ac[min_lag:max_lag + 1] * prior
+    if strength.max() <= 0:
+        return None
+    best_bpm = float(bpms[int(np.argmax(strength))])
+    return round(best_bpm, 1)

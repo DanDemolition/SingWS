@@ -9245,32 +9245,67 @@ class ConfirmInterruptDialog(QDialog):
         layout.addLayout(buttons)
 
 
+class _BpmDetectWorker(QObject):
+    """Decode + estimate BPM off the UI thread. Emits the BPM (0.0 on failure)."""
+    done = pyqtSignal(float)
+
+    def __init__(self, audio_path: str):
+        super().__init__()
+        self.audio_path = str(audio_path or "")
+
+    def run(self):
+        bpm = 0.0
+        try:
+            import phrase_detect
+            pcm = phrase_detect.decode_pcm_mono(self.audio_path, sr=16000)
+            v = phrase_detect.estimate_bpm(pcm, 16000)
+            if v and float(v) > 0:
+                bpm = float(v)
+        except Exception as e:
+            try:
+                _diag(f"[PHRASE-BPM] estimate failed: {e}")
+            except Exception:
+                pass
+        self.done.emit(bpm)
+
+
 class WaveformDecodeWorker(QObject):
-    """Decodes a song off the UI thread and computes the waveform envelope, a
-    single suggested start, and the structural section boundaries.
-    Emits (peaks_ndarray_or_None, suggested_seconds_or_-1, sections_list)."""
-    done = pyqtSignal(object, float, object)
+    """Decodes a song off the UI thread and computes the waveform envelope, an
+    auto-estimated BPM, a single suggested start, and the structural section
+    boundaries. Emits (peaks_or_None, suggested_seconds_or_-1, sections_list,
+    bpm_or_0)."""
+    done = pyqtSignal(object, float, object, float)
 
     def __init__(self, audio_path: str, n_cols: int, bpm=None):
         super().__init__()
         self.audio_path = str(audio_path or "")
         self.n_cols = int(n_cols)
-        self.bpm = bpm
+        self.bpm = bpm  # known BPM (tag/cache) or None → estimate from audio
 
     def run(self):
         peaks = None
         suggested = -1.0
         sections = []
+        bpm_out = 0.0
         try:
             import phrase_detect
-            sr = 16000  # enough spectral resolution for chroma/timbre features
+            sr = 16000  # enough spectral resolution for chroma/timbre/tempo
             pcm = phrase_detect.decode_pcm_mono(self.audio_path, sr=sr)
             peaks = phrase_detect.peaks(pcm, self.n_cols)
-            s = phrase_detect.suggest_start(pcm, sr, bpm=self.bpm)
+            bpm = self.bpm
+            if not bpm or float(bpm) <= 0:
+                try:
+                    bpm = phrase_detect.estimate_bpm(pcm, sr)
+                except Exception as e:
+                    _diag(f"[PHRASE-WAVEFORM] bpm estimate failed: {e}")
+                    bpm = None
+            if bpm and float(bpm) > 0:
+                bpm_out = float(bpm)
+            s = phrase_detect.suggest_start(pcm, sr, bpm=(bpm_out or None))
             if s is not None:
                 suggested = float(s)
             try:
-                sections = phrase_detect.detect_sections(pcm, sr, bpm=self.bpm)
+                sections = phrase_detect.detect_sections(pcm, sr, bpm=(bpm_out or None))
             except Exception as e:
                 _diag(f"[PHRASE-WAVEFORM] section detection failed: {e}")
                 sections = []
@@ -9279,7 +9314,7 @@ class WaveformDecodeWorker(QObject):
                 _diag(f"[PHRASE-WAVEFORM] decode failed: {e}")
             except Exception:
                 pass
-        self.done.emit(peaks, suggested, sections)
+        self.done.emit(peaks, suggested, sections, bpm_out)
 
 
 class PhraseWaveformWidget(QWidget):
@@ -9436,6 +9471,8 @@ class PhraseStartDialog(QDialog):
         layout.addWidget(self.waveform)
         self._suggested_seconds = None
         self._detected_sections = []
+        # True once the host has chosen/moved a start, so auto-suggest won't override it.
+        self._user_touched_position = False
 
         # Marker list (edit/delete)
         layout.addWidget(QLabel("Markers (click waveform or a row to set position & preview):"))
@@ -9494,6 +9531,7 @@ class PhraseStartDialog(QDialog):
 
         if current_start is not None and current_start > 0:
             self._set_position(float(current_start))
+            self._user_touched_position = True  # keep an existing chosen start
         self._reload_markers()
         self._start_waveform_decode()
 
@@ -9512,10 +9550,19 @@ class PhraseStartDialog(QDialog):
         except Exception as e:
             _diag(f"[PHRASE-WAVEFORM] could not start decode: {e}")
 
-    def _on_waveform_ready(self, peaks, suggested, sections=None):
+    def _on_waveform_ready(self, peaks, suggested, sections=None, bpm=0.0):
         try:
             if peaks is not None:
                 self.waveform.set_peaks(peaks)
+            # Auto-BPM: if the host hasn't typed a BPM, fill in the detected one,
+            # cache it for instant reuse, and recompute the bar markers.
+            try:
+                if bpm and float(bpm) > 0 and self._parsed_bpm() is None:
+                    self.bpm_edit.setText(f"{float(bpm):g}")
+                    if self.primary_path:
+                        phrase_markers.set_song_bpm(self.primary_path, float(bpm))
+            except Exception:
+                pass
             if suggested is not None and suggested >= 0:
                 self._suggested_seconds = float(suggested)
                 self.suggest_btn.setEnabled(True)
@@ -9525,10 +9572,18 @@ class PhraseStartDialog(QDialog):
             # Detected section/transition boundaries (labels are estimates).
             self._detected_sections = list(sections or [])
             self._reload_markers()
+            # Auto-suggest: pre-select the recommended start so the host can just
+            # confirm — but only when they haven't already chosen/touched a point.
+            try:
+                if (not self._user_touched_position) and self._suggested_seconds and self._suggested_seconds > 0:
+                    self._set_position(self._suggested_seconds)
+            except Exception:
+                pass
         except Exception as e:
             _diag(f"[PHRASE-WAVEFORM] ready handler failed: {e}")
 
     def _on_waveform_click(self, seconds):
+        self._user_touched_position = True
         self._set_position(seconds)
         self._preview(seconds)
 
@@ -9568,11 +9623,13 @@ class PhraseStartDialog(QDialog):
             pass
 
     def _on_spin_changed(self, val):
+        self._user_touched_position = True
         self.pos_slider.blockSignals(True)
         self.pos_slider.setValue(int(float(val) * 100))
         self.pos_slider.blockSignals(False)
 
     def _on_slider_changed(self, val):
+        self._user_touched_position = True
         self.pos_spin.blockSignals(True)
         self.pos_spin.setValue(float(val) / 100.0)
         self.pos_spin.blockSignals(False)
@@ -9619,6 +9676,7 @@ class PhraseStartDialog(QDialog):
             pass
 
     def _on_marker_clicked(self, item):
+        self._user_touched_position = True
         r = item.data(Qt.ItemDataRole.UserRole) or {}
         secs = float(r.get("seconds") or 0.0)
         self._set_position(secs)
@@ -23800,26 +23858,27 @@ class KaraokeApp(QWidget):
             audio = primary
         return str(primary), str(audio)
 
-    def _phrase_resolve_bpm(self, primary_path, audio_path, *, prompt=True, parent=None):
-        """BPM for a song: a saved marker's bpm, else embedded tags, else (if
-        prompt) ask the host. Returns float or None."""
+    def _phrase_resolve_bpm(self, primary_path, audio_path, *, prompt=False, parent=None):
+        """Known BPM for a song without analyzing audio: a saved marker's bpm,
+        else the auto-detected cache, else embedded tags. Returns float or None.
+        (Auto-detection from the audio happens in the background — see the
+        waveform worker and _detect_bpm_async — so we never block or prompt.)"""
         try:
             marker = phrase_markers.default_marker(str(primary_path)) if primary_path else None
             if marker and marker.get("bpm"):
                 return float(marker["bpm"])
         except Exception:
             pass
+        try:
+            cached = phrase_markers.get_song_bpm(str(primary_path)) if primary_path else None
+            if cached:
+                return float(cached)
+        except Exception:
+            pass
         bpm = phrase_markers.read_bpm_from_tags(audio_path or primary_path)
         if bpm:
             return float(bpm)
-        if not prompt:
-            return None
-        val, ok = QInputDialog.getDouble(
-            parent or self, "Phrase Start — BPM",
-            "No BPM metadata for this song.\nEnter the song's BPM to compute phrase points:",
-            120.0, 40.0, 300.0, 1,
-        )
-        return float(val) if ok and val > 0 else None
+        return None
 
     @staticmethod
     def _fmt_mmss(seconds: float) -> str:
@@ -23874,11 +23933,36 @@ class KaraokeApp(QWidget):
         if entry is None:
             return
         primary, audio = self._phrase_song_paths(entry)
-        bpm = self._phrase_resolve_bpm(primary, audio, prompt=True)
-        if not bpm:
-            # No BPM and host declined to enter one → steer to manual markers.
-            self.open_phrase_start_dialog(singer_idx, song_idx)
+        bpm = self._phrase_resolve_bpm(primary, audio)
+        if bpm:
+            self._apply_phrase_bars_with_bpm(singer_idx, song_idx, bars, float(bpm))
             return
+        # No known BPM → auto-detect from the audio in the background, cache it,
+        # then apply. Plug-and-play: no prompt, no UI freeze.
+        try:
+            self._set_processing_text("Analyzing tempo…")
+        except Exception:
+            pass
+
+        def _on_bpm(detected):
+            if detected and detected > 0:
+                try:
+                    if primary:
+                        phrase_markers.set_song_bpm(primary, float(detected))
+                except Exception:
+                    pass
+                self._apply_phrase_bars_with_bpm(singer_idx, song_idx, bars, float(detected))
+            else:
+                # Couldn't detect a tempo → open the dialog so the host can set it.
+                self.open_phrase_start_dialog(singer_idx, song_idx)
+
+        self._detect_bpm_async(audio or primary, _on_bpm)
+
+    def _apply_phrase_bars_with_bpm(self, singer_idx: int, song_idx: int, bars: int, bpm: float):
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            return
+        primary, _audio = self._phrase_song_paths(entry)
         seconds = phrase_markers.bars_to_seconds(bars, bpm)
         if seconds is None:
             return
@@ -23897,6 +23981,32 @@ class KaraokeApp(QWidget):
         self._persist_song_modifier_change(
             f"Phrase start: {bars} bars ({self._fmt_mmss(seconds)}) for {name}"
         )
+
+    def _detect_bpm_async(self, audio_path, callback):
+        """Decode + estimate BPM off the UI thread, then call callback(bpm) on
+        the UI thread (bpm is 0.0 on failure). Never blocks playback."""
+        try:
+            thread = QThread(self)
+            worker = _BpmDetectWorker(str(audio_path or ""))
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.done.connect(callback)
+            worker.done.connect(thread.quit)
+            worker.done.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            # Keep strong refs until the thread finishes so they aren't GC'd.
+            if not hasattr(self, "_bpm_jobs"):
+                self._bpm_jobs = []
+            job = (thread, worker)
+            self._bpm_jobs.append(job)
+            thread.finished.connect(lambda j=job: self._bpm_jobs.remove(j) if j in self._bpm_jobs else None)
+            thread.start()
+        except Exception as e:
+            _diag(f"[PHRASE-BPM] async detect failed: {e}")
+            try:
+                callback(0.0)
+            except Exception:
+                pass
 
     # ── marker cloud sync + file backup ──────────────────────────────────────
     def _phrase_sync_config(self):

@@ -168,6 +168,17 @@ def init_schema(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_markers_path ON markers(song_path)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_markers_key ON markers(song_key)")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_markers_uuid ON markers(uuid)")
+    # Per-song detected BPM cache (local only) so auto-tempo is computed once and
+    # reused instantly by the bar shortcuts and the dialog.
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS song_meta (
+            song_path  TEXT PRIMARY KEY,
+            bpm        REAL,
+            updated_at INTEGER
+        )
+        """
+    )
     con.commit()
 
 
@@ -411,6 +422,40 @@ def apply_remote(records: List[Dict[str, Any]], *, dbfile: Optional[Path] = None
             applied += 1
         con.commit()
         return applied
+    finally:
+        con.close()
+
+
+def get_song_bpm(path: str, *, dbfile: Optional[Path] = None) -> Optional[float]:
+    """Cached auto-detected BPM for a song, or None."""
+    if not path:
+        return None
+    con = _connect(dbfile)
+    try:
+        row = con.execute("SELECT bpm FROM song_meta WHERE song_path=?", (str(path),)).fetchone()
+        if row and row["bpm"]:
+            try:
+                v = float(row["bpm"])
+                return v if v > 0 else None
+            except (TypeError, ValueError):
+                return None
+        return None
+    finally:
+        con.close()
+
+
+def set_song_bpm(path: str, bpm: float, *, dbfile: Optional[Path] = None) -> None:
+    """Cache an auto-detected BPM for a song (local only)."""
+    if not path or not bpm or bpm <= 0:
+        return
+    con = _connect(dbfile)
+    try:
+        con.execute(
+            "INSERT INTO song_meta (song_path, bpm, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(song_path) DO UPDATE SET bpm=excluded.bpm, updated_at=excluded.updated_at",
+            (str(path), float(bpm), int(time.time())),
+        )
+        con.commit()
     finally:
         con.close()
 

@@ -204,6 +204,31 @@ class SyncTests(unittest.TestCase):
                 pass
 
 
+class SongBpmCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db = Path(self.tmp.name)
+
+    def tearDown(self):
+        try:
+            os.unlink(self.tmp.name)
+        except OSError:
+            pass
+
+    def test_bpm_cache_roundtrip(self):
+        self.assertIsNone(pm.get_song_bpm("/s/x.mp3", dbfile=self.db))
+        pm.set_song_bpm("/s/x.mp3", 128.0, dbfile=self.db)
+        self.assertAlmostEqual(pm.get_song_bpm("/s/x.mp3", dbfile=self.db), 128.0)
+        # upsert overwrites
+        pm.set_song_bpm("/s/x.mp3", 90.5, dbfile=self.db)
+        self.assertAlmostEqual(pm.get_song_bpm("/s/x.mp3", dbfile=self.db), 90.5)
+
+    def test_bpm_cache_ignores_bad(self):
+        pm.set_song_bpm("/s/y.mp3", 0, dbfile=self.db)
+        self.assertIsNone(pm.get_song_bpm("/s/y.mp3", dbfile=self.db))
+
+
 class ResolvePhraseStartIntegrationTests(unittest.TestCase):
     """Exercises the KaraokeApp._resolve_phrase_start glue against the real module.
     Requires SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS=1 (set by the test runner)."""
