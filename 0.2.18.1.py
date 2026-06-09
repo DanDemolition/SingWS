@@ -9498,9 +9498,17 @@ class PhraseStartDialog(QDialog):
 
         # Action buttons
         actions = QHBoxLayout()
-        self.preview_btn = QPushButton("Preview from here")
+        self.preview_btn = QPushButton("▶ Preview")
         self.preview_btn.clicked.connect(lambda: self._preview(self.pos_spin.value()))
         actions.addWidget(self.preview_btn)
+        self.pause_btn = QPushButton("⏸ Pause")
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.clicked.connect(self._toggle_pause_preview)
+        actions.addWidget(self.pause_btn)
+        self.stop_btn = QPushButton("⏹ Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._stop_preview)
+        actions.addWidget(self.stop_btn)
         save_btn = QPushButton("Save custom marker")
         save_btn.clicked.connect(self._save_custom)
         actions.addWidget(save_btn)
@@ -9524,8 +9532,11 @@ class PhraseStartDialog(QDialog):
         bottom.addWidget(use_btn)
         layout.addLayout(bottom)
 
-        # Preview is disabled during a live performance to protect the show.
-        if self.app._phrase_is_playing():
+        # Closing the dialog (Close, Use as start, or the window X) stops any preview.
+        self.finished.connect(self._on_dialog_finished)
+
+        # Preview is disabled if a real (non-preview) song is already playing — protect the show.
+        if self.app._phrase_is_playing() and not self.app._phrase_preview_active():
             self.preview_btn.setEnabled(False)
             self.preview_btn.setToolTip("Stop playback to preview")
 
@@ -9732,13 +9743,48 @@ class PhraseStartDialog(QDialog):
         self._reload_markers()
 
     def _preview(self, seconds):
-        if self.app._phrase_is_playing():
+        # Block only when a *real* (non-preview) song is playing — protect the show.
+        if self.app._phrase_is_playing() and not self.app._phrase_preview_active():
             QMessageBox.information(self, "Preview", "Stop the current song before previewing.")
             return
+        # If our own preview is already running, stop it so we restart at the new point.
+        if self.app._phrase_preview_active():
+            self.app._phrase_preview_stop()
         try:
             self.app._phrase_preview_at(self.primary_path, self.audio_path, float(seconds))
+            self._set_preview_controls(True)
         except Exception as e:
             QMessageBox.warning(self, "Preview", f"Could not preview:\n{e}")
+            self._set_preview_controls(False)
+
+    def _set_preview_controls(self, active: bool):
+        try:
+            self.pause_btn.setEnabled(active)
+            self.stop_btn.setEnabled(active)
+            self.pause_btn.setText("⏸ Pause")  # reset label when (re)starting/stopping
+        except Exception:
+            pass
+
+    def _stop_preview(self):
+        self.app._phrase_preview_stop()
+        self._set_preview_controls(False)
+
+    def _toggle_pause_preview(self):
+        if not self.app._phrase_preview_active():
+            self._set_preview_controls(False)
+            return
+        paused = self.app._phrase_preview_toggle_pause()
+        try:
+            self.pause_btn.setText("▶ Resume" if paused else "⏸ Pause")
+        except Exception:
+            pass
+
+    def _on_dialog_finished(self, _result=0):
+        # Closing the dialog should never leave a preview playing out the main output.
+        try:
+            self.app._phrase_preview_stop()
+        except Exception:
+            pass
 
     def _use_as_start(self):
         self.chosen_seconds = float(self.pos_spin.value())
@@ -24131,10 +24177,21 @@ class KaraokeApp(QWidget):
             pass
         return False
 
+    def _phrase_preview_active(self) -> bool:
+        """True when the current playback was started as a Phrase-Start preview
+        (so the dialog can stop/pause/restart it without touching a live show).
+        Clears itself if the preview has already ended/stopped."""
+        if not getattr(self, "_phrase_preview_flag", False):
+            return False
+        if getattr(self, "karaoke_transport", None) is None and not getattr(self, "gst_pipeline", None):
+            self._phrase_preview_flag = False
+            return False
+        return True
+
     def _phrase_preview_at(self, primary_path, audio_path, seconds):
         """Start the song at `seconds` for preview (default key/tempo). Does NOT
-        touch the queue. Only called when nothing is playing (guarded by the
-        dialog) so it cannot interrupt a live performance."""
+        touch the queue. Only called when nothing else is playing (guarded by
+        the dialog) so it cannot interrupt a live performance."""
         p = str(primary_path or "")
         pl = p.lower()
         if pl.endswith(".mp4"):
@@ -24150,6 +24207,32 @@ class KaraokeApp(QWidget):
             self.play_cdg_mp3_dual(p, mp3, semitones=0, start_seconds=seconds)
         else:
             raise RuntimeError(f"Unsupported media for preview: {p}")
+        self._phrase_preview_flag = True
+
+    def _phrase_preview_stop(self):
+        """Stop a Phrase-Start preview if one is playing."""
+        if not self._phrase_preview_active():
+            return
+        self._phrase_preview_flag = False
+        try:
+            self.stop_playback(skip_confirmation=True)
+        except Exception as e:
+            _diag(f"[PHRASE-PREVIEW] stop failed: {e}")
+
+    def _phrase_preview_toggle_pause(self) -> bool:
+        """Pause/resume the preview transport. Returns True if now paused."""
+        t = getattr(self, "karaoke_transport", None)
+        if t is None:
+            return False
+        try:
+            if t.is_paused():
+                t.resume()
+                return False
+            t.pause()
+            return True
+        except Exception as e:
+            _diag(f"[PHRASE-PREVIEW] pause toggle failed: {e}")
+            return False
 
     def open_phrase_start_dialog(self, singer_idx: int, song_idx: int):
         entry = self._queue_song_entry(singer_idx, song_idx)

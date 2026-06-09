@@ -10,7 +10,8 @@
     16 Bars / Custom…). BPM-derived offsets use embedded ID3 BPM when present.
   - **Phrase Start dialog** with a rendered waveform, vertical labeled marker
     lines (4 Bar / 8 Bar / 16 Bar / Custom / Suggested), a position slider, and
-    click-to-preview.
+    click-to-preview, plus **▶ Preview / ⏸ Pause / ⏹ Stop** controls (preview
+    no longer plays on with no way to stop it; closing the dialog stops it too).
   - **Automatic BPM detection** from the audio (pure numpy/scipy tempo
     estimation — no tags or typing needed), cached per song. The 4/8/16-bar
     starts and the Custom dialog now fill in tempo on their own; the dialog also
