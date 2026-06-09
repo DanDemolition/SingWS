@@ -22639,8 +22639,17 @@ class KaraokeApp(QWidget):
         participants = self._duet_participants_from_display(primary, duet_display)
         ok, limit_message = self._check_queue_song_limit(participants)
         if not ok:
-            self._show_queue_limit_rejected(limit_message, remote=is_remote)
-            return False
+            # Public/web submissions (singer self-signup, Singer History, kiosk) are
+            # remote adds and stay capped at the per-singer limit. An operator-driven
+            # add from the host controls (is_remote is False) is intentionally allowed
+            # to exceed the cap — log the bypass so it stays auditable in diagnostics.
+            if is_remote:
+                self._show_queue_limit_rejected(limit_message, remote=is_remote)
+                return False
+            try:
+                _diag(f"[QUEUE-LIMIT] host bypass — operator added over limit: {limit_message}")
+            except Exception:
+                pass
 
         for singer_idx, singer in enumerate(self.queue):
             if self._queue_limit_name_key(singer.get("name", "")) == self._queue_limit_name_key(primary):
