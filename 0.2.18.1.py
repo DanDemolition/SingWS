@@ -12626,7 +12626,7 @@ class KaraokeApp(QWidget):
         btn_row1.addWidget(self.move_down_button, 1)
         btn_row1.addWidget(self.remove_button, 1)
         btn_row1.addWidget(self.clear_queue_button, 1)
-        btn_row1.addWidget(self.rotation_lock_button, 0)
+        btn_row1.addWidget(self.rotation_lock_button, 1)
 
         self.move_up_button.clicked.connect(self.move_up)
         self.move_down_button.clicked.connect(self.move_down)
@@ -12665,7 +12665,10 @@ class KaraokeApp(QWidget):
                 border-color: rgba(115,144,180,0.10);
             }}
         """
-        for b in (self.move_up_button, self.move_down_button):
+        # Keep the reorder CSS so the Rotation Lock button can fall back to the
+        # exact neighbour style when it is unlocked (see _update_rotation_lock_button).
+        self._reorder_btn_css = _reorder_btn_css
+        for b in (self.move_up_button, self.move_down_button, self.rotation_lock_button):
             b.setMinimumHeight(38)
             b.setStyleSheet(_reorder_btn_css)
         self.remove_button.setMinimumHeight(38)
@@ -23469,53 +23472,37 @@ class KaraokeApp(QWidget):
         locked = self._is_rotation_locked()
         btn.setVisible(in_rotation)
         btn.setEnabled(in_rotation)
-        btn.setText("Lock")
+        btn.setMinimumHeight(38)  # match the reorder/remove/clear buttons
+        btn.setText("Unlock" if locked else "Lock")
         btn.setToolTip("Unlock rotation" if locked else "Lock rotation")
 
         if locked:
+            # Active state: a yellow highlight, but the SAME geometry (radius,
+            # padding, font) as the neighbouring queue buttons so it still fits in.
             btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #f3cb00;
-                    color: #111111;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #f7d735, stop:1 #f3cb00);
+                    color: #1a1606;
                     border: 1px solid #ffe066;
-                    border-radius: 6px;
-                    margin-top: 3px;
-                    padding: 6px 12px;
+                    border-radius: 9px;
+                    padding: 9px 12px;
+                    font-size: 12px;
+                    font-weight: 700;
+                    letter-spacing: 0.3px;
                 }
                 QPushButton:hover {
-                    background-color: #f7d735;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #ffe04a, stop:1 #f7d735);
+                    border-color: #fff0a6;
                 }
                 QPushButton:pressed {
                     background-color: #ddb700;
                 }
             """)
         else:
-            try:
-                base_color = QColor(ALT_COLOR)
-                border_color = base_color.lighter(115)
-                hover_color = base_color.lighter(110)
-                pressed_color = base_color.darker(110)
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {base_color.name()};
-                        border: 1px solid {border_color.name()};
-                        border-radius: 6px;
-                        margin-top: 3px;
-                        padding: 6px 12px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {hover_color.name()};
-                    }}
-                    QPushButton:pressed {{
-                        background-color: {pressed_color.name()};
-                    }}
-                """)
-            except Exception:
-                btn.setStyleSheet("")
-            try:
-                self.style_buttons_to_match_queue()
-            except Exception:
-                pass
+            # Inactive state: identical to the Move Up / Move Down buttons.
+            btn.setStyleSheet(getattr(self, "_reorder_btn_css", ""))
 
         try:
             btn.style().unpolish(btn)
