@@ -179,6 +179,15 @@ def init_schema(con: sqlite3.Connection) -> None:
         )
         """
     )
+    # Beat-grid analysis columns (idempotent): downbeat phase + confidence so
+    # loops can snap to the bar grid. Added after the original bpm-only table.
+    _sm_cols = {r[1] for r in con.execute("PRAGMA table_info(song_meta)").fetchall()}
+    if "first_beat" not in _sm_cols:
+        con.execute("ALTER TABLE song_meta ADD COLUMN first_beat REAL")
+    if "confidence" not in _sm_cols:
+        con.execute("ALTER TABLE song_meta ADD COLUMN confidence REAL")
+    if "analyzed_at" not in _sm_cols:
+        con.execute("ALTER TABLE song_meta ADD COLUMN analyzed_at INTEGER")
     con.commit()
 
 
@@ -454,6 +463,55 @@ def set_song_bpm(path: str, bpm: float, *, dbfile: Optional[Path] = None) -> Non
             "INSERT INTO song_meta (song_path, bpm, updated_at) VALUES (?,?,?) "
             "ON CONFLICT(song_path) DO UPDATE SET bpm=excluded.bpm, updated_at=excluded.updated_at",
             (str(path), float(bpm), int(time.time())),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_song_analysis(path: str, *, dbfile: Optional[Path] = None) -> Optional[dict]:
+    """Cached beat-grid analysis for a song: {bpm, first_beat, confidence} or None
+    (None only when there's no usable BPM). `first_beat` may be None."""
+    if not path:
+        return None
+    con = _connect(dbfile)
+    try:
+        row = con.execute(
+            "SELECT bpm, first_beat, confidence FROM song_meta WHERE song_path=?", (str(path),)
+        ).fetchone()
+        if not row or not row["bpm"]:
+            return None
+        try:
+            bpm = float(row["bpm"])
+        except (TypeError, ValueError):
+            return None
+        if bpm <= 0:
+            return None
+        fb = row["first_beat"]
+        return {
+            "bpm": bpm,
+            "first_beat": (float(fb) if fb is not None else None),
+            "confidence": (float(row["confidence"]) if row["confidence"] is not None else 0.0),
+        }
+    finally:
+        con.close()
+
+
+def set_song_analysis(path: str, bpm: float, first_beat=None, confidence: float = 0.0,
+                      *, dbfile: Optional[Path] = None) -> None:
+    """Cache full beat-grid analysis for a song (local only)."""
+    if not path or not bpm or bpm <= 0:
+        return
+    con = _connect(dbfile)
+    try:
+        now = int(time.time())
+        fb = float(first_beat) if first_beat is not None else None
+        con.execute(
+            "INSERT INTO song_meta (song_path, bpm, first_beat, confidence, updated_at, analyzed_at) "
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(song_path) DO UPDATE SET bpm=excluded.bpm, first_beat=excluded.first_beat, "
+            "confidence=excluded.confidence, updated_at=excluded.updated_at, analyzed_at=excluded.analyzed_at",
+            (str(path), float(bpm), fb, float(confidence or 0.0), now, now),
         )
         con.commit()
     finally:

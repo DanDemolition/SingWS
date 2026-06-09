@@ -228,6 +228,18 @@ class SongBpmCacheTests(unittest.TestCase):
         pm.set_song_bpm("/s/y.mp3", 0, dbfile=self.db)
         self.assertIsNone(pm.get_song_bpm("/s/y.mp3", dbfile=self.db))
 
+    def test_analysis_roundtrip(self):
+        pm.set_song_analysis("/s/z.mp3", 124.0, first_beat=0.37, confidence=0.8, dbfile=self.db)
+        a = pm.get_song_analysis("/s/z.mp3", dbfile=self.db)
+        self.assertAlmostEqual(a["bpm"], 124.0)
+        self.assertAlmostEqual(a["first_beat"], 0.37)
+        self.assertAlmostEqual(a["confidence"], 0.8)
+        # bpm helper still reads the same row
+        self.assertAlmostEqual(pm.get_song_bpm("/s/z.mp3", dbfile=self.db), 124.0)
+        # set_song_bpm-only leaves first_beat None but readable
+        pm.set_song_bpm("/s/w.mp3", 100.0, dbfile=self.db)
+        self.assertIsNone(pm.get_song_analysis("/s/w.mp3", dbfile=self.db)["first_beat"])
+
 
 class ResolvePhraseStartIntegrationTests(unittest.TestCase):
     """Exercises the KaraokeApp._resolve_phrase_start glue against the real module.
