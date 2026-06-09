@@ -2483,6 +2483,8 @@ DEFAULTS = {
     "queue_mode": "classic",               # classic | rotation
     "rotation_locked": False,               # one-shot: weave new singers into the next rotation
     "rotation_lock_insert_count": 0,        # session/persisted spacing counter for locked inserts
+    "intro_loop_enabled": False,            # between songs: loop the next song's intro (instead of BGM)
+    "intro_loop_bars": 8,                   # bars to loop: 4 / 8 / 16
     "end_silence_trim_enabled": True,      # CDG/ZIP/MP4: detect trailing karaoke silence and bring BG up early (no dead air)
     "end_silence_trim_threshold_sec": 6.0, # sustained low audio before intelligent karaoke early-end
     "karaoke_auto_advance": False,         # auto-play the next queued karaoke when a song ends (off = stop after each song)
@@ -15150,6 +15152,7 @@ class KaraokeApp(QWidget):
         mode: str,
         semitones: int,
         start_seconds: float = 0.0,
+        loop_seconds=None,
     ):
         if PythonKaraokeTransport is None:
             detail = str(PYTHON_KARAOKE_IMPORT_ERROR or "Python karaoke transport is unavailable")
@@ -15270,6 +15273,11 @@ class KaraokeApp(QWidget):
         self.karaoke_volume = None
         try:
             transport.start(start_seconds)
+            if loop_seconds and len(loop_seconds) == 2:
+                try:
+                    transport.set_loop(float(loop_seconds[0]), float(loop_seconds[1]))
+                except Exception as e:
+                    _diag(f"[INTRO-LOOP] set_loop failed: {e}")
         except Exception as e:
             self.karaoke_transport = None
             try:
@@ -15314,7 +15322,7 @@ class KaraokeApp(QWidget):
         self.preview_window.force_black = False
         self.preview_window.update()
 
-    def _play_python_mp4(self, song_path, semitones=0, start_seconds=0.0):
+    def _play_python_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
         self._prepare_python_karaoke_start(song_path)
         self._current_karaoke_mode = "mp4"
@@ -15339,9 +15347,10 @@ class KaraokeApp(QWidget):
             mode="mp4",
             semitones=self._current_karaoke_semitones,
             start_seconds=start_seconds,
+            loop_seconds=loop_seconds,
         )
 
-    def _play_python_cdg(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0):
+    def _play_python_cdg(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._prepare_python_karaoke_start(mp3_path)
         self._current_karaoke_mode = "cdg"
         self._current_karaoke_cdg_path = str(cdg_path or "")
@@ -15359,9 +15368,10 @@ class KaraokeApp(QWidget):
             mode="cdg",
             semitones=self._current_karaoke_semitones,
             start_seconds=start_seconds,
+            loop_seconds=loop_seconds,
         )
 
-    def _play_python_mp3(self, song_path, semitones=0, start_seconds=0.0):
+    def _play_python_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
         self._prepare_python_karaoke_start(song_path)
         self._current_karaoke_mode = "mp3"
@@ -16467,6 +16477,14 @@ class KaraokeApp(QWidget):
         early_end_reason = str(getattr(self, "_end_silence_last_reason", "") or "")
         early_auto_advance = bool(getattr(self, "_end_silence_auto_advance_next", False))
         self._reset_end_silence_state()
+
+        # Intro Loop: instead of BGM, auto-advance to the next queued song held at
+        # a looping intro. Reuse the proven early-auto-advance path (skips BG
+        # overlap, tears down, then triggers play_next_file) and flag the loop.
+        if (not early_auto_advance) and self._should_start_intro_loop():
+            early_auto_advance = True
+            self._pending_intro_loop = True
+            _diag("[INTRO-LOOP] media-end → auto-advance into next song's intro loop")
         if early_end_reason:
             _diag(f"[END] early-end handoff reason={early_end_reason} auto_advance={early_auto_advance}")
 
@@ -17752,6 +17770,41 @@ class KaraokeApp(QWidget):
         rotation_lock_cb.setToolTip("New singers are woven into the next rotation, then the lock turns off automatically.")
         v.addWidget(rotation_lock_cb)
 
+        # --- Intro Loop: loop the next song's intro between songs (instead of BGM) ---
+        intro_loop_cb = QCheckBox("Intro Loop between songs (loop the next song's intro instead of BGM)")
+        intro_loop_cb.setChecked(bool(self.settings.get("intro_loop_enabled", False)))
+        intro_loop_cb.setToolTip("When a song ends, the next song's intro loops automatically until you hit Play, which continues the track.")
+        v.addWidget(intro_loop_cb)
+        intro_loop_row = QHBoxLayout()
+        intro_loop_row.addWidget(QLabel("Loop length:"))
+        intro_loop_bars_combo = QComboBox(dlg)
+        for _b in (4, 8, 16):
+            intro_loop_bars_combo.addItem(f"{_b} bars", _b)
+        _cur_bars = int(self.settings.get("intro_loop_bars", 8) or 8)
+        _bi = intro_loop_bars_combo.findData(_cur_bars)
+        intro_loop_bars_combo.setCurrentIndex(_bi if _bi >= 0 else 1)
+        intro_loop_bars_combo.setEnabled(bool(self.settings.get("intro_loop_enabled", False)))
+        intro_loop_row.addWidget(intro_loop_bars_combo)
+        intro_loop_row.addStretch(1)
+        v.addLayout(intro_loop_row)
+
+        def on_intro_loop_toggled(checked: bool):
+            self.settings["intro_loop_enabled"] = bool(checked)
+            intro_loop_bars_combo.setEnabled(bool(checked))
+            if not checked:
+                self._intro_loop_active = False
+            self.save_settings()
+
+        def on_intro_loop_bars_changed(_idx: int):
+            try:
+                self.settings["intro_loop_bars"] = int(intro_loop_bars_combo.currentData() or 8)
+            except Exception:
+                self.settings["intro_loop_bars"] = 8
+            self.save_settings()
+
+        intro_loop_cb.toggled.connect(on_intro_loop_toggled)
+        intro_loop_bars_combo.currentIndexChanged.connect(on_intro_loop_bars_changed)
+
         # --- Filename format (controls how Artist/Title/Disc are parsed) ---
         v = _section_card(tab_search, "Filename Format",
                           "How your files name the artist, title and disc/brand code "
@@ -18355,21 +18408,26 @@ class KaraokeApp(QWidget):
         dur, _member_key = fast_mp3_duration_from_zip(zip_path)
         return int(dur) if dur and dur > 0 else None
 
-    def play_mp3g_zip(self, zip_path, semitones=0, start_seconds=0.0):
-        # Phrase-start: the start offset must survive the async extraction
-        # round-trip, since _on_zip_extract_finished re-enters this method
-        # without the offset. Stash it per zip_path and read it back here.
+    def play_mp3g_zip(self, zip_path, semitones=0, start_seconds=0.0, loop_seconds=None):
+        # Phrase-start / intro-loop: the start offset + loop region must survive
+        # the async extraction round-trip, since _on_zip_extract_finished re-enters
+        # this method without them. Stash per zip_path and read them back here.
         if not hasattr(self, "_mp3g_pending_start"):
             self._mp3g_pending_start = {}
+        if not hasattr(self, "_mp3g_pending_loop"):
+            self._mp3g_pending_loop = {}
         effective_start = float(start_seconds or 0.0)
         if effective_start <= 0.0:
             effective_start = float(self._mp3g_pending_start.get(str(zip_path), 0.0))
+        effective_loop = loop_seconds or self._mp3g_pending_loop.get(str(zip_path))
         # Cached ZIPs can start immediately; uncached extraction happens in a
         # worker so Python zipfile or fallback `unzip` cannot freeze the GUI.
         cdg_path, mp3_path = self.zip_cache.cached_paths_if_ready(zip_path)
         if not cdg_path or not mp3_path:
             if float(start_seconds or 0.0) > 0.0:
                 self._mp3g_pending_start[str(zip_path)] = float(start_seconds)
+            if loop_seconds:
+                self._mp3g_pending_loop[str(zip_path)] = loop_seconds
             print("[PERF] main_thread_blocking_call removed task=zip_extract worker=QThread")
             try:
                 if getattr(self, "_zip_extract_thread", None) is not None and self._zip_extract_thread.isRunning():
@@ -18403,9 +18461,10 @@ class KaraokeApp(QWidget):
         print(f"🎵 Using extracted CDG: {cdg_path}")
         print(f"🎵 Using extracted MP3: {mp3_path}")
 
-        # Run playback (with any phrase-start offset carried across extraction)
+        # Run playback (with any phrase-start offset + loop carried across extraction)
         self._mp3g_pending_start.pop(str(zip_path), None)
-        self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones, start_seconds=effective_start)
+        self._mp3g_pending_loop.pop(str(zip_path), None)
+        self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones, start_seconds=effective_start, loop_seconds=effective_loop)
 
     def _on_zip_extract_finished(self, zip_path: str, cdg_path: str, mp3_path: str, semitones: int, ok: bool, message: str):
         try:
@@ -23787,6 +23846,39 @@ class KaraokeApp(QWidget):
             return None
         return entry if isinstance(entry, dict) else None
 
+    # ── Intro Loop (auto beat-loop between songs) ────────────────────────────
+    def _should_start_intro_loop(self) -> bool:
+        """True if, on song end, we should auto-advance into the next song's
+        looping intro (instead of BGM)."""
+        try:
+            if not bool(self.settings.get("intro_loop_enabled", False)):
+                return False
+            if getattr(self, "_intro_loop_active", False):
+                return False
+            return any(self.is_singer_active(s) for s in (self.queue or []))
+        except Exception:
+            return False
+
+    def _release_intro_loop(self):
+        """Let a held intro loop continue past the loop point (the seamless
+        'continue the track' on Play). No teardown, no restart."""
+        self._intro_loop_active = False
+        self._pending_intro_loop = False
+        t = getattr(self, "karaoke_transport", None)
+        if t is not None:
+            try:
+                t.clear_loop()
+            except Exception as e:
+                _diag(f"[INTRO-LOOP] clear_loop failed: {e}")
+        try:
+            self._set_processing_text("Playing…")
+        except Exception:
+            pass
+        try:
+            self.update_queue_display()
+        except Exception:
+            pass
+
     def _resolve_phrase_start(self, primary_path, entry, duration_secs=0.0) -> float:
         """Where this song should start (seconds). A per-instance choice on the
         queue entry wins (including an explicit 0.0 = Beginning); otherwise the
@@ -27469,6 +27561,12 @@ class KaraokeApp(QWidget):
                 '<span style="color:#5C6170;"> • </span>'
                 '<span style="color:#F3CB00; font-weight:900;">LOCKED</span>'
             )
+        loop_html = ""
+        if getattr(self, "_intro_loop_active", False):
+            loop_html = (
+                '<span style="color:#5C6170;"> • </span>'
+                '<span style="color:#5AC8FA; font-weight:900;">LOOPING</span>'
+            )
 
         self.queue_label.setText(
             f'<span style="color:#9CA3B5; font-weight:700;">SINGERS</span> '
@@ -27479,7 +27577,7 @@ class KaraokeApp(QWidget):
             f'{end_html}'
             f'<span style="color:#5C6170;"> • </span>'
             f'<span style="color:#B994FF; font-weight:800;">{mode_label}</span>'
-            f'{locked_html}'
+            f'{locked_html}{loop_html}'
         )
 
     def update_queue_display(self):
@@ -28418,6 +28516,12 @@ class KaraokeApp(QWidget):
         self._bg_transition_advance_timer.start(max(0, int(advance_after_ms)))
 
     def play_next_file(self, skip_confirmation=False):
+        # Intro Loop release: if the next song is held in a looping intro, a
+        # Play/Next press just lets it continue past the loop — no teardown, no
+        # advance. (Not during the media-end auto-advance, which sets _pending.)
+        if getattr(self, "_intro_loop_active", False) and not getattr(self, "_pending_intro_loop", False):
+            self._release_intro_loop()
+            return
         self._cancel_pending_media_end_cleanup("play_next")
         try:
             q_len = len(self.queue) if hasattr(self, "queue") and self.queue is not None else -1
@@ -28625,6 +28729,27 @@ class KaraokeApp(QWidget):
         # saved default marker is reused; otherwise 0 (the file start).
         phrase_start = self._resolve_phrase_start(primary_path, entry, current_song_dur)
 
+        # Intro Loop: when the media-end handoff requested it, hold this song at a
+        # looping intro [phrase_start, phrase_start + N bars] until Play releases it.
+        intro_loop_seconds = None
+        if getattr(self, "_pending_intro_loop", False):
+            self._pending_intro_loop = False
+            try:
+                bpm = self._phrase_resolve_bpm(primary_path, primary_path)
+                if bpm:
+                    bars = int(self.settings.get("intro_loop_bars", 8) or 8)
+                    length = phrase_markers.bars_to_seconds(bars, bpm)
+                    if length and length > 0:
+                        intro_loop_seconds = (float(phrase_start), float(phrase_start) + float(length))
+                        self._intro_loop_active = True
+                        _diag(f"[INTRO-LOOP] engaged {intro_loop_seconds} bpm={bpm} bars={bars}")
+                if intro_loop_seconds is None:
+                    # No BPM yet → play normally this time and cache BPM in the
+                    # background so the loop engages next time this song comes up.
+                    self._detect_bpm_async(primary_path, lambda b, p=primary_path: (phrase_markers.set_song_bpm(p, b) if b else None))
+            except Exception as e:
+                _diag(f"[INTRO-LOOP] engage failed: {e}")
+
         self.video_window.force_black = False
         self.video_window.idle = False
         self.video_window.update()
@@ -28644,19 +28769,19 @@ class KaraokeApp(QWidget):
             if isinstance(song_info[0], str) and song_info[0].endswith(".cdg"):
                 cdg_path, mp3_path = song_info
                 song_path_display = cdg_path
-                self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start)
+                self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
             elif isinstance(song_info[0], str) and song_info[0].endswith(".mp4"):
                 # Old tuple (original, processed) — play original with realtime key change
                 orig_mp4 = song_info[0]
                 song_path_display = orig_mp4
-                self.play_mp4(orig_mp4, semitones=key, start_seconds=phrase_start)
+                self.play_mp4(orig_mp4, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
             else:
                 # Fallback to first element
                 song_path_display = str(song_info[0])
                 if song_path_display.endswith(".mp4"):
-                    self.play_mp4(song_path_display, semitones=key, start_seconds=phrase_start)
+                    self.play_mp4(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
                 elif song_path_display.endswith(".mp3"):
-                    self.play_mp3(song_path_display, semitones=key, start_seconds=phrase_start)
+                    self.play_mp3(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
                 else:
                     print("Unsupported tuple format:", song_info)
                     return
@@ -28664,13 +28789,13 @@ class KaraokeApp(QWidget):
             # Plain string path
             song_path_display = song_info
             if song_info.endswith(".mp4"):
-                self.play_mp4(song_info, semitones=key, start_seconds=phrase_start)
+                self.play_mp4(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
             elif song_info.endswith(".mp3"):
-                self.play_mp3(song_info, semitones=key, start_seconds=phrase_start)
+                self.play_mp3(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
             elif song_info.endswith(".zip"):
                 # NEW: Handle MP3G zip files
                 if self.is_mp3g_zip(song_info):
-                    self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start)
+                    self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
                 else:
                     print("Invalid zip format:", song_info)
                     return
@@ -28678,7 +28803,7 @@ class KaraokeApp(QWidget):
                 base, _ = os.path.splitext(song_info)
                 mp3_path = base + ".mp3"
                 if os.path.exists(mp3_path):
-                    self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start)
+                    self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
                 else:
                     _diag(f"[PLAYNEXT] failed: missing MP3 pair for CDG {song_info}")
                     print("Missing MP3 for CDG:", song_info)
@@ -29088,20 +29213,20 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[BG] Manual-stop recovery failed: {e}")
     
-    def play_mp4(self, song_path, semitones=0, start_seconds=0.0):
-        self._play_python_mp4(song_path, semitones, start_seconds=start_seconds)
+    def play_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
+        self._play_python_mp4(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
-    def play_cdg_mp3_dual(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, fast_restart=False):
-        self._play_python_cdg(cdg_path, mp3_path, semitones, start_seconds=start_seconds)
+    def play_cdg_mp3_dual(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, fast_restart=False, loop_seconds=None):
+        self._play_python_cdg(cdg_path, mp3_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
     def on_media_ended(self, event=None):
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(0, self._handle_media_end_safe)
                 
-    def play_mp3(self, song_path, semitones=0, start_seconds=0.0):
-        self._play_python_mp3(song_path, semitones, start_seconds=start_seconds)
+    def play_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
+        self._play_python_mp3(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
     def get_singer_index_by_row(self, row):
