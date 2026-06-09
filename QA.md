@@ -28,9 +28,26 @@ Silicon**. Location / "Accept Requests" QA lives in the SingWS-Server repo.
 - [ ] Switch Queue Mode to **Classic** → lock clears.
 - [ ] Restart the app while locked → lock state is restored from settings.
 
-## Host song-limit override
-- [ ] Operator can add a 3rd song for a singer past the cap.
-- [ ] A web/Singer-History request for that singer is still blocked at the cap.
+## Phrase Start — auto-BPM & preview controls
+- [ ] Open Custom Phrase Start on a song with **no BPM tag** → the BPM field
+      fills in on its own (auto-detected) and the 4/8/16-bar marks compute.
+- [ ] A suggested start is **pre-selected** when the dialog opens.
+- [ ] **▶ Preview** plays from the chosen point; **⏸ Pause** pauses/resumes;
+      **⏹ Stop** stops. Re-previewing restarts cleanly (no stacked audio).
+- [ ] **Closing the dialog stops the preview** (no audio left on the main output).
+
+## Intro Loop (between-songs beat loop)
+- [ ] Settings → enable **Intro Loop**, pick **8 bars**.
+- [ ] Queue 2+ songs; play one and let it **end** → the next song's intro starts
+      **looping** at its phrase point; the queue label shows **`LOOPING`**.
+- [ ] Listen at the wrap point — the loop repeats with **no click/gap**.
+- [ ] Hit **Play/Next** → the loop releases and the track **continues past the
+      loop and plays through** seamlessly (no restart).
+- [ ] Works for **CDG**, **MP4**, and **MP3**.
+- [ ] First time on a fresh song with no cached BPM: it may play normally once
+      while it analyzes tempo in the background, then loop on the next encounter.
+- [ ] Toggle Intro Loop **off** → normal between-songs behavior (BGM/idle) returns.
+- [ ] CPU stays low while looping.
 
 ## Platforms
 - [ ] Full pass on **Intel**.
