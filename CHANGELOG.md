@@ -38,6 +38,12 @@
   adds. Classic mode is unchanged.
 - **Host song-limit override** — the operator can add a 3rd+ song for a singer
   past the per-singer cap; public/web/Singer-History requests stay capped.
+- **Intro Loop** (between-songs filler, opt-in) — when a song ends, the next
+  queued song's intro auto-loops a chosen number of bars (4/8/16) starting at
+  its phrase point (reuses the auto-BPM / phrase markers) instead of background
+  music; hitting **Play/Next** releases the loop and that same track continues
+  past the loop and plays through. Settings toggle + bar selector; a `LOOPING`
+  badge shows while held. Default OFF — Classic playback is unchanged.
 
 ### Notes
 - Pairs with the SingWS-Server marker-sync endpoints for cross-machine markers.

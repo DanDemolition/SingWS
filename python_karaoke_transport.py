@@ -872,6 +872,10 @@ class PythonKaraokeTransport(QObject):
         self._decoder = None
         self._decoder_done = False
         self._ended_sent = False
+        # Intro Loop (A–B): when set, _tick() seeks back to _loop_start once
+        # playback reaches _loop_end, and the end-of-track signal is suppressed.
+        self._loop_start = None
+        self._loop_end = None
         self._clock_source_seconds = 0.0
         self._clock_processed_us = 0
         # Count only real karaoke PCM pulled by the output device. Silence
@@ -1001,6 +1005,41 @@ class PythonKaraokeTransport(QObject):
             _fp = max(0.0, target + float(getattr(self, "video_offset_seconds", 0.0) or 0.0))
             self.frame_ready.emit(self.cdg.frame_at(_fp))
             self._last_cdg_generation = self.cdg.generation
+
+    @staticmethod
+    def _loop_target(position, loop_start, loop_end):
+        """Pure wrap decision: returns loop_start when `position` has reached/passed
+        loop_end of a valid [start,end) region, else None. Unit-testable."""
+        if loop_start is None or loop_end is None:
+            return None
+        try:
+            ls = float(loop_start)
+            le = float(loop_end)
+        except (TypeError, ValueError):
+            return None
+        if le <= ls:
+            return None
+        if float(position) >= le:
+            return ls
+        return None
+
+    def set_loop(self, start, end):
+        """Loop [start, end) — playback wraps back to start at end (intro loop)."""
+        try:
+            ls = max(0.0, float(start))
+            le = float(end)
+        except (TypeError, ValueError):
+            return
+        if self.duration_seconds > 0.0:
+            le = min(le, self.duration_seconds)
+        if le <= ls:
+            return
+        self._loop_start = ls
+        self._loop_end = le
+
+    def clear_loop(self):
+        self._loop_start = None
+        self._loop_end = None
 
     def set_modifiers(self, tempo_ratio: float, semitones: float):
         position = self.position_seconds()
@@ -1376,6 +1415,12 @@ class PythonKaraokeTransport(QObject):
         # Audio is pulled by Qt's audio thread (the _PcmFeeder), so the UI tick
         # no longer drains PCM — it only drives the video frame + end detection.
         position = self.position_seconds()
+        # Intro Loop: wrap back to the loop start once we reach the loop end.
+        if not self._paused:
+            _wrap = self._loop_target(position, self._loop_start, self._loop_end)
+            if _wrap is not None:
+                self.seek(_wrap)
+                position = _wrap
         self._visual_tick_count += 1
         # Visual-only calibration: the frame is rendered at position + offset so
         # the host can nudge lyric/video timing without affecting the audio clock
@@ -1415,7 +1460,7 @@ class PythonKaraokeTransport(QObject):
             if image is not None:
                 self._visual_emit_count += 1
                 self.frame_ready.emit(image)
-        if self._decoder_done:
+        if self._decoder_done and self._loop_start is None:
             with self._pcm_lock:
                 empty = (not self._pcm_chunks) and (not self._pending_output)
             if empty and not self._ended_sent:
