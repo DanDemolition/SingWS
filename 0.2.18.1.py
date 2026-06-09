@@ -254,6 +254,7 @@ import subprocess
 import json
 import hashlib
 import song_index  # local module (~/SingWS/singws.db)
+import phrase_markers  # local module (~/SingWS/phrase_markers.db) — Phrase-Aligned Song Start
 try:
     from mutagen import File as MutagenFile
 except Exception:
@@ -9241,6 +9242,438 @@ class ConfirmInterruptDialog(QDialog):
 
         layout.addLayout(buttons)
 
+
+class WaveformDecodeWorker(QObject):
+    """Decodes a song to a waveform peak envelope (and a suggested start) off the
+    UI thread. Emits (peaks_ndarray_or_None, suggested_seconds_or_-1)."""
+    done = pyqtSignal(object, float)
+
+    def __init__(self, audio_path: str, n_cols: int, bpm=None):
+        super().__init__()
+        self.audio_path = str(audio_path or "")
+        self.n_cols = int(n_cols)
+        self.bpm = bpm
+
+    def run(self):
+        peaks = None
+        suggested = -1.0
+        try:
+            import phrase_detect
+            pcm = phrase_detect.decode_pcm_mono(self.audio_path)
+            peaks = phrase_detect.peaks(pcm, self.n_cols)
+            sr = 8000
+            s = phrase_detect.suggest_start(pcm, sr, bpm=self.bpm)
+            if s is not None:
+                suggested = float(s)
+        except Exception as e:
+            try:
+                _diag(f"[PHRASE-WAVEFORM] decode failed: {e}")
+            except Exception:
+                pass
+        self.done.emit(peaks, suggested)
+
+
+class PhraseWaveformWidget(QWidget):
+    """Draws the decoded waveform with vertical, labeled marker lines and a
+    playhead. Clicking maps the x position to a time and calls the callback."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(96)
+        self.setMinimumWidth(480)
+        self._peaks = None          # (n,2) min/max in [-1,1]
+        self._duration = 0.0
+        self._markers = []          # [{seconds,label,kind}]
+        self._playhead = None
+        self._on_click = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_peaks(self, peaks):
+        self._peaks = peaks
+        self.update()
+
+    def set_duration(self, seconds):
+        self._duration = max(0.0, float(seconds or 0.0))
+        self.update()
+
+    def set_markers(self, markers):
+        self._markers = list(markers or [])
+        self.update()
+
+    def set_playhead(self, seconds):
+        self._playhead = None if seconds is None else max(0.0, float(seconds))
+        self.update()
+
+    def set_position_callback(self, cb):
+        self._on_click = cb
+
+    def _x_for_seconds(self, seconds):
+        if self._duration <= 0:
+            return 0
+        return int((float(seconds) / self._duration) * self.width())
+
+    def mousePressEvent(self, event):
+        if self._duration > 0 and self.width() > 0 and callable(self._on_click):
+            frac = max(0.0, min(1.0, event.position().x() / self.width()))
+            self._on_click(frac * self._duration)
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QColor, QPen, QFont
+        p = QPainter(self)
+        try:
+            w, h = self.width(), self.height()
+            mid = h / 2.0
+            p.fillRect(0, 0, w, h, QColor(20, 20, 28))
+            # waveform
+            if self._peaks is not None and len(self._peaks) > 0:
+                n = len(self._peaks)
+                p.setPen(QPen(QColor(120, 130, 170), 1))
+                for x in range(w):
+                    i = int(x / max(1, w) * n)
+                    if i >= n:
+                        i = n - 1
+                    mn = float(self._peaks[i][0])
+                    mx = float(self._peaks[i][1])
+                    y1 = mid - mx * (mid - 4)
+                    y2 = mid - mn * (mid - 4)
+                    p.drawLine(x, int(y1), x, int(y2))
+            else:
+                p.setPen(QColor(110, 110, 120))
+                p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Decoding waveform…")
+            # markers
+            colors = {"bar4": QColor(90, 200, 250), "bar8": QColor(90, 200, 250),
+                      "bar16": QColor(90, 200, 250), "custom": QColor(255, 180, 60),
+                      "suggested": QColor(120, 230, 140)}
+            font = QFont()
+            font.setPointSize(8)
+            p.setFont(font)
+            for m in self._markers:
+                try:
+                    x = self._x_for_seconds(m.get("seconds", 0.0))
+                except Exception:
+                    continue
+                col = colors.get(m.get("kind", "custom"), QColor(255, 180, 60))
+                p.setPen(QPen(col, 2))
+                p.drawLine(x, 0, x, h)
+                p.setPen(col)
+                p.drawText(x + 3, 12, str(m.get("label", "")))
+            # playhead
+            if self._playhead is not None and self._duration > 0:
+                x = self._x_for_seconds(self._playhead)
+                p.setPen(QPen(QColor(245, 245, 250), 1))
+                p.drawLine(x, 0, x, h)
+        finally:
+            p.end()
+
+
+class PhraseStartDialog(QDialog):
+    """Phrase-Aligned Song Start — lightweight marker editor / preview.
+
+    No waveform rendering (deferred): a BPM field that derives 4/8/16-bar
+    markers, a list of all markers (bar + custom) with a position slider, and
+    Preview / Save / Use-as-start actions. Markers persist in phrase_markers.db
+    keyed by the song's path so they are reused automatically next time.
+    """
+
+    def __init__(self, app, *, primary_path, audio_path, song_key, duration,
+                 current_start=None, display_name="this song"):
+        super().__init__(app)
+        from PyQt6.QtWidgets import QLineEdit, QDoubleSpinBox
+        self.app = app
+        self.primary_path = str(primary_path or "")
+        self.audio_path = str(audio_path or primary_path or "")
+        self.song_key = str(song_key or "")
+        self.duration = float(duration or 0.0)
+        self.chosen_seconds = None  # set when "Use as Start" is clicked
+
+        self.setWindowTitle("Custom Phrase Start")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+        try:
+            win = app.palette().color(QPalette.ColorRole.Window)
+            base = app.palette().color(QPalette.ColorRole.Base)
+            txtc = app.palette().color(QPalette.ColorRole.Text)
+            self.setStyleSheet(dialog_stylesheet(win, base, txtc))
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        header = QLabel(f"Phrase start for:\n{display_name}")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        # BPM row
+        bpm_row = QHBoxLayout()
+        bpm_row.addWidget(QLabel("BPM:"))
+        self.bpm_edit = QLineEdit()
+        detected = self.app._phrase_resolve_bpm(self.primary_path, self.audio_path, prompt=False, parent=self)
+        if detected:
+            self.bpm_edit.setText(f"{float(detected):g}")
+        self.bpm_edit.setPlaceholderText("e.g. 120 (enter to compute 4/8/16-bar marks)")
+        bpm_row.addWidget(self.bpm_edit, 1)
+        recompute_btn = QPushButton("Compute bar marks")
+        recompute_btn.clicked.connect(self._recompute_bars)
+        bpm_row.addWidget(recompute_btn)
+        layout.addLayout(bpm_row)
+
+        # Waveform with marker lines (click to set position & preview)
+        self.waveform = PhraseWaveformWidget()
+        self.waveform.set_duration(self.duration)
+        self.waveform.set_position_callback(self._on_waveform_click)
+        layout.addWidget(self.waveform)
+        self._suggested_seconds = None
+
+        # Marker list (edit/delete)
+        layout.addWidget(QLabel("Markers (click waveform or a row to set position & preview):"))
+        self.marker_list = QListWidget()
+        self.marker_list.setMaximumHeight(140)
+        self.marker_list.itemClicked.connect(self._on_marker_clicked)
+        layout.addWidget(self.marker_list, 1)
+
+        # Position row
+        pos_row = QHBoxLayout()
+        pos_row.addWidget(QLabel("Position (s):"))
+        self.pos_spin = QDoubleSpinBox()
+        self.pos_spin.setDecimals(2)
+        self.pos_spin.setRange(0.0, max(0.0, self.duration if self.duration > 0 else 3600.0))
+        self.pos_spin.setSingleStep(0.5)
+        self.pos_spin.valueChanged.connect(self._on_spin_changed)
+        pos_row.addWidget(self.pos_spin)
+        self.pos_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pos_slider.setRange(0, int((self.duration if self.duration > 0 else 600.0) * 100))
+        self.pos_slider.valueChanged.connect(self._on_slider_changed)
+        pos_row.addWidget(self.pos_slider, 1)
+        layout.addLayout(pos_row)
+
+        # Action buttons
+        actions = QHBoxLayout()
+        self.preview_btn = QPushButton("Preview from here")
+        self.preview_btn.clicked.connect(lambda: self._preview(self.pos_spin.value()))
+        actions.addWidget(self.preview_btn)
+        save_btn = QPushButton("Save custom marker")
+        save_btn.clicked.connect(self._save_custom)
+        actions.addWidget(save_btn)
+        del_btn = QPushButton("Delete selected")
+        del_btn.clicked.connect(self._delete_selected)
+        actions.addWidget(del_btn)
+        self.suggest_btn = QPushButton("Use suggestion")
+        self.suggest_btn.setEnabled(False)
+        self.suggest_btn.setToolTip("Analyzing…")
+        self.suggest_btn.clicked.connect(self._use_suggestion)
+        actions.addWidget(self.suggest_btn)
+        layout.addLayout(actions)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        use_btn = QPushButton("Use as start")
+        use_btn.clicked.connect(self._use_as_start)
+        bottom.addWidget(close_btn)
+        bottom.addWidget(use_btn)
+        layout.addLayout(bottom)
+
+        # Preview is disabled during a live performance to protect the show.
+        if self.app._phrase_is_playing():
+            self.preview_btn.setEnabled(False)
+            self.preview_btn.setToolTip("Stop playback to preview")
+
+        if current_start is not None and current_start > 0:
+            self._set_position(float(current_start))
+        self._reload_markers()
+        self._start_waveform_decode()
+
+    def _start_waveform_decode(self):
+        """Decode the waveform + compute a suggested start off the UI thread."""
+        try:
+            self._wf_thread = QThread(self)
+            self._wf_worker = WaveformDecodeWorker(self.audio_path, 1200, bpm=self._parsed_bpm())
+            self._wf_worker.moveToThread(self._wf_thread)
+            self._wf_thread.started.connect(self._wf_worker.run)
+            self._wf_worker.done.connect(self._on_waveform_ready)
+            self._wf_worker.done.connect(self._wf_thread.quit)
+            self._wf_worker.done.connect(self._wf_worker.deleteLater)
+            self._wf_thread.finished.connect(self._wf_thread.deleteLater)
+            self._wf_thread.start()
+        except Exception as e:
+            _diag(f"[PHRASE-WAVEFORM] could not start decode: {e}")
+
+    def _on_waveform_ready(self, peaks, suggested):
+        try:
+            if peaks is not None:
+                self.waveform.set_peaks(peaks)
+            if suggested is not None and suggested >= 0:
+                self._suggested_seconds = float(suggested)
+                self.suggest_btn.setEnabled(True)
+                self.suggest_btn.setToolTip(f"Suggested start ~{self.app._fmt_mmss(suggested)}")
+            else:
+                self.suggest_btn.setToolTip("No clear intro to skip")
+            self._reload_markers()
+        except Exception as e:
+            _diag(f"[PHRASE-WAVEFORM] ready handler failed: {e}")
+
+    def _on_waveform_click(self, seconds):
+        self._set_position(seconds)
+        self._preview(seconds)
+
+    def _use_suggestion(self):
+        if self._suggested_seconds is None:
+            return
+        self._set_position(self._suggested_seconds)
+        try:
+            phrase_markers.upsert_marker(
+                self.primary_path, kind="custom", seconds=float(self._suggested_seconds),
+                label="Suggested", source="detected", song_key=self.song_key,
+            )
+            self.app._sync_push_phrase_markers()
+        except Exception:
+            pass
+        self._reload_markers()
+
+    # ── helpers ──
+    def _parsed_bpm(self):
+        try:
+            v = float(self.bpm_edit.text().strip())
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    def _set_position(self, seconds):
+        seconds = max(0.0, float(seconds or 0.0))
+        self.pos_spin.blockSignals(True)
+        self.pos_slider.blockSignals(True)
+        self.pos_spin.setValue(seconds)
+        self.pos_slider.setValue(int(seconds * 100))
+        self.pos_spin.blockSignals(False)
+        self.pos_slider.blockSignals(False)
+        try:
+            self.waveform.set_playhead(seconds)
+        except Exception:
+            pass
+
+    def _on_spin_changed(self, val):
+        self.pos_slider.blockSignals(True)
+        self.pos_slider.setValue(int(float(val) * 100))
+        self.pos_slider.blockSignals(False)
+
+    def _on_slider_changed(self, val):
+        self.pos_spin.blockSignals(True)
+        self.pos_spin.setValue(float(val) / 100.0)
+        self.pos_spin.blockSignals(False)
+
+    def _reload_markers(self):
+        self.marker_list.clear()
+        bpm = self._parsed_bpm()
+        rows = []
+        if bpm:
+            for bars in (4, 8, 16):
+                secs = phrase_markers.bars_to_seconds(bars, bpm)
+                if secs is not None and (self.duration <= 0 or secs < self.duration):
+                    rows.append({"label": phrase_markers.bar_label(bars), "seconds": secs,
+                                 "kind": phrase_markers.bar_kind(bars), "id": None})
+        try:
+            for m in phrase_markers.list_markers(self.primary_path, self.song_key):
+                if m.get("kind") == "custom":
+                    rows.append({"label": m.get("label") or "Custom", "seconds": float(m["seconds"]),
+                                 "kind": "custom", "id": m.get("id")})
+        except Exception:
+            pass
+        if self._suggested_seconds is not None and self._suggested_seconds > 0:
+            rows.append({"label": "Suggested", "seconds": float(self._suggested_seconds),
+                         "kind": "suggested", "id": None})
+        rows.sort(key=lambda r: r["seconds"])
+        for r in rows:
+            item = QListWidgetItem(f"{r['label']}  —  {self.app._fmt_mmss(r['seconds'])}")
+            item.setData(Qt.ItemDataRole.UserRole, r)
+            self.marker_list.addItem(item)
+        # Mirror the markers onto the waveform overlay.
+        try:
+            self.waveform.set_markers(rows)
+        except Exception:
+            pass
+
+    def _on_marker_clicked(self, item):
+        r = item.data(Qt.ItemDataRole.UserRole) or {}
+        secs = float(r.get("seconds") or 0.0)
+        self._set_position(secs)
+        # Requirement: clicking a marker previews from that point (safe no-op if playing).
+        self._preview(secs)
+
+    def _recompute_bars(self):
+        if not self._parsed_bpm():
+            QMessageBox.information(self, "Phrase Start", "Enter a valid BPM first.")
+            return
+        bpm = self._parsed_bpm()
+        for bars in (4, 8, 16):
+            secs = phrase_markers.bars_to_seconds(bars, bpm)
+            if secs is None:
+                continue
+            try:
+                phrase_markers.upsert_marker(
+                    self.primary_path, kind=phrase_markers.bar_kind(bars), seconds=float(secs),
+                    bars=int(bars), bpm=float(bpm), label=phrase_markers.bar_label(bars),
+                    source="bpm", song_key=self.song_key,
+                )
+            except Exception:
+                pass
+        self.app._sync_push_phrase_markers()
+        self._reload_markers()
+
+    def _save_custom(self):
+        secs = float(self.pos_spin.value())
+        try:
+            phrase_markers.upsert_marker(
+                self.primary_path, kind="custom", seconds=secs, label="Custom",
+                source="manual", song_key=self.song_key,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Phrase Start", f"Could not save marker:\n{e}")
+            return
+        self.app._sync_push_phrase_markers()
+        self._reload_markers()
+
+    def _delete_selected(self):
+        item = self.marker_list.currentItem()
+        if not item:
+            return
+        r = item.data(Qt.ItemDataRole.UserRole) or {}
+        if not r.get("id"):
+            QMessageBox.information(self, "Phrase Start", "Bar marks are derived from BPM and can't be deleted; change the BPM instead.")
+            return
+        try:
+            phrase_markers.delete_marker(int(r["id"]))
+        except Exception:
+            pass
+        self.app._sync_push_phrase_markers()
+        self._reload_markers()
+
+    def _preview(self, seconds):
+        if self.app._phrase_is_playing():
+            QMessageBox.information(self, "Preview", "Stop the current song before previewing.")
+            return
+        try:
+            self.app._phrase_preview_at(self.primary_path, self.audio_path, float(seconds))
+        except Exception as e:
+            QMessageBox.warning(self, "Preview", f"Could not preview:\n{e}")
+
+    def _use_as_start(self):
+        self.chosen_seconds = float(self.pos_spin.value())
+        # Persist as a custom marker + default so it's reused next time.
+        try:
+            mid = phrase_markers.upsert_marker(
+                self.primary_path, kind="custom", seconds=self.chosen_seconds, label="Custom",
+                source="manual", song_key=self.song_key, make_default=True,
+            )
+            phrase_markers.set_default_marker(self.primary_path, mid)
+            self.app._sync_push_phrase_markers()
+        except Exception:
+            pass
+        self.accept()
+
+
 class PreviewVideoAreaWidget(QWidget):
     """Native preview surface widget that can be replaced to evict stale GL overlays."""
     def __init__(self, owner):
@@ -14040,6 +14473,12 @@ class KaraokeApp(QWidget):
         except Exception:
             tempo_percent = None
 
+        phrase_start = entry.get("phrase_start_seconds")
+        try:
+            phrase_start = float(phrase_start) if phrase_start is not None else None
+        except Exception:
+            phrase_start = None
+
         right_parts = []
         if duet_display:
             # Bare "DUET" marker only — the badge delegate renders it as a chip.
@@ -14055,6 +14494,8 @@ class KaraokeApp(QWidget):
             right_parts.append(f"KEY {key:+d}")
         if tempo_percent is not None and tempo_percent != 100:
             right_parts.append(f"SPD {tempo_percent}%")
+        if phrase_start is not None and phrase_start > 0:
+            right_parts.append(f"START {self._fmt_mmss(phrase_start)}")
 
         right = "  ".join([p for p in right_parts if p])
 
@@ -14070,6 +14511,8 @@ class KaraokeApp(QWidget):
             detail_parts.append(f"Key: {key:+d}")
         if tempo_percent is not None and tempo_percent != 100:
             detail_parts.append(f"Speed: {tempo_percent}%")
+        if phrase_start is not None and phrase_start > 0:
+            detail_parts.append(f"Start: {self._fmt_mmss(phrase_start)}")
         if detail_parts:
             tooltip_parts.append("  ".join(detail_parts))
         tooltip = "\n".join([p for p in tooltip_parts if p])
@@ -14734,7 +15177,7 @@ class KaraokeApp(QWidget):
         self.preview_window.force_black = False
         self.preview_window.update()
 
-    def _play_python_mp4(self, song_path, semitones=0):
+    def _play_python_mp4(self, song_path, semitones=0, start_seconds=0.0):
         self._reset_end_silence_state()
         self._prepare_python_karaoke_start(song_path)
         self._current_karaoke_mode = "mp4"
@@ -14758,6 +15201,7 @@ class KaraokeApp(QWidget):
             video_path=song_path,
             mode="mp4",
             semitones=self._current_karaoke_semitones,
+            start_seconds=start_seconds,
         )
 
     def _play_python_cdg(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0):
@@ -14780,7 +15224,7 @@ class KaraokeApp(QWidget):
             start_seconds=start_seconds,
         )
 
-    def _play_python_mp3(self, song_path, semitones=0):
+    def _play_python_mp3(self, song_path, semitones=0, start_seconds=0.0):
         self._reset_end_silence_state()
         self._prepare_python_karaoke_start(song_path)
         self._current_karaoke_mode = "mp3"
@@ -14790,6 +15234,7 @@ class KaraokeApp(QWidget):
             video_path=None,
             mode="audio",
             semitones=self._current_karaoke_semitones,
+            start_seconds=start_seconds,
         )
 
     def _gst_teardown(self):
@@ -15405,6 +15850,15 @@ class KaraokeApp(QWidget):
 
         self.poll_thread.start()
         print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
+
+        # Pull cloud phrase markers once when networking comes up, and push any
+        # local changes that haven't been backed up yet. Both run in background
+        # threads and never block playback.
+        try:
+            self._pull_phrase_markers()
+            self._sync_push_phrase_markers()
+        except Exception as e:
+            _diag(f"[PHRASE-SYNC] startup sync skipped: {e}")
         try:
             QTimer.singleShot(250, lambda: self._sync_remote_removal_tombstones_async("poll_start"))
         except Exception:
@@ -17186,10 +17640,17 @@ class KaraokeApp(QWidget):
         logs_btn = QPushButton("Logs")
         logs_btn.setToolTip(f"Open logs folder: {LOGS_DIR}")
 
+        export_markers_btn = QPushButton("Export Phrase Markers")
+        import_markers_btn = QPushButton("Import Phrase Markers")
+        export_markers_btn.clicked.connect(self.export_phrase_markers)
+        import_markers_btn.clicked.connect(self.import_phrase_markers)
+
         _search_actions_card = _section_card(tab_search, "Library Tools")
         _search_actions = QHBoxLayout()
         _search_actions.addWidget(scan_folder_btn)
         _search_actions.addWidget(export_csv_btn)
+        _search_actions.addWidget(export_markers_btn)
+        _search_actions.addWidget(import_markers_btn)
         _search_actions.addStretch(1)
         _search_actions_card.addLayout(_search_actions)
 
@@ -17730,11 +18191,21 @@ class KaraokeApp(QWidget):
         dur, _member_key = fast_mp3_duration_from_zip(zip_path)
         return int(dur) if dur and dur > 0 else None
 
-    def play_mp3g_zip(self, zip_path, semitones=0):
+    def play_mp3g_zip(self, zip_path, semitones=0, start_seconds=0.0):
+        # Phrase-start: the start offset must survive the async extraction
+        # round-trip, since _on_zip_extract_finished re-enters this method
+        # without the offset. Stash it per zip_path and read it back here.
+        if not hasattr(self, "_mp3g_pending_start"):
+            self._mp3g_pending_start = {}
+        effective_start = float(start_seconds or 0.0)
+        if effective_start <= 0.0:
+            effective_start = float(self._mp3g_pending_start.get(str(zip_path), 0.0))
         # Cached ZIPs can start immediately; uncached extraction happens in a
         # worker so Python zipfile or fallback `unzip` cannot freeze the GUI.
         cdg_path, mp3_path = self.zip_cache.cached_paths_if_ready(zip_path)
         if not cdg_path or not mp3_path:
+            if float(start_seconds or 0.0) > 0.0:
+                self._mp3g_pending_start[str(zip_path)] = float(start_seconds)
             print("[PERF] main_thread_blocking_call removed task=zip_extract worker=QThread")
             try:
                 if getattr(self, "_zip_extract_thread", None) is not None and self._zip_extract_thread.isRunning():
@@ -17768,8 +18239,9 @@ class KaraokeApp(QWidget):
         print(f"🎵 Using extracted CDG: {cdg_path}")
         print(f"🎵 Using extracted MP3: {mp3_path}")
 
-        # Run playback
-        self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones)
+        # Run playback (with any phrase-start offset carried across extraction)
+        self._mp3g_pending_start.pop(str(zip_path), None)
+        self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones, start_seconds=effective_start)
 
     def _on_zip_extract_finished(self, zip_path: str, cdg_path: str, mp3_path: str, semitones: int, ok: bool, message: str):
         try:
@@ -22962,6 +23434,10 @@ class KaraokeApp(QWidget):
             key_action.triggered.connect(lambda: self.open_song_key_dialog(singer_idx, song_idx))
             speed_action = menu.addAction("Change Speed / Tempo…")
             speed_action.triggered.connect(lambda: self.open_song_tempo_dialog(singer_idx, song_idx))
+            menu.addSeparator()
+            phrase_menu = menu.addMenu("Phrase Start")
+            style_app_menu(phrase_menu)
+            self._build_phrase_start_submenu(phrase_menu, singer_idx, song_idx)
 
         if not menu.isEmpty():
             menu.exec(self.queue_display.viewport().mapToGlobal(position))
@@ -22973,6 +23449,33 @@ class KaraokeApp(QWidget):
         except Exception:
             return None
         return entry if isinstance(entry, dict) else None
+
+    def _resolve_phrase_start(self, primary_path, entry, duration_secs=0.0) -> float:
+        """Where this song should start (seconds). A per-instance choice on the
+        queue entry wins (including an explicit 0.0 = Beginning); otherwise the
+        song's saved default marker is reused; otherwise 0.0. Always clamped to
+        a safe range. Never raises — phrase-start must never block playback."""
+        try:
+            entry_override = None
+            if isinstance(entry, dict) and entry.get("phrase_start_seconds") is not None:
+                entry_override = float(entry.get("phrase_start_seconds"))
+            default_seconds = None
+            if entry_override is None and primary_path:
+                marker = phrase_markers.default_marker(str(primary_path))
+                if marker:
+                    default_seconds = float(marker.get("seconds") or 0.0)
+            start = phrase_markers.resolve_start_seconds(entry_override, default_seconds, duration_secs)
+            if start > 0.0:
+                _diag(f"[PHRASE-START] start={start:.3f}s "
+                      f"(override={entry_override} default={default_seconds} dur={duration_secs}) "
+                      f"path={os.path.basename(str(primary_path or ''))}")
+            return float(start)
+        except Exception as e:
+            try:
+                _diag(f"[PHRASE-START] resolve failed, starting at 0: {e}")
+            except Exception:
+                pass
+            return 0.0
 
     def _persist_song_modifier_change(self, message: str = ""):
         """Save + refresh after editing a per-song key/tempo override."""
@@ -23047,6 +23550,288 @@ class KaraokeApp(QWidget):
         self._persist_song_modifier_change(
             f"Speed {int(val)}% set for {name}" if int(val) != 100 else f"Speed reset for {name}"
         )
+
+    # ── Phrase-Aligned Song Start ────────────────────────────────────────────
+    def _phrase_song_paths(self, entry):
+        """(primary_path, audio_path) for an entry. primary_path is the marker
+        key (matches play-dispatch); audio_path is the file BPM tags live on
+        (the paired MP3 for CDG)."""
+        song_info = entry.get("song_info") if isinstance(entry, dict) else entry
+        try:
+            primary = self._song_info_primary_path(song_info) or ""
+        except Exception:
+            primary = ""
+        try:
+            audio = self._loudness_audio_path(song_info) or primary
+        except Exception:
+            audio = primary
+        return str(primary), str(audio)
+
+    def _phrase_resolve_bpm(self, primary_path, audio_path, *, prompt=True, parent=None):
+        """BPM for a song: a saved marker's bpm, else embedded tags, else (if
+        prompt) ask the host. Returns float or None."""
+        try:
+            marker = phrase_markers.default_marker(str(primary_path)) if primary_path else None
+            if marker and marker.get("bpm"):
+                return float(marker["bpm"])
+        except Exception:
+            pass
+        bpm = phrase_markers.read_bpm_from_tags(audio_path or primary_path)
+        if bpm:
+            return float(bpm)
+        if not prompt:
+            return None
+        val, ok = QInputDialog.getDouble(
+            parent or self, "Phrase Start — BPM",
+            "No BPM metadata for this song.\nEnter the song's BPM to compute phrase points:",
+            120.0, 40.0, 300.0, 1,
+        )
+        return float(val) if ok and val > 0 else None
+
+    @staticmethod
+    def _fmt_mmss(seconds: float) -> str:
+        seconds = max(0.0, float(seconds or 0.0))
+        m = int(seconds // 60)
+        s = seconds - m * 60
+        return f"{m}:{s:05.2f}"
+
+    def _build_phrase_start_submenu(self, menu, singer_idx: int, song_idx: int):
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            act = menu.addAction("Phrase start unavailable for this entry")
+            act.setEnabled(False)
+            return
+        primary, audio = self._phrase_song_paths(entry)
+        try:
+            current = entry.get("phrase_start_seconds")
+            current = float(current) if current is not None else None
+        except Exception:
+            current = None
+        # Non-prompting BPM peek just for labels.
+        bpm = self._phrase_resolve_bpm(primary, audio, prompt=False)
+
+        begin_act = menu.addAction("✓ Start at Beginning" if (current is None or current <= 0.0) else "Start at Beginning")
+        begin_act.triggered.connect(lambda: self._set_phrase_start_beginning(singer_idx, song_idx))
+        menu.addSeparator()
+        for bars in (4, 8, 16):
+            label = f"Start at {bars} Bars"
+            if bpm:
+                secs = phrase_markers.bars_to_seconds(bars, bpm)
+                if secs is not None:
+                    label += f"  ({self._fmt_mmss(secs)})"
+                    if current is not None and abs(current - secs) < 0.05:
+                        label = "✓ " + label
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _checked=False, b=bars: self._apply_phrase_bars(singer_idx, song_idx, b))
+        menu.addSeparator()
+        custom_act = menu.addAction("Custom Phrase Start…")
+        custom_act.triggered.connect(lambda: self.open_phrase_start_dialog(singer_idx, song_idx))
+
+    def _set_phrase_start_beginning(self, singer_idx: int, song_idx: int):
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            return
+        # Explicit 0.0 (not None) so it overrides any saved default marker.
+        entry["phrase_start_seconds"] = 0.0
+        name = str(entry.get("display_name") or "this song")
+        self._persist_song_modifier_change(f"Phrase start reset to beginning for {name}")
+
+    def _apply_phrase_bars(self, singer_idx: int, song_idx: int, bars: int):
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            return
+        primary, audio = self._phrase_song_paths(entry)
+        bpm = self._phrase_resolve_bpm(primary, audio, prompt=True)
+        if not bpm:
+            # No BPM and host declined to enter one → steer to manual markers.
+            self.open_phrase_start_dialog(singer_idx, song_idx)
+            return
+        seconds = phrase_markers.bars_to_seconds(bars, bpm)
+        if seconds is None:
+            return
+        entry["phrase_start_seconds"] = float(seconds)
+        try:
+            if primary:
+                phrase_markers.upsert_marker(
+                    primary, kind=phrase_markers.bar_kind(bars), seconds=float(seconds),
+                    bars=int(bars), bpm=float(bpm), label=phrase_markers.bar_label(bars),
+                    source="bpm", song_key=self._phrase_song_key(entry), make_default=True,
+                )
+        except Exception as e:
+            _diag(f"[PHRASE-START] could not save bar marker: {e}")
+        self._sync_push_phrase_markers()
+        name = str(entry.get("display_name") or "this song")
+        self._persist_song_modifier_change(
+            f"Phrase start: {bars} bars ({self._fmt_mmss(seconds)}) for {name}"
+        )
+
+    # ── marker cloud sync + file backup ──────────────────────────────────────
+    def _phrase_sync_config(self):
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        return base_url, tenant, api_key
+
+    def _sync_push_phrase_markers(self):
+        """Push markers changed since the last successful push to the server
+        (cloud backup). Background thread; never blocks the UI/playback."""
+        base_url, tenant, api_key = self._phrase_sync_config()
+        if not base_url or not tenant or not api_key:
+            return
+        try:
+            since = float(self.settings.get("phrase_markers_pushed_at", 0) or 0)
+            changed = phrase_markers.changed_since(since)
+        except Exception as e:
+            _diag(f"[PHRASE-SYNC] changed_since failed: {e}")
+            return
+        if not changed:
+            return
+        import threading, requests, json as _json
+
+        def send():
+            try:
+                resp = requests.post(
+                    f"{base_url}/api/v1/set_phrase_markers.php",
+                    data={"user": tenant, "markers": _json.dumps(changed)},
+                    headers={"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/phrase-markers"},
+                    timeout=8,
+                )
+                if 200 <= resp.status_code < 300:
+                    maxupd = max(int(m.get("updated_at") or 0) for m in changed)
+                    self.settings["phrase_markers_pushed_at"] = maxupd
+                    _diag(f"[PHRASE-SYNC] pushed {len(changed)} marker(s) up to {maxupd}")
+                else:
+                    print(f"[PHRASE-SYNC] push HTTP {resp.status_code}: {resp.text[:160]}")
+            except Exception as e:
+                print(f"[PHRASE-SYNC] push failed: {e}")
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def _pull_phrase_markers(self):
+        """Pull server markers changed since our watermark and merge them
+        (last-write-wins). Runs once at startup. Background thread."""
+        base_url, tenant, api_key = self._phrase_sync_config()
+        if not base_url or not tenant or not api_key:
+            return
+        try:
+            since = int(self.settings.get("phrase_markers_synced_at", 0) or 0)
+        except Exception:
+            since = 0
+        import threading, requests
+
+        def fetch():
+            try:
+                resp = requests.get(
+                    f"{base_url}/api/v1/get_phrase_markers.php",
+                    params={"user": tenant, "since": since},
+                    headers={"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/phrase-markers"},
+                    timeout=8,
+                )
+                if 200 <= resp.status_code < 300:
+                    data = resp.json()
+                    markers = data.get("markers", []) or []
+                    if markers:
+                        applied = phrase_markers.apply_remote(markers)
+                        _diag(f"[PHRASE-SYNC] pulled {len(markers)} marker(s), applied {applied}")
+                    self.settings["phrase_markers_synced_at"] = int(data.get("now") or since)
+                else:
+                    print(f"[PHRASE-SYNC] pull HTTP {resp.status_code}: {resp.text[:160]}")
+            except Exception as e:
+                print(f"[PHRASE-SYNC] pull failed: {e}")
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def export_phrase_markers(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(self, "Export Phrase Markers", "phrase_markers.json", "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            count = phrase_markers.export_to_json(path)
+            self._set_processing_text(f"Exported {count} phrase marker(s).")
+        except Exception as e:
+            QMessageBox.warning(self, "Export Phrase Markers", f"Could not export:\n{e}")
+
+    def import_phrase_markers(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Import Phrase Markers", "", "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            applied = phrase_markers.import_from_json(path)
+            self._sync_push_phrase_markers()
+            self._set_processing_text(f"Imported {applied} phrase marker(s).")
+        except Exception as e:
+            QMessageBox.warning(self, "Import Phrase Markers", f"Could not import:\n{e}")
+
+    def _phrase_song_key(self, entry) -> str:
+        try:
+            return phrase_markers.song_key_for(
+                path=self._phrase_song_paths(entry)[0],
+                artist=str(entry.get("artist", "") or ""),
+                title=str(entry.get("title", "") or ""),
+                discid=str(entry.get("discid", "") or ""),
+            )
+        except Exception:
+            return ""
+
+    def _phrase_is_playing(self) -> bool:
+        """True if a karaoke song is currently playing (preview is blocked then)."""
+        try:
+            if getattr(self, "karaoke_transport", None) is not None:
+                return True
+            if getattr(self, "gst_pipeline", None):
+                return True
+            if getattr(self, "preview_pipeline", None):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _phrase_preview_at(self, primary_path, audio_path, seconds):
+        """Start the song at `seconds` for preview (default key/tempo). Does NOT
+        touch the queue. Only called when nothing is playing (guarded by the
+        dialog) so it cannot interrupt a live performance."""
+        p = str(primary_path or "")
+        pl = p.lower()
+        if pl.endswith(".mp4"):
+            self.play_mp4(p, semitones=0, start_seconds=seconds)
+        elif pl.endswith(".mp3"):
+            self.play_mp3(p, semitones=0, start_seconds=seconds)
+        elif pl.endswith(".zip"):
+            self.play_mp3g_zip(p, semitones=0, start_seconds=seconds)
+        elif pl.endswith(".cdg"):
+            mp3 = audio_path if (audio_path and audio_path.lower().endswith(".mp3")) else (os.path.splitext(p)[0] + ".mp3")
+            if not os.path.exists(mp3):
+                raise RuntimeError("Missing MP3 pair for CDG preview")
+            self.play_cdg_mp3_dual(p, mp3, semitones=0, start_seconds=seconds)
+        else:
+            raise RuntimeError(f"Unsupported media for preview: {p}")
+
+    def open_phrase_start_dialog(self, singer_idx: int, song_idx: int):
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            return
+        primary, audio = self._phrase_song_paths(entry)
+        try:
+            duration = float(entry.get("duration") or self._get_duration_secs(audio) or 0.0)
+        except Exception:
+            duration = 0.0
+        dlg = PhraseStartDialog(
+            self,
+            primary_path=primary,
+            audio_path=audio,
+            song_key=self._phrase_song_key(entry),
+            duration=duration,
+            current_start=entry.get("phrase_start_seconds"),
+            display_name=str(entry.get("display_name") or "this song"),
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.chosen_seconds is not None:
+            entry["phrase_start_seconds"] = float(dlg.chosen_seconds)
+            name = str(entry.get("display_name") or "this song")
+            self._persist_song_modifier_change(
+                f"Phrase start: {self._fmt_mmss(dlg.chosen_seconds)} for {name}"
+            )
 
     def rename_singer_dialog(self, singer_idx: int):
         if singer_idx < 0 or singer_idx >= len(self.queue):
@@ -27383,6 +28168,11 @@ class KaraokeApp(QWidget):
         except Exception:
             current_song_dur = 0
 
+        # Phrase-Aligned Song Start: resolve where this song should begin. A
+        # per-instance choice on the queue entry wins; otherwise the song's
+        # saved default marker is reused; otherwise 0 (the file start).
+        phrase_start = self._resolve_phrase_start(primary_path, entry, current_song_dur)
+
         self.video_window.force_black = False
         self.video_window.idle = False
         self.video_window.update()
@@ -27402,19 +28192,19 @@ class KaraokeApp(QWidget):
             if isinstance(song_info[0], str) and song_info[0].endswith(".cdg"):
                 cdg_path, mp3_path = song_info
                 song_path_display = cdg_path
-                self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key)
+                self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start)
             elif isinstance(song_info[0], str) and song_info[0].endswith(".mp4"):
                 # Old tuple (original, processed) — play original with realtime key change
                 orig_mp4 = song_info[0]
                 song_path_display = orig_mp4
-                self.play_mp4(orig_mp4, semitones=key)
+                self.play_mp4(orig_mp4, semitones=key, start_seconds=phrase_start)
             else:
                 # Fallback to first element
                 song_path_display = str(song_info[0])
                 if song_path_display.endswith(".mp4"):
-                    self.play_mp4(song_path_display, semitones=key)
+                    self.play_mp4(song_path_display, semitones=key, start_seconds=phrase_start)
                 elif song_path_display.endswith(".mp3"):
-                    self.play_mp3(song_path_display, semitones=key)
+                    self.play_mp3(song_path_display, semitones=key, start_seconds=phrase_start)
                 else:
                     print("Unsupported tuple format:", song_info)
                     return
@@ -27422,13 +28212,13 @@ class KaraokeApp(QWidget):
             # Plain string path
             song_path_display = song_info
             if song_info.endswith(".mp4"):
-                self.play_mp4(song_info, semitones=key)
+                self.play_mp4(song_info, semitones=key, start_seconds=phrase_start)
             elif song_info.endswith(".mp3"):
-                self.play_mp3(song_info, semitones=key)
+                self.play_mp3(song_info, semitones=key, start_seconds=phrase_start)
             elif song_info.endswith(".zip"):
                 # NEW: Handle MP3G zip files
                 if self.is_mp3g_zip(song_info):
-                    self.play_mp3g_zip(song_info, semitones=key)
+                    self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start)
                 else:
                     print("Invalid zip format:", song_info)
                     return
@@ -27436,7 +28226,7 @@ class KaraokeApp(QWidget):
                 base, _ = os.path.splitext(song_info)
                 mp3_path = base + ".mp3"
                 if os.path.exists(mp3_path):
-                    self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key)
+                    self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start)
                 else:
                     _diag(f"[PLAYNEXT] failed: missing MP3 pair for CDG {song_info}")
                     print("Missing MP3 for CDG:", song_info)
@@ -27844,8 +28634,8 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[BG] Manual-stop recovery failed: {e}")
     
-    def play_mp4(self, song_path, semitones=0):
-        self._play_python_mp4(song_path, semitones)
+    def play_mp4(self, song_path, semitones=0, start_seconds=0.0):
+        self._play_python_mp4(song_path, semitones, start_seconds=start_seconds)
 
 
     def play_cdg_mp3_dual(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, fast_restart=False):
@@ -27856,8 +28646,8 @@ class KaraokeApp(QWidget):
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(0, self._handle_media_end_safe)
                 
-    def play_mp3(self, song_path, semitones=0):
-        self._play_python_mp3(song_path, semitones)
+    def play_mp3(self, song_path, semitones=0, start_seconds=0.0):
+        self._play_python_mp3(song_path, semitones, start_seconds=start_seconds)
 
 
     def get_singer_index_by_row(self, row):
