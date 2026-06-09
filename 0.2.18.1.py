@@ -2481,6 +2481,8 @@ DEFAULTS = {
     "rotation_estimate_include_all_songs": False,  # False=first song only, True=all queued songs
     "rotation_padding_sec": 90,            # seconds added per active singer in queue ETA
     "queue_mode": "classic",               # classic | rotation
+    "rotation_locked": False,               # one-shot: weave new singers into the next rotation
+    "rotation_lock_insert_count": 0,        # session/persisted spacing counter for locked inserts
     "end_silence_trim_enabled": True,      # CDG/ZIP/MP4: detect trailing karaoke silence and bring BG up early (no dead air)
     "end_silence_trim_threshold_sec": 6.0, # sustained low audio before intelligent karaoke early-end
     "karaoke_auto_advance": False,         # auto-play the next queued karaoke when a song ends (off = stop after each song)
@@ -12590,20 +12592,26 @@ class KaraokeApp(QWidget):
         self.move_down_button = QPushButton("↓︎  Move Down")
         self.remove_button = QPushButton("✕  Remove")
         self.clear_queue_button = QPushButton("Clear Queue")
+        # Rotation Lock — only visible/usable in Rotation mode (see _update_rotation_lock_button).
+        self.rotation_lock_button = QPushButton("Lock")
+        self.rotation_lock_button.setToolTip("Lock rotation")
         self.move_up_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.move_down_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.remove_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_queue_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.rotation_lock_button.setCursor(Qt.CursorShape.PointingHandCursor)
         # Move buttons share equal width; Remove is slightly narrower and sits apart.
         btn_row1.addWidget(self.move_up_button, 1)
         btn_row1.addWidget(self.move_down_button, 1)
         btn_row1.addWidget(self.remove_button, 1)
         btn_row1.addWidget(self.clear_queue_button, 1)
+        btn_row1.addWidget(self.rotation_lock_button, 0)
 
         self.move_up_button.clicked.connect(self.move_up)
         self.move_down_button.clicked.connect(self.move_down)
         self.remove_button.clicked.connect(self.remove_selected)
         self.clear_queue_button.clicked.connect(self.clear_queue_with_confirmation)
+        self.rotation_lock_button.clicked.connect(self.toggle_rotation_lock_button)
 
         # Neutral, polished style for the reorder controls.
         _reorder_btn_css = f"""
@@ -13565,6 +13573,7 @@ class KaraokeApp(QWidget):
         else:
             QTimer.singleShot(1500, self._refresh_singer_history_view)
         self.update_queue_display()
+        self._update_rotation_lock_button()
         if not self._safe_mode():
             self.update_bg_track_display()
         #self.start_request_polling()
@@ -17609,6 +17618,12 @@ class KaraokeApp(QWidget):
         queue_mode_row.addStretch(1)
         v.addLayout(queue_mode_row)
 
+        rotation_lock_cb = QCheckBox("Lock rotation until next rotation starts")
+        rotation_lock_cb.setChecked(current_mode == "rotation" and bool(self.settings.get("rotation_locked", False)))
+        rotation_lock_cb.setEnabled(current_mode == "rotation")
+        rotation_lock_cb.setToolTip("New singers are woven into the next rotation, then the lock turns off automatically.")
+        v.addWidget(rotation_lock_cb)
+
         # --- Filename format (controls how Artist/Title/Disc are parsed) ---
         v = _section_card(tab_search, "Filename Format",
                           "How your files name the artist, title and disc/brand code "
@@ -17902,10 +17917,30 @@ class KaraokeApp(QWidget):
             if mode not in ("classic", "rotation"):
                 mode = "classic"
             self.settings["queue_mode"] = mode
+            rotation_lock_cb.setEnabled(mode == "rotation")
+            # Switching back to Classic always clears any rotation lock.
+            if mode != "rotation":
+                rotation_lock_cb.setChecked(False)
+                self._rotation_clear_lock(save=False)
             self.save_settings()
             try:
                 self._rotation_recompute_round_state(force_reset=False)
                 self.update_queue_display()
+                self._update_rotation_lock_button()
+            except Exception:
+                pass
+
+        def on_rotation_lock_toggled(checked: bool):
+            enabled = bool(checked) and self._is_rotation_mode()
+            self.settings["rotation_locked"] = enabled
+            if not enabled:
+                self._rotation_clear_lock(save=False)
+            else:
+                self.settings["rotation_lock_insert_count"] = 0
+            self.save_settings()
+            try:
+                self.update_queue_display()
+                self._update_rotation_lock_button()
             except Exception:
                 pass
 
@@ -18003,6 +18038,7 @@ class KaraokeApp(QWidget):
         estimate_all_songs_cb.toggled.connect(on_estimate_all_songs_toggled)
         padding_spin.valueChanged.connect(on_padding_changed)
         queue_mode_combo.currentIndexChanged.connect(on_queue_mode_changed)
+        rotation_lock_cb.toggled.connect(on_rotation_lock_toggled)
 
         def on_filename_fmt_changed(_idx: int):
             new_fmt = str(filename_fmt_combo.currentData() or DEFAULT_FILENAME_FORMAT)
@@ -23137,6 +23173,10 @@ class KaraokeApp(QWidget):
                         )
                 except Exception:
                     pass
+                # An existing singer adding another song stays in their current
+                # slot; just keep any locked newcomers interleaved correctly.
+                if self._is_rotation_locked():
+                    self._rotation_reweave_locked_tail()
                 self.update_queue_display()
                 if not is_remote:
                     self._select_queue_singer_for_host(singer_idx)
@@ -23147,13 +23187,18 @@ class KaraokeApp(QWidget):
         new_singer = {"name": primary, "songs": [entry], "skipped": False, "has_sung": False, "round_sung": False, "rotation_marker": False}
         if self._is_rotation_mode():
             self._rotation_recompute_round_state(force_reset=False)
-            marker_idx = self._rotation_marker_index()
-            ins = marker_idx if marker_idx >= 0 else self._rotation_boundary_index()
-            # Requested rule: if the next-rotation marker singer is currently top/next,
-            # keep them next and append new signups to bottom.
-            if ins == 0 and len(self.queue) > 0:
-                ins = len(self.queue)
-            self.queue.insert(ins, new_singer)
+            if self._is_rotation_locked():
+                # Locked: weave the newcomer into the NEXT rotation (around the
+                # next-rotation marker), never ahead of currently-active singers.
+                self._rotation_insert_locked_new_singer(new_singer)
+            else:
+                marker_idx = self._rotation_marker_index()
+                ins = marker_idx if marker_idx >= 0 else self._rotation_boundary_index()
+                # Requested rule: if the next-rotation marker singer is currently top/next,
+                # keep them next and append new signups to bottom.
+                if ins == 0 and len(self.queue) > 0:
+                    ins = len(self.queue)
+                self.queue.insert(ins, new_singer)
             self._rotation_repair_marker()
             self._rotation_recompute_round_state(force_reset=False)
         else:
@@ -23297,6 +23342,186 @@ class KaraokeApp(QWidget):
             return str(self.settings.get("queue_mode", "classic")).strip().lower() == "rotation"
         except Exception:
             return False
+
+    # ── Rotation Lock ────────────────────────────────────────────────────────
+    # When Rotation Mode is on, the host can "lock" the rotation so that new
+    # signups do NOT jump into the current rotation — they are woven into the
+    # NEXT rotation only (around the next-rotation marker). The lock clears
+    # itself automatically when the next rotation begins.
+    def _is_rotation_locked(self) -> bool:
+        try:
+            return self._is_rotation_mode() and bool(self.settings.get("rotation_locked", False))
+        except Exception:
+            return False
+
+    def _rotation_clear_lock(self, save: bool = True):
+        try:
+            self.settings["rotation_locked"] = False
+            self.settings["rotation_lock_insert_count"] = 0
+        except Exception:
+            pass
+        for singer in self.queue:
+            if isinstance(singer, dict):
+                singer.pop("rotation_lock_new", None)
+                singer.pop("rotation_lock_order", None)
+        if save:
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+        try:
+            self._update_rotation_lock_button()
+        except Exception:
+            pass
+
+    def _rotation_reweave_locked_tail(self):
+        """Keep locked signups interleaved with the marked/returning singers."""
+        if not self._is_rotation_locked() or not self.queue:
+            return
+
+        marker_idx = self._rotation_marker_index()
+        pinned_marker = None
+        if 0 <= marker_idx < len(self.queue) and not self.is_singer_active(self.queue[marker_idx]):
+            pinned_marker = self.queue[marker_idx]
+
+        first_new_idx = -1
+        for i, singer in enumerate(self.queue):
+            if bool(singer.get("rotation_lock_new", False)):
+                first_new_idx = i
+                break
+
+        starts = [i for i in (marker_idx, first_new_idx) if i >= 0]
+        if not starts:
+            return
+        tail_start = min(starts)
+        head = self.queue[:tail_start]
+        tail = self.queue[tail_start:]
+
+        new_tail = []
+        old_tail = []
+        for s in tail:
+            if s is pinned_marker:
+                continue
+            if bool(s.get("rotation_lock_new", False)):
+                new_tail.append(s)
+            else:
+                old_tail.append(s)
+        new_tail.sort(key=lambda s: int(s.get("rotation_lock_order", 0) or 0))
+
+        woven = []
+        if pinned_marker is not None:
+            woven.append(pinned_marker)
+        max_len = max(len(new_tail), len(old_tail))
+        for i in range(max_len):
+            if i < len(new_tail):
+                woven.append(new_tail[i])
+            if i < len(old_tail):
+                woven.append(old_tail[i])
+        self.queue = head + woven
+
+    def _rotation_insert_locked_new_singer(self, new_singer: dict):
+        try:
+            order = int(self.settings.get("rotation_lock_insert_count", 0) or 0)
+        except Exception:
+            order = 0
+        new_singer["rotation_lock_new"] = True
+        new_singer["rotation_lock_order"] = order
+        self.settings["rotation_lock_insert_count"] = order + 1
+
+        marker_idx = self._rotation_marker_index()
+        ins = marker_idx if marker_idx >= 0 else self._rotation_boundary_index()
+        if marker_idx >= 0 and not self.is_singer_active(self.queue[marker_idx]):
+            ins = marker_idx + 1
+        self.queue.insert(max(0, min(ins, len(self.queue))), new_singer)
+        self._rotation_reweave_locked_tail()
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+
+    def _update_rotation_lock_button(self):
+        btn = getattr(self, "rotation_lock_button", None)
+        if btn is None:
+            return
+
+        in_rotation = self._is_rotation_mode()
+        locked = self._is_rotation_locked()
+        btn.setVisible(in_rotation)
+        btn.setEnabled(in_rotation)
+        btn.setText("Lock")
+        btn.setToolTip("Unlock rotation" if locked else "Lock rotation")
+
+        if locked:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f3cb00;
+                    color: #111111;
+                    border: 1px solid #ffe066;
+                    border-radius: 6px;
+                    margin-top: 3px;
+                    padding: 6px 12px;
+                }
+                QPushButton:hover {
+                    background-color: #f7d735;
+                }
+                QPushButton:pressed {
+                    background-color: #ddb700;
+                }
+            """)
+        else:
+            try:
+                base_color = QColor(ALT_COLOR)
+                border_color = base_color.lighter(115)
+                hover_color = base_color.lighter(110)
+                pressed_color = base_color.darker(110)
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {base_color.name()};
+                        border: 1px solid {border_color.name()};
+                        border-radius: 6px;
+                        margin-top: 3px;
+                        padding: 6px 12px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {hover_color.name()};
+                    }}
+                    QPushButton:pressed {{
+                        background-color: {pressed_color.name()};
+                    }}
+                """)
+            except Exception:
+                btn.setStyleSheet("")
+            try:
+                self.style_buttons_to_match_queue()
+            except Exception:
+                pass
+
+        try:
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        except Exception:
+            pass
+        btn.update()
+
+    def toggle_rotation_lock_button(self):
+        if not self._is_rotation_mode():
+            self._rotation_clear_lock(save=False)
+            self.save_settings()
+            self._update_rotation_lock_button()
+            return
+
+        if self._is_rotation_locked():
+            self._rotation_clear_lock(save=False)
+        else:
+            self.settings["rotation_locked"] = True
+            self.settings["rotation_lock_insert_count"] = 0
+
+        self.save_settings()
+        try:
+            self.update_queue_display()
+        except Exception:
+            pass
+        self._update_rotation_lock_button()
 
     def _rotation_boundary_index(self) -> int:
         """Return insertion boundary: after unsung active singers, before sung active singers."""
@@ -27037,6 +27262,12 @@ class KaraokeApp(QWidget):
             )
 
         mode_label = "ROTATION" if self._is_rotation_mode() else "CLASSIC"
+        locked_html = ""
+        if self._is_rotation_locked():
+            locked_html = (
+                '<span style="color:#5C6170;"> • </span>'
+                '<span style="color:#F3CB00; font-weight:900;">LOCKED</span>'
+            )
 
         self.queue_label.setText(
             f'<span style="color:#9CA3B5; font-weight:700;">SINGERS</span> '
@@ -27047,6 +27278,7 @@ class KaraokeApp(QWidget):
             f'{end_html}'
             f'<span style="color:#5C6170;"> • </span>'
             f'<span style="color:#B994FF; font-weight:800;">{mode_label}</span>'
+            f'{locked_html}'
         )
 
     def update_queue_display(self):
@@ -27089,6 +27321,10 @@ class KaraokeApp(QWidget):
         try:
             self._rotation_recompute_round_state(force_reset=False)
             self._rotation_repair_marker()
+        except Exception:
+            pass
+        try:
+            self._update_rotation_lock_button()
         except Exception:
             pass
         self.queue_display.clear()
@@ -28057,6 +28293,15 @@ class KaraokeApp(QWidget):
                 marker_was_top = (self._rotation_marker_index() == 0)
             except Exception:
                 marker_was_top = False
+            # The next rotation is starting: a locked newcomer (or the marked
+            # singer) is reaching the top, so the lock has done its job — clear it.
+            try:
+                if self._is_rotation_locked() and self.queue:
+                    top = self.queue[0]
+                    if bool(top.get("rotation_lock_new", False)) or marker_was_top:
+                        self._rotation_clear_lock(save=True)
+            except Exception:
+                pass
 
         singer = None
         attempts_remaining = max(0, len(self.queue))
@@ -28069,6 +28314,8 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 self.queue.append(singer)
+                if self._is_rotation_locked():
+                    self._rotation_reweave_locked_tail()
                 continue
             active_songs = singer.get("songs") and any(
                 (not song.get("skipped", False)) if isinstance(song, dict) else True
@@ -28081,6 +28328,8 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             self.queue.append(singer)
+            if self._is_rotation_locked():
+                self._rotation_reweave_locked_tail()
             singer = None
         if singer is None:
             QTimer.singleShot(0, self.update_queue_display)
@@ -28110,6 +28359,8 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 self.queue.append(singer)
+                if self._is_rotation_locked():
+                    self._rotation_reweave_locked_tail()
                 self.queue = self.queue.copy()
                 QTimer.singleShot(0, self.update_queue_display)
                 return
@@ -28299,6 +28550,8 @@ class KaraokeApp(QWidget):
         if self._is_rotation_mode():
             singer["round_sung"] = True
         self.queue.append(singer)
+        if self._is_rotation_locked():
+            self._rotation_reweave_locked_tail()
         if self._is_rotation_mode():
             # Playback rule: marker stays with the singer that just started the new rotation.
             if marker_was_top:
