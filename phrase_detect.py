@@ -353,6 +353,10 @@ def detect_sections(pcm: np.ndarray, sr: int, bpm: Optional[float] = None,
 
 
 # ───────────────────────────── tempo (BPM) estimate ─────────────────────────
+# Bump when the analysis algorithm changes so cached results are recomputed.
+# v2: sub-BPM precision (parabolic interpolation) + interpolated beat phase.
+ANALYSIS_VERSION = 2
+
 def _onset_envelope(pcm: np.ndarray, sr: int):
     """Positive spectral-flux onset envelope + frames-per-second. (None, 0) on failure."""
     n_fft = 1024
@@ -371,10 +375,24 @@ def _onset_envelope(pcm: np.ndarray, sr: int):
     return onset, sr / float(hop)
 
 
+def _parabolic_offset(y, i: int) -> float:
+    """Sub-sample offset of a peak at index i via parabolic interpolation of the
+    three points (i-1, i, i+1). Returns a value in [-1, 1]; 0 if not refinable."""
+    i = int(i)
+    if i <= 0 or i >= len(y) - 1:
+        return 0.0
+    a, b, c = float(y[i - 1]), float(y[i]), float(y[i + 1])
+    denom = a - 2.0 * b + c
+    if denom == 0.0:
+        return 0.0
+    return max(-1.0, min(1.0, 0.5 * (a - c) / denom))
+
+
 def _bar_comb(onset: np.ndarray, fps: float, bpm: float):
     """Fold the onset envelope onto a one-bar grid (4/4) and return
     (downbeat_offset_seconds, peakiness). peakiness = max/mean of the folded
-    accent — higher means a clearer, more periodic pulse. (None, 0) if unusable."""
+    accent — higher means a clearer, more periodic pulse. (None, 0) if unusable.
+    The phase is parabola-interpolated for sub-frame precision."""
     bar_lag = 4.0 * 60.0 / float(bpm) * fps  # samples per bar
     L = int(round(bar_lag))
     if L < 4:
@@ -387,7 +405,11 @@ def _bar_comb(onset: np.ndarray, fps: float, bpm: float):
     if m <= 0:
         return None, 0.0
     phase = int(np.argmax(comb))
-    return phase / fps, float(comb.max() / m)
+    # circular parabolic interpolation around the peak
+    a = float(comb[(phase - 1) % L]); b = float(comb[phase]); c = float(comb[(phase + 1) % L])
+    denom = a - 2.0 * b + c
+    off = max(-1.0, min(1.0, 0.5 * (a - c) / denom)) if denom != 0.0 else 0.0
+    return (phase + off) / fps, float(comb.max() / m)
 
 
 def estimate_tempo_and_beat(pcm: np.ndarray, sr: int,
@@ -439,9 +461,20 @@ def estimate_tempo_and_beat(pcm: np.ndarray, sr: int,
             best = (score, cand, first_beat, peak)
     if best is None:
         # No bar grid — fall back to the plain tempo with no beat phase.
-        return {"bpm": round(base_bpm, 1), "first_beat": None, "confidence": 0.0}
+        return {"bpm": round(base_bpm, 2), "first_beat": None, "confidence": 0.0}
     _score, bpm, first_beat, peak = best
-    return {"bpm": round(float(bpm), 1),
+
+    # Refine the chosen tempo to sub-BPM precision: parabola-interpolate the
+    # autocorrelation peak at the chosen lag. Integer lags at this frame rate
+    # quantize BPM by ~2 near 120, which is enough to make an N-bar loop drift —
+    # this removes that quantization so the loop length matches real bars.
+    lag = fps * 60.0 / float(bpm)
+    li = int(round(lag))
+    refined = li + _parabolic_offset(ac, li)
+    if refined > 0:
+        bpm = 60.0 * fps / refined
+
+    return {"bpm": round(float(bpm), 2),
             "first_beat": round(float(first_beat), 4),
             "confidence": round(min(1.0, float(peak) / 6.0), 3)}
 

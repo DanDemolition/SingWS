@@ -188,6 +188,8 @@ def init_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE song_meta ADD COLUMN confidence REAL")
     if "analyzed_at" not in _sm_cols:
         con.execute("ALTER TABLE song_meta ADD COLUMN analyzed_at INTEGER")
+    if "analysis_version" not in _sm_cols:
+        con.execute("ALTER TABLE song_meta ADD COLUMN analysis_version INTEGER")
     con.commit()
 
 
@@ -477,7 +479,8 @@ def get_song_analysis(path: str, *, dbfile: Optional[Path] = None) -> Optional[d
     con = _connect(dbfile)
     try:
         row = con.execute(
-            "SELECT bpm, first_beat, confidence FROM song_meta WHERE song_path=?", (str(path),)
+            "SELECT bpm, first_beat, confidence, analysis_version FROM song_meta WHERE song_path=?",
+            (str(path),),
         ).fetchone()
         if not row or not row["bpm"]:
             return None
@@ -492,13 +495,14 @@ def get_song_analysis(path: str, *, dbfile: Optional[Path] = None) -> Optional[d
             "bpm": bpm,
             "first_beat": (float(fb) if fb is not None else None),
             "confidence": (float(row["confidence"]) if row["confidence"] is not None else 0.0),
+            "version": (int(row["analysis_version"]) if row["analysis_version"] is not None else 0),
         }
     finally:
         con.close()
 
 
 def set_song_analysis(path: str, bpm: float, first_beat=None, confidence: float = 0.0,
-                      *, dbfile: Optional[Path] = None) -> None:
+                      version: int = 0, *, dbfile: Optional[Path] = None) -> None:
     """Cache full beat-grid analysis for a song (local only)."""
     if not path or not bpm or bpm <= 0:
         return
@@ -507,11 +511,12 @@ def set_song_analysis(path: str, bpm: float, first_beat=None, confidence: float 
         now = int(time.time())
         fb = float(first_beat) if first_beat is not None else None
         con.execute(
-            "INSERT INTO song_meta (song_path, bpm, first_beat, confidence, updated_at, analyzed_at) "
-            "VALUES (?,?,?,?,?,?) "
+            "INSERT INTO song_meta (song_path, bpm, first_beat, confidence, analysis_version, updated_at, analyzed_at) "
+            "VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(song_path) DO UPDATE SET bpm=excluded.bpm, first_beat=excluded.first_beat, "
-            "confidence=excluded.confidence, updated_at=excluded.updated_at, analyzed_at=excluded.analyzed_at",
-            (str(path), float(bpm), fb, float(confidence or 0.0), now, now),
+            "confidence=excluded.confidence, analysis_version=excluded.analysis_version, "
+            "updated_at=excluded.updated_at, analyzed_at=excluded.analyzed_at",
+            (str(path), float(bpm), fb, float(confidence or 0.0), int(version or 0), now, now),
         )
         con.commit()
     finally:
