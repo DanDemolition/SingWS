@@ -353,34 +353,59 @@ def detect_sections(pcm: np.ndarray, sr: int, bpm: Optional[float] = None,
 
 
 # ───────────────────────────── tempo (BPM) estimate ─────────────────────────
-def estimate_bpm(pcm: np.ndarray, sr: int,
-                 min_bpm: float = 70.0, max_bpm: float = 180.0) -> Optional[float]:
-    """Estimate tempo (BPM) from the audio — no tags needed. Pure numpy/scipy.
-
-    Onset-strength envelope (positive spectral flux) → FFT autocorrelation →
-    pick the strongest lag in the plausible tempo range, weighted by a soft
-    prior around 120 BPM to suppress half/double-tempo octave errors. Returns a
-    rounded BPM, or None when the audio is too short / has no clear pulse.
-    """
-    pcm = np.asarray(pcm, dtype=np.float32)
-    if pcm.size < sr * 5:
-        return None
+def _onset_envelope(pcm: np.ndarray, sr: int):
+    """Positive spectral-flux onset envelope + frames-per-second. (None, 0) on failure."""
     n_fft = 1024
     hop = max(1, int(sr * 0.01))  # 10 ms
     mag = _stft_mag(pcm, n_fft, hop)
     if mag.shape[0] < 16:
-        return None
-
+        return None, 0.0
     flux = np.diff(mag, axis=0)
     flux[flux < 0] = 0.0
     onset = flux.sum(axis=1).astype(np.float32)
-    onset -= _smooth(onset, 16)  # high-pass the envelope (drop slow drift)
+    onset -= _smooth(onset, 16)  # drop slow drift
     onset[onset < 0] = 0.0
     if onset.max() <= 0:
-        return None
+        return None, 0.0
     onset = onset / onset.max()
+    return onset, sr / float(hop)
 
-    fps = sr / float(hop)
+
+def _bar_comb(onset: np.ndarray, fps: float, bpm: float):
+    """Fold the onset envelope onto a one-bar grid (4/4) and return
+    (downbeat_offset_seconds, peakiness). peakiness = max/mean of the folded
+    accent — higher means a clearer, more periodic pulse. (None, 0) if unusable."""
+    bar_lag = 4.0 * 60.0 / float(bpm) * fps  # samples per bar
+    L = int(round(bar_lag))
+    if L < 4:
+        return None, 0.0
+    k = onset.size // L
+    if k < 2:
+        return None, 0.0
+    comb = onset[:k * L].reshape(k, L).sum(axis=0)
+    m = float(comb.mean())
+    if m <= 0:
+        return None, 0.0
+    phase = int(np.argmax(comb))
+    return phase / fps, float(comb.max() / m)
+
+
+def estimate_tempo_and_beat(pcm: np.ndarray, sr: int,
+                            min_bpm: float = 70.0, max_bpm: float = 180.0) -> Optional[dict]:
+    """Estimate tempo + beat grid from audio — no tags. Pure numpy/scipy.
+
+    Returns {bpm, first_beat, confidence} or None. `first_beat` is the time
+    (seconds, in [0, one bar)) of the first DOWNBEAT, so loops can be snapped to
+    bar boundaries. Octave (½×/2×) errors are reduced by also scoring those
+    candidates and keeping the one with the clearest bar-level pulse.
+    """
+    pcm = np.asarray(pcm, dtype=np.float32)
+    if pcm.size < sr * 5:
+        return None
+    onset, fps = _onset_envelope(pcm, sr)
+    if onset is None:
+        return None
+
     n = onset.size
     spec = np.fft.rfft(onset, n=2 * n)
     ac = np.fft.irfft(spec * np.conj(spec))[:n].real
@@ -397,5 +422,56 @@ def estimate_bpm(pcm: np.ndarray, sr: int,
     strength = ac[min_lag:max_lag + 1] * prior
     if strength.max() <= 0:
         return None
-    best_bpm = float(bpms[int(np.argmax(strength))])
-    return round(best_bpm, 1)
+    base_bpm = float(bpms[int(np.argmax(strength))])
+
+    # Octave hardening: score the base tempo and its half/double by how cleanly
+    # the onsets fold onto a bar grid; pick the clearest that's in range.
+    best = None
+    for cand in (base_bpm, base_bpm * 2.0, base_bpm / 2.0):
+        if cand < min_bpm or cand > max_bpm:
+            continue
+        first_beat, peak = _bar_comb(onset, fps, cand)
+        if first_beat is None:
+            continue
+        ac_lag = ac[min(n - 1, max(1, int(round(fps * 60.0 / cand))))]
+        score = float(peak) * float(max(0.0, ac_lag))
+        if best is None or score > best[0]:
+            best = (score, cand, first_beat, peak)
+    if best is None:
+        # No bar grid — fall back to the plain tempo with no beat phase.
+        return {"bpm": round(base_bpm, 1), "first_beat": None, "confidence": 0.0}
+    _score, bpm, first_beat, peak = best
+    return {"bpm": round(float(bpm), 1),
+            "first_beat": round(float(first_beat), 4),
+            "confidence": round(min(1.0, float(peak) / 6.0), 3)}
+
+
+def estimate_bpm(pcm: np.ndarray, sr: int,
+                 min_bpm: float = 70.0, max_bpm: float = 180.0) -> Optional[float]:
+    """BPM only (thin wrapper over estimate_tempo_and_beat)."""
+    res = estimate_tempo_and_beat(pcm, sr, min_bpm, max_bpm)
+    return res["bpm"] if res else None
+
+
+def beat_aligned_loop(start_hint: float, bpm: float, first_beat, bars: int):
+    """(loop_start, loop_end) for an N-bar loop, snapped to the bar grid so it
+    starts on a downbeat and spans exactly N bars. Falls back to a plain N-bar
+    span at `start_hint` when no beat grid is available."""
+    try:
+        bpm = float(bpm)
+        bars = int(bars)
+        start_hint = max(0.0, float(start_hint or 0.0))
+    except (TypeError, ValueError):
+        return None
+    if bpm <= 0 or bars <= 0:
+        return None
+    bar = 4.0 * 60.0 / bpm  # seconds per bar (4/4)
+    if first_beat is None:
+        return (start_hint, start_hint + bars * bar)
+    fb = float(first_beat)
+    # Snap loop_start to the nearest downbeat, not before the first one.
+    nbars = round((start_hint - fb) / bar)
+    loop_start = fb + max(0, int(nbars)) * bar
+    if loop_start < fb:
+        loop_start = fb
+    return (round(loop_start, 4), round(loop_start + bars * bar, 4))

@@ -255,6 +255,7 @@ import json
 import hashlib
 import song_index  # local module (~/SingWS/singws.db)
 import phrase_markers  # local module (~/SingWS/phrase_markers.db) — Phrase-Aligned Song Start
+import phrase_detect  # local module — tempo/beat analysis + beat-aligned loops
 try:
     from mutagen import File as MutagenFile
 except Exception:
@@ -9248,27 +9249,74 @@ class ConfirmInterruptDialog(QDialog):
 
 
 class _BpmDetectWorker(QObject):
-    """Decode + estimate BPM off the UI thread. Emits the BPM (0.0 on failure)."""
+    """Decode + estimate tempo & beat grid off the UI thread. Caches the full
+    analysis (keyed by cache_path) and emits the BPM (0.0 on failure)."""
     done = pyqtSignal(float)
 
-    def __init__(self, audio_path: str):
+    def __init__(self, audio_path: str, cache_path: str = ""):
         super().__init__()
         self.audio_path = str(audio_path or "")
+        self.cache_path = str(cache_path or audio_path or "")
 
     def run(self):
         bpm = 0.0
         try:
-            import phrase_detect
             pcm = phrase_detect.decode_pcm_mono(self.audio_path, sr=16000)
-            v = phrase_detect.estimate_bpm(pcm, 16000)
-            if v and float(v) > 0:
-                bpm = float(v)
+            res = phrase_detect.estimate_tempo_and_beat(pcm, 16000)
+            if res and res.get("bpm"):
+                bpm = float(res["bpm"])
+                if self.cache_path:
+                    try:
+                        phrase_markers.set_song_analysis(
+                            self.cache_path, bpm, res.get("first_beat"), res.get("confidence") or 0.0)
+                    except Exception as e:
+                        _diag(f"[PHRASE-BPM] cache write failed: {e}")
         except Exception as e:
             try:
                 _diag(f"[PHRASE-BPM] estimate failed: {e}")
             except Exception:
                 pass
         self.done.emit(bpm)
+
+
+class AnalyzeLibraryWorker(QObject):
+    """Batch tempo/beat analysis of the whole library, off the UI thread. Caches
+    each song's analysis (keyed by its primary path) as it goes — so it is
+    incremental/resumable — and reports progress. Never touches audio output."""
+    progress = pyqtSignal(int, int, str)   # done, total, current name
+    finished = pyqtSignal(int, int)        # analyzed, total
+
+    def __init__(self, items):
+        super().__init__()
+        # items: list of (primary_path, audio_path, display_name)
+        self.items = list(items or [])
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        total = len(self.items)
+        done = 0
+        analyzed = 0
+        for primary, audio, name in self.items:
+            if self._cancel:
+                break
+            done += 1
+            self.progress.emit(done, total, str(name or ""))
+            try:
+                pcm = phrase_detect.decode_pcm_mono(str(audio), sr=16000)
+                res = phrase_detect.estimate_tempo_and_beat(pcm, 16000)
+                if res and res.get("bpm"):
+                    phrase_markers.set_song_analysis(
+                        str(primary), float(res["bpm"]), res.get("first_beat"), res.get("confidence") or 0.0)
+                    analyzed += 1
+            except Exception as e:
+                try:
+                    _diag(f"[ANALYZE-LIB] failed for {name}: {e}")
+                except Exception:
+                    pass
+        self.finished.emit(analyzed, total)
 
 
 class WaveformDecodeWorker(QObject):
@@ -17840,6 +17888,12 @@ class KaraokeApp(QWidget):
         import_markers_btn = QPushButton("Import Phrase Markers")
         export_markers_btn.clicked.connect(self.export_phrase_markers)
         import_markers_btn.clicked.connect(self.import_phrase_markers)
+        analyze_lib_btn = QPushButton("Analyze Library (BPM & beats)")
+        analyze_lib_btn.setToolTip("Detect tempo + beat grid for every song and cache it, so Intro Loop and bar starts land on the beat. Incremental — re-runs only analyze new songs.")
+        analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False))
+        reanalyze_lib_btn = QPushButton("Re-analyze All")
+        reanalyze_lib_btn.setToolTip("Force a full re-analysis of every song.")
+        reanalyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=True))
 
         _search_actions_card = _section_card(tab_search, "Library Tools")
         _search_actions = QHBoxLayout()
@@ -17849,6 +17903,11 @@ class KaraokeApp(QWidget):
         _search_actions.addWidget(import_markers_btn)
         _search_actions.addStretch(1)
         _search_actions_card.addLayout(_search_actions)
+        _analyze_row = QHBoxLayout()
+        _analyze_row.addWidget(analyze_lib_btn)
+        _analyze_row.addWidget(reanalyze_lib_btn)
+        _analyze_row.addStretch(1)
+        _search_actions_card.addLayout(_analyze_row)
 
         _display_actions_card = _section_card(tab_display, "Display Tools")
         _display_actions = QHBoxLayout()
@@ -24101,7 +24160,12 @@ class KaraokeApp(QWidget):
         if entry is None:
             return
         primary, _audio = self._phrase_song_paths(entry)
-        seconds = phrase_markers.bars_to_seconds(bars, bpm)
+        # Beat-aligned when we know the grid: N bars from the first downbeat.
+        analysis = phrase_markers.get_song_analysis(primary) if primary else None
+        if analysis and analysis.get("first_beat") is not None:
+            seconds = float(analysis["first_beat"]) + bars * (4.0 * 60.0 / float(bpm))
+        else:
+            seconds = phrase_markers.bars_to_seconds(bars, bpm)
         if seconds is None:
             return
         entry["phrase_start_seconds"] = float(seconds)
@@ -24120,12 +24184,12 @@ class KaraokeApp(QWidget):
             f"Phrase start: {bars} bars ({self._fmt_mmss(seconds)}) for {name}"
         )
 
-    def _detect_bpm_async(self, audio_path, callback):
-        """Decode + estimate BPM off the UI thread, then call callback(bpm) on
-        the UI thread (bpm is 0.0 on failure). Never blocks playback."""
+    def _detect_bpm_async(self, audio_path, callback, cache_path=None):
+        """Decode + estimate tempo/beat off the UI thread (cached under
+        cache_path), then call callback(bpm) on the UI thread (0.0 on failure)."""
         try:
             thread = QThread(self)
-            worker = _BpmDetectWorker(str(audio_path or ""))
+            worker = _BpmDetectWorker(str(audio_path or ""), str(cache_path or audio_path or ""))
             worker.moveToThread(thread)
             thread.started.connect(worker.run)
             worker.done.connect(callback)
@@ -24145,6 +24209,84 @@ class KaraokeApp(QWidget):
                 callback(0.0)
             except Exception:
                 pass
+
+    # ── Analyze Library (batch tempo/beat) ───────────────────────────────────
+    def _analysis_audio_for_track(self, track):
+        """(primary_path, audio_path) for a library track, or None if it can't be
+        analyzed here (e.g. a ZIP needing extraction). CDG → its paired MP3."""
+        try:
+            primary = str(track.get("path") or "")
+        except Exception:
+            primary = ""
+        if not primary:
+            return None
+        pl = primary.lower()
+        if pl.endswith(".cdg"):
+            mp3 = os.path.splitext(primary)[0] + ".mp3"
+            return (primary, mp3) if os.path.exists(mp3) else None
+        if pl.endswith(".mp4") or pl.endswith(".mp3"):
+            return (primary, primary)
+        return None  # .zip / unknown — skip (rare; opened-in-dialog still analyzes)
+
+    def analyze_library(self, force: bool = False):
+        """Analyze tempo + beat grid for the whole library and cache it, so Intro
+        Loop and bar starts land on the beat. Incremental unless force."""
+        from PyQt6.QtWidgets import QProgressDialog
+        tracks = list(getattr(self, "tracks", []) or [])
+        items = []
+        for t in tracks:
+            pa = self._analysis_audio_for_track(t)
+            if not pa:
+                continue
+            primary, audio = pa
+            if not force:
+                a = phrase_markers.get_song_analysis(primary)
+                if a and a.get("first_beat") is not None:
+                    continue  # already analyzed
+            name = str(t.get("display") or t.get("title") or os.path.basename(primary))
+            items.append((primary, audio, name))
+
+        if not items:
+            QMessageBox.information(self, "Analyze Library",
+                                    "Nothing to analyze — the library is already analyzed."
+                                    if tracks else "No songs in the library yet. Scan a folder first.")
+            return
+
+        dlg = QProgressDialog(f"Analyzing {len(items)} song(s)…", "Cancel", 0, len(items), self)
+        dlg.setWindowTitle("Analyze Library")
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(True)
+        dlg.setAutoReset(True)
+
+        thread = QThread(self)
+        worker = AnalyzeLibraryWorker(items)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _on_progress(done, total, name):
+            try:
+                dlg.setValue(done - 1)
+                dlg.setLabelText(f"Analyzing {done}/{total}…\n{name}")
+            except Exception:
+                pass
+
+        def _on_finished(analyzed, total):
+            try:
+                dlg.setValue(total)
+            except Exception:
+                pass
+            self._set_processing_text(f"Analyzed {analyzed} of {total} song(s).")
+
+        worker.progress.connect(_on_progress)
+        worker.finished.connect(_on_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        dlg.canceled.connect(worker.cancel)
+        # keep refs alive
+        self._analyze_lib_job = (thread, worker, dlg)
+        thread.start()
+        dlg.show()
 
     # ── marker cloud sync + file backup ──────────────────────────────────────
     def _phrase_sync_config(self):
@@ -28735,18 +28877,22 @@ class KaraokeApp(QWidget):
         if getattr(self, "_pending_intro_loop", False):
             self._pending_intro_loop = False
             try:
-                bpm = self._phrase_resolve_bpm(primary_path, primary_path)
+                bars = int(self.settings.get("intro_loop_bars", 8) or 8)
+                analysis = phrase_markers.get_song_analysis(primary_path)
+                bpm = analysis["bpm"] if analysis else self._phrase_resolve_bpm(primary_path, primary_path)
+                first_beat = analysis["first_beat"] if analysis else None
                 if bpm:
-                    bars = int(self.settings.get("intro_loop_bars", 8) or 8)
-                    length = phrase_markers.bars_to_seconds(bars, bpm)
-                    if length and length > 0:
-                        intro_loop_seconds = (float(phrase_start), float(phrase_start) + float(length))
+                    # Beat-aligned: start on a downbeat, span exactly N bars so the
+                    # loop sits on the groove instead of drifting.
+                    region = phrase_detect.beat_aligned_loop(float(phrase_start), float(bpm), first_beat, bars)
+                    if region:
+                        intro_loop_seconds = region
                         self._intro_loop_active = True
-                        _diag(f"[INTRO-LOOP] engaged {intro_loop_seconds} bpm={bpm} bars={bars}")
+                        _diag(f"[INTRO-LOOP] engaged {region} bpm={bpm} first_beat={first_beat} bars={bars}")
                 if intro_loop_seconds is None:
-                    # No BPM yet → play normally this time and cache BPM in the
-                    # background so the loop engages next time this song comes up.
-                    self._detect_bpm_async(primary_path, lambda b, p=primary_path: (phrase_markers.set_song_bpm(p, b) if b else None))
+                    # No analysis yet → play normally this time and analyze the
+                    # beat grid in the background so the loop is tight next time.
+                    self._detect_bpm_async(primary_path, lambda b: None, cache_path=primary_path)
             except Exception as e:
                 _diag(f"[INTRO-LOOP] engage failed: {e}")
 

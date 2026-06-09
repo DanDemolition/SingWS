@@ -44,6 +44,13 @@
   music; hitting **Play/Next** releases the loop and that same track continues
   past the loop and plays through. Settings toggle + bar selector; a `LOOPING`
   badge shows while held. Default OFF — Classic playback is unchanged.
+  - **Beat-aligned & accurate**: loops now snap to a detected **beat grid**
+    (start on a downbeat, span exactly N bars) using improved, octave-hardened
+    tempo + beat-phase analysis (pure numpy/scipy) — so they sit on the groove
+    instead of drifting. Bar-derived phrase starts are beat-aligned too.
+  - **Analyze Library** (Library Tools) — batch-detect tempo + beat grid for
+    every song and cache it (incremental, resumable, cancellable progress), so
+    loops/starts are accurate and instant. "Re-analyze All" forces a full pass.
 
 ### Notes
 - Pairs with the SingWS-Server marker-sync endpoints for cross-machine markers.

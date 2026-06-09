@@ -147,5 +147,62 @@ class EstimateBpmTests(unittest.TestCase):
         self.assertEqual(pd.estimate_bpm(ct, self.SR), pd.estimate_bpm(ct, self.SR))
 
 
+class TempoAndBeatTests(unittest.TestCase):
+    SR = 16000
+
+    def _click_track(self, bpm, secs=20.0, phase=0.0):
+        n = int(self.SR * secs)
+        sig = np.zeros(n, dtype=np.float32)
+        period = int(self.SR * 60.0 / bpm)
+        click = np.exp(-np.linspace(0, 8, int(self.SR * 0.03))).astype(np.float32)
+        start0 = int(self.SR * phase)
+        for start in range(start0, n - click.size, period):
+            sig[start:start + click.size] += click
+        return sig
+
+    def test_returns_bpm_and_beat(self):
+        res = pd.estimate_tempo_and_beat(self._click_track(120), self.SR)
+        self.assertIsNotNone(res)
+        ratios = [res["bpm"] / 120.0, res["bpm"] / 60.0, res["bpm"] / 240.0]
+        self.assertTrue(any(abs(r - 1.0) < 0.04 for r in ratios))
+        self.assertIsNotNone(res["first_beat"])
+        self.assertTrue(0.0 <= res["confidence"] <= 1.0)
+
+    def test_first_beat_tracks_phase(self):
+        # A click track offset by ~0.25s: first_beat (mod beat) should sit near
+        # the clicks, not at 0. (Downbeat phase is within one bar.)
+        res = pd.estimate_tempo_and_beat(self._click_track(120, phase=0.25), self.SR)
+        self.assertIsNotNone(res)
+        beat = 60.0 / res["bpm"]
+        fb_mod = res["first_beat"] % beat
+        # distance to the true 0.25s click phase (circular within a beat)
+        d = min(abs(fb_mod - 0.25), beat - abs(fb_mod - 0.25))
+        self.assertLess(d, 0.08)
+
+
+class BeatAlignedLoopTests(unittest.TestCase):
+    def test_exact_n_bars_and_downbeat(self):
+        # 120 BPM → beat 0.5s, bar 2.0s. first_beat 0.1s.
+        ls, le = pd.beat_aligned_loop(start_hint=4.4, bpm=120, first_beat=0.1, bars=8)
+        bar = 2.0
+        self.assertAlmostEqual(le - ls, 8 * bar)          # exactly 8 bars
+        n = (ls - 0.1) / bar                              # whole number of bars from first_beat
+        self.assertAlmostEqual(n, round(n), places=4)
+        self.assertAlmostEqual(ls, 0.1 + round((4.4 - 0.1) / bar) * bar)
+
+    def test_fallback_without_grid(self):
+        ls, le = pd.beat_aligned_loop(start_hint=3.0, bpm=120, first_beat=None, bars=4)
+        self.assertAlmostEqual(ls, 3.0)
+        self.assertAlmostEqual(le - ls, 4 * 2.0)  # 4 bars @120 = 8s
+
+    def test_never_before_first_downbeat(self):
+        ls, _ = pd.beat_aligned_loop(start_hint=0.0, bpm=120, first_beat=1.3, bars=4)
+        self.assertGreaterEqual(ls, 1.3)
+
+    def test_invalid(self):
+        self.assertIsNone(pd.beat_aligned_loop(0.0, 0, 0.0, 8))
+        self.assertIsNone(pd.beat_aligned_loop(0.0, 120, 0.0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
