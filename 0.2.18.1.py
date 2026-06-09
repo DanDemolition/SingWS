@@ -9268,7 +9268,8 @@ class _BpmDetectWorker(QObject):
                 if self.cache_path:
                     try:
                         phrase_markers.set_song_analysis(
-                            self.cache_path, bpm, res.get("first_beat"), res.get("confidence") or 0.0)
+                            self.cache_path, bpm, res.get("first_beat"), res.get("confidence") or 0.0,
+                            version=phrase_detect.ANALYSIS_VERSION)
                     except Exception as e:
                         _diag(f"[PHRASE-BPM] cache write failed: {e}")
         except Exception as e:
@@ -9309,7 +9310,8 @@ class AnalyzeLibraryWorker(QObject):
                 res = phrase_detect.estimate_tempo_and_beat(pcm, 16000)
                 if res and res.get("bpm"):
                     phrase_markers.set_song_analysis(
-                        str(primary), float(res["bpm"]), res.get("first_beat"), res.get("confidence") or 0.0)
+                        str(primary), float(res["bpm"]), res.get("first_beat"), res.get("confidence") or 0.0,
+                        version=phrase_detect.ANALYSIS_VERSION)
                     analyzed += 1
             except Exception as e:
                 try:
@@ -24241,8 +24243,9 @@ class KaraokeApp(QWidget):
             primary, audio = pa
             if not force:
                 a = phrase_markers.get_song_analysis(primary)
-                if a and a.get("first_beat") is not None:
-                    continue  # already analyzed
+                if (a and a.get("first_beat") is not None
+                        and int(a.get("version") or 0) >= phrase_detect.ANALYSIS_VERSION):
+                    continue  # already analyzed with the current algorithm
             name = str(t.get("display") or t.get("title") or os.path.basename(primary))
             items.append((primary, audio, name))
 

@@ -168,6 +168,15 @@ class TempoAndBeatTests(unittest.TestCase):
         self.assertIsNotNone(res["first_beat"])
         self.assertTrue(0.0 <= res["confidence"] <= 1.0)
 
+    def test_bpm_is_precise(self):
+        # Sub-BPM precision (parabolic interpolation) — critical so an N-bar loop
+        # doesn't drift. Use tempos that don't land on integer autocorr lags.
+        for bpm in (98.0, 117.3, 123.5, 140.7):
+            est = pd.estimate_tempo_and_beat(self._click_track(bpm, secs=24), self.SR)["bpm"]
+            # accept the exact tempo or a clean octave, within 0.6 BPM
+            cands = [est, est / 2.0, est * 2.0]
+            self.assertTrue(any(abs(c - bpm) < 0.6 for c in cands), f"bpm={bpm} est={est}")
+
     def test_first_beat_tracks_phase(self):
         # A click track offset by ~0.25s: first_beat (mod beat) should sit near
         # the clicks, not at 0. (Downbeat phase is within one bar.)
