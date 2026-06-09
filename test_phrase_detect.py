@@ -52,5 +52,70 @@ class SuggestTests(unittest.TestCase):
         self.assertIsNone(pd.suggest_start(np.zeros(100, dtype=np.float32), 8000))
 
 
+class DetectSectionsTests(unittest.TestCase):
+    SR = 16000
+
+    def _section(self, freq, amp, noise, secs):
+        n = int(self.SR * secs)
+        t = np.arange(n) / self.SR
+        rng = np.random.RandomState(int(freq))  # deterministic per section type
+        sig = amp * np.sin(2 * np.pi * freq * t)
+        if noise > 0:
+            sig = sig + noise * rng.randn(n).astype(np.float32)
+        return sig.astype(np.float32)
+
+    def _song(self):
+        # Intro (quiet, low instrumental) → Verse → Chorus → Verse → Chorus.
+        intro = self._section(110, 0.15, 0.0, 12)
+        verse = self._section(220, 0.40, 0.20, 14)
+        chorus = self._section(330, 0.85, 0.35, 14)
+        pcm = np.concatenate([intro, verse, chorus, verse, chorus])
+        seams = [12, 26, 40, 54]
+        return pcm, seams
+
+    def test_boundaries_near_seams(self):
+        pcm, seams = self._song()
+        secs = pd.detect_sections(pcm, self.SR)
+        self.assertGreaterEqual(len(secs), 2)
+        # every detected boundary is time-ordered and well-formed
+        times = [s["seconds"] for s in secs]
+        self.assertEqual(times, sorted(times))
+        for s in secs:
+            self.assertIn(s["from_type"], pd.SECTION_TYPES)
+            self.assertIn(s["to_type"], pd.SECTION_TYPES)
+            self.assertTrue(0.0 <= s["confidence"] <= 1.0)
+            self.assertEqual(s["label"], f"{s['from_type']}→{s['to_type']}")
+        # at least half of the true seams have a detected boundary within 3.5s
+        hits = sum(any(abs(t - seam) <= 3.5 for t in times) for seam in seams)
+        self.assertGreaterEqual(hits, 2)
+
+    def test_structural_labels(self):
+        pcm, _ = self._song()
+        secs = pd.detect_sections(pcm, self.SR)
+        # the quiet first section should read as Intro or Instrumental
+        self.assertIn(secs[0]["from_type"], ("Intro", "Instrumental"))
+        # the loud, repeated section should surface as a Chorus somewhere
+        all_types = {s["from_type"] for s in secs} | {s["to_type"] for s in secs}
+        self.assertIn("Chorus", all_types)
+
+    def test_bar_snap(self):
+        pcm, _ = self._song()
+        secs = pd.detect_sections(pcm, self.SR, bpm=120)  # 2.0 s/bar
+        spb = 4 * 60.0 / 120.0
+        for s in secs:
+            self.assertAlmostEqual(s["seconds"] / spb, round(s["seconds"] / spb), places=3)
+
+    def test_deterministic(self):
+        pcm, _ = self._song()
+        a = pd.detect_sections(pcm, self.SR)
+        b = pd.detect_sections(pcm, self.SR)
+        self.assertEqual([x["seconds"] for x in a], [x["seconds"] for x in b])
+        self.assertEqual([x["label"] for x in a], [x["label"] for x in b])
+
+    def test_short_and_silence(self):
+        self.assertEqual(pd.detect_sections(np.zeros(self.SR * 3, dtype=np.float32), self.SR), [])
+        self.assertEqual(pd.detect_sections(np.zeros(self.SR * 30, dtype=np.float32), self.SR), [])
+
+
 if __name__ == "__main__":
     unittest.main()
