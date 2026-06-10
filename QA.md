@@ -23,6 +23,11 @@ Silicon**. Location / "Accept Requests" QA lives in the SingWS-Server repo.
 - [ ] Toggling on turns it **yellow** ("Unlock"); the queue label shows `LOCKED`.
 - [ ] While locked, add a new singer via **manual add**, a **web request**, and
       **Singer History** → each lands in the **next** rotation, not the current one.
+- [ ] Locked newcomers are woven in **behind** the returning singers already
+      waiting for the next rotation (they never cut ahead of a returner).
+- [ ] When the **yellow top-of-rotation singer is already next**, the Lock
+      button is **disabled** with a tooltip explaining why; a lock saved from a
+      previous session in that state clears itself.
 - [ ] An existing singer adding a 2nd song **stays in their current slot**.
 - [ ] Advance the rotation to the top → lock **auto-clears**.
 - [ ] Switch Queue Mode to **Classic** → lock clears.
@@ -48,6 +53,18 @@ Silicon**. Location / "Accept Requests" QA lives in the SingWS-Server repo.
       while it analyzes tempo in the background, then loop on the next encounter.
 - [ ] Toggle Intro Loop **off** → normal between-songs behavior (BGM/idle) returns.
 - [ ] CPU stays low while looping.
+
+## Analyze Library (Library Tools)
+- [ ] **Analyze Library** → the progress window opens **on top of the main
+      window** (no minimizing needed) and is freely movable.
+- [ ] Clicking Analyze / **Re-analyze All** again while a pass is running does
+      **not** open a second window — it brings the existing one to the front.
+- [ ] **Cancel** stops the pass; re-running resumes where it left off
+      (already-analyzed songs are skipped).
+- [ ] A corrupt/unreadable file doesn't hang the pass — it's skipped after at
+      most ~60s and the count keeps moving.
+- [ ] After a full pass, Intro Loop wraps land **on the beat** for several
+      different songs (incl. CDG).
 
 ## Platforms
 - [ ] Full pass on **Intel**.

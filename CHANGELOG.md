@@ -52,6 +52,17 @@
     every song and cache it (incremental, resumable, cancellable progress), so
     loops/starts are accurate and instant. "Re-analyze All" forces a full pass.
 
+### Fixed
+- **Analyze Library progress window** — opens on top of the main window (was
+  hidden behind it); clicking Analyze again while a pass runs resurfaces the
+  existing window instead of spawning duplicates; a corrupt/locked file now
+  times out (~60s) and is skipped instead of hanging the whole batch.
+- **Rotation Lock logic** (ported from the 0.3.1.0 build) — locked newcomers
+  are woven in **behind** returning singers (no longer cut ahead); the lock
+  only engages while the marked next-rotation singer isn't already next (button
+  disabled with a tooltip otherwise; no safe gap → newcomers append like
+  unlocked rotation); a stale saved lock in that state clears itself.
+
 ### Notes
 - Pairs with the SingWS-Server marker-sync endpoints for cross-machine markers.
 - Tests: `test_phrase_markers.py`, `test_phrase_detect.py`,
