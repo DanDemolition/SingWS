@@ -45,11 +45,25 @@ class RotationLockModeTests(unittest.TestCase):
 
     def test_locked_only_when_rotation_mode(self):
         app = make_app(self.mod, locked=True, mode="classic")
+        # Marker not at index 0 → the lock is meaningful (can_enable True).
+        app.queue = [singer("A"), singer("M", active=False, marker=True)]
         self.assertFalse(app._is_rotation_locked())  # classic can't be locked
         app.settings["queue_mode"] = "rotation"
         self.assertTrue(app._is_rotation_locked())
         app.settings["rotation_locked"] = False
         self.assertFalse(app._is_rotation_locked())
+
+    def test_lock_requires_marker_not_already_next(self):
+        # Fix: locking is pointless when the yellow top-of-rotation singer is
+        # already next (marker at index 0) — it must not count as locked.
+        app = make_app(self.mod, locked=True, mode="rotation")
+        app.queue = [singer("M", active=False, marker=True), singer("A")]
+        self.assertFalse(app._rotation_lock_can_enable())
+        self.assertFalse(app._is_rotation_locked())
+        # Move the marker down a slot → lock becomes meaningful.
+        app.queue = [singer("A"), singer("M", active=False, marker=True)]
+        self.assertTrue(app._rotation_lock_can_enable())
+        self.assertTrue(app._is_rotation_locked())
 
 
 class RotationLockInsertTests(unittest.TestCase):
@@ -95,7 +109,9 @@ class RotationLockInsertTests(unittest.TestCase):
         self.assertEqual(order[0], "A")              # current singer untouched at head
         self.assertEqual(order[1], "M")              # marker pinned at tail start
         self.assertLess(order.index("M"), order.index("C"))  # newcomer after marker
-        self.assertLess(order.index("C"), order.index("B"))  # newcomer woven before old returner
+        # Fix: returning singers keep their slot — the locked newcomer is woven
+        # in AFTER them, not ahead of them.
+        self.assertLess(order.index("B"), order.index("C"))  # returner before newcomer
 
     def test_existing_active_singer_not_moved_by_reweave(self):
         app = make_app(self.mod)
