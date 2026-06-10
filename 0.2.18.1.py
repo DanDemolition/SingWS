@@ -24234,6 +24234,16 @@ class KaraokeApp(QWidget):
         """Analyze tempo + beat grid for the whole library and cache it, so Intro
         Loop and bar starts land on the beat. Incremental unless force."""
         from PyQt6.QtWidgets import QProgressDialog
+        # Don't start a second pass while one is running — just resurface the
+        # existing progress window (this is what caused duplicate windows).
+        if getattr(self, "_analyze_running", False):
+            try:
+                _, _w, _d = getattr(self, "_analyze_lib_job", (None, None, None))
+                if _d is not None:
+                    _d.show(); _d.raise_(); _d.activateWindow()
+            except Exception:
+                pass
+            return
         tracks = list(getattr(self, "tracks", []) or [])
         items = []
         for t in tracks:
@@ -24296,6 +24306,7 @@ class KaraokeApp(QWidget):
                 pass
 
         def _on_finished(analyzed, total):
+            self._analyze_running = False
             try:
                 dlg.setValue(total)
             except Exception:
@@ -24308,10 +24319,14 @@ class KaraokeApp(QWidget):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         dlg.canceled.connect(worker.cancel)
-        # keep refs alive
+        dlg.canceled.connect(lambda: setattr(self, "_analyze_running", False))
+        # keep refs alive + mark running so a second click just resurfaces this one
+        self._analyze_running = True
         self._analyze_lib_job = (thread, worker, dlg)
         thread.start()
         dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     # ── marker cloud sync + file backup ──────────────────────────────────────
     def _phrase_sync_config(self):

@@ -40,7 +40,13 @@ def decode_pcm_mono(path: str, sr: int = 8000, max_seconds: float = 720.0) -> np
         "-i", str(path),
         "-ac", "1", "-ar", str(int(sr)), "-f", "f32le", "-",
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    # Hard timeout so a single corrupt/locked file can't hang a whole
+    # Analyze-Library batch — the caller treats this as a skipped song.
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              check=False, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg decode timed out for {path}")
     if proc.returncode != 0 or not proc.stdout:
         raise RuntimeError(f"ffmpeg decode failed for {path}")
     return np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32, copy=False)
