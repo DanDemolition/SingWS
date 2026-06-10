@@ -23596,9 +23596,36 @@ class KaraokeApp(QWidget):
     # signups do NOT jump into the current rotation — they are woven into the
     # NEXT rotation only (around the next-rotation marker). The lock clears
     # itself automatically when the next rotation begins.
+    def _rotation_lock_can_enable(self) -> bool:
+        """Rotation lock is only useful while the marked next-rotation singer is not already next."""
+        if not self._is_rotation_mode() or not self.queue:
+            return False
+        try:
+            return self._rotation_marker_index() != 0
+        except Exception:
+            return False
+
+    def _rotation_sanitize_lock_state(self, save: bool = False) -> bool:
+        """Clear a stale saved lock when the marker is at the top/next singer."""
+        try:
+            if (
+                self._is_rotation_mode()
+                and bool(self.settings.get("rotation_locked", False))
+                and not self._rotation_lock_can_enable()
+            ):
+                self._rotation_clear_lock(save=save)
+                return False
+        except Exception:
+            return False
+        return True
+
     def _is_rotation_locked(self) -> bool:
         try:
-            return self._is_rotation_mode() and bool(self.settings.get("rotation_locked", False))
+            return (
+                self._is_rotation_mode()
+                and bool(self.settings.get("rotation_locked", False))
+                and self._rotation_lock_can_enable()
+            )
         except Exception:
             return False
 
@@ -23661,10 +23688,12 @@ class KaraokeApp(QWidget):
             woven.append(pinned_marker)
         max_len = max(len(new_tail), len(old_tail))
         for i in range(max_len):
-            if i < len(new_tail):
-                woven.append(new_tail[i])
+            # Existing/marked rotation singers stay first; locked new singers are
+            # woven in after them for the next rotation.
             if i < len(old_tail):
                 woven.append(old_tail[i])
+            if i < len(new_tail):
+                woven.append(new_tail[i])
         self.queue = head + woven
 
     def _rotation_insert_locked_new_singer(self, new_singer: dict):
@@ -23677,8 +23706,16 @@ class KaraokeApp(QWidget):
         self.settings["rotation_lock_insert_count"] = order + 1
 
         marker_idx = self._rotation_marker_index()
+        if marker_idx == 0:
+            # If the yellow top-of-rotation singer is already next, locking has no safe
+            # insertion gap; behave like unlocked rotation and append new singers.
+            self.queue.append(new_singer)
+            self._rotation_clear_lock(save=False)
+            return
         ins = marker_idx if marker_idx >= 0 else self._rotation_boundary_index()
-        if marker_idx >= 0 and not self.is_singer_active(self.queue[marker_idx]):
+        if marker_idx >= 0:
+            # The marked singer is the first singer of the next rotation; new locked
+            # signups should start below that singer, never above them.
             ins = marker_idx + 1
         self.queue.insert(max(0, min(ins, len(self.queue))), new_singer)
         self._rotation_reweave_locked_tail()
@@ -23693,12 +23730,19 @@ class KaraokeApp(QWidget):
             return
 
         in_rotation = self._is_rotation_mode()
+        self._rotation_sanitize_lock_state(save=False)
         locked = self._is_rotation_locked()
+        can_lock = self._rotation_lock_can_enable()
         btn.setVisible(in_rotation)
-        btn.setEnabled(in_rotation)
+        btn.setEnabled(in_rotation and (locked or can_lock))
         btn.setMinimumHeight(38)  # match the reorder/remove/clear buttons
         btn.setText("Unlock" if locked else "Lock")
-        btn.setToolTip("Unlock rotation" if locked else "Lock rotation")
+        if locked:
+            btn.setToolTip("Unlock rotation")
+        elif in_rotation and not can_lock:
+            btn.setToolTip("Rotation lock is available after the yellow top-of-rotation singer is no longer next")
+        else:
+            btn.setToolTip("Lock rotation")
 
         if locked:
             # Active state: a yellow highlight, but the SAME geometry (radius,
@@ -23745,8 +23789,12 @@ class KaraokeApp(QWidget):
         if self._is_rotation_locked():
             self._rotation_clear_lock(save=False)
         else:
-            self.settings["rotation_locked"] = True
-            self.settings["rotation_lock_insert_count"] = 0
+            if not self._rotation_lock_can_enable():
+                self._rotation_clear_lock(save=False)
+                print("[ROTATION] lock ignored: yellow top-of-rotation singer is already next")
+            else:
+                self.settings["rotation_locked"] = True
+                self.settings["rotation_lock_insert_count"] = 0
 
         self.save_settings()
         try:
