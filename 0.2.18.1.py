@@ -24255,11 +24255,33 @@ class KaraokeApp(QWidget):
                                     if tracks else "No songs in the library yet. Scan a folder first.")
             return
 
-        dlg = QProgressDialog(f"Analyzing {len(items)} song(s)…", "Cancel", 0, len(items), self)
+        # Parent to the active modal window (e.g. the open Settings dialog) so the
+        # progress window isn't blocked by it — otherwise a modal Settings would
+        # prevent interacting with / moving the progress window.
+        _prog_parent = None
+        try:
+            _prog_parent = QApplication.activeModalWidget()
+        except Exception:
+            _prog_parent = None
+        dlg = QProgressDialog(f"Analyzing {len(items)} song(s)…", "Cancel", 0, len(items), _prog_parent or self)
         dlg.setWindowTitle("Analyze Library")
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(True)
         dlg.setAutoReset(True)
+        # Non-modal so the host can keep using the app + move both windows while
+        # analysis runs (it's already on a background thread). Independent window
+        # with min/close controls so it's freely movable.
+        dlg.setModal(False)
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
+        try:
+            dlg.setWindowFlags(
+                Qt.WindowType.Window
+                | Qt.WindowType.CustomizeWindowHint
+                | Qt.WindowType.WindowTitleHint
+                | Qt.WindowType.WindowMinimizeButtonHint
+            )
+        except Exception:
+            pass
 
         thread = QThread(self)
         worker = AnalyzeLibraryWorker(items)
