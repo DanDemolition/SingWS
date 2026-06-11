@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.2.18.3"
+APP_VERSION = "0.3.0.0"
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -1004,7 +1004,16 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QFont, QPalette, QColor, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, pyqtProperty, QMetaObject, pyqtSlot, QPoint, QPointF
 from PyQt6.QtWidgets import QDialog, QDialogButtonBox
-from PyQt6.QtCore import QUrl, QItemSelectionModel
+from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery
+
+# WebSocket request relay (wskar.com). Optional: older PyQt6 installs may lack
+# QtWebSockets — the app then falls back to request polling.
+try:
+    from PyQt6.QtWebSockets import QWebSocket
+    QTWEBSOCKETS_AVAILABLE = True
+except Exception:
+    QWebSocket = None
+    QTWEBSOCKETS_AVAILABLE = False
 
 
 # --- SQLite search/index workers (no UI-thread blocking) ---
@@ -8399,11 +8408,14 @@ class SimplePollWorker(QObject):
     host_state_sync_requested = pyqtSignal()
     connection_status_changed = pyqtSignal(bool, str)  # NEW: (connected, message)
 
-    def __init__(self, base_url, user_id, api_key, interval_sec=2, host_interval_sec=2):
+    def __init__(self, base_url, user_id, api_key, interval_sec=2, host_interval_sec=2, poll_requests=True):
         super().__init__()
         self.base_url = _network_normalize_base_url(base_url)
         self.user_id = (user_id or "").strip() or "default"
         self.api_key = (api_key or "").strip()
+        # False while the WebSocket relay owns request delivery: this worker
+        # then only polls host commands, never get_requests.php.
+        self.poll_requests = bool(poll_requests)
         self.normal_interval = interval_sec
         self.interval = interval_sec
         self.host_interval = max(2.0, float(host_interval_sec or 2))
@@ -8435,7 +8447,7 @@ class SimplePollWorker(QObject):
             if self.api_key:
                 headers["X-API-Key"] = self.api_key
 
-            if now >= next_request_poll:
+            if self.poll_requests and now >= next_request_poll:
                 next_request_poll = now + max(1, int(self.interval))
                 try:
                     params = {"user": self.user_id, "sync": "1"}
@@ -8529,6 +8541,149 @@ class SimplePollWorker(QObject):
 
             # Interruptible short wait keeps host remote controls responsive.
             self._stop_evt.wait(0.5)
+
+class RelayRequestWorker(QObject):
+    """WebSocket request-relay client (wss://wskar.com/relay).
+
+    Replaces get_requests.php polling on servers that push a
+    ``requests_available`` message when a new request is submitted. Owns one
+    QWebSocket and one single-shot reconnect QTimer; lives on the GUI thread
+    (QWebSocket I/O is async and never blocks).
+    """
+
+    requests_available = pyqtSignal(str)            # reason ("connect" | "relay")
+    connection_status_changed = pyqtSignal(bool, str)
+
+    RECONNECT_DELAY_MS = 5000
+
+    def __init__(self, base_url, user_id, api_key, app_version, parent=None):
+        super().__init__(parent)
+        self.base_url = _network_normalize_base_url(base_url)
+        self.user_id = (user_id or "").strip() or "default"
+        self.api_key = (api_key or "").strip()
+        self.app_version = str(app_version or "").strip()
+        self._socket = None
+        self._closing = False
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.setSingleShot(True)
+        self._reconnect_timer.setInterval(self.RECONNECT_DELAY_MS)
+        self._reconnect_timer.timeout.connect(self._open_socket)
+
+    def relay_url(self) -> QUrl:
+        base = QUrl(self.base_url)
+        url = QUrl()
+        url.setScheme("wss" if base.scheme() != "http" else "ws")
+        url.setHost(base.host())
+        if base.port() > 0:
+            url.setPort(base.port())
+        url.setPath("/relay")
+        query = QUrlQuery()
+        query.addQueryItem("user", QUrl.toPercentEncoding(self.user_id).data().decode("ascii"))
+        query.addQueryItem("token", QUrl.toPercentEncoding(self.api_key).data().decode("ascii"))
+        query.addQueryItem("app_version", QUrl.toPercentEncoding(self.app_version).data().decode("ascii"))
+        url.setQuery(query)
+        return url
+
+    def _redacted_url(self) -> str:
+        url = self.relay_url()
+        query = QUrlQuery(url.query())
+        query.removeAllQueryItems("token")
+        query.addQueryItem("token", "***")
+        safe = QUrl(url)
+        safe.setQuery(query)
+        return safe.toString()
+
+    def start(self):
+        self._closing = False
+        self._open_socket()
+
+    def stop(self):
+        self._closing = True
+        try:
+            self._reconnect_timer.stop()
+        except Exception:
+            pass
+        sock = self._socket
+        self._socket = None
+        if sock is not None:
+            try:
+                sock.blockSignals(True)
+                sock.abort()
+                sock.deleteLater()
+            except Exception:
+                pass
+
+    def _schedule_reconnect(self):
+        if self._closing:
+            return
+        if not self._reconnect_timer.isActive():
+            self._reconnect_timer.start()
+
+    def _open_socket(self):
+        if self._closing or QWebSocket is None:
+            return
+        # Never hold two sockets: tear down any previous one first.
+        old = self._socket
+        self._socket = None
+        if old is not None:
+            try:
+                old.blockSignals(True)
+                old.abort()
+                old.deleteLater()
+            except Exception:
+                pass
+        sock = QWebSocket()
+        sock.setParent(self)
+        sock.connected.connect(self._on_connected)
+        sock.disconnected.connect(self._on_disconnected)
+        sock.textMessageReceived.connect(self._on_text_message)
+        try:
+            sock.errorOccurred.connect(self._on_error)
+        except Exception:
+            pass
+        self._socket = sock
+        print(f"[RELAY] Connecting to {self._redacted_url()}")
+        sock.open(self.relay_url())
+
+    def _on_connected(self):
+        print("[RELAY] Connected")
+        self.connection_status_changed.emit(True, "Relay connected")
+        # Recover anything submitted while we were disconnected.
+        self.requests_available.emit("connect")
+
+    def _on_disconnected(self):
+        if self._closing:
+            return
+        print("[RELAY] Disconnected; reconnecting soon")
+        self.connection_status_changed.emit(False, "Relay disconnected; reconnecting")
+        self._schedule_reconnect()
+
+    def _on_error(self, _error):
+        if self._closing:
+            return
+        sock = self._socket
+        msg = ""
+        try:
+            msg = sock.errorString() if sock is not None else ""
+        except Exception:
+            pass
+        print(f"[RELAY] Socket error: {msg}")
+        self._schedule_reconnect()
+
+    def _on_text_message(self, message: str):
+        try:
+            data = json.loads(message)
+        except Exception:
+            print(f"[RELAY] Ignoring non-JSON message: {str(message)[:120]!r}")
+            return
+        msg_type = str((data or {}).get("type", "") or "").strip().lower() if isinstance(data, dict) else ""
+        if msg_type == "hello":
+            print(f"[RELAY] Hello tenant={data.get('user', data.get('tenant', self.user_id))}")
+        elif msg_type == "requests_available":
+            print("[RELAY] requests_available")
+            self.requests_available.emit("relay")
+        else:
+            print(f"[RELAY] Ignoring message type={msg_type!r}")
 
 class DurationProbeWorker(QObject):
     progress = pyqtSignal(int, int)   # (done, total)
@@ -16015,6 +16170,176 @@ class KaraokeApp(QWidget):
             pass
         return report
 
+    # ------------------------------------------------------------------
+    # WebSocket request relay (wss://wskar.com/relay + get_requests_v2.php)
+    # ------------------------------------------------------------------
+
+    RELAY_MIN_APP_VERSION = (0, 3, 0, 0)
+    RELAY_HOSTS = {"wskar.com", "www.wskar.com"}
+
+    @staticmethod
+    def _version_tuple(version: str) -> tuple:
+        parts = []
+        for chunk in str(version or "").split("."):
+            digits = "".join(ch for ch in chunk if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+        return tuple(parts) if parts else (0,)
+
+    def _request_transport_setting(self) -> str:
+        """Transport preference: auto (default) | websocket/relay | polling."""
+        value = str(self.settings.get("request_transport", "auto") or "auto").strip().lower()
+        if value in ("websocket", "relay"):
+            return "websocket"
+        if value == "polling":
+            return "polling"
+        return "auto"
+
+    def _supports_request_relay(self) -> bool:
+        if not QTWEBSOCKETS_AVAILABLE or QWebSocket is None:
+            return False
+        return self._version_tuple(APP_VERSION) >= self.RELAY_MIN_APP_VERSION
+
+    def _should_use_request_relay(self, base_url: str, tenant: str, api_key: str) -> bool:
+        if self._request_transport_setting() == "polling":
+            return False
+        if not self._supports_request_relay():
+            return False
+        if not (tenant or "").strip() or not (api_key or "").strip():
+            return False
+        host = QUrl(_network_normalize_base_url(base_url)).host().strip().lower()
+        return host in self.RELAY_HOSTS
+
+    def _start_request_relay(self, base_url: str, tenant: str, api_key: str):
+        self._stop_request_relay()
+        self._relay_fetch_in_flight = False
+        self._relay_fetch_queued = False
+        worker = RelayRequestWorker(base_url, tenant, api_key, APP_VERSION, parent=self)
+        worker.requests_available.connect(self.fetch_remote_requests_once)
+        self.relay_worker = worker
+        worker.start()
+
+    def _stop_request_relay(self):
+        worker = getattr(self, "relay_worker", None)
+        self.relay_worker = None
+        if worker is not None:
+            try:
+                worker.stop()
+                worker.deleteLater()
+            except Exception:
+                pass
+
+    def fetch_remote_requests_once(self, reason: str = "relay"):
+        """Fetch pending requests from get_requests_v2.php in a background thread.
+
+        Never overlaps fetches: a notification that lands mid-fetch queues
+        exactly one follow-up fetch.
+        """
+        if bool(getattr(self, "_relay_fetch_in_flight", False)):
+            self._relay_fetch_queued = True
+            return
+        self._relay_fetch_in_flight = True
+
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        print(f"[REQUESTS] Fetching due to {reason}")
+
+        def worker():
+            rows = None
+            try:
+                resp = requests.get(
+                    f"{base_url}/get_requests_v2.php",
+                    params={"user": tenant},
+                    headers={"X-API-Key": api_key, "User-Agent": f"SingWS/{APP_VERSION}"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        rows = data
+                    else:
+                        print(f"[REQUESTS] v2 fetch: unexpected payload (not a list): {str(data)[:160]!r}")
+                else:
+                    print(f"[REQUESTS] v2 fetch failed: HTTP {resp.status_code} - {(resp.text or '')[:160]!r}")
+            except Exception as e:
+                print(f"[REQUESTS] v2 fetch failed: {e}")
+            finally:
+                fetched = rows
+                self._run_on_ui_thread(lambda: self._relay_fetch_finished(fetched))
+
+        threading.Thread(target=worker, daemon=True, name="relay-request-fetch").start()
+
+    def _relay_fetch_finished(self, rows):
+        self._relay_fetch_in_flight = False
+        try:
+            if rows:
+                self._handle_relay_requests(rows)
+        finally:
+            if bool(getattr(self, "_relay_fetch_queued", False)):
+                self._relay_fetch_queued = False
+                self.fetch_remote_requests_once("queued notification")
+
+    def _handle_relay_requests(self, rows):
+        """Process v2 request rows on the UI thread, then ack the successes."""
+        processed = getattr(self, "_relay_processed_request_ids", None)
+        if not isinstance(processed, set):
+            processed = set()
+            self._relay_processed_request_ids = processed
+
+        ack_ids = []
+        for req in rows or []:
+            if not isinstance(req, dict):
+                continue
+            try:
+                rid = int(req.get("id") or 0)
+            except Exception:
+                rid = 0
+            if rid > 0 and rid in processed:
+                # Already queued in this session (e.g. an earlier ack POST was
+                # lost and the lease expired) — just re-ack, never re-queue.
+                ack_ids.append(rid)
+                continue
+            ok = False
+            try:
+                ok = bool(self.process_external_request(req))
+            except Exception as e:
+                logging.error(f"Relay request processing failed: {req.get('artist', '')} - {req.get('title', '')}: {e}")
+                print(f"❌ Error processing relay request: {e}")
+            if ok and rid > 0:
+                processed.add(rid)
+                ack_ids.append(rid)
+        if ack_ids:
+            self.ack_remote_requests(ack_ids)
+
+    def ack_remote_requests(self, ack_ids):
+        ids = sorted({int(i) for i in (ack_ids or []) if int(i) > 0})
+        if not ids:
+            return
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+
+        def worker():
+            try:
+                resp = requests.post(
+                    f"{base_url}/get_requests_v2.php",
+                    json={"user": tenant, "tenant": tenant, "ack_ids": ids},
+                    headers={
+                        "X-API-Key": api_key,
+                        "Content-Type": "application/json",
+                        "User-Agent": f"SingWS/{APP_VERSION}",
+                    },
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    print(f"[REQUESTS] Acked {len(ids)} request(s): {ids}")
+                else:
+                    print(f"[REQUESTS] Ack failed: HTTP {resp.status_code} - {(resp.text or '')[:160]!r}")
+            except Exception as e:
+                print(f"[REQUESTS] Ack failed: {e}")
+
+        threading.Thread(target=worker, daemon=True, name="relay-request-ack").start()
+
     def start_request_polling(self):
         if self._safe_mode():
             print("[SAFE-MODE] Polling start ignored")
@@ -16025,8 +16350,16 @@ class KaraokeApp(QWidget):
         # Safety: ensure any previous thread is gone
         self.stop_request_polling()
 
-        self.poll_thread = QThread(self)
         api_key = self.settings.get("api_key", "")
+
+        # WebSocket relay replaces get_requests.php polling when supported
+        # (wskar.com, tenant + API key configured, QtWebSockets importable).
+        use_relay = self._should_use_request_relay(base_url, tenant, api_key)
+        if use_relay:
+            self._start_request_relay(base_url, tenant, api_key)
+            print(f"✅ Request relay started (WebSocket) tenant={tenant}; request polling disabled")
+
+        self.poll_thread = QThread(self)
         try:
             _poll_iv = self._effective_request_poll_interval_sec()
         except Exception:
@@ -16037,6 +16370,7 @@ class KaraokeApp(QWidget):
             api_key,
             interval_sec=_poll_iv,
             host_interval_sec=self._effective_host_poll_interval_sec(),
+            poll_requests=not use_relay,
         )
         self.poll_worker.moveToThread(self.poll_thread)
 
@@ -16046,7 +16380,10 @@ class KaraokeApp(QWidget):
         self.poll_thread.started.connect(self.poll_worker.run)
 
         self.poll_thread.start()
-        print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
+        if use_relay:
+            print(f"✅ Host-controls polling started ({base_url}/api/v1/host_commands.php); requests via relay")
+        else:
+            print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
 
         # Pull cloud phrase markers once when networking comes up, and push any
         # local changes that haven't been backed up yet. Both run in background
@@ -16062,6 +16399,10 @@ class KaraokeApp(QWidget):
             pass
 
     def stop_request_polling(self):
+        # Relay and polling are managed together: stopping the request
+        # transport always tears down both, so they can never run at once.
+        self._stop_request_relay()
+
         t = getattr(self, "poll_thread", None)
         w = getattr(self, "poll_worker", None)
 
@@ -26021,6 +26362,12 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print("Session location shutdown sync failed:", e)
 
+        # --- Stop WebSocket request relay (socket + reconnect timer) ---
+        try:
+            self._stop_request_relay()
+        except Exception as e:
+            print("Relay stop failed:", e)
+
         # --- Stop polling thread cleanly ---
         try:
             if hasattr(self, "poll_worker") and self.poll_worker:
@@ -29679,16 +30026,25 @@ class KaraokeApp(QWidget):
         api_key = str(self.settings.get("api_key", "") or "").strip()
         if not base_url or not tenant or not api_key:
             return
+        import threading
+        state = object.__getattribute__(self, "__dict__")
         try:
-            now = time.time()
-            if now - float(getattr(self, "_remote_tombstone_sync_last_ts", 0.0) or 0.0) < 2.0:
-                return
-            if bool(getattr(self, "_remote_tombstone_sync_active", False)):
-                return
-            self._remote_tombstone_sync_last_ts = now
-            self._remote_tombstone_sync_active = True
+            lock = state.get("_remote_tombstone_sync_lock")
+            if lock is None:
+                lock = threading.Lock()
+                state["_remote_tombstone_sync_lock"] = lock
+            with lock:
+                now = time.time()
+                if now - float(state.get("_remote_tombstone_sync_last_ts", 0.0) or 0.0) < 2.0:
+                    return
+                if bool(state.get("_remote_tombstone_sync_active", False)):
+                    return
+                state["_remote_tombstone_sync_last_ts"] = now
+                state["_remote_tombstone_sync_active"] = True
         except Exception:
-            pass
+            if bool(state.get("_remote_tombstone_sync_active", False)):
+                return
+            state["_remote_tombstone_sync_active"] = True
         data = self._ensure_remote_request_tombstones()
         pending = [
             dict(item)
@@ -29702,7 +30058,7 @@ class KaraokeApp(QWidget):
                 pass
             return
 
-        import threading, requests
+        import requests
 
         def send():
             headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/removal-sync"}

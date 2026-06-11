@@ -3,6 +3,21 @@
 ## Unreleased
 
 ### Added
+- **WebSocket request relay (v0.3.0.x)** — on wskar.com the app now connects to
+  `wss://wskar.com/relay` and fetches new requests the moment the server pushes
+  a `requests_available` notification, instead of polling `get_requests.php`
+  every couple of seconds.
+  - Requests are fetched from `get_requests_v2.php` and **acknowledged after
+    they are successfully queued** (lease + ack model), so a request is never
+    lost or double-queued across fetches, reconnects, or app restarts; a fetch
+    on connect recovers anything submitted while the app was offline.
+  - Auto-selects WebSocket mode when the base URL host is `wskar.com` /
+    `www.wskar.com` with a tenant + API key configured (override with the
+    `request_transport` setting: `auto` / `websocket` / `polling`). Other hosts
+    (e.g. beta) and older setups keep the existing polling transport.
+  - Reconnects 5 s after a drop with a single socket and timer; host
+    remote-controls polling stays active in relay mode (the relay does not push
+    host commands). Request polling stays off the whole time.
 - **Phrase-Aligned Song Start** — start a song at a musical phrase (4/8/16 bars
   in, or a hand-placed marker) instead of only at the file start, to skip long
   intros and land on a verse/chorus.

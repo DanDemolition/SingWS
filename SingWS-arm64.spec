@@ -79,6 +79,8 @@ a = Analysis(
         'scipy.signal',
         'scipy.signal._sosfilt',
         'scipy.signal._signaltools',
+        # WebSocket request relay (wss://wskar.com/relay)
+        'PyQt6.QtWebSockets',
     ],
     hookspath=[],
     hooksconfig={},
@@ -144,8 +146,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.2.18.3',
-        'CFBundleVersion': '0.2.18.3',
+        'CFBundleShortVersionString': '0.3.0.0',
+        'CFBundleVersion': '0.3.0.0',
         'NSHighResolutionCapable': True,
     },
 )
