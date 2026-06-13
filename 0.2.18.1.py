@@ -8552,6 +8552,7 @@ class RelayRequestWorker(QObject):
     """
 
     requests_available = pyqtSignal(str)            # reason ("connect" | "relay")
+    history_available = pyqtSignal(str)             # reason ("history_updated" | ...)
     connection_status_changed = pyqtSignal(bool, str)
 
     RECONNECT_DELAY_MS = 5000
@@ -8682,6 +8683,17 @@ class RelayRequestWorker(QObject):
         elif msg_type == "requests_available":
             print("[RELAY] requests_available")
             self.requests_available.emit("relay")
+        elif msg_type in {
+            "history_added",
+            "history_updated",
+            "history_deleted",
+            "history_reordered",
+            "history_preferred_brand_changed",
+            "history_favorite_changed",
+            "history_bulk_sync",
+        }:
+            print(f"[RELAY] {msg_type}")
+            self.history_available.emit(msg_type)
         else:
             print(f"[RELAY] Ignoring message type={msg_type!r}")
 
@@ -14764,6 +14776,12 @@ class KaraokeApp(QWidget):
             meta_bits.append(f"Duration: {self._fmt_right_time(dur)}")
         if meta_bits:
             tooltip_parts.append("  ".join(meta_bits))
+        path = str(track.get("path") or "").strip()
+        if path:
+            try:
+                tooltip_parts.append(f"File: {Path(path).name}")
+            except Exception:
+                pass
         tooltip = "\n".join([p for p in tooltip_parts if p])
 
         visible = self._two_col_text(self.results_list, left, right)
@@ -16215,6 +16233,7 @@ class KaraokeApp(QWidget):
         self._relay_fetch_queued = False
         worker = RelayRequestWorker(base_url, tenant, api_key, APP_VERSION, parent=self)
         worker.requests_available.connect(self.fetch_remote_requests_once)
+        worker.history_available.connect(lambda reason: self._sync_singer_history_async(f"relay_{reason}"))
         self.relay_worker = worker
         worker.start()
 
@@ -16299,6 +16318,8 @@ class KaraokeApp(QWidget):
                 # lost and the lease expired) — just re-ack, never re-queue.
                 ack_ids.append(rid)
                 continue
+            if rid > 0 and not req.get("request_id"):
+                req["request_id"] = rid
             ok = False
             try:
                 ok = bool(self.process_external_request(req))
@@ -20327,6 +20348,7 @@ class KaraokeApp(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._record_singer_history_song_tombstone(singer_key, song_key, song)
         songs.pop(song_key, None)
         record["unique_song_count"] = len(songs)
         record["updated_at"] = int(time.time())
@@ -23717,7 +23739,7 @@ class KaraokeApp(QWidget):
         }
         if isinstance(remote_meta, dict):
             try:
-                remote_request_id = int(remote_meta.get("request_id", 0) or 0)
+                remote_request_id = int(remote_meta.get("request_id", remote_meta.get("id", 0)) or 0)
             except Exception:
                 remote_request_id = 0
             if remote_request_id > 0:
@@ -24275,6 +24297,8 @@ class KaraokeApp(QWidget):
             menu.addSeparator()
             change_disc_action = menu.addAction("Change Disc ID...")
             change_disc_action.triggered.connect(lambda: self.open_change_discid_dialog(singer_idx, song_idx))
+            replace_track_action = menu.addAction("Replace Track...")
+            replace_track_action.triggered.connect(lambda: self.open_replace_track_dialog(singer_idx, song_idx))
             menu.addSeparator()
             key_action = menu.addAction("Change Key…")
             key_action.triggered.connect(lambda: self.open_song_key_dialog(singer_idx, song_idx))
@@ -25236,7 +25260,49 @@ class KaraokeApp(QWidget):
                     continue
                 deletions_out[norm_key] = {"name": name or norm_key, "deleted_at": deleted_at}
 
-        return {"singers": singers_out, "deletions": deletions_out}
+        song_deletions_out = {}
+        try:
+            song_deletions = raw_history.get("song_deletions", {}) if isinstance(raw_history, dict) else {}
+        except Exception:
+            song_deletions = {}
+        if isinstance(song_deletions, dict):
+            for raw_singer_key, raw_items in song_deletions.items():
+                norm_singer = self._normalize_singer_pref_key(raw_singer_key)
+                if not norm_singer or not isinstance(raw_items, dict):
+                    continue
+                for raw_song_key, raw_value in raw_items.items():
+                    if not isinstance(raw_value, dict):
+                        continue
+                    song_key = self._normalize_history_song_key(
+                        raw_value.get("artist", ""),
+                        raw_value.get("title", ""),
+                        raw_value.get("songid", ""),
+                        raw_value.get("path", ""),
+                    )
+                    if not song_key:
+                        song_key = str(raw_value.get("song_key", raw_song_key) or raw_song_key).strip().lower()
+                    if not song_key:
+                        continue
+                    try:
+                        deleted_at = int(raw_value.get("deleted_at") or 0)
+                    except Exception:
+                        deleted_at = 0
+                    if deleted_at <= 0:
+                        continue
+                    bucket = song_deletions_out.setdefault(norm_singer, {})
+                    prev = bucket.get(song_key)
+                    if isinstance(prev, dict) and int(prev.get("deleted_at") or 0) >= deleted_at:
+                        continue
+                    bucket[song_key] = {
+                        "name": str(raw_value.get("name", raw_singer_key) or raw_singer_key).strip(),
+                        "song_key": song_key,
+                        "artist": str(raw_value.get("artist", "") or "").strip(),
+                        "title": str(raw_value.get("title", "") or "").strip(),
+                        "songid": str(raw_value.get("songid", "") or "").strip(),
+                        "deleted_at": deleted_at,
+                    }
+
+        return {"singers": singers_out, "deletions": deletions_out, "song_deletions": song_deletions_out}
 
     def _normalize_history_song_key(self, artist: str = "", title: str = "", songid: str = "", path: str = "") -> str:
         artist = str(artist or "").strip().lower()
@@ -25361,18 +25427,44 @@ class KaraokeApp(QWidget):
             "deleted_at": int(deleted_at),
         }
 
+    def _record_singer_history_song_tombstone(self, singer_key: str, song_key: str, song: dict | None = None, deleted_at: int | None = None) -> None:
+        norm_key = self._normalize_singer_pref_key(singer_key)
+        song_key = str(song_key or "").strip()
+        if not norm_key or not song_key:
+            return
+        if deleted_at is None:
+            deleted_at = int(time.time())
+        song = song if isinstance(song, dict) else {}
+        bucket = self.singer_history.setdefault("song_deletions", {}).setdefault(norm_key, {})
+        prev = bucket.get(song_key)
+        if isinstance(prev, dict) and int(prev.get("deleted_at") or 0) >= int(deleted_at):
+            return
+        singer_name = norm_key
+        record = self.singer_history.get("singers", {}).get(norm_key)
+        if isinstance(record, dict):
+            singer_name = str(record.get("name") or norm_key)
+        bucket[song_key] = {
+            "name": singer_name,
+            "song_key": song_key,
+            "artist": str(song.get("artist", "") or "").strip(),
+            "title": str(song.get("title", "") or "").strip(),
+            "songid": str(song.get("songid", "") or "").strip(),
+            "deleted_at": int(deleted_at),
+        }
+
     def _export_singer_history_payload(self) -> dict:
         try:
             normalized = self._normalize_singer_history_store(self.singer_history)
             return {
                 "singers": normalized.get("singers", {}),
                 "deletions": normalized.get("deletions", {}),
+                "song_deletions": normalized.get("song_deletions", {}),
                 "generated_at": int(time.time()),
                 "sync_version": 2,
                 "app_version": APP_VERSION,
             }
         except Exception:
-            return {"singers": {}, "deletions": {}, "generated_at": int(time.time()), "sync_version": 2, "app_version": APP_VERSION}
+            return {"singers": {}, "deletions": {}, "song_deletions": {}, "generated_at": int(time.time()), "sync_version": 2, "app_version": APP_VERSION}
 
     def _merge_remote_singer_history(self, payload) -> bool:
         if not isinstance(payload, dict):
@@ -25384,6 +25476,7 @@ class KaraokeApp(QWidget):
         changed = False
         local_singers = self.singer_history.setdefault("singers", {})
         local_deletions = self.singer_history.setdefault("deletions", {})
+        local_song_deletions = self.singer_history.setdefault("song_deletions", {})
 
         # Reconcile tombstones: keep the newest deleted_at per singer (last-writer-wins).
         remote_deletions = remote.get("deletions", {})
@@ -25400,6 +25493,24 @@ class KaraokeApp(QWidget):
                     "deleted_at": deleted_at,
                 }
                 changed = True
+
+        remote_song_deletions = remote.get("song_deletions", {})
+        if isinstance(remote_song_deletions, dict):
+            for norm_key, items in remote_song_deletions.items():
+                if not isinstance(items, dict):
+                    continue
+                bucket = local_song_deletions.setdefault(norm_key, {})
+                for song_key, entry in items.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    deleted_at = int(entry.get("deleted_at") or 0)
+                    if deleted_at <= 0:
+                        continue
+                    prev = bucket.get(song_key)
+                    if isinstance(prev, dict) and int(prev.get("deleted_at") or 0) >= deleted_at:
+                        continue
+                    bucket[song_key] = dict(entry)
+                    changed = True
 
         for singer_key, remote_record in remote_singers.items():
             local_record = local_singers.get(singer_key)
@@ -25450,6 +25561,44 @@ class KaraokeApp(QWidget):
                             int(remote_song.get("last_performed_at") or 0),
                         )
             local_record["unique_song_count"] = len(local_songs)
+
+        for norm_key, items in list(local_song_deletions.items()):
+            if not isinstance(items, dict):
+                continue
+            record = local_singers.get(norm_key)
+            songs = record.get("songs", {}) if isinstance(record, dict) else {}
+            for song_key, entry in list(items.items()):
+                deleted_at = int((entry or {}).get("deleted_at") or 0)
+                matching = []
+                if isinstance(songs, dict):
+                    if isinstance(songs.get(song_key), dict):
+                        matching.append((song_key, songs.get(song_key)))
+                    for candidate_key, candidate_song in songs.items():
+                        if not isinstance(candidate_song, dict):
+                            continue
+                        normalized_candidate = self._normalize_history_song_key(
+                            candidate_song.get("artist", ""),
+                            candidate_song.get("title", ""),
+                            candidate_song.get("songid", ""),
+                            candidate_song.get("path", ""),
+                        )
+                        if normalized_candidate == song_key:
+                            if not any(existing_key == candidate_key for existing_key, _song in matching):
+                                matching.append((candidate_key, candidate_song))
+                for actual_key, song in matching:
+                    if not isinstance(song, dict):
+                        continue
+                    if int(song.get("updated_at") or 0) > deleted_at:
+                        items.pop(song_key, None)
+                        changed = True
+                        break
+                    else:
+                        songs.pop(actual_key, None)
+                        if isinstance(record, dict):
+                            record["unique_song_count"] = len(songs)
+                        changed = True
+            if not items:
+                local_song_deletions.pop(norm_key, None)
 
         # Enforce tombstones: a deletion wins unless the alive record is strictly
         # newer than the deletion (resurrection), in which case the tombstone clears.
@@ -26025,14 +26174,30 @@ class KaraokeApp(QWidget):
         matched.sort(key=lambda x: x[0])
         return [x[1] for x in matched]
 
+    def _track_from_search_row(self, row: dict) -> dict:
+        if not isinstance(row, dict):
+            row = {}
+        disc = row.get("discid") or row.get("disc_id") or row.get("disc") or ""
+        return {
+            "artist": row.get("artist") or "",
+            "title": row.get("title") or "",
+            "discid": disc,
+            "disc_id": disc,
+            "duration": row.get("duration_secs") or row.get("duration") or "",
+            "path": row.get("path") or "",
+            "type": row.get("song_type") or row.get("type") or "",
+            "display": row.get("display") or "",
+            "songid": row.get("songid") or row.get("song_id") or row.get("id") or "",
+        }
+
     def _build_queue_entry_from_track_choice(self, old_entry, track: dict):
         path = str(track.get("path", "") or "").strip()
         if not path:
             raise ValueError("Selected track has no valid path.")
 
         key = self._queue_entry_key(old_entry)
-        skipped = bool(old_entry.get("skipped", False)) if isinstance(old_entry, dict) else False
         duet_display = self._queue_entry_duet_display(old_entry)
+        new_entry = dict(old_entry) if isinstance(old_entry, dict) else {}
 
         low = path.lower()
         if low.endswith(".cdg"):
@@ -26054,19 +26219,397 @@ class KaraokeApp(QWidget):
             song_info = path
             song_type = str(track.get("type") or "")
 
-        return {
+        artist = str(track.get("artist") or "").strip()
+        title = str(track.get("title") or "").strip()
+        disc_id = str(track.get("disc_id") or track.get("discid") or "").strip()
+        display = str(track.get("display") or "").strip()
+        if not display:
+            display = " - ".join([p for p in (artist, title, disc_id) if p])
+
+        new_entry.update({
             "song_info": song_info,
             "key": key,
-            "skipped": skipped,
             "duet_display": duet_display,
-            "artist": str(track.get("artist") or "").strip(),
-            "title": str(track.get("title") or "").strip(),
+            "artist": artist,
+            "title": title,
             "duration": track.get("duration") or track.get("duration_secs"),
-            "disc_id": str(track.get("disc_id") or track.get("discid") or "").strip(),
-            "display": str(track.get("display") or "").strip(),
+            "disc_id": disc_id,
+            "display": display,
+            "display_name": display,
             "path": path,
             "type": song_type,
+        })
+        if "songid" in track or "song_id" in track:
+            new_entry["songid"] = str(track.get("songid") or track.get("song_id") or "").strip()
+        if "tempo_percent" not in new_entry and isinstance(old_entry, (tuple, list)) and len(old_entry) >= 3:
+            try:
+                if isinstance(old_entry[2], (int, float)):
+                    new_entry["tempo_percent"] = int(old_entry[2])
+            except Exception:
+                pass
+        return new_entry
+
+    def _replace_queue_song_with_track(self, singer_idx: int, song_idx: int, track: dict, source: str = "replace_track"):
+        if singer_idx < 0 or singer_idx >= len(self.queue):
+            return False
+        songs = self.queue[singer_idx].get("songs", [])
+        if song_idx < 0 or song_idx >= len(songs):
+            return False
+
+        singer_name = str(self.queue[singer_idx].get("name", "") or "").strip()
+        old_entry = songs[song_idx]
+        old_artist, old_title = self._queue_entry_artist_title(old_entry)
+        new_entry = self._build_queue_entry_from_track_choice(old_entry, track)
+        new_artist, new_title = self._queue_entry_artist_title(new_entry)
+        songs[song_idx] = new_entry
+        try:
+            self._queue_revision = int(getattr(self, "_queue_revision", 0)) + 1
+        except Exception:
+            self._queue_revision = 1
+        request_id = self._queue_entry_remote_request_id(new_entry)
+        try:
+            tempo_percent = int(new_entry.get("tempo_percent") or 100)
+        except Exception:
+            tempo_percent = 100
+        _diag(
+            "[REPLACE-TRACK] "
+            f"source={source} singer={singer_name!r} request_id={request_id or ''} "
+            f"old={old_artist!r}/{old_title!r} new={new_artist!r}/{new_title!r} "
+            f"key={self._queue_entry_key(new_entry):+d} tempo={tempo_percent}% "
+            f"revision={int(getattr(self, '_queue_revision', 0) or 0)}"
+        )
+        self.update_queue_display()
+        self.save_data()
+        try:
+            self._schedule_next_up_prescan()
+        except Exception:
+            pass
+        try:
+            self.post_rotation()
+        except Exception:
+            pass
+        self._push_remote_request_replacement(
+            new_entry,
+            singer_name=singer_name,
+            old_artist=old_artist,
+            old_title=old_title,
+            source=source,
+        )
+        return True
+
+    def _push_remote_request_replacement(self, entry, *, singer_name: str = "", old_artist: str = "", old_title: str = "", source: str = "replace_track"):
+        request_id = self._queue_entry_remote_request_id(entry)
+        if request_id is None:
+            _diag(f"[REPLACE-TRACK] local-only replacement synced through rotation mirror source={source}")
+            return
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        if not base_url or not tenant or not api_key:
+            _diag(f"[REPLACE-TRACK] queued unsynced request_id={request_id} reason=network_not_configured")
+            return
+
+        artist, title = self._queue_entry_artist_title(entry)
+        try:
+            song_key = int(entry.get("key") or 0)
+        except Exception:
+            song_key = 0
+        try:
+            tempo_offset = int(entry.get("tempo_percent") or 100) - 100
+        except Exception:
+            tempo_offset = 0
+        payload = {
+            "user": tenant,
+            "request_id": int(request_id),
+            "singer_name": singer_name,
+            "old_artist": old_artist,
+            "old_title": old_title,
+            "artist": artist,
+            "title": title,
+            "songid": entry.get("songid", ""),
+            "disc_id": entry.get("disc_id", ""),
+            "path": self._queue_entry_primary_path(entry) or str(entry.get("path") or ""),
+            "duration": entry.get("duration", ""),
+            "song_key": song_key,
+            "tempo": tempo_offset,
+            "source": source,
         }
+
+        import threading, requests
+
+        def send():
+            headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/replace-track"}
+            try:
+                resp = requests.post(
+                    f"{base_url}/api/v1/replace_remote_request.php",
+                    data=payload,
+                    headers=headers,
+                    timeout=6,
+                )
+                if 200 <= resp.status_code < 300:
+                    _diag(f"[REPLACE-TRACK] server accepted request_id={request_id} status={resp.status_code}")
+                else:
+                    print(f"[REPLACE-TRACK] HTTP {resp.status_code}: {resp.text[:180]}")
+            except Exception as e:
+                print(f"[REPLACE-TRACK] Failed to sync request {request_id}: {e}")
+
+        threading.Thread(target=send, daemon=True).start()
+
+
+    def open_replace_track_dialog(self, singer_idx: int, song_idx: int):
+        if singer_idx < 0 or singer_idx >= len(self.queue):
+            return
+        songs = self.queue[singer_idx].get("songs", [])
+        if song_idx < 0 or song_idx >= len(songs):
+            return
+
+        old_entry = songs[song_idx]
+        old_artist, old_title = self._queue_entry_artist_title(old_entry)
+        old_label = f"{old_artist} - {old_title}".strip(" -") or "selected track"
+
+        class _ReplaceTrackDialog(QDialog):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._on_resize_cb = None
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                cb = getattr(self, "_on_resize_cb", None)
+                if cb is not None:
+                    try:
+                        cb()
+                    except Exception:
+                        pass
+
+        dlg = _ReplaceTrackDialog(self)
+        dlg.setWindowTitle("Replace Track")
+        dlg.setMinimumSize(560, 340)
+        try:
+            geo_hex = str((self.settings or {}).get("replace_track_dialog_geometry", "") or "").strip()
+            if not (geo_hex and dlg.restoreGeometry(QByteArray.fromHex(geo_hex.encode("ascii")))):
+                sz = (self.settings or {}).get("replace_track_dialog_size") or {}
+                dlg.resize(max(560, int(sz.get("w", 900))), max(340, int(sz.get("h", 540))))
+        except Exception:
+            dlg.resize(900, 540)
+
+        try:
+            base = self.palette().color(QPalette.ColorRole.Base)
+            win = self.palette().color(QPalette.ColorRole.Window)
+            txtc = self.palette().color(QPalette.ColorRole.Text)
+            border = base.darker(120)
+            field_bg = base.darker(105)
+            dlg.setStyleSheet(
+                dialog_stylesheet(win, base, txtc)
+                + f"""
+                QListWidget {{
+                    background-color: {field_bg.name()};
+                    color: {txtc.name()};
+                    border: 1px solid {border.name()};
+                    border-radius: 8px;
+                    outline: none;
+                }}
+                QListWidget::item {{ padding: 2px 6px; }}
+                QListWidget::item:selected {{
+                    background-color: palette(highlight);
+                    color: palette(highlighted-text);
+                }}
+                """
+            )
+        except Exception:
+            pass
+
+        v = QVBoxLayout(dlg)
+        search = QLineEdit(dlg)
+        search.setPlaceholderText("Search replacement song...")
+        search.setClearButtonEnabled(True)
+        v.addWidget(search)
+
+        results = QListWidget(dlg)
+        results.setAlternatingRowColors(True)
+        results.setUniformItemSizes(True)
+        results.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        results.setItemDelegate(
+            RightAlignedMetaDelegate(
+                self._row_left_role,
+                self._row_right_role,
+                results,
+                compact_shift_ratio=0.0,
+                edge_pad_px=2,
+                gap_px=12,
+                force_scrollbar_reserve_px=0,
+            )
+        )
+        v.addWidget(results, 1)
+
+        confirm = QLabel(f"Replace '{old_label}' with a selected track?")
+        confirm.setWordWrap(True)
+        confirm.setStyleSheet(f"color: {_v('warning')}; font-weight: 700;")
+        v.addWidget(confirm)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=dlg)
+        replace_btn = btns.addButton("Replace", QDialogButtonBox.ButtonRole.AcceptRole)
+        replace_btn.setEnabled(False)
+        v.addWidget(btns)
+
+        search_state = {"job_id": 0, "thread": None}
+        search_timer = QTimer(dlg)
+        search_timer.setSingleShot(True)
+        search_timer.setInterval(max(120, int(self._effective_search_debounce_ms() * 0.7)))
+
+        def current_track():
+            item = results.currentItem()
+            if item is None:
+                return None
+            track = item.data(Qt.ItemDataRole.UserRole)
+            return track if isinstance(track, dict) else None
+
+        def refresh_confirm():
+            track = current_track()
+            replace_btn.setEnabled(track is not None)
+            if not track:
+                confirm.setText(f"Replace '{old_label}' with a selected track?")
+                return
+            new_artist = str(track.get("artist") or "").strip()
+            new_title = str(track.get("title") or "").strip()
+            new_label = f"{new_artist} - {new_title}".strip(" -") or str(track.get("display") or "replacement track")
+            confirm.setText(f"Replace '{old_label}' with '{new_label}'?")
+
+        def add_rows(rows):
+            results.setUpdatesEnabled(False)
+            try:
+                results.clear()
+                for r in rows or []:
+                    try:
+                        track = self._track_from_search_row(r)
+                        if not str(track.get("path") or "").strip():
+                            continue
+                        _label, tooltip, left, right = self._build_search_row_text(track)
+                        item = QListWidgetItem(left)
+                        item.setData(Qt.ItemDataRole.UserRole, track)
+                        self._set_aligned_row_meta(item, left, right)
+                        item.setData(self._row_disc_role, str(track.get("disc_id") or "").strip())
+                        try:
+                            item.setToolTip(tooltip)
+                        except Exception:
+                            pass
+                        results.addItem(item)
+                    except Exception:
+                        continue
+            finally:
+                results.setUpdatesEnabled(True)
+            if results.count() > 0:
+                results.setCurrentRow(0)
+            refresh_confirm()
+
+        def on_results(job_id, rows):
+            if int(job_id) != int(search_state.get("job_id") or 0):
+                return
+            if not str(search.text() or "").strip():
+                results.clear()
+                refresh_confirm()
+                return
+            add_rows(rows)
+
+        def start_search():
+            query = str(search.text() or "").strip()
+            search_state["job_id"] = int(search_state.get("job_id") or 0) + 1
+            job_id = int(search_state["job_id"])
+            if not query:
+                results.clear()
+                refresh_confirm()
+                return
+            try:
+                thr = search_state.get("thread")
+                if thr is not None and thr.isRunning():
+                    thr.requestInterruption()
+            except Exception:
+                pass
+            thread = SongSearchThread(
+                job_id,
+                query,
+                limit=250,
+                fuzzy=not (self._performance_mode() or self._safe_mode()),
+            )
+            thread.results_ready.connect(on_results)
+            try:
+                thread.finished.connect(thread.deleteLater)
+            except Exception:
+                pass
+            search_state["thread"] = thread
+            thread.start()
+
+        def apply_choice():
+            track = current_track()
+            if not isinstance(track, dict):
+                return
+            try:
+                if self._replace_queue_song_with_track(singer_idx, song_idx, track, source="replace_track_dialog"):
+                    dlg.accept()
+            except Exception as e:
+                QMessageBox.warning(dlg, "Replace Track", str(e))
+
+        def refresh_rows_for_width():
+            try:
+                current = results.currentRow()
+                for i in range(results.count()):
+                    it = results.item(i)
+                    track = it.data(Qt.ItemDataRole.UserRole)
+                    if not isinstance(track, dict):
+                        continue
+                    _label, tooltip, left, right = self._build_search_row_text(track)
+                    it.setText(left)
+                    self._set_aligned_row_meta(it, left, right)
+                    try:
+                        it.setToolTip(tooltip)
+                    except Exception:
+                        pass
+                if 0 <= current < results.count():
+                    results.setCurrentRow(current)
+            except Exception:
+                pass
+
+        resize_refresh_timer = QTimer(dlg)
+        resize_refresh_timer.setSingleShot(True)
+        resize_refresh_timer.timeout.connect(refresh_rows_for_width)
+        dlg._on_resize_cb = lambda: resize_refresh_timer.start(20)
+        search.textChanged.connect(lambda *_: search_timer.start())
+        search.returnPressed.connect(apply_choice)
+        search_timer.timeout.connect(start_search)
+        results.itemSelectionChanged.connect(refresh_confirm)
+        results.itemDoubleClicked.connect(lambda *_: apply_choice())
+        btns.accepted.connect(apply_choice)
+        btns.rejected.connect(dlg.reject)
+
+        def persist_size():
+            try:
+                s = dlg.size()
+                self.settings["replace_track_dialog_size"] = {"w": int(s.width()), "h": int(s.height())}
+                try:
+                    self.settings["replace_track_dialog_geometry"] = bytes(dlg.saveGeometry().toHex()).decode("ascii")
+                except Exception:
+                    pass
+                self.save_settings()
+            except Exception:
+                pass
+            try:
+                thr = search_state.get("thread")
+                if thr is not None and thr.isRunning():
+                    thr.requestInterruption()
+            except Exception:
+                pass
+
+        dlg.finished.connect(lambda _r: persist_size())
+        try:
+            seed = " ".join([p for p in (old_artist, old_title) if p]).strip()
+            if seed:
+                search.setText(seed)
+                search.selectAll()
+                search_timer.start(10)
+        except Exception:
+            pass
+        search.setFocus(Qt.FocusReason.PopupFocusReason)
+        dlg.exec()
+
 
     def open_change_discid_dialog(self, singer_idx: int, song_idx: int):
         if singer_idx < 0 or singer_idx >= len(self.queue):
@@ -26244,14 +26787,8 @@ class KaraokeApp(QWidget):
             if not isinstance(track, dict):
                 return
             try:
-                self.queue[singer_idx]["songs"][song_idx] = self._build_queue_entry_from_track_choice(old_entry, track)
-                self.update_queue_display()
-                self.save_data()
-                try:
-                    self._schedule_next_up_prescan()
-                except Exception:
-                    pass
-                dlg.accept()
+                if self._replace_queue_song_with_track(singer_idx, song_idx, track, source="change_discid_dialog"):
+                    dlg.accept()
             except Exception as e:
                 QMessageBox.warning(dlg, "Change Disc ID", str(e))
 
@@ -27534,17 +28071,7 @@ class KaraokeApp(QWidget):
                 for i in range(start, end):
                     r = rows[i]
                     try:
-                        track = {
-                            "artist": r.get("artist") or "",
-                            "title": r.get("title") or "",
-                            # FIXED: Map 'discid' from DB to both field names for compatibility
-                            "discid": r.get("discid") or "",
-                            "disc_id": r.get("discid") or "",  # also set disc_id for compatibility
-                            "duration": r.get("duration_secs") or r.get("duration") or "",
-                            "path": r.get("path") or "",
-                            "type": r.get("song_type") or r.get("type") or "",
-                            "display": r.get("display") or "",
-                        }
+                        track = self._track_from_search_row(r)
                         label, tooltip, left, right = self._build_search_row_text(track)
                         item = QListWidgetItem(label)
                         item.setData(Qt.ItemDataRole.UserRole, track)
@@ -29252,7 +29779,7 @@ class KaraokeApp(QWidget):
             try:
                 remote_request_id = self._queue_entry_remote_request_id(entry)
                 if remote_request_id is not None:
-                    self._delete_remote_request(
+                    self._complete_remote_request(
                         remote_request_id,
                         entry=entry,
                         singer_name=str(singer.get("name", "") or ""),
@@ -29928,7 +30455,7 @@ class KaraokeApp(QWidget):
                 return left.strip(), right.strip()
         return "", ""
 
-    def _record_remote_request_tombstone(self, request_id: int, *, entry=None, singer_name: str = "", reason: str = "host_remove") -> dict | None:
+    def _record_remote_request_tombstone(self, request_id: int, *, entry=None, singer_name: str = "", reason: str = "host_remove", status: str = "removed") -> dict | None:
         try:
             request_id = int(request_id or 0)
         except Exception:
@@ -29966,6 +30493,9 @@ class KaraokeApp(QWidget):
         except Exception:
             self._queue_revision = 1
         now = time.time()
+        status = str(status or "removed").strip().lower()
+        if status not in {"removed", "completed", "sung"}:
+            status = "removed"
         tombstone = {
             "request_id": request_id,
             "singer_name": singer_name,
@@ -29977,7 +30507,7 @@ class KaraokeApp(QWidget):
             "removal_reason": str(reason or "host_remove"),
             "local_revision": int(getattr(self, "_queue_revision", 0) or 0),
             "server_synced_at": None,
-            "status": "removed",
+            "status": status,
         }
         data.setdefault("requests", {})[str(request_id)] = tombstone
         self._save_remote_request_tombstones(data)
@@ -30066,15 +30596,19 @@ class KaraokeApp(QWidget):
             try:
                 for tombstone in pending:
                     rid = int(tombstone.get("request_id") or 0)
+                    state_name = str(tombstone.get("status") or "removed").strip().lower()
+                    if state_name not in {"removed", "completed", "sung"}:
+                        state_name = "removed"
                     payload = {
                         "user": tenant,
                         "request_id": rid,
-                        "state": "removed",
-                        "status": "removed",
+                        "state": state_name,
+                        "status": state_name,
                         "singer_name": tombstone.get("singer_name", ""),
                         "artist": tombstone.get("artist", ""),
                         "title": tombstone.get("title", ""),
                         "removed_at": int(float(tombstone.get("removed_at") or time.time())),
+                        "completed_at": int(float(tombstone.get("removed_at") or time.time())),
                         "removed_by": tombstone.get("removed_by", "host"),
                         "removal_reason": tombstone.get("removal_reason", reason),
                         "local_revision": tombstone.get("local_revision", ""),
@@ -30114,6 +30648,72 @@ class KaraokeApp(QWidget):
                         self._remote_tombstone_sync_active = False
                     except Exception:
                         pass
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def _complete_remote_request(self, request_id: int, *, entry=None, singer_name: str = "", reason: str = "song_completed"):
+        try:
+            request_id = int(request_id or 0)
+        except Exception:
+            return
+        if request_id <= 0:
+            return
+        tombstone = self._record_remote_request_tombstone(
+            request_id,
+            entry=entry,
+            singer_name=singer_name,
+            reason=reason,
+            status="completed",
+        )
+        try:
+            removed = getattr(self, "_remote_removed_request_ids", None)
+            if not isinstance(removed, set):
+                removed = set()
+                self._remote_removed_request_ids = removed
+            removed.add(request_id)
+        except Exception:
+            pass
+
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        if not base_url or not tenant or not api_key:
+            _diag(f"[REMOTE-COMPLETE] queued unsynced request_id={request_id} reason=network_not_configured")
+            return
+
+        import threading, requests
+
+        def send():
+            headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/complete-request"}
+            try:
+                mark = requests.post(
+                    f"{base_url}/api/v1/complete_remote_request.php",
+                    data={
+                        "user": tenant,
+                        "request_id": request_id,
+                        "state": "completed",
+                        "status": "completed",
+                        "singer_name": singer_name,
+                        "artist": (tombstone or {}).get("artist", ""),
+                        "title": (tombstone or {}).get("title", ""),
+                        "completed_at": int(float((tombstone or {}).get("removed_at") or time.time())),
+                        "removal_reason": reason,
+                        "local_revision": (tombstone or {}).get("local_revision", ""),
+                    },
+                    headers=headers,
+                    timeout=5,
+                )
+                if 200 <= mark.status_code < 300:
+                    latest = self._ensure_remote_request_tombstones()
+                    item = latest.get("requests", {}).get(str(request_id))
+                    if isinstance(item, dict):
+                        item["server_synced_at"] = time.time()
+                        self._save_remote_request_tombstones(latest)
+                    _diag(f"[REMOTE-COMPLETE] server acknowledged completion request_id={request_id} status={mark.status_code}")
+                else:
+                    print(f"[REMOTE-COMPLETE] mark completed HTTP {mark.status_code}: {mark.text[:160]}")
+            except Exception as e:
+                print(f"[REMOTE-COMPLETE] Failed to mark request {request_id} completed: {e}")
 
         threading.Thread(target=send, daemon=True).start()
 

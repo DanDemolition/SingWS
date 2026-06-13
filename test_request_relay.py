@@ -123,6 +123,18 @@ class HandleRelayRequestsTests(unittest.TestCase):
         app._handle_relay_requests(["junk", None, {"id": "abc"}, {"singer": "A"}])
         self.assertEqual(app.acked, [])
 
+    def test_relay_id_is_aliased_to_request_id_for_queue_metadata(self):
+        app = make_app()
+        app._relay_processed_request_ids = set()
+        seen = []
+        app.process_external_request = lambda req: seen.append(dict(req)) or True
+        app.ack_remote_requests = lambda ids: None
+
+        app._handle_relay_requests([{"id": 42, "singer": "A", "artist": "X", "title": "T"}])
+
+        self.assertEqual(seen[0]["id"], 42)
+        self.assertEqual(seen[0]["request_id"], 42)
+
 
 class FetchOverlapTests(unittest.TestCase):
     def test_second_fetch_queued_while_in_flight(self):
@@ -185,6 +197,15 @@ class RelayWorkerTests(unittest.TestCase):
         self.assertEqual(seen, ["relay"])
         worker._on_text_message("not json at all")
         self.assertEqual(seen, ["relay"])
+        worker.stop()
+
+    def test_history_event_triggers_history_sync_signal(self):
+        worker = self.make_worker()
+        seen = []
+        worker.history_available.connect(lambda reason: seen.append(reason))
+        worker._on_text_message('{"type": "history_updated"}')
+        worker._on_text_message('{"type": "history_bulk_sync"}')
+        self.assertEqual(seen, ["history_updated", "history_bulk_sync"])
         worker.stop()
 
     def test_connected_triggers_recovery_fetch(self):
