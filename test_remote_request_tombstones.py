@@ -195,6 +195,240 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             tombstone = app._ensure_remote_request_tombstones()["requests"]["202"]
             self.assertIsNotNone(tombstone["server_synced_at"])
 
+    def test_completed_song_pushes_completed_state_without_delete(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+
+            with fake_network(self.singws) as net:
+                app._complete_remote_request(
+                    505,
+                    entry={"artist": "Artist", "title": "Title"},
+                    singer_name="Ada",
+                    reason="song_completed",
+                )
+
+            complete_posts = [p for p in net.posts if "complete_remote_request.php" in p["url"]]
+            delete_posts = [p for p in net.posts if "delete_remote_request.php" in p["url"]]
+            self.assertEqual(len(complete_posts), 1)
+            self.assertEqual(delete_posts, [])
+            payload = complete_posts[0]["data"]
+            self.assertEqual(int(payload["request_id"]), 505)
+            self.assertEqual(payload["state"], "completed")
+
+            tombstone = app._ensure_remote_request_tombstones()["requests"]["505"]
+            self.assertEqual(tombstone["status"], "completed")
+            self.assertIsNotNone(tombstone["server_synced_at"])
+
+    def test_replace_track_builder_preserves_queue_metadata(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            old_entry = {
+                "song_info": "/music/old.mp3",
+                "key": 3,
+                "tempo_percent": 94,
+                "remote_request_id": 707,
+                "phrase_start_seconds": 12.5,
+                "duet_display": "Ada & Bob",
+                "skipped": True,
+                "custom_metadata": "keep-me",
+                "artist": "Old Artist",
+                "title": "Old Title",
+            }
+            track = {
+                "artist": "New Artist",
+                "title": "New Title",
+                "disc_id": "KJ-100",
+                "duration": 211,
+                "path": "/music/new.mp3",
+                "type": "mp3",
+                "songid": "song-100",
+            }
+
+            new_entry = app._build_queue_entry_from_track_choice(old_entry, track)
+
+            self.assertEqual(new_entry["artist"], "New Artist")
+            self.assertEqual(new_entry["title"], "New Title")
+            self.assertEqual(new_entry["disc_id"], "KJ-100")
+            self.assertEqual(new_entry["duration"], 211)
+            self.assertEqual(new_entry["song_info"], "/music/new.mp3")
+            self.assertEqual(new_entry["songid"], "song-100")
+            self.assertEqual(new_entry["key"], 3)
+            self.assertEqual(new_entry["tempo_percent"], 94)
+            self.assertEqual(new_entry["remote_request_id"], 707)
+            self.assertEqual(new_entry["phrase_start_seconds"], 12.5)
+            self.assertEqual(new_entry["duet_display"], "Ada & Bob")
+            self.assertTrue(new_entry["skipped"])
+            self.assertEqual(new_entry["custom_metadata"], "keep-me")
+
+    def test_replace_track_pushes_authenticated_replace_endpoint(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            entry = {
+                "remote_request_id": 808,
+                "artist": "New Artist",
+                "title": "New Title",
+                "disc_id": "KJ-200",
+                "duration": 199,
+                "path": "/music/new.mp3",
+                "songid": "song-200",
+                "key": -2,
+                "tempo_percent": 112,
+            }
+
+            with fake_network(self.singws) as net:
+                app._push_remote_request_replacement(
+                    entry,
+                    singer_name="Ada",
+                    old_artist="Old Artist",
+                    old_title="Old Title",
+                    source="unit_test",
+                )
+
+            replace_posts = [p for p in net.posts if "replace_remote_request.php" in p["url"]]
+            self.assertEqual(len(replace_posts), 1)
+            payload = replace_posts[0]["data"]
+            headers = replace_posts[0]["headers"]
+            self.assertEqual(headers["X-API-Key"], "secret-key")
+            self.assertEqual(int(payload["request_id"]), 808)
+            self.assertEqual(payload["singer_name"], "Ada")
+            self.assertEqual(payload["old_artist"], "Old Artist")
+            self.assertEqual(payload["old_title"], "Old Title")
+            self.assertEqual(payload["artist"], "New Artist")
+            self.assertEqual(payload["title"], "New Title")
+            self.assertEqual(payload["disc_id"], "KJ-200")
+            self.assertEqual(payload["path"], "/music/new.mp3")
+            self.assertEqual(int(payload["song_key"]), -2)
+            self.assertEqual(int(payload["tempo"]), 12)
+
+    def test_websocket_relay_id_survives_queueing_and_replace_track(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(
+                self.singws,
+                Path(td) / "tombstones.json",
+                settings={**CONNECTED_SETTINGS, "karaoke_normalize_enabled": False},
+            )
+            relay_track = {
+                "artist": "Relay Artist",
+                "title": "Relay Title",
+                "disc_id": "KJ-300",
+                "discid": "KJ-300",
+                "duration": 188,
+                "path": "/music/relay.mp3",
+                "type": "mp3",
+                "display": "Relay Artist - Relay Title - KJ-300",
+            }
+            app._find_song_for_request = lambda artist, title: [relay_track]
+            app._relay_processed_request_ids = set()
+            app._unmatched_request_sigs = set()
+            app._pending_track_data = None
+            app.acked = []
+            app.ack_remote_requests = lambda ids: app.acked.extend(ids)
+            app.post_rotation = lambda: None
+            app._schedule_next_up_prescan = lambda: None
+            app.process_external_request = self.singws.KaraokeApp.process_external_request.__get__(app, self.singws.KaraokeApp)
+
+            app._handle_relay_requests([
+                {"id": 909, "singer": "Ada", "artist": "Relay Artist", "title": "Relay Title", "key": 1, "tempo": -3}
+            ])
+
+            self.assertEqual(app.acked, [909])
+            entry = app.queue[0]["songs"][0]
+            self.assertEqual(entry["remote_request_id"], 909)
+            self.assertEqual(entry["key"], 1)
+            self.assertEqual(entry["tempo_percent"], 97)
+
+            replacement = {
+                "artist": "Replacement Artist",
+                "title": "Replacement Title",
+                "disc_id": "KJ-301",
+                "duration": 205,
+                "path": "/music/replacement.mp3",
+                "type": "mp3",
+            }
+            with fake_network(self.singws) as net:
+                ok = app._replace_queue_song_with_track(0, 0, replacement, source="relay_replace_regression")
+
+            self.assertTrue(ok)
+            replace_posts = [p for p in net.posts if "replace_remote_request.php" in p["url"]]
+            self.assertEqual(len(replace_posts), 1)
+            payload = replace_posts[0]["data"]
+            self.assertEqual(int(payload["request_id"]), 909)
+            self.assertEqual(payload["old_artist"], "Relay Artist")
+            self.assertEqual(payload["old_title"], "Relay Title")
+            self.assertEqual(payload["artist"], "Replacement Artist")
+            self.assertEqual(payload["title"], "Replacement Title")
+            self.assertEqual(int(payload["song_key"]), 1)
+            self.assertEqual(int(payload["tempo"]), -3)
+
+    def test_singer_history_song_tombstone_removes_remote_song_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.singer_history = {
+                "singers": {
+                    "ada": {
+                        "name": "Ada",
+                        "updated_at": 100,
+                        "last_seen_at": 100,
+                        "songs": {
+                            "old artist|old title|OLD-1": {
+                                "artist": "Old Artist",
+                                "title": "Old Title",
+                                "songid": "OLD-1",
+                                "updated_at": 100,
+                            }
+                        },
+                    }
+                },
+                "deletions": {},
+                "song_deletions": {},
+            }
+            app.queue = [{
+                "name": "Ada",
+                "songs": [{
+                    "artist": "Old Artist",
+                    "title": "Old Title",
+                    "song_info": "/music/active.mp3",
+                    "key": 4,
+                    "tempo_percent": 91,
+                }],
+            }]
+
+            app._merge_remote_singer_history({
+                "singers": {
+                    "ada": {
+                        "name": "Ada",
+                        "updated_at": 100,
+                        "last_seen_at": 100,
+                        "songs": {
+                            "old artist|old title|OLD-1": {
+                                "artist": "Old Artist",
+                                "title": "Old Title",
+                                "songid": "OLD-1",
+                                "updated_at": 100,
+                            }
+                        },
+                    }
+                },
+                "song_deletions": {
+                    "ada": {
+                        "old artist|old title|OLD-1": {
+                            "name": "Ada",
+                            "song_key": "old artist|old title|OLD-1",
+                            "artist": "Old Artist",
+                            "title": "Old Title",
+                            "songid": "OLD-1",
+                            "deleted_at": 200,
+                        }
+                    }
+                },
+            })
+
+            self.assertEqual(app.singer_history["singers"]["ada"]["songs"], {})
+            self.assertEqual(app.queue[0]["songs"][0]["key"], 4)
+            self.assertEqual(app.queue[0]["songs"][0]["tempo_percent"], 91)
+            exported = app._export_singer_history_payload()
+            self.assertIn("old artist|old title|old-1", exported["song_deletions"]["ada"])
+
     def test_server_unreachable_queues_tombstone_then_syncs_later(self):
         """Server down at removal time: tombstone is queued unsynced, and a
         later sync pass pushes it once the server is reachable again."""
