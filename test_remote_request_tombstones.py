@@ -109,8 +109,12 @@ def make_app(module, tombstone_path: Path, settings=None):
     app._unmatched_remote_request_ids = set()
     app._pending_remote_order_syncs = {}
     app._queue_revision = 0
+    app._remote_attention_requests = {}
     app.update_queue_display = lambda: None
     app.save_data = lambda: None
+    app.save_settings = lambda: None
+    app._refresh_header_status = lambda: None
+    app._apply_idle_background = lambda *args, **kwargs: None
     app.processed_requests = []
 
     def process(req):
@@ -136,6 +140,80 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             ])
 
             self.assertEqual(app.processed_requests, [])
+            self.assertTrue(app._remote_attention_requests)
+
+    def test_accepting_on_imports_burst_of_remote_requests(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+
+            app._reconcile_remote_requests([
+                {
+                    "request_id": 1000 + i,
+                    "singer": f"Singer {i}",
+                    "artist": f"Artist {i}",
+                    "title": f"Title {i}",
+                    "key": 0,
+                    "tempo": 0,
+                }
+                for i in range(10)
+            ])
+
+            self.assertEqual(len(app.processed_requests), 10)
+            self.assertEqual(app.settings["requests_accepting"], True)
+
+    def test_server_payload_missing_queued_request_does_not_drop_local_queue(self):
+        """Relay/v2 may stop listing acked requests; local accepted queue wins."""
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Ada",
+                "songs": [{
+                    "song_info": "/music/queued.mp3",
+                    "artist": "Artist",
+                    "title": "Queued",
+                    "remote_request_id": 501,
+                    "key": 0,
+                    "tempo_percent": 100,
+                    "skipped": False,
+                }],
+                "skipped": False,
+                "has_sung": False,
+            }]
+
+            app._reconcile_remote_requests([])
+
+            self.assertEqual(app._queue_remote_request_ids(), [501])
+            self.assertEqual(app.queue[0]["songs"][0]["title"], "Queued")
+
+    def test_completed_song_does_not_disable_accepting(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            app.settings["requests_accepting"] = True
+
+            with fake_network(self.singws):
+                app._complete_remote_request(
+                    606,
+                    entry={"artist": "Artist", "title": "Title"},
+                    singer_name="Ada",
+                    reason="song_completed",
+                )
+
+            self.assertTrue(app.settings["requests_accepting"])
+
+    def test_network_hiccup_does_not_disable_accepting(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            app.settings["requests_accepting"] = True
+
+            with fake_network(self.singws, fail=True):
+                app._delete_remote_request(
+                    707,
+                    entry={"artist": "Artist", "title": "Title"},
+                    singer_name="Ada",
+                    reason="host_remove_song",
+                )
+
+            self.assertTrue(app.settings["requests_accepting"])
 
     def test_local_remote_delete_creates_unsynced_tombstone(self):
         with tempfile.TemporaryDirectory() as td:

@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.0.3"
+APP_VERSION = "0.3.0.4"
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -16234,6 +16234,7 @@ class KaraokeApp(QWidget):
         worker = RelayRequestWorker(base_url, tenant, api_key, APP_VERSION, parent=self)
         worker.requests_available.connect(self.fetch_remote_requests_once)
         worker.history_available.connect(lambda reason: self._sync_singer_history_async(f"relay_{reason}"))
+        worker.connection_status_changed.connect(self._set_server_connection_status)
         self.relay_worker = worker
         worker.start()
 
@@ -16412,6 +16413,7 @@ class KaraokeApp(QWidget):
         self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
         self.poll_worker.host_commands_received.connect(self.handle_host_commands_from_thread)
         self.poll_worker.host_state_sync_requested.connect(self._schedule_host_control_state_sync)
+        self.poll_worker.connection_status_changed.connect(self._set_server_connection_status)
         self.poll_thread.started.connect(self.poll_worker.run)
 
         self.poll_thread.start()
@@ -20949,9 +20951,32 @@ class KaraokeApp(QWidget):
             accepting_dot = "●"
             accepting_text = "Accepting Requests" if accepting else "Requests Closed"
             accepting_color = _v("now_singing") if accepting else _v("warning")
+            connection = str(getattr(self, "_server_connection_state", "") or ("Connected" if self.is_network_configured() else "Offline"))
+            try:
+                queue_rev = int(getattr(self, "_queue_revision", 0) or 0)
+            except Exception:
+                queue_rev = 0
             if hasattr(self, "header_status_label"):
                 self.header_status_label.setText(
-                    f'<span style="color:{accepting_color};">{accepting_dot}</span>  {accepting_text}'
+                    f'<span style="color:{accepting_color};">{accepting_dot}</span>  '
+                    f'{accepting_text} • {connection} • Rev {queue_rev}'
+                )
+                last_received = str(getattr(self, "_last_request_received_summary", "") or "None")
+                last_accepted = str(getattr(self, "_last_request_accepted_summary", "") or "None")
+                last_sync = str(getattr(self, "_last_sync_time_label", "") or "Never")
+                last_error = str(getattr(self, "_last_server_error", "") or "None")
+                pending = getattr(self, "_remote_attention_requests", None)
+                pending_count = len(pending) if isinstance(pending, dict) else 0
+                self.header_status_label.setToolTip(
+                    "Server diagnostics\n"
+                    f"Enabled: {'Yes' if accepting else 'No'}\n"
+                    f"Connection: {connection}\n"
+                    f"Last request received: {last_received}\n"
+                    f"Last request accepted: {last_accepted}\n"
+                    f"Last sync: {last_sync}\n"
+                    f"Last error: {last_error}\n"
+                    f"Queue revision: {queue_rev}\n"
+                    f"Needs attention: {pending_count}"
                 )
             if hasattr(self, "header_location_label"):
                 tenant_name = str(
@@ -20962,6 +20987,23 @@ class KaraokeApp(QWidget):
                 self.header_location_label.setText(f"• {tenant_name}")
         except Exception:
             pass
+
+    def _set_server_connection_status(self, connected: bool, message: str = ""):
+        msg = str(message or "").strip()
+        if connected:
+            self._server_connection_state = "Connected"
+            self._last_server_error = ""
+        else:
+            lower = msg.lower()
+            self._server_connection_state = "Offline" if "auth" in lower or "failed" in lower else "Reconnecting"
+            self._last_server_error = msg
+        self._last_sync_time_label = datetime.now().strftime("%H:%M:%S")
+        _diag(
+            "[SERVER-STATE] connection "
+            f"connected={int(bool(connected))} state={self._server_connection_state!r} message={msg!r} "
+            f"accepting_requests={int(self._is_requests_accepting_cached())}"
+        )
+        self._refresh_header_status()
 
     def _hero_badge_text(self, singer_name: str, artist: str = "", title: str = "") -> str:
         singer_name = str(singer_name or "").strip()
@@ -21069,6 +21111,70 @@ class KaraokeApp(QWidget):
             return bool(self.settings.get("requests_accepting", True))
         except Exception:
             return True
+
+    def _set_requests_accepting_local(self, is_accepting: bool, *, reason: str = "unknown", persist: bool = True) -> bool:
+        """Set the host-authoritative accepting state with explicit diagnostics.
+
+        Network sync may reconnect or repair the server-side accepting.txt, but
+        it must not silently flip this local/host-facing state. Keep every real
+        state mutation behind this helper so show logs answer "who changed it?"
+        """
+        new_value = bool(is_accepting)
+        try:
+            old_value = bool(self.settings.get("requests_accepting", True))
+        except Exception:
+            old_value = True
+        caller = "unknown"
+        try:
+            import inspect as _inspect
+            frame = _inspect.stack()[1]
+            caller = f"{frame.function}:{frame.lineno}"
+        except Exception:
+            pass
+        try:
+            self.settings["requests_accepting"] = new_value
+        except Exception:
+            pass
+        _diag(
+            "[SERVER-STATE] requests_accepting "
+            f"{int(old_value)}->{int(new_value)} reason={reason} caller={caller} persist={int(bool(persist))}"
+        )
+        if persist:
+            try:
+                self.save_settings()
+            except Exception as e:
+                _diag(f"[SERVER-STATE] save_settings failed reason={reason}: {e}")
+        try:
+            self._refresh_header_status()
+        except Exception:
+            pass
+        try:
+            self._apply_idle_background(force=False, advance_slideshow=False)
+        except Exception:
+            pass
+        return new_value
+
+    def _repair_server_accepting_async(self, base_url: str, tenant: str, api_key: str, desired: bool, *, reason: str):
+        """Best-effort server repair: mirror host intent without changing host intent."""
+        if not api_key:
+            _diag(
+                "[SERVER-STATE] accepting repair skipped "
+                f"reason={reason} desired={int(bool(desired))} api_key=0"
+            )
+            return
+
+        def worker():
+            ok, error_msg = self._net_set_accepting(base_url, tenant, api_key, bool(desired))
+            _diag(
+                "[SERVER-STATE] accepting repair "
+                f"reason={reason} desired={int(bool(desired))} ok={int(bool(ok))} "
+                f"error={error_msg!r}"
+            )
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="accepting-state-repair").start()
+        except Exception as e:
+            _diag(f"[SERVER-STATE] accepting repair thread failed reason={reason}: {e}")
 
     def _refresh_slideshow_images(self):
         folder = str(self.settings.get("background_slideshow_folder", "") or "").strip()
@@ -21623,19 +21729,13 @@ class KaraokeApp(QWidget):
             v.addWidget(host_hint)
 
             # Track current accepting state
-            accepting_state = [False]  # Use list so we can modify in nested functions
+            accepting_state = [self._is_requests_accepting_cached()]  # Host-authoritative state
             
-            def update_accepting_button(is_accepting, is_syncing=False):
+            def update_accepting_button(is_accepting, is_syncing=False, *, persist_local=True, reason="network_dialog"):
                 """Update the accepting button appearance."""
-                accepting_state[0] = is_accepting
-                if not is_syncing:
-                    try:
-                        self.settings["requests_accepting"] = bool(is_accepting)
-                        self.save_settings()
-                        self._refresh_header_status()
-                        self._apply_idle_background(force=False, advance_slideshow=False)
-                    except Exception:
-                        pass
+                accepting_state[0] = bool(is_accepting)
+                if not is_syncing and persist_local:
+                    self._set_requests_accepting_local(bool(is_accepting), reason=reason, persist=True)
                 if is_syncing:
                     accepting_btn.setText("Accepting Requests: Syncing...")
                     accepting_btn.setEnabled(False)
@@ -21713,7 +21813,23 @@ class KaraokeApp(QWidget):
                                 else:
                                     update_connection_indicator("connected", msg)
                                 if accepting_value is not None:
-                                    update_accepting_button(bool(accepting_value))
+                                    local_accepting = self._is_requests_accepting_cached()
+                                    server_accepting = bool(accepting_value)
+                                    update_accepting_button(local_accepting, persist_local=False, reason="sync_check_local_authoritative")
+                                    if server_accepting != local_accepting:
+                                        _diag(
+                                            "[SERVER-STATE] accepting mismatch "
+                                            f"server={int(server_accepting)} local={int(local_accepting)} "
+                                            "reason=sync_check; repairing server to local host intent"
+                                        )
+                                        update_connection_indicator("partial", "Connected; repairing accepting state")
+                                        self._repair_server_accepting_async(
+                                            base,
+                                            user_id,
+                                            api_key,
+                                            local_accepting,
+                                            reason="sync_check_mismatch",
+                                        )
                             else:
                                 update_connection_indicator("error", msg or "Cannot reach server")
                             _network_log(f"final UI state label={conn_label.text()!r} accepting={accepting_value!r}")
@@ -21744,9 +21860,13 @@ class KaraokeApp(QWidget):
                     return
                 
                 # Toggle to opposite state
-                previous_state = accepting_state[0]
+                previous_state = self._is_requests_accepting_cached()
                 new_state = not previous_state
-                update_accepting_button(new_state, is_syncing=True)
+                _diag(
+                    "[SERVER-STATE] host requested accepting toggle "
+                    f"{int(previous_state)}->{int(new_state)}"
+                )
+                update_accepting_button(new_state, is_syncing=True, persist_local=False, reason="host_toggle_syncing")
 
                 def worker():
                     started = time.monotonic()
@@ -21757,9 +21877,9 @@ class KaraokeApp(QWidget):
 
                     def finish():
                         if ok:
-                            update_accepting_button(new_state)
+                            update_accepting_button(new_state, persist_local=True, reason="host_toggle")
                         else:
-                            update_accepting_button(previous_state)
+                            update_accepting_button(previous_state, persist_local=False, reason="host_toggle_failed_revert_display")
                             QMessageBox.warning(
                                 dlg,
                                 "Update Failed",
@@ -21833,6 +21953,7 @@ class KaraokeApp(QWidget):
     
             # Initial connection check
             try:
+                update_accepting_button(self._is_requests_accepting_cached(), persist_local=False, reason="dialog_initial")
                 check_connection()
             except Exception:
                 update_connection_indicator("error", "Check failed")
@@ -30883,6 +31004,95 @@ class KaraokeApp(QWidget):
                     pass
         return sorted(set(ids))
 
+    def _log_remote_request_diag(self, req: dict | None, *, status: str, match_result: str = "",
+                                 queue_insert_result: str = "", failure_reason: str = "") -> None:
+        req = req if isinstance(req, dict) else {}
+        try:
+            request_id = int(req.get("request_id") or req.get("id") or 0)
+        except Exception:
+            request_id = 0
+        try:
+            rev = int(getattr(self, "_queue_revision", 0) or 0)
+        except Exception:
+            rev = 0
+        try:
+            accepting = int(self._is_requests_accepting_cached())
+        except Exception:
+            accepting = 1
+        summary = (
+            f"#{request_id} {str(req.get('singer', '') or '').strip()} - "
+            f"{str(req.get('artist', '') or '').strip()} / {str(req.get('title', '') or '').strip()}"
+        ).strip()
+        try:
+            if status in {"received", "processing", "pending"}:
+                self._last_request_received_summary = summary
+            if status == "accepted":
+                self._last_request_accepted_summary = summary
+            if failure_reason:
+                self._last_server_error = str(failure_reason)
+            self._last_sync_time_label = datetime.now().strftime("%H:%M:%S")
+        except Exception:
+            pass
+        _diag(
+            "[REQUEST-DIAG] "
+            f"request_id={request_id} singer={str(req.get('singer', '') or '')!r} "
+            f"artist={str(req.get('artist', '') or '')!r} title={str(req.get('title', '') or '')!r} "
+            f"received_ts={int(time.time())} status={status} match_result={match_result!r} "
+            f"queue_insert_result={queue_insert_result!r} sync_revision={rev} "
+            f"server_enabled={accepting} failure_reason={failure_reason!r}"
+        )
+        try:
+            self._refresh_header_status()
+        except Exception:
+            pass
+
+    def _record_remote_attention_request(self, req: dict | None, reason: str) -> None:
+        """Keep failed automatic requests visible to diagnostics instead of losing them."""
+        req = dict(req or {}) if isinstance(req, dict) else {}
+        try:
+            rid = int(req.get("request_id") or req.get("id") or 0)
+        except Exception:
+            rid = 0
+        key = rid or hash((
+            str(req.get("singer", "") or "").lower(),
+            str(req.get("artist", "") or "").lower(),
+            str(req.get("title", "") or "").lower(),
+        ))
+        pending = getattr(self, "_remote_attention_requests", None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._remote_attention_requests = pending
+        item = dict(req)
+        item["attention_reason"] = str(reason or "unknown")
+        item["attention_at"] = int(time.time())
+        pending[key] = item
+        _diag(
+            "[REQUEST-ATTENTION] pending "
+            f"request_id={rid} singer={str(req.get('singer', '') or '')!r} "
+            f"artist={str(req.get('artist', '') or '')!r} title={str(req.get('title', '') or '')!r} "
+            f"reason={reason!r} pending_count={len(pending)}"
+        )
+
+    def _clear_remote_attention_request(self, req: dict | None) -> None:
+        pending = getattr(self, "_remote_attention_requests", None)
+        if not isinstance(pending, dict):
+            return
+        req = req if isinstance(req, dict) else {}
+        try:
+            rid = int(req.get("request_id") or req.get("id") or 0)
+        except Exception:
+            rid = 0
+        keys = []
+        if rid:
+            keys.append(rid)
+        keys.append(hash((
+            str(req.get("singer", "") or "").lower(),
+            str(req.get("artist", "") or "").lower(),
+            str(req.get("title", "") or "").lower(),
+        )))
+        for key in keys:
+            pending.pop(key, None)
+
     def _clear_remote_queue_async(self, request_ids: list[int] | None = None, reason: str = "clear_queue"):
         """Clear server-side requests/rotation, then force a poll refresh.
 
@@ -31065,6 +31275,11 @@ class KaraokeApp(QWidget):
         except Exception:
             removed_ids = set()
         accepting_requests = self._is_requests_accepting_cached()
+        try:
+            self._last_sync_time_label = datetime.now().strftime("%H:%M:%S")
+            self._refresh_header_status()
+        except Exception:
+            pass
         _diag(
             "[REMOTE-SYNC] reconcile "
             f"count={len(reqs or [])} accepting_requests={int(accepting_requests)} "
@@ -31124,6 +31339,10 @@ class KaraokeApp(QWidget):
                 "key": key,
                 "tempo": tempo,
             })
+            try:
+                self._log_remote_request_diag(normalized[-1], status="received", match_result="pending", queue_insert_result="pending")
+            except Exception:
+                pass
 
         desired_ids = {item["request_id"] for item in normalized}
         existing_ids = set()
@@ -31163,7 +31382,16 @@ class KaraokeApp(QWidget):
                 if remote_id is None:
                     continue
                 if remote_id not in desired_ids:
-                    del songs[song_idx]
+                    # Do not delete an already-accepted local queue entry just
+                    # because the latest server sync no longer lists it. Newer
+                    # relay/v2 servers may stop returning delivered/acked rows;
+                    # the host queue remains authoritative until explicit host
+                    # removal or song completion records a tombstone.
+                    existing_ids.add(remote_id)
+                    _diag(
+                        "[REMOTE-SYNC] preserving local queued request missing from server payload "
+                        f"request_id={remote_id} singer={singer.get('name', '')!r}"
+                    )
                 else:
                     existing_ids.add(remote_id)
             if not songs:
@@ -31193,9 +31421,18 @@ class KaraokeApp(QWidget):
                     "[REMOTE-SYNC] new request not imported because accepting_requests=0 "
                     f"request_id={rid} singer={req.get('singer', '')!r} title={req.get('title', '')!r}"
                 )
+                self._log_remote_request_diag(
+                    req,
+                    status="pending",
+                    match_result="not_attempted",
+                    queue_insert_result="blocked",
+                    failure_reason="host_not_accepting",
+                )
+                self._record_remote_attention_request(req, "host_not_accepting")
                 continue
             if not self.process_external_request(req):
                 failed.add(rid)
+                self._record_remote_attention_request(req, "auto_accept_failed")
 
         tempo_by_id = {item["request_id"]: item["tempo"] for item in normalized}
         key_by_id = {item["request_id"]: item["key"] for item in normalized}
@@ -31374,10 +31611,15 @@ class KaraokeApp(QWidget):
     def process_external_request(self, req):
         import time as time_module
         start = time_module.time()
+        req = req if isinstance(req, dict) else {}
         
         singer = (req.get("singer", "") or "").strip()
         artist = (req.get("artist", "") or "").strip()
         title  = (req.get("title", "") or "").strip()
+        try:
+            self._log_remote_request_diag(req, status="processing", match_result="pending", queue_insert_result="pending")
+        except Exception:
+            pass
 
         # Safe int parse for key (semitones)
         try:
@@ -31405,6 +31647,14 @@ class KaraokeApp(QWidget):
             _failed_sigs = set()
             self._unmatched_request_sigs = _failed_sigs
         if _sig in _failed_sigs:
+            self._log_remote_request_diag(
+                req,
+                status="pending",
+                match_result="previous_failure",
+                queue_insert_result="not_attempted",
+                failure_reason="previous_auto_match_failure",
+            )
+            self._record_remote_attention_request(req, "previous_auto_match_failure")
             return False
 
         # Resolve via the SAME search the in-app library box uses (tolerant
@@ -31430,6 +31680,14 @@ class KaraokeApp(QWidget):
                 pass
             print(msg)
             _failed_sigs.add(_sig)
+            self._log_remote_request_diag(
+                req,
+                status="pending",
+                match_result="no_match",
+                queue_insert_result="not_attempted",
+                failure_reason="no_local_library_match",
+            )
+            self._record_remote_attention_request(req, "no_local_library_match")
             return False
 
         # Only log requests we actually resolve and queue.
@@ -31484,7 +31742,13 @@ class KaraokeApp(QWidget):
         if ext == ".mp4":
             # Realtime key-change handled by GStreamer during playback
             song_data = (chosen['path'], key, tempo_percent)  # (mp4_path, semitones, tempo_percent)
-            return bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+            ok = bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+            self._log_remote_request_diag(req, status="accepted" if ok else "pending", match_result="matched", queue_insert_result="created" if ok else "failed", failure_reason="" if ok else "queue_insert_failed")
+            if ok:
+                self._clear_remote_attention_request(req)
+            else:
+                self._record_remote_attention_request(req, "queue_insert_failed")
+            return ok
 
         elif ext == ".cdg":
             # Need matching MP3; we won't preprocess — GStreamer will pitch-shift live
@@ -31506,27 +31770,51 @@ class KaraokeApp(QWidget):
                     if os.path.exists(dir_path):
                         files_in_dir = [f for f in os.listdir(dir_path) if base.split('/')[-1] in f]
                         print(f"  Files with same base name: {files_in_dir}")
+                    self._log_remote_request_diag(req, status="pending", match_result="matched", queue_insert_result="not_attempted", failure_reason="cdg_missing_mp3")
+                    self._record_remote_attention_request(req, "cdg_missing_mp3")
                     return False
 
             song_data = ((chosen['path'], mp3_path), key, tempo_percent)  # ((cdg_path, mp3_path), semitones, tempo_percent)
-            return bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+            ok = bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+            self._log_remote_request_diag(req, status="accepted" if ok else "pending", match_result="matched", queue_insert_result="created" if ok else "failed", failure_reason="" if ok else "queue_insert_failed")
+            if ok:
+                self._clear_remote_attention_request(req)
+            else:
+                self._record_remote_attention_request(req, "queue_insert_failed")
+            return ok
 
         elif ext == ".mp3":
             # In case your library has plain MP3 entries
             song_data = (chosen['path'], key, tempo_percent)  # (mp3_path, semitones, tempo_percent)
-            return bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+            ok = bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+            self._log_remote_request_diag(req, status="accepted" if ok else "pending", match_result="matched", queue_insert_result="created" if ok else "failed", failure_reason="" if ok else "queue_insert_failed")
+            if ok:
+                self._clear_remote_attention_request(req)
+            else:
+                self._record_remote_attention_request(req, "queue_insert_failed")
+            return ok
 
         elif ext == ".zip":
             # NEW: Handle MP3G requests
             if self.is_mp3g_zip(chosen['path']):
                 song_data = (chosen['path'], key, tempo_percent)
-                return bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+                ok = bool(self._add_song_to_queue(singer, song_data, track=chosen, remote_meta=req))  # Pass track data!
+                self._log_remote_request_diag(req, status="accepted" if ok else "pending", match_result="matched", queue_insert_result="created" if ok else "failed", failure_reason="" if ok else "queue_insert_failed")
+                if ok:
+                    self._clear_remote_attention_request(req)
+                else:
+                    self._record_remote_attention_request(req, "queue_insert_failed")
+                return ok
             else:
                 print("Invalid zip format in external request:", chosen['path'])
+                self._log_remote_request_diag(req, status="pending", match_result="matched", queue_insert_result="not_attempted", failure_reason="invalid_zip_format")
+                self._record_remote_attention_request(req, "invalid_zip_format")
                 return False
 
         else:
             print("Unsupported format in external request:", chosen['path'])
+            self._log_remote_request_diag(req, status="pending", match_result="matched", queue_insert_result="not_attempted", failure_reason=f"unsupported_format:{ext}")
+            self._record_remote_attention_request(req, f"unsupported_format:{ext}")
             return False
             
     def get_rotation_data(self):
