@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.3.0.7",
+  "version": "0.3.0.8",
   "release_date": "2026-06-14",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.3.0.7-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.7-arm64-installer.dmg",
+      "filename": "SingWS-0.3.0.8-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.8-arm64-installer.dmg",
       "size": "179 MB",
-      "sha256": "4c698415a6a5083a50677fe5d4c7a9c212877c7859df34f6adb4e00915bbf4e8"
+      "sha256": "93d742ef79e6a0f27ea00d90af8ba78aaf0d98f95c4b98bca94cf56d5638d094"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.3.0.7-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.7-x86_64-installer.dmg",
+      "filename": "SingWS-0.3.0.8-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.8-x86_64-installer.dmg",
       "size": "256 MB",
-      "sha256": "529d1cdca182ad31595879d0ced18959636630309916b4151ee09b95b0caa9c3"
+      "sha256": "3b702f2ac6757c8b9fde9fca1d2a3c0acb6a127b540a981504aa1ea12efd7390"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.3.0.7-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.7-universal-installer.dmg",
+      "filename": "SingWS-0.3.0.8-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.8-universal-installer.dmg",
       "size": "402 MB",
-      "sha256": "3a08e8524325e97f079f1b1333f758b9e1ec4ab924cb814dafd9937482cb000d"
+      "sha256": "696b5cda79df1ef176aa0078ee9cd640d60f0bf166f82e7de80a532281f57386"
     }
   }
 }
