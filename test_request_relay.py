@@ -172,6 +172,46 @@ class FetchOverlapTests(unittest.TestCase):
         self.assertFalse(app._relay_fetch_queued)
 
 
+class RelayFallbackPollingTests(unittest.TestCase):
+    def test_relay_mode_routes_poll_fallback_through_relay_handler(self):
+        app = make_app()
+        connected = []
+
+        class FakeSignal:
+            def connect(self, fn):
+                connected.append(fn)
+
+        class FakePollWorker:
+            requests_received = FakeSignal()
+
+        app.poll_worker = FakePollWorker()
+        app._handle_relay_requests = lambda rows: None
+        app.handle_requests_from_thread = lambda rows: None
+
+        MAIN.KaraokeApp._connect_poll_worker_requests_received(app, True)
+
+        self.assertEqual(connected, [app._handle_relay_requests])
+
+    def test_polling_mode_keeps_legacy_request_handler(self):
+        app = make_app()
+        connected = []
+
+        class FakeSignal:
+            def connect(self, fn):
+                connected.append(fn)
+
+        class FakePollWorker:
+            requests_received = FakeSignal()
+
+        app.poll_worker = FakePollWorker()
+        app._handle_relay_requests = lambda rows: None
+        app.handle_requests_from_thread = lambda rows: None
+
+        MAIN.KaraokeApp._connect_poll_worker_requests_received(app, False)
+
+        self.assertEqual(connected, [app.handle_requests_from_thread])
+
+
 @unittest.skipUnless(MAIN.QTWEBSOCKETS_AVAILABLE, "QtWebSockets unavailable")
 class RelayWorkerTests(unittest.TestCase):
     @classmethod

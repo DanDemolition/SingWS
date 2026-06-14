@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.0.6"
+APP_VERSION = "0.3.0.7"
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -8413,8 +8413,9 @@ class SimplePollWorker(QObject):
         self.base_url = _network_normalize_base_url(base_url)
         self.user_id = (user_id or "").strip() or "default"
         self.api_key = (api_key or "").strip()
-        # False while the WebSocket relay owns request delivery: this worker
-        # then only polls host commands, never get_requests.php.
+        # Keep this enabled even when the WebSocket relay is active. The relay
+        # gives fast push delivery; the non-mutating sync poll is the safety net
+        # if a relay notification is missed during a live show.
         self.poll_requests = bool(poll_requests)
         self.normal_interval = interval_sec
         self.interval = interval_sec
@@ -16376,6 +16377,12 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=worker, daemon=True, name="relay-request-ack").start()
 
+    def _connect_poll_worker_requests_received(self, use_relay: bool):
+        if use_relay:
+            self.poll_worker.requests_received.connect(self._handle_relay_requests)
+        else:
+            self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
+
     def start_request_polling(self):
         if self._safe_mode():
             print("[SAFE-MODE] Polling start ignored")
@@ -16406,11 +16413,11 @@ class KaraokeApp(QWidget):
             api_key,
             interval_sec=_poll_iv,
             host_interval_sec=self._effective_host_poll_interval_sec(),
-            poll_requests=not use_relay,
+            poll_requests=True,
         )
         self.poll_worker.moveToThread(self.poll_thread)
 
-        self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
+        self._connect_poll_worker_requests_received(use_relay)
         self.poll_worker.host_commands_received.connect(self.handle_host_commands_from_thread)
         self.poll_worker.host_state_sync_requested.connect(self._schedule_host_control_state_sync)
         self.poll_worker.connection_status_changed.connect(self._set_server_connection_status)
@@ -16418,7 +16425,7 @@ class KaraokeApp(QWidget):
 
         self.poll_thread.start()
         if use_relay:
-            print(f"✅ Host-controls polling started ({base_url}/api/v1/host_commands.php); requests via relay")
+            print(f"✅ Host-controls polling started ({base_url}/api/v1/host_commands.php); requests via relay + sync fallback")
         else:
             print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
 
