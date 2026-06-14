@@ -28,6 +28,7 @@ echo ">>> arm64 DMG done: $(ls -lh SingWS-${VER}-arm64-installer.dmg | awk '{pri
 echo ">>> [3/4] x86_64 PyInstaller (universal venv + GStreamer env)"
 rm -rf build dist
 export GI_TYPELIB_PATH="${GST}/lib/girepository-1.0"
+export XDG_DATA_DIRS="${GST}/share:${XDG_DATA_DIRS:-}"
 export DYLD_FALLBACK_LIBRARY_PATH="${GST}/lib"
 export PKG_CONFIG_PATH="${GST}/lib/pkgconfig"
 .venv-universal/bin/pyinstaller --noconfirm "SingWS-x86_64.spec"

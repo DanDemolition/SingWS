@@ -110,6 +110,7 @@ def make_app(module, tombstone_path: Path, settings=None):
     app._pending_remote_order_syncs = {}
     app._queue_revision = 0
     app._remote_attention_requests = {}
+    app._disable_accepting_watchdog = True
     app.update_queue_display = lambda: None
     app.save_data = lambda: None
     app.save_settings = lambda: None
@@ -246,6 +247,26 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                 )
 
             self.assertTrue(app.settings["requests_accepting"])
+
+    def test_background_reconcile_repairs_server_accepting_without_flipping_host_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            app.settings["requests_accepting"] = True
+            app._disable_accepting_watchdog = False
+            app._net_fetch_accepting = lambda base_url, tenant: False
+            repairs = []
+
+            def repair(base_url, tenant, api_key, accepting):
+                repairs.append((base_url, tenant, api_key, accepting))
+                return True, ""
+
+            app._net_set_accepting = repair
+
+            with mock.patch.object(threading, "Thread", _InlineThread):
+                app._reconcile_remote_requests([])
+
+            self.assertTrue(app.settings["requests_accepting"])
+            self.assertEqual(repairs, [("https://beta.wskar.com", "venue", "secret-key", True)])
 
     def test_local_remote_delete_creates_unsynced_tombstone(self):
         with tempfile.TemporaryDirectory() as td:

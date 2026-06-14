@@ -189,8 +189,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.3.0.5',
-        'CFBundleVersion': '0.3.0.5',
+        'CFBundleShortVersionString': '0.3.0.6',
+        'CFBundleVersion': '0.3.0.6',
         'NSHighResolutionCapable': True,
     },
 )

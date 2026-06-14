@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.0.5"
+APP_VERSION = "0.3.0.6"
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -21176,6 +21176,62 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[SERVER-STATE] accepting repair thread failed reason={reason}: {e}")
 
+    def _ensure_server_accepting_matches_host_intent_async(self, *, reason: str = "background_sync", min_interval_sec: float = 30.0):
+        """Keep the public server accepting flag aligned with host intent.
+
+        The local setting is host-authoritative. This watchdog only repairs the
+        server-side flag; it never changes the host-facing enabled state.
+        """
+        if bool(getattr(self, "_disable_accepting_watchdog", False)):
+            return False
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        if not base_url or not tenant or not api_key:
+            return False
+
+        desired = self._is_requests_accepting_cached()
+        now = time.monotonic()
+        try:
+            last = float(getattr(self, "_last_accepting_watchdog_ts", 0.0) or 0.0)
+        except Exception:
+            last = 0.0
+        if last > 0.0 and (now - last) < float(min_interval_sec):
+            return False
+        self._last_accepting_watchdog_ts = now
+
+        def worker():
+            server_value = self._net_fetch_accepting(base_url, tenant)
+            if server_value is None:
+                _diag(
+                    "[SERVER-STATE] accepting watchdog "
+                    f"reason={reason} desired={int(bool(desired))} server=unknown action=skip"
+                )
+                return
+            if bool(server_value) == bool(desired):
+                _diag(
+                    "[SERVER-STATE] accepting watchdog "
+                    f"reason={reason} desired={int(bool(desired))} server={int(bool(server_value))} action=ok"
+                )
+                return
+            _diag(
+                "[SERVER-STATE] accepting watchdog mismatch "
+                f"reason={reason} server={int(bool(server_value))} local={int(bool(desired))} "
+                "action=repair_server_to_local"
+            )
+            ok, error_msg = self._net_set_accepting(base_url, tenant, api_key, bool(desired))
+            _diag(
+                "[SERVER-STATE] accepting watchdog repair "
+                f"reason={reason} desired={int(bool(desired))} ok={int(bool(ok))} error={error_msg!r}"
+            )
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="accepting-state-watchdog").start()
+            return True
+        except Exception as e:
+            _diag(f"[SERVER-STATE] accepting watchdog thread failed reason={reason}: {e}")
+            return False
+
     def _refresh_slideshow_images(self):
         folder = str(self.settings.get("background_slideshow_folder", "") or "").strip()
         if folder == self._idle_bg_slideshow_folder_cached and self._idle_bg_slideshow_images:
@@ -31289,6 +31345,10 @@ class KaraokeApp(QWidget):
             f"count={len(reqs or [])} accepting_requests={int(accepting_requests)} "
             f"sync_connected={int(self.is_network_configured())}"
         )
+        try:
+            self._ensure_server_accepting_matches_host_intent_async(reason="remote_reconcile")
+        except Exception as e:
+            _diag(f"[SERVER-STATE] accepting watchdog schedule failed reason=remote_reconcile: {e}")
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue

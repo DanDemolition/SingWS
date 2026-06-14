@@ -9,6 +9,7 @@ echo ">>> UNIVERSAL build start $(date) (v${VER})"
 .venv/bin/python tools/make_dmg_assets.py --style-only
 rm -rf build dist
 export GI_TYPELIB_PATH="${GST}/lib/girepository-1.0"
+export XDG_DATA_DIRS="${GST}/share:${XDG_DATA_DIRS:-}"
 export DYLD_FALLBACK_LIBRARY_PATH="${GST}/lib"
 export PKG_CONFIG_PATH="${GST}/lib/pkgconfig"
 .venv-universal/bin/pyinstaller --noconfirm "SingWS-universal.spec"
