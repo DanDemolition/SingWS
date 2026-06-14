@@ -1311,6 +1311,10 @@ class SongbookUploadThread(QThread):
         self.tracks = list(tracks or [])
 
     def _collect_rows(self):
+        rows = self._rows_from_tracks(self.tracks)
+        if rows:
+            return rows
+
         rows = []
         try:
             dbf = song_index.db_path()
@@ -1333,8 +1337,15 @@ class SongbookUploadThread(QThread):
         if rows:
             return rows
 
+        return []
+
+    @staticmethod
+    def _rows_from_tracks(tracks):
+        rows = []
         seen = set()
-        for track in self.tracks:
+        for track in tracks or []:
+            if not isinstance(track, dict):
+                continue
             artist = str(track.get("artist", "")).strip()
             title = str(track.get("title", "")).strip()
             if not artist or not title:
@@ -20966,7 +20977,7 @@ class KaraokeApp(QWidget):
             if hasattr(self, "header_status_label"):
                 self.header_status_label.setText(
                     f'<span style="color:{accepting_color};">{accepting_dot}</span>  '
-                    f'{accepting_text} • {connection} • Rev {queue_rev}'
+                    f'{accepting_text} • {connection}'
                 )
                 last_received = str(getattr(self, "_last_request_received_summary", "") or "None")
                 last_accepted = str(getattr(self, "_last_request_accepted_summary", "") or "None")
@@ -27422,11 +27433,33 @@ class KaraokeApp(QWidget):
         start_time = time.time()
 
         old_tracks = list(getattr(self, "tracks", []) or [])
+        old_by_path = {str(t.get("path") or ""): t for t in old_tracks if isinstance(t, dict) and t.get("path")}
         old_duration_by_path = {
             t.get("path"): t.get("duration")
             for t in old_tracks
-            if t.get("path") and t.get("duration")
+            if isinstance(t, dict) and t.get("path") and t.get("duration")
         }
+
+        def _scan_file_sig(path: str):
+            try:
+                st = os.stat(path)
+                return int(st.st_mtime), int(st.st_size)
+            except Exception:
+                return None, None
+
+        def _old_track_unchanged(old_track: dict, mtime, size) -> bool:
+            if not isinstance(old_track, dict):
+                return False
+            old_mtime = old_track.get("scan_mtime")
+            old_size = old_track.get("scan_size")
+            if old_mtime is None or old_size is None:
+                # Older libraries did not persist scan signatures. Reuse once so
+                # Quick Update regains its fast path, then write signatures below.
+                return True
+            try:
+                return int(old_mtime) == int(mtime) and int(old_size) == int(size)
+            except Exception:
+                return False
 
         # Keep untouched tracks outside selected roots in quick mode.
         keep_outside_roots = []
@@ -27464,6 +27497,7 @@ class KaraokeApp(QWidget):
 
         files_seen = 0
         tracks_added, zip_count, mp4_count, cdg_count = 0, 0, 0, 0
+        tracks_reused, tracks_changed = 0, 0
         last_ui = time.time()
 
         for scan_root in roots:
@@ -27507,6 +27541,32 @@ class KaraokeApp(QWidget):
                         continue
 
                     seen.add(full_path)
+                    scan_mtime, scan_size = _scan_file_sig(full_path)
+                    old_track = old_by_path.get(str(full_path))
+                    if quick_mode and _old_track_unchanged(old_track, scan_mtime, scan_size):
+                        track = dict(old_track)
+                        track["path"] = full_path
+                        track["type"] = song_type
+                        if scan_mtime is not None:
+                            track["scan_mtime"] = scan_mtime
+                        if scan_size is not None:
+                            track["scan_size"] = scan_size
+                        if not track.get("artist") or not track.get("title") or not track.get("display"):
+                            base = os.path.splitext(name)[0]
+                            fmt = str(self.settings.get("filename_format", DEFAULT_FILENAME_FORMAT) or DEFAULT_FILENAME_FORMAT)
+                            artist, title, disc_id = parse_filename_stem(base, fmt)
+                            if not track.get("artist"):
+                                track["artist"] = artist
+                            if not track.get("title"):
+                                track["title"] = title
+                            if not track.get("disc_id"):
+                                track["disc_id"] = disc_id
+                            track["display"] = self._display_for_track(track)
+                        new_tracks.append(track)
+                        tracks_added += 1
+                        tracks_reused += 1
+                        continue
+
                     base = os.path.splitext(name)[0]
                     fmt = str(self.settings.get("filename_format", DEFAULT_FILENAME_FORMAT) or DEFAULT_FILENAME_FORMAT)
                     artist, title, disc_id = parse_filename_stem(base, fmt)
@@ -27519,9 +27579,15 @@ class KaraokeApp(QWidget):
                         "disc_id": disc_id,
                         "duration": old_duration_by_path.get(full_path),
                     }
+                    if scan_mtime is not None:
+                        track["scan_mtime"] = scan_mtime
+                    if scan_size is not None:
+                        track["scan_size"] = scan_size
                     track["display"] = self._display_for_track(track)
                     new_tracks.append(track)
                     tracks_added += 1
+                    if quick_mode and old_track is not None:
+                        tracks_changed += 1
 
         self.tracks = new_tracks
         try:
@@ -27533,12 +27599,13 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # Build scan delta summary for the post-index "Import Complete" status line.
-        old_by_path = {str(t.get("path") or ""): t for t in old_tracks if t.get("path")}
         new_by_path = {str(t.get("path") or ""): t for t in new_tracks if t.get("path")}
         old_paths = set(old_by_path.keys())
         new_paths = set(new_by_path.keys())
         added_count = len(new_paths - old_paths)
         removed_count = len(old_paths - new_paths)
+        reindex_needed = (not quick_mode) or added_count > 0 or removed_count > 0 or tracks_changed > 0
+        self._pending_scan_reindex_needed = bool(reindex_needed)
         self._last_scan_summary_text = (
             f"Added: {added_count:,} • Removed: {removed_count:,} • "
             f"Total: {len(new_tracks):,}"
@@ -27547,6 +27614,8 @@ class KaraokeApp(QWidget):
         scan_time = time.time() - start_time
         print(f"✅ Phase 1 completed in {scan_time:.2f} seconds")
         print(f"📁 Found {tracks_added} tracks ({zip_count} zip files, {mp4_count} mp4, ~{cdg_count} cdg entries)")
+        if quick_mode:
+            print(f"⚡ Quick Update reused {tracks_reused:,} unchanged track(s); changed existing: {tracks_changed:,}")
         file_counts = {"ZIP": zip_count, "MP4": mp4_count, "CDG": cdg_count}
         SingWSLogger.log_scan_complete(tracks_added, scan_time, file_counts)
 
@@ -27580,9 +27649,9 @@ class KaraokeApp(QWidget):
             print("   (DB will be built after durations are obtained)")
             QTimer.singleShot(250, self._start_duration_probe)
         else:
-            print("✅ All durations present — building search index...")
+            print("✅ All durations present — checking search index...")
             try:
-                self.ensure_song_index_async(force=True)
+                self.ensure_song_index_async(force=bool(reindex_needed))
             except Exception as e:
                 print(f"⚠️ Failed to rebuild search index: {e}")
         
@@ -27974,7 +28043,9 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         try:
-            self._persist_tracks_json(trigger_reindex=(resolved > 0))
+            pending_scan_reindex = bool(getattr(self, "_pending_scan_reindex_needed", False))
+            self._pending_scan_reindex_needed = False
+            self._persist_tracks_json(trigger_reindex=(resolved > 0 or pending_scan_reindex))
         except Exception as e:
             self._duration_scan_state = "error"
             self._duration_scan_error = str(e)
