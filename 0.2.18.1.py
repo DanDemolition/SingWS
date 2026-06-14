@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.0.2"
+APP_VERSION = "0.3.0.3"
 
 # Try to import psutil for system info (optional but recommended)
 try:
