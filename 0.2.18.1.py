@@ -16248,7 +16248,7 @@ class KaraokeApp(QWidget):
                 pass
 
     def fetch_remote_requests_once(self, reason: str = "relay"):
-        """Fetch pending requests from get_requests_v2.php in a background thread.
+        """Fetch active remote requests from get_requests_v2.php in a background thread.
 
         Never overlaps fetches: a notification that lands mid-fetch queues
         exactly one follow-up fetch.
@@ -16268,7 +16268,7 @@ class KaraokeApp(QWidget):
             try:
                 resp = requests.get(
                     f"{base_url}/get_requests_v2.php",
-                    params={"user": tenant},
+                    params={"user": tenant, "sync": "1"},
                     headers={"X-API-Key": api_key, "User-Agent": f"SingWS/{APP_VERSION}"},
                     timeout=10,
                 )
@@ -16291,7 +16291,7 @@ class KaraokeApp(QWidget):
     def _relay_fetch_finished(self, rows):
         self._relay_fetch_in_flight = False
         try:
-            if rows:
+            if rows is not None:
                 self._handle_relay_requests(rows)
         finally:
             if bool(getattr(self, "_relay_fetch_queued", False)):
@@ -16299,34 +16299,48 @@ class KaraokeApp(QWidget):
                 self.fetch_remote_requests_once("queued notification")
 
     def _handle_relay_requests(self, rows):
-        """Process v2 request rows on the UI thread, then ack the successes."""
+        """Reconcile v2 request rows on the UI thread, then ack queued successes."""
         processed = getattr(self, "_relay_processed_request_ids", None)
         if not isinstance(processed, set):
             processed = set()
             self._relay_processed_request_ids = processed
+
+        for req in rows or []:
+            if isinstance(req, dict):
+                try:
+                    rid = int(req.get("id") or req.get("request_id") or 0)
+                except Exception:
+                    rid = 0
+                if rid > 0 and not req.get("request_id"):
+                    req["request_id"] = rid
+
+        try:
+            self._reconcile_remote_requests(rows or [])
+        except Exception as e:
+            logging.error(f"Relay request reconciliation failed: {e}")
+            print(f"❌ Error reconciling relay requests: {e}")
+            return
+
+        try:
+            queue_ids = set(int(v) for v in self._queue_remote_request_ids())
+        except Exception:
+            queue_ids = set()
 
         ack_ids = []
         for req in rows or []:
             if not isinstance(req, dict):
                 continue
             try:
-                rid = int(req.get("id") or 0)
+                rid = int(req.get("request_id") or req.get("id") or 0)
             except Exception:
                 rid = 0
-            if rid > 0 and rid in processed:
-                # Already queued in this session (e.g. an earlier ack POST was
-                # lost and the lease expired) — just re-ack, never re-queue.
-                ack_ids.append(rid)
+            if rid <= 0:
                 continue
-            if rid > 0 and not req.get("request_id"):
-                req["request_id"] = rid
-            ok = False
-            try:
-                ok = bool(self.process_external_request(req))
-            except Exception as e:
-                logging.error(f"Relay request processing failed: {req.get('artist', '')} - {req.get('title', '')}: {e}")
-                print(f"❌ Error processing relay request: {e}")
-            if ok and rid > 0:
+            state = str(req.get("state") or "").strip().lower()
+            already_delivered = bool(req.get("sent") or req.get("delivered") or state == "delivered")
+            if already_delivered:
+                continue
+            if rid in processed or rid in queue_ids:
                 processed.add(rid)
                 ack_ids.append(rid)
         if ack_ids:
@@ -31059,8 +31073,6 @@ class KaraokeApp(QWidget):
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue
-            if bool(req.get("sent", False)):
-                continue
             try:
                 request_id = int(req.get("request_id", 0) or 0)
             except Exception:
@@ -31099,6 +31111,7 @@ class KaraokeApp(QWidget):
                 tempo = int(req.get("tempo", 0) or 0)
             except Exception:
                 tempo = 0
+            tempo = max(-30, min(30, tempo))
             queue_singer, _duet_display = self._parse_duet_singer(singer)
             if not queue_singer:
                 queue_singer = singer
@@ -31210,11 +31223,8 @@ class KaraokeApp(QWidget):
             pass
 
         # Sync per-song metadata (key / tempo edits made on the website) onto the
-        # matching local entries — but DO NOT reorder. The desktop app is the
-        # admin/source of truth for show order: once the host arranges the queue,
-        # the server must never reshuffle it. New requests are appended by
-        # process_external_request and dropped ones were removed above; the
-        # host-set order of everything else is preserved exactly.
+        # matching local entries. Singer-side ordering is allowed only within
+        # that singer's own song list; the overall singer rotation never moves.
         # Host-wins: a key/tempo edit the operator just pushed must not be
         # reverted by a poll that raced ahead of the server commit. We keep the
         # pending host value until the server reports the same thing (or the
@@ -31252,9 +31262,29 @@ class KaraokeApp(QWidget):
                         server_key = want_key
                         server_tempo = want_tempo
                     entry["key"] = server_key
+                    server_tempo = max(-30, min(30, int(server_tempo or 0)))
                     entry["tempo_percent"] = 100 + server_tempo
-        # (Intentionally no per-singer song reordering here — see note above.)
-        _ = desired_by_singer  # retained for the order-push handshake only
+        for singer in self.queue:
+            singer_key = str(singer.get("name", "") or "").strip().lower()
+            order = desired_by_singer.get(singer_key, [])
+            if not order:
+                continue
+            rank = {int(rid): idx for idx, rid in enumerate(order)}
+            songs = singer.get("songs", [])
+            if not isinstance(songs, list) or len(songs) < 2:
+                continue
+            before = [self._queue_entry_remote_request_id(entry) for entry in songs]
+            indexed = list(enumerate(songs))
+            indexed.sort(
+                key=lambda pair: (
+                    rank.get(self._queue_entry_remote_request_id(pair[1]), len(rank) + pair[0]),
+                    pair[0],
+                )
+            )
+            singer["songs"] = [entry for _idx, entry in indexed]
+            after = [self._queue_entry_remote_request_id(entry) for entry in singer["songs"]]
+            if before != after:
+                _diag(f"[REMOTE-SYNC] applied singer song order singer={singer.get('name', '')!r} order={after}")
 
         self.update_queue_display()
         try:
@@ -31360,7 +31390,7 @@ class KaraokeApp(QWidget):
             tempo_offset = int(req.get("tempo", 0) or 0)
         except Exception:
             tempo_offset = 0
-        tempo_offset = max(-10, min(10, tempo_offset))
+        tempo_offset = max(-30, min(30, tempo_offset))
         tempo_percent = 100 + tempo_offset
 
         # Skip requests we've already tried and couldn't match in the library.

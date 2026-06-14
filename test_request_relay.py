@@ -79,14 +79,21 @@ class HandleRelayRequestsTests(unittest.TestCase):
     def make_handler_app(self, results):
         app = make_app()
         app._relay_processed_request_ids = set()
-        app.processed = []
+        app.reconciled = []
+        app._queue_ids = set()
         app.acked = []
 
-        def process(req):
-            app.processed.append(req.get("id"))
-            return results.get(req.get("id"), False)
+        def reconcile(rows):
+            for req in rows:
+                if not isinstance(req, dict):
+                    continue
+                rid = req.get("request_id") or req.get("id")
+                app.reconciled.append(rid)
+                if results.get(rid, False):
+                    app._queue_ids.add(rid)
 
-        app.process_external_request = process
+        app._reconcile_remote_requests = reconcile
+        app._queue_remote_request_ids = lambda: sorted(app._queue_ids)
         app.ack_remote_requests = lambda ids: app.acked.extend(ids)
         return app
 
@@ -97,24 +104,24 @@ class HandleRelayRequestsTests(unittest.TestCase):
         ]
         app = self.make_handler_app({1: True, 2: False})
         app._handle_relay_requests(rows)
-        self.assertEqual(app.processed, [1, 2])
+        self.assertEqual(app.reconciled, [1, 2])
         self.assertEqual(app.acked, [1])
         self.assertEqual(app._relay_processed_request_ids, {1})
 
     def test_redelivered_processed_id_reacked_not_requeued(self):
-        app = self.make_handler_app({3: True})
+        app = self.make_handler_app({3: False})
         app._relay_processed_request_ids = {3}
         app._handle_relay_requests([{"id": 3, "singer": "A", "artist": "X", "title": "T"}])
-        self.assertEqual(app.processed, [], "already-processed request must not be re-queued")
+        self.assertEqual(app.reconciled, [3])
         self.assertEqual(app.acked, [3])
 
-    def test_processing_exception_not_acked(self):
+    def test_reconcile_exception_not_acked(self):
         app = self.make_handler_app({})
 
-        def boom(req):
+        def boom(rows):
             raise RuntimeError("nope")
 
-        app.process_external_request = boom
+        app._reconcile_remote_requests = boom
         app._handle_relay_requests([{"id": 9, "artist": "X", "title": "T"}])
         self.assertEqual(app.acked, [])
 
@@ -127,13 +134,22 @@ class HandleRelayRequestsTests(unittest.TestCase):
         app = make_app()
         app._relay_processed_request_ids = set()
         seen = []
-        app.process_external_request = lambda req: seen.append(dict(req)) or True
+        app._reconcile_remote_requests = lambda rows: seen.extend(dict(row) for row in rows)
+        app._queue_remote_request_ids = lambda: [42]
         app.ack_remote_requests = lambda ids: None
 
         app._handle_relay_requests([{"id": 42, "singer": "A", "artist": "X", "title": "T"}])
 
         self.assertEqual(seen[0]["id"], 42)
         self.assertEqual(seen[0]["request_id"], 42)
+
+    def test_delivered_rows_reconcile_but_are_not_acked(self):
+        app = self.make_handler_app({5: True})
+        app._handle_relay_requests([
+            {"id": 5, "singer": "A", "artist": "X", "title": "T", "sent": True, "state": "delivered"}
+        ])
+        self.assertEqual(app.reconciled, [5])
+        self.assertEqual(app.acked, [])
 
 
 class FetchOverlapTests(unittest.TestCase):

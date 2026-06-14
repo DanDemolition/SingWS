@@ -174,6 +174,58 @@ class HostWinsModifierTests(unittest.TestCase):
         self.assertEqual(self.entry["key"], 3)
         self.assertNotIn(77, self.app._pending_remote_modifier_pushes)
 
+    def test_delivered_server_edit_updates_existing_queue_entry(self):
+        self.app._reconcile_remote_requests(
+            [{
+                "request_id": 77,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Title",
+                "key": -4,
+                "tempo": 35,
+                "sent": True,
+                "state": "delivered",
+            }]
+        )
+        self.assertEqual(self.entry["key"], -4)
+        self.assertEqual(self.entry["tempo_percent"], 130)
+
+    def test_remote_order_applies_inside_singer_only(self):
+        self.app.queue[0]["songs"].append({
+            "remote_request_id": 88,
+            "artist": "Artist",
+            "title": "Second",
+            "display_name": "Artist • Second",
+            "song_info": "/tmp/second.mp3",
+            "key": 0,
+            "skipped": False,
+        })
+        self.app.queue.append({
+            "name": "Other",
+            "songs": [{
+                "remote_request_id": 99,
+                "artist": "Other",
+                "title": "Song",
+                "display_name": "Other • Song",
+                "song_info": "/tmp/other.mp3",
+                "key": 0,
+                "skipped": False,
+            }],
+            "skipped": False,
+        })
+
+        self.app._reconcile_remote_requests([
+            {"request_id": 88, "singer": "Grace", "artist": "Artist", "title": "Second", "key": 0, "tempo": 0, "sent": True},
+            {"request_id": 77, "singer": "Grace", "artist": "Artist", "title": "Title", "key": 0, "tempo": 0, "sent": True},
+            {"request_id": 99, "singer": "Other", "artist": "Other", "title": "Song", "key": 0, "tempo": 0, "sent": True},
+        ])
+
+        self.assertEqual([s["name"] for s in self.app.queue], ["Grace", "Other"])
+        self.assertEqual(
+            [song["remote_request_id"] for song in self.app.queue[0]["songs"]],
+            [88, 77],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
