@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.0.4"
+APP_VERSION = "0.3.0.5"
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -31276,6 +31276,10 @@ class KaraokeApp(QWidget):
             removed_ids = set()
         accepting_requests = self._is_requests_accepting_cached()
         try:
+            local_remote_ids = set(int(v) for v in self._queue_remote_request_ids())
+        except Exception:
+            local_remote_ids = set()
+        try:
             self._last_sync_time_label = datetime.now().strftime("%H:%M:%S")
             self._refresh_header_status()
         except Exception:
@@ -31312,6 +31316,25 @@ class KaraokeApp(QWidget):
                     removed_ids.add(request_id)
                     self._remote_removed_request_ids = removed_ids
                     self._sync_remote_removal_tombstones_async("stale_poll_repush")
+                except Exception:
+                    pass
+                continue
+            state = str(req.get("state", "") or "").strip().lower()
+            delivered = bool(req.get("sent") or req.get("delivered") or state in {"delivered", "completed", "sung", "removed"})
+            if delivered and request_id not in local_remote_ids:
+                _diag(
+                    "[REMOTE-SYNC] historical request ignored "
+                    f"request_id={request_id} state={state!r} sent={int(bool(req.get('sent')))} "
+                    f"delivered={int(bool(req.get('delivered')))}"
+                )
+                try:
+                    self._log_remote_request_diag(
+                        req,
+                        status="ignored",
+                        match_result="historical",
+                        queue_insert_result="not_attempted",
+                        failure_reason=f"historical_state:{state or 'sent'}",
+                    )
                 except Exception:
                     pass
                 continue

@@ -161,6 +161,38 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(len(app.processed_requests), 10)
             self.assertEqual(app.settings["requests_accepting"], True)
 
+    def test_delivered_v2_history_rows_are_not_imported_as_new_requests(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+
+            app._reconcile_remote_requests([
+                {
+                    "request_id": 471,
+                    "singer": "Old Singer",
+                    "artist": "Old Artist",
+                    "title": "Old Title",
+                    "key": 0,
+                    "tempo": 0,
+                    "sent": True,
+                    "delivered": True,
+                    "state": "delivered",
+                },
+                {
+                    "request_id": 1001,
+                    "singer": "New Singer",
+                    "artist": "New Artist",
+                    "title": "New Title",
+                    "key": 0,
+                    "tempo": 0,
+                    "state": "pending",
+                },
+            ])
+
+            self.assertEqual(
+                [req["request_id"] for req in app.processed_requests],
+                [1001],
+            )
+
     def test_server_payload_missing_queued_request_does_not_drop_local_queue(self):
         """Relay/v2 may stop listing acked requests; local accepted queue wins."""
         with tempfile.TemporaryDirectory() as td:

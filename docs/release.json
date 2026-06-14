@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.3.0.4",
+  "version": "0.3.0.5",
   "release_date": "2026-06-14",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.3.0.4-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.4-arm64-installer.dmg",
+      "filename": "SingWS-0.3.0.5-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.5-arm64-installer.dmg",
       "size": "179 MB",
-      "sha256": "885e1d6358316cb372daafb7cd11a02609f6fce3099bdb18b766c9e1b8bcca28"
+      "sha256": "f17f8a3d87ee5aa72d86aeef9d25935bd8a639fd15fbf101746d753433914450"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.3.0.4-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.4-x86_64-installer.dmg",
+      "filename": "SingWS-0.3.0.5-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.5-x86_64-installer.dmg",
       "size": "256 MB",
-      "sha256": "6c816e57f88f4e58e2fc6c1e2dcc47e33db0d4c54fabcb21481bb3d991da83dd"
+      "sha256": "40268c66dd3c4e60c66c79435d922841200d27f842911fc0dc27a64f18dd08fc"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.3.0.4-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.4-universal-installer.dmg",
+      "filename": "SingWS-0.3.0.5-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.5-universal-installer.dmg",
       "size": "402 MB",
-      "sha256": "4c1e1ec170244168f8596146be19ae50a88cfb37f6b0ec02eaa9fdbaacf2a96a"
+      "sha256": "c19e9409a0e32bb071609c839b994a850e57f6ae9189947bb7e768b73bdf0f29"
     }
   }
 }
