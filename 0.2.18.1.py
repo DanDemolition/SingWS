@@ -30807,11 +30807,18 @@ class KaraokeApp(QWidget):
             rid = int(req.get("request_id", 0) or 0)
         except Exception:
             rid = 0
+        song_key = remote_request_song_key(req.get("singer", ""), req.get("artist", ""), req.get("title", ""))
         if rid > 0:
             tombstone = items.get(str(rid))
             if isinstance(tombstone, dict):
-                return tombstone
-        song_key = remote_request_song_key(req.get("singer", ""), req.get("artist", ""), req.get("title", ""))
+                tombstone_key = str(tombstone.get("song_key") or "").strip()
+                if tombstone_key and song_key and tombstone_key != song_key:
+                    _diag(
+                        "[REMOTE-TOMBSTONE] id reused with different song signature; ignoring stale tombstone "
+                        f"request_id={rid} tombstone_key={tombstone_key!r} request_key={song_key!r}"
+                    )
+                else:
+                    return tombstone
         if not song_key or song_key == "||":
             return None
         for tombstone in items.values():
@@ -31479,13 +31486,6 @@ class KaraokeApp(QWidget):
                 request_id = 0
             if request_id <= 0:
                 continue
-            if request_id in removed_ids:
-                _diag(f"[REMOTE-TOMBSTONE] poll old request ignored request_id={request_id} reason=in_memory_removed")
-                try:
-                    self._sync_remote_removal_tombstones_async("stale_poll_repush")
-                except Exception:
-                    pass
-                continue
             tombstone = self._remote_request_matches_tombstone(req)
             if tombstone is not None:
                 _diag(
@@ -31500,6 +31500,13 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 continue
+            if request_id in removed_ids:
+                try:
+                    removed_ids.discard(request_id)
+                    self._remote_removed_request_ids = removed_ids
+                except Exception:
+                    pass
+                _diag(f"[REMOTE-TOMBSTONE] reused request id accepted request_id={request_id} reason=signature_mismatch")
             state = str(req.get("state", "") or "").strip().lower()
             try:
                 removed_at = int(float(req.get("removed_at") or 0))

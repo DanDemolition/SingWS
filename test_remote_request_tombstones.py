@@ -335,6 +335,22 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
 
             self.assertEqual(app.processed_requests, [])
 
+    def test_reused_request_id_with_different_signature_is_not_tombstoned(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app._record_remote_request_tombstone(
+                303,
+                entry={"artist": "Old Artist", "title": "Old Title"},
+                singer_name="Old Singer",
+                reason="host_remove_song",
+            )
+
+            app._reconcile_remote_requests([
+                {"request_id": 303, "singer": "New Singer", "artist": "New Artist", "title": "New Title", "key": 0, "tempo": 0}
+            ])
+
+            self.assertEqual([req["request_id"] for req in app.processed_requests], [303])
+
     def test_accepting_off_remove_pushes_removal_to_server(self):
         """Accepting Requests off, but Connected: removing a song still pushes
         the removal to the server and marks the tombstone synced."""
