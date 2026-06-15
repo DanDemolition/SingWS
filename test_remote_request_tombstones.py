@@ -218,6 +218,39 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(app._queue_remote_request_ids(), [501])
             self.assertEqual(app.queue[0]["songs"][0]["title"], "Queued")
 
+    def test_server_removed_tombstone_drops_matching_local_queue_entry(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Ada",
+                "songs": [{
+                    "song_info": "/music/queued.mp3",
+                    "artist": "Artist",
+                    "title": "Queued",
+                    "remote_request_id": 501,
+                    "key": 0,
+                    "tempo_percent": 100,
+                    "skipped": False,
+                }],
+                "skipped": False,
+                "has_sung": False,
+            }]
+
+            app._reconcile_remote_requests([
+                {
+                    "request_id": 501,
+                    "singer": "Ada",
+                    "artist": "Artist",
+                    "title": "Queued",
+                    "state": "removed",
+                    "sent": True,
+                    "removed_at": 1712345678,
+                }
+            ])
+
+            self.assertEqual(app.queue, [])
+            self.assertIn(501, app._remote_removed_request_ids)
+
     def test_completed_song_does_not_disable_accepting(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)

@@ -31138,6 +31138,49 @@ class KaraokeApp(QWidget):
                     pass
         return sorted(set(ids))
 
+    def _remove_local_remote_request_by_id(self, request_id: int, reason: str = "server_removed") -> int:
+        try:
+            request_id = int(request_id or 0)
+        except Exception:
+            request_id = 0
+        if request_id <= 0:
+            return 0
+        removed = 0
+        for singer_idx in range(len(self.queue) - 1, -1, -1):
+            singer = self.queue[singer_idx]
+            if not isinstance(singer, dict):
+                continue
+            songs = singer.get("songs", [])
+            if not isinstance(songs, list):
+                continue
+            for song_idx in range(len(songs) - 1, -1, -1):
+                entry = songs[song_idx]
+                remote_id = self._queue_entry_remote_request_id(entry)
+                try:
+                    remote_id = int(remote_id or 0)
+                except Exception:
+                    remote_id = 0
+                if remote_id != request_id:
+                    continue
+                songs.pop(song_idx)
+                removed += 1
+                _diag(
+                    "[REMOTE-SYNC] removed local queued request from server tombstone "
+                    f"request_id={request_id} singer={singer.get('name', '')!r} reason={reason}"
+                )
+            if songs:
+                continue
+            if self._should_preserve_rotation_identity(singer):
+                singer["songs"] = []
+            else:
+                del self.queue[singer_idx]
+        if removed:
+            try:
+                self._queue_revision = int(getattr(self, "_queue_revision", 0)) + 1
+            except Exception:
+                self._queue_revision = 1
+        return removed
+
     def _log_remote_request_diag(self, req: dict | None, *, status: str, match_result: str = "",
                                  queue_insert_result: str = "", failure_reason: str = "") -> None:
         req = req if isinstance(req, dict) else {}
@@ -31458,6 +31501,33 @@ class KaraokeApp(QWidget):
                     pass
                 continue
             state = str(req.get("state", "") or "").strip().lower()
+            try:
+                removed_at = int(float(req.get("removed_at") or 0))
+            except Exception:
+                removed_at = 0
+            try:
+                completed_at = int(float(req.get("completed_at") or 0))
+            except Exception:
+                completed_at = 0
+            server_terminal = state in {"removed", "completed", "sung"} or removed_at > 0 or completed_at > 0
+            if server_terminal:
+                removed_count = self._remove_local_remote_request_by_id(
+                    request_id,
+                    reason=f"server_{state or ('removed' if removed_at else 'completed')}",
+                )
+                try:
+                    removed_ids.add(request_id)
+                    self._remote_removed_request_ids = removed_ids
+                except Exception:
+                    pass
+                self._log_remote_request_diag(
+                    req,
+                    status="removed" if state == "removed" or removed_at else "completed",
+                    match_result="server_tombstone",
+                    queue_insert_result="removed" if removed_count else "not_present",
+                    failure_reason="",
+                )
+                continue
             delivered = bool(req.get("sent") or req.get("delivered") or state in {"delivered", "completed", "sung", "removed"})
             if delivered and request_id not in local_remote_ids:
                 _diag(
