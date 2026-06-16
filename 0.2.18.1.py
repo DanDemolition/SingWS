@@ -8709,6 +8709,149 @@ class RelayRequestWorker(QObject):
         else:
             print(f"[RELAY] Ignoring message type={msg_type!r}")
 
+class HostControlRelayWorker(QObject):
+    """WebSocket host-control relay client for the v2 DAW / Live Player remote.
+
+    Bidirectional, unlike RelayRequestWorker (which only receives request/history
+    notifications): this worker publishes playback ``state``/``playback_tick`` and
+    receives ``command`` messages from the browser, replying with ``ack``. It uses
+    ``channel=host`` + ``role=app`` so the relay can route it into the tenant's
+    host-control room separately from the request relay. v1 polling stays active as
+    a fallback. See the SingWS-Server repo: v2/README-websocket.md.
+    """
+
+    command_received = pyqtSignal(dict)
+    connection_status_changed = pyqtSignal(bool, str)
+
+    RECONNECT_DELAY_MS = 5000
+
+    def __init__(self, base_url, user_id, api_key, app_version, parent=None):
+        super().__init__(parent)
+        self.base_url = _network_normalize_base_url(base_url)
+        self.user_id = (user_id or "").strip() or "default"
+        self.api_key = (api_key or "").strip()
+        self.app_version = str(app_version or "").strip()
+        self._socket = None
+        self._closing = False
+        self._connected = False
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.setSingleShot(True)
+        self._reconnect_timer.setInterval(self.RECONNECT_DELAY_MS)
+        self._reconnect_timer.timeout.connect(self._open_socket)
+
+    def relay_url(self) -> QUrl:
+        base = QUrl(self.base_url)
+        url = QUrl()
+        url.setScheme("wss" if base.scheme() != "http" else "ws")
+        url.setHost(base.host())
+        if base.port() > 0:
+            url.setPort(base.port())
+        url.setPath("/relay")
+        query = QUrlQuery()
+        query.addQueryItem("role", "app")
+        query.addQueryItem("channel", "host")
+        query.addQueryItem("user", QUrl.toPercentEncoding(self.user_id).data().decode("ascii"))
+        query.addQueryItem("token", QUrl.toPercentEncoding(self.api_key).data().decode("ascii"))
+        query.addQueryItem("app_version", QUrl.toPercentEncoding(self.app_version).data().decode("ascii"))
+        url.setQuery(query)
+        return url
+
+    def is_connected(self) -> bool:
+        return bool(self._connected)
+
+    def start(self):
+        self._closing = False
+        self._open_socket()
+
+    def stop(self):
+        self._closing = True
+        self._connected = False
+        try:
+            self._reconnect_timer.stop()
+        except Exception:
+            pass
+        sock = self._socket
+        self._socket = None
+        if sock is not None:
+            try:
+                sock.blockSignals(True)
+                sock.abort()
+                sock.deleteLater()
+            except Exception:
+                pass
+
+    def _schedule_reconnect(self):
+        if self._closing:
+            return
+        if not self._reconnect_timer.isActive():
+            self._reconnect_timer.start()
+
+    def _open_socket(self):
+        if self._closing or QWebSocket is None:
+            return
+        old = self._socket
+        self._socket = None
+        if old is not None:
+            try:
+                old.blockSignals(True)
+                old.abort()
+                old.deleteLater()
+            except Exception:
+                pass
+        sock = QWebSocket()
+        sock.setParent(self)
+        sock.connected.connect(self._on_connected)
+        sock.disconnected.connect(self._on_disconnected)
+        sock.textMessageReceived.connect(self._on_text_message)
+        try:
+            sock.errorOccurred.connect(self._on_error)
+        except Exception:
+            pass
+        self._socket = sock
+        sock.open(self.relay_url())
+
+    def _on_connected(self):
+        self._connected = True
+        print("[HOST-RELAY] Connected")
+        self.connection_status_changed.emit(True, "Host relay connected")
+
+    def _on_disconnected(self):
+        self._connected = False
+        if self._closing:
+            return
+        print("[HOST-RELAY] Disconnected; reconnecting soon")
+        self._schedule_reconnect()
+
+    def _on_error(self, _error):
+        self._connected = False
+        if self._closing:
+            return
+        sock = self._socket
+        try:
+            print(f"[HOST-RELAY] Socket error: {sock.errorString() if sock else ''}")
+        except Exception:
+            pass
+        self._schedule_reconnect()
+
+    def _on_text_message(self, message: str):
+        try:
+            data = json.loads(message)
+        except Exception:
+            return
+        if isinstance(data, dict) and str(data.get("type", "")).strip().lower() == "command":
+            self.command_received.emit(data)
+
+    def send_json(self, obj: dict) -> bool:
+        sock = self._socket
+        if sock is None or not self._connected:
+            return False
+        try:
+            sock.sendTextMessage(json.dumps(obj, separators=(",", ":")))
+            return True
+        except Exception:
+            return False
+
+
 class DurationProbeWorker(QObject):
     progress = pyqtSignal(int, int)   # (done, total)
     finished = pyqtSignal()
@@ -16205,6 +16348,10 @@ class KaraokeApp(QWidget):
     # ------------------------------------------------------------------
 
     RELAY_MIN_APP_VERSION = (0, 3, 0, 0)
+    # v2 DAW host-control over WebSocket is for app versions strictly newer than
+    # 3.0.0.0 (the server spec's notation); in this app's 0.3.0.x scheme that is
+    # > (0,3,0,0), i.e. >= (0,3,0,1).
+    DAW_RELAY_MIN_APP_VERSION = (0, 3, 0, 1)
     RELAY_HOSTS = {"wskar.com", "www.wskar.com"}
 
     @staticmethod
@@ -16259,6 +16406,115 @@ class KaraokeApp(QWidget):
                 worker.deleteLater()
             except Exception:
                 pass
+
+    # ── v2 DAW host-control over WebSocket ───────────────────────────────────
+    def _supports_host_control_relay(self) -> bool:
+        if not QTWEBSOCKETS_AVAILABLE or QWebSocket is None:
+            return False
+        return self._version_tuple(APP_VERSION) >= self.DAW_RELAY_MIN_APP_VERSION
+
+    def _should_use_host_control_relay(self, base_url: str, tenant: str, api_key: str) -> bool:
+        if self._request_transport_setting() == "polling":
+            return False
+        if not self._supports_host_control_relay():
+            return False
+        if not (tenant or "").strip() or not (api_key or "").strip():
+            return False
+        host = QUrl(_network_normalize_base_url(base_url)).host().strip().lower()
+        return host in self.RELAY_HOSTS
+
+    def _start_host_control_relay(self, base_url: str, tenant: str, api_key: str):
+        self._stop_host_control_relay()
+        worker = HostControlRelayWorker(base_url, tenant, api_key, APP_VERSION, parent=self)
+        worker.command_received.connect(self._on_host_relay_command)
+        worker.connection_status_changed.connect(self._set_server_connection_status)
+        self.host_relay_worker = worker
+        worker.start()
+        # Publisher: push playback_tick frequently + full state on change, so the
+        # v2 DAW page tracks position smoothly. GUI-thread QTimer; cheap, never
+        # touches the audio thread.
+        timer = getattr(self, "_host_relay_pub_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.timeout.connect(self._publish_host_state_ws)
+            self._host_relay_pub_timer = timer
+        self._host_relay_last_full_sig = ""
+        self._host_relay_last_full_at = 0.0
+        timer.start(150)
+
+    def _stop_host_control_relay(self):
+        timer = getattr(self, "_host_relay_pub_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        worker = getattr(self, "host_relay_worker", None)
+        self.host_relay_worker = None
+        if worker is not None:
+            try:
+                worker.stop()
+                worker.deleteLater()
+            except Exception:
+                pass
+
+    def _on_host_relay_command(self, data: dict):
+        worker = getattr(self, "host_relay_worker", None)
+        if worker is None or not isinstance(data, dict):
+            return
+        request_id = data.get("request_id")
+        action = str(data.get("command") or data.get("action") or "").strip().lower()
+        args = data.get("args")
+        if not isinstance(args, dict):
+            args = {}
+        ok = False
+        message = ""
+        try:
+            _diag(f"[HOST-RELAY] command received id={request_id} action={action}")
+            ok, message = self._execute_host_control_command(action, args)
+        except Exception as e:
+            ok, message = False, str(e)
+            _diag(f"[HOST-RELAY] command failed id={request_id} action={action} reason={message}")
+        worker.send_json({"type": "ack", "request_id": request_id, "ok": bool(ok), "message": str(message or "")})
+        # Push a fresh full state right after a command so the UI snaps to truth.
+        self._publish_host_state_ws(force=True)
+
+    def _publish_host_state_ws(self, force: bool = False):
+        worker = getattr(self, "host_relay_worker", None)
+        if worker is None or not worker.is_connected():
+            return
+        try:
+            state = self._host_control_state()
+        except Exception:
+            return
+        playback = state.get("playback", {}) if isinstance(state, dict) else {}
+        # Frequent lightweight tick for smooth position.
+        worker.send_json({
+            "type": "playback_tick",
+            "position_seconds": playback.get("position_seconds", 0.0),
+            "duration_seconds": playback.get("duration_seconds", 0.0),
+            "remaining_seconds": playback.get("remaining_seconds", 0.0),
+            "is_playing": playback.get("is_playing", False),
+            "updated_at": int(time.time()),
+        })
+        # Full state on change (rotation/song/key/tempo/bgm) or at least every ~3s.
+        full = {
+            "type": "state",
+            "user": self.settings.get("user", self.settings.get("tenant", "")),
+            "app_version": APP_VERSION,
+            "connected": True,
+            "updated_at": int(time.time()),
+            "rotation": state.get("rotation", {}),
+            "playback": playback,
+        }
+        sig = json.dumps([full["rotation"], playback.get("key"), playback.get("tempo"),
+                          playback.get("bgm_volume"), playback.get("title")], sort_keys=True)
+        now = time.monotonic()
+        if force or sig != getattr(self, "_host_relay_last_full_sig", "") or \
+           (now - getattr(self, "_host_relay_last_full_at", 0.0)) > 3.0:
+            self._host_relay_last_full_sig = sig
+            self._host_relay_last_full_at = now
+            worker.send_json(full)
 
     def fetch_remote_requests_once(self, reason: str = "relay"):
         """Fetch active remote requests from get_requests_v2.php in a background thread.
@@ -16413,6 +16669,14 @@ class KaraokeApp(QWidget):
             self._start_request_relay(base_url, tenant, api_key)
             print(f"✅ Request relay started (WebSocket) tenant={tenant}; request polling disabled")
 
+        # v2 DAW host-control over WebSocket (app > 3.0.0.0). Runs alongside the
+        # v1 host_commands.php polling below, which stays active for older browsers
+        # and as a fallback. A given browser uses exactly one channel, so commands
+        # are never executed twice.
+        if self._should_use_host_control_relay(base_url, tenant, api_key):
+            self._start_host_control_relay(base_url, tenant, api_key)
+            print(f"✅ Host-control relay started (WebSocket) tenant={tenant}")
+
         self.poll_thread = QThread(self)
         try:
             _poll_iv = self._effective_request_poll_interval_sec()
@@ -16457,6 +16721,7 @@ class KaraokeApp(QWidget):
         # Relay and polling are managed together: stopping the request
         # transport always tears down both, so they can never run at once.
         self._stop_request_relay()
+        self._stop_host_control_relay()
 
         t = getattr(self, "poll_thread", None)
         w = getattr(self, "poll_worker", None)
@@ -19018,22 +19283,54 @@ class KaraokeApp(QWidget):
         except Exception:
             position = 0.0
             duration = 0.0
+        position = round(float(position or 0.0), 3)
+        duration = round(float(duration or 0.0), 3)
         bg = getattr(self, "bg_music", None)
         rotation = self._host_rotation_state()
+        karaoke_playing = bool(getattr(self, "karaoke_playing", False))
+        karaoke_paused = bool(self._is_karaoke_paused())
+        key = int(getattr(self, "_current_karaoke_semitones", 0) or 0)
+        tempo_percent = int(getattr(self, "_karaoke_tempo_percent", 100) or 100)
+        bg_volume = float(getattr(bg, "volume", self.settings.get("bg_volume", 0.8)) or 0.0) if bg is not None else 0.0
+        # Title/artist of the song that is actually playing right now.
+        play_title = ""
+        play_artist = ""
+        if karaoke_playing:
+            play_title = str(rotation["current"]["title"] or "").strip()
+            try:
+                current_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip()
+                if current_path:
+                    display_name = self.lookup_display_name(current_path, artist_title_only=True)
+                    if " • " in display_name:
+                        play_artist = display_name.split(" • ", 1)[0].strip()
+            except Exception:
+                play_artist = ""
         return {
-            "karaoke_playing": bool(getattr(self, "karaoke_playing", False)),
-            "karaoke_paused": bool(self._is_karaoke_paused()),
-            "position_seconds": round(float(position or 0.0), 3),
-            "duration_seconds": round(float(duration or 0.0), 3),
+            "karaoke_playing": karaoke_playing,
+            "karaoke_paused": karaoke_paused,
+            "position_seconds": position,
+            "duration_seconds": duration,
             "queue_length": len(getattr(self, "queue", []) or []),
             "last_singer": rotation["last"]["singer"],
             "current_singer": rotation["current"]["singer"],
             "next_singer": rotation["next"]["singer"],
             "rotation": rotation,
-            "key": int(getattr(self, "_current_karaoke_semitones", 0) or 0),
-            "tempo_percent": int(getattr(self, "_karaoke_tempo_percent", 100) or 100),
+            "key": key,
+            "tempo_percent": tempo_percent,
             "bg_playing": bool(getattr(bg, "is_playing", False)) if bg is not None else False,
-            "bg_volume": float(getattr(bg, "volume", self.settings.get("bg_volume", 0.8)) or 0.0) if bg is not None else 0.0,
+            "bg_volume": bg_volume,
+            # Structured block consumed by the DAW / Live Player web remote.
+            "playback": {
+                "title": play_title,
+                "artist": play_artist,
+                "position_seconds": position,
+                "duration_seconds": duration,
+                "remaining_seconds": round(max(0.0, duration - position), 3),
+                "is_playing": karaoke_playing and not karaoke_paused,
+                "key": key,
+                "tempo": round(tempo_percent / 100.0, 4),
+                "bgm_volume": round(bg_volume, 4),
+            },
         }
 
     def _host_empty_rotation_slot(self, singer: str = "", title: str = "", item_id: str = "") -> dict:
@@ -19178,7 +19475,7 @@ class KaraokeApp(QWidget):
         if action in ("stop", "stop_playback"):
             self.stop_and_clear_now_singing(skip_confirmation=True)
             return True, "stop"
-        if action in ("next", "play_next"):
+        if action in ("next", "play_next", "skip"):
             self.play_next_file(skip_confirmation=True)
             return True, "next"
         if action in ("restart", "restart_current"):
@@ -19202,6 +19499,21 @@ class KaraokeApp(QWidget):
         if action == "tempo_down":
             self._step_karaoke_tempo(-1)
             return True, "tempo_down"
+        if action in ("set_key", "key_set"):
+            semitones = int(round(float(args.get("value", args.get("semitones", 0)) or 0)))
+            self._set_karaoke_key(semitones, apply_live=True)
+            return True, f"set_key {semitones:+d}"
+        if action in ("set_tempo", "tempo_set"):
+            value = float(args.get("value", args.get("tempo", 1.0)) or 1.0)
+            # Accept a ratio (1.0 = 100%) or a raw percent (100 = 100%).
+            percent = int(round(value * 100.0)) if value <= 5.0 else int(round(value))
+            self._set_karaoke_tempo(percent, apply_live=True)
+            return True, f"set_tempo {percent}%"
+        if action in ("seek_to", "seek_absolute"):
+            seconds = max(0.0, float(args.get("seconds", args.get("value", 0)) or 0))
+            if self._karaoke_seek_seconds(seconds):
+                return True, f"seek_to {seconds:.1f}s"
+            return False, "seek unavailable"
         if action in ("bg_play_pause", "bg_toggle"):
             self._bg_main_toggle_playback()
             return True, "bg_play_pause"
