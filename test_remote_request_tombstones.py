@@ -350,6 +350,26 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             ])
 
             self.assertEqual([req["request_id"] for req in app.processed_requests], [303])
+            self.assertNotIn("303", app._ensure_remote_request_tombstones()["requests"])
+
+    def test_reused_request_id_clears_stale_removed_memory(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app._record_remote_request_tombstone(
+                460,
+                entry={"artist": "Alice Cooper", "title": "I'm Eighteen"},
+                singer_name="Jorge",
+                reason="host_clear_queue",
+            )
+            app._remote_removed_request_ids.add(460)
+
+            app._reconcile_remote_requests([
+                {"request_id": 460, "singer": "Dan", "artist": "Avenged Sevenfold", "title": "Almost Easy", "key": 0, "tempo": 0}
+            ])
+
+            self.assertEqual([req["request_id"] for req in app.processed_requests], [460])
+            self.assertNotIn(460, app._remote_removed_request_ids)
+            self.assertNotIn("460", app._ensure_remote_request_tombstones()["requests"])
 
     def test_accepting_off_remove_pushes_removal_to_server(self):
         """Accepting Requests off, but Connected: removing a song still pushes

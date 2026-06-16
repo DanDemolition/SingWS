@@ -31129,6 +31129,11 @@ class KaraokeApp(QWidget):
                         "[REMOTE-TOMBSTONE] id reused with different song signature; ignoring stale tombstone "
                         f"request_id={rid} tombstone_key={tombstone_key!r} request_key={song_key!r}"
                     )
+                    try:
+                        items.pop(str(rid), None)
+                        self._save_remote_request_tombstones(data)
+                    except Exception:
+                        pass
                 else:
                     return tombstone
         if not song_key or song_key == "||":
