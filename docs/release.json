@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.3.0.10",
-  "release_date": "2026-06-14",
+  "version": "0.3.1.0",
+  "release_date": "2026-06-16",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.3.0.10-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.10-arm64-installer.dmg",
+      "filename": "SingWS-0.3.1.0-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.0-arm64-installer.dmg",
       "size": "179 MB",
-      "sha256": "6a8580afa46939e4c46430b24ad70dcc2d1bbcf8171f51a0cb944d35d0c3e549"
+      "sha256": "fedc3ca0a40b2bbcab550c46b3ba3be7e888bba6cfc02c1bbb3b954c5a99f120"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.3.0.10-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.10-x86_64-installer.dmg",
+      "filename": "SingWS-0.3.1.0-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.0-x86_64-installer.dmg",
       "size": "256 MB",
-      "sha256": "fe452a7bdf15310143eca905a3988d61f7846c6784311e8af1cbb1c6b82f7dac"
+      "sha256": "4370049158833293001077851508d623b0c6f8ba281a6284b844f52cd691b90b"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.3.0.10-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.0.10-universal-installer.dmg",
+      "filename": "SingWS-0.3.1.0-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.0-universal-installer.dmg",
       "size": "402 MB",
-      "sha256": "b1a59dce5c197eede39912c675d3932e45ef8909b158fea8c8a49ad945a83b97"
+      "sha256": "dd0c7a202a93e05bc0b5663dddcd8a3d0a48b19a90adbc2dda7bf6a67fc86330"
     }
   }
 }
