@@ -162,6 +162,99 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(len(app.processed_requests), 10)
             self.assertEqual(app.settings["requests_accepting"], True)
 
+    def test_remote_burst_batches_queue_display_and_save(self):
+        """Accepted remote bursts should not rebuild the queue UI once per song.
+
+        The real add path marks the queue display dirty; reconciliation should
+        coalesce that into one final refresh and one persistence request.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.karaoke_playing = True
+            display_calls = []
+            save_calls = []
+            app.update_queue_display = lambda: display_calls.append("refresh")
+            app.save_data = lambda: save_calls.append("save")
+
+            def process(req):
+                app.processed_requests.append(req)
+                app._request_queue_display_refresh()
+                return True
+
+            app.process_external_request = process
+
+            app._reconcile_remote_requests([
+                {
+                    "request_id": 1200 + i,
+                    "singer": f"Singer {i}",
+                    "artist": f"Artist {i}",
+                    "title": f"Title {i}",
+                    "key": 0,
+                    "tempo": 0,
+                }
+                for i in range(10)
+            ])
+
+            self.assertEqual(len(app.processed_requests), 10)
+            self.assertEqual(display_calls, ["refresh"])
+            self.assertEqual(save_calls, ["save"])
+
+    def test_waiting_or_failed_requests_feed_app_waiting_list_not_rotation(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+
+            app._reconcile_remote_requests([
+                {
+                    "request_id": 1301,
+                    "singer": "Ada",
+                    "artist": "Artist",
+                    "title": "Waiting Song",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                },
+                {
+                    "request_id": 1302,
+                    "singer": "Grace",
+                    "artist": "Artist",
+                    "title": "Failed Song",
+                    "state": "failed",
+                    "last_error": "No local match",
+                },
+            ])
+
+            self.assertEqual(app.processed_requests, [])
+            self.assertEqual(app._waiting_for_add_count(), 2)
+            self.assertEqual(
+                sorted(app._waiting_for_add_requests.keys()),
+                [1301, 1302],
+            )
+
+    def test_waiting_list_excludes_already_queued_remote_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Ada",
+                "songs": [{
+                    "artist": "Artist",
+                    "title": "Already Queued",
+                    "song_info": "/music/queued.mp3",
+                    "remote_request_id": 1401,
+                }],
+            }]
+
+            app._reconcile_remote_requests([
+                {
+                    "request_id": 1401,
+                    "singer": "Ada",
+                    "artist": "Artist",
+                    "title": "Already Queued",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                },
+            ])
+
+            self.assertEqual(app._waiting_for_add_count(), 0)
+
     def test_delivered_v2_history_rows_are_not_imported_as_new_requests(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")

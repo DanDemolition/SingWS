@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from unittest import mock
 
 
 def load_main_module():
@@ -71,6 +72,33 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(rotation["next"]["singer"], "George")
         self.assertNotEqual(rotation["current"]["item_id"], rotation["next"]["item_id"])
         self.assertEqual(rotation["next"]["title"], "Next")
+
+    def test_settings_save_scheduler_debounces_ui_thread_writes(self):
+        app = make_app(self.singws)
+        calls = []
+        app.save_settings = lambda: calls.append("save")
+
+        class FakeTimer:
+            def __init__(self):
+                self.started = []
+
+            def start(self, delay):
+                self.started.append(delay)
+
+        class FakeApp:
+            def thread(self):
+                return "ui-thread"
+
+        fake_timer = FakeTimer()
+        app._save_settings_timer = fake_timer
+
+        with mock.patch.object(self.singws.QApplication, "instance", return_value=FakeApp()), \
+             mock.patch.object(self.singws.QThread, "currentThread", return_value="ui-thread"):
+            app._schedule_save_settings(700)
+            app._schedule_save_settings(250)
+
+        self.assertEqual(calls, [])
+        self.assertEqual(fake_timer.started, [700, 250])
 
 
 if __name__ == "__main__":
