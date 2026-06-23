@@ -9603,9 +9603,12 @@ class _BpmDetectWorker(QObject):
 
 
 class AnalyzeLibraryWorker(QObject):
-    """Batch tempo/beat analysis of the whole library, off the UI thread. Caches
-    each song's analysis (keyed by its primary path) as it goes — so it is
-    incremental/resumable — and reports progress. Never touches audio output."""
+    """Batch loudness/gain analysis for karaoke + BGM, off the UI thread.
+
+    Caches each audio file as it goes so the pass is resumable. Work is
+    serialized through the same loudness semaphore used by live background
+    analysis, which keeps ffmpeg from piling onto playback on Intel Macs.
+    """
     progress = pyqtSignal(int, int, str)   # done, total, current name
     finished = pyqtSignal(int, int)        # analyzed, total
 
@@ -9622,19 +9625,34 @@ class AnalyzeLibraryWorker(QObject):
         total = len(self.items)
         done = 0
         analyzed = 0
-        for primary, audio, name in self.items:
+        for _source, audio, name in self.items:
             if self._cancel:
                 break
             done += 1
             self.progress.emit(done, total, str(name or ""))
             try:
-                pcm = phrase_detect.decode_pcm_mono(str(audio), sr=16000)
-                res = phrase_detect.estimate_tempo_and_beat(pcm, 16000)
-                if res and res.get("bpm"):
-                    phrase_markers.set_song_analysis(
-                        str(primary), float(res["bpm"]), res.get("first_beat"), res.get("confidence") or 0.0,
-                        version=phrase_detect.ANALYSIS_VERSION)
+                audio = str(audio or "")
+                sig = _loudness_file_sig(audio)
+                with _loudness_sem:
+                    lufs, peak_db = _measure_loudness_lufs(audio)
+                if lufs is not None and sig is not None:
+                    with _loudness_lock:
+                        _loudness_cache[audio] = {
+                            "i": float(lufs),
+                            "peak_db": peak_db,
+                            "mtime": sig[0],
+                            "size": sig[1],
+                        }
+                        _loudness_save_cache()
                     analyzed += 1
+                    try:
+                        _diag(
+                            f"[LOUDNESS-LIB] {os.path.basename(audio)} "
+                            f"I={float(lufs):.1f} LUFS "
+                            f"gain={_loudness_gain_from_lufs(lufs, peak_db):+.1f}dB"
+                        )
+                    except Exception:
+                        pass
             except Exception as e:
                 try:
                     _diag(f"[ANALYZE-LIB] failed for {name}: {e}")
@@ -15014,12 +15032,6 @@ class KaraokeApp(QWidget):
         except Exception:
             tempo_percent = None
 
-        phrase_start = entry.get("phrase_start_seconds")
-        try:
-            phrase_start = float(phrase_start) if phrase_start is not None else None
-        except Exception:
-            phrase_start = None
-
         right_parts = []
         if duet_display:
             # Bare "DUET" marker only — the badge delegate renders it as a chip.
@@ -15035,8 +15047,6 @@ class KaraokeApp(QWidget):
             right_parts.append(f"KEY {key:+d}")
         if tempo_percent is not None and tempo_percent != 100:
             right_parts.append(f"SPD {tempo_percent}%")
-        if phrase_start is not None and phrase_start > 0:
-            right_parts.append(f"START {self._fmt_mmss(phrase_start)}")
 
         right = "  ".join([p for p in right_parts if p])
 
@@ -15052,8 +15062,6 @@ class KaraokeApp(QWidget):
             detail_parts.append(f"Key: {key:+d}")
         if tempo_percent is not None and tempo_percent != 100:
             detail_parts.append(f"Speed: {tempo_percent}%")
-        if phrase_start is not None and phrase_start > 0:
-            detail_parts.append(f"Start: {self._fmt_mmss(phrase_start)}")
         if detail_parts:
             tooltip_parts.append("  ".join(detail_parts))
         tooltip = "\n".join([p for p in tooltip_parts if p])
@@ -16728,14 +16736,6 @@ class KaraokeApp(QWidget):
         else:
             print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
 
-        # Pull cloud phrase markers once when networking comes up, and push any
-        # local changes that haven't been backed up yet. Both run in background
-        # threads and never block playback.
-        try:
-            self._pull_phrase_markers()
-            self._sync_push_phrase_markers()
-        except Exception as e:
-            _diag(f"[PHRASE-SYNC] startup sync skipped: {e}")
         try:
             QTimer.singleShot(250, lambda: self._sync_remote_removal_tombstones_async("poll_start"))
         except Exception:
@@ -18543,23 +18543,17 @@ class KaraokeApp(QWidget):
         logs_btn = QPushButton("Logs")
         logs_btn.setToolTip(f"Open logs folder: {LOGS_DIR}")
 
-        export_markers_btn = QPushButton("Export Phrase Markers")
-        import_markers_btn = QPushButton("Import Phrase Markers")
-        export_markers_btn.clicked.connect(self.export_phrase_markers)
-        import_markers_btn.clicked.connect(self.import_phrase_markers)
-        analyze_lib_btn = QPushButton("Analyze Library (BPM & beats)")
-        analyze_lib_btn.setToolTip("Detect tempo + beat grid for every song and cache it, so Intro Loop and bar starts land on the beat. Incremental — re-runs only analyze new songs.")
+        analyze_lib_btn = QPushButton("Analyze Library Volume")
+        analyze_lib_btn.setToolTip("Pre-analyze loudness/gain for karaoke and background-music tracks. Incremental — only analyzes files that are not already cached.")
         analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False))
-        reanalyze_lib_btn = QPushButton("Re-analyze All")
-        reanalyze_lib_btn.setToolTip("Force a full re-analysis of every song.")
+        reanalyze_lib_btn = QPushButton("Re-analyze Volume")
+        reanalyze_lib_btn.setToolTip("Force a fresh loudness/gain analysis for karaoke and background-music tracks.")
         reanalyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=True))
 
         _search_actions_card = _section_card(tab_search, "Library Tools")
         _search_actions = QHBoxLayout()
         _search_actions.addWidget(scan_folder_btn)
         _search_actions.addWidget(export_csv_btn)
-        _search_actions.addWidget(export_markers_btn)
-        _search_actions.addWidget(import_markers_btn)
         _search_actions.addStretch(1)
         _search_actions_card.addLayout(_search_actions)
         _analyze_row = QHBoxLayout()
@@ -25358,10 +25352,6 @@ class KaraokeApp(QWidget):
             key_action.triggered.connect(lambda: self.open_song_key_dialog(singer_idx, song_idx))
             speed_action = menu.addAction("Change Speed / Tempo…")
             speed_action.triggered.connect(lambda: self.open_song_tempo_dialog(singer_idx, song_idx))
-            menu.addSeparator()
-            phrase_menu = menu.addMenu("Phrase Start")
-            style_app_menu(phrase_menu)
-            self._build_phrase_start_submenu(phrase_menu, singer_idx, song_idx)
 
         if not menu.isEmpty():
             menu.exec(self.queue_display.viewport().mapToGlobal(position))
@@ -25411,31 +25401,8 @@ class KaraokeApp(QWidget):
             pass
 
     def _resolve_phrase_start(self, primary_path, entry, duration_secs=0.0) -> float:
-        """Where this song should start (seconds). A per-instance choice on the
-        queue entry wins (including an explicit 0.0 = Beginning); otherwise the
-        song's saved default marker is reused; otherwise 0.0. Always clamped to
-        a safe range. Never raises — phrase-start must never block playback."""
-        try:
-            entry_override = None
-            if isinstance(entry, dict) and entry.get("phrase_start_seconds") is not None:
-                entry_override = float(entry.get("phrase_start_seconds"))
-            default_seconds = None
-            if entry_override is None and primary_path:
-                marker = phrase_markers.default_marker(str(primary_path))
-                if marker:
-                    default_seconds = float(marker.get("seconds") or 0.0)
-            start = phrase_markers.resolve_start_seconds(entry_override, default_seconds, duration_secs)
-            if start > 0.0:
-                _diag(f"[PHRASE-START] start={start:.3f}s "
-                      f"(override={entry_override} default={default_seconds} dur={duration_secs}) "
-                      f"path={os.path.basename(str(primary_path or ''))}")
-            return float(start)
-        except Exception as e:
-            try:
-                _diag(f"[PHRASE-START] resolve failed, starting at 0: {e}")
-            except Exception:
-                pass
-            return 0.0
+        """Retired phrase-start feature: always begin at the file start."""
+        return 0.0
 
     def _persist_song_modifier_change(self, message: str = ""):
         """Save + refresh after editing a per-song key/tempo override."""
@@ -25682,10 +25649,14 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-    # ── Analyze Library (batch tempo/beat) ───────────────────────────────────
+    # ── Analyze Library (batch loudness/gain) ────────────────────────────────
     def _analysis_audio_for_track(self, track):
-        """(primary_path, audio_path) for a library track, or None if it can't be
-        analyzed here (e.g. a ZIP needing extraction). CDG → its paired MP3."""
+        """(source, audio_path, display_name) for a karaoke library track.
+
+        CDG measures the paired MP3. ZIPs are skipped because they need
+        extraction first; queued/played ZIP songs still get analyzed through the
+        normal playback loudness path once the audio file exists.
+        """
         try:
             primary = str(track.get("path") or "")
         except Exception:
@@ -25695,14 +25666,105 @@ class KaraokeApp(QWidget):
         pl = primary.lower()
         if pl.endswith(".cdg"):
             mp3 = os.path.splitext(primary)[0] + ".mp3"
-            return (primary, mp3) if os.path.exists(mp3) else None
-        if pl.endswith(".mp4") or pl.endswith(".mp3"):
-            return (primary, primary)
-        return None  # .zip / unknown — skip (rare; opened-in-dialog still analyzes)
+            audio = mp3 if os.path.exists(mp3) else ""
+        elif os.path.splitext(pl)[1] in {".mp4", ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"}:
+            audio = primary
+        else:
+            audio = ""
+        if not audio:
+            return None
+        name = str(track.get("display") or track.get("title") or os.path.basename(primary))
+        return ("Karaoke", audio, name)
+
+    def _bgm_analysis_items(self) -> list[tuple[str, str, str]]:
+        """BGM tracks to include in batch loudness analysis."""
+        audio_exts = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".mp4"}
+        candidates = []
+
+        def _add_path(path):
+            path = str(path or "")
+            if not path:
+                return
+            if os.path.isfile(path):
+                if os.path.splitext(path)[1].lower() in audio_exts:
+                    candidates.append(path)
+                return
+            if os.path.isdir(path):
+                try:
+                    for root, _, files in os.walk(path):
+                        for fname in files:
+                            if fname.startswith("."):
+                                continue
+                            full = os.path.join(root, fname)
+                            if os.path.splitext(full)[1].lower() in audio_exts:
+                                candidates.append(full)
+                except Exception:
+                    pass
+
+        try:
+            bg = getattr(self, "bg_music", None)
+            for p in list(getattr(bg, "playlist", []) or []):
+                _add_path(p)
+        except Exception:
+            pass
+        try:
+            mgr = getattr(self, "bg_manager", None)
+            for t in list(getattr(mgr, "current_playlist", []) or []):
+                _add_path(t.get("path") if isinstance(t, dict) else t)
+        except Exception:
+            pass
+        try:
+            p = Path.home() / "SingWS" / "bg_playlist.json"
+            data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+            if isinstance(data, list):
+                for t in data:
+                    _add_path(t.get("path") if isinstance(t, dict) else t)
+        except Exception:
+            pass
+        try:
+            for root in list(self.settings.get("bg_import_folders", []) or []):
+                _add_path(root)
+        except Exception:
+            pass
+
+        seen = set()
+        items = []
+        for path in candidates:
+            key = os.path.abspath(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(("BGM", path, os.path.basename(path)))
+        return items
+
+    def _library_loudness_analysis_items(self, force: bool = False):
+        """Return deduped karaoke+BGM audio files that need loudness analysis."""
+        _loudness_load_cache()
+        raw_items = []
+        for t in list(getattr(self, "tracks", []) or []):
+            item = self._analysis_audio_for_track(t)
+            if item:
+                raw_items.append(item)
+        raw_items.extend(self._bgm_analysis_items())
+
+        seen = set()
+        items = []
+        for source, audio, name in raw_items:
+            audio = str(audio or "")
+            if not audio or not os.path.exists(audio):
+                continue
+            key = os.path.abspath(audio)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not force and loudness_gain_db_cached(audio) is not None:
+                continue
+            label = f"{source}: {name or os.path.basename(audio)}"
+            items.append((source, audio, label))
+        return items
 
     def analyze_library(self, force: bool = False):
-        """Analyze tempo + beat grid for the whole library and cache it, so Intro
-        Loop and bar starts land on the beat. Incremental unless force."""
+        """Analyze static loudness/gain for karaoke and BGM libraries."""
         from PyQt6.QtWidgets import QProgressDialog
         # Don't start a second pass while one is running — just resurface the
         # existing progress window (this is what caused duplicate windows).
@@ -25715,24 +25777,13 @@ class KaraokeApp(QWidget):
                 pass
             return
         tracks = list(getattr(self, "tracks", []) or [])
-        items = []
-        for t in tracks:
-            pa = self._analysis_audio_for_track(t)
-            if not pa:
-                continue
-            primary, audio = pa
-            if not force:
-                a = phrase_markers.get_song_analysis(primary)
-                if (a and a.get("first_beat") is not None
-                        and int(a.get("version") or 0) >= phrase_detect.ANALYSIS_VERSION):
-                    continue  # already analyzed with the current algorithm
-            name = str(t.get("display") or t.get("title") or os.path.basename(primary))
-            items.append((primary, audio, name))
+        items = self._library_loudness_analysis_items(force=force)
 
         if not items:
             QMessageBox.information(self, "Analyze Library",
-                                    "Nothing to analyze — the library is already analyzed."
-                                    if tracks else "No songs in the library yet. Scan a folder first.")
+                                    "Nothing to analyze — library volume is already cached."
+                                    if tracks or self._bgm_analysis_items()
+                                    else "No karaoke or background-music tracks found. Scan karaoke or add BGM first.")
             return
 
         # Parent to the active modal window (e.g. the open Settings dialog) so the
@@ -25743,8 +25794,8 @@ class KaraokeApp(QWidget):
             _prog_parent = QApplication.activeModalWidget()
         except Exception:
             _prog_parent = None
-        dlg = QProgressDialog(f"Analyzing {len(items)} song(s)…", "Cancel", 0, len(items), _prog_parent or self)
-        dlg.setWindowTitle("Analyze Library")
+        dlg = QProgressDialog(f"Analyzing volume for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
+        dlg.setWindowTitle("Analyze Library Volume")
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(True)
         dlg.setAutoReset(True)
@@ -25781,7 +25832,7 @@ class KaraokeApp(QWidget):
                 dlg.setValue(total)
             except Exception:
                 pass
-            self._set_processing_text(f"Analyzed {analyzed} of {total} song(s).")
+            self._set_processing_text(f"Analyzed volume for {analyzed} of {total} track(s).")
 
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
@@ -30982,35 +31033,13 @@ class KaraokeApp(QWidget):
         except Exception:
             current_song_dur = 0
 
-        # Phrase-Aligned Song Start: resolve where this song should begin. A
-        # per-instance choice on the queue entry wins; otherwise the song's
-        # saved default marker is reused; otherwise 0 (the file start).
+        # Phrase-start has been retired; songs always begin at the file start.
         phrase_start = self._resolve_phrase_start(primary_path, entry, current_song_dur)
 
-        # Intro Loop: when the media-end handoff requested it, hold this song at a
-        # looping intro [phrase_start, phrase_start + N bars] until Play releases it.
+        # Retired phrase/intro-loop path.
         intro_loop_seconds = None
         if getattr(self, "_pending_intro_loop", False):
             self._pending_intro_loop = False
-            try:
-                bars = int(self.settings.get("intro_loop_bars", 8) or 8)
-                analysis = phrase_markers.get_song_analysis(primary_path)
-                bpm = analysis["bpm"] if analysis else self._phrase_resolve_bpm(primary_path, primary_path)
-                first_beat = analysis["first_beat"] if analysis else None
-                if bpm:
-                    # Beat-aligned: start on a downbeat, span exactly N bars so the
-                    # loop sits on the groove instead of drifting.
-                    region = phrase_detect.beat_aligned_loop(float(phrase_start), float(bpm), first_beat, bars)
-                    if region:
-                        intro_loop_seconds = region
-                        self._intro_loop_active = True
-                        _diag(f"[INTRO-LOOP] engaged {region} bpm={bpm} first_beat={first_beat} bars={bars}")
-                if intro_loop_seconds is None:
-                    # No analysis yet → play normally this time and analyze the
-                    # beat grid in the background so the loop is tight next time.
-                    self._detect_bpm_async(primary_path, lambda b: None, cache_path=primary_path)
-            except Exception as e:
-                _diag(f"[INTRO-LOOP] engage failed: {e}")
 
         self.video_window.force_black = False
         self.video_window.idle = False

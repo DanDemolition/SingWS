@@ -1,4 +1,7 @@
 import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest import mock
 
@@ -99,6 +102,43 @@ class RecentRegressionTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
         self.assertEqual(fake_timer.started, [700, 250])
+
+    def test_library_volume_analysis_collects_karaoke_and_bgm(self):
+        app = make_app(self.singws)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cdg = root / "karaoke.cdg"
+            mp3 = root / "karaoke.mp3"
+            bgm = root / "bgm.mp3"
+            cdg.write_text("", encoding="utf-8")
+            mp3.write_text("audio", encoding="utf-8")
+            bgm.write_text("audio", encoding="utf-8")
+
+            app.tracks = [{"path": str(cdg), "display": "Karaoke Song"}]
+            app.bg_music = SimpleNamespace(playlist=[str(bgm)])
+            app.bg_manager = SimpleNamespace(current_playlist=[{"path": str(bgm)}])
+            app.settings = {"bg_import_folders": []}
+
+            with mock.patch.object(self.singws.Path, "home", return_value=root):
+                with mock.patch.object(self.singws, "loudness_gain_db_cached", return_value=None):
+                    items = app._library_loudness_analysis_items(force=False)
+
+                paths = [item[1] for item in items]
+                self.assertEqual(paths.count(str(mp3)), 1)
+                self.assertEqual(paths.count(str(bgm)), 1)
+                self.assertTrue(any(item[0] == "Karaoke" for item in items))
+                self.assertTrue(any(item[0] == "BGM" for item in items))
+
+                with mock.patch.object(
+                    self.singws,
+                    "loudness_gain_db_cached",
+                    side_effect=lambda path: 0.0 if path == str(mp3) else None,
+                ):
+                    incremental = app._library_loudness_analysis_items(force=False)
+                    forced = app._library_loudness_analysis_items(force=True)
+
+            self.assertNotIn(str(mp3), [item[1] for item in incremental])
+            self.assertIn(str(mp3), [item[1] for item in forced])
 
 
 if __name__ == "__main__":

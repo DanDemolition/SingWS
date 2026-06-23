@@ -242,7 +242,7 @@ class SongBpmCacheTests(unittest.TestCase):
 
 
 class ResolvePhraseStartIntegrationTests(unittest.TestCase):
-    """Exercises the KaraokeApp._resolve_phrase_start glue against the real module.
+    """Exercises the retired KaraokeApp._resolve_phrase_start glue.
     Requires SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS=1 (set by the test runner)."""
 
     @classmethod
@@ -255,20 +255,18 @@ class ResolvePhraseStartIntegrationTests(unittest.TestCase):
     def _app(self):
         return self.mod.KaraokeApp.__new__(self.mod.KaraokeApp)
 
-    def test_entry_override_wins(self):
+    def test_entry_override_is_ignored_after_retirement(self):
         app = self._app()
-        # explicit per-instance value beats any saved default
         with _patched_default(self.mod, {"seconds": 8.0}):
-            self.assertAlmostEqual(app._resolve_phrase_start("/x.mp3", {"phrase_start_seconds": 20.0}, 300), 20.0)
-            # explicit 0.0 (Beginning) also wins over the default
+            self.assertEqual(app._resolve_phrase_start("/x.mp3", {"phrase_start_seconds": 20.0}, 300), 0.0)
             self.assertEqual(app._resolve_phrase_start("/x.mp3", {"phrase_start_seconds": 0.0}, 300), 0.0)
 
-    def test_default_marker_reused_and_clamped(self):
+    def test_default_marker_ignored_after_retirement(self):
         app = self._app()
         with _patched_default(self.mod, {"seconds": 12.0}):
-            self.assertAlmostEqual(app._resolve_phrase_start("/x.mp3", {}, 300), 12.0)
+            self.assertEqual(app._resolve_phrase_start("/x.mp3", {}, 300), 0.0)
         with _patched_default(self.mod, {"seconds": 999.0}):
-            self.assertAlmostEqual(app._resolve_phrase_start("/x.mp3", {}, 100), 98.0)  # clamp to dur-2
+            self.assertEqual(app._resolve_phrase_start("/x.mp3", {}, 100), 0.0)
         with _patched_default(self.mod, None):
             self.assertEqual(app._resolve_phrase_start("/x.mp3", {}, 300), 0.0)
 
