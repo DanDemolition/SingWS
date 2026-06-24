@@ -19797,18 +19797,23 @@ class KaraokeApp(QWidget):
         actions = QHBoxLayout()
         actions.setSpacing(8)
         self.waiting_for_add_add_button = QPushButton("Add Now")
-        self.waiting_for_add_clear_button = QPushButton("Clear")
+        self.waiting_for_add_find_button = QPushButton("Find Song…")
+        self.waiting_for_add_clear_button = QPushButton("Remove")
         self.waiting_for_add_add_button.setStyleSheet(button_css(padding="8px 12px", radius=8))
-        self.waiting_for_add_clear_button.setStyleSheet(danger_button_css(padding="8px 12px", radius=8))
+        self.waiting_for_add_find_button.setStyleSheet(subtle_button_css(padding="8px 12px", radius=8))
+        self.waiting_for_add_clear_button.setStyleSheet(warning_button_css(padding="8px 12px", radius=8))
         self.waiting_for_add_add_button.clicked.connect(self._add_selected_waiting_for_add)
+        self.waiting_for_add_find_button.clicked.connect(self._find_song_for_selected_waiting_for_add)
         self.waiting_for_add_clear_button.clicked.connect(self._clear_selected_waiting_for_add)
         actions.addStretch(1)
         actions.addWidget(self.waiting_for_add_add_button)
+        actions.addWidget(self.waiting_for_add_find_button)
         actions.addWidget(self.waiting_for_add_clear_button)
         shell_layout.addLayout(actions)
         root.addWidget(shell, 1)
 
         self.waiting_for_add_add_button.setEnabled(False)
+        self.waiting_for_add_find_button.setEnabled(False)
         self.waiting_for_add_clear_button.setEnabled(False)
         return page
 
@@ -19995,9 +20000,12 @@ class KaraokeApp(QWidget):
             state = {}
         try:
             add_button = state.get("waiting_for_add_add_button")
+            find_button = state.get("waiting_for_add_find_button")
             clear_button = state.get("waiting_for_add_clear_button")
             if add_button is not None:
                 add_button.setEnabled(enabled)
+            if find_button is not None:
+                find_button.setEnabled(enabled)
             if clear_button is not None:
                 clear_button.setEnabled(enabled)
         except Exception:
@@ -20051,6 +20059,266 @@ class KaraokeApp(QWidget):
             pass
         self._refresh_waiting_for_add_view()
         self._show_processing_notification("Added waiting request to rotation.", level="success")
+
+    def _waiting_for_add_song_data_from_track(self, req: dict, track: dict):
+        path = str((track or {}).get("path") or "").strip()
+        if not path:
+            raise ValueError("Selected track has no valid path.")
+        try:
+            key = int((req or {}).get("key") or (req or {}).get("key_change") or 0)
+        except Exception:
+            key = 0
+        try:
+            tempo_offset = int((req or {}).get("tempo") or 0)
+        except Exception:
+            tempo_offset = 0
+        tempo_percent = max(70, min(130, 100 + tempo_offset))
+        low = path.lower()
+        if low.endswith(".cdg"):
+            mp3_path = self._find_mp3_pair_for_cdg(path)
+            if not mp3_path:
+                raise FileNotFoundError(f"Matching MP3 not found for CDG:\n{path}")
+            return ((path, mp3_path), key, tempo_percent)
+        if low.endswith(".zip") and not self.is_mp3g_zip(path):
+            raise ValueError(f"ZIP must contain exactly one CDG and one MP3:\n{path}")
+        return (path, key, tempo_percent)
+
+    def _add_waiting_for_add_track(self, req: dict, track: dict) -> bool:
+        rid = self._waiting_for_add_request_id(req)
+        if rid <= 0:
+            return False
+        singer = str((req or {}).get("singer") or "").strip()
+        if not singer:
+            raise ValueError("Waiting request has no singer name.")
+        song_data = self._waiting_for_add_song_data_from_track(req, track)
+        ok = bool(self._add_song_to_queue(singer, song_data, track=track, remote_meta=req))
+        if not ok:
+            return False
+        try:
+            self._waiting_for_add_handled_ids.add(rid)
+        except Exception:
+            self._waiting_for_add_handled_ids = {rid}
+        try:
+            self._mark_waiting_for_add_delivered_async(rid, req)
+        except Exception:
+            pass
+        try:
+            getattr(self, "_waiting_for_add_requests", {}).pop(rid, None)
+        except Exception:
+            pass
+        self._refresh_waiting_for_add_view()
+        self._show_processing_notification("Added selected song to rotation.", level="success")
+        return True
+
+    def _find_song_for_selected_waiting_for_add(self):
+        req = self._selected_waiting_for_add_request()
+        if not req:
+            return
+        singer = str(req.get("singer") or "").strip() or "Unknown singer"
+        old_artist = str(req.get("artist") or "").strip()
+        old_title = str(req.get("title") or "").strip()
+        old_label = f"{old_artist} - {old_title}".strip(" -") or "waiting request"
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Find Song for Waiting Request")
+        dlg.setMinimumSize(560, 340)
+        try:
+            sz = (self.settings or {}).get("waiting_find_song_dialog_size") or {}
+            dlg.resize(max(560, int(sz.get("w", 900))), max(340, int(sz.get("h", 540))))
+        except Exception:
+            dlg.resize(900, 540)
+        try:
+            base = self.palette().color(QPalette.ColorRole.Base)
+            win = self.palette().color(QPalette.ColorRole.Window)
+            txtc = self.palette().color(QPalette.ColorRole.Text)
+            border = base.darker(120)
+            field_bg = base.darker(105)
+            dlg.setStyleSheet(
+                dialog_stylesheet(win, base, txtc)
+                + f"""
+                QListWidget {{
+                    background-color: {field_bg.name()};
+                    color: {txtc.name()};
+                    border: 1px solid {border.name()};
+                    border-radius: 8px;
+                    outline: none;
+                }}
+                QListWidget::item {{ padding: 2px 6px; }}
+                QListWidget::item:selected {{
+                    background-color: palette(highlight);
+                    color: palette(highlighted-text);
+                }}
+                """
+            )
+        except Exception:
+            pass
+
+        layout = QVBoxLayout(dlg)
+        summary = QLabel(f"{singer}: {old_label}")
+        summary.setWordWrap(True)
+        summary.setStyleSheet(f"color:{_v('text_soft')}; font-weight:700;")
+        layout.addWidget(summary)
+
+        search = QLineEdit(dlg)
+        search.setPlaceholderText("Search your karaoke library...")
+        search.setClearButtonEnabled(True)
+        layout.addWidget(search)
+
+        results = QListWidget(dlg)
+        results.setAlternatingRowColors(True)
+        results.setUniformItemSizes(True)
+        results.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        results.setItemDelegate(
+            RightAlignedMetaDelegate(
+                self._row_left_role,
+                self._row_right_role,
+                results,
+                compact_shift_ratio=0.0,
+                edge_pad_px=2,
+                gap_px=12,
+                force_scrollbar_reserve_px=0,
+            )
+        )
+        layout.addWidget(results, 1)
+
+        confirm = QLabel("Select a track to add this waiting request.")
+        confirm.setWordWrap(True)
+        confirm.setStyleSheet(f"color:{_v('warning')}; font-weight:700;")
+        layout.addWidget(confirm)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, parent=dlg)
+        add_btn = btns.addButton("Add Selected", QDialogButtonBox.ButtonRole.AcceptRole)
+        add_btn.setEnabled(False)
+        layout.addWidget(btns)
+
+        search_state = {"job_id": 0, "thread": None}
+        search_timer = QTimer(dlg)
+        search_timer.setSingleShot(True)
+        search_timer.setInterval(max(120, int(self._effective_search_debounce_ms() * 0.7)))
+
+        def current_track():
+            item = results.currentItem()
+            if item is None:
+                return None
+            track = item.data(Qt.ItemDataRole.UserRole)
+            return track if isinstance(track, dict) else None
+
+        def refresh_confirm():
+            track = current_track()
+            add_btn.setEnabled(track is not None)
+            if not track:
+                confirm.setText("Select a track to add this waiting request.")
+                return
+            artist = str(track.get("artist") or "").strip()
+            title = str(track.get("title") or "").strip()
+            label = f"{artist} - {title}".strip(" -") or str(track.get("display") or "selected track")
+            confirm.setText(f"Add '{label}' for {singer}?")
+
+        def add_rows(rows):
+            results.setUpdatesEnabled(False)
+            try:
+                results.clear()
+                for r in rows or []:
+                    try:
+                        track = self._track_from_search_row(r)
+                        if not str(track.get("path") or "").strip():
+                            continue
+                        _label, tooltip, left, right = self._build_search_row_text(track)
+                        item = QListWidgetItem(left)
+                        item.setData(Qt.ItemDataRole.UserRole, track)
+                        self._set_aligned_row_meta(item, left, right)
+                        item.setData(self._row_disc_role, str(track.get("disc_id") or "").strip())
+                        try:
+                            item.setToolTip(tooltip)
+                        except Exception:
+                            pass
+                        results.addItem(item)
+                    except Exception:
+                        continue
+            finally:
+                results.setUpdatesEnabled(True)
+            if results.count() > 0:
+                results.setCurrentRow(0)
+            refresh_confirm()
+
+        def on_results(job_id, rows):
+            if int(job_id) != int(search_state.get("job_id") or 0):
+                return
+            if not str(search.text() or "").strip():
+                results.clear()
+                refresh_confirm()
+                return
+            add_rows(rows)
+
+        def start_search():
+            query = str(search.text() or "").strip()
+            search_state["job_id"] = int(search_state.get("job_id") or 0) + 1
+            job_id = int(search_state["job_id"])
+            if not query:
+                results.clear()
+                refresh_confirm()
+                return
+            try:
+                thr = search_state.get("thread")
+                if thr is not None and thr.isRunning():
+                    thr.requestInterruption()
+            except Exception:
+                pass
+            thread = SongSearchThread(
+                job_id,
+                query,
+                limit=250,
+                fuzzy=not (self._performance_mode() or self._safe_mode()),
+            )
+            thread.results_ready.connect(on_results)
+            try:
+                thread.finished.connect(thread.deleteLater)
+            except Exception:
+                pass
+            search_state["thread"] = thread
+            thread.start()
+
+        def apply_choice():
+            track = current_track()
+            if not isinstance(track, dict):
+                return
+            try:
+                if self._add_waiting_for_add_track(req, track):
+                    dlg.accept()
+            except Exception as e:
+                QMessageBox.warning(dlg, "Waiting for Add", str(e))
+
+        search.textChanged.connect(lambda *_: search_timer.start())
+        search.returnPressed.connect(apply_choice)
+        search_timer.timeout.connect(start_search)
+        results.itemSelectionChanged.connect(refresh_confirm)
+        results.itemDoubleClicked.connect(lambda *_: apply_choice())
+        btns.accepted.connect(apply_choice)
+        btns.rejected.connect(dlg.reject)
+
+        def cleanup():
+            try:
+                s = dlg.size()
+                self.settings["waiting_find_song_dialog_size"] = {"w": int(s.width()), "h": int(s.height())}
+                self.save_settings()
+            except Exception:
+                pass
+            try:
+                thr = search_state.get("thread")
+                if thr is not None and thr.isRunning():
+                    thr.requestInterruption()
+            except Exception:
+                pass
+
+        dlg.finished.connect(lambda _r: cleanup())
+        seed = " ".join([p for p in (old_artist, old_title) if p]).strip()
+        if seed:
+            search.setText(seed)
+            search.selectAll()
+            search_timer.start(10)
+        search.setFocus(Qt.FocusReason.PopupFocusReason)
+        dlg.exec()
 
     def _mark_waiting_for_add_delivered_async(self, request_id: int, req: dict | None = None):
         try:

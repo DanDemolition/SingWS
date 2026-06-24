@@ -255,6 +255,43 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
 
             self.assertEqual(app._waiting_for_add_count(), 0)
 
+    def test_waiting_request_can_add_selected_local_track(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            req = {
+                "request_id": 1501,
+                "singer": "Ada",
+                "artist": "Remote Artist",
+                "title": "Remote Title",
+                "key": -1,
+                "tempo": 8,
+            }
+            app._waiting_for_add_requests = {1501: req}
+            app._waiting_for_add_handled_ids = set()
+            app._refresh_waiting_for_add_view = lambda: None
+            app._show_processing_notification = lambda *args, **kwargs: None
+            delivered = []
+            added = []
+            app._mark_waiting_for_add_delivered_async = lambda rid, req=None: delivered.append(rid)
+
+            def add_song(singer, song_data, track=None, remote_meta=None):
+                added.append((singer, song_data, track, remote_meta))
+                return True
+
+            app._add_song_to_queue = add_song
+
+            track = {
+                "path": "/music/local-match.mp3",
+                "artist": "Local Artist",
+                "title": "Local Title",
+            }
+            self.assertTrue(app._add_waiting_for_add_track(req, track))
+
+            self.assertEqual(added, [("Ada", ("/music/local-match.mp3", -1, 108), track, req)])
+            self.assertEqual(delivered, [1501])
+            self.assertIn(1501, app._waiting_for_add_handled_ids)
+            self.assertNotIn(1501, app._waiting_for_add_requests)
+
     def test_delivered_v2_history_rows_are_not_imported_as_new_requests(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
