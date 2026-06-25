@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.1.1"
+APP_VERSION = "0.3.1.2"
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -1984,39 +1984,74 @@ def loudness_gain_db_cached(audio_path: str):
         return None
 
 
-def _measure_loudness_lufs(audio_path: str):
+def _measure_loudness_lufs(audio_path: str, cancel_check=None):
     """Measure integrated loudness (LUFS) and sample peak via ffmpeg.
 
-    Returns (integrated_lufs, max_volume_db) or (None, None).  The peak pass is
-    cached and used only to cap static gain; no live compressor/limiter is added.
+    Returns (integrated_lufs, max_peak_db) or (None, None).  The measured peak
+    is cached and used only to cap static gain; no live compressor/limiter is added.
     """
     try:
         from python_karaoke_transport import _ffmpeg_path
         ffmpeg = _ffmpeg_path("ffmpeg")
     except Exception:
         ffmpeg = "ffmpeg"
+    def _cancelled():
+        if cancel_check is None:
+            return False
+        try:
+            return bool(cancel_check())
+        except Exception:
+            return False
+
+    def _run_ffmpeg(cmd):
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if hasattr(os, "setpriority"):
+                _loudness_lower_priority(proc.pid)
+            deadline = time.monotonic() + 120.0
+            while True:
+                if _cancelled():
+                    try:
+                        proc.terminate()
+                        proc.communicate(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                            proc.communicate(timeout=2)
+                        except Exception:
+                            pass
+                    return None
+                timeout = min(0.25, max(0.0, deadline - time.monotonic()))
+                try:
+                    _out, err = proc.communicate(timeout=timeout)
+                    return (err or b"").decode("utf-8", errors="ignore")
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() >= deadline:
+                        try:
+                            proc.kill()
+                            proc.communicate(timeout=5)
+                        except Exception:
+                            pass
+                        return None
+        except Exception:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=5)
+                except Exception:
+                    pass
+            return None
+
     cmd = [
         ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-threads", "1",
-        "-i", audio_path, "-map", "0:a:0", "-af", "ebur128", "-f", "null", "-",
+        "-i", audio_path, "-map", "0:a:0", "-af", "ebur128=peak=true", "-f", "null", "-",
     ]
-    proc = None
-    try:
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        if hasattr(os, "setpriority"):
-            _loudness_lower_priority(proc.pid)
-        _out, err = proc.communicate(timeout=120)
-        text = (err or b"").decode("utf-8", errors="ignore")
-    except Exception:
-        # On timeout or any failure, make sure the child is not left running.
-        if proc is not None:
-            try:
-                proc.kill()
-                proc.communicate(timeout=5)
-            except Exception:
-                pass
+    text = _run_ffmpeg(cmd)
+    if text is None:
         return None, None
     matches = re.findall(r"\bI:\s*(-?\d+(?:\.\d+)?)\s*LUFS", text)
     if not matches:
@@ -2030,30 +2065,13 @@ def _measure_loudness_lufs(audio_path: str):
         return None, None
 
     peak_db = None
-    peak_cmd = [
-        ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-threads", "1",
-        "-i", audio_path, "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-",
-    ]
-    proc = None
     try:
-        proc = subprocess.Popen(
-            peak_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        if hasattr(os, "setpriority"):
-            _loudness_lower_priority(proc.pid)
-        _out, err = proc.communicate(timeout=120)
-        peak_text = (err or b"").decode("utf-8", errors="ignore")
-        peak_match = re.findall(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", peak_text)
+        peak_match = re.findall(r"\bPeak:\s*(-?\d+(?:\.\d+)?)\s*dBFS", text)
+        if not peak_match:
+            peak_match = re.findall(r"\bTPK:\s*(-?\d+(?:\.\d+)?)\s*dBFS", text)
         if peak_match:
             peak_db = float(peak_match[-1])
     except Exception:
-        if proc is not None:
-            try:
-                proc.kill()
-                proc.communicate(timeout=5)
-            except Exception:
-                pass
         peak_db = None
     return val, peak_db
 
@@ -2555,6 +2573,7 @@ DEFAULTS = {
     "session_location_ttl_minutes": 720,    # session location heartbeat TTL
     "audio_output_id": "default",          # default | discovered GST device id
     "karaoke_scan_roots": [],              # remembered karaoke library roots for incremental scan
+    "karaoke_scan_dir_sigs": {},           # directory signatures so Update can skip unchanged folders
     "header_qr_url": "",                   # optional request URL rendered as clickable QR in header
 }
 
@@ -9617,16 +9636,21 @@ class AnalyzeLibraryWorker(QObject):
         # items: list of (primary_path, audio_path, display_name)
         self.items = list(items or [])
         self._cancel = False
+        self._cancel_event = threading.Event()
 
     def cancel(self):
         self._cancel = True
+        self._cancel_event.set()
+
+    def is_cancelled(self):
+        return self._cancel or self._cancel_event.is_set()
 
     def run(self):
         total = len(self.items)
         done = 0
         analyzed = 0
         for _source, audio, name in self.items:
-            if self._cancel:
+            if self.is_cancelled():
                 break
             done += 1
             self.progress.emit(done, total, str(name or ""))
@@ -9634,7 +9658,9 @@ class AnalyzeLibraryWorker(QObject):
                 audio = str(audio or "")
                 sig = _loudness_file_sig(audio)
                 with _loudness_sem:
-                    lufs, peak_db = _measure_loudness_lufs(audio)
+                    lufs, peak_db = _measure_loudness_lufs(audio, cancel_check=self.is_cancelled)
+                if self.is_cancelled():
+                    break
                 if lufs is not None and sig is not None:
                     with _loudness_lock:
                         _loudness_cache[audio] = {
@@ -26096,19 +26122,26 @@ class KaraokeApp(QWidget):
 
         def _on_finished(analyzed, total):
             self._analyze_running = False
+            cancelled = False
+            try:
+                cancelled = bool(worker.is_cancelled())
+            except Exception:
+                cancelled = False
             try:
                 dlg.setValue(total)
             except Exception:
                 pass
-            self._set_processing_text(f"Analyzed volume for {analyzed} of {total} track(s).")
+            if cancelled:
+                self._set_processing_text(f"Cancelled volume analysis after {analyzed} of {total} track(s).")
+            else:
+                self._set_processing_text(f"Analyzed volume for {analyzed} of {total} track(s).")
 
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        dlg.canceled.connect(worker.cancel)
-        dlg.canceled.connect(lambda: setattr(self, "_analyze_running", False))
+        dlg.canceled.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
         # keep refs alive + mark running so a second click just resurfaces this one
         self._analyze_running = True
         self._analyze_lib_job = (thread, worker, dlg)
@@ -28614,6 +28647,13 @@ class KaraokeApp(QWidget):
             except Exception:
                 return None, None
 
+        def _scan_dir_sig(path: str):
+            try:
+                st = os.stat(path)
+                return [int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))), int(st.st_size)]
+            except Exception:
+                return None
+
         def _old_track_unchanged(old_track: dict, mtime, size) -> bool:
             if not isinstance(old_track, dict):
                 return False
@@ -28627,6 +28667,59 @@ class KaraokeApp(QWidget):
                 return int(old_mtime) == int(mtime) and int(old_size) == int(size)
             except Exception:
                 return False
+
+        def _song_type_for_name(filename: str):
+            lower = str(filename or "").lower()
+            if lower.endswith(".mp4"):
+                return "mp4"
+            if lower.endswith(".cdg"):
+                return "cdg"
+            if lower.endswith(".zip"):
+                return "mp3g"
+            return None
+
+        def _make_scanned_track(full_path: str, song_type: str, old_track: dict | None = None):
+            name = os.path.basename(full_path)
+            scan_mtime, scan_size = _scan_file_sig(full_path)
+            if quick_mode and _old_track_unchanged(old_track, scan_mtime, scan_size):
+                track = dict(old_track)
+                track["path"] = full_path
+                track["type"] = song_type
+                if scan_mtime is not None:
+                    track["scan_mtime"] = scan_mtime
+                if scan_size is not None:
+                    track["scan_size"] = scan_size
+                if not track.get("artist") or not track.get("title") or not track.get("display"):
+                    base = os.path.splitext(name)[0]
+                    fmt = str(self.settings.get("filename_format", DEFAULT_FILENAME_FORMAT) or DEFAULT_FILENAME_FORMAT)
+                    artist, title, disc_id = parse_filename_stem(base, fmt)
+                    if not track.get("artist"):
+                        track["artist"] = artist
+                    if not track.get("title"):
+                        track["title"] = title
+                    if not track.get("disc_id"):
+                        track["disc_id"] = disc_id
+                    track["display"] = self._display_for_track(track)
+                return track, True, False
+
+            base = os.path.splitext(name)[0]
+            fmt = str(self.settings.get("filename_format", DEFAULT_FILENAME_FORMAT) or DEFAULT_FILENAME_FORMAT)
+            artist, title, disc_id = parse_filename_stem(base, fmt)
+            track = {
+                "path": full_path,
+                "type": song_type,
+                "artist": artist,
+                "title": title,
+                "disc_id": disc_id,
+                "duration": old_duration_by_path.get(full_path),
+            }
+            if scan_mtime is not None:
+                track["scan_mtime"] = scan_mtime
+            if scan_size is not None:
+                track["scan_size"] = scan_size
+            track["display"] = self._display_for_track(track)
+            changed_existing = bool(quick_mode and old_track is not None)
+            return track, False, changed_existing
 
         # Keep untouched tracks outside selected roots in quick mode.
         keep_outside_roots = []
@@ -28666,97 +28759,223 @@ class KaraokeApp(QWidget):
         tracks_added, zip_count, mp4_count, cdg_count = 0, 0, 0, 0
         tracks_reused, tracks_changed = 0, 0
         last_ui = time.time()
+        dir_sigs = {}
 
-        for scan_root in roots:
-            for root, _, files in os.walk(scan_root):
-                now = time.time()
-                if (now - last_ui) >= 0.05:
+        if quick_mode:
+            root_norms = [os.path.normcase(os.path.abspath(r)) for r in roots]
+
+            def _is_under_any_root(path: str) -> bool:
+                try:
+                    p = os.path.normcase(os.path.abspath(path))
+                    for rn in root_norms:
+                        if p == rn or p.startswith(rn + os.sep):
+                            return True
+                except Exception:
+                    pass
+                return False
+
+            stored_dir_sigs = self.settings.get("karaoke_scan_dir_sigs", {}) or {}
+            if not isinstance(stored_dir_sigs, dict):
+                stored_dir_sigs = {}
+            no_dir_cache = not bool(stored_dir_sigs)
+            try:
+                baseline_ns = int(TRACKS_PATH.stat().st_mtime_ns)
+            except Exception:
+                baseline_ns = 0
+
+            tracks_by_path = {str(t.get("path") or ""): dict(t) for t in old_tracks if isinstance(t, dict) and t.get("path")}
+            under_root_paths = {p for p in tracks_by_path if _is_under_any_root(p)}
+            known_dirs = set(os.path.abspath(r) for r in roots)
+            for path in under_root_paths:
+                try:
+                    known_dirs.add(os.path.abspath(os.path.dirname(path)))
+                except Exception:
+                    pass
+            for path in stored_dir_sigs.keys():
+                if _is_under_any_root(path):
+                    known_dirs.add(os.path.abspath(path))
+
+            changed_dirs = set()
+            removed_dirs = set()
+            for directory in sorted(known_dirs):
+                sig = _scan_dir_sig(directory)
+                if sig is None:
+                    removed_dirs.add(directory)
+                    continue
+                dir_sigs[directory] = sig
+                old_sig = stored_dir_sigs.get(directory)
+                if old_sig is None:
+                    if no_dir_cache and baseline_ns and int(sig[0]) <= baseline_ns:
+                        continue
+                    changed_dirs.add(directory)
+                    continue
+                try:
+                    if [int(old_sig[0]), int(old_sig[1])] != [int(sig[0]), int(sig[1])]:
+                        changed_dirs.add(directory)
+                except Exception:
+                    changed_dirs.add(directory)
+
+            def _remove_tracks_under(directory: str):
+                dn = os.path.normcase(os.path.abspath(directory))
+                for path in list(tracks_by_path.keys()):
                     try:
-                        self.processing_label.setText(f"Scanning… {files_seen:,}")
-                        QApplication.processEvents()
+                        pn = os.path.normcase(os.path.abspath(path))
+                        if pn.startswith(dn + os.sep):
+                            tracks_by_path.pop(path, None)
                     except Exception:
                         pass
-                    last_ui = now
 
-                for name in files:
-                    files_seen += 1
-                    lower = name.lower()
-                    full_path = os.path.join(root, name)
+            for directory in sorted(removed_dirs, key=len, reverse=True):
+                _remove_tracks_under(directory)
+
+            scanned_dirs = set()
+
+            def _scan_directory_files(directory: str, recursive: bool = False):
+                nonlocal files_seen, tracks_added, zip_count, mp4_count, cdg_count, tracks_reused, tracks_changed, last_ui
+                directory = os.path.abspath(directory)
+                if directory in scanned_dirs:
+                    return
+                scanned_dirs.add(directory)
+                try:
+                    entries = list(os.scandir(directory))
+                except Exception:
+                    return
+                sig = _scan_dir_sig(directory)
+                if sig is not None:
+                    dir_sigs[directory] = sig
+                current_files = set()
+                for entry in entries:
+                    try:
+                        name = entry.name
+                        lower = name.lower()
+                    except Exception:
+                        continue
                     if name.startswith("._") or lower.endswith(".ds_store"):
                         continue
-                    if full_path in seen:
-                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            child_dir = os.path.abspath(entry.path)
+                            child_sig = _scan_dir_sig(child_dir)
+                            if child_sig is not None:
+                                dir_sigs[child_dir] = child_sig
+                            if recursive or child_dir not in known_dirs:
+                                _scan_directory_files(child_dir, recursive=True)
+                            continue
+                    except Exception:
+                        pass
 
-                    if (files_seen % 50) == 0:
+                    song_type = _song_type_for_name(name)
+                    if song_type is None:
+                        continue
+                    full_path = entry.path
+                    current_files.add(full_path)
+                    files_seen += 1
+                    if song_type == "mp4":
+                        mp4_count += 1
+                    elif song_type == "cdg":
+                        cdg_count += 1
+                    elif song_type == "mp3g":
+                        zip_count += 1
+                    old_track = old_by_path.get(str(full_path))
+                    track, reused, changed_existing = _make_scanned_track(full_path, song_type, old_track)
+                    tracks_by_path[full_path] = track
+                    tracks_added += 1
+                    if reused:
+                        tracks_reused += 1
+                    if changed_existing:
+                        tracks_changed += 1
+                    now = time.time()
+                    if (now - last_ui) >= 0.05:
+                        try:
+                            self.processing_label.setText(f"Scanning changed folders… {files_seen:,}")
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+                        last_ui = now
+
+                # A changed known directory also tells us which files were
+                # deleted from that directory, without rewalking unchanged dirs.
+                for path in list(under_root_paths):
+                    try:
+                        if os.path.abspath(os.path.dirname(path)) == directory and path not in current_files:
+                            tracks_by_path.pop(path, None)
+                    except Exception:
+                        pass
+
+            for directory in sorted(changed_dirs):
+                _scan_directory_files(directory, recursive=False)
+
+            new_tracks = []
+            emitted = set()
+            for old in old_tracks:
+                path = str(old.get("path") or "") if isinstance(old, dict) else ""
+                if path and path in tracks_by_path and path not in emitted:
+                    new_tracks.append(tracks_by_path[path])
+                    emitted.add(path)
+            for path in sorted(tracks_by_path.keys(), key=lambda p: song_index.normalize_text(os.path.basename(p))):
+                if path not in emitted:
+                    new_tracks.append(tracks_by_path[path])
+                    emitted.add(path)
+            tracks_added = len([t for t in new_tracks if _is_under_any_root(str(t.get("path") or ""))])
+        else:
+            for scan_root in roots:
+                for root, _, files in os.walk(scan_root):
+                    root_abs = os.path.abspath(root)
+                    sig = _scan_dir_sig(root_abs)
+                    if sig is not None:
+                        dir_sigs[root_abs] = sig
+                    now = time.time()
+                    if (now - last_ui) >= 0.05:
                         try:
                             self.processing_label.setText(f"Scanning… {files_seen:,}")
                             QApplication.processEvents()
                         except Exception:
                             pass
+                        last_ui = now
 
-                    song_type = None
-                    if lower.endswith(".mp4"):
-                        song_type = "mp4"
-                        mp4_count += 1
-                    elif lower.endswith(".cdg"):
-                        song_type = "cdg"
-                        cdg_count += 1
-                    elif lower.endswith(".zip"):
-                        song_type = "mp3g"
-                        zip_count += 1
-                    else:
-                        continue
+                    for name in files:
+                        files_seen += 1
+                        lower = name.lower()
+                        full_path = os.path.join(root, name)
+                        if name.startswith("._") or lower.endswith(".ds_store"):
+                            continue
+                        if full_path in seen:
+                            continue
 
-                    seen.add(full_path)
-                    scan_mtime, scan_size = _scan_file_sig(full_path)
-                    old_track = old_by_path.get(str(full_path))
-                    if quick_mode and _old_track_unchanged(old_track, scan_mtime, scan_size):
-                        track = dict(old_track)
-                        track["path"] = full_path
-                        track["type"] = song_type
-                        if scan_mtime is not None:
-                            track["scan_mtime"] = scan_mtime
-                        if scan_size is not None:
-                            track["scan_size"] = scan_size
-                        if not track.get("artist") or not track.get("title") or not track.get("display"):
-                            base = os.path.splitext(name)[0]
-                            fmt = str(self.settings.get("filename_format", DEFAULT_FILENAME_FORMAT) or DEFAULT_FILENAME_FORMAT)
-                            artist, title, disc_id = parse_filename_stem(base, fmt)
-                            if not track.get("artist"):
-                                track["artist"] = artist
-                            if not track.get("title"):
-                                track["title"] = title
-                            if not track.get("disc_id"):
-                                track["disc_id"] = disc_id
-                            track["display"] = self._display_for_track(track)
+                        if (files_seen % 50) == 0:
+                            try:
+                                self.processing_label.setText(f"Scanning… {files_seen:,}")
+                                QApplication.processEvents()
+                            except Exception:
+                                pass
+
+                        song_type = _song_type_for_name(name)
+                        if song_type is None:
+                            continue
+                        if song_type == "mp4":
+                            mp4_count += 1
+                        elif song_type == "cdg":
+                            cdg_count += 1
+                        elif song_type == "mp3g":
+                            zip_count += 1
+
+                        seen.add(full_path)
+                        old_track = old_by_path.get(str(full_path))
+                        track, reused, changed_existing = _make_scanned_track(full_path, song_type, old_track)
                         new_tracks.append(track)
                         tracks_added += 1
-                        tracks_reused += 1
-                        continue
-
-                    base = os.path.splitext(name)[0]
-                    fmt = str(self.settings.get("filename_format", DEFAULT_FILENAME_FORMAT) or DEFAULT_FILENAME_FORMAT)
-                    artist, title, disc_id = parse_filename_stem(base, fmt)
-
-                    track = {
-                        "path": full_path,
-                        "type": song_type,
-                        "artist": artist,
-                        "title": title,
-                        "disc_id": disc_id,
-                        "duration": old_duration_by_path.get(full_path),
-                    }
-                    if scan_mtime is not None:
-                        track["scan_mtime"] = scan_mtime
-                    if scan_size is not None:
-                        track["scan_size"] = scan_size
-                    track["display"] = self._display_for_track(track)
-                    new_tracks.append(track)
-                    tracks_added += 1
-                    if quick_mode and old_track is not None:
-                        tracks_changed += 1
+                        if reused:
+                            tracks_reused += 1
+                        if changed_existing:
+                            tracks_changed += 1
 
         self.tracks = new_tracks
+        try:
+            self.settings["karaoke_scan_dir_sigs"] = dir_sigs
+            self.settings["karaoke_scan_last_update"] = time.time()
+            self.save_settings()
+        except Exception:
+            pass
         try:
             self._display_name_cache = {}
         except Exception:
