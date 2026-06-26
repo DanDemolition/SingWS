@@ -414,6 +414,38 @@ def danger_button_css(*, padding: str = "8px 12px", radius: int = 8) -> str:
     """
 
 
+def _network_state_button_css(kind: str) -> str:
+    tones = {
+        "sync": ("rgba(186,128,18,0.96)", "rgba(213,149,23,0.98)", "rgba(152,103,11,0.98)"),
+        "accepting": ("rgba(26,110,60,0.96)", "rgba(33,136,74,0.98)", "rgba(20,87,47,0.98)"),
+        "closed": ("rgba(125,37,37,0.96)", "rgba(156,49,49,0.98)", "rgba(95,28,28,0.98)"),
+    }
+    base_bg, hover_bg, pressed_bg = tones.get(kind, tones["closed"])
+    return f"""
+        QPushButton {{
+            background-color: {base_bg};
+            color: {_v('text_bright')};
+            font-weight: 700;
+            font-size: 14px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 10px;
+        }}
+        QPushButton:hover {{
+            background-color: {hover_bg};
+            border-color: rgba(255,255,255,0.14);
+        }}
+        QPushButton:pressed {{
+            background-color: {pressed_bg};
+        }}
+        QPushButton:disabled {{
+            background-color: rgba(255,255,255,0.06);
+            color: {_v('text_soft')};
+            border-color: rgba(255,255,255,0.04);
+        }}
+    """
+
+
 def soundboard_pad_css(state: str = "loaded") -> str:
     """Polished soundboard-pad styling.
 
@@ -22979,37 +23011,6 @@ class KaraokeApp(QWidget):
             def _network_state_label_css(color: str) -> str:
                 return f"color: {color}; font-size: 12px; font-weight: 600;"
 
-            def _network_state_button_css(kind: str) -> str:
-                tones = {
-                    "sync": ("rgba(186,128,18,0.96)", "rgba(213,149,23,0.98)", "rgba(152,103,11,0.98)"),
-                    "accepting": ("rgba(26,110,60,0.96)", "rgba(33,136,74,0.98)", "rgba(20,87,47,0.98)"),
-                    "closed": ("rgba(125,37,37,0.96)", "rgba(156,49,49,0.98)", "rgba(95,28,28,0.98)"),
-                }
-                base_bg, hover_bg, pressed_bg = tones.get(kind, tones["closed"])
-                return f"""
-                    QPushButton {{
-                        background-color: {base_bg};
-                        color: {_v('text_bright')};
-                        font-weight: 700;
-                        font-size: 14px;
-                        border-radius: 8px;
-                        border: 1px solid rgba(255,255,255,0.08);
-                        padding: 10px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: {hover_bg};
-                        border-color: rgba(255,255,255,0.14);
-                    }}
-                    QPushButton:pressed {{
-                        background-color: {pressed_bg};
-                    }}
-                    QPushButton:disabled {{
-                        background-color: rgba(255,255,255,0.06);
-                        color: {_v('text_soft')};
-                        border-color: rgba(255,255,255,0.04);
-                    }}
-                """
-
             # --- Dialog styling ---
             try:
                 from PyQt6.QtGui import QPalette
@@ -31153,29 +31154,57 @@ class KaraokeApp(QWidget):
             et = event.type()
         except Exception:
             et = None
+        try:
+            queue_list = getattr(self, "queue_display", None)
+            queue_viewport = queue_list.viewport() if queue_list is not None else None
+        except RuntimeError:
+            queue_list = None
+            queue_viewport = None
+        except Exception:
+            queue_list = None
+            queue_viewport = None
+        try:
+            results_list = getattr(self, "results_list", None)
+            results_viewport = results_list.viewport() if results_list is not None else None
+        except RuntimeError:
+            results_list = None
+            results_viewport = None
+        except Exception:
+            results_list = None
+            results_viewport = None
 
         # Reformat lists when their viewport resizes (window drag / layout changes)
         try:
-            if et == event.Type.Resize and (obj == self.queue_display.viewport() or obj == self.results_list.viewport()):
+            if et == event.Type.Resize and (obj == queue_viewport or obj == results_viewport):
                 self._schedule_reformat_lists()
         except Exception:
             pass
 
         # Queue deselect
-        if obj == self.queue_display.viewport():
-            if et == event.Type.MouseButtonPress:
-                index = self.queue_display.indexAt(event.pos())
-                if not index.isValid():
-                    self.queue_display.clearSelection()
-                    return True
+        if queue_list is not None and obj == queue_viewport:
+            try:
+                if et == event.Type.MouseButtonPress:
+                    index = queue_list.indexAt(event.pos())
+                    if not index.isValid():
+                        queue_list.clearSelection()
+                        return True
+            except RuntimeError:
+                return False
+            except Exception:
+                pass
 
         # Search results deselect (matches queue behavior)
-        if obj == self.results_list.viewport():
-            if et == event.Type.MouseButtonPress:
-                index = self.results_list.indexAt(event.pos())
-                if not index.isValid():
-                    self.results_list.clearSelection()
-                    return True
+        if results_list is not None and obj == results_viewport:
+            try:
+                if et == event.Type.MouseButtonPress:
+                    index = results_list.indexAt(event.pos())
+                    if not index.isValid():
+                        results_list.clearSelection()
+                        return True
+            except RuntimeError:
+                return False
+            except Exception:
+                pass
 
         return super().eventFilter(obj, event)
 
