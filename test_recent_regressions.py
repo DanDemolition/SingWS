@@ -32,6 +32,33 @@ def make_app(module):
     return app
 
 
+class FakeStatusLabel:
+    def __init__(self):
+        self._text = ""
+        self.styles = []
+
+    def setText(self, text):
+        self._text = str(text or "")
+
+    def text(self):
+        return self._text
+
+    def setStyleSheet(self, style):
+        self.styles.append(style)
+
+
+class FakeSingleShotTimer:
+    def __init__(self):
+        self.started = []
+        self.stopped = 0
+
+    def stop(self):
+        self.stopped += 1
+
+    def start(self, delay):
+        self.started.append(delay)
+
+
 class RecentRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -188,6 +215,36 @@ class RecentRegressionTests(unittest.TestCase):
             worker.run()
 
         self.assertEqual(measured, ["/tmp/one.mp3"])
+
+    def test_processing_text_auto_dismisses_by_default(self):
+        app = make_app(self.singws)
+        app.processing_label = FakeStatusLabel()
+        app._processing_notification_timer = FakeSingleShotTimer()
+        app._processing_notification_text = ""
+
+        self.singws.KaraokeApp._set_processing_text(app, "Import Complete")
+
+        self.assertEqual(app.processing_label.text(), "Import Complete")
+        self.assertEqual(app._processing_notification_text, "Import Complete")
+        self.assertEqual(app._processing_notification_timer.started, [self.singws.PROCESSING_NOTIFICATION_TIMEOUT_MS])
+
+        self.singws.KaraokeApp._clear_processing_notification(app)
+
+        self.assertEqual(app.processing_label.text(), "")
+        self.assertEqual(app._processing_notification_text, "")
+
+    def test_processing_progress_can_opt_out_of_auto_dismiss(self):
+        app = make_app(self.singws)
+        app.processing_label = FakeStatusLabel()
+        app._processing_notification_timer = FakeSingleShotTimer()
+        app._processing_notification_text = "old message"
+
+        self.singws.KaraokeApp._set_processing_text(app, "Building search index…", auto_dismiss_ms=None)
+
+        self.assertEqual(app.processing_label.text(), "Building search index…")
+        self.assertEqual(app._processing_notification_text, "")
+        self.assertEqual(app._processing_notification_timer.started, [])
+        self.assertEqual(app._processing_notification_timer.stopped, 1)
 
 
 if __name__ == "__main__":

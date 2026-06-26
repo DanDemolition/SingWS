@@ -9,6 +9,7 @@ from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.3.1.3"
+PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -19205,12 +19206,17 @@ class KaraokeApp(QWidget):
                     return
             except Exception:
                 pass
-            self._set_processing_text(f"Extracting ZIP… {os.path.basename(str(zip_path))}")
+            self._set_processing_text(
+                f"Extracting ZIP… {os.path.basename(str(zip_path))}",
+                auto_dismiss_ms=None,
+            )
             self._zip_extract_thread = QThread(self)
             self._zip_extract_worker = ZipExtractWorker(self.zip_cache, zip_path, int(semitones or 0))
             self._zip_extract_worker.moveToThread(self._zip_extract_thread)
             self._zip_extract_thread.started.connect(self._zip_extract_worker.run)
-            self._zip_extract_worker.progress_text.connect(self._set_processing_text)
+            self._zip_extract_worker.progress_text.connect(
+                lambda msg: self._set_processing_text(msg, auto_dismiss_ms=None)
+            )
             self._zip_extract_worker.finished.connect(self._on_zip_extract_finished)
             self._zip_extract_worker.finished.connect(self._zip_extract_thread.quit)
             self._zip_extract_worker.finished.connect(self._zip_extract_worker.deleteLater)
@@ -29825,7 +29831,10 @@ class KaraokeApp(QWidget):
         self._duration_scan_state = "running" if total > 0 else "finished"
         self._duration_scan_error = ""
         try:
-            self._set_processing_text(f"Getting Durations… 0/{total:,}" if total > 0 else "")
+            self._set_processing_text(
+                f"Getting Durations… 0/{total:,}" if total > 0 else "",
+                auto_dismiss_ms=None,
+            )
         except Exception:
             pass
         
@@ -29945,7 +29954,7 @@ class KaraokeApp(QWidget):
     def _on_duration_progress_counts(self, done: int, total: int):
         # Update processing label with duration progress
         try:
-            self._set_processing_text(f"Getting Durations… {done:,}/{total:,}")
+            self._set_processing_text(f"Getting Durations… {done:,}/{total:,}", auto_dismiss_ms=None)
         except Exception:
             pass
 
@@ -29993,7 +30002,7 @@ class KaraokeApp(QWidget):
             dbf = song_index.db_path()
             if not dbf.exists():
                 try:
-                    self._set_processing_text("Building search index…")
+                    self._set_processing_text("Building search index…", auto_dismiss_ms=None)
                 except Exception:
                     pass
                 try:
@@ -30075,9 +30084,10 @@ class KaraokeApp(QWidget):
         except Exception:
             self.search_tracks()
 
-    def _set_processing_text(self, msg: str, *, auto_dismiss_ms: int | None = None):
+    def _set_processing_text(self, msg: str, *, auto_dismiss_ms: int | None = PROCESSING_NOTIFICATION_TIMEOUT_MS):
         # Reuse whatever label you already show scan/probe status in.
         # We try a few common ones used in your builds.
+        text = str(msg or "")
         if auto_dismiss_ms is None:
             try:
                 timer = getattr(self, "_processing_notification_timer", None)
@@ -30085,13 +30095,28 @@ class KaraokeApp(QWidget):
                     timer.stop()
             except Exception:
                 pass
+            try:
+                self._processing_notification_text = ""
+            except Exception:
+                pass
+        elif not text:
+            try:
+                timer = getattr(self, "_processing_notification_timer", None)
+                if timer is not None:
+                    timer.stop()
+            except Exception:
+                pass
+            try:
+                self._processing_notification_text = ""
+            except Exception:
+                pass
         for name in ("processing_label", "scan_status", "duration_status", "status_label"):
             try:
                 w = getattr(self, name, None)
                 if w is not None:
-                    w.setText(msg)
-                    if auto_dismiss_ms is not None and auto_dismiss_ms > 0:
-                        self._processing_notification_text = str(msg or "")
+                    w.setText(text)
+                    if text and auto_dismiss_ms is not None and auto_dismiss_ms > 0:
+                        self._processing_notification_text = text
                         timer = getattr(self, "_processing_notification_timer", None)
                         if timer is not None:
                             timer.stop()
@@ -30117,14 +30142,23 @@ class KaraokeApp(QWidget):
             self.processing_label.setStyleSheet(f"color: {color}; font-size:11px; font-weight:750;")
         except Exception:
             pass
-        timeout = None if persistent else 15000
+        timeout = None if persistent else PROCESSING_NOTIFICATION_TIMEOUT_MS
         self._set_processing_text(str(msg or ""), auto_dismiss_ms=timeout)
 
     def _clear_processing_notification(self):
         try:
             expected = str(getattr(self, "_processing_notification_text", "") or "")
-            if hasattr(self, "processing_label") and self.processing_label.text() == expected:
-                self.processing_label.setText("")
+            if not expected:
+                return
+            for name in ("processing_label", "scan_status", "duration_status", "status_label"):
+                try:
+                    w = getattr(self, name, None)
+                    if w is not None and w.text() == expected:
+                        w.setText("")
+                except Exception:
+                    pass
+            self._processing_notification_text = ""
+            if hasattr(self, "processing_label"):
                 self.processing_label.setStyleSheet(f"color: {_v('warning')}; font-size:11px; font-weight:750;")
         except Exception:
             pass
@@ -30159,7 +30193,7 @@ class KaraokeApp(QWidget):
     def _on_index_progress(self, msg: str, current: int, total: int):
         """Update status label with indexing progress."""
         try:
-            self._set_processing_text(msg)
+            self._set_processing_text(msg, auto_dismiss_ms=None)
         except Exception:
             pass
 
