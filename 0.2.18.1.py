@@ -2515,8 +2515,8 @@ DEFAULTS = {
     "background_slideshow_folder": "",     # folder for slideshow images
     "background_slideshow_interval_sec": 10, # slideshow interval in seconds
     "requests_accepting": True,            # local cached accepting state from network dialog
+    "use_waiting_for_add": False,          # server-backed waitlist mode for the current show
     "host_controls_pin": "",               # optional host-only remote control PIN/password
-    "host_controls_lan_only": False,       # if supported by server, restrict browser host controls to LAN/private IPs
     "rotation_estimate_include_all_songs": False,  # False=first song only, True=all queued songs
     "rotation_padding_sec": 90,            # seconds added per active singer in queue ETA
     "queue_mode": "classic",               # classic | rotation
@@ -19775,9 +19775,19 @@ class KaraokeApp(QWidget):
         header.addWidget(self.waiting_for_add_meta_label)
         shell_layout.addLayout(header)
 
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(8)
+        self.waiting_for_add_waitlist_toggle = QPushButton("Waitlist: Disabled")
+        self.waiting_for_add_waitlist_toggle.setMinimumHeight(38)
+        self.waiting_for_add_waitlist_toggle.clicked.connect(self._toggle_waitlist_enabled_from_waiting_page)
+        toggle_row.addWidget(self.waiting_for_add_waitlist_toggle)
+        toggle_row.addStretch(1)
+        shell_layout.addLayout(toggle_row)
+        self._refresh_waitlist_toggle_button()
+
         self.waiting_for_add_list = QListWidget()
         self.waiting_for_add_list.setAlternatingRowColors(True)
-        self.waiting_for_add_list.setUniformItemSizes(True)
+        self.waiting_for_add_list.setUniformItemSizes(False)
         self.waiting_for_add_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.waiting_for_add_list.setStyleSheet(
             list_widget_css()
@@ -19883,6 +19893,176 @@ class KaraokeApp(QWidget):
             return True
         return bool(str(req.get("pending_reason") or req.get("last_error") or req.get("attention_reason") or "").strip())
 
+    def _waiting_for_add_status_kind(self, req: dict | None) -> str:
+        req = req or {}
+        state = str(req.get("state") or "").strip().lower()
+        try:
+            completed_at = int(float(req.get("completed_at") or 0))
+            removed_at = int(float(req.get("removed_at") or 0))
+        except Exception:
+            completed_at = 0
+            removed_at = 0
+        if state in {"removed", "skipped"} or removed_at > 0:
+            return "removed"
+        if state in {"completed", "sung"} or completed_at > 0:
+            return "sung"
+        if state == "failed" or str(req.get("last_error") or req.get("attention_reason") or "").strip():
+            return "waitlist"
+        if state == "waiting" or str(req.get("pending_reason") or "").strip():
+            return "waitlist"
+        return "active"
+
+    def _waiting_for_add_status_label(self, kind: str) -> str:
+        return {
+            "active": "Active",
+            "waitlist": "Waitlisted",
+            "sung": "Sung",
+            "removed": "Removed",
+        }.get(str(kind or "").strip().lower(), "Active")
+
+    def _waiting_for_add_request_time_text(self, req: dict | None) -> str:
+        req = req or {}
+        for key in (
+            "request_time",
+            "requested_at",
+            "created_at",
+            "submitted_at",
+            "received_at",
+            "ts",
+            "time",
+        ):
+            value = req.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                if isinstance(value, (int, float)) or str(value).strip().isdigit():
+                    stamp = int(float(value))
+                    if stamp > 100000:
+                        return datetime.fromtimestamp(stamp).strftime("%I:%M %p").lstrip("0")
+                    continue
+            except Exception:
+                pass
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return parsed.strftime("%I:%M %p").lstrip("0")
+            except Exception:
+                return text
+        return "Unknown time"
+
+    def _waiting_for_add_active_rotation_rows(self) -> list[dict]:
+        rows = []
+        try:
+            queue = list(getattr(self, "queue", []) or [])
+        except Exception:
+            queue = []
+        for singer in queue:
+            if not isinstance(singer, dict):
+                continue
+            singer_name = str(singer.get("name") or singer.get("singer") or "").strip() or "Unknown singer"
+            for entry in list(singer.get("songs", []) or []):
+                if not isinstance(entry, dict):
+                    continue
+                if bool(entry.get("skipped")) or bool(entry.get("removed")):
+                    continue
+                artist = str(entry.get("artist") or "").strip()
+                title = str(entry.get("title") or "").strip()
+                display_name = str(entry.get("display_name") or "").strip()
+                if not (artist and title):
+                    a2, t2, _d2 = self._split_display_artist_title_disc(display_name)
+                    artist = artist or a2
+                    title = title or t2
+                if not title:
+                    title = display_name or "Unknown song"
+                req = {
+                    "request_id": self._queue_entry_remote_request_id(entry) or 0,
+                    "singer": singer_name,
+                    "artist": artist,
+                    "title": title,
+                    "request_time": entry.get("request_time") or entry.get("created_at") or entry.get("requested_at") or "",
+                    "state": "active",
+                }
+                rows.append(self._waiting_for_add_row(req, "active", selectable=False))
+        return rows
+
+    def _waiting_for_add_row(self, req: dict, kind: str, *, selectable: bool) -> dict:
+        req = dict(req or {})
+        return {
+            "request_id": self._waiting_for_add_request_id(req),
+            "singer": str(req.get("singer") or "").strip() or "Unknown singer",
+            "artist": str(req.get("artist") or "").strip() or "Unknown artist",
+            "title": str(req.get("title") or "").strip() or "Unknown song",
+            "request_time": self._waiting_for_add_request_time_text(req),
+            "status_kind": str(kind or "active"),
+            "status_label": self._waiting_for_add_status_label(kind),
+            "selectable": bool(selectable),
+            "request": req,
+        }
+
+    def _waiting_for_add_sections(self) -> list[dict]:
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
+        try:
+            local_ids = set(int(v) for v in (self._queue_remote_request_ids() or []))
+        except Exception:
+            local_ids = set()
+
+        active_rows = self._waiting_for_add_active_rotation_rows()
+
+        pending = state.get("_waiting_for_add_requests", {})
+        if not isinstance(pending, dict):
+            pending = {}
+        wait_rows = []
+        for rid, req in pending.items():
+            try:
+                rid_int = int(rid)
+            except Exception:
+                continue
+            if rid_int <= 0 or rid_int in local_ids:
+                continue
+            wait_rows.append(self._waiting_for_add_row(req, "waitlist", selectable=True))
+        wait_rows.sort(key=lambda row: (row.get("request_time") or "", row.get("request_id") or 0))
+
+        terminal = state.get("_waiting_for_add_recent_terminal_requests", {})
+        if not isinstance(terminal, dict):
+            terminal = {}
+        sung_rows = []
+        removed_rows = []
+        for rid, req in terminal.items():
+            try:
+                rid_int = int(rid)
+            except Exception:
+                continue
+            if rid_int <= 0 or rid_int in local_ids:
+                continue
+            kind = self._waiting_for_add_status_kind(req)
+            if kind == "sung":
+                sung_rows.append(self._waiting_for_add_row(req, "sung", selectable=False))
+            elif kind == "removed":
+                removed_rows.append(self._waiting_for_add_row(req, "removed", selectable=False))
+        sung_rows.sort(key=lambda row: (row.get("request_time") or "", row.get("request_id") or 0))
+        removed_rows.sort(key=lambda row: (row.get("request_time") or "", row.get("request_id") or 0))
+
+        sections = [
+            {"key": "active", "title": "Active Rotation", "rows": active_rows},
+            {"key": "waitlist", "title": "Waitlisted Songs", "rows": wait_rows},
+            {"key": "sung", "title": "Completed / Sung Songs", "rows": sung_rows},
+            {"key": "removed", "title": "Removed / Skipped Songs", "rows": removed_rows},
+        ]
+        return sections
+
+    def _waiting_for_add_row_text(self, row: dict) -> str:
+        singer = row.get("singer") or "Unknown singer"
+        title = row.get("title") or "Unknown song"
+        artist = row.get("artist") or "Unknown artist"
+        request_time = row.get("request_time") or "Unknown time"
+        status = row.get("status_label") or "Active"
+        return f"[{status}] {singer} | {title}\n{artist} | {request_time}"
+
     def _upsert_waiting_for_add_request(self, req: dict | None, reason: str = "") -> None:
         if not isinstance(req, dict):
             return
@@ -19920,11 +20100,12 @@ class KaraokeApp(QWidget):
             handled = set()
             self._waiting_for_add_handled_ids = handled
         items = {}
+        terminal_items = {}
         for req in reqs or []:
-            if not self._is_waiting_for_add_request(req):
+            if not isinstance(req, dict):
                 continue
             rid = self._waiting_for_add_request_id(req)
-            if rid <= 0 or rid in handled or rid in local_ids:
+            if rid <= 0:
                 continue
             try:
                 completed_at = int(float(req.get("completed_at") or 0))
@@ -19933,7 +20114,13 @@ class KaraokeApp(QWidget):
                 completed_at = 0
                 removed_at = 0
             state_name = str(req.get("state") or "").strip().lower()
-            if state_name in {"removed", "completed", "sung", "delivered"} or completed_at > 0 or removed_at > 0:
+            if state_name in {"removed", "skipped", "completed", "sung"} or completed_at > 0 or removed_at > 0:
+                if rid not in local_ids:
+                    terminal_items[rid] = dict(req)
+                continue
+            if not self._is_waiting_for_add_request(req):
+                continue
+            if rid in handled or rid in local_ids:
                 continue
             items[rid] = dict(req)
         try:
@@ -19944,6 +20131,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._waiting_for_add_requests = items
+        self._waiting_for_add_recent_terminal_requests = terminal_items
         self._refresh_waiting_for_add_view()
 
     def _refresh_waiting_for_add_view(self):
@@ -19951,23 +20139,7 @@ class KaraokeApp(QWidget):
             state = object.__getattribute__(self, "__dict__")
         except Exception:
             return
-        pending = state.get("_waiting_for_add_requests", {})
-        if not isinstance(pending, dict):
-            pending = {}
-        try:
-            local_ids = set(int(v) for v in (self._queue_remote_request_ids() or []))
-        except Exception:
-            local_ids = set()
-        rows = []
-        for rid, req in pending.items():
-            try:
-                rid = int(rid)
-            except Exception:
-                continue
-            if rid <= 0 or rid in local_ids:
-                continue
-            rows.append((rid, req))
-        rows.sort(key=lambda pair: pair[0])
+        sections = self._waiting_for_add_sections()
 
         current_id = 0
         try:
@@ -19980,20 +20152,55 @@ class KaraokeApp(QWidget):
         waiting_list = state.get("waiting_for_add_list")
         if waiting_list is not None:
             waiting_list.clear()
-            for rid, req in rows:
-                singer = str(req.get("singer") or "").strip() or "Unknown singer"
-                artist = str(req.get("artist") or "").strip()
-                title = str(req.get("title") or "").strip()
-                song = " - ".join([v for v in (artist, title) if v]) or "Unknown song"
-                item = QListWidgetItem(f"{singer}    {song}\n{self._waiting_for_add_reason_text(req)}")
-                item.setData(Qt.ItemDataRole.UserRole, rid)
-                waiting_list.addItem(item)
-                if rid == current_id:
-                    waiting_list.setCurrentItem(item)
-            if rows and waiting_list.currentRow() < 0:
-                waiting_list.setCurrentRow(0)
+            first_selectable = None
+            colors = {
+                "active": QColor("#34d399"),
+                "waitlist": QColor("#fbbf24"),
+                "sung": QColor("#60a5fa"),
+                "removed": QColor("#f87171"),
+            }
+            for section in sections:
+                rows = section.get("rows") or []
+                header = QListWidgetItem(f"{section.get('title', 'Requests')} ({len(rows)})")
+                header.setData(Qt.ItemDataRole.UserRole, 0)
+                header.setFlags(header.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                font = header.font()
+                font.setBold(True)
+                header.setFont(font)
+                header.setForeground(QBrush(QColor("#cbd5e1")))
+                header.setBackground(QBrush(QColor(11, 18, 32)))
+                waiting_list.addItem(header)
+                if not rows:
+                    empty = QListWidgetItem("No songs in this section")
+                    empty.setData(Qt.ItemDataRole.UserRole, 0)
+                    empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                    empty.setForeground(QBrush(QColor("#64748b")))
+                    waiting_list.addItem(empty)
+                    continue
+                for row in rows:
+                    rid = int(row.get("request_id") or 0)
+                    item = QListWidgetItem(self._waiting_for_add_row_text(row))
+                    item.setData(Qt.ItemDataRole.UserRole, rid if row.get("selectable") else 0)
+                    item.setForeground(QBrush(colors.get(row.get("status_kind"), QColor("#e2e8f0"))))
+                    item.setToolTip(
+                        f"Singer: {row.get('singer')}\n"
+                        f"Song: {row.get('title')}\n"
+                        f"Artist: {row.get('artist')}\n"
+                        f"Request Time: {row.get('request_time')}\n"
+                        f"Status: {row.get('status_label')}"
+                    )
+                    if not row.get("selectable"):
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                    waiting_list.addItem(item)
+                    if row.get("selectable") and first_selectable is None:
+                        first_selectable = item
+                    if row.get("selectable") and rid == current_id:
+                        waiting_list.setCurrentItem(item)
+            if first_selectable is not None and waiting_list.currentRow() < 0:
+                waiting_list.setCurrentItem(first_selectable)
 
-        count = len(rows)
+        wait_section = next((s for s in sections if s.get("key") == "waitlist"), {"rows": []})
+        count = len(wait_section.get("rows") or [])
         meta_label = state.get("waiting_for_add_meta_label")
         if meta_label is not None:
             meta_label.setText("Clear" if count == 0 else f"{count} waiting")
@@ -22265,6 +22472,147 @@ class KaraokeApp(QWidget):
             pass
         return new_value
 
+    def _is_waitlist_enabled_cached(self) -> bool:
+        try:
+            return bool(self.settings.get("use_waiting_for_add", False))
+        except Exception:
+            return False
+
+    def _set_waitlist_enabled_local(self, enabled: bool, *, reason: str = "unknown", persist: bool = False) -> bool:
+        new_value = bool(enabled)
+        try:
+            old_value = bool(self.settings.get("use_waiting_for_add", False))
+        except Exception:
+            old_value = False
+        try:
+            self.settings["use_waiting_for_add"] = new_value
+        except Exception:
+            pass
+        _diag(
+            "[WAITLIST-STATE] use_waiting_for_add "
+            f"{int(old_value)}->{int(new_value)} reason={reason} persist={int(bool(persist))}"
+        )
+        if persist:
+            try:
+                self.save_settings()
+            except Exception as e:
+                _diag(f"[WAITLIST-STATE] save_settings failed reason={reason}: {e}")
+        try:
+            self._refresh_waitlist_toggle_button()
+        except Exception:
+            pass
+        return new_value
+
+    def _refresh_waitlist_toggle_button(self, syncing: bool = False):
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            return
+        btn = state.get("waiting_for_add_waitlist_toggle")
+        if btn is None:
+            return
+        enabled = self._is_waitlist_enabled_cached()
+        if syncing:
+            btn.setText("Waitlist: Syncing")
+            btn.setEnabled(False)
+            btn.setStyleSheet(_network_state_button_css("sync"))
+            return
+        btn.setEnabled(True)
+        if enabled:
+            btn.setText("Waitlist: Enabled")
+            btn.setStyleSheet(_network_state_button_css("accepting"))
+        else:
+            btn.setText("Waitlist: Disabled")
+            btn.setStyleSheet(_network_state_button_css("closed"))
+
+    def _waitlist_sync_config(self):
+        try:
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+            tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+            api_key = str(self.settings.get("api_key", "") or "").strip()
+            return base_url, tenant, api_key
+        except Exception:
+            return "", "", ""
+
+    def _sync_waitlist_state_from_server_async(self, *, reason: str = "background_sync", min_interval_sec: float = 30.0):
+        if bool(getattr(self, "_disable_waitlist_state_pull", False)):
+            return False
+        base_url, tenant, _api_key = self._waitlist_sync_config()
+        if not base_url or not tenant:
+            return False
+        now = time.monotonic()
+        try:
+            last = float(getattr(self, "_last_waitlist_state_pull_ts", 0.0) or 0.0)
+        except Exception:
+            last = 0.0
+        if last > 0.0 and (now - last) < float(min_interval_sec):
+            return False
+        self._last_waitlist_state_pull_ts = now
+
+        def worker():
+            server_value = self._net_fetch_waitlist_enabled(base_url, tenant)
+            if server_value is None:
+                _diag(f"[WAITLIST-STATE] pull skipped reason={reason} server=unknown")
+                return
+
+            def finish():
+                self._set_waitlist_enabled_local(bool(server_value), reason=f"{reason}_server_pull", persist=False)
+
+            self._run_on_ui_thread(finish)
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="waitlist-state-pull").start()
+            return True
+        except Exception as e:
+            _diag(f"[WAITLIST-STATE] pull thread failed reason={reason}: {e}")
+            return False
+
+    def _set_waitlist_enabled_from_host(self, enabled: bool, *, reason: str = "host_toggle") -> bool:
+        base_url, tenant, api_key = self._waitlist_sync_config()
+        if not base_url or not tenant or not api_key:
+            self._set_waitlist_enabled_local(bool(enabled), reason=f"{reason}_local_only", persist=False)
+            return False
+        previous = self._is_waitlist_enabled_cached()
+        desired = bool(enabled)
+        self._set_waitlist_enabled_local(desired, reason=f"{reason}_optimistic", persist=False)
+        try:
+            self._refresh_waitlist_toggle_button(syncing=True)
+        except Exception:
+            pass
+
+        def worker():
+            ok, error_msg = self._net_set_waitlist_enabled(base_url, tenant, api_key, desired)
+
+            def finish():
+                if ok:
+                    self._set_waitlist_enabled_local(desired, reason=reason, persist=False)
+                else:
+                    self._set_waitlist_enabled_local(previous, reason=f"{reason}_failed_revert", persist=False)
+                    try:
+                        QMessageBox.warning(
+                            self,
+                            "Waitlist Sync Failed",
+                            f"Could not update waitlist mode on the server:\n\n{error_msg or 'Unknown error'}",
+                        )
+                    except Exception:
+                        pass
+
+            self._run_on_ui_thread(finish)
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="waitlist-state-set").start()
+            return True
+        except Exception as e:
+            self._set_waitlist_enabled_local(previous, reason=f"{reason}_thread_failed", persist=False)
+            _diag(f"[WAITLIST-STATE] set thread failed reason={reason}: {e}")
+            return False
+
+    def _toggle_waitlist_enabled_from_waiting_page(self):
+        self._set_waitlist_enabled_from_host(
+            not self._is_waitlist_enabled_cached(),
+            reason="waiting_page_toggle",
+        )
+
     def _repair_server_accepting_async(self, base_url: str, tenant: str, api_key: str, desired: bool, *, reason: str):
         """Best-effort server repair: mirror host intent without changing host intent."""
         if not api_key:
@@ -22857,6 +23205,16 @@ class KaraokeApp(QWidget):
             hint_label.setStyleSheet(_network_label_css())
             v.addWidget(hint_label)
 
+            waitlist_checkbox = QCheckBox("Enable Waitlist")
+            waitlist_checkbox.setChecked(self._is_waitlist_enabled_cached())
+            waitlist_checkbox.setToolTip("When enabled, closed or full shows can keep requests on the host waitlist.")
+            v.addWidget(waitlist_checkbox)
+
+            waitlist_hint = QLabel("Turn this off at the end of the night to stop closed-show requests from being saved for next launch.")
+            waitlist_hint.setStyleSheet(_network_label_css())
+            waitlist_hint.setWordWrap(True)
+            v.addWidget(waitlist_hint)
+
             v.addSpacing(12)
 
             songbook_label = QLabel("Online Songbook:")
@@ -22886,10 +23244,6 @@ class KaraokeApp(QWidget):
             host_pin_row.addWidget(host_pin_edit, 1)
             v.addLayout(host_pin_row)
 
-            host_lan_only_cb = QCheckBox("LAN-only browser access when supported by the server")
-            host_lan_only_cb.setChecked(bool(self.settings.get("host_controls_lan_only", False)))
-            v.addWidget(host_lan_only_cb)
-
             host_hint = QLabel("The phone page queues commands on the server; this laptop polls and executes them locally.")
             host_hint.setStyleSheet(_network_label_css())
             host_hint.setWordWrap(True)
@@ -22897,6 +23251,7 @@ class KaraokeApp(QWidget):
 
             # Track current accepting state
             accepting_state = [self._is_requests_accepting_cached()]  # Host-authoritative state
+            waitlist_state = [self._is_waitlist_enabled_cached()]
             
             def update_accepting_button(is_accepting, is_syncing=False, *, persist_local=True, reason="network_dialog"):
                 """Update the accepting button appearance."""
@@ -22915,6 +23270,23 @@ class KaraokeApp(QWidget):
                     accepting_btn.setText("Accepting Requests: Off")
                     accepting_btn.setEnabled(True)
                     accepting_btn.setStyleSheet(_network_state_button_css("closed"))
+
+            def update_waitlist_checkbox(enabled, is_syncing=False, *, persist_local=True, reason="network_dialog"):
+                waitlist_state[0] = bool(enabled)
+                if not is_syncing and persist_local:
+                    self._set_waitlist_enabled_local(bool(enabled), reason=reason, persist=True)
+                try:
+                    waitlist_checkbox.blockSignals(True)
+                    waitlist_checkbox.setChecked(bool(enabled))
+                finally:
+                    waitlist_checkbox.blockSignals(False)
+                waitlist_checkbox.setEnabled(not bool(is_syncing))
+                if is_syncing:
+                    waitlist_checkbox.setText("Enable Waitlist (syncing...)")
+                elif enabled:
+                    waitlist_checkbox.setText("Enable Waitlist (On)")
+                else:
+                    waitlist_checkbox.setText("Enable Waitlist (Off)")
             
             def update_connection_indicator(state, message=""):
                 """Update the server connection indicator."""
@@ -22962,6 +23334,10 @@ class KaraokeApp(QWidget):
                     started = time.monotonic()
                     try:
                         status = probe_network_sync_status(base, user_id, api_key, timeout_sec=6.0)
+                        try:
+                            status["waitlist_enabled"] = self._net_fetch_waitlist_enabled(base, user_id)
+                        except Exception:
+                            status["waitlist_enabled"] = None
                         elapsed_ms = (time.monotonic() - started) * 1000.0
                         if elapsed_ms >= 50.0:
                             _perf_log_if_slow("network_sync_check", elapsed_ms)
@@ -22974,11 +23350,18 @@ class KaraokeApp(QWidget):
                             conn_refresh_btn.setText("Test Sync")
                             msg = str(status.get("message") or "")
                             accepting_value = status.get("accepting")
+                            waitlist_value = status.get("waitlist_enabled")
                             if status.get("ok"):
                                 if status.get("partial"):
                                     update_connection_indicator("partial", msg)
                                 else:
                                     update_connection_indicator("connected", msg)
+                                if waitlist_value is not None:
+                                    update_waitlist_checkbox(
+                                        bool(waitlist_value),
+                                        persist_local=True,
+                                        reason="sync_check_server_waitlist",
+                                    )
                                 if accepting_value is not None:
                                     local_accepting = self._is_requests_accepting_cached()
                                     server_accepting = bool(accepting_value)
@@ -23006,6 +23389,53 @@ class KaraokeApp(QWidget):
                     self._run_on_ui_thread(finish)
 
                 print("[PERF] main_thread_blocking_call removed task=network_sync_check worker=thread")
+                threading.Thread(target=worker, daemon=True).start()
+
+            def toggle_waitlist_from_network_dialog(checked):
+                base = _network_normalize_base_url(base_edit.text())
+                user_id = user_edit.text().strip()
+                api_key = key_edit.text().strip()
+
+                if not base or not user_id:
+                    QMessageBox.warning(dlg, "Missing Information", "Please enter both Base URL and User ID.")
+                    update_waitlist_checkbox(waitlist_state[0], persist_local=False, reason="waitlist_toggle_missing_config")
+                    return
+
+                if not api_key:
+                    QMessageBox.warning(dlg, "Missing API Key", "Please enter your API Key.")
+                    update_waitlist_checkbox(waitlist_state[0], persist_local=False, reason="waitlist_toggle_missing_key")
+                    return
+
+                previous_state = bool(waitlist_state[0])
+                new_state = bool(checked)
+                _diag(
+                    "[WAITLIST-STATE] host requested network dialog toggle "
+                    f"{int(previous_state)}->{int(new_state)}"
+                )
+                update_waitlist_checkbox(new_state, is_syncing=True, persist_local=False, reason="network_dialog_toggle_syncing")
+
+                def worker():
+                    started = time.monotonic()
+                    ok, error_msg = self._net_set_waitlist_enabled(base, user_id, api_key, new_state)
+                    elapsed_ms = (time.monotonic() - started) * 1000.0
+                    if elapsed_ms >= 50.0:
+                        _perf_log_if_slow("network_waitlist_toggle", elapsed_ms)
+
+                    def finish():
+                        if ok:
+                            update_waitlist_checkbox(new_state, persist_local=True, reason="network_dialog_toggle")
+                        else:
+                            update_waitlist_checkbox(previous_state, persist_local=False, reason="network_dialog_toggle_failed_revert")
+                            QMessageBox.warning(
+                                dlg,
+                                "Update Failed",
+                                f"Could not update waitlist mode:\n\n{error_msg or 'Unknown error'}\n\n"
+                                "Check your Base URL, User ID, and API Key."
+                            )
+
+                    self._run_on_ui_thread(finish)
+
+                print("[PERF] main_thread_blocking_call removed task=network_waitlist_toggle worker=thread")
                 threading.Thread(target=worker, daemon=True).start()
 
             def preview_header_qr():
@@ -23121,6 +23551,7 @@ class KaraokeApp(QWidget):
             # Initial connection check
             try:
                 update_accepting_button(self._is_requests_accepting_cached(), persist_local=False, reason="dialog_initial")
+                update_waitlist_checkbox(self._is_waitlist_enabled_cached(), persist_local=False, reason="dialog_initial")
                 check_connection()
             except Exception:
                 update_connection_indicator("error", "Check failed")
@@ -23128,6 +23559,7 @@ class KaraokeApp(QWidget):
             # Wire up buttons
             conn_refresh_btn.clicked.connect(check_connection)
             accepting_btn.clicked.connect(toggle_accepting)
+            waitlist_checkbox.toggled.connect(toggle_waitlist_from_network_dialog)
             upload_songbook_btn.clicked.connect(upload_songbook)
             detect_now_btn.clicked.connect(lambda: detect_location_now(show_result=True))
             qr_preview_btn.clicked.connect(preview_header_qr)
@@ -23151,7 +23583,6 @@ class KaraokeApp(QWidget):
                 self.settings["api_key"] = (key_edit.text().strip() or "")
                 self.settings["header_qr_url"] = qr_edit.text().strip()
                 self.settings["host_controls_pin"] = host_pin_edit.text().strip()
-                self.settings["host_controls_lan_only"] = bool(host_lan_only_cb.isChecked())
                 self.settings["session_location_auto_detect"] = bool(auto_loc_checkbox.isChecked())
                 self.settings["session_location_latitude"] = lat_edit.text().strip()
                 self.settings["session_location_longitude"] = lng_edit.text().strip()
@@ -23173,7 +23604,6 @@ class KaraokeApp(QWidget):
                     user_for_host = self.settings.get("user", self.settings.get("tenant", ""))
                     key_for_host = self.settings.get("api_key", "")
                     pin_for_host = self.settings.get("host_controls_pin", "")
-                    lan_for_host = bool(self.settings.get("host_controls_lan_only", False))
 
                     def sync_host_controls_worker():
                         started = time.monotonic()
@@ -23183,7 +23613,6 @@ class KaraokeApp(QWidget):
                                 user_for_host,
                                 key_for_host,
                                 pin_for_host,
-                                lan_for_host,
                             )
                             if not ok:
                                 _diag(f"[HOST-CONTROLS] settings sync failed: {msg}")
@@ -23485,7 +23914,63 @@ class KaraokeApp(QWidget):
             print(f"⚠️ accepting set failed: {e}")
             return False, f"Error: {str(e)}"
 
-    def _net_set_host_controls(self, base_url: str, tenant: str, api_key: str, pin: str, lan_only: bool) -> tuple[bool, str]:
+    def _net_fetch_waitlist_enabled(self, base_url: str, tenant: str):
+        """Return True/False for the server waitlist setting, or None if unknown."""
+        try:
+            base = _network_normalize_base_url(base_url)
+            t = (tenant or "").strip() or "default"
+            url = f"{base}/tenants/{t}/settings.json"
+            r = requests.get(url, params={"_": int(time.time())}, timeout=5)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            if not isinstance(data, dict):
+                return None
+            return bool(data.get("use_waiting_for_add", False))
+        except Exception as e:
+            try:
+                print(f"⚠️ waitlist setting fetch failed: {e}")
+            except Exception:
+                pass
+            return None
+
+    def _net_set_waitlist_enabled(self, base_url: str, tenant: str, api_key: str, enabled: bool) -> tuple[bool, str]:
+        """Set the server waitlist mode via the authenticated host API."""
+        try:
+            base = _network_normalize_base_url(base_url)
+            t = (tenant or "").strip() or "default"
+            key = (api_key or "").strip()
+            if not base or not t or not key:
+                return False, "Missing Base URL, User ID, or API Key"
+            url = f"{base}/api/v1/set_waiting_for_add.php"
+            r = requests.post(
+                url,
+                data={
+                    "user": t,
+                    "use_waiting_for_add": "1" if enabled else "0",
+                },
+                headers={"X-API-Key": key, "Accept": "application/json"},
+                timeout=5,
+            )
+            if r.status_code == 200:
+                try:
+                    result = r.json()
+                    if result.get("ok") is True:
+                        return True, ""
+                    return False, str(result.get("error", "Unknown error"))
+                except Exception:
+                    return False, "Invalid response from server"
+            if r.status_code == 404:
+                return False, "Server does not support desktop waitlist sync yet"
+            return False, f"Server returned HTTP {r.status_code}"
+        except requests.exceptions.Timeout:
+            return False, "Request timed out"
+        except requests.exceptions.ConnectionError:
+            return False, "Connection failed"
+        except Exception as e:
+            return False, str(e)
+
+    def _net_set_host_controls(self, base_url: str, tenant: str, api_key: str, pin: str) -> tuple[bool, str]:
         """Push host-control auth settings to the request server."""
         try:
             base = _network_normalize_base_url(base_url)
@@ -23498,7 +23983,6 @@ class KaraokeApp(QWidget):
                 data={
                     "user": t,
                     "host_controls_pin": str(pin or ""),
-                    "host_controls_lan_only": "1" if lan_only else "0",
                 },
                 headers={"X-API-Key": key},
                 timeout=5,
@@ -32940,6 +33424,10 @@ class KaraokeApp(QWidget):
             self._ensure_server_accepting_matches_host_intent_async(reason="remote_reconcile")
         except Exception as e:
             _diag(f"[SERVER-STATE] accepting watchdog schedule failed reason=remote_reconcile: {e}")
+        try:
+            self._sync_waitlist_state_from_server_async(reason="remote_reconcile")
+        except Exception as e:
+            _diag(f"[WAITLIST-STATE] pull schedule failed reason=remote_reconcile: {e}")
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue

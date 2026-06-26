@@ -111,6 +111,7 @@ def make_app(module, tombstone_path: Path, settings=None):
     app._queue_revision = 0
     app._remote_attention_requests = {}
     app._disable_accepting_watchdog = True
+    app._disable_waitlist_state_pull = True
     app.update_queue_display = lambda: None
     app.save_data = lambda: None
     app.save_settings = lambda: None
@@ -291,6 +292,92 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(delivered, [1501])
             self.assertIn(1501, app._waiting_for_add_handled_ids)
             self.assertNotIn(1501, app._waiting_for_add_requests)
+
+    def test_waiting_sections_distinguish_active_waitlisted_and_terminal_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Ada",
+                "songs": [{
+                    "artist": "Active Artist",
+                    "title": "Active Title",
+                    "remote_request_id": 1601,
+                    "request_time": 1712340000,
+                }],
+            }]
+            app._waiting_for_add_requests = {
+                1602: {
+                    "request_id": 1602,
+                    "singer": "Bea",
+                    "artist": "Wait Artist",
+                    "title": "Wait Title",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                    "created_at": 1712340300,
+                },
+            }
+            app._waiting_for_add_recent_terminal_requests = {
+                1603: {
+                    "request_id": 1603,
+                    "singer": "Cal",
+                    "artist": "Done Artist",
+                    "title": "Done Title",
+                    "state": "sung",
+                    "completed_at": 1712340600,
+                },
+                1604: {
+                    "request_id": 1604,
+                    "singer": "Dee",
+                    "artist": "Skip Artist",
+                    "title": "Skip Title",
+                    "state": "removed",
+                    "removed_at": 1712340900,
+                },
+            }
+
+            sections = {section["key"]: section for section in app._waiting_for_add_sections()}
+
+            self.assertEqual(sections["active"]["rows"][0]["status_label"], "Active")
+            self.assertEqual(sections["active"]["rows"][0]["singer"], "Ada")
+            self.assertEqual(sections["waitlist"]["rows"][0]["status_label"], "Waitlisted")
+            self.assertTrue(sections["waitlist"]["rows"][0]["selectable"])
+            self.assertEqual(sections["sung"]["rows"][0]["status_label"], "Sung")
+            self.assertEqual(sections["removed"]["rows"][0]["status_label"], "Removed")
+
+    def test_waitlist_toggle_syncs_to_server_and_pulls_server_changes(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            app.settings["use_waiting_for_add"] = False
+            app._run_on_ui_thread = lambda fn: fn()
+            app._refresh_waitlist_toggle_button = lambda *args, **kwargs: None
+
+            with fake_network(self.singws) as fake:
+                app._set_waitlist_enabled_from_host(True, reason="test_toggle")
+
+            self.assertTrue(app.settings["use_waiting_for_add"])
+            self.assertEqual(len(fake.posts), 1)
+            self.assertTrue(fake.posts[0]["url"].endswith("/api/v1/set_waiting_for_add.php"))
+            self.assertEqual(fake.posts[0]["data"]["use_waiting_for_add"], "1")
+
+            app.settings["use_waiting_for_add"] = True
+            app._net_fetch_waitlist_enabled = lambda base_url, tenant: False
+            app._disable_waitlist_state_pull = False
+            with mock.patch.object(threading, "Thread", _InlineThread):
+                self.assertTrue(app._sync_waitlist_state_from_server_async(reason="test_pull", min_interval_sec=0))
+            self.assertFalse(app.settings["use_waiting_for_add"])
+
+    def test_lan_only_browser_access_option_removed_from_desktop_source(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("host_controls_lan_only", source)
+        self.assertNotIn("LAN-only browser access", source)
+
+    def test_network_settings_exposes_waitlist_checkbox(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+
+        self.assertIn('QCheckBox("Enable Waitlist")', source)
+        self.assertIn("toggle_waitlist_from_network_dialog", source)
+        self.assertIn("_net_set_waitlist_enabled", source)
 
     def test_delivered_v2_history_rows_are_not_imported_as_new_requests(self):
         with tempfile.TemporaryDirectory() as td:
