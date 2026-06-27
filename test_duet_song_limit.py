@@ -26,6 +26,8 @@ def make_app(module):
     app = module.KaraokeApp.__new__(module.KaraokeApp)
     app.settings = {"queue_mode": "rotation", "karaoke_normalize_enabled": False, "limit_pending_max": 2}
     app.queue = []
+    app._waiting_for_add_requests = {}
+    app._deferred_remote_adds = []
     app.update_queue_display = lambda: None
     app.save_data = lambda: None
     app._select_queue_singer_for_host = lambda idx: None
@@ -87,6 +89,33 @@ class DuetSongLimitTests(unittest.TestCase):
         self.assertTrue(add(app, " singer   a ", "two"))
         self.assertFalse(add(app, "SINGER A", "three"))
 
+    def test_waitlisted_song_counts_toward_remote_limit(self):
+        app = make_app(self.singws)
+        app._waiting_for_add_requests = {
+            7001: {"request_id": 7001, "singer": "Singer A", "artist": "Artist", "title": "Pending"}
+        }
+
+        self.assertTrue(add(app, "Singer A", "second"))
+        self.assertFalse(add(app, "Singer A", "third"))
+
+    def test_active_and_waitlisted_song_at_limit_blocks_remote(self):
+        app = make_app(self.singws)
+        self.assertTrue(add(app, "Singer A", "active"))
+        app._waiting_for_add_requests = {
+            7002: {"request_id": 7002, "singer": "Singer A", "artist": "Artist", "title": "Pending"}
+        }
+
+        self.assertFalse(add(app, "Singer A", "third"))
+
+    def test_two_waitlisted_songs_block_remote(self):
+        app = make_app(self.singws)
+        app._waiting_for_add_requests = {
+            7003: {"request_id": 7003, "singer": "Singer A", "artist": "Artist", "title": "Pending 1"},
+            7004: {"request_id": 7004, "singer": "Singer A", "artist": "Artist", "title": "Pending 2"},
+        }
+
+        self.assertFalse(add(app, "Singer A", "third"))
+
 
 class HostBypassSongLimitTests(unittest.TestCase):
     @classmethod
@@ -135,6 +164,16 @@ class HostBypassSongLimitTests(unittest.TestCase):
             if app._queue_limit_name_key(singer.get("name", "")) == app._queue_limit_name_key("Singer A"):
                 song_titles = [s.get("title") or s.get("display") for s in singer.get("songs", [])]
         self.assertEqual(len(song_titles), 3)
+
+    def test_host_can_bypass_limit_with_waitlisted_songs(self):
+        app = make_app(self.singws)
+        app._waiting_for_add_requests = {
+            7101: {"request_id": 7101, "singer": "Singer A", "artist": "Artist", "title": "Pending 1"},
+            7102: {"request_id": 7102, "singer": "Singer A", "artist": "Artist", "title": "Pending 2"},
+        }
+
+        self.assertFalse(add(app, "Singer A", "remote-third"))
+        self.assertTrue(add_host(app, "Singer A", "host-third"))
 
 
 if __name__ == "__main__":
