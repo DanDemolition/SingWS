@@ -129,6 +129,7 @@ def make_remote_app(module):
     app._select_queue_singer_for_host = lambda idx: None
     app._unmatched_remote_request_ids = set()
     app._pending_remote_order_syncs = {}
+    app._queue_revision = 0
     # Pre-set lazily-created attrs that the bare __new__ widget can't getattr.
     app._pending_remote_modifier_pushes = {}
     app._remote_removed_request_ids = set()
@@ -225,6 +226,154 @@ class HostWinsModifierTests(unittest.TestCase):
             [song["remote_request_id"] for song in self.app.queue[0]["songs"]],
             [88, 77],
         )
+
+
+class HostWinsOrderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def setUp(self):
+        self.app = make_remote_app(self.singws)
+        self.app.queue[0]["songs"].append({
+            "remote_request_id": 88,
+            "artist": "Artist",
+            "title": "Second",
+            "display_name": "Artist • Second",
+            "song_info": "/tmp/second.mp3",
+            "key": 0,
+            "skipped": False,
+        })
+
+    def _ids(self, singer_idx=0):
+        return [song["remote_request_id"] for song in self.app.queue[singer_idx]["songs"]]
+
+    def test_host_reorder_survives_stale_poll_without_metadata(self):
+        songs = self.app.queue[0]["songs"]
+        songs[0], songs[1] = songs[1], songs[0]
+        self.app._sync_remote_singer_order(0)
+
+        self.app._reconcile_remote_requests([
+            {"request_id": 77, "singer": "Grace", "artist": "Artist", "title": "Title", "key": 0, "tempo": 0, "sent": True},
+            {"request_id": 88, "singer": "Grace", "artist": "Artist", "title": "Second", "key": 0, "tempo": 0, "sent": True},
+        ])
+
+        self.assertEqual(self._ids(), [88, 77])
+        self.assertEqual(self.app.queue[0]["last_order_source"], "host")
+
+    def test_singer_reorder_before_host_change_is_ignored(self):
+        self.app._reconcile_remote_requests([
+            {
+                "request_id": 88,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Second",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "last_order_source": "singer",
+                "singer_order_updated_at": 1000,
+            },
+            {
+                "request_id": 77,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Title",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "last_order_source": "singer",
+                "singer_order_updated_at": 1000,
+            },
+        ])
+        self.assertEqual(self._ids(), [88, 77])
+
+        songs = self.app.queue[0]["songs"]
+        songs[0], songs[1] = songs[1], songs[0]
+        self.app._sync_remote_singer_order(0)
+        host_stamp = self.app.queue[0]["host_order_updated_at"]
+
+        self.app._reconcile_remote_requests([
+            {
+                "request_id": 88,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Second",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "last_order_source": "singer",
+                "singer_order_updated_at": host_stamp - 1,
+            },
+            {
+                "request_id": 77,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Title",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "last_order_source": "singer",
+                "singer_order_updated_at": host_stamp - 1,
+            },
+        ])
+
+        self.assertEqual(self._ids(), [77, 88])
+
+    def test_singer_reorder_after_host_change_is_accepted(self):
+        self.app._sync_remote_singer_order(0)
+        host_stamp = self.app.queue[0]["host_order_updated_at"]
+
+        self.app._reconcile_remote_requests([
+            {
+                "request_id": 88,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Second",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "last_order_source": "singer",
+                "singer_order_updated_at": host_stamp + 1000,
+            },
+            {
+                "request_id": 77,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Title",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "last_order_source": "singer",
+                "singer_order_updated_at": host_stamp + 1000,
+            },
+        ])
+
+        self.assertEqual(self._ids(), [88, 77])
+        self.assertEqual(self.app.queue[0]["last_order_source"], "singer")
+
+    def test_stale_order_for_one_singer_does_not_affect_another(self):
+        self.app.queue.append({
+            "name": "Other",
+            "songs": [
+                {"remote_request_id": 99, "artist": "Other", "title": "One", "display_name": "Other • One", "song_info": "/tmp/o1.mp3", "key": 0, "skipped": False},
+                {"remote_request_id": 100, "artist": "Other", "title": "Two", "display_name": "Other • Two", "song_info": "/tmp/o2.mp3", "key": 0, "skipped": False},
+            ],
+            "skipped": False,
+        })
+        songs = self.app.queue[0]["songs"]
+        songs[0], songs[1] = songs[1], songs[0]
+        self.app._sync_remote_singer_order(0)
+
+        self.app._reconcile_remote_requests([
+            {"request_id": 77, "singer": "Grace", "artist": "Artist", "title": "Title", "key": 0, "tempo": 0, "sent": True},
+            {"request_id": 88, "singer": "Grace", "artist": "Artist", "title": "Second", "key": 0, "tempo": 0, "sent": True},
+            {"request_id": 100, "singer": "Other", "artist": "Other", "title": "Two", "key": 0, "tempo": 0, "sent": True},
+            {"request_id": 99, "singer": "Other", "artist": "Other", "title": "One", "key": 0, "tempo": 0, "sent": True},
+        ])
+
+        self.assertEqual(self._ids(0), [88, 77])
+        self.assertEqual(self._ids(1), [100, 99])
 
 
 if __name__ == "__main__":

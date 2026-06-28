@@ -146,7 +146,8 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             ])
 
             self.assertEqual(app.processed_requests, [])
-            self.assertTrue(app._remote_attention_requests)
+            self.assertFalse(getattr(app, "_remote_attention_requests", {}))
+            self.assertFalse(getattr(app, "_waiting_for_add_requests", {}))
 
     def test_accepting_on_imports_burst_of_remote_requests(self):
         with tempfile.TemporaryDirectory() as td:
@@ -274,16 +275,28 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                     "state": "failed",
                     "last_error": "No local match",
                 },
+                {
+                    "request_id": 1303,
+                    "singer": "Jake",
+                    "artist": "Missing Artist",
+                    "title": "Missing Song",
+                    "state": "failed_needs_review",
+                    "pending_reason": "artist_title_not_found",
+                    "pending_status": "Needs Review",
+                    "request_source": "kiosk",
+                },
             ])
 
             self.assertEqual(app.processed_requests, [])
-            self.assertEqual(app._waiting_for_add_count(), 2)
+            self.assertEqual(app._waiting_for_add_count(), 3)
             self.assertEqual(
                 sorted(app._waiting_for_add_requests.keys()),
-                [1301, 1302],
+                [1301, 1302, 1303],
             )
+            row = app._waiting_for_add_row(app._waiting_for_add_requests[1303], "waitlist", selectable=True)
+            self.assertEqual(row["status_label"], "Needs Review")
 
-    def test_requests_off_with_one_existing_song_waitlists_valid_request(self):
+    def test_requests_off_ignores_stale_pending_with_one_existing_song(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.settings["requests_accepting"] = False
@@ -302,9 +315,10 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             ])
 
             self.assertEqual(app.processed_requests, [])
-            self.assertIn(1802, app._waiting_for_add_requests)
+            self.assertNotIn(1802, app._waiting_for_add_requests)
+            self.assertFalse(getattr(app, "_remote_attention_requests", {}))
 
-    def test_requests_off_blocks_when_active_and_waitlist_reach_limit(self):
+    def test_requests_off_does_not_accumulate_hidden_pending_waitlist(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.settings["requests_accepting"] = False
@@ -326,11 +340,11 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                 {"request_id": 1813, "singer": "Ada", "artist": "Artist", "title": "Third"},
             ])
 
-            self.assertIn(1812, app._waiting_for_add_requests)
+            self.assertNotIn(1812, app._waiting_for_add_requests)
             self.assertNotIn(1813, app._waiting_for_add_requests)
             self.assertEqual(app.processed_requests, [])
 
-    def test_requests_off_allows_two_waitlisted_then_blocks_third(self):
+    def test_requests_off_does_not_flush_pending_rows_into_waitlist(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.settings["requests_accepting"] = False
@@ -341,7 +355,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                 {"request_id": 1823, "singer": "Ada", "artist": "Artist", "title": "Three"},
             ])
 
-            self.assertEqual(sorted(app._waiting_for_add_requests.keys()), [1821, 1822])
+            self.assertEqual(sorted(app._waiting_for_add_requests.keys()), [])
             self.assertEqual(app.processed_requests, [])
 
     def test_accepting_on_blocks_remote_request_at_active_limit(self):
@@ -446,7 +460,9 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                     "state": "waiting",
                     "pending_reason": "rotation_full",
                     "created_at": 1712340300,
-                    "source": "Server signup",
+                    "selected_version": "SC",
+                    "selected_disc_id": "SC-123",
+                    "received_at_server": "2026-06-28T05:00:00Z",
                     "duration_secs": 185,
                 },
             }
@@ -480,8 +496,9 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertIn("Singer: Bea", text)
             self.assertIn("Song: Wait Title", text)
             self.assertIn("Artist: Wait Artist", text)
-            self.assertIn("Version: Requested: Server signup", text)
+            self.assertIn("Version: Requested: SC / SC-123", text)
             self.assertIn("Length: 3:05", text)
+            self.assertIn("Server:", text)
 
     def test_waiting_replacement_preserves_request_slot_and_order(self):
         with tempfile.TemporaryDirectory() as td:
