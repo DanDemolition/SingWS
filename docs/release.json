@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.3.1.4",
+  "version": "0.3.1.5",
   "release_date": "2026-06-27",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.3.1.4-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.4-arm64-installer.dmg",
+      "filename": "SingWS-0.3.1.5-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.5-arm64-installer.dmg",
       "size": "179 MB",
-      "sha256": "cfada27664a362f6f1bf329bcfdf930d134d88c778cb8495b84a40ddfc963438"
+      "sha256": "8cc3fde6e849a9da6de1037365d64750f75ee00ad246cafb415b0bc32fcbd180"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.3.1.4-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.4-x86_64-installer.dmg",
+      "filename": "SingWS-0.3.1.5-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.5-x86_64-installer.dmg",
       "size": "256 MB",
-      "sha256": "87d9773a3fc7d79c32d644b01e2ab0f3670401001f3533f0a343193fa4db4f47"
+      "sha256": "150f2dbcb9bc9b4750370c6ad8394607204cb60927e97cf229eb05588ecf2b4d"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.3.1.4-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.4-universal-installer.dmg",
+      "filename": "SingWS-0.3.1.5-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.3.1.5-universal-installer.dmg",
       "size": "402 MB",
-      "sha256": "7ae0a056bb3d8bf55d88692cec56fbe8f3e0d9f4ad39600607bdd17015b7ef53"
+      "sha256": "a5c7197f72b5c598650237ffbc2bfcc39445ae0591187dd6df3618d9c05129e3"
     }
   }
 }
