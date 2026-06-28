@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.1.6"
+APP_VERSION = "0.3.1.7"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 
 # Try to import psutil for system info (optional but recommended)
@@ -21340,6 +21340,7 @@ class KaraokeApp(QWidget):
         if status:
             return status
         labels = {
+            "failed_needs_review": "Needs Review",
             "host_not_accepting": "Waiting because requests are closed",
             "rotation_full": "Waiting because rotation is full",
             "sync_failed": "Waiting because song failed to sync",
@@ -21353,6 +21354,8 @@ class KaraokeApp(QWidget):
         if reason.startswith("unsupported_format"):
             return "Waiting because song format is unsupported"
         state = str(req.get("state") or "").strip().lower()
+        if state == "failed_needs_review":
+            return "Needs Review"
         if state == "failed":
             return "Waiting because song failed to sync"
         if state == "waiting":
@@ -21363,7 +21366,7 @@ class KaraokeApp(QWidget):
         if not isinstance(req, dict):
             return False
         state = str(req.get("state") or "").strip().lower()
-        if state in {"waiting", "failed"}:
+        if state in {"waiting", "failed", "failed_needs_review"}:
             return True
         return bool(str(req.get("pending_reason") or req.get("last_error") or req.get("attention_reason") or "").strip())
 
@@ -21380,7 +21383,7 @@ class KaraokeApp(QWidget):
             return "removed"
         if state in {"completed", "sung"} or completed_at > 0:
             return "sung"
-        if state == "failed" or str(req.get("last_error") or req.get("attention_reason") or "").strip():
+        if state in {"failed", "failed_needs_review"} or str(req.get("last_error") or req.get("attention_reason") or "").strip():
             return "waitlist"
         if state == "waiting" or str(req.get("pending_reason") or "").strip():
             return "waitlist"
@@ -21390,6 +21393,7 @@ class KaraokeApp(QWidget):
         return {
             "active": "Active",
             "waitlist": "Waitlisted",
+            "needs_review": "Needs Review",
             "sung": "Sung",
             "removed": "Removed",
         }.get(str(kind or "").strip().lower(), "Active")
@@ -21398,6 +21402,7 @@ class KaraokeApp(QWidget):
         req = req or {}
         for key in (
             "request_time",
+            "requested_at_client",
             "requested_at",
             "created_at",
             "submitted_at",
@@ -21423,6 +21428,28 @@ class KaraokeApp(QWidget):
                 parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
                 return parsed.strftime("%I:%M %p").lstrip("0")
             except Exception:
+                return text
+        return "Unknown time"
+
+    def _waiting_for_add_server_time_text(self, req: dict | None) -> str:
+        req = req or {}
+        for key in ("received_at_server", "server_received_at", "received_at", "ts"):
+            value = req.get(key)
+            if value in (None, ""):
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return parsed.strftime("%I:%M %p").lstrip("0")
+            except Exception:
+                try:
+                    stamp = int(float(text))
+                    if stamp > 100000:
+                        return datetime.fromtimestamp(stamp).strftime("%I:%M %p").lstrip("0")
+                except Exception:
+                    pass
                 return text
         return "Unknown time"
 
@@ -21476,8 +21503,11 @@ class KaraokeApp(QWidget):
             "duration": self._waiting_for_add_duration_text(req),
             "first_time_singer": self._is_first_time_waitlist_singer(str(req.get("singer") or "")),
             "request_time": self._waiting_for_add_request_time_text(req),
-            "status_kind": str(kind or "active"),
-            "status_label": self._waiting_for_add_status_label(kind),
+            "server_received_time": self._waiting_for_add_server_time_text(req),
+            "status_kind": "needs_review" if str(req.get("state") or "").strip().lower() == "failed_needs_review" else str(kind or "active"),
+            "status_label": self._waiting_for_add_status_label(
+                "needs_review" if str(req.get("state") or "").strip().lower() == "failed_needs_review" else kind
+            ),
             "selectable": bool(selectable),
             "request": req,
         }
@@ -21500,7 +21530,19 @@ class KaraokeApp(QWidget):
         source = "Replacement" if replacement else "Requested"
         track = replacement or req
         pieces = []
-        for key in ("disc_id", "discid", "songid", "song_id", "brand", "source", "version"):
+        for key in (
+            "selected_version",
+            "selected_brand",
+            "selected_disc_id",
+            "selected_source",
+            "disc_id",
+            "discid",
+            "songid",
+            "song_id",
+            "brand",
+            "source",
+            "version",
+        ):
             value = str(track.get(key) or "").strip()
             if value and value.lower() not in {"unknown", "none"} and value not in pieces:
                 pieces.append(value)
@@ -21550,7 +21592,7 @@ class KaraokeApp(QWidget):
         if not isinstance(req, dict):
             req = {}
         raw_value = None
-        for key in ("request_time", "requested_at", "created_at", "submitted_at", "received_at", "ts", "time"):
+        for key in ("received_at_server", "request_time", "requested_at_client", "requested_at", "created_at", "submitted_at", "received_at", "ts", "time"):
             value = req.get(key)
             if value not in (None, ""):
                 raw_value = value
@@ -21597,6 +21639,7 @@ class KaraokeApp(QWidget):
         title = row.get("title") or "Unknown song"
         artist = row.get("artist") or "Unknown artist"
         request_time = row.get("request_time") or "Unknown time"
+        server_received_time = row.get("server_received_time") or "Unknown time"
         version = row.get("version") or "Requested"
         duration = row.get("duration") or "Length unknown"
         status = row.get("status_label") or "Pending"
@@ -21605,7 +21648,7 @@ class KaraokeApp(QWidget):
         return (
             f"Singer: {singer}    Status: {status}\n"
             f"Song: {title}    Artist: {artist}\n"
-            f"Version: {version}    Length: {duration}    Requested: {request_time}"
+            f"Version: {version}    Length: {duration}    Requested: {request_time}    Server: {server_received_time}"
         )
 
     def _upsert_waiting_for_add_request(self, req: dict | None, reason: str = "") -> None:
@@ -21748,6 +21791,7 @@ class KaraokeApp(QWidget):
                         f"Version: {row.get('version')}\n"
                         f"Length: {row.get('duration')}\n"
                         f"Request Time: {row.get('request_time')}\n"
+                        f"Server Received: {row.get('server_received_time')}\n"
                         f"Status: {row.get('status_label')}"
                         + ("\nFirst turn this show" if row.get("first_time_singer") else "")
                     )
@@ -21846,11 +21890,12 @@ class KaraokeApp(QWidget):
         song = " - ".join([v for v in (artist, title) if v]) or "Unknown song"
         version = self._waiting_for_add_version_text(req)
         duration = self._waiting_for_add_duration_text(req)
+        server_received = self._waiting_for_add_server_time_text(req)
         detail = self._waiting_for_add_reason_text(req)
         err = str(req.get("last_error") or req.get("attention_error") or "").strip()
         if err and err != detail:
             detail = f"{detail}. {err}"
-        detail_label.setText(f"{singer}: {song}\n{version} • {duration}\n{detail}")
+        detail_label.setText(f"{singer}: {song}\n{version} • {duration} • Server {server_received}\n{detail}")
 
     def _show_waiting_for_add_context_menu(self, position):
         waiting_list = getattr(self, "waiting_for_add_list", None)
@@ -22025,6 +22070,15 @@ class KaraokeApp(QWidget):
         ok = bool(self._add_song_to_queue(singer, song_data, track=track, remote_meta=req))
         if not ok:
             return False
+        try:
+            primary, _duet = self._parse_duet_singer(singer)
+            target_key = self._queue_limit_name_key(primary or singer)
+            for idx, queue_singer in enumerate(self.queue or []):
+                if self._queue_limit_name_key((queue_singer or {}).get("name", "")) == target_key:
+                    self._sync_remote_singer_order(idx, reason="host_add_waitlist_song")
+                    break
+        except Exception:
+            pass
         try:
             self._waiting_for_add_handled_ids.add(rid)
         except Exception:
@@ -28018,6 +28072,8 @@ class KaraokeApp(QWidget):
                 # slot; just keep any locked newcomers interleaved correctly.
                 if self._is_rotation_locked():
                     self._rotation_reweave_locked_tail()
+                if not is_remote:
+                    self._sync_remote_singer_order(singer_idx, reason="host_add_song")
                 self._request_queue_display_refresh()
                 if not is_remote:
                     self._select_queue_singer_for_host(singer_idx)
@@ -28045,6 +28101,8 @@ class KaraokeApp(QWidget):
         else:
             self.queue.append(new_singer)
             ins = len(self.queue) - 1
+        if not is_remote:
+            self._sync_remote_singer_order(ins, reason="host_add_song")
         if not is_remote:
             self.singer_input.clear()
         self._request_queue_display_refresh()
@@ -34055,6 +34113,11 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 del self.queue[singer_idx]["songs"][song_idx]
+                try:
+                    if singer_idx < len(self.queue):
+                        self._sync_remote_singer_order(singer_idx, reason="host_remove_song")
+                except Exception:
+                    pass
 
         self.update_queue_display()
 
@@ -35182,6 +35245,147 @@ class KaraokeApp(QWidget):
             pass
         return None
 
+    def _coerce_order_timestamp(self, value) -> int:
+        try:
+            if value is None or value == "":
+                return 0
+            raw = float(value)
+            if raw <= 0:
+                return 0
+            # Server fields are milliseconds. Accept seconds from older callers.
+            if raw < 100000000000:
+                raw *= 1000.0
+            return int(raw)
+        except Exception:
+            return 0
+
+    def _remote_order_now_ms(self, singer: dict | None = None) -> int:
+        now = int(time.time() * 1000)
+        try:
+            if isinstance(singer, dict):
+                prev = max(
+                    self._coerce_order_timestamp(singer.get("host_order_updated_at")),
+                    self._coerce_order_timestamp(singer.get("singer_order_updated_at")),
+                )
+                if now <= prev:
+                    now = prev + 1
+        except Exception:
+            pass
+        return now
+
+    def _singer_remote_order_ids(self, singer: dict | None) -> list[int]:
+        request_ids = []
+        try:
+            for entry in (singer or {}).get("songs", []) or []:
+                remote_id = self._queue_entry_remote_request_id(entry)
+                if remote_id is not None:
+                    request_ids.append(int(remote_id))
+        except Exception:
+            pass
+        return request_ids
+
+    def _record_host_singer_order_change(self, singer_idx: int, *, reason: str = "host_order_change", request_ids: list[int] | None = None) -> tuple[list[int], int, int]:
+        try:
+            singer = self.queue[int(singer_idx)]
+        except Exception:
+            return [], 0, 0
+        if not isinstance(singer, dict):
+            return [], 0, 0
+        if request_ids is None:
+            request_ids = self._singer_remote_order_ids(singer)
+        try:
+            self._queue_revision = int(getattr(self, "_queue_revision", 0) or 0) + 1
+        except Exception:
+            self._queue_revision = 1
+        revision = int(getattr(self, "_queue_revision", 0) or 0)
+        stamp = self._remote_order_now_ms(singer)
+        singer["host_order_updated_at"] = stamp
+        singer["order_revision"] = revision
+        singer["last_order_source"] = "host"
+        singer.setdefault("singer_order_updated_at", 0)
+        singer_key = str(singer.get("name", "") or "").strip().lower()
+        if singer_key and request_ids:
+            try:
+                if not hasattr(self, "_pending_remote_order_syncs") or not isinstance(self._pending_remote_order_syncs, dict):
+                    self._pending_remote_order_syncs = {}
+                self._pending_remote_order_syncs[singer_key] = {
+                    "request_ids": list(request_ids),
+                    "host_order_updated_at": stamp,
+                    "order_revision": revision,
+                    "last_order_source": "host",
+                    "reason": reason,
+                }
+            except Exception:
+                pass
+        _diag(
+            "[ORDER-CONFLICT] singer="
+            f"{singer.get('name','')!r} old_order={request_ids} incoming_order=[] local_order={request_ids} "
+            f"source=host local_revision={revision} incoming_revision=0 "
+            f"local_ts={stamp} incoming_ts=0 decision=recorded reason={reason}"
+        )
+        return list(request_ids), stamp, revision
+
+    def _remote_order_meta_from_req(self, req: dict) -> dict:
+        if not isinstance(req, dict):
+            return {"host_order_updated_at": 0, "singer_order_updated_at": 0, "order_revision": 0, "last_order_source": "server"}
+        source = str(req.get("last_order_source") or req.get("order_source") or req.get("source") or "server").strip().lower()
+        if source not in {"host", "singer", "server"}:
+            source = "server"
+        try:
+            revision = int(req.get("order_revision") or req.get("revision") or 0)
+        except Exception:
+            revision = 0
+        return {
+            "host_order_updated_at": self._coerce_order_timestamp(req.get("host_order_updated_at")),
+            "singer_order_updated_at": self._coerce_order_timestamp(req.get("singer_order_updated_at")),
+            "order_revision": revision,
+            "last_order_source": source,
+        }
+
+    def _merge_remote_order_meta(self, current: dict | None, incoming: dict) -> dict:
+        merged = dict(current or {})
+        incoming = incoming or {}
+        host_ts = max(int(merged.get("host_order_updated_at") or 0), int(incoming.get("host_order_updated_at") or 0))
+        singer_ts = max(int(merged.get("singer_order_updated_at") or 0), int(incoming.get("singer_order_updated_at") or 0))
+        revision = max(int(merged.get("order_revision") or 0), int(incoming.get("order_revision") or 0))
+        source = str(incoming.get("last_order_source") or merged.get("last_order_source") or "server").strip().lower()
+        if source not in {"host", "singer", "server"}:
+            source = "server"
+        merged.update({
+            "host_order_updated_at": host_ts,
+            "singer_order_updated_at": singer_ts,
+            "order_revision": revision,
+            "last_order_source": source,
+        })
+        return merged
+
+    def _incoming_order_timestamp(self, meta: dict | None) -> int:
+        meta = meta or {}
+        source = str(meta.get("last_order_source") or "server").strip().lower()
+        host_ts = int(meta.get("host_order_updated_at") or 0)
+        singer_ts = int(meta.get("singer_order_updated_at") or 0)
+        if source == "singer":
+            return singer_ts
+        if source == "host":
+            return host_ts
+        return max(host_ts, singer_ts)
+
+    def _apply_order_meta_to_singer(self, singer: dict, meta: dict | None) -> None:
+        if not isinstance(singer, dict) or not isinstance(meta, dict):
+            return
+        host_ts = int(meta.get("host_order_updated_at") or 0)
+        singer_ts = int(meta.get("singer_order_updated_at") or 0)
+        revision = int(meta.get("order_revision") or 0)
+        if host_ts:
+            singer["host_order_updated_at"] = max(self._coerce_order_timestamp(singer.get("host_order_updated_at")), host_ts)
+        if singer_ts:
+            singer["singer_order_updated_at"] = max(self._coerce_order_timestamp(singer.get("singer_order_updated_at")), singer_ts)
+        if revision:
+            singer["order_revision"] = max(int(singer.get("order_revision") or 0), revision)
+        source = str(meta.get("last_order_source") or "").strip().lower()
+        if source in {"host", "singer", "server"} and (host_ts or singer_ts or revision):
+            singer["last_order_source"] = source
+
     def _load_remote_request_tombstones(self) -> dict:
         try:
             if not REMOTE_REQUEST_TOMBSTONES_PATH.exists():
@@ -35766,6 +35970,9 @@ class KaraokeApp(QWidget):
             "[REQUEST-DIAG] "
             f"request_id={request_id} singer={str(req.get('singer', '') or '')!r} "
             f"artist={str(req.get('artist', '') or '')!r} title={str(req.get('title', '') or '')!r} "
+            f"source={str(req.get('request_source') or req.get('source') or '')!r} "
+            f"session_id={str(req.get('singer_session_id') or req.get('session_id') or '')!r} "
+            f"selected_version={str(req.get('selected_version') or req.get('selected_brand') or req.get('selected_disc_id') or '')!r} "
             f"received_ts={int(time.time())} status={status} match_result={match_result!r} "
             f"queue_insert_result={queue_insert_result!r} sync_revision={rev} "
             f"server_enabled={accepting} failure_reason={failure_reason!r}"
@@ -35855,8 +36062,13 @@ class KaraokeApp(QWidget):
                     data={
                         "user": tenant,
                         "request_id": rid,
+                        "state": "failed_needs_review",
                         "reason": str(reason or "sync_failed"),
                         "error": str(req.get("attention_error") or reason or ""),
+                        "source": str(req.get("request_source") or req.get("source") or ""),
+                        "singer": str(req.get("singer") or ""),
+                        "artist": str(req.get("artist") or ""),
+                        "title": str(req.get("title") or ""),
                     },
                     headers={"X-API-Key": api_key},
                     timeout=4,
@@ -36010,40 +36222,24 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=send, daemon=True).start()
 
-    def _sync_remote_singer_order(self, singer_idx: int):
+    def _sync_remote_singer_order(self, singer_idx: int, *, reason: str = "host_reorder"):
         try:
             singer = self.queue[singer_idx]
         except Exception:
             return
         songs = singer.get("songs", []) if isinstance(singer, dict) else []
-        request_ids = []
-        for entry in songs:
-            remote_id = self._queue_entry_remote_request_id(entry)
-            if remote_id is not None:
-                request_ids.append(remote_id)
+        request_ids = self._singer_remote_order_ids(singer)
+        request_ids, host_order_updated_at, rev = self._record_host_singer_order_change(
+            singer_idx,
+            reason=reason,
+            request_ids=request_ids,
+        )
         if not request_ids:
             return
-        try:
-            import time as _time
-            if not hasattr(self, "_pending_remote_order_syncs") or not isinstance(self._pending_remote_order_syncs, dict):
-                self._pending_remote_order_syncs = {}
-            singer_key = str(singer.get("name", "") or "").strip().lower()
-            if singer_key:
-                self._pending_remote_order_syncs[singer_key] = {
-                    "request_ids": list(request_ids),
-                    "expires_at": _time.time() + 30.0,
-                }
-        except Exception:
-            pass
-
-        # Host reorder => bump the queue revision (app is the order authority).
-        try:
-            self._queue_revision = int(getattr(self, "_queue_revision", 0)) + 1
-        except Exception:
-            self._queue_revision = 1
-        rev = self._queue_revision
-        _diag(f"[REORDER] singer={singer.get('name','')!r} order={request_ids} "
-              f"queue_revision={rev} (host is authoritative)")
+        _diag(
+            f"[REORDER] singer={singer.get('name','')!r} order={request_ids} "
+            f"queue_revision={rev} host_order_updated_at={host_order_updated_at} (host is authoritative)"
+        )
 
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
@@ -36058,12 +36254,15 @@ class KaraokeApp(QWidget):
                 resp = requests.post(
                     f"{base_url}/api/v1/set_remote_request_order.php",
                     data=[("user", tenant), ("revision", str(rev)),
+                          ("order_revision", str(rev)),
+                          ("host_order_updated_at", str(host_order_updated_at)),
+                          ("last_order_source", "host"),
                           *[("request_ids[]", rid) for rid in request_ids]],
                     headers={"X-API-Key": api_key},
                     timeout=5,
                 )
                 _diag(f"[REORDER] server accepted={resp.status_code == 200} "
-                      f"(HTTP {resp.status_code}) revision={rev}")
+                      f"(HTTP {resp.status_code}) revision={rev} host_order_updated_at={host_order_updated_at}")
             except Exception as e:
                 print(f"[REMOTE-ORDER] Failed to sync order for singer {singer.get('name', '')}: {e}")
 
@@ -36215,6 +36414,7 @@ class KaraokeApp(QWidget):
             queue_singer, _duet_display = self._parse_duet_singer(singer)
             if not queue_singer:
                 queue_singer = singer
+            order_meta = self._remote_order_meta_from_req(req)
             normalized.append({
                 "request_id": request_id,
                 "singer": singer,
@@ -36223,6 +36423,20 @@ class KaraokeApp(QWidget):
                 "title": str(req.get("title", "") or "").strip(),
                 "key": key,
                 "tempo": tempo,
+                "host_order_updated_at": order_meta.get("host_order_updated_at", 0),
+                "singer_order_updated_at": order_meta.get("singer_order_updated_at", 0),
+                "order_revision": order_meta.get("order_revision", 0),
+                "last_order_source": order_meta.get("last_order_source", "server"),
+                "request_source": str(req.get("request_source") or req.get("source") or ""),
+                "source": str(req.get("request_source") or req.get("source") or ""),
+                "singer_session_id": req.get("singer_session_id") or req.get("session_id") or "",
+                "selected_version": req.get("selected_version") or "",
+                "selected_brand": req.get("selected_brand") or "",
+                "selected_disc_id": req.get("selected_disc_id") or "",
+                "received_at_server": req.get("received_at_server") or "",
+                "pending_reason": req.get("pending_reason") or "",
+                "pending_status": req.get("pending_status") or "",
+                "last_error": req.get("last_error") or "",
             })
             try:
                 self._log_remote_request_diag(normalized[-1], status="received", match_result="pending", queue_insert_result="pending")
@@ -36315,18 +36529,17 @@ class KaraokeApp(QWidget):
                     continue
                 if not accepting_requests:
                     _diag(
-                        "[REMOTE-SYNC] new request parked in waitlist because accepting_requests=0 "
-                        f"request_id={rid} singer={req.get('singer', '')!r} title={req.get('title', '')!r}"
+                        "[REMOTE-SYNC] stale pending request ignored because accepting_requests=0 "
+                        f"request_id={rid} singer={req.get('singer', '')!r} title={req.get('title', '')!r} "
+                        f"state={req.get('state', '')!r} received_at_server={req.get('received_at_server', '')!r}"
                     )
                     self._log_remote_request_diag(
                         req,
-                        status="pending",
+                        status="ignored",
                         match_result="not_attempted",
-                        queue_insert_result="waitlisted",
-                        failure_reason="host_not_accepting",
+                        queue_insert_result="ignored",
+                        failure_reason="accepting_closed_stale_pending",
                     )
-                    self._record_remote_attention_request(req, "host_not_accepting")
-                    self._add_participants_to_song_counts(intake_counts, self._remote_request_participants(req))
                     continue
                 if self._should_async_remote_request_intake():
                     if self._start_remote_request_intake_worker(req):
@@ -36347,25 +36560,35 @@ class KaraokeApp(QWidget):
         tempo_by_id = {item["request_id"]: item["tempo"] for item in normalized}
         key_by_id = {item["request_id"]: item["key"] for item in normalized}
         desired_by_singer = {}
+        desired_meta_by_singer = {}
         for req in normalized:
-            desired_by_singer.setdefault(req["queue_singer"].lower(), []).append(req["request_id"])
+            singer_key = req["queue_singer"].lower()
+            desired_by_singer.setdefault(singer_key, []).append(req["request_id"])
+            desired_meta_by_singer[singer_key] = self._merge_remote_order_meta(desired_meta_by_singer.get(singer_key), req)
 
         try:
-            import time as _time
             pending = getattr(self, "_pending_remote_order_syncs", {})
             if isinstance(pending, dict):
                 for singer_key in list(pending.keys()):
                     item = pending.get(singer_key) or {}
-                    expires_at = float(item.get("expires_at") or 0.0)
-                    if expires_at and expires_at < _time.time():
-                        pending.pop(singer_key, None)
-                        continue
                     pending_ids = [int(v) for v in (item.get("request_ids") or []) if int(v) in desired_ids]
                     server_ids = desired_by_singer.get(singer_key, [])
                     if pending_ids and set(pending_ids) == set(server_ids):
-                        desired_by_singer[singer_key] = pending_ids
                         if server_ids == pending_ids:
+                            incoming_meta = desired_meta_by_singer.get(singer_key, {})
+                            incoming_host_ts = int(incoming_meta.get("host_order_updated_at") or 0)
+                            pending_host_ts = int(item.get("host_order_updated_at") or 0)
+                            if incoming_host_ts and pending_host_ts and incoming_host_ts < pending_host_ts:
+                                desired_by_singer[singer_key] = pending_ids
+                                continue
                             pending.pop(singer_key, None)
+                        else:
+                            incoming_meta = desired_meta_by_singer.get(singer_key, {})
+                            incoming_source = str(incoming_meta.get("last_order_source") or "server").strip().lower()
+                            incoming_ts = self._incoming_order_timestamp(incoming_meta)
+                            pending_host_ts = int(item.get("host_order_updated_at") or 0)
+                            if not (incoming_source == "singer" and incoming_ts > pending_host_ts):
+                                desired_by_singer[singer_key] = pending_ids
         except Exception:
             pass
 
@@ -36416,11 +36639,51 @@ class KaraokeApp(QWidget):
             order = desired_by_singer.get(singer_key, [])
             if not order:
                 continue
+            incoming_meta = desired_meta_by_singer.get(singer_key, {})
             rank = {int(rid): idx for idx, rid in enumerate(order)}
             songs = singer.get("songs", [])
             if not isinstance(songs, list) or len(songs) < 2:
                 continue
             before = [self._queue_entry_remote_request_id(entry) for entry in songs]
+            local_host_ts = self._coerce_order_timestamp(singer.get("host_order_updated_at"))
+            local_singer_ts = self._coerce_order_timestamp(singer.get("singer_order_updated_at"))
+            local_revision = int(singer.get("order_revision") or 0)
+            incoming_ts = self._incoming_order_timestamp(incoming_meta)
+            incoming_revision = int((incoming_meta or {}).get("order_revision") or 0)
+            incoming_source = str((incoming_meta or {}).get("last_order_source") or "server").strip().lower()
+            local_remote_ids = [rid for rid in before if rid is not None]
+            pending_item = getattr(self, "_pending_remote_order_syncs", {}).get(singer_key, {}) if isinstance(getattr(self, "_pending_remote_order_syncs", {}), dict) else {}
+            pending_ids = [int(v) for v in (pending_item.get("request_ids") or []) if int(v) in desired_ids]
+            force_pending = bool(pending_ids and set(pending_ids) == set(order) and order == pending_ids)
+            allow_remote_order = True
+            decision_reason = "applied"
+            if force_pending:
+                allow_remote_order = True
+                decision_reason = "pending_host_order"
+            elif local_host_ts > 0:
+                if incoming_source == "singer" and incoming_ts > local_host_ts:
+                    allow_remote_order = True
+                    decision_reason = "newer_singer_order"
+                elif incoming_source == "host" and incoming_ts >= local_host_ts:
+                    allow_remote_order = True
+                    decision_reason = "host_echo"
+                elif incoming_revision > local_revision and incoming_ts >= max(local_host_ts, local_singer_ts):
+                    allow_remote_order = True
+                    decision_reason = "newer_revision"
+                else:
+                    allow_remote_order = False
+                    decision_reason = "ignored_stale_remote_order"
+            elif local_singer_ts > 0 and incoming_ts and incoming_ts < local_singer_ts:
+                allow_remote_order = False
+                decision_reason = "ignored_older_singer_order"
+            if not allow_remote_order:
+                _diag(
+                    "[ORDER-CONFLICT] singer="
+                    f"{singer.get('name','')!r} old_order={before} incoming_order={order} local_order={local_remote_ids} "
+                    f"source={incoming_source} local_revision={local_revision} incoming_revision={incoming_revision} "
+                    f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision=ignored"
+                )
+                continue
             indexed = list(enumerate(songs))
             indexed.sort(
                 key=lambda pair: (
@@ -36430,8 +36693,21 @@ class KaraokeApp(QWidget):
             )
             singer["songs"] = [entry for _idx, entry in indexed]
             after = [self._queue_entry_remote_request_id(entry) for entry in singer["songs"]]
+            self._apply_order_meta_to_singer(singer, incoming_meta)
             if before != after:
-                _diag(f"[REMOTE-SYNC] applied singer song order singer={singer.get('name', '')!r} order={after}")
+                _diag(
+                    "[ORDER-CONFLICT] singer="
+                    f"{singer.get('name','')!r} old_order={before} incoming_order={order} local_order={after} "
+                    f"source={incoming_source} local_revision={local_revision} incoming_revision={incoming_revision} "
+                    f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision={decision_reason}"
+                )
+            else:
+                _diag(
+                    "[ORDER-CONFLICT] singer="
+                    f"{singer.get('name','')!r} old_order={before} incoming_order={order} local_order={after} "
+                    f"source={incoming_source} local_revision={local_revision} incoming_revision={incoming_revision} "
+                    f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision=no_change"
+                )
 
         self._queue_display_batch_dirty = False
         self._request_queue_display_refresh()
