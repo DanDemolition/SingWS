@@ -191,5 +191,11 @@ app = BUNDLE(
         'CFBundleShortVersionString': '0.3.1.5',
         'CFBundleVersion': '0.3.1.5',
         'NSHighResolutionCapable': True,
+        'NSLocationWhenInUseUsageDescription': (
+            "SingWS uses this Mac's location to set venue coordinates for request signups."
+        ),
+        'NSLocationUsageDescription': (
+            "SingWS uses this Mac's location to set venue coordinates for request signups."
+        ),
     },
 )

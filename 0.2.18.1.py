@@ -25123,12 +25123,13 @@ class KaraokeApp(QWidget):
                     if show_result:
                         QMessageBox.information(dlg, "Location Detected", f"Using current device location:\n\n{lat_val}, {lng_val}")
                     return True
-                update_location_status("Auto-detect failed. Manual coordinates will be used if provided.")
+                friendly_err = self._friendly_location_detection_error(err)
+                update_location_status(f"{friendly_err} Manual coordinates will be used if provided.")
                 if show_result:
                     QMessageBox.warning(
                         dlg,
                         "Location Detection Failed",
-                        err or "Could not detect this device's location. You can still enter coordinates manually."
+                        friendly_err
                     )
                 return False
 
@@ -25610,6 +25611,37 @@ class KaraokeApp(QWidget):
     
             dlg.exec()
 
+    def _friendly_location_detection_error(self, err):
+        raw = str(err or "").strip()
+        lower = raw.lower()
+        fallback = "Could not detect this Mac's location. You can still enter venue coordinates manually."
+        permission_msg = (
+            "Location permission is denied for SingWS. Enable Location Services for SingWS in "
+            "System Settings > Privacy & Security > Location Services, or enter the venue coordinates manually."
+        )
+        if not raw:
+            return fallback
+        if "kclerrordomain" in lower:
+            if "code=1" in lower or "denied" in lower:
+                return permission_msg
+            if "code=0" in lower:
+                return (
+                    "SingWS could not get a location fix yet. Try again near the venue, "
+                    "or enter the venue coordinates manually."
+                )
+            return (
+                "SingWS could not detect this Mac's location. Check Location Services in "
+                "System Settings, or enter the venue coordinates manually."
+            )
+        if (
+            "permission denied" in lower
+            or "location permission denied" in lower
+            or "not authorized" in lower
+            or "location services are disabled" in lower
+        ):
+            return permission_msg
+        return raw
+
     def _detect_current_device_location(self, timeout_sec: float = 12.0):
         if sys.platform != "darwin":
             return None, "Auto-detect is currently supported on macOS only."
@@ -25671,6 +25703,17 @@ class KaraokeApp(QWidget):
             delegate._event = event
             manager.setDelegate_(delegate)
             manager.setDesiredAccuracy_(kCLLocationAccuracyBest)
+            try:
+                if hasattr(CLLocationManager, "locationServicesEnabled") and not bool(CLLocationManager.locationServicesEnabled()):
+                    return None, self._friendly_location_detection_error("Location Services are disabled.")
+            except Exception:
+                pass
+            try:
+                status = int(manager.authorizationStatus())
+                if status in (1, 2):  # restricted / denied
+                    return None, self._friendly_location_detection_error("Location permission denied for SingWS.")
+            except Exception:
+                pass
             if hasattr(manager, "requestWhenInUseAuthorization"):
                 manager.requestWhenInUseAuthorization()
             manager.startUpdatingLocation()
@@ -25684,7 +25727,9 @@ class KaraokeApp(QWidget):
 
             loc = holder.get("location")
             if loc is None:
-                return None, holder.get("error") or "Timed out waiting for device location."
+                return None, self._friendly_location_detection_error(
+                    holder.get("error") or "Timed out waiting for device location."
+                )
 
             coord = loc.coordinate()
             accuracy = None
@@ -25700,7 +25745,7 @@ class KaraokeApp(QWidget):
                 "detected_at": int(time.time()),
             }, ""
         except Exception as e:
-            return None, f"Auto-detect failed: {e}"
+            return None, self._friendly_location_detection_error(f"Auto-detect failed: {e}")
 
     def _session_location_payload(self, allow_auto_detect: bool = True):
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
