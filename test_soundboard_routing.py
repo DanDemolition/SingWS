@@ -32,6 +32,15 @@ class SoundboardRoutingTests(unittest.TestCase):
         self.assertIn("_create_audio_sink_for_selected_output", source)
         self.assertIn("Gst.ElementFactory.make(\"playbin\"", source)
 
+    def test_soundboard_pad_playing_style_tracks_playback_state(self):
+        source = inspect.getsource(self.singws.SoundboardPad)
+        self.assertNotIn("_visual_playing", source)
+        self.assertNotIn("_flash_playing_style", source)
+        self.assertIn("_poll_pipeline_bus", source)
+        self.assertIn("_handle_gst_message", source)
+        self.assertIn("self._playing = True", source)
+        self.assertIn("self._playing = False", source)
+
     def test_audio_output_change_rebinds_soundboard_strip(self):
         app = self.singws.KaraokeApp.__new__(self.singws.KaraokeApp)
         app.settings = {"audio_output_id": "default"}

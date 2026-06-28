@@ -12815,6 +12815,9 @@ class SoundboardPad(QPushButton):
         self._bus = None
         self._bus_handler_id = None
         self._playing = False
+        self._bus_poll_timer = QTimer(self)
+        self._bus_poll_timer.setInterval(80)
+        self._bus_poll_timer.timeout.connect(self._poll_pipeline_bus)
 
         self._refresh_face()
 
@@ -12944,6 +12947,7 @@ class SoundboardPad(QPushButton):
                 pass
 
     def _unwatch_pipeline_bus(self):
+        self._stop_bus_polling()
         bus = getattr(self, "_bus", None)
         if bus is None:
             return
@@ -12983,6 +12987,7 @@ class SoundboardPad(QPushButton):
             pipe.set_state(Gst.State.PLAYING)
             self._playing = True
             self._refresh_face()
+            self._start_bus_polling()
             owner = self._app_owner()
             selected = owner._get_selected_audio_output_id() if owner is not None and hasattr(owner, "_get_selected_audio_output_id") else "default"
             _diag(f"[SOUNDBOARD] play slot={self.slot_index} output={selected} file={Path(self._clip_path).name}")
@@ -12994,6 +12999,9 @@ class SoundboardPad(QPushButton):
             self._stop_pipeline()
 
     def _on_gst_message(self, _bus, msg):
+        self._handle_gst_message(msg)
+
+    def _handle_gst_message(self, msg):
         try:
             mtype = msg.type
             if mtype == Gst.MessageType.EOS:
@@ -13004,6 +13012,48 @@ class SoundboardPad(QPushButton):
                     _diag(f"[SOUNDBOARD] error slot={self.slot_index}: {err} ({debug})")
                 except Exception:
                     pass
+                self._stop_pipeline()
+        except Exception:
+            pass
+
+    def _start_bus_polling(self):
+        try:
+            if not self._bus_poll_timer.isActive():
+                self._bus_poll_timer.start()
+        except Exception:
+            pass
+
+    def _stop_bus_polling(self):
+        try:
+            if self._bus_poll_timer.isActive():
+                self._bus_poll_timer.stop()
+        except Exception:
+            pass
+
+    def _poll_pipeline_bus(self):
+        if not bool(getattr(self, "_playing", False)):
+            self._stop_bus_polling()
+            return
+        pipe = getattr(self, "_pipeline", None)
+        bus = getattr(self, "_bus", None)
+        if pipe is None:
+            self._stop_pipeline()
+            return
+        try:
+            if bus is not None:
+                for _ in range(12):
+                    msg = bus.pop()
+                    if msg is None:
+                        break
+                    self._handle_gst_message(msg)
+                    if not bool(getattr(self, "_playing", False)):
+                        return
+        except Exception:
+            pass
+        try:
+            ok_pos, pos = pipe.query_position(Gst.Format.TIME)
+            ok_dur, dur = pipe.query_duration(Gst.Format.TIME)
+            if ok_pos and ok_dur and dur > 0 and pos >= max(0, dur - 50_000_000):
                 self._stop_pipeline()
         except Exception:
             pass
@@ -13038,6 +13088,7 @@ class SoundboardPad(QPushButton):
                 pipe.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, int(pos))
             pipe.set_state(Gst.State.PLAYING)
             self._playing = True
+            self._start_bus_polling()
         except Exception:
             self._stop_pipeline()
         self._refresh_face()
