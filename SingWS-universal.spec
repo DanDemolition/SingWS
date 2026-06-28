@@ -189,8 +189,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.3.1.5',
-        'CFBundleVersion': '0.3.1.5',
+        'CFBundleShortVersionString': '0.3.1.6',
+        'CFBundleVersion': '0.3.1.6',
         'NSHighResolutionCapable': True,
         'NSLocationWhenInUseUsageDescription': (
             "SingWS uses this Mac's location to set venue coordinates for request signups."
