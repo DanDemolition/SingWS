@@ -8,7 +8,7 @@ import logging.handlers
 from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.3.1.8"
+APP_VERSION = "0.3.1.9"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 
 # Try to import psutil for system info (optional but recommended)
