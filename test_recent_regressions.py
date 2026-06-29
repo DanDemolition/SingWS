@@ -69,6 +69,8 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("ticker_speed_px_per_sec", self.singws.DEFAULTS)
         self.assertGreater(float(self.singws.DEFAULTS["ticker_speed_px_per_sec"]), 0)
         self.assertEqual(int(self.singws.DEFAULTS["video_timing_offset_ms"]), 0)
+        self.assertTrue(self.singws.DEFAULTS["next_up_overlay_enabled"])
+        self.assertEqual(int(self.singws.DEFAULTS["next_up_overlay_duration_sec"]), 10)
 
     def test_host_rotation_state_empty_defaults(self):
         app = make_app(self.singws)
@@ -102,6 +104,54 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(rotation["next"]["singer"], "George")
         self.assertNotEqual(rotation["current"]["item_id"], rotation["next"]["item_id"])
         self.assertEqual(rotation["next"]["title"], "Next")
+
+    def test_next_up_overlay_payload_uses_next_song_and_on_deck(self):
+        app = make_app(self.singws)
+        app._current_karaoke_singer_name = "Ada"
+        app._current_karaoke_song_path = "/tmp/current.mp3"
+        app.queue = [
+            {
+                "name": "Ada",
+                "skipped": False,
+                "songs": [
+                    {"song_info": "/tmp/current.mp3", "artist": "Artist", "title": "Current", "skipped": False},
+                    {"song_info": "/tmp/next.mp3", "artist": "Artist", "title": "Next", "skipped": False},
+                ],
+            },
+            {
+                "name": "Bo",
+                "skipped": False,
+                "songs": [
+                    {"song_info": "/tmp/bo.mp3", "artist": "Other", "title": "On Deck", "skipped": False},
+                ],
+            },
+        ]
+
+        payload = app._next_up_transition_payload_from_queue()
+        self.assertEqual(payload["singer"], "Ada")
+        self.assertEqual(payload["title"], "Next")
+        self.assertEqual(payload["artist"], "Artist")
+        self.assertEqual(payload["on_deck"], "Bo")
+
+    def test_next_up_overlay_setting_gate_and_duration(self):
+        app = make_app(self.singws)
+        calls = []
+
+        class FakeArea:
+            def show_next_up_overlay(self, payload, duration):
+                calls.append((payload, duration))
+
+        app.video_window = SimpleNamespace(video_area=FakeArea())
+        app.settings["next_up_overlay_enabled"] = True
+        app.settings["next_up_overlay_duration_sec"] = 7
+        payload = {"singer": "Ada", "title": "Song", "artist": "Artist", "on_deck": "Bo"}
+
+        self.assertTrue(app._show_next_up_transition_overlay(payload, reason="test"))
+        self.assertEqual(calls, [(payload, 7.0)])
+
+        app.settings["next_up_overlay_enabled"] = False
+        self.assertFalse(app._show_next_up_transition_overlay(payload, reason="test"))
+        self.assertEqual(len(calls), 1)
 
     def test_settings_save_scheduler_debounces_ui_thread_writes(self):
         app = make_app(self.singws)
@@ -144,7 +194,14 @@ class RecentRegressionTests(unittest.TestCase):
             app.tracks = [{"path": str(cdg), "display": "Karaoke Song"}]
             app.bg_music = SimpleNamespace(playlist=[str(bgm)])
             app.bg_manager = SimpleNamespace(current_playlist=[{"path": str(bgm)}])
-            app.settings = {"bg_import_folders": []}
+            app.settings = {
+                "bg_import_folders": [],
+                "simple_audio_mode": False,
+                "karaoke_normalize_enabled": True,
+                "bg_normalize_enabled": True,
+                "performance_mode": False,
+                "safe_mode": False,
+            }
 
             with mock.patch.object(self.singws.Path, "home", return_value=root):
                 with mock.patch.object(self.singws, "loudness_gain_db_cached", return_value=None):

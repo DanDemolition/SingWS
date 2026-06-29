@@ -1900,11 +1900,27 @@ _loudness_cache = {}
 _loudness_cache_loaded = False
 _loudness_lock = threading.Lock()
 _loudness_inflight = set()
+_loudness_cancel_event = threading.Event()
 # Serialize loudness analysis so at most one ffmpeg ebur128 pass runs at a
 # time.  Combined with single-threaded + niced ffmpeg below, this keeps the
 # background analysis from starving the audio decode/stretch thread and
 # causing choppy playback on weaker CPUs (e.g. Intel Macs).
 _loudness_sem = threading.Semaphore(1)
+
+
+def _loudness_workers_allowed() -> bool:
+    return not _loudness_cancel_event.is_set()
+
+
+def set_loudness_workers_enabled(enabled: bool, reason: str = ""):
+    if enabled:
+        if _loudness_cancel_event.is_set():
+            _diag(f"[LOUDNESS] workers enabled reason={reason or 'unknown'}")
+        _loudness_cancel_event.clear()
+    else:
+        if not _loudness_cancel_event.is_set():
+            _diag(f"[LOUDNESS] workers disabled reason={reason or 'unknown'}")
+        _loudness_cancel_event.set()
 
 
 def _loudness_lower_priority(pid: int):
@@ -2114,19 +2130,41 @@ def analyze_loudness_async(audio_path: str):
     """Measure + cache loudness for a file in the background if not already done."""
     if not audio_path:
         return
+    if not _loudness_workers_allowed():
+        try:
+            _diag(f"[LOUDNESS] analysis skipped reason=workers_disabled file={os.path.basename(audio_path)}")
+        except Exception:
+            pass
+        return
     _loudness_load_cache()
     if loudness_gain_db_cached(audio_path) is not None:
+        try:
+            _diag(f"[LOUDNESS] analysis skipped reason=cache_hit file={os.path.basename(audio_path)}")
+        except Exception:
+            pass
         return
     with _loudness_lock:
         if audio_path in _loudness_inflight:
+            try:
+                _diag(f"[LOUDNESS] analysis skipped reason=inflight file={os.path.basename(audio_path)}")
+            except Exception:
+                pass
             return
         _loudness_inflight.add(audio_path)
 
     def _work():
         try:
+            if not _loudness_workers_allowed():
+                return
             sig = _loudness_file_sig(audio_path)
             with _loudness_sem:
-                lufs, peak_db = _measure_loudness_lufs(audio_path)
+                lufs, peak_db = _measure_loudness_lufs(audio_path, cancel_check=lambda: not _loudness_workers_allowed())
+            if not _loudness_workers_allowed():
+                try:
+                    _diag(f"[LOUDNESS] analysis cancelled before cache write file={os.path.basename(audio_path)}")
+                except Exception:
+                    pass
+                return
             if lufs is not None and sig is not None:
                 with _loudness_lock:
                     _loudness_cache[audio_path] = {
@@ -2543,6 +2581,8 @@ DEFAULTS = {
     "cdg_timing_offset_ms": 500,     # CDG-only lyric timing nudge (-3000..+3000ms; +=lyrics earlier)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
+    "next_up_overlay_enabled": True, # Show temporary audience-facing Next Up transition panel
+    "next_up_overlay_duration_sec": 10, # seconds the Next Up transition panel stays visible
     "disc_id_priority": "",          # comma-separated prefixes for remote request matching (blank = no priority)
     "background_closed_image_path": "",   # optional background shown when requests are closed
     "background_slideshow_enabled": False, # rotate images while idle
@@ -3226,7 +3266,7 @@ def detect_lead_silence(path, noise_db=-50.0, min_silence=0.5) -> float:
 BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
 BG_SILENCE_MIN_S = 1.2      # sustained silence required before advancing
 BG_SILENCE_TAIL_WINDOW = 45.0  # only act within this many seconds of the track end
-BGM_UNKNOWN_ANALYSIS_PREGAIN = 0.75  # only when BG normalization is enabled and cache misses
+BGM_UNKNOWN_ANALYSIS_PREGAIN = 1.0  # uncached BG tracks play raw; analysis is for future starts only
 
 
 class BackgroundMusicPlayer(QObject):
@@ -3911,6 +3951,9 @@ class BackgroundMusicPlayer(QObject):
         """
         if not path:
             return None
+        if not self._bg_normalize_active():
+            _diag(f"[BG-AUDIO] normalization bypassed reason=disabled track={Path(path).name}")
+            return None
         info = loudness_info_cached(path)
         if info is None:
             _diag(f"[BG-AUDIO] normalization cache miss track={Path(path).name} action=analyze_async")
@@ -3968,6 +4011,10 @@ class BackgroundMusicPlayer(QObject):
             host = self.parent()
             if host is None or not hasattr(host, "settings"):
                 return False
+            if hasattr(host, "_safe_mode") and host._safe_mode():
+                return False
+            if hasattr(host, "_performance_mode") and host._performance_mode():
+                return False
             if bool(host.settings.get("simple_audio_mode", True)):
                 return False
             return bool(host.settings.get("bg_normalize_enabled", True))
@@ -3977,11 +4024,13 @@ class BackgroundMusicPlayer(QObject):
     def _bg_norm_factor_for_path(self, path: str | None) -> tuple[float, dict | None]:
         enabled = self._bg_normalize_active()
         if not enabled or not path:
+            if path:
+                _diag(f"[BG-AUDIO] normalization gain bypassed reason={'disabled' if not enabled else 'missing_path'} track={Path(path).name}")
             return 1.0, None
         info = self._bg_loudness_info_for_path(path)
         if info is None:
             _diag(
-                f"[BG-AUDIO] normalization cache miss safe pre-gain track={Path(path).name} "
+                f"[BG-AUDIO] normalization cache miss unity playback track={Path(path).name} "
                 f"gain_linear={BGM_UNKNOWN_ANALYSIS_PREGAIN:.3f}"
             )
             return BGM_UNKNOWN_ANALYSIS_PREGAIN, None
@@ -4070,15 +4119,11 @@ class BackgroundMusicPlayer(QObject):
             info = self._bg_loudness_info_for_path(path)
             if info is None:
                 factor = BGM_UNKNOWN_ANALYSIS_PREGAIN
-                _diag(f"[BG-AUDIO] calculated gain unavailable deck={deck} track={Path(path).name}; using safe pre-gain={factor:.3f}")
+                _diag(f"[BG-AUDIO] calculated gain unavailable deck={deck} track={Path(path).name}; unity playback while analysis runs gain={factor:.3f}")
                 if deck == "secondary" and hasattr(engine, "set_secondary_normalize_gain"):
                     engine.set_secondary_normalize_gain(factor)
                 elif hasattr(engine, "set_primary_normalize_gain"):
                     engine.set_primary_normalize_gain(factor)
-                # The loudness measurement is still running in the background.
-                # Re-apply the proper gain once it lands so the FIRST track of a
-                # session isn't stuck at the safe pre-gain for its whole play.
-                self._schedule_bg_normalize_retry(path, deck)
             else:
                 factor = float(info.get("gain_linear", 1.0) or 1.0)
                 try:
@@ -4094,8 +4139,10 @@ class BackgroundMusicPlayer(QObject):
             try:
                 if self.playlist:
                     nxt = self.playlist[(int(self.current_index) + 1) % len(self.playlist)]
-                    if nxt and loudness_gain_db_cached(nxt) is None:
-                        analyze_loudness_async(nxt)
+                    if nxt:
+                        nxt_info = self._bg_loudness_info_for_path(nxt)
+                        if nxt_info is None:
+                            _diag(f"[BG-AUDIO] next-track normalization warming queued_or_skipped track={Path(nxt).name}")
             except Exception:
                 pass
             return info
@@ -4302,8 +4349,7 @@ class BackgroundMusicPlayer(QObject):
             next_index = (self.current_index + 1) % len(self.playlist)
             next_file = self.playlist[next_index]
             try:
-                info = self._bg_loudness_info_for_path(next_file)
-                norm_gain = float((info or {}).get("gain_linear", 1.0) or 1.0)
+                norm_gain, info = self._bg_norm_factor_for_path(next_file)
                 if not self._bass_engine.start_crossfade(next_file, self.crossfade_duration_ms, norm_gain=norm_gain):
                     return
                 _diag(f"[BG-AUDIO] track={Path(next_file).name} deck=secondary chain={self._bg_dsp_chain_label(next_file, info)}")
@@ -5394,6 +5440,15 @@ class VideoAreaWidget(QWidget):
         self._viz_peaks = [0.12] * 14
         self._viz_audio_level = 0.0
         self._idle_paint_log_ts = 0.0
+        self._next_up_overlay_payload = {}
+        self._next_up_overlay_phase = ""
+        self._next_up_overlay_phase_started = 0.0
+        self._next_up_overlay_fade_ms = 250
+        self._next_up_overlay_tick_timer = QTimer(self)
+        self._next_up_overlay_tick_timer.timeout.connect(self._tick_next_up_overlay)
+        self._next_up_overlay_hide_timer = QTimer(self)
+        self._next_up_overlay_hide_timer.setSingleShot(True)
+        self._next_up_overlay_hide_timer.timeout.connect(self.hide_next_up_overlay)
 
     def set_background_image(self, image_path):
         if image_path and os.path.exists(image_path):
@@ -5424,6 +5479,73 @@ class VideoAreaWidget(QWidget):
         self._karaoke_scaled_pixmap = QPixmap()
         self._karaoke_scaled_key = None
         self.update()
+
+    def show_next_up_overlay(self, payload: dict, duration_sec: float = 10.0):
+        if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
+            self.hide_next_up_overlay(immediate=True)
+            return
+        self._next_up_overlay_payload = dict(payload)
+        self._next_up_overlay_phase = "fade_in"
+        self._next_up_overlay_phase_started = time.monotonic()
+        try:
+            duration_ms = int(max(1.0, min(60.0, float(duration_sec or 10.0))) * 1000)
+        except Exception:
+            duration_ms = 10000
+        self._next_up_overlay_hide_timer.stop()
+        self._next_up_overlay_hide_timer.start(duration_ms)
+        if not self._next_up_overlay_tick_timer.isActive():
+            self._next_up_overlay_tick_timer.start(33)
+        self.update()
+
+    def hide_next_up_overlay(self, immediate: bool = False):
+        try:
+            self._next_up_overlay_hide_timer.stop()
+        except Exception:
+            pass
+        if immediate or not self._next_up_overlay_payload:
+            self._next_up_overlay_payload = {}
+            self._next_up_overlay_phase = ""
+            try:
+                self._next_up_overlay_tick_timer.stop()
+            except Exception:
+                pass
+            self.update()
+            return
+        self._next_up_overlay_phase = "fade_out"
+        self._next_up_overlay_phase_started = time.monotonic()
+        if not self._next_up_overlay_tick_timer.isActive():
+            self._next_up_overlay_tick_timer.start(33)
+        self.update()
+
+    def _tick_next_up_overlay(self):
+        if not self._next_up_overlay_payload:
+            self._next_up_overlay_tick_timer.stop()
+            return
+        self.update()
+
+    def _next_up_overlay_alpha(self) -> float:
+        if not self._next_up_overlay_payload:
+            return 0.0
+        phase = str(self._next_up_overlay_phase or "")
+        elapsed_ms = (time.monotonic() - float(self._next_up_overlay_phase_started or 0.0)) * 1000.0
+        fade_ms = max(1.0, float(self._next_up_overlay_fade_ms or 250))
+        if phase == "fade_in":
+            alpha = min(1.0, max(0.0, elapsed_ms / fade_ms))
+            if alpha >= 1.0:
+                self._next_up_overlay_phase = "hold"
+            return alpha
+        if phase == "fade_out":
+            alpha = 1.0 - min(1.0, max(0.0, elapsed_ms / fade_ms))
+            if alpha <= 0.0:
+                self._next_up_overlay_payload = {}
+                self._next_up_overlay_phase = ""
+                try:
+                    self._next_up_overlay_tick_timer.stop()
+                except Exception:
+                    pass
+                return 0.0
+            return alpha
+        return 1.0
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -5677,6 +5799,133 @@ class VideoAreaWidget(QWidget):
 
         painter.restore()
 
+    def _draw_next_up_overlay(self, painter: QPainter):
+        payload = self._next_up_overlay_payload if isinstance(self._next_up_overlay_payload, dict) else {}
+        if not payload:
+            return
+        alpha = self._next_up_overlay_alpha()
+        if alpha <= 0.0:
+            return
+
+        w = self.width()
+        h = self.height()
+        if w <= 180 or h <= 160:
+            return
+
+        singer = str(payload.get("singer", "") or "").strip()
+        title = str(payload.get("title", "") or "").strip()
+        artist = str(payload.get("artist", "") or "").strip()
+        on_deck = str(payload.get("on_deck", "") or "").strip()
+        if not singer:
+            return
+
+        panel_w = min(int(w * 0.78), 920)
+        panel_h = min(int(h * 0.52), 430)
+        panel_h = max(260, panel_h)
+        x = int((w - panel_w) / 2)
+        y = int((h - panel_h) / 2)
+        pad = max(24, int(panel_w * 0.055))
+        text_w = max(80, panel_w - pad * 2)
+
+        def a(value: int) -> int:
+            return max(0, min(255, int(value * alpha)))
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, a(105)))
+        painter.drawRoundedRect(QRectF(x + 10, y + 14, panel_w, panel_h), 22, 22)
+        painter.setBrush(QColor(3, 3, 8, a(244)))
+        painter.drawRoundedRect(QRectF(x, y, panel_w, panel_h), 20, 20)
+
+        try:
+            accent = QColor(_v("accent_bright"))
+        except Exception:
+            accent = QColor("#8B5CF6")
+        accent.setAlpha(a(255))
+
+        label_font = painter.font()
+        label_font.setBold(True)
+        label_font.setPointSize(max(13, int(panel_h * 0.055)))
+
+        singer_font = painter.font()
+        singer_font.setBold(True)
+        singer_font.setPointSize(max(34, int(panel_h * 0.155)))
+
+        singing_font = painter.font()
+        singing_font.setBold(True)
+        singing_font.setPointSize(max(12, int(panel_h * 0.045)))
+
+        title_font = painter.font()
+        title_font.setBold(True)
+        title_font.setPointSize(max(22, int(panel_h * 0.095)))
+
+        artist_font = painter.font()
+        artist_font.setBold(False)
+        artist_font.setPointSize(max(16, int(panel_h * 0.066)))
+
+        deck_font = painter.font()
+        deck_font.setBold(True)
+        deck_font.setPointSize(max(15, int(panel_h * 0.06)))
+
+        y_cursor = y + pad
+
+        painter.setFont(label_font)
+        label_fm = QFontMetrics(label_font)
+        painter.setPen(accent)
+        painter.drawText(QRect(x + pad, y_cursor, text_w, label_fm.height() + 6),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Next Up:")
+        y_cursor += label_fm.height() + 8
+
+        painter.setFont(singer_font)
+        singer_fm = QFontMetrics(singer_font)
+        singer_text = singer_fm.elidedText(singer, Qt.TextElideMode.ElideRight, text_w)
+        painter.setPen(accent)
+        painter.drawText(QRect(x + pad, y_cursor, text_w, singer_fm.height() + 10),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, singer_text)
+        y_cursor += singer_fm.height() + 20
+
+        painter.setFont(singing_font)
+        singing_fm = QFontMetrics(singing_font)
+        painter.setPen(QColor(255, 255, 255, a(205)))
+        painter.drawText(QRect(x + pad, y_cursor, text_w, singing_fm.height() + 4),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Singing:")
+        y_cursor += singing_fm.height() + 5
+
+        painter.setFont(title_font)
+        title_fm = QFontMetrics(title_font)
+        title_text = title_fm.elidedText(title or "Unknown Song", Qt.TextElideMode.ElideRight, text_w)
+        painter.setPen(QColor(255, 255, 255, a(255)))
+        painter.drawText(QRect(x + pad, y_cursor, text_w, title_fm.height() + 8),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, title_text)
+        y_cursor += title_fm.height() + 7
+
+        if artist:
+            painter.setFont(artist_font)
+            artist_fm = QFontMetrics(artist_font)
+            artist_text = artist_fm.elidedText(f"by {artist}", Qt.TextElideMode.ElideRight, text_w)
+            painter.setPen(QColor(230, 230, 238, a(228)))
+            painter.drawText(QRect(x + pad, y_cursor, text_w, artist_fm.height() + 6),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, artist_text)
+            y_cursor += artist_fm.height() + 18
+
+        if on_deck:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, a(30)))
+            line_y = min(y + panel_h - pad - 70, y_cursor)
+            painter.drawRoundedRect(QRectF(x + pad, line_y, text_w, 1), 1, 1)
+            y_cursor = line_y + 18
+
+            painter.setFont(deck_font)
+            deck_fm = QFontMetrics(deck_font)
+            deck_text = deck_fm.elidedText(f"On Deck: {on_deck}", Qt.TextElideMode.ElideRight, text_w)
+            painter.setPen(QColor(255, 255, 255, a(230)))
+            painter.drawText(QRect(x + pad, y_cursor, text_w, deck_fm.height() + 8),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, deck_text)
+
+        painter.restore()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("black"))
@@ -5700,6 +5949,8 @@ class VideoAreaWidget(QWidget):
         info = self._get_idle_bg_overlay_info()
         if info:
             self._draw_idle_bg_overlay(painter, info)
+
+        self._draw_next_up_overlay(painter)
 
         painter.end()
 
@@ -9804,6 +10055,12 @@ class VideoWindow(QWidget):
                     new_area.background_pixmap = QPixmap(old.background_pixmap)
             except Exception:
                 pass
+            try:
+                payload = getattr(old, "_next_up_overlay_payload", {}) or {}
+                if isinstance(payload, dict) and payload:
+                    new_area.show_next_up_overlay(payload, 3.0)
+            except Exception:
+                pass
 
             # Replace in-place to avoid transient layout collapse/jumps.
             self._main_layout.replaceWidget(old, new_area)
@@ -10068,7 +10325,7 @@ class AnalyzeLibraryWorker(QObject):
         self._cancel_event.set()
 
     def is_cancelled(self):
-        return self._cancel or self._cancel_event.is_set()
+        return self._cancel or self._cancel_event.is_set() or (not _loudness_workers_allowed())
 
     def run(self):
         total = len(self.items)
@@ -12061,6 +12318,229 @@ class SingerHistorySingerListModel(QAbstractListModel):
         return QModelIndex()
 
 
+class SingerHistoryDirectoryBuildWorker(QObject):
+    """Build Singer History directory rows away from the GUI thread."""
+
+    finished = pyqtSignal(int, dict)
+
+    def __init__(self, job_id: int, singers_snapshot: list, search: str, render_limit: int, song_scan_limit: int):
+        super().__init__()
+        self.job_id = int(job_id)
+        self.singers_snapshot = list(singers_snapshot or [])
+        self.search = str(search or "").strip().lower()
+        self.render_limit = max(1, int(render_limit or 1))
+        self.song_scan_limit = max(1, int(song_scan_limit or 1))
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        started = time.perf_counter()
+        timings = {}
+        model_rows = []
+        total_matches = 0
+        shown = 0
+        cancelled = False
+        try:
+            sort_t0 = time.perf_counter()
+            singers = list(self.singers_snapshot or [])
+            singers.sort(key=lambda kv: str((kv[1] or {}).get("name", "") or "").strip().lower())
+            timings["sort_ms"] = (time.perf_counter() - sort_t0) * 1000.0
+
+            scan_t0 = time.perf_counter()
+            matched_rows = []
+            for row_num, (singer_key, record) in enumerate(singers):
+                if self._cancelled:
+                    cancelled = True
+                    break
+                if not isinstance(record, dict):
+                    continue
+                name = str(record.get("name", "") or singer_key).strip()
+                if self.search:
+                    haystack = f"{name} {record.get('preferred_disc_priority', '')}".lower()
+                    if self.search not in haystack:
+                        song_match = False
+                        try:
+                            song_values = list((record.get("songs", {}) or {}).values())
+                        except Exception:
+                            song_values = []
+                        for idx, song in enumerate(song_values):
+                            if idx >= self.song_scan_limit:
+                                break
+                            if not isinstance(song, dict):
+                                continue
+                            text = (
+                                f"{song.get('artist', '')} {song.get('title', '')} "
+                                f"{song.get('disc_id', '')} {song.get('duet_display', '')}"
+                            ).lower()
+                            if self.search in text:
+                                song_match = True
+                                break
+                        if not song_match:
+                            continue
+                total_matches += 1
+                if len(matched_rows) < self.render_limit:
+                    matched_rows.append((singer_key, record, name))
+                if row_num and row_num % 256 == 0:
+                    time.sleep(0)
+            timings["scan_ms"] = (time.perf_counter() - scan_t0) * 1000.0
+
+            rows_t0 = time.perf_counter()
+            for singer_key, record, name in matched_rows:
+                if self._cancelled:
+                    cancelled = True
+                    break
+                try:
+                    perf = int(record.get("total_performances") or 0)
+                except Exception:
+                    perf = 0
+                try:
+                    uniq = int(record.get("unique_song_count") or len(record.get("songs", {}) or {}))
+                except Exception:
+                    uniq = 0
+                pref = str(record.get("preferred_disc_priority", "") or "").strip()
+                lines = [name, f"{perf} plays  ·  {uniq} songs"]
+                if pref:
+                    lines.append(f"Prefers: {pref}")
+                text = "\n".join(lines)
+                model_rows.append({
+                    "text": text,
+                    "singer_key": singer_key,
+                    "selectable": True,
+                    "tooltip": text,
+                    "height": 52,
+                })
+            shown = min(total_matches, len(matched_rows))
+            if total_matches > len(matched_rows) and not cancelled:
+                model_rows.append({
+                    "text": f"Showing {len(matched_rows)} of {total_matches} singers. Refine search to narrow results.",
+                    "singer_key": "",
+                    "selectable": False,
+                    "foreground_hex": "#94a3b8",
+                    "height": 52,
+                })
+            timings["rows_ms"] = (time.perf_counter() - rows_t0) * 1000.0
+        except Exception as e:
+            model_rows = [{
+                "text": f"Could not load singer history: {e}",
+                "singer_key": "",
+                "selectable": False,
+                "foreground_hex": "#f59e0b",
+                "height": 52,
+            }]
+            cancelled = False
+        finally:
+            timings["total_ms"] = (time.perf_counter() - started) * 1000.0
+            self.finished.emit(self.job_id, {
+                "rows": model_rows,
+                "total_matches": total_matches,
+                "shown": shown,
+                "search": self.search,
+                "timings": timings,
+                "cancelled": cancelled,
+            })
+
+
+class SingerHistorySongsBuildWorker(QObject):
+    """Build one singer's song-history rows away from the GUI thread."""
+
+    finished = pyqtSignal(int, str, dict)
+
+    def __init__(self, job_id: int, singer_key: str, songs_snapshot: list, render_limit: int):
+        super().__init__()
+        self.job_id = int(job_id)
+        self.singer_key = str(singer_key or "")
+        self.songs_snapshot = list(songs_snapshot or [])
+        self.render_limit = max(1, int(render_limit or 1))
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    @staticmethod
+    def _song_display(song: dict) -> str:
+        artist = str(song.get("artist", "") or "").strip() or "Unknown Artist"
+        title = str(song.get("title", "") or "").strip() or "Unknown Song"
+        disc = str(song.get("disc_id", "") or "").strip()
+        song_type = str(song.get("song_type", "") or "").strip().upper()
+        duet_display = str(song.get("duet_display", "") or "").strip()
+        key = int(song.get("last_key") or 0)
+        tempo = int(song.get("last_tempo_percent") or 100)
+        meta = []
+        if duet_display:
+            meta.append(f"Duet: {duet_display}")
+        if disc:
+            meta.append(disc)
+        if song_type:
+            meta.append(song_type)
+        meta.append(f"Key {key:+d}")
+        meta.append(f"Tempo {tempo}%")
+        return f"{artist} • {title}\n" + "  ·  ".join(meta)
+
+    def run(self):
+        started = time.perf_counter()
+        timings = {}
+        model_rows = []
+        cancelled = False
+        total = 0
+        try:
+            sort_t0 = time.perf_counter()
+            songs = list(self.songs_snapshot or [])
+            total = len(songs)
+            songs.sort(key=lambda kv: (
+                -(int((kv[1] or {}).get("last_performed_at") or 0)),
+                str((kv[1] or {}).get("artist", "") or "").lower(),
+                str((kv[1] or {}).get("title", "") or "").lower(),
+            ))
+            timings["sort_ms"] = (time.perf_counter() - sort_t0) * 1000.0
+
+            rows_t0 = time.perf_counter()
+            for idx, (song_key, song) in enumerate(songs[:self.render_limit]):
+                if self._cancelled:
+                    cancelled = True
+                    break
+                if not isinstance(song, dict):
+                    continue
+                text = self._song_display(song)
+                model_rows.append({
+                    "text": text,
+                    "song_key": song_key,
+                    "selectable": True,
+                    "tooltip": text,
+                    "height": 44,
+                })
+                if idx and idx % 128 == 0:
+                    time.sleep(0)
+            if total > self.render_limit and not cancelled:
+                model_rows.append({
+                    "text": f"Showing {self.render_limit} of {total} songs. Use search or edit history to narrow this list.",
+                    "song_key": "",
+                    "selectable": False,
+                    "foreground_hex": "#94a3b8",
+                    "height": 44,
+                })
+            timings["rows_ms"] = (time.perf_counter() - rows_t0) * 1000.0
+        except Exception as e:
+            model_rows = [{
+                "text": f"Could not load song history: {e}",
+                "song_key": "",
+                "selectable": False,
+                "foreground_hex": "#f59e0b",
+                "height": 44,
+            }]
+            cancelled = False
+        finally:
+            timings["total_ms"] = (time.perf_counter() - started) * 1000.0
+            self.finished.emit(self.job_id, self.singer_key, {
+                "rows": model_rows,
+                "total": total,
+                "shown": min(total, self.render_limit),
+                "timings": timings,
+                "cancelled": cancelled,
+            })
+
+
 class QueueListModel(QAbstractListModel):
     """Model-backed rows for the live rotation queue."""
 
@@ -13656,6 +14136,10 @@ class KaraokeApp(QWidget):
         if changed:
             try: self.save_settings()
             except Exception: pass
+        try:
+            self._sync_loudness_worker_gate("startup")
+        except Exception:
+            pass
 
         # Restore main window geometry (position/size) if saved; otherwise use default startup positioning.
         try:
@@ -17045,14 +17529,12 @@ class KaraokeApp(QWidget):
         # Processing is on — the compressor/limiter want a consistent input
         # level, so master processing and normalization work together.
         trim_db = self._track_trim_db(audio_path)
-        want_normalize = (
-            bool(self.settings.get("karaoke_normalize_enabled", True))
-            and (not simple_audio or master_active)
-        )
+        want_normalize = self._karaoke_normalize_active(master_active=master_active)
         try:
             if not want_normalize:
                 transport.normalize_gain_db = trim_db
-                _diag(f"[LOUDNESS] song_start_gain clean gain={trim_db:+.1f}dB master={int(master_active)} file={os.path.basename(audio_path)}")
+                reason = self._karaoke_normalize_bypass_reason(master_active=master_active)
+                _diag(f"[LOUDNESS] gain_bypassed reason={reason} clean_gain={trim_db:+.1f}dB master={int(master_active)} file={os.path.basename(audio_path)}")
             else:
                 gain = loudness_gain_db_cached(audio_path)
                 if gain is None:
@@ -18648,7 +19130,7 @@ class KaraokeApp(QWidget):
             try:
                 self._bg_resume_reason = "karaoke_end_overlap"
                 _diag("Karaoke track ended, starting BG overlap fade...")
-                self._start_bg_with_fade_safe("media_end_overlap")
+                can_overlap = bool(self._start_bg_with_fade_safe("media_end_overlap"))
             except Exception as e:
                 print("Failed starting BG overlap fade:", e)
                 can_overlap = False
@@ -18710,6 +19192,11 @@ class KaraokeApp(QWidget):
                 self.preview_window.update()
             except Exception as e:
                 print("restore background failed:", e)
+
+            try:
+                self._show_next_up_transition_overlay(reason="media_end")
+            except Exception:
+                pass
 
             if not schedule_bg_resume:
                 return
@@ -19563,6 +20050,23 @@ class KaraokeApp(QWidget):
         cdg_quality_row.addStretch(1)
         v.addLayout(cdg_quality_row)
 
+        v = _section_card(tab_display, "Show Screen Transition")
+        next_up_overlay_cb = QCheckBox('Show "Next Up" Transition Overlay')
+        next_up_overlay_cb.setChecked(bool(self.settings.get("next_up_overlay_enabled", True)))
+        v.addWidget(next_up_overlay_cb)
+
+        next_up_duration_row = QHBoxLayout()
+        next_up_duration_row.addWidget(QLabel("Overlay duration (seconds):"))
+        next_up_duration_spin = QSpinBox(dlg)
+        next_up_duration_spin.setRange(1, 60)
+        try:
+            next_up_duration_spin.setValue(max(1, min(60, int(float(self.settings.get("next_up_overlay_duration_sec", 10) or 10)))))
+        except Exception:
+            next_up_duration_spin.setValue(10)
+        next_up_duration_row.addWidget(next_up_duration_spin)
+        next_up_duration_row.addStretch(1)
+        v.addLayout(next_up_duration_row)
+
         # --- CDG lyric timing offset (visual-only calibration backup) ---
         v = _section_card(tab_display, "CDG Lyric Timing Offset",
                           "Visual-only nudge for CDG lyric latency. "
@@ -19879,6 +20383,10 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             try:
+                self._sync_loudness_worker_gate("master_audio_settings_changed")
+            except Exception:
+                pass
+            try:
                 master_apply_timer.start(120)
             except Exception:
                 self._refresh_master_audio_runtime()
@@ -20077,6 +20585,10 @@ class KaraokeApp(QWidget):
             self.settings["performance_mode"] = bool(checked)
             self.save_settings()
             try:
+                self._sync_loudness_worker_gate("performance_mode_toggled")
+            except Exception:
+                pass
+            try:
                 self._apply_performance_mode_runtime()
             except Exception:
                 pass
@@ -20088,6 +20600,10 @@ class KaraokeApp(QWidget):
         def on_safe_mode_toggled(checked: bool):
             self.settings["safe_mode"] = bool(checked)
             self.save_settings()
+            try:
+                self._sync_loudness_worker_gate("safe_mode_toggled")
+            except Exception:
+                pass
             try:
                 self._apply_performance_mode_runtime()
             except Exception:
@@ -20200,6 +20716,24 @@ class KaraokeApp(QWidget):
                 self.settings["end_silence_trim_threshold_sec"] = 6.0
             self.save_settings()
 
+        def on_next_up_overlay_toggled(checked: bool):
+            self.settings["next_up_overlay_enabled"] = bool(checked)
+            self.save_settings()
+            if not checked:
+                try:
+                    area = getattr(getattr(self, "video_window", None), "video_area", None)
+                    if area is not None and hasattr(area, "hide_next_up_overlay"):
+                        area.hide_next_up_overlay(immediate=True)
+                except Exception:
+                    pass
+
+        def on_next_up_duration_changed(value: int):
+            try:
+                self.settings["next_up_overlay_duration_sec"] = max(1, min(60, int(value)))
+            except Exception:
+                self.settings["next_up_overlay_duration_sec"] = 10
+            self.save_settings()
+
         def on_auto_advance_toggled(checked: bool):
             self.settings["karaoke_auto_advance"] = bool(checked)
             self.save_settings()
@@ -20211,6 +20745,10 @@ class KaraokeApp(QWidget):
         def on_simple_audio_toggled(checked: bool):
             self.settings["simple_audio_mode"] = bool(checked)
             self.save_settings()
+            try:
+                self._sync_loudness_worker_gate("simple_audio_toggled")
+            except Exception:
+                pass
             # Apply to the running BG engine immediately: drop/restore the EQ and
             # re-evaluate normalization so the change is live, not just on the
             # next song.
@@ -20230,10 +20768,18 @@ class KaraokeApp(QWidget):
         def on_normalize_toggled(checked: bool):
             self.settings["karaoke_normalize_enabled"] = bool(checked)
             self.save_settings()
+            try:
+                self._sync_loudness_worker_gate("karaoke_normalize_toggled")
+            except Exception:
+                pass
 
         def on_bg_normalize_toggled(checked: bool):
             self.settings["bg_normalize_enabled"] = bool(checked)
             self.save_settings()
+            try:
+                self._sync_loudness_worker_gate("bg_normalize_toggled")
+            except Exception:
+                pass
             # Apply immediately to the running BG engine.
             try:
                 if hasattr(self, "bg_music") and self.bg_music is not None:
@@ -20319,6 +20865,8 @@ class KaraokeApp(QWidget):
             update_dir_edit.setText(str(Path.home() / "Downloads" / "SingWS Updates"))
             cdg_stretch_cb.setChecked(False)
             cdg_quality_combo.setCurrentIndex(cdg_quality_combo.findData("standard"))
+            next_up_overlay_cb.setChecked(True)
+            next_up_duration_spin.setValue(10)
             show_tooltips_cb.setChecked(False)
             disc_priority_edit.setText("")
             defer_remote_adds_cb.setChecked(False)
@@ -20352,6 +20900,8 @@ class KaraokeApp(QWidget):
         slider.sliderReleased.connect(apply_text_size_from_slider)
         cdg_stretch_cb.toggled.connect(on_cdg_stretch_toggled)
         cdg_quality_combo.currentIndexChanged.connect(on_cdg_quality_changed)
+        next_up_overlay_cb.toggled.connect(on_next_up_overlay_toggled)
+        next_up_duration_spin.valueChanged.connect(on_next_up_duration_changed)
         performance_mode_cb.toggled.connect(on_performance_mode_toggled)
         safe_mode_cb.toggled.connect(on_safe_mode_toggled)
         perf_debug_cb.toggled.connect(on_perf_debug_toggled)
@@ -21142,6 +21692,25 @@ class KaraokeApp(QWidget):
                 _diag(f"[PERF] singer_history_refresh_scheduled reason={reason} delay_ms={int(delay_ms)}")
         except Exception:
             self._refresh_singer_history_view()
+
+    def _history_perf_log(self, name: str, ms: float, **meta):
+        try:
+            ms = float(ms)
+            _perf_record(f"singer_history_{name}", ms)
+            if ms < 5.0:
+                return
+            if ms >= 50.0:
+                bucket = ">=50ms"
+            elif ms >= 25.0:
+                bucket = ">=25ms"
+            elif ms >= 10.0:
+                bucket = ">=10ms"
+            else:
+                bucket = ">=5ms"
+            details = " ".join(f"{k}={v}" for k, v in meta.items() if v is not None)
+            _diag(f"[PERF] singer_history_{name} bucket={bucket} ms={ms:.1f}" + (f" {details}" if details else ""))
+        except Exception:
+            pass
 
     def _schedule_waiting_for_add_view_refresh(self, delay_ms: int | None = None, *, reason: str = "coalesced"):
         try:
@@ -22953,7 +23522,7 @@ class KaraokeApp(QWidget):
     def _refresh_singer_history_view(self):
         if not hasattr(self, "singer_history_singer_list"):
             return
-        _perf_t0 = time.perf_counter()
+        open_t0 = time.perf_counter()
         current_key = self._selected_singer_history_key()
         search = ""
         try:
@@ -22963,93 +23532,168 @@ class KaraokeApp(QWidget):
         playing = bool(getattr(self, "karaoke_playing", False))
         render_limit = 220 if playing else 700
         song_scan_limit = 120 if playing else 500
-        matched_rows = []
-        total_matches = 0
+
         try:
-            singers = list(self.singer_history.get("singers", {}).items())
-            singers.sort(key=lambda kv: self._history_sort_key(kv[1]))
-            for singer_key, record in singers:
+            self._singer_history_refresh_job_id = int(getattr(self, "_singer_history_refresh_job_id", 0) or 0) + 1
+            job_id = int(self._singer_history_refresh_job_id)
+        except Exception:
+            job_id = int(time.time() * 1000)
+            self._singer_history_refresh_job_id = job_id
+
+        old_worker = getattr(self, "_singer_history_directory_worker", None)
+        try:
+            if old_worker is not None and hasattr(old_worker, "cancel"):
+                old_worker.cancel()
+        except Exception:
+            pass
+
+        snapshot_t0 = time.perf_counter()
+        try:
+            singers_snapshot = list((self.singer_history.get("singers", {}) or {}).items())
+        except Exception:
+            singers_snapshot = []
+        self._history_perf_log(
+            "snapshot",
+            (time.perf_counter() - snapshot_t0) * 1000.0,
+            count=len(singers_snapshot),
+            playing=int(playing),
+            search=int(bool(search)),
+        )
+
+        if not singers_snapshot:
+            self._apply_singer_history_directory_rows(job_id, {
+                "rows": [],
+                "total_matches": 0,
+                "shown": 0,
+                "search": search,
+                "timings": {"total_ms": 0.0},
+                "cancelled": False,
+            }, current_key)
+            self._history_perf_log("open_request", (time.perf_counter() - open_t0) * 1000.0, count=0)
+            return
+
+        try:
+            self.singer_history_meta_label.setText("Loading singers...")
+            if hasattr(self, "singer_history_left_meta_label"):
+                self.singer_history_left_meta_label.setText("Loading")
+        except Exception:
+            pass
+
+        try:
+            thread = QThread(self)
+            worker = SingerHistoryDirectoryBuildWorker(job_id, singers_snapshot, search, render_limit, song_scan_limit)
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            targets = getattr(self, "_singer_history_directory_targets", None)
+            if not isinstance(targets, dict):
+                targets = {}
+                self._singer_history_directory_targets = targets
+            targets[job_id] = current_key
+            worker.finished.connect(self._on_singer_history_directory_built)
+            worker.finished.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            self._singer_history_directory_thread = thread
+            self._singer_history_directory_worker = worker
+            jobs = getattr(self, "_singer_history_directory_jobs", None)
+            if not isinstance(jobs, list):
+                jobs = []
+                self._singer_history_directory_jobs = jobs
+            job_ref = (thread, worker)
+            jobs.append(job_ref)
+            thread.finished.connect(lambda ref=job_ref: jobs.remove(ref) if ref in jobs else None)
+            thread.start()
+            self._history_perf_log(
+                "open_request",
+                (time.perf_counter() - open_t0) * 1000.0,
+                count=len(singers_snapshot),
+                playing=int(playing),
+                search=int(bool(search)),
+            )
+        except Exception as e:
+            _diag(f"[PERF] singer_history_worker_start_failed error={e}")
+            rows = []
+            for singer_key, record in singers_snapshot[:render_limit]:
+                if not isinstance(record, dict):
+                    continue
                 name = str(record.get("name", "") or singer_key).strip()
-                if search:
-                    haystack = f"{name} {record.get('preferred_disc_priority', '')}".lower()
-                    if search not in haystack:
-                        song_match = False
-                        for idx, song in enumerate((record.get("songs", {}) or {}).values()):
-                            if idx >= song_scan_limit:
-                                break
-                            text = (
-                                f"{song.get('artist', '')} {song.get('title', '')} "
-                                f"{song.get('disc_id', '')} {song.get('duet_display', '')}"
-                            ).lower()
-                            if search in text:
-                                song_match = True
-                                break
-                        if not song_match:
-                            continue
-                total_matches += 1
-                if len(matched_rows) < render_limit:
-                    matched_rows.append((singer_key, record, name))
+                text = f"{name}\n{int(record.get('total_performances') or 0)} plays  ·  {int(record.get('unique_song_count') or len(record.get('songs', {}) or {}))} songs"
+                rows.append({"text": text, "singer_key": singer_key, "selectable": True, "tooltip": text, "height": 52})
+            self._apply_singer_history_directory_rows(job_id, {
+                "rows": rows,
+                "total_matches": len(singers_snapshot),
+                "shown": len(rows),
+                "search": search,
+                "timings": {"total_ms": (time.perf_counter() - open_t0) * 1000.0},
+                "cancelled": False,
+            }, current_key)
 
-            model_rows = []
-            for singer_key, record, name in matched_rows:
-                perf = int(record.get("total_performances") or 0)
-                uniq = int(record.get("unique_song_count") or len(record.get("songs", {}) or {}))
-                pref = str(record.get("preferred_disc_priority", "") or "").strip()
-                lines = [name, f"{perf} plays  ·  {uniq} songs"]
-                if pref:
-                    lines.append(f"Prefers: {pref}")
-                text = "\n".join(lines)
-                model_rows.append({
-                    "text": text,
-                    "singer_key": singer_key,
-                    "selectable": True,
-                    "tooltip": text,
-                    "height": 52,
-                })
-            if total_matches > len(matched_rows):
-                model_rows.append({
-                    "text": f"Showing {len(matched_rows)} of {total_matches} singers. Refine search to narrow results.",
-                    "singer_key": "",
-                    "selectable": False,
-                    "foreground": QColor("#94a3b8"),
-                    "height": 52,
-                })
+    def _on_singer_history_directory_built(self, job_id: int, result: dict):
+        try:
+            targets = getattr(self, "_singer_history_directory_targets", {})
+            current_key = str((targets or {}).pop(int(job_id), "") or "")
+            if int(job_id) != int(getattr(self, "_singer_history_refresh_job_id", 0) or 0):
+                return
+            if isinstance(result, dict) and result.get("cancelled"):
+                return
+            self._apply_singer_history_directory_rows(job_id, result, current_key)
+        except Exception as e:
+            _diag(f"[PERF] singer_history_directory_apply_failed error={e}")
 
-            selection_model = self.singer_history_singer_list.selectionModel()
-            self.singer_history_singer_list.setUpdatesEnabled(False)
+    def _apply_singer_history_directory_rows(self, job_id: int, result: dict, current_key: str):
+        apply_t0 = time.perf_counter()
+        rows = list((result or {}).get("rows") or [])
+        for row in rows:
+            color_hex = row.pop("foreground_hex", None)
+            if color_hex:
+                try:
+                    row["foreground"] = QColor(str(color_hex))
+                except Exception:
+                    pass
+        total_matches = int((result or {}).get("total_matches") or 0)
+        shown = int((result or {}).get("shown") or 0)
+        search = str((result or {}).get("search") or "")
+        selection_model = self.singer_history_singer_list.selectionModel()
+        self.singer_history_singer_list.setUpdatesEnabled(False)
+        if selection_model is not None:
+            selection_model.blockSignals(True)
+        try:
+            self.singer_history_singer_model.setRows(rows)
+            target_index = self.singer_history_singer_model.indexForSingerKey(current_key)
+            if not target_index.isValid():
+                target_index = self.singer_history_singer_model.firstSelectableIndex()
+            if target_index.isValid():
+                self.singer_history_singer_list.setCurrentIndex(target_index)
+            else:
+                self.singer_history_singer_list.setCurrentIndex(QModelIndex())
+        finally:
             if selection_model is not None:
-                selection_model.blockSignals(True)
-            try:
-                self.singer_history_singer_model.setRows(model_rows)
-                target_index = self.singer_history_singer_model.indexForSingerKey(current_key)
-                if not target_index.isValid():
-                    target_index = self.singer_history_singer_model.firstSelectableIndex()
-                if target_index.isValid():
-                    self.singer_history_singer_list.setCurrentIndex(target_index)
-                else:
-                    self.singer_history_singer_list.setCurrentIndex(QModelIndex())
-            finally:
-                if selection_model is not None:
-                    selection_model.blockSignals(False)
-                self.singer_history_singer_list.setUpdatesEnabled(True)
-
-            shown = min(total_matches, len(matched_rows))
+                selection_model.blockSignals(False)
+            self.singer_history_singer_list.setUpdatesEnabled(True)
+        try:
             suffix = "" if total_matches == shown else f" ({shown} shown)"
             self.singer_history_meta_label.setText(f"{total_matches} singers{suffix}")
             try:
                 self.singer_history_left_meta_label.setText("Directory" if total_matches else "Empty")
             except Exception:
                 pass
-            self._update_singer_history_details(self._selected_singer_history_key())
-        finally:
-            try:
-                elapsed_ms = (time.perf_counter() - _perf_t0) * 1000.0
-                if bool(getattr(self, "karaoke_playing", False)) and elapsed_ms >= 25.0:
-                    _diag(f"[PERF] singer_history_refresh_during_playback ms={elapsed_ms:.1f} search={bool(search)}")
-                else:
-                    _perf_log_if_slow("singer_history_refresh", elapsed_ms)
-            except Exception:
-                pass
+        except Exception:
+            pass
+        self._update_singer_history_details(self._selected_singer_history_key())
+        self._history_perf_log(
+            "model_apply",
+            (time.perf_counter() - apply_t0) * 1000.0,
+            rows=len(rows),
+            total=total_matches,
+            playing=int(bool(getattr(self, "karaoke_playing", False))),
+            search=int(bool(search)),
+        )
+        try:
+            timings = dict((result or {}).get("timings") or {})
+            for key, value in timings.items():
+                self._history_perf_log(f"directory_worker_{key.replace('_ms', '')}", float(value), job=job_id)
+        except Exception:
+            pass
 
     def _on_singer_history_selection_changed(self, *_args):
         self._update_singer_history_details(self._selected_singer_history_key())
@@ -23057,6 +23701,12 @@ class KaraokeApp(QWidget):
     def _update_singer_history_details(self, singer_key: str):
         if not hasattr(self, "singer_history_name_label"):
             return
+        old_worker = getattr(self, "_singer_history_songs_worker", None)
+        try:
+            if old_worker is not None and hasattr(old_worker, "cancel"):
+                old_worker.cancel()
+        except Exception:
+            pass
         record = self.singer_history.get("singers", {}).get(singer_key, {}) if singer_key else {}
         if not isinstance(record, dict) or not singer_key:
             self.singer_history_name_label.setText("Select a singer")
@@ -23105,48 +23755,131 @@ class KaraokeApp(QWidget):
         self.singer_history_delete_singer_button.setEnabled(True)
         self.singer_history_add_song_button.setEnabled(True)
         current_song_key = self._selected_singer_history_song_key()
-        songs = list((record.get("songs", {}) or {}).items())
-        songs.sort(key=lambda kv: (-(int(kv[1].get("last_performed_at") or 0)), kv[1].get("artist", "").lower(), kv[1].get("title", "").lower()))
         render_limit = 180 if bool(getattr(self, "karaoke_playing", False)) else 500
-        model_rows = []
-        self.singer_history_songs_list.setUpdatesEnabled(False)
         try:
-            for song_key, song in songs[:render_limit]:
-                text = self._history_song_display(song)
-                model_rows.append({
-                    "text": text,
-                    "song_key": song_key,
-                    "selectable": True,
-                    "tooltip": text,
-                    "height": 44,
-                })
-            if len(songs) > render_limit:
-                model_rows.append({
-                    "text": f"Showing {render_limit} of {len(songs)} songs. Use search or edit history to narrow this list.",
-                    "song_key": "",
-                    "selectable": False,
-                    "foreground": QColor("#94a3b8"),
-                    "height": 44,
-                })
-            self.singer_history_songs_model.setRows(model_rows)
-        finally:
-            self.singer_history_songs_list.setUpdatesEnabled(True)
+            songs = list((record.get("songs", {}) or {}).items())
+        except Exception:
+            songs = []
         try:
-            shown = min(len(songs), render_limit)
-            suffix = "" if shown == len(songs) else f" ({shown} shown)"
-            self.singer_history_song_meta_label.setText(f"{len(songs)} entries{suffix}")
+            self._singer_history_songs_job_id = int(getattr(self, "_singer_history_songs_job_id", 0) or 0) + 1
+            job_id = int(self._singer_history_songs_job_id)
+        except Exception:
+            job_id = int(time.time() * 1000)
+            self._singer_history_songs_job_id = job_id
+        self.singer_history_edit_song_button.setEnabled(False)
+        self.singer_history_delete_song_button.setEnabled(False)
+        try:
+            self.singer_history_song_meta_label.setText(f"{len(songs)} entries (loading)")
         except Exception:
             pass
-        self.singer_history_edit_song_button.setEnabled(bool(songs))
-        self.singer_history_delete_song_button.setEnabled(bool(songs))
-        if songs:
+        if not songs:
+            try:
+                self.singer_history_songs_model.setRows([])
+                self.singer_history_song_meta_label.setText("0 entries")
+            except Exception:
+                pass
+            return
+        try:
+            thread = QThread(self)
+            worker = SingerHistorySongsBuildWorker(job_id, singer_key, songs, render_limit)
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            selected_by_job = getattr(self, "_singer_history_songs_selected_by_job", None)
+            if not isinstance(selected_by_job, dict):
+                selected_by_job = {}
+                self._singer_history_songs_selected_by_job = selected_by_job
+            selected_by_job[job_id] = current_song_key
+            worker.finished.connect(self._on_singer_history_songs_built)
+            worker.finished.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            self._singer_history_songs_thread = thread
+            self._singer_history_songs_worker = worker
+            jobs = getattr(self, "_singer_history_songs_jobs", None)
+            if not isinstance(jobs, list):
+                jobs = []
+                self._singer_history_songs_jobs = jobs
+            job_ref = (thread, worker)
+            jobs.append(job_ref)
+            thread.finished.connect(lambda ref=job_ref: jobs.remove(ref) if ref in jobs else None)
+            thread.start()
+        except Exception as e:
+            _diag(f"[PERF] singer_history_songs_worker_start_failed singer={singer_key} error={e}")
+            rows = []
+            for song_key, song in songs[:render_limit]:
+                if not isinstance(song, dict):
+                    continue
+                text = self._history_song_display(song)
+                rows.append({"text": text, "song_key": song_key, "selectable": True, "tooltip": text, "height": 44})
+            self._apply_singer_history_song_rows(job_id, singer_key, {
+                "rows": rows,
+                "total": len(songs),
+                "shown": len(rows),
+                "timings": {},
+                "cancelled": False,
+            }, current_song_key)
+
+    def _on_singer_history_songs_built(self, job_id: int, singer_key: str, result: dict):
+        try:
+            selected_by_job = getattr(self, "_singer_history_songs_selected_by_job", {})
+            current_song_key = str((selected_by_job or {}).pop(int(job_id), "") or "")
+            if int(job_id) != int(getattr(self, "_singer_history_songs_job_id", 0) or 0):
+                return
+            if str(singer_key or "") != self._selected_singer_history_key():
+                return
+            if isinstance(result, dict) and result.get("cancelled"):
+                return
+            self._apply_singer_history_song_rows(job_id, singer_key, result, current_song_key)
+        except Exception as e:
+            _diag(f"[PERF] singer_history_songs_apply_failed singer={singer_key} error={e}")
+
+    def _apply_singer_history_song_rows(self, job_id: int, singer_key: str, result: dict, current_song_key: str):
+        apply_t0 = time.perf_counter()
+        rows = list((result or {}).get("rows") or [])
+        for row in rows:
+            color_hex = row.pop("foreground_hex", None)
+            if color_hex:
+                try:
+                    row["foreground"] = QColor(str(color_hex))
+                except Exception:
+                    pass
+        self.singer_history_songs_list.setUpdatesEnabled(False)
+        try:
+            self.singer_history_songs_model.setRows(rows)
+        finally:
+            self.singer_history_songs_list.setUpdatesEnabled(True)
+        total = int((result or {}).get("total") or 0)
+        shown = int((result or {}).get("shown") or 0)
+        try:
+            suffix = "" if shown == total else f" ({shown} shown)"
+            self.singer_history_song_meta_label.setText(f"{total} entries{suffix}")
+        except Exception:
+            pass
+        has_rows = any((row or {}).get("selectable") for row in rows)
+        self.singer_history_edit_song_button.setEnabled(bool(has_rows))
+        self.singer_history_delete_song_button.setEnabled(bool(has_rows))
+        if has_rows:
             target_index = self.singer_history_songs_model.indexForSongKey(current_song_key)
             if not target_index.isValid():
                 target_index = self.singer_history_songs_model.firstSelectableIndex()
             if target_index.isValid():
                 self.singer_history_songs_list.setCurrentIndex(target_index)
+        self._history_perf_log(
+            "songs_model_apply",
+            (time.perf_counter() - apply_t0) * 1000.0,
+            singer=singer_key,
+            rows=len(rows),
+            total=total,
+            playing=int(bool(getattr(self, "karaoke_playing", False))),
+        )
+        try:
+            timings = dict((result or {}).get("timings") or {})
+            for key, value in timings.items():
+                self._history_perf_log(f"songs_worker_{key.replace('_ms', '')}", float(value), singer=singer_key, job=job_id)
+        except Exception:
+            pass
 
-    def _history_brand_choices(self) -> list[str]:
+    def _history_brand_choices(self, *, allow_sync_build: bool = True) -> list[str]:
         try:
             tracks = getattr(self, "tracks", []) or []
             cache_key = (len(tracks), id(tracks))
@@ -23157,7 +23890,10 @@ class KaraokeApp(QWidget):
         except Exception:
             tracks = getattr(self, "tracks", []) or []
             cache_key = None
+        if not allow_sync_build:
+            return []
         brands = set()
+        _perf_t0 = time.perf_counter()
         try:
             for t in tracks:
                 disc = str((t or {}).get("disc_id", "") or "").strip()
@@ -23171,6 +23907,10 @@ class KaraokeApp(QWidget):
             self._history_brand_choices_cache = list(choices)
         except Exception:
             pass
+        try:
+            self._history_perf_log("brand_choices_build", (time.perf_counter() - _perf_t0) * 1000.0, tracks=len(tracks))
+        except Exception:
+            pass
         return choices
 
     def _refresh_singer_history_brand_combo(self, current_pref: str = ""):
@@ -23178,7 +23918,7 @@ class KaraokeApp(QWidget):
         if combo is None:
             return
         current_pref = ", ".join(normalize_disc_priority(current_pref, max_items=10))
-        choices = self._history_brand_choices()
+        choices = self._history_brand_choices(allow_sync_build=not bool(getattr(self, "karaoke_playing", False)))
         try:
             combo.blockSignals(True)
             combo.clear()
@@ -23229,7 +23969,7 @@ class KaraokeApp(QWidget):
     def _commit_singer_history_change(self, reason: str = "history_edit"):
         self._apply_singer_history_preferences_to_queue()
         try:
-            self.save_data()
+            self._schedule_save_data(250 if bool(getattr(self, "karaoke_playing", False)) else 0)
         except Exception:
             pass
         self._schedule_singer_history_refresh(reason=reason)
@@ -27271,6 +28011,149 @@ class KaraokeApp(QWidget):
         s = self._next_singer_entry()
         return str(s.get("name", "") or "").strip() if isinstance(s, dict) else ""
 
+    def _next_up_queue_target(self):
+        """Return (singer, entry) for the next playable queue item."""
+        cur = self._current_play_item_key()
+        try:
+            queue = list(getattr(self, "queue", []) or [])
+        except Exception:
+            queue = []
+        for singer in queue:
+            if not isinstance(singer, dict) or singer.get("skipped", False):
+                continue
+            entry = self._first_active_entry_for_singer(singer)
+            if entry is None:
+                continue
+            if self._entry_play_item_key(singer, entry) == cur:
+                nxt_same = self._next_active_entry_after(singer, entry)
+                if nxt_same is not None:
+                    return singer, nxt_same
+                continue
+            return singer, entry
+        return None, None
+
+    def _first_active_singer_name_from_queue(self) -> str:
+        try:
+            for singer in getattr(self, "queue", []) or []:
+                if not isinstance(singer, dict) or singer.get("skipped", False):
+                    continue
+                if self._first_active_entry_for_singer(singer) is not None:
+                    return str(singer.get("name", "") or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    def _next_up_entry_artist_title(self, entry, song_path: str = "") -> tuple[str, str]:
+        artist = ""
+        title = ""
+        try:
+            if isinstance(entry, dict):
+                artist = str(entry.get("artist") or "").strip()
+                title = str(entry.get("title") or "").strip()
+                if not (artist and title):
+                    a2, t2 = self._entry_artist_title(entry)
+                    artist = artist or str(a2 or "").strip()
+                    title = title or str(t2 or "").strip()
+        except Exception:
+            pass
+        if (not title or not artist) and song_path:
+            try:
+                display = self.lookup_display_name(song_path, artist_title_only=True)
+            except Exception:
+                display = ""
+            if " • " in str(display):
+                a2, t2 = str(display).split(" • ", 1)
+                artist = artist or a2.strip()
+                title = title or t2.strip()
+            elif display:
+                title = title or str(display).strip()
+        if not title and song_path:
+            try:
+                title = Path(str(song_path)).stem
+            except Exception:
+                title = str(song_path)
+        return artist, title
+
+    def _next_up_transition_payload_for(self, singer: dict, entry, *, following_singer: str = "") -> dict:
+        if not isinstance(singer, dict):
+            return {}
+        singer_name = str(singer.get("name", "") or "").strip()
+        if not singer_name:
+            return {}
+        duet_display = ""
+        song_info = None
+        try:
+            if isinstance(entry, dict):
+                duet_display = str(entry.get("duet_display") or "").strip()
+                song_info = entry.get("song_info")
+            elif isinstance(entry, (tuple, list)):
+                song_info = entry[0] if entry else None
+                if len(entry) >= 4:
+                    duet_display = str(entry[3] or "").strip()
+                elif len(entry) >= 3 and not isinstance(entry[2], (int, float)):
+                    duet_display = str(entry[2] or "").strip()
+            else:
+                song_info = entry
+        except Exception:
+            song_info = entry
+        song_path = self._song_info_primary_path(song_info)
+        artist, title = self._next_up_entry_artist_title(entry, song_path)
+        return {
+            "singer": duet_display or singer_name,
+            "title": title,
+            "artist": artist,
+            "on_deck": str(following_singer or "").strip(),
+        }
+
+    def _next_up_transition_payload_from_queue(self) -> dict:
+        singer, entry = self._next_up_queue_target()
+        if not isinstance(singer, dict) or entry is None:
+            return {}
+        following = ""
+        try:
+            seen = False
+            for candidate in getattr(self, "queue", []) or []:
+                if candidate is singer:
+                    seen = True
+                    continue
+                if not seen:
+                    continue
+                if not isinstance(candidate, dict) or candidate.get("skipped", False):
+                    continue
+                if self._first_active_entry_for_singer(candidate) is not None:
+                    following = str(candidate.get("name", "") or "").strip()
+                    break
+        except Exception:
+            following = ""
+        return self._next_up_transition_payload_for(singer, entry, following_singer=following)
+
+    def _next_up_overlay_duration_sec(self) -> float:
+        try:
+            return max(1.0, min(60.0, float(self.settings.get("next_up_overlay_duration_sec", 10) or 10)))
+        except Exception:
+            return 10.0
+
+    def _show_next_up_transition_overlay(self, payload: dict | None = None, *, reason: str = "unknown") -> bool:
+        if not bool(self.settings.get("next_up_overlay_enabled", True)):
+            return False
+        payload = payload if isinstance(payload, dict) else self._next_up_transition_payload_from_queue()
+        if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
+            return False
+        try:
+            area = getattr(getattr(self, "video_window", None), "video_area", None)
+            if area is None or not hasattr(area, "show_next_up_overlay"):
+                return False
+            area.show_next_up_overlay(payload, self._next_up_overlay_duration_sec())
+            _diag(
+                f"[NEXT-UP-OVERLAY] show reason={reason} singer={payload.get('singer', '')!r} "
+                f"title={payload.get('title', '')!r} artist={payload.get('artist', '')!r} "
+                f"on_deck={payload.get('on_deck', '')!r}"
+            )
+            return True
+        except Exception as e:
+            _diag(f"[NEXT-UP-OVERLAY] show failed reason={reason}: {e}")
+            return False
+
     @staticmethod
     def _split_duet_for_html(value: str):
         """Return (primary, partner_clause) from a 'Primary & Partner' display
@@ -27968,6 +28851,95 @@ class KaraokeApp(QWidget):
         s = str(name or "")
         return _re.sub(r"\S+", lambda m: m.group(0)[0].upper() + m.group(0)[1:], s)
 
+    def _queue_singer_match_index(self, singer_name: str) -> int:
+        target = self._queue_limit_name_key(singer_name)
+        if not target:
+            return -1
+        try:
+            for idx, singer in enumerate(self.queue or []):
+                if self._queue_limit_name_key((singer or {}).get("name", "")) == target:
+                    return idx
+        except Exception:
+            pass
+        return -1
+
+    def _queue_order_snapshot_for_log(self, singer: dict | None) -> list:
+        out = []
+        try:
+            for idx, entry in enumerate((singer or {}).get("songs", []) or []):
+                remote_id = self._queue_entry_remote_request_id(entry)
+                if remote_id is not None:
+                    out.append(f"rid:{remote_id}")
+                elif isinstance(entry, dict):
+                    title = str(entry.get("display_name") or entry.get("title") or "").strip()
+                    out.append(f"local:{idx}:{title[:48]}")
+                else:
+                    out.append(f"local:{idx}:{type(entry).__name__}")
+        except Exception:
+            pass
+        return out
+
+    def _queue_insert_source_label(self, remote_meta: dict | None, *, host_source: str = "host") -> str:
+        if not isinstance(remote_meta, dict):
+            return str(host_source or "host")
+        source = str(
+            remote_meta.get("request_source")
+            or remote_meta.get("submission_source")
+            or remote_meta.get("source")
+            or remote_meta.get("created_by")
+            or "server"
+        ).strip().lower()
+        if source in {"host", "desktop"}:
+            return "host"
+        if source in {"kiosk", "phone", "server", "singer", "waitlist"}:
+            return source
+        return "server"
+
+    def _log_queue_insert_resolution(
+        self,
+        *,
+        singer_name: str,
+        request_id: int = 0,
+        source: str = "host",
+        reason: str = "queue_insert",
+        before: list | None = None,
+        after: list | None = None,
+        insertion_index: int = -1,
+        active_count: int = 0,
+        singer_idx: int = -1,
+    ) -> None:
+        try:
+            singer = self.queue[singer_idx] if 0 <= int(singer_idx) < len(self.queue) else {}
+        except Exception:
+            singer = {}
+        try:
+            queue_revision = int(getattr(self, "_queue_revision", 0) or 0)
+        except Exception:
+            queue_revision = 0
+        _diag(
+            "[QUEUE-INSERT] "
+            f"singer={str(singer_name or '')!r} request_id={int(request_id or 0) or ''} "
+            f"source={source} reason={reason} active_song_count={int(active_count or 0)} "
+            f"insertion_index={int(insertion_index)} before={before or []} after={after or []} "
+            f"queue_revision={queue_revision} host_revision={int((singer or {}).get('order_revision') or 0)} "
+            f"server_revision=0 host_order_updated_at={int((singer or {}).get('host_order_updated_at') or 0)}"
+        )
+
+    def _mark_inserted_singer_order_authoritative(self, singer_idx: int, *, is_remote: bool, reason: str) -> None:
+        try:
+            singer = self.queue[int(singer_idx)]
+        except Exception:
+            return
+        if not isinstance(singer, dict):
+            return
+        # Any desktop-accepted insertion establishes the current local song order
+        # as authoritative.  For remote requests this prevents the next stale
+        # server poll from sorting the new request ahead of an existing song.
+        try:
+            self._sync_remote_singer_order(int(singer_idx), reason=reason)
+        except Exception:
+            pass
+
     def _add_song_to_queue(self, singer_name, song_data, track=None, remote_meta=None):
         # Always capitalize the first letter of every word in the singer's name,
         # whether typed by the operator or submitted remotely
@@ -28028,14 +29000,19 @@ class KaraokeApp(QWidget):
                 remote_request_id = 0
             if remote_request_id > 0:
                 entry["remote_request_id"] = remote_request_id
+        else:
+            remote_request_id = 0
+        insert_source = self._queue_insert_source_label(remote_meta)
 
         # Pre-measure loudness in the background so the song is normalized by the
         # time it actually plays (it usually sits in the queue behind others).
         try:
-            if bool(self.settings.get("karaoke_normalize_enabled", True)):
+            if self._karaoke_normalize_active():
                 _ap = self._loudness_audio_path(song_info)
                 if _ap:
                     analyze_loudness_async(_ap)
+            else:
+                _diag(f"[LOUDNESS] queue_preanalysis_skipped reason={self._karaoke_normalize_bypass_reason()} song={display_name!r}")
         except Exception:
             pass
 
@@ -28054,32 +29031,52 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-        for singer_idx, singer in enumerate(self.queue):
-            if self._queue_limit_name_key(singer.get("name", "")) == self._queue_limit_name_key(primary):
-                singer.setdefault("has_sung", False)
-                singer.setdefault("round_sung", False)
-                singer.setdefault("rotation_marker", False)
-                singer["songs"].append(entry)
-                try:
-                    if self._is_rotation_mode() and bool(singer.get("has_sung", False)):
-                        _diag(
-                            f"[ROTATION] returning singer kept original row: "
-                            f"{primary} idx={singer_idx} pending={len(singer.get('songs') or [])}"
-                        )
-                except Exception:
-                    pass
-                # An existing singer adding another song stays in their current
-                # slot; just keep any locked newcomers interleaved correctly.
-                if self._is_rotation_locked():
-                    self._rotation_reweave_locked_tail()
-                if not is_remote:
-                    self._sync_remote_singer_order(singer_idx, reason="host_add_song")
-                self._request_queue_display_refresh()
-                if not is_remote:
-                    self._select_queue_singer_for_host(singer_idx)
-                    self.singer_input.clear()
-                    self.key_selector.setCurrentIndex(self.key_selector.findText("Key: 0"))
-                return True
+        singer_idx = self._queue_singer_match_index(primary)
+        if singer_idx >= 0:
+            singer = self.queue[singer_idx]
+            songs = singer.setdefault("songs", [])
+            before_order = self._queue_order_snapshot_for_log(singer)
+            active_count = len(songs)
+            singer.setdefault("has_sung", False)
+            singer.setdefault("round_sung", False)
+            singer.setdefault("rotation_marker", False)
+            insertion_index = len(songs)
+            songs.append(entry)
+            try:
+                if self._is_rotation_mode() and bool(singer.get("has_sung", False)):
+                    _diag(
+                        f"[ROTATION] returning singer kept original row: "
+                        f"{primary} idx={singer_idx} pending={len(singer.get('songs') or [])}"
+                    )
+            except Exception:
+                pass
+            # An existing singer adding another song stays in their current
+            # slot; just keep any locked newcomers interleaved correctly.
+            if self._is_rotation_locked():
+                self._rotation_reweave_locked_tail()
+            self._mark_inserted_singer_order_authoritative(
+                singer_idx,
+                is_remote=is_remote,
+                reason=f"{insert_source}_append_existing_singer",
+            )
+            after_order = self._queue_order_snapshot_for_log(singer)
+            self._log_queue_insert_resolution(
+                singer_name=primary,
+                request_id=remote_request_id,
+                source=insert_source,
+                reason="append_existing_singer",
+                before=before_order,
+                after=after_order,
+                insertion_index=insertion_index,
+                active_count=active_count,
+                singer_idx=singer_idx,
+            )
+            self._request_queue_display_refresh()
+            if not is_remote:
+                self._select_queue_singer_for_host(singer_idx)
+                self.singer_input.clear()
+                self.key_selector.setCurrentIndex(self.key_selector.findText("Key: 0"))
+            return True
 
         new_singer = {"name": primary, "songs": [entry], "skipped": False, "has_sung": False, "round_sung": False, "rotation_marker": False}
         if self._is_rotation_mode():
@@ -28101,8 +29098,22 @@ class KaraokeApp(QWidget):
         else:
             self.queue.append(new_singer)
             ins = len(self.queue) - 1
-        if not is_remote:
-            self._sync_remote_singer_order(ins, reason="host_add_song")
+        self._mark_inserted_singer_order_authoritative(
+            ins,
+            is_remote=is_remote,
+            reason=f"{insert_source}_new_singer",
+        )
+        self._log_queue_insert_resolution(
+            singer_name=primary,
+            request_id=remote_request_id,
+            source=insert_source,
+            reason="new_singer",
+            before=[],
+            after=self._queue_order_snapshot_for_log(new_singer),
+            insertion_index=0,
+            active_count=0,
+            singer_idx=ins,
+        )
         if not is_remote:
             self.singer_input.clear()
         self._request_queue_display_refresh()
@@ -28979,13 +29990,22 @@ class KaraokeApp(QWidget):
 
     def _library_loudness_analysis_items(self, force: bool = False):
         """Return deduped karaoke+BGM audio files that need loudness analysis."""
+        if not self._any_loudness_normalization_active():
+            _diag("[LOUDNESS-LIB] item_scan_skipped reason=normalization_disabled")
+            return []
         _loudness_load_cache()
         raw_items = []
-        for t in list(getattr(self, "tracks", []) or []):
-            item = self._analysis_audio_for_track(t)
-            if item:
-                raw_items.append(item)
-        raw_items.extend(self._bgm_analysis_items())
+        if self._karaoke_normalize_active():
+            for t in list(getattr(self, "tracks", []) or []):
+                item = self._analysis_audio_for_track(t)
+                if item:
+                    raw_items.append(item)
+        else:
+            _diag(f"[LOUDNESS-LIB] karaoke_scan_skipped reason={self._karaoke_normalize_bypass_reason()}")
+        if self._bg_normalize_setting_active():
+            raw_items.extend(self._bgm_analysis_items())
+        else:
+            _diag("[LOUDNESS-LIB] bgm_scan_skipped reason=disabled")
 
         seen = set()
         items = []
@@ -29006,6 +30026,14 @@ class KaraokeApp(QWidget):
     def analyze_library(self, force: bool = False):
         """Analyze static loudness/gain for karaoke and BGM libraries."""
         from PyQt6.QtWidgets import QProgressDialog
+        if not self._any_loudness_normalization_active():
+            _diag("[LOUDNESS-LIB] skipped reason=normalization_disabled")
+            QMessageBox.information(
+                self,
+                "Analyze Library",
+                "Normalization is disabled, so no volume analysis is needed.",
+            )
+            return
         # Don't start a second pass while one is running — just resurface the
         # existing progress window (this is what caused duplicate windows).
         if getattr(self, "_analyze_running", False):
@@ -30006,14 +31034,6 @@ class KaraokeApp(QWidget):
         except Exception:
             return
 
-        payload = self._export_singer_history_payload()
-        singer_count = len((payload.get("singers") or {}) if isinstance(payload, dict) else {})
-        deletion_count = len((payload.get("deletions") or {}) if isinstance(payload, dict) else {})
-        generated_at = int(payload.get("generated_at") or 0) if isinstance(payload, dict) else 0
-        print(
-            f"[singer-history] sync start reason={reason} "
-            f"local_singers={singer_count} deletions={deletion_count} generated_at={generated_at}"
-        )
         # Always merge: deletions propagate via tombstones (payload["deletions"]),
         # so the destructive "replace" mode is no longer needed and would risk
         # wiping records from other devices.
@@ -30021,6 +31041,18 @@ class KaraokeApp(QWidget):
 
         def send():
             try:
+                export_t0 = time.perf_counter()
+                payload = self._export_singer_history_payload()
+                export_ms = (time.perf_counter() - export_t0) * 1000.0
+                if export_ms >= 5.0:
+                    _diag(f"[PERF] singer_history_sync_export_worker ms={export_ms:.1f} reason={reason}")
+                singer_count = len((payload.get("singers") or {}) if isinstance(payload, dict) else {})
+                deletion_count = len((payload.get("deletions") or {}) if isinstance(payload, dict) else {})
+                generated_at = int(payload.get("generated_at") or 0) if isinstance(payload, dict) else 0
+                print(
+                    f"[singer-history] sync start reason={reason} "
+                    f"local_singers={singer_count} deletions={deletion_count} generated_at={generated_at}"
+                )
                 resp = requests.post(
                     f"{base_url}/api/v1/singer_history_sync.php",
                     json={
@@ -30053,7 +31085,7 @@ class KaraokeApp(QWidget):
                 )
                 if self._merge_remote_singer_history(merged):
                     try:
-                        self.save_data()
+                        self._schedule_save_data(500 if bool(getattr(self, "karaoke_playing", False)) else 0)
                     except Exception:
                         pass
                     print(f"[singer-history] merged remote changes reason={reason}")
@@ -32267,6 +33299,78 @@ class KaraokeApp(QWidget):
         except Exception:
             return True
 
+    def _karaoke_normalize_active(self, master_active: bool | None = None) -> bool:
+        """True only when karaoke loudness work is allowed to read/cache/analyze.
+
+        This is the hard gate for the "Normalize karaoke volume" checkbox. When
+        the checkbox is off, no cache read, cache write, LUFS calculation, or
+        background loudness worker should start from karaoke paths.
+        """
+        try:
+            if not bool(self.settings.get("karaoke_normalize_enabled", True)):
+                return False
+            if self._performance_mode() or self._safe_mode():
+                return False
+            if not self._simple_audio_mode():
+                return True
+            if master_active is None:
+                master_active = self._master_processing_active()
+            return bool(master_active)
+        except Exception:
+            return False
+
+    def _karaoke_normalize_bypass_reason(self, master_active: bool | None = None) -> str:
+        try:
+            if not bool(self.settings.get("karaoke_normalize_enabled", True)):
+                return "setting_off"
+            if self._safe_mode():
+                return "safe_mode"
+            if self._performance_mode():
+                return "performance_mode"
+            if self._simple_audio_mode():
+                if master_active is None:
+                    master_active = self._master_processing_active()
+                if not master_active:
+                    return "simple_audio_mode"
+            return "unknown"
+        except Exception:
+            return "error"
+
+    def _bg_normalize_setting_active(self) -> bool:
+        """App-level mirror of BackgroundMusicPlayer._bg_normalize_active().
+
+        Used before batch analysis so disabled BGM normalization does not scan
+        folders, read loudness cache, or wake any analysis workers.
+        """
+        try:
+            if bool(self.settings.get("simple_audio_mode", True)):
+                return False
+            if self._performance_mode() or self._safe_mode():
+                return False
+            return bool(self.settings.get("bg_normalize_enabled", True))
+        except Exception:
+            return False
+
+    def _any_loudness_normalization_active(self) -> bool:
+        return bool(self._karaoke_normalize_active() or self._bg_normalize_setting_active())
+
+    def _sync_loudness_worker_gate(self, reason: str = "settings"):
+        enabled = self._any_loudness_normalization_active()
+        set_loudness_workers_enabled(enabled, reason=reason)
+        if not enabled:
+            self._cancel_loudness_analysis(reason)
+
+    def _cancel_loudness_analysis(self, reason: str = "settings"):
+        try:
+            job = getattr(self, "_analyze_lib_job", None)
+            if isinstance(job, tuple) and len(job) >= 2:
+                worker = job[1]
+                if worker is not None and hasattr(worker, "cancel"):
+                    worker.cancel()
+                    _diag(f"[LOUDNESS-LIB] cancel requested reason={reason}")
+        except Exception:
+            pass
+
     def _performance_mode(self) -> bool:
         """Performance Mode lowers nonessential background/UI work for slower Macs."""
         try:
@@ -34205,9 +35309,11 @@ class KaraokeApp(QWidget):
             self._next_silence_path = path
             self._next_silence_offset = float(self._silence_cache.get(path, 0.0))
             try:
-                if (not self._simple_audio_mode()) and bool(self.settings.get("karaoke_normalize_enabled", True)):
+                if self._karaoke_normalize_active():
                     if loudness_gain_db_cached(path) is None:
                         analyze_loudness_async(path)
+                else:
+                    _diag(f"[LOUDNESS] next-up analysis skipped reason={self._karaoke_normalize_bypass_reason()} file={Path(path).name}")
             except Exception:
                 pass
             return
@@ -34233,10 +35339,12 @@ class KaraokeApp(QWidget):
                 else:
                     offset = detect_lead_silence(resolved)
                 try:
-                    if (not self._simple_audio_mode()) and bool(self.settings.get("karaoke_normalize_enabled", True)):
+                    if self._karaoke_normalize_active():
                         if loudness_gain_db_cached(resolved) is None:
                             analyze_loudness_async(resolved)
                             _diag(f"[LOUDNESS] queued next-up analysis for {Path(resolved).name}")
+                    else:
+                        _diag(f"[LOUDNESS] next-up analysis skipped reason={self._karaoke_normalize_bypass_reason()} file={Path(resolved).name}")
                 except Exception:
                     pass
             except Exception:
@@ -34821,6 +35929,20 @@ class KaraokeApp(QWidget):
             artist = (display_name or "").strip()
             title = ""
 
+        try:
+            payload = self._next_up_transition_payload_for(
+                singer,
+                entry,
+                following_singer=self._first_active_singer_name_from_queue(),
+            )
+            if title:
+                payload["title"] = title
+            if artist:
+                payload["artist"] = artist
+            self._show_next_up_transition_overlay(payload, reason="play_next")
+        except Exception:
+            pass
+
         # Render 3-line Now Singing with stable eliding + padding-aware width
         self._current_karaoke_singer_name = str(singer.get("name", "") or "")
         self._current_karaoke_singer_display = str(singer_display or "")
@@ -35328,7 +36450,10 @@ class KaraokeApp(QWidget):
     def _remote_order_meta_from_req(self, req: dict) -> dict:
         if not isinstance(req, dict):
             return {"host_order_updated_at": 0, "singer_order_updated_at": 0, "order_revision": 0, "last_order_source": "server"}
-        source = str(req.get("last_order_source") or req.get("order_source") or req.get("source") or "server").strip().lower()
+        # Do not use the generic request "source" field here: values such as
+        # "phone", "kiosk", or "singer" describe who submitted the request, not
+        # who explicitly reordered an existing singer queue.
+        source = str(req.get("last_order_source") or req.get("order_source") or "server").strip().lower()
         if source not in {"host", "singer", "server"}:
             source = "server"
         try:
@@ -37923,22 +39048,22 @@ class KaraokeApp(QWidget):
             print("BG is disabled (master). Not starting.")
             try: self.bg_music.stop()
             except Exception: pass
-            return
+            return False
         if not self.settings.get("bg_autoplay_on_idle", True):
             print("BG autoplay is OFF. Not starting.")
             try: self.bg_music.stop()
             except Exception: pass
-            return
+            return False
         # Never auto-start BGM on app launch — only after the user has manually
         # pressed play at least once this session.
         if not getattr(self, "_bgm_session_started", False):
             print("BG auto-start blocked: user has not pressed play this session.")
-            return
+            return False
         
         # Make sure we have a valid background music setup
         if not hasattr(self, 'bg_music') or not self.bg_music.playlist:
             print("No background music or playlist available")
-            return
+            return False
         
         print(f"Starting fade in for track: {self.bg_music.get_current_track_info()}")
         
@@ -37961,20 +39086,27 @@ class KaraokeApp(QWidget):
 
         # Start fade in with current slider volume
         self.bg_music.fade_in(target_volume, fade_in_ms, allow_during_karaoke=allow_overlap)
+        started = bool(getattr(self.bg_music, "is_playing", False))
+        if not started:
+            _diag(f"[BG-HANDOFF] fade_in did not start reason={resume_reason}")
+            return False
         
         # Update button state after fade starts
         QTimer.singleShot(100, self.update_bg_button_state)
         QTimer.singleShot(fade_in_ms + 100, self.update_bg_button_state)  # Also update after fade completes
+        _diag(f"[BG-HANDOFF] fade_in started reason={resume_reason} duration_ms={fade_in_ms}")
+        return True
 
     def _start_bg_with_fade_safe(self, source: str = "unknown"):
         try:
-            self._start_bg_with_fade()
+            return bool(self._start_bg_with_fade())
         except Exception as e:
             _diag(f"[BG-HANDOFF] fade_start failed source={source} err={e}")
             try:
                 logging.exception("BG fade handoff failure")
             except Exception:
                 pass
+            return False
 
 
 class Ticker(QFrame):

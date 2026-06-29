@@ -173,7 +173,12 @@ class ModelBackedViewQATests(unittest.TestCase):
         app.karaoke_playing = True
         started = time.perf_counter()
         app._refresh_singer_history_view()
-        module.QApplication.processEvents()
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            module.QApplication.processEvents()
+            if app.singer_history_singer_model.rowCount() >= 221 and app.singer_history_songs_model.rowCount() > 0:
+                break
+            time.sleep(0.01)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self.assert_perf_under("qa_singer_history_long_rows_refresh", elapsed_ms, 1500.0)
 

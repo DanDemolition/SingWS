@@ -235,6 +235,41 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(len(added), 1)
             self.assertEqual(app._deferred_remote_adds, [])
 
+    def test_deferred_remote_add_counts_toward_singer_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["defer_remote_adds_until_between_singers"] = True
+            app.settings["limit_pending_max"] = 2
+            app.karaoke_playing = True
+            app.queue = [{
+                "name": "Ada",
+                "songs": [{"artist": "Artist", "title": "Already In", "display": "Artist • Already In"}],
+            }]
+
+            second = {
+                "_ok": True,
+                "request_id": 1801,
+                "request_time": 10,
+                "singer": "Ada",
+                "song_data": ("/music/second.mp3", 0, 100),
+                "track": {"path": "/music/second.mp3", "artist": "Artist", "title": "Second"},
+                "remote_meta": {"request_id": 1801, "singer": "Ada", "artist": "Artist", "title": "Second"},
+            }
+            third = {
+                "_ok": True,
+                "request_id": 1802,
+                "request_time": 11,
+                "singer": "Ada",
+                "song_data": ("/music/third.mp3", 0, 100),
+                "track": {"path": "/music/third.mp3", "artist": "Artist", "title": "Third"},
+                "remote_meta": {"request_id": 1802, "singer": "Ada", "artist": "Artist", "title": "Third"},
+            }
+
+            self.assertTrue(app._apply_resolved_remote_add(second, allow_defer=True))
+            self.assertEqual(app._deferred_remote_request_ids(), {1801})
+            self.assertFalse(app._apply_resolved_remote_add(third, allow_defer=True))
+            self.assertEqual(app._deferred_remote_request_ids(), {1801})
+
     def test_server_terminal_state_removes_deferred_remote_add(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")

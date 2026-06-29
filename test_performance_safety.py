@@ -81,6 +81,7 @@ class PerformanceSafetyTests(unittest.TestCase):
 
     def test_singer_history_song_list_uses_model_backed_view(self):
         self.assertIn("class SingerHistorySongListModel(QAbstractListModel)", MAIN_SOURCE)
+        self.assertIn("class SingerHistorySongsBuildWorker(QObject)", MAIN_SOURCE)
         page = function_source("_build_singer_history_page")
         self.assertIn("self.singer_history_songs_model = SingerHistorySongListModel(self)", page)
         self.assertIn("self.singer_history_songs_list = QListView()", page)
@@ -89,13 +90,17 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("self.singer_history_songs_list.setTextElideMode(Qt.TextElideMode.ElideNone)", page)
         self.assertIn("self.singer_history_songs_list.setItemDelegate(WrapHeightItemDelegate", page)
         details = function_source("_update_singer_history_details")
-        self.assertIn("self.singer_history_songs_model.setRows(model_rows)", details)
+        self.assertIn("SingerHistorySongsBuildWorker", details)
+        self.assertIn("worker.moveToThread(thread)", details)
+        apply_rows = function_source("_apply_singer_history_song_rows")
+        self.assertIn("self.singer_history_songs_model.setRows(rows)", apply_rows)
         self.assertNotIn("QListWidgetItem(self._history_song_display", details)
         selector = function_source("_selected_singer_history_song_key")
         self.assertIn("model.songKeyForIndex(view.currentIndex())", selector)
 
     def test_singer_history_directory_uses_model_backed_view(self):
         self.assertIn("class SingerHistorySingerListModel(QAbstractListModel)", MAIN_SOURCE)
+        self.assertIn("class SingerHistoryDirectoryBuildWorker(QObject)", MAIN_SOURCE)
         page = function_source("_build_singer_history_page")
         self.assertIn("self.singer_history_singer_model = SingerHistorySingerListModel(self)", page)
         self.assertIn("self.singer_history_singer_list = QListView()", page)
@@ -104,11 +109,19 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("self.singer_history_singer_list.setTextElideMode(Qt.TextElideMode.ElideNone)", page)
         self.assertIn("self.singer_history_singer_list.setItemDelegate", page)
         refresh = function_source("_refresh_singer_history_view")
-        self.assertIn("self.singer_history_singer_model.setRows(model_rows)", refresh)
+        self.assertIn("SingerHistoryDirectoryBuildWorker", refresh)
+        self.assertIn("worker.moveToThread(thread)", refresh)
+        apply_rows = function_source("_apply_singer_history_directory_rows")
+        self.assertIn("self.singer_history_singer_model.setRows(rows)", apply_rows)
         self.assertNotIn("QListWidgetItem(\"\\n\".join(lines))", refresh)
         self.assertNotIn("self.singer_history_singer_list.addItem", refresh)
         selector = function_source("_selected_singer_history_key")
         self.assertIn("model.singerKeyForIndex(view.currentIndex())", selector)
+
+    def test_singer_history_edits_use_debounced_save_path(self):
+        source = function_source("_commit_singer_history_change")
+        self.assertIn("_schedule_save_data", source)
+        self.assertNotIn("self.save_data()", source)
 
     def test_queue_uses_model_backed_view_with_identity_roles(self):
         self.assertIn("class QueueListModel(QAbstractListModel)", MAIN_SOURCE)

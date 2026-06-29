@@ -248,6 +248,71 @@ class HostWinsOrderTests(unittest.TestCase):
     def _ids(self, singer_idx=0):
         return [song["remote_request_id"] for song in self.app.queue[singer_idx]["songs"]]
 
+    def test_accepted_second_request_is_appended_and_survives_stale_server_order(self):
+        self.app.queue[0]["songs"] = [self.app.queue[0]["songs"][0]]
+        ok = self.app._add_song_to_queue(
+            "Grace",
+            ("/tmp/second.mp3", 0, 100),
+            track={
+                "path": "/tmp/second.mp3",
+                "display": "Artist • Second",
+                "artist": "Artist",
+                "title": "Second",
+                "disc_id": "SC222",
+                "duration_secs": 181,
+            },
+            remote_meta={
+                "request_id": 88,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Second",
+                "source": "phone",
+            },
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(self._ids(), [77, 88])
+        self.assertEqual(self.app.queue[0]["last_order_source"], "host")
+        self.assertGreater(self.app.queue[0].get("host_order_updated_at", 0), 0)
+
+        self.app._reconcile_remote_requests([
+            {"request_id": 88, "singer": "Grace", "artist": "Artist", "title": "Second", "key": 0, "tempo": 0, "sent": True},
+            {"request_id": 77, "singer": "Grace", "artist": "Artist", "title": "Title", "key": 0, "tempo": 0, "sent": True},
+        ])
+
+        self.assertEqual(self._ids(), [77, 88])
+
+    def test_generic_singer_request_source_is_not_explicit_reorder(self):
+        self.app._sync_remote_singer_order(0)
+        host_stamp = self.app.queue[0]["host_order_updated_at"]
+
+        self.app._reconcile_remote_requests([
+            {
+                "request_id": 88,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Second",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "source": "singer",
+                "singer_order_updated_at": host_stamp + 1000,
+            },
+            {
+                "request_id": 77,
+                "singer": "Grace",
+                "artist": "Artist",
+                "title": "Title",
+                "key": 0,
+                "tempo": 0,
+                "sent": True,
+                "source": "singer",
+                "singer_order_updated_at": host_stamp + 1000,
+            },
+        ])
+
+        self.assertEqual(self._ids(), [77, 88])
+
     def test_host_reorder_survives_stale_poll_without_metadata(self):
         songs = self.app.queue[0]["songs"]
         songs[0], songs[1] = songs[1], songs[0]
