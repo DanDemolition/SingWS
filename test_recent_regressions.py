@@ -153,7 +153,7 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertFalse(app._show_next_up_transition_overlay(payload, reason="test"))
         self.assertEqual(len(calls), 1)
 
-    def test_next_up_overlay_requires_completed_song_token(self):
+    def test_next_up_overlay_pressing_play_does_not_show(self):
         app = make_app(self.singws)
         calls = []
 
@@ -163,6 +163,9 @@ class RecentRegressionTests(unittest.TestCase):
 
         app.video_window = SimpleNamespace(video_area=FakeArea())
         app.settings["next_up_overlay_enabled"] = True
+        app._next_up_overlay_completion_token = 1
+        app._next_up_overlay_consumed_token = 0
+        app._next_up_overlay_pending_payload = {"singer": "Ada", "title": "Next", "artist": "Artist", "on_deck": ""}
 
         singer = {"name": "Ada"}
         entry = {"song_info": "/tmp/next.mp3", "title": "Next", "artist": "Artist"}
@@ -177,8 +180,36 @@ class RecentRegressionTests(unittest.TestCase):
             )
         )
         self.assertEqual(calls, [])
+        self.assertEqual(app._next_up_overlay_consumed_token, 1)
 
-    def test_next_up_overlay_consumes_completed_song_once(self):
+    def test_next_up_overlay_pause_resume_seek_restart_do_not_show(self):
+        app = make_app(self.singws)
+        calls = []
+
+        class FakeArea:
+            def show_next_up_overlay(self, payload, duration):
+                calls.append((payload, duration))
+
+        app.video_window = SimpleNamespace(video_area=FakeArea())
+        app.settings["next_up_overlay_enabled"] = True
+        singer = {"name": "Ada"}
+        entry = {"song_info": "/tmp/next.mp3", "title": "Next", "artist": "Artist"}
+        for idx, reason in enumerate(("pause_resume", "seek", "same_song_restart"), start=1):
+            app._next_up_overlay_completion_token = idx
+            app._next_up_overlay_consumed_token = 0
+            app._next_up_overlay_pending_payload = {"singer": "Ada", "title": "Next", "artist": "Artist", "on_deck": ""}
+            self.assertFalse(
+                app._consume_next_up_overlay_for_transition(
+                    singer,
+                    entry,
+                    title="Next",
+                    artist="Artist",
+                    reason=reason,
+                )
+            )
+        self.assertEqual(calls, [])
+
+    def test_next_up_overlay_song_end_shows_once(self):
         app = make_app(self.singws)
         calls = []
 
@@ -210,32 +241,40 @@ class RecentRegressionTests(unittest.TestCase):
         ]
 
         self.assertTrue(app._mark_next_up_overlay_pending_after_completion(reason="test_end"))
-        singer = {"name": "Ada"}
-        entry = {"song_info": "/tmp/next.mp3", "title": "Next", "artist": "Artist"}
-        self.assertTrue(
-            app._consume_next_up_overlay_for_transition(
-                singer,
-                entry,
-                title="Next",
-                artist="Artist",
-                reason="test_play",
-            )
-        )
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0]["singer"], "Ada")
         self.assertEqual(calls[0][0]["title"], "Next")
         self.assertEqual(calls[0][0]["artist"], "Artist")
+        self.assertEqual(calls[0][0]["on_deck"], "Bo")
+        self.assertEqual(calls[0][1], 10.0)
 
-        self.assertFalse(
-            app._consume_next_up_overlay_for_transition(
-                singer,
-                entry,
-                title="Next",
-                artist="Artist",
-                reason="test_play_again",
-            )
-        )
+        self.assertFalse(app._mark_next_up_overlay_pending_after_completion(reason="test_end_duplicate"))
         self.assertEqual(len(calls), 1)
+
+    def test_next_up_overlay_no_next_singer_does_not_show(self):
+        app = make_app(self.singws)
+        calls = []
+
+        class FakeArea:
+            def show_next_up_overlay(self, payload, duration):
+                calls.append((payload, duration))
+
+        app.video_window = SimpleNamespace(video_area=FakeArea())
+        app.settings["next_up_overlay_enabled"] = True
+        app._current_karaoke_singer_name = "Ada"
+        app._current_karaoke_song_path = "/tmp/current.mp3"
+        app.queue = [
+            {
+                "name": "Ada",
+                "skipped": False,
+                "songs": [
+                    {"song_info": "/tmp/current.mp3", "artist": "Artist", "title": "Current", "skipped": False},
+                ],
+            },
+        ]
+
+        self.assertFalse(app._mark_next_up_overlay_pending_after_completion(reason="test_end_no_next"))
+        self.assertEqual(calls, [])
 
     def test_settings_save_scheduler_debounces_ui_thread_writes(self):
         app = make_app(self.singws)

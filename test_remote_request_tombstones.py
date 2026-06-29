@@ -437,6 +437,167 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
 
             self.assertEqual(app._waiting_for_add_count(), 0)
 
+    def test_waiting_list_excludes_history_request_already_in_singer_queue(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Dan",
+                "songs": [
+                    {
+                        "artist": "Manual Artist",
+                        "title": "Manual Song",
+                        "song_info": "/music/manual.mp3",
+                        "remote_request_id": 2401,
+                        "request_source": "server",
+                    },
+                    {
+                        "artist": "History Artist",
+                        "title": "History Song",
+                        "song_info": "/music/history.mp3",
+                        "source": "history",
+                    },
+                ],
+            }]
+
+            app._set_waiting_for_add_requests([
+                {
+                    "request_id": 2402,
+                    "singer": "Dan",
+                    "artist": "History Artist",
+                    "title": "History Song",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                    "request_source": "singer_history",
+                    "selected_disc_id": "HIST-77",
+                },
+            ])
+
+            self.assertEqual(app._waiting_for_add_count(), 0)
+            self.assertNotIn(2402, app._waiting_for_add_requests)
+            self.assertIn(2402, app._waiting_for_add_handled_ids)
+
+    def test_pressing_play_state_change_does_not_resurrect_accepted_history_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Dan",
+                "songs": [
+                    {"artist": "Manual Artist", "title": "Manual Song", "remote_request_id": 2411},
+                    {"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"},
+                ],
+            }]
+            pending = {
+                "request_id": 2412,
+                "singer": "Dan",
+                "artist": "History Artist",
+                "title": "History Song",
+                "state": "waiting",
+                "pending_reason": "rotation_full",
+                "request_source": "singer_history",
+            }
+
+            app._set_waiting_for_add_requests([pending])
+            app.queue[0]["songs"].pop(0)
+            app._set_waiting_for_add_requests([pending])
+
+            self.assertEqual([song["title"] for song in app.queue[0]["songs"]], ["History Song"])
+            self.assertEqual(app._waiting_for_add_count(), 0)
+            self.assertNotIn(2412, app._waiting_for_add_requests)
+
+    def test_waiting_add_now_cannot_duplicate_already_queued_history_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Dan",
+                "songs": [{"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"}],
+            }]
+            req = {
+                "request_id": 2421,
+                "singer": "Dan",
+                "artist": "History Artist",
+                "title": "History Song",
+                "state": "waiting",
+                "pending_reason": "rotation_full",
+                "request_source": "singer_history",
+            }
+            app._waiting_for_add_requests = {2421: req}
+            app._waiting_for_add_handled_ids = set()
+            app._show_processing_notification = lambda *args, **kwargs: None
+            delivered = []
+            added = []
+            app._mark_waiting_for_add_delivered_async = lambda rid, req=None: delivered.append(rid)
+            app._add_song_to_queue = lambda *args, **kwargs: added.append((args, kwargs)) or True
+
+            track = {"path": "/music/history.mp3", "artist": "History Artist", "title": "History Song"}
+            self.assertTrue(app._add_waiting_for_add_track(req, track))
+
+            self.assertEqual(added, [])
+            self.assertEqual(delivered, [2421])
+            self.assertEqual(len(app.queue[0]["songs"]), 1)
+            self.assertNotIn(2421, app._waiting_for_add_requests)
+            self.assertIn(2421, app._waiting_for_add_handled_ids)
+
+    def test_resolved_remote_add_does_not_create_duplicate_active_song(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Dan",
+                "songs": [{"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"}],
+            }]
+            added = []
+            app._add_song_to_queue = lambda *args, **kwargs: added.append((args, kwargs)) or True
+            delivered = []
+            app._mark_waiting_for_add_delivered_async = lambda rid, req=None: delivered.append(rid)
+
+            payload = {
+                "_ok": True,
+                "request_id": 2431,
+                "request_time": 10,
+                "singer": "Dan",
+                "song_data": ("/music/history.mp3", 0, 100),
+                "track": {"path": "/music/history.mp3", "artist": "History Artist", "title": "History Song"},
+                "remote_meta": {
+                    "request_id": 2431,
+                    "singer": "Dan",
+                    "artist": "History Artist",
+                    "title": "History Song",
+                    "request_source": "singer_history",
+                },
+            }
+
+            self.assertTrue(app._apply_resolved_remote_add(payload, allow_defer=True))
+            self.assertEqual(added, [])
+            self.assertEqual(delivered, [2431])
+            self.assertEqual(len(app.queue[0]["songs"]), 1)
+
+    def test_sync_restart_does_not_resurrect_accepted_history_pending_item(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Dan",
+                "songs": [
+                    {"artist": "Manual Artist", "title": "Manual Song", "remote_request_id": 2441},
+                    {"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"},
+                ],
+            }]
+            pending = {
+                "request_id": 2442,
+                "singer": "Dan",
+                "artist": "History Artist",
+                "title": "History Song",
+                "state": "waiting",
+                "pending_reason": "rotation_full",
+                "request_source": "singer_history",
+            }
+
+            app._set_waiting_for_add_requests([pending])
+            app._set_waiting_for_add_requests([pending])
+            app._reconcile_remote_requests([pending])
+
+            self.assertEqual(app._waiting_for_add_count(), 0)
+            self.assertNotIn(2442, app._waiting_for_add_requests)
+            self.assertEqual(app.processed_requests, [])
+
     def test_waiting_request_can_add_selected_local_track(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
@@ -521,9 +682,15 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             }
 
             sections = app._waiting_for_add_sections()
-            self.assertEqual([section["key"] for section in sections], ["waitlist"])
+            self.assertEqual([section["key"] for section in sections], ["active_rotation", "waitlist", "completed", "removed"])
 
-            row = sections[0]["rows"][0]
+            active_row = sections[0]["rows"][0]
+            self.assertEqual(active_row["status_label"], "Active Rotation")
+            self.assertEqual(active_row["singer"], "Ada")
+            self.assertFalse(active_row["selectable"])
+            self.assertEqual(active_row["queue_position"], 1)
+
+            row = sections[1]["rows"][0]
             text = app._waiting_for_add_row_text(row)
             self.assertEqual(row["status_label"], "Waitlisted")
             self.assertEqual(row["singer"], "Bea")
@@ -534,6 +701,77 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertIn("Version: Requested: SC / SC-123", text)
             self.assertIn("Length: 3:05", text)
             self.assertIn("Server:", text)
+            self.assertEqual(sections[2]["rows"][0]["status_label"], "Sung")
+            self.assertEqual(sections[3]["rows"][0]["status_label"], "Removed")
+
+    def test_pending_acceptance_section_is_distinct_from_waitlist(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["defer_remote_adds_until_between_singers"] = True
+            app._deferred_remote_adds = [{
+                "_ok": True,
+                "request_id": 1901,
+                "request_time": 1712340100,
+                "singer": "Ada",
+                "artist": "Blue Artist",
+                "title": "Blue Title",
+                "song_data": ("/music/blue.mp3", 0, 100),
+                "track": {"path": "/music/blue.mp3", "artist": "Blue Artist", "title": "Blue Title", "disc_id": "KV-900"},
+                "remote_meta": {"request_id": 1901, "singer": "Ada", "artist": "Blue Artist", "title": "Blue Title"},
+            }]
+            app._waiting_for_add_requests = {
+                1901: {
+                    "request_id": 1901,
+                    "singer": "Ada",
+                    "artist": "Blue Artist",
+                    "title": "Blue Title",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                },
+                1902: {
+                    "request_id": 1902,
+                    "singer": "Bea",
+                    "artist": "Wait Artist",
+                    "title": "Wait Title",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                },
+            }
+
+            sections = app._waiting_for_add_sections()
+            self.assertEqual([section["key"] for section in sections], ["pending_acceptance", "waitlist"])
+            pending_row = sections[0]["rows"][0]
+            self.assertEqual(pending_row["request_id"], 1901)
+            self.assertEqual(pending_row["status_label"], "Pending Acceptance")
+            self.assertFalse(pending_row["selectable"])
+            self.assertEqual(pending_row["queue_position"], 1)
+            self.assertIn("Queue: #1", app._waiting_for_add_row_text(pending_row))
+            self.assertEqual([row["request_id"] for row in sections[1]["rows"]], [1902])
+
+    def test_add_pending_now_flushes_during_playback(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["defer_remote_adds_until_between_singers"] = True
+            app.karaoke_playing = True
+            added = []
+            app._add_song_to_queue = lambda singer, song_data, track=None, remote_meta=None: added.append((singer, song_data, track, remote_meta)) or True
+            app._log_remote_request_diag = lambda *args, **kwargs: None
+            app._clear_remote_attention_request = lambda *args, **kwargs: None
+            app._show_processing_notification = lambda *args, **kwargs: None
+            app._deferred_remote_adds = [{
+                "_ok": True,
+                "request_id": 1903,
+                "request_time": 1712340100,
+                "singer": "Ada",
+                "song_data": ("/music/now.mp3", 0, 100),
+                "track": {"path": "/music/now.mp3", "artist": "Now Artist", "title": "Now Title"},
+                "remote_meta": {"request_id": 1903, "singer": "Ada", "artist": "Now Artist", "title": "Now Title"},
+            }]
+
+            app._manual_add_deferred_remote_adds()
+
+            self.assertEqual(len(added), 1)
+            self.assertEqual(app._deferred_remote_adds, [])
 
     def test_waiting_replacement_preserves_request_slot_and_order(self):
         with tempfile.TemporaryDirectory() as td:

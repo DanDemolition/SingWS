@@ -229,9 +229,10 @@ class ModelBackedViewQATests(unittest.TestCase):
 
         self.assertIsInstance(app.waiting_for_add_list, module.QListView)
         self.assertEqual(app.waiting_for_add_list.horizontalScrollBarPolicy(), module.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.assertEqual(app.waiting_for_add_model.rowCount(), 25)
+        self.assertEqual(app.waiting_for_add_model.rowCount(), 26)
         self.assertIsNotNone(app._selected_waiting_for_add_request())
-        self.assertIn("Version:", app.waiting_for_add_model.data(app.waiting_for_add_model.index(0, 0)))
+        first_waitlist_index = app.waiting_for_add_model.firstSelectableIndex()
+        self.assertIn("Version:", app.waiting_for_add_model.data(first_waitlist_index))
 
         before = app.waiting_for_add_list.font().pointSize()
         app.settings["list_font_scale"] = 1.4
@@ -240,7 +241,7 @@ class ModelBackedViewQATests(unittest.TestCase):
         self.assertGreaterEqual(app.waiting_for_add_list.font().pointSize(), before)
 
         _FakeMenu.instances.clear()
-        index = app.waiting_for_add_model.index(0, 0)
+        index = first_waitlist_index
         app.waiting_for_add_list.setCurrentIndex(index)
         position = app.waiting_for_add_list.visualRect(index).center()
         with mock.patch.object(module, "QMenu", _FakeMenu):

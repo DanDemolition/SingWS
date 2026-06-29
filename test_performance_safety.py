@@ -44,6 +44,31 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("queue_display.setUpdatesEnabled(False)", source)
         self.assertIn("queue_display.setUpdatesEnabled(True)", source)
 
+    def test_queue_add_defers_metadata_lookup_during_playback(self):
+        source = function_source("_add_song_to_queue")
+        self.assertIn("karaoke_playing", source)
+        self.assertIn("[QUEUE-ADD] metadata lookup deferred during playback", source)
+        self.assertLess(source.index("karaoke_playing"), source.index("self.lookup_display_name(fallback_path)"))
+
+    def test_next_up_prescan_has_disabled_worker_gate(self):
+        source = function_source("_schedule_next_up_prescan")
+        self.assertIn("_lead_silence_prescan_enabled", source)
+        prescan = function_source("_prescan_next_track")
+        self.assertIn("_lead_silence_prescan_enabled", prescan)
+        self.assertIn("_next_prescan_inflight", prescan)
+        gate = function_source("_lead_silence_prescan_enabled")
+        self.assertIn("_performance_mode", gate)
+        self.assertIn("_safe_mode", gate)
+        self.assertIn("end_silence_trim_enabled", gate)
+
+    def test_playback_worker_diagnostics_are_logged(self):
+        refresh = function_source("_request_queue_display_refresh")
+        self.assertIn("_log_active_background_workers", refresh)
+        diag = function_source("_log_active_background_workers")
+        self.assertIn("[PLAYBACK-WORKERS]", diag)
+        self.assertIn("loudness_inflight", diag)
+        self.assertIn("lead_silence_prescan", diag)
+
     def test_deferred_remote_adds_save_off_thread_during_playback(self):
         source = function_source("_save_deferred_remote_adds")
         self.assertIn("karaoke_playing", source)

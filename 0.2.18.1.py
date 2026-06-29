@@ -2597,6 +2597,7 @@ DEFAULTS = {
     "queue_mode": "classic",               # classic | rotation
     "rotation_locked": False,               # one-shot: weave new singers into the next rotation
     "rotation_lock_insert_count": 0,        # session/persisted spacing counter for locked inserts
+    "empty_rotation_slot_timeout_sec": 180, # keep a singer's place briefly while replacing a removed song
     "intro_loop_enabled": False,            # between songs: loop the next song's intro (instead of BGM)
     "intro_loop_bars": 8,                   # bars to loop: 4 / 8 / 16
     "end_silence_trim_enabled": True,      # CDG/ZIP/MP4: detect trailing karaoke silence and bring BG up early (no dead air)
@@ -5839,9 +5840,9 @@ class VideoAreaWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, a(70)))
+        painter.setBrush(QColor(0, 0, 0, a(38)))
         painter.drawRoundedRect(QRectF(x + 10, y + 14, panel_w, panel_h), 22, 22)
-        painter.setBrush(QColor(3, 3, 8, a(153)))
+        painter.setBrush(QColor(3, 3, 8, a(102)))
         painter.drawRoundedRect(QRectF(x, y, panel_w, panel_h), 20, 20)
 
         try:
@@ -5850,25 +5851,13 @@ class VideoAreaWidget(QWidget):
             accent = QColor("#8B5CF6")
         accent.setAlpha(a(255))
 
-        label_font = painter.font()
-        label_font.setBold(True)
-        label_font.setPointSize(max(13, int(panel_h * 0.055)))
-
         singer_font = painter.font()
         singer_font.setBold(True)
-        singer_font.setPointSize(max(34, int(panel_h * 0.155)))
+        singer_font.setPointSize(max(30, int(panel_h * 0.132)))
 
         singing_font = painter.font()
         singing_font.setBold(True)
-        singing_font.setPointSize(max(12, int(panel_h * 0.045)))
-
-        title_font = painter.font()
-        title_font.setBold(True)
-        title_font.setPointSize(max(22, int(panel_h * 0.095)))
-
-        artist_font = painter.font()
-        artist_font.setBold(False)
-        artist_font.setPointSize(max(16, int(panel_h * 0.066)))
+        singing_font.setPointSize(max(16, int(panel_h * 0.066)))
 
         deck_font = painter.font()
         deck_font.setBold(True)
@@ -5876,44 +5865,24 @@ class VideoAreaWidget(QWidget):
 
         y_cursor = y + pad
 
-        painter.setFont(label_font)
-        label_fm = QFontMetrics(label_font)
-        painter.setPen(accent)
-        painter.drawText(QRect(x + pad, y_cursor, text_w, label_fm.height() + 6),
-                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "NEXT UP")
-        y_cursor += label_fm.height() + 8
-
         painter.setFont(singer_font)
         singer_fm = QFontMetrics(singer_font)
-        singer_text = singer_fm.elidedText(singer, Qt.TextElideMode.ElideRight, text_w)
+        singer_text = singer_fm.elidedText(f"Next up: {singer}", Qt.TextElideMode.ElideRight, text_w)
         painter.setPen(accent)
         painter.drawText(QRect(x + pad, y_cursor, text_w, singer_fm.height() + 10),
                          Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, singer_text)
-        y_cursor += singer_fm.height() + 20
+        y_cursor += singer_fm.height() + 24
 
         painter.setFont(singing_font)
         singing_fm = QFontMetrics(singing_font)
-        painter.setPen(QColor(255, 255, 255, a(205)))
-        painter.drawText(QRect(x + pad, y_cursor, text_w, singing_fm.height() + 4),
-                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Singing")
-        y_cursor += singing_fm.height() + 5
-
-        painter.setFont(title_font)
-        title_fm = QFontMetrics(title_font)
-        title_text = title_fm.elidedText(title or "Unknown Song", Qt.TextElideMode.ElideRight, text_w)
-        painter.setPen(QColor(255, 255, 255, a(255)))
-        painter.drawText(QRect(x + pad, y_cursor, text_w, title_fm.height() + 8),
-                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, title_text)
-        y_cursor += title_fm.height() + 7
-
+        singing_text = f"Singing: {title or 'Unknown Song'}"
         if artist:
-            painter.setFont(artist_font)
-            artist_fm = QFontMetrics(artist_font)
-            artist_text = artist_fm.elidedText(f"by {artist}", Qt.TextElideMode.ElideRight, text_w)
-            painter.setPen(QColor(230, 230, 238, a(228)))
-            painter.drawText(QRect(x + pad, y_cursor, text_w, artist_fm.height() + 6),
-                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, artist_text)
-            y_cursor += artist_fm.height() + 18
+            singing_text = f"{singing_text} by {artist}"
+        singing_text = singing_fm.elidedText(singing_text, Qt.TextElideMode.ElideRight, text_w)
+        painter.setPen(QColor(255, 255, 255, a(230)))
+        painter.drawText(QRect(x + pad, y_cursor, text_w, singing_fm.height() + 8),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, singing_text)
+        y_cursor += singing_fm.height() + 22
 
         if on_deck:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -5924,7 +5893,7 @@ class VideoAreaWidget(QWidget):
 
             painter.setFont(deck_font)
             deck_fm = QFontMetrics(deck_font)
-            deck_text = deck_fm.elidedText(f"On Deck: {on_deck}", Qt.TextElideMode.ElideRight, text_w)
+            deck_text = deck_fm.elidedText(f"On deck: {on_deck}", Qt.TextElideMode.ElideRight, text_w)
             painter.setPen(QColor(255, 255, 255, a(230)))
             painter.drawText(QRect(x + pad, y_cursor, text_w, deck_fm.height() + 8),
                              Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, deck_text)
@@ -13934,6 +13903,7 @@ class KaraokeApp(QWidget):
         self._next_silence_path = ""
         self._next_scan_path = ""
         self._next_scan_token = 0
+        self._next_prescan_inflight = set()
         self._silence_cache = {}
         self._transition_gap_sec = 0.0
         self._bg_fade_duration_ms = 3000
@@ -13972,6 +13942,7 @@ class KaraokeApp(QWidget):
         self._media_end_overlay_eligible = False
         self._next_up_overlay_completion_token = 0
         self._next_up_overlay_consumed_token = 0
+        self._next_up_overlay_last_completion_key = ()
         self._next_up_overlay_pending_payload = {}
         self._next_up_overlay_pending_reason = ""
         self._preview_overlay_refresh_timer = QTimer(self)
@@ -15043,15 +15014,6 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         rotation_header_row.addWidget(self.queue_label)
-        self.deferred_remote_status_label = QLabel("")
-        self.deferred_remote_status_label.setStyleSheet(f"color:{_v('warning')}; font-size:11px; font-weight:800;")
-        self.deferred_remote_status_label.setVisible(False)
-        rotation_header_row.addWidget(self.deferred_remote_status_label)
-        self.deferred_remote_add_now_button = QPushButton("Add Pending Now")
-        self.deferred_remote_add_now_button.setStyleSheet(subtle_button_css(padding="6px 10px", radius=8))
-        self.deferred_remote_add_now_button.setVisible(False)
-        self.deferred_remote_add_now_button.clicked.connect(self._manual_add_deferred_remote_adds)
-        rotation_header_row.addWidget(self.deferred_remote_add_now_button)
         rotation_card_layout.addLayout(rotation_header_row)
         rotation_divider = QFrame()
         rotation_divider.setFixedHeight(1)
@@ -16808,6 +16770,8 @@ class KaraokeApp(QWidget):
                 song_info = entry.get("song_info")
             else:
                 song_info = entry[0] if isinstance(entry, (tuple, list)) and len(entry) >= 1 else entry
+            if bool(getattr(self, "karaoke_playing", False)):
+                return 0
             song_path = song_info[0] if isinstance(song_info, (tuple, list)) else song_info
             return max(0, int(self._get_duration_secs(song_path) or 0))
         except Exception:
@@ -21835,6 +21799,53 @@ class KaraokeApp(QWidget):
         shell_layout.addLayout(toggle_row)
         self._refresh_waitlist_toggle_button()
 
+        self.pending_acceptance_panel = QFrame()
+        self.pending_acceptance_panel.setObjectName("pendingAcceptancePanel")
+        self.pending_acceptance_panel.setStyleSheet(
+            """
+            QFrame#pendingAcceptancePanel {
+                background: rgba(14,165,233,0.12);
+                border: 1px solid rgba(56,189,248,0.36);
+                border-radius: 8px;
+            }
+            """
+        )
+        pending_layout = QVBoxLayout(self.pending_acceptance_panel)
+        pending_layout.setContentsMargins(10, 9, 10, 10)
+        pending_layout.setSpacing(6)
+
+        pending_header = QHBoxLayout()
+        pending_header.setSpacing(8)
+        self.pending_acceptance_title_label = QLabel("Pending Acceptance")
+        self.pending_acceptance_title_label.setStyleSheet(
+            "color:#bae6fd; font-size:13px; font-weight:900; letter-spacing:0px;"
+        )
+        pending_header.addWidget(self.pending_acceptance_title_label)
+        self.pending_acceptance_badge_label = QLabel("0")
+        self.pending_acceptance_badge_label.setStyleSheet(
+            "color:#082f49; background:#7dd3fc; border-radius:8px; padding:2px 8px; font-size:11px; font-weight:900;"
+        )
+        pending_header.addWidget(self.pending_acceptance_badge_label)
+        pending_header.addStretch(1)
+        self.deferred_remote_add_now_button = QPushButton("Add Pending Now")
+        self.deferred_remote_add_now_button.setStyleSheet(
+            "QPushButton { background: rgba(14,165,233,0.28); color:#e0f2fe; border:1px solid rgba(125,211,252,0.48); border-radius:8px; padding:7px 12px; font-weight:850; }"
+            "QPushButton:hover { background: rgba(14,165,233,0.40); }"
+            "QPushButton:disabled { color:rgba(224,242,254,0.42); border-color:rgba(125,211,252,0.18); background:rgba(14,165,233,0.10); }"
+        )
+        self.deferred_remote_add_now_button.clicked.connect(self._manual_add_deferred_remote_adds)
+        pending_header.addWidget(self.deferred_remote_add_now_button)
+        pending_layout.addLayout(pending_header)
+
+        self.pending_acceptance_helper_label = QLabel(
+            "These requests will automatically be added when the current song finishes."
+        )
+        self.pending_acceptance_helper_label.setWordWrap(True)
+        self.pending_acceptance_helper_label.setStyleSheet("color:#93c5fd; font-size:12px; font-weight:750;")
+        pending_layout.addWidget(self.pending_acceptance_helper_label)
+        self.pending_acceptance_panel.setVisible(False)
+        shell_layout.addWidget(self.pending_acceptance_panel)
+
         self.waiting_for_add_model = WaitlistRequestListModel(self)
         self.waiting_for_add_list = QListView()
         self.waiting_for_add_list.setModel(self.waiting_for_add_model)
@@ -21916,6 +21927,200 @@ class KaraokeApp(QWidget):
         except Exception:
             return 0
 
+    def _accepted_request_identity_text(self, value) -> str:
+        try:
+            return song_index.normalize_text(str(value or "").strip())
+        except Exception:
+            return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    def _accepted_request_identity_parts(self, req: dict | None) -> tuple:
+        req = req if isinstance(req, dict) else {}
+        replacement = req.get("replacement_track") if isinstance(req.get("replacement_track"), dict) else {}
+        track = replacement if replacement else req
+        singer_raw = str(req.get("singer") or req.get("name") or "").strip()
+        primary, _duet = self._parse_duet_singer(singer_raw)
+        singer_key = self._queue_limit_name_key(primary or singer_raw)
+        artist = self._accepted_request_identity_text(track.get("artist") or req.get("artist") or "")
+        title = self._accepted_request_identity_text(track.get("title") or req.get("title") or req.get("display_name") or "")
+        version_values = []
+        for key in (
+            "song_key",
+            "stable_request_key",
+            "selected_version",
+            "selected_brand",
+            "selected_disc_id",
+            "selected_source",
+            "disc_id",
+            "discid",
+            "songid",
+            "song_id",
+            "brand",
+            "version",
+            "source",
+            "request_source",
+        ):
+            value = self._accepted_request_identity_text(track.get(key) or req.get(key) or "")
+            if value and value not in version_values:
+                version_values.append(value)
+        return singer_key, artist, title, "|".join(version_values[:4])
+
+    def _accepted_request_identity_for_entry(self, singer: dict | None, entry: dict | None) -> tuple:
+        singer_name = str((singer or {}).get("name") or "").strip()
+        entry = entry if isinstance(entry, dict) else {}
+        artist = str(entry.get("artist") or "").strip()
+        title = str(entry.get("title") or "").strip()
+        if not (artist and title):
+            try:
+                display = str(entry.get("display_name") or entry.get("display") or "").strip()
+                a2, t2, _d2 = self._split_display_artist_title_disc(display)
+                artist = artist or a2
+                title = title or t2
+            except Exception:
+                pass
+        req = {
+            "singer": singer_name,
+            "artist": artist,
+            "title": title,
+            "selected_version": entry.get("selected_version"),
+            "selected_brand": entry.get("selected_brand"),
+            "selected_disc_id": entry.get("selected_disc_id") or entry.get("disc_id") or entry.get("discid"),
+            "song_key": entry.get("song_key") or entry.get("stable_request_key"),
+            "songid": entry.get("songid") or entry.get("song_id"),
+            "source": entry.get("source") or entry.get("type"),
+            "request_source": entry.get("request_source"),
+        }
+        return self._accepted_request_identity_parts(req)
+
+    def _accepted_request_identity_sets(self) -> tuple[set[int], set[tuple], set[tuple]]:
+        ids: set[int] = set()
+        exact_sigs: set[tuple] = set()
+        loose_sigs: set[tuple] = set()
+        try:
+            for rid in self._queue_remote_request_ids() or []:
+                rid = int(rid)
+                if rid > 0:
+                    ids.add(rid)
+        except Exception:
+            pass
+        try:
+            ids |= {int(v) for v in self._deferred_remote_request_ids()}
+        except Exception:
+            pass
+        try:
+            ids |= {int(v) for v in self._remote_request_inflight_ids()}
+        except Exception:
+            pass
+        try:
+            handled = getattr(self, "_waiting_for_add_handled_ids", set())
+            if isinstance(handled, set):
+                ids |= {int(v) for v in handled if int(v) > 0}
+        except Exception:
+            pass
+        try:
+            for singer in getattr(self, "queue", []) or []:
+                if not isinstance(singer, dict):
+                    continue
+                for entry in singer.get("songs", []) or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    rid = self._queue_entry_remote_request_id(entry)
+                    if rid is not None:
+                        try:
+                            ids.add(int(rid))
+                        except Exception:
+                            pass
+                    sig = self._accepted_request_identity_for_entry(singer, entry)
+                    if sig[0] and sig[1] and sig[2]:
+                        exact_sigs.add(sig)
+                        loose_sigs.add(sig[:3])
+        except Exception:
+            pass
+        return ids, exact_sigs, loose_sigs
+
+    def _request_matches_accepted_queue_item(self, req: dict | None, *, identity_sets=None) -> bool:
+        if not isinstance(req, dict):
+            return False
+        if identity_sets is None:
+            identity_sets = self._accepted_request_identity_sets()
+        accepted_ids, exact_sigs, loose_sigs = identity_sets
+        rid = self._waiting_for_add_request_id(req)
+        if rid > 0 and rid in accepted_ids:
+            return True
+        sig = self._accepted_request_identity_parts(req)
+        if sig[0] and sig[1] and sig[2]:
+            if sig in exact_sigs:
+                return True
+            if sig[:3] in loose_sigs:
+                return True
+        return False
+
+    def _cleanup_accepted_waiting_for_add_requests(self, *, reason: str = "accepted_cleanup") -> int:
+        pending = getattr(self, "_waiting_for_add_requests", None)
+        if not isinstance(pending, dict) or not pending:
+            return 0
+        identity_sets = self._accepted_request_identity_sets()
+        removed = 0
+        handled = getattr(self, "_waiting_for_add_handled_ids", None)
+        if not isinstance(handled, set):
+            handled = set()
+            self._waiting_for_add_handled_ids = handled
+        for rid, req in list(pending.items()):
+            if self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
+                pending.pop(rid, None)
+                rid_int = 0
+                try:
+                    rid_int = int(rid)
+                    if rid_int > 0:
+                        handled.add(rid_int)
+                except Exception:
+                    pass
+                removed += 1
+                try:
+                    attention = getattr(self, "_remote_attention_requests", None)
+                    if isinstance(attention, dict):
+                        attention.pop(rid, None)
+                        attention.pop(rid_int, None)
+                except Exception:
+                    pass
+        if removed:
+            _diag(f"[WAITING-FOR-ADD] removed accepted duplicate pending count={removed} reason={reason}")
+        return removed
+
+    def _mark_waiting_for_add_duplicate_accepted(self, req: dict | None, *, reason: str = "accepted_duplicate") -> None:
+        rid = self._waiting_for_add_request_id(req)
+        if rid <= 0:
+            return
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
+        try:
+            handled = state.get("_waiting_for_add_handled_ids")
+            if not isinstance(handled, set):
+                handled = set()
+                self._waiting_for_add_handled_ids = handled
+            handled.add(rid)
+            state["_waiting_for_add_handled_ids"] = handled
+        except Exception:
+            pass
+        try:
+            pending = state.get("_waiting_for_add_requests")
+            if isinstance(pending, dict):
+                pending.pop(rid, None)
+        except Exception:
+            pass
+        try:
+            attention = state.get("_remote_attention_requests")
+            if isinstance(attention, dict):
+                attention.pop(rid, None)
+        except Exception:
+            pass
+        try:
+            self._mark_waiting_for_add_delivered_async(rid, req)
+        except Exception:
+            pass
+        _diag(f"[WAITING-FOR-ADD] suppressed accepted duplicate request_id={rid} reason={reason}")
+
     def _waiting_for_add_reason_text(self, req: dict | None) -> str:
         req = req or {}
         reason = str(req.get("pending_reason") or req.get("attention_reason") or "").strip()
@@ -21975,6 +22180,8 @@ class KaraokeApp(QWidget):
     def _waiting_for_add_status_label(self, kind: str) -> str:
         return {
             "active": "Active",
+            "active_rotation": "Active Rotation",
+            "pending_acceptance": "Pending Acceptance",
             "waitlist": "Waitlisted",
             "needs_review": "Needs Review",
             "sung": "Sung",
@@ -22042,6 +22249,7 @@ class KaraokeApp(QWidget):
             queue = list(getattr(self, "queue", []) or [])
         except Exception:
             queue = []
+        queue_pos = 0
         for singer in queue:
             if not isinstance(singer, dict):
                 continue
@@ -22051,6 +22259,7 @@ class KaraokeApp(QWidget):
                     continue
                 if bool(entry.get("skipped")) or bool(entry.get("removed")):
                     continue
+                queue_pos += 1
                 artist = str(entry.get("artist") or "").strip()
                 title = str(entry.get("title") or "").strip()
                 display_name = str(entry.get("display_name") or "").strip()
@@ -22067,8 +22276,82 @@ class KaraokeApp(QWidget):
                     "title": title,
                     "request_time": entry.get("request_time") or entry.get("created_at") or entry.get("requested_at") or "",
                     "state": "active",
+                    "queue_position": queue_pos,
                 }
-                rows.append(self._waiting_for_add_row(req, "active", selectable=False))
+                rows.append(self._waiting_for_add_row(req, "active_rotation", selectable=False))
+        return rows
+
+    def _pending_acceptance_enabled(self) -> bool:
+        try:
+            return bool(self.settings.get("defer_remote_adds_until_between_singers", False))
+        except Exception:
+            return False
+
+    def _pending_acceptance_rows(self, *, local_ids: set[int] | None = None, identity_sets=None) -> list[dict]:
+        if not self._pending_acceptance_enabled():
+            return []
+        try:
+            pending = list(object.__getattribute__(self, "__dict__").get("_deferred_remote_adds", []) or [])
+        except Exception:
+            pending = []
+        if not pending:
+            return []
+        local_ids = local_ids or set()
+        if identity_sets is None:
+            accepted_ids, exact_sigs, loose_sigs = self._accepted_request_identity_sets()
+            try:
+                accepted_ids = set(accepted_ids) - self._deferred_remote_request_ids()
+            except Exception:
+                accepted_ids = set(accepted_ids)
+            identity_sets = (accepted_ids, exact_sigs, loose_sigs)
+        rows = []
+        for position, item in enumerate(pending, start=1):
+            if not isinstance(item, dict):
+                continue
+            try:
+                rid = int(item.get("request_id") or 0)
+            except Exception:
+                rid = 0
+            if rid <= 0 or rid in local_ids:
+                continue
+            req = dict(item.get("remote_meta") or {})
+            req.setdefault("request_id", rid)
+            if not req.get("singer"):
+                req["singer"] = item.get("singer")
+            if not req.get("artist"):
+                req["artist"] = item.get("artist")
+            if not req.get("title"):
+                req["title"] = item.get("title")
+            req.setdefault("request_time", item.get("request_time") or item.get("deferred_at"))
+            req["queue_position"] = position
+            track = item.get("track")
+            if isinstance(track, dict):
+                if not req.get("artist"):
+                    req["artist"] = track.get("artist")
+                if not req.get("title"):
+                    req["title"] = track.get("title")
+                for key in (
+                    "selected_version",
+                    "selected_brand",
+                    "selected_disc_id",
+                    "selected_source",
+                    "disc_id",
+                    "discid",
+                    "songid",
+                    "song_id",
+                    "brand",
+                    "source",
+                    "version",
+                    "duration_secs",
+                    "duration",
+                    "path",
+                ):
+                    if not req.get(key) and track.get(key):
+                        req[key] = track.get(key)
+            if self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
+                continue
+            rows.append(self._waiting_for_add_row(req, "pending_acceptance", selectable=False))
+        rows.sort(key=self._waiting_for_add_order_key)
         return rows
 
     def _waiting_for_add_row(self, req: dict, kind: str, *, selectable: bool) -> dict:
@@ -22087,6 +22370,7 @@ class KaraokeApp(QWidget):
             "first_time_singer": self._is_first_time_waitlist_singer(str(req.get("singer") or "")),
             "request_time": self._waiting_for_add_request_time_text(req),
             "server_received_time": self._waiting_for_add_server_time_text(req),
+            "queue_position": req.get("queue_position"),
             "status_kind": "needs_review" if str(req.get("state") or "").strip().lower() == "failed_needs_review" else str(kind or "active"),
             "status_label": self._waiting_for_add_status_label(
                 "needs_review" if str(req.get("state") or "").strip().lower() == "failed_needs_review" else kind
@@ -22201,6 +22485,26 @@ class KaraokeApp(QWidget):
             local_ids = set(int(v) for v in (self._queue_remote_request_ids() or []))
         except Exception:
             local_ids = set()
+        identity_sets = self._accepted_request_identity_sets()
+        try:
+            deferred_ids = self._deferred_remote_request_ids()
+        except Exception:
+            deferred_ids = set()
+        pending_identity_sets = (set(identity_sets[0]) - set(deferred_ids), identity_sets[1], identity_sets[2])
+
+        sections = []
+        pending_acceptance_rows = self._pending_acceptance_rows(local_ids=local_ids, identity_sets=pending_identity_sets)
+        if pending_acceptance_rows:
+            sections.append({
+                "key": "pending_acceptance",
+                "title": "Pending Acceptance",
+                "rows": pending_acceptance_rows,
+                "helper": "These requests will automatically be added when the current song finishes.",
+            })
+
+        active_rows = self._waiting_for_add_active_rotation_rows()
+        if active_rows:
+            sections.append({"key": "active_rotation", "title": "Active Rotation", "rows": active_rows})
 
         pending = state.get("_waiting_for_add_requests", {})
         if not isinstance(pending, dict):
@@ -22211,11 +22515,36 @@ class KaraokeApp(QWidget):
                 rid_int = int(rid)
             except Exception:
                 continue
-            if rid_int <= 0 or rid_int in local_ids:
+            if rid_int <= 0 or rid_int in local_ids or self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
                 continue
             wait_rows.append(self._waiting_for_add_row(req, "waitlist", selectable=True))
         wait_rows.sort(key=self._waiting_for_add_order_key)
-        return [{"key": "waitlist", "title": "Pending Requests", "rows": wait_rows}]
+        if wait_rows:
+            sections.append({"key": "waitlist", "title": "Waitlist", "rows": wait_rows})
+
+        completed_rows = []
+        removed_rows = []
+        terminal = state.get("_waiting_for_add_recent_terminal_requests", {})
+        if isinstance(terminal, dict):
+            for rid, req in terminal.items():
+                try:
+                    rid_int = int(rid)
+                except Exception:
+                    continue
+                if rid_int <= 0 or rid_int in local_ids or rid_int in deferred_ids:
+                    continue
+                kind = self._waiting_for_add_status_kind(req)
+                if kind == "sung":
+                    completed_rows.append(self._waiting_for_add_row(req, "sung", selectable=False))
+                elif kind == "removed":
+                    removed_rows.append(self._waiting_for_add_row(req, "removed", selectable=False))
+        completed_rows.sort(key=self._waiting_for_add_order_key)
+        removed_rows.sort(key=self._waiting_for_add_order_key)
+        if completed_rows:
+            sections.append({"key": "completed", "title": "Completed", "rows": completed_rows})
+        if removed_rows:
+            sections.append({"key": "removed", "title": "Removed / Skipped", "rows": removed_rows})
+        return sections
 
     def _waiting_for_add_row_text(self, row: dict) -> str:
         singer = row.get("singer") or "Unknown singer"
@@ -22228,8 +22557,15 @@ class KaraokeApp(QWidget):
         status = row.get("status_label") or "Pending"
         if row.get("first_time_singer"):
             status = f"{status} - First turn"
+        queue_position = row.get("queue_position")
+        queue_text = ""
+        try:
+            if queue_position not in (None, "") and int(queue_position) > 0:
+                queue_text = f"    Queue: #{int(queue_position)}"
+        except Exception:
+            queue_text = ""
         return (
-            f"Singer: {singer}    Status: {status}\n"
+            f"Singer: {singer}    Status: {status}{queue_text}\n"
             f"Song: {title}    Artist: {artist}\n"
             f"Version: {version}    Length: {duration}    Requested: {request_time}    Server: {server_received_time}"
         )
@@ -22246,6 +22582,9 @@ class KaraokeApp(QWidget):
             return
         handled = state.get("_waiting_for_add_handled_ids", set())
         if isinstance(handled, set) and rid in handled:
+            return
+        if self._request_matches_accepted_queue_item(req):
+            self._mark_waiting_for_add_duplicate_accepted(req, reason=f"upsert:{reason or 'waitlist'}")
             return
         item = dict(req)
         if reason and not item.get("pending_reason") and not item.get("attention_reason"):
@@ -22270,6 +22609,7 @@ class KaraokeApp(QWidget):
         if not isinstance(handled, set):
             handled = set()
             self._waiting_for_add_handled_ids = handled
+        identity_sets = self._accepted_request_identity_sets()
         candidates = {}
         terminal_items = {}
         for req in reqs or []:
@@ -22293,11 +22633,14 @@ class KaraokeApp(QWidget):
                 continue
             if rid in handled or rid in local_ids:
                 continue
+            if self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
+                self._mark_waiting_for_add_duplicate_accepted(req, reason="set_requests")
+                continue
             candidates[rid] = dict(req)
         try:
             for rid, req in state.get("_remote_attention_requests", {}).items():
                 rid = int(rid)
-                if rid > 0 and rid not in handled and rid not in local_ids:
+                if rid > 0 and rid not in handled and rid not in local_ids and not self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
                     candidates.setdefault(rid, dict(req))
         except Exception:
             pass
@@ -22324,6 +22667,7 @@ class KaraokeApp(QWidget):
             self._add_participants_to_song_counts(counts, self._remote_request_participants(req))
         self._waiting_for_add_requests = items
         self._waiting_for_add_recent_terminal_requests = terminal_items
+        self._cleanup_accepted_waiting_for_add_requests(reason="set_requests_final")
         self._schedule_waiting_for_add_view_refresh(reason="set_requests")
 
     def _refresh_waiting_for_add_view(self):
@@ -22346,23 +22690,39 @@ class KaraokeApp(QWidget):
         waiting_list = state.get("waiting_for_add_list")
         waiting_model = state.get("waiting_for_add_model")
         if waiting_list is not None and waiting_model is not None:
-            colors = {"waitlist": QColor("#e2e8f0")}
+            colors = {
+                "pending_acceptance": QColor("#bae6fd"),
+                "active_rotation": QColor("#bbf7d0"),
+                "waitlist": QColor("#e2e8f0"),
+                "needs_review": QColor("#fde68a"),
+                "sung": QColor("#c4b5fd"),
+                "removed": QColor("#fca5a5"),
+            }
+            header_colors = {
+                "pending_acceptance": (QColor("#7dd3fc"), QColor(14, 165, 233, 42)),
+                "active_rotation": (QColor("#86efac"), QColor(22, 163, 74, 30)),
+                "waitlist": (QColor("#e2e8f0"), QColor(71, 85, 105, 36)),
+                "completed": (QColor("#c4b5fd"), QColor(124, 58, 237, 30)),
+                "removed": (QColor("#fca5a5"), QColor(220, 38, 38, 28)),
+            }
             render_limit = 120 if bool(getattr(self, "karaoke_playing", False)) else 300
             rendered = 0
             total_rows = 0
             model_rows = []
             for section in sections:
                 rows = section.get("rows") or []
-                total_rows += len(rows)
                 if not rows:
-                    model_rows.append({
-                        "text": "No pending waitlist requests",
-                        "request_id": 0,
-                        "selectable": False,
-                        "foreground": QColor("#64748b"),
-                        "height": 44,
-                    })
                     continue
+                total_rows += len(rows)
+                header_fg, header_bg = header_colors.get(section.get("key"), (QColor("#e2e8f0"), QColor(51, 65, 85, 32)))
+                model_rows.append({
+                    "text": f"{section.get('title') or 'Requests'} ({len(rows)})",
+                    "request_id": 0,
+                    "selectable": False,
+                    "foreground": header_fg,
+                    "background": header_bg,
+                    "height": 38,
+                })
                 for row in rows:
                     if rendered >= render_limit:
                         continue
@@ -22376,6 +22736,7 @@ class KaraokeApp(QWidget):
                         f"Request Time: {row.get('request_time')}\n"
                         f"Server Received: {row.get('server_received_time')}\n"
                         f"Status: {row.get('status_label')}"
+                        + (f"\nQueue Position: #{int(row.get('queue_position'))}" if str(row.get("queue_position") or "").isdigit() else "")
                         + ("\nFirst turn this show" if row.get("first_time_singer") else "")
                     )
                     model_rows.append({
@@ -22388,9 +22749,17 @@ class KaraokeApp(QWidget):
                         "height": 76,
                     })
                     rendered += 1
+            if not model_rows:
+                model_rows.append({
+                    "text": "No pending, active, or waitlisted requests.",
+                    "request_id": 0,
+                    "selectable": False,
+                    "foreground": QColor("#64748b"),
+                    "height": 44,
+                })
             if total_rows > rendered:
                 model_rows.append({
-                    "text": f"Showing {rendered} of {total_rows} waitlist requests.",
+                    "text": f"Showing {rendered} of {total_rows} requests.",
                     "request_id": 0,
                     "selectable": False,
                     "foreground": QColor("#94a3b8"),
@@ -22408,11 +22777,34 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        pending_section = next((s for s in sections if s.get("key") == "pending_acceptance"), {"rows": []})
+        pending_count = len(pending_section.get("rows") or [])
+        pending_enabled = self._pending_acceptance_enabled()
+        pending_panel = state.get("pending_acceptance_panel")
+        if pending_panel is not None:
+            pending_panel.setVisible(bool(pending_enabled and pending_count > 0))
+        pending_badge = state.get("pending_acceptance_badge_label")
+        if pending_badge is not None:
+            pending_badge.setText(str(pending_count))
+        pending_helper = state.get("pending_acceptance_helper_label")
+        if pending_helper is not None:
+            pending_helper.setVisible(bool(pending_enabled and pending_count > 0))
+        pending_button = state.get("deferred_remote_add_now_button")
+        if pending_button is not None:
+            pending_button.setVisible(bool(pending_enabled and pending_count > 0))
+            pending_button.setEnabled(bool(pending_count > 0))
+            pending_button.setToolTip("Accept all pending requests now")
+
         wait_section = next((s for s in sections if s.get("key") == "waitlist"), {"rows": []})
         count = len(wait_section.get("rows") or [])
         meta_label = state.get("waiting_for_add_meta_label")
         if meta_label is not None:
-            meta_label.setText("Clear" if count == 0 else f"{count} waiting")
+            if pending_count and count:
+                meta_label.setText(f"{pending_count} pending • {count} waiting")
+            elif pending_count:
+                meta_label.setText(f"{pending_count} pending")
+            else:
+                meta_label.setText("Clear" if count == 0 else f"{count} waiting")
         detail_label = state.get("waiting_for_add_detail_label")
         if count == 0 and detail_label is not None:
             detail_label.setText("No waitlisted songs.")
@@ -22649,6 +23041,33 @@ class KaraokeApp(QWidget):
         singer = str((req or {}).get("singer") or "").strip()
         if not singer:
             raise ValueError("Waiting request has no singer name.")
+        check_req = dict(req or {})
+        if isinstance(track, dict):
+            check_req["replacement_track"] = dict(track)
+            check_req.setdefault("artist", track.get("artist"))
+            check_req.setdefault("title", track.get("title"))
+            for key in (
+                "song_key",
+                "stable_request_key",
+                "selected_version",
+                "selected_brand",
+                "selected_disc_id",
+                "selected_source",
+                "disc_id",
+                "discid",
+                "songid",
+                "song_id",
+                "brand",
+                "version",
+                "source",
+            ):
+                if not check_req.get(key) and track.get(key):
+                    check_req[key] = track.get(key)
+        if self._request_matches_accepted_queue_item(check_req):
+            self._mark_waiting_for_add_duplicate_accepted(req, reason="add_track")
+            self._schedule_waiting_for_add_view_refresh(reason="add_track_duplicate")
+            self._show_processing_notification("That request is already in the singer's queue.", level="info")
+            return True
         song_data = self._waiting_for_add_song_data_from_track(req, track)
         ok = bool(self._add_song_to_queue(singer, song_data, track=track, remote_meta=req))
         if not ok:
@@ -22672,6 +23091,10 @@ class KaraokeApp(QWidget):
             pass
         try:
             getattr(self, "_waiting_for_add_requests", {}).pop(rid, None)
+        except Exception:
+            pass
+        try:
+            self._cleanup_accepted_waiting_for_add_requests(reason="add_track")
         except Exception:
             pass
         self._schedule_waiting_for_add_view_refresh(reason="add_track")
@@ -23116,13 +23539,14 @@ class KaraokeApp(QWidget):
             local_ids = set(int(v) for v in (self._queue_remote_request_ids() or []))
         except Exception:
             local_ids = set()
+        identity_sets = self._accepted_request_identity_sets()
         count = 0
-        for rid in pending.keys():
+        for rid, req in pending.items():
             try:
                 rid_int = int(rid)
             except Exception:
                 continue
-            if rid_int not in local_ids:
+            if rid_int not in local_ids and not self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
                 count += 1
         return count
 
@@ -28161,6 +28585,24 @@ class KaraokeApp(QWidget):
         if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
             self._clear_next_up_overlay_pending("no_next_singer")
             return False
+        transition_key = (
+            str(getattr(self, "_current_karaoke_singer_display", "") or getattr(self, "_current_karaoke_singer_name", "") or "").strip(),
+            str(getattr(self, "_current_karaoke_song_path", "") or "").strip(),
+            str(payload.get("singer", "") or "").strip(),
+            str(payload.get("title", "") or "").strip(),
+            str(payload.get("artist", "") or "").strip(),
+        )
+        try:
+            last_transition_key = self.__dict__.get("_next_up_overlay_last_completion_key", ())
+        except Exception:
+            last_transition_key = ()
+        if transition_key and transition_key == last_transition_key:
+            self._clear_next_up_overlay_pending("duplicate_completion_transition")
+            try:
+                _diag(f"[NEXT-UP-OVERLAY] duplicate completion ignored reason={reason} key={transition_key!r}")
+            except Exception:
+                pass
+            return False
         try:
             token = int(getattr(self, "_next_up_overlay_completion_token", 0) or 0) + 1
         except Exception:
@@ -28168,6 +28610,7 @@ class KaraokeApp(QWidget):
         self._next_up_overlay_completion_token = token
         self._next_up_overlay_pending_payload = dict(payload)
         self._next_up_overlay_pending_reason = str(reason or "media_end")
+        self._next_up_overlay_last_completion_key = transition_key
         try:
             _diag(
                 f"[NEXT-UP-OVERLAY] armed token={token} reason={reason} "
@@ -28176,7 +28619,14 @@ class KaraokeApp(QWidget):
             )
         except Exception:
             pass
-        return True
+        shown = self._show_next_up_transition_overlay(payload, reason=f"{reason}:completed_song_end")
+        self._next_up_overlay_consumed_token = token
+        self._clear_next_up_overlay_pending(f"shown_at_completion:{reason}")
+        try:
+            _diag(f"[NEXT-UP-OVERLAY] completion token={token} shown={shown} reason={reason}")
+        except Exception:
+            pass
+        return bool(shown)
 
     def _consume_next_up_overlay_for_transition(
         self,
@@ -28203,31 +28653,12 @@ class KaraokeApp(QWidget):
             return False
 
         self._next_up_overlay_consumed_token = token
-        self._clear_next_up_overlay_pending(f"consumed:{reason}")
-        if not bool(self.settings.get("next_up_overlay_enabled", True)):
-            try:
-                _diag(f"[NEXT-UP-OVERLAY] consumed token={token} but hidden: setting disabled")
-            except Exception:
-                pass
-            return False
-
-        payload = self._next_up_transition_payload_for(
-            singer,
-            entry,
-            following_singer=self._first_active_singer_name_from_queue(),
-        )
-        if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
-            payload = dict(pending)
-        if title:
-            payload["title"] = str(title).strip()
-        if artist:
-            payload["artist"] = str(artist).strip()
-        shown = self._show_next_up_transition_overlay(payload, reason=f"{reason}:completed_song_token")
+        self._clear_next_up_overlay_pending(f"suppressed_start_trigger:{reason}")
         try:
-            _diag(f"[NEXT-UP-OVERLAY] consumed token={token} shown={shown} reason={reason}")
+            _diag(f"[NEXT-UP-OVERLAY] start/resume trigger suppressed token={token} reason={reason}")
         except Exception:
             pass
-        return shown
+        return False
 
     def _show_next_up_transition_overlay(self, payload: dict | None = None, *, reason: str = "unknown") -> bool:
         if not bool(self.settings.get("next_up_overlay_enabled", True)):
@@ -28615,6 +29046,10 @@ class KaraokeApp(QWidget):
     def _request_queue_display_refresh(self):
         """Mark the queue UI dirty, batching remote bursts into one rebuild."""
         try:
+            self._log_active_background_workers("queue_refresh_request")
+        except Exception:
+            pass
+        try:
             state = object.__getattribute__(self, "__dict__")
         except Exception:
             state = {}
@@ -28807,6 +29242,10 @@ class KaraokeApp(QWidget):
         self._deferred_remote_adds = kept
         self._save_deferred_remote_adds()
         self._update_deferred_remote_add_status()
+        try:
+            self._schedule_waiting_for_add_view_refresh(reason="deferred_removed")
+        except Exception:
+            pass
         return True
 
     def _remote_request_inflight_ids(self) -> set[int]:
@@ -28857,9 +29296,23 @@ class KaraokeApp(QWidget):
         try:
             btn = getattr(self, "deferred_remote_add_now_button", None)
             if btn is not None:
-                btn.setVisible(count > 0)
-                btn.setEnabled(count > 0 and not active)
-                btn.setToolTip("Available between singers" if active else "Add pending remote requests now")
+                enabled = bool(self._pending_acceptance_enabled() and count > 0)
+                btn.setVisible(enabled)
+                btn.setEnabled(enabled)
+                btn.setToolTip("Accept all pending requests now" if enabled else "No pending requests")
+        except Exception:
+            pass
+        try:
+            panel = getattr(self, "pending_acceptance_panel", None)
+            if panel is not None:
+                visible = bool(self._pending_acceptance_enabled() and count > 0)
+                panel.setVisible(visible)
+                badge = getattr(self, "pending_acceptance_badge_label", None)
+                if badge is not None:
+                    badge.setText(str(count))
+                helper = getattr(self, "pending_acceptance_helper_label", None)
+                if helper is not None:
+                    helper.setVisible(visible)
         except Exception:
             pass
 
@@ -28883,25 +29336,27 @@ class KaraokeApp(QWidget):
         self._deferred_remote_adds = pending
         self._save_deferred_remote_adds()
         self._update_deferred_remote_add_status()
+        try:
+            self._schedule_waiting_for_add_view_refresh(reason="deferred_queued")
+        except Exception:
+            pass
         _diag(f"[REMOTE-DEFER] queued request_id={rid} pending_count={len(pending)}")
         return True
 
     def _manual_add_deferred_remote_adds(self):
-        if bool(getattr(self, "karaoke_playing", False)):
+        added = self._flush_deferred_remote_adds("manual", force=True)
+        if added:
             try:
-                QMessageBox.warning(self, "Add Pending Requests", "Pending requests can be added safely between singers.")
+                self._show_processing_notification(f"Added {added} pending request{'s' if added != 1 else ''} to rotation.", level="success")
             except Exception:
                 pass
-            self._update_deferred_remote_add_status()
-            return
-        self._flush_deferred_remote_adds("manual")
 
-    def _flush_deferred_remote_adds(self, reason: str = "between_singers") -> int:
+    def _flush_deferred_remote_adds(self, reason: str = "between_singers", *, force: bool = False) -> int:
         try:
             active = bool(object.__getattribute__(self, "__dict__").get("karaoke_playing", False))
         except Exception:
             active = False
-        if active:
+        if active and not force:
             self._update_deferred_remote_add_status()
             return 0
         try:
@@ -28930,6 +29385,10 @@ class KaraokeApp(QWidget):
         self._deferred_remote_adds = remaining
         self._save_deferred_remote_adds()
         self._update_deferred_remote_add_status()
+        try:
+            self._schedule_waiting_for_add_view_refresh(reason=f"deferred_flush_{reason}")
+        except Exception:
+            pass
         if added:
             _diag(f"[REMOTE-DEFER] flushed count={added} reason={reason}")
             try:
@@ -29037,6 +29496,14 @@ class KaraokeApp(QWidget):
             pass
 
     def _add_song_to_queue(self, singer_name, song_data, track=None, remote_meta=None):
+        try:
+            self._prune_expired_empty_rotation_slots()
+        except Exception:
+            pass
+        try:
+            self._log_active_background_workers("queue_add_start")
+        except Exception:
+            pass
         # Always capitalize the first letter of every word in the singer's name,
         # whether typed by the operator or submitted remotely
         # (e.g. "dan smith" -> "Dan Smith").
@@ -29071,9 +29538,17 @@ class KaraokeApp(QWidget):
             # DB uses "duration_secs", code expects "duration"
             duration = track.get("duration_secs") or track.get("duration")
         else:
-            # Fallback: lookup (slower, but works for manual file adds)
-            display_name = self.lookup_display_name(song_info[0] if isinstance(song_info, tuple) else song_info)
-            duration = self._get_duration_secs(song_info[0] if isinstance(song_info, tuple) else song_info)
+            # Fallback lookup can hit DB/filesystem duration paths. During
+            # active karaoke, keep queue insertion cheap and let later idle
+            # refreshes enrich metadata from the library.
+            fallback_path = song_info[0] if isinstance(song_info, tuple) else song_info
+            if bool(getattr(self, "karaoke_playing", False)):
+                display_name = os.path.basename(str(fallback_path or "")) or "Unknown"
+                duration = None
+                _diag(f"[QUEUE-ADD] metadata lookup deferred during playback song={display_name!r}")
+            else:
+                display_name = self.lookup_display_name(fallback_path)
+                duration = self._get_duration_secs(fallback_path)
         
         # Store as dict with all info
         entry = {
@@ -29138,6 +29613,7 @@ class KaraokeApp(QWidget):
             singer.setdefault("rotation_marker", False)
             insertion_index = len(songs)
             songs.append(entry)
+            self._clear_temporary_empty_rotation_slot(singer, reason="replacement_added")
             try:
                 if self._is_rotation_mode() and bool(singer.get("has_sung", False)):
                     _diag(
@@ -29181,6 +29657,10 @@ class KaraokeApp(QWidget):
                 # Locked: weave the newcomer into the NEXT rotation (around the
                 # next-rotation marker), never ahead of currently-active singers.
                 self._rotation_insert_locked_new_singer(new_singer)
+                try:
+                    ins = self.queue.index(new_singer)
+                except Exception:
+                    ins = self._queue_singer_match_index(primary)
             else:
                 marker_idx = self._rotation_marker_index()
                 ins = marker_idx if marker_idx >= 0 else self._rotation_boundary_index()
@@ -29328,6 +29808,88 @@ class KaraokeApp(QWidget):
                 return True
         return False
 
+    def _empty_rotation_slot_timeout_sec(self) -> float:
+        try:
+            return max(15.0, float(self.settings.get("empty_rotation_slot_timeout_sec", 180) or 180))
+        except Exception:
+            return 180.0
+
+    def _mark_rotation_slot_temporarily_empty(self, singer: dict, *, reason: str = "song_removed") -> bool:
+        if not isinstance(singer, dict) or not self._is_rotation_mode():
+            return False
+        if singer.get("songs"):
+            return False
+        now = time.time()
+        singer["temporary_empty_slot"] = True
+        singer["empty_slot_reason"] = str(reason or "song_removed")
+        singer["empty_slot_created_at"] = now
+        singer["empty_slot_until"] = now + self._empty_rotation_slot_timeout_sec()
+        singer.setdefault("has_sung", False)
+        singer.setdefault("round_sung", False)
+        singer.setdefault("rotation_marker", False)
+        _diag(
+            "[ROTATION-SLOT] preserved empty singer slot "
+            f"singer={str(singer.get('name', '') or '')!r} reason={reason} "
+            f"timeout_sec={int(self._empty_rotation_slot_timeout_sec())}"
+        )
+        return True
+
+    def _clear_temporary_empty_rotation_slot(self, singer: dict, *, reason: str = "replacement_added") -> None:
+        if not isinstance(singer, dict):
+            return
+        was_temp = bool(singer.get("temporary_empty_slot", False))
+        singer.pop("temporary_empty_slot", None)
+        singer.pop("empty_slot_reason", None)
+        singer.pop("empty_slot_created_at", None)
+        singer.pop("empty_slot_until", None)
+        if was_temp:
+            _diag(
+                "[ROTATION-SLOT] filled preserved singer slot "
+                f"singer={str(singer.get('name', '') or '')!r} reason={reason}"
+            )
+
+    def _delete_rotation_singer_row(self, singer_idx: int, *, reason: str = "cleanup") -> None:
+        try:
+            singer_idx = int(singer_idx)
+            was_marker = bool(self.queue[singer_idx].get("rotation_marker", False)) if self._is_rotation_mode() else False
+            singer_name = str(self.queue[singer_idx].get("name", "") or "")
+            del self.queue[singer_idx]
+            if self._is_rotation_mode() and was_marker and self.queue:
+                new_idx = singer_idx if singer_idx < len(self.queue) else 0
+                self._rotation_set_marker_index(new_idx)
+            _diag(f"[ROTATION-SLOT] removed empty singer row singer={singer_name!r} reason={reason}")
+        except Exception:
+            pass
+
+    def _prune_expired_empty_rotation_slots(self, *, force: bool = False) -> int:
+        if not self._is_rotation_mode():
+            return 0
+        now = time.time()
+        removed = 0
+        for singer_idx in range(len(self.queue) - 1, -1, -1):
+            try:
+                singer = self.queue[singer_idx]
+            except Exception:
+                continue
+            if not isinstance(singer, dict):
+                continue
+            if singer.get("songs"):
+                self._clear_temporary_empty_rotation_slot(singer, reason="slot_has_song")
+                continue
+            if not bool(singer.get("temporary_empty_slot", False)):
+                continue
+            try:
+                expired = now >= float(singer.get("empty_slot_until") or 0.0)
+            except Exception:
+                expired = True
+            if force or expired:
+                self._delete_rotation_singer_row(
+                    singer_idx,
+                    reason="empty_slot_cleanup" if not force else "empty_slot_force_cleanup",
+                )
+                removed += 1
+        return removed
+
     def _should_preserve_rotation_identity(self, singer) -> bool:
         """Keep played-through rotation rows even when the server has no pending songs."""
         if not isinstance(singer, dict):
@@ -29336,6 +29898,11 @@ class KaraokeApp(QWidget):
             return False
         if singer.get("songs"):
             return True
+        if bool(singer.get("temporary_empty_slot", False)):
+            try:
+                return time.time() < float(singer.get("empty_slot_until") or 0.0)
+            except Exception:
+                return True
         return bool(
             singer.get("has_sung", False)
             or singer.get("round_sung", False)
@@ -29649,6 +30216,10 @@ class KaraokeApp(QWidget):
 
     def show_queue_context_menu(self, position):
         """Show context menu for singers and songs"""
+        try:
+            self._log_active_background_workers("queue_context_menu", force=True)
+        except Exception:
+            pass
         item = self.queue_display.itemAt(position)
         if not item:
             return
@@ -29674,6 +30245,14 @@ class KaraokeApp(QWidget):
             if singer_pref:
                 clear_brand_action = menu.addAction(f"Clear Preferred Brand ({singer_pref})")
                 clear_brand_action.triggered.connect(lambda: self.clear_singer_brand_override(singer_idx))
+            if self._is_rotation_mode() and not singer.get("songs") and bool(singer.get("temporary_empty_slot", False)):
+                menu.addSeparator()
+                cleanup_action = menu.addAction("Remove Empty Singer Slot")
+                cleanup_action.triggered.connect(lambda: (
+                    self._delete_rotation_singer_row(singer_idx, reason="host_cleanup_empty_slot"),
+                    self._request_queue_display_refresh(),
+                    self._schedule_save_data(0),
+                ))
             menu.addSeparator()
             direct_msg_action = menu.addAction("Direct Message Singer...")
             direct_msg_action.triggered.connect(lambda: self.open_direct_message_dialog(singer_idx))
@@ -33467,6 +34046,89 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _active_background_worker_snapshot(self) -> dict:
+        qthreads = []
+        for name in (
+            "_dur_thread",
+            "_library_scan_thread",
+            "_zip_extract_thread",
+            "_analyze_lib_job",
+            "poll_thread",
+        ):
+            try:
+                obj = getattr(self, name, None)
+                if name == "_analyze_lib_job" and isinstance(obj, tuple):
+                    obj = obj[0] if obj else None
+                if obj is not None and hasattr(obj, "isRunning") and obj.isRunning():
+                    qthreads.append(name)
+            except Exception:
+                pass
+        timers = []
+        for name in (
+            "_queue_display_refresh_timer",
+            "_save_data_timer",
+            "rotation_post_timer",
+            "_bg_transition_fade_timer",
+            "_bg_transition_advance_timer",
+            "_media_end_cleanup_timer",
+        ):
+            try:
+                timer = getattr(self, name, None)
+                if timer is not None and hasattr(timer, "isActive") and timer.isActive():
+                    timers.append(name)
+            except Exception:
+                pass
+        thread_names = []
+        try:
+            for th in threading.enumerate():
+                nm = str(getattr(th, "name", "") or "")
+                if nm and (
+                    nm.startswith("remote-")
+                    or nm.startswith("singws-")
+                    or nm.startswith("waitlist-")
+                    or nm.startswith("request-")
+                    or nm.startswith("relay-")
+                ):
+                    thread_names.append(nm)
+        except Exception:
+            pass
+        try:
+            with _loudness_lock:
+                loudness_inflight = len(_loudness_inflight)
+        except Exception:
+            loudness_inflight = 0
+        try:
+            prescan_inflight = len(getattr(self, "_next_prescan_inflight", set()) or set())
+        except Exception:
+            prescan_inflight = 0
+        return {
+            "qthreads": qthreads,
+            "timers": timers,
+            "threads": sorted(thread_names),
+            "loudness_inflight": loudness_inflight,
+            "lead_silence_prescan": prescan_inflight,
+        }
+
+    def _log_active_background_workers(self, reason: str = "status", *, force: bool = False):
+        try:
+            if not bool(getattr(self, "karaoke_playing", False)) and not force:
+                return
+            now = time.monotonic()
+            last = float(getattr(self, "_active_worker_log_last_ts", 0.0) or 0.0)
+            if not force and now - last < 10.0:
+                return
+            self._active_worker_log_last_ts = now
+            snap = self._active_background_worker_snapshot()
+            _diag(
+                "[PLAYBACK-WORKERS] "
+                f"reason={reason} karaoke_active={int(bool(getattr(self, 'karaoke_playing', False)))} "
+                f"qthreads={snap['qthreads']} timers={snap['timers']} threads={snap['threads']} "
+                f"loudness_inflight={snap['loudness_inflight']} "
+                f"lead_silence_prescan={snap['lead_silence_prescan']}"
+            )
+        except Exception:
+            pass
+
     def _performance_mode(self) -> bool:
         """Performance Mode lowers nonessential background/UI work for slower Macs."""
         try:
@@ -34734,6 +35396,7 @@ class KaraokeApp(QWidget):
             pass
 
         try:
+            self._prune_expired_empty_rotation_slots()
             self._rotation_recompute_round_state(force_reset=False)
             self._rotation_repair_marker()
         except Exception:
@@ -34904,8 +35567,12 @@ class KaraokeApp(QWidget):
                 else:
                     # Fallback for old format (will be slow first time, cached after)
                     song_path = song_info[0] if isinstance(song_info, (tuple, list)) else song_info
-                    display_name = self.lookup_display_name(song_path)
-                    dur = self._get_duration_secs(song_path)
+                    if karaoke_active:
+                        display_name = os.path.basename(str(song_path or "")) or "Unknown"
+                        dur = 0
+                    else:
+                        display_name = self.lookup_display_name(song_path)
+                        dur = self._get_duration_secs(song_path)
                     # Convert to new format in place for next time
                     try:
                         entry["display_name"] = display_name
@@ -35289,13 +35956,7 @@ class KaraokeApp(QWidget):
                             )
                 except Exception:
                     pass
-                was_marker = bool(self.queue[singer_idx].get("rotation_marker", False)) if self._is_rotation_mode() else False
-                del self.queue[singer_idx]
-                if self._is_rotation_mode() and was_marker:
-                    # Marker transfer rule: if marked singer is deleted, singer below becomes marker.
-                    if self.queue:
-                        new_idx = singer_idx if singer_idx < len(self.queue) else 0
-                        self._rotation_set_marker_index(new_idx)
+                self._delete_rotation_singer_row(singer_idx, reason="host_remove_singer")
         # Remove song if it's a song line
         elif item_kind == "song":
             singer_idx, song_idx = self._queue_item_song_indices(item, index)
@@ -35314,12 +35975,21 @@ class KaraokeApp(QWidget):
                     pass
                 del self.queue[singer_idx]["songs"][song_idx]
                 try:
+                    if singer_idx < len(self.queue) and not self.queue[singer_idx].get("songs"):
+                        self._mark_rotation_slot_temporarily_empty(self.queue[singer_idx], reason="host_remove_song")
+                except Exception:
+                    pass
+                try:
                     if singer_idx < len(self.queue):
                         self._sync_remote_singer_order(singer_idx, reason="host_remove_song")
                 except Exception:
                     pass
 
-        self.update_queue_display()
+        self._request_queue_display_refresh()
+        try:
+            self._schedule_save_data(1000 if bool(getattr(self, "karaoke_playing", False)) else 0)
+        except Exception:
+            pass
 
     def _resolve_karaoke_audio_path(self, song_info) -> str:
         """Return the best audio path for a queued karaoke entry (empty if not scannable)."""
@@ -35389,11 +36059,26 @@ class KaraokeApp(QWidget):
         self._next_silence_offset = clamped
         print(f"[SILENCE] next-up prescan ready: {Path(resolved).name} offset={clamped:.2f}s")
 
+    def _lead_silence_prescan_enabled(self) -> bool:
+        try:
+            if self._safe_mode() or self._performance_mode():
+                return False
+            return bool(self.settings.get("end_silence_trim_enabled", True))
+        except Exception:
+            return False
+
     def _prescan_next_track(self, path: str):
         """Scan only the current next-up song in a daemon thread."""
         if not path:
             self._next_silence_path = ""
             self._next_silence_offset = 0.0
+            return
+        if not self._lead_silence_prescan_enabled():
+            self._next_scan_token += 1
+            self._next_scan_path = ""
+            self._next_silence_path = ""
+            self._next_silence_offset = 0.0
+            _diag(f"[SILENCE] next-up prescan skipped reason=disabled file={Path(path).name}")
             return
 
         self._next_scan_token += 1
@@ -35417,8 +36102,18 @@ class KaraokeApp(QWidget):
         print(f"[SILENCE] prescan start: {Path(path).name}")
 
         def worker(scan_path: str, scan_token: int):
+            try:
+                inflight = getattr(self, "_next_prescan_inflight", None)
+                if not isinstance(inflight, set):
+                    inflight = set()
+                    self._next_prescan_inflight = inflight
+                inflight.add(scan_token)
+            except Exception:
+                pass
             resolved = scan_path
             try:
+                if not self._lead_silence_prescan_enabled():
+                    return
                 low = scan_path.lower()
                 if low.endswith('.zip'):
                     # Pre-extract next-up ZIP in background so silence scan can run on MP3.
@@ -35447,13 +36142,28 @@ class KaraokeApp(QWidget):
                 offset = 0.0
                 resolved = scan_path
 
+            finally:
+                try:
+                    inflight = getattr(self, "_next_prescan_inflight", None)
+                    if isinstance(inflight, set):
+                        inflight.discard(scan_token)
+                except Exception:
+                    pass
+
             # Safe to update state (no direct Qt UI here)
-            self._apply_prescan_result(scan_path, scan_token, offset, resolved_path=resolved)
+            if self._lead_silence_prescan_enabled():
+                self._apply_prescan_result(scan_path, scan_token, offset, resolved_path=resolved)
 
         threading.Thread(target=worker, args=(path, token), daemon=True).start()
 
     def _schedule_next_up_prescan(self):
         """Re-evaluate next-up and scan only when it changes."""
+        if not self._lead_silence_prescan_enabled():
+            self._next_scan_token += 1
+            self._next_scan_path = ""
+            self._next_silence_path = ""
+            self._next_silence_offset = 0.0
+            return
         next_path = self._get_next_up_audio_path()
 
         if not next_path:
@@ -36026,13 +36736,7 @@ class KaraokeApp(QWidget):
             title = ""
 
         try:
-            self._consume_next_up_overlay_for_transition(
-                singer,
-                entry,
-                title=title,
-                artist=artist,
-                reason="play_next",
-            )
+            self._clear_next_up_overlay_pending("play_next_start_no_overlay")
         except Exception:
             pass
 
@@ -36052,7 +36756,7 @@ class KaraokeApp(QWidget):
                 key=key,
                 tempo_percent=tempo_percent,
             )
-            self.save_data()
+            self._schedule_save_data(1000 if bool(getattr(self, "karaoke_playing", False)) else 0)
             self._sync_singer_history_async("play_next")
         except Exception:
             pass
@@ -37144,7 +37848,10 @@ class KaraokeApp(QWidget):
                 )
             if songs:
                 continue
-            if self._should_preserve_rotation_identity(singer):
+            if self._is_rotation_mode():
+                singer["songs"] = []
+                self._mark_rotation_slot_temporarily_empty(singer, reason=reason)
+            elif self._should_preserve_rotation_identity(singer):
                 singer["songs"] = []
             else:
                 del self.queue[singer_idx]
@@ -37488,6 +38195,10 @@ class KaraokeApp(QWidget):
 
     def _reconcile_remote_requests(self, reqs):
         _perf_t0 = time.perf_counter()
+        try:
+            self._prune_expired_empty_rotation_slots()
+        except Exception:
+            pass
         try:
             if time.time() < float(getattr(self, "_remote_clear_in_progress_until", 0.0) or 0.0):
                 _diag(f"[REMOTE-CLEAR] ignoring stale poll during clear window ({len(reqs or [])} request(s))")
@@ -38155,6 +38866,45 @@ class KaraokeApp(QWidget):
             return False
 
         req = payload.get("remote_meta") or payload
+        check_req = dict(req or {})
+        track = payload.get("track")
+        if isinstance(track, dict):
+            check_req.setdefault("artist", track.get("artist"))
+            check_req.setdefault("title", track.get("title"))
+            for key in (
+                "song_key",
+                "stable_request_key",
+                "selected_version",
+                "selected_brand",
+                "selected_disc_id",
+                "selected_source",
+                "disc_id",
+                "discid",
+                "songid",
+                "song_id",
+                "brand",
+                "version",
+                "source",
+            ):
+                if not check_req.get(key) and track.get(key):
+                    check_req[key] = track.get(key)
+        identity_sets = self._accepted_request_identity_sets()
+        try:
+            current_rid = int(check_req.get("request_id") or check_req.get("id") or payload.get("request_id") or 0)
+            if current_rid > 0 and current_rid in identity_sets[0]:
+                identity_sets = (set(identity_sets[0]) - {current_rid}, identity_sets[1], identity_sets[2])
+        except Exception:
+            pass
+        if self._request_matches_accepted_queue_item(check_req, identity_sets=identity_sets):
+            self._mark_waiting_for_add_duplicate_accepted(req, reason="remote_add")
+            self._log_remote_request_diag(
+                req,
+                status="accepted",
+                match_result="already_queued",
+                queue_insert_result="duplicate_suppressed",
+                failure_reason="",
+            )
+            return True
         ok_limit, limit_message = self._check_remote_request_song_limit(req)
         if not ok_limit:
             self._record_remote_limit_blocked_request(req, limit_message)
