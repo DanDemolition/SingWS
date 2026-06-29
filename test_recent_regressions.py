@@ -153,6 +153,90 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertFalse(app._show_next_up_transition_overlay(payload, reason="test"))
         self.assertEqual(len(calls), 1)
 
+    def test_next_up_overlay_requires_completed_song_token(self):
+        app = make_app(self.singws)
+        calls = []
+
+        class FakeArea:
+            def show_next_up_overlay(self, payload, duration):
+                calls.append((payload, duration))
+
+        app.video_window = SimpleNamespace(video_area=FakeArea())
+        app.settings["next_up_overlay_enabled"] = True
+
+        singer = {"name": "Ada"}
+        entry = {"song_info": "/tmp/next.mp3", "title": "Next", "artist": "Artist"}
+
+        self.assertFalse(
+            app._consume_next_up_overlay_for_transition(
+                singer,
+                entry,
+                title="Next",
+                artist="Artist",
+                reason="test_play",
+            )
+        )
+        self.assertEqual(calls, [])
+
+    def test_next_up_overlay_consumes_completed_song_once(self):
+        app = make_app(self.singws)
+        calls = []
+
+        class FakeArea:
+            def show_next_up_overlay(self, payload, duration):
+                calls.append((payload, duration))
+
+        app.video_window = SimpleNamespace(video_area=FakeArea())
+        app.settings["next_up_overlay_enabled"] = True
+        app.settings["next_up_overlay_duration_sec"] = 10
+        app._current_karaoke_singer_name = "Ada"
+        app._current_karaoke_song_path = "/tmp/current.mp3"
+        app.queue = [
+            {
+                "name": "Ada",
+                "skipped": False,
+                "songs": [
+                    {"song_info": "/tmp/current.mp3", "artist": "Artist", "title": "Current", "skipped": False},
+                    {"song_info": "/tmp/next.mp3", "artist": "Artist", "title": "Next", "skipped": False},
+                ],
+            },
+            {
+                "name": "Bo",
+                "skipped": False,
+                "songs": [
+                    {"song_info": "/tmp/bo.mp3", "artist": "Other", "title": "On Deck", "skipped": False},
+                ],
+            },
+        ]
+
+        self.assertTrue(app._mark_next_up_overlay_pending_after_completion(reason="test_end"))
+        singer = {"name": "Ada"}
+        entry = {"song_info": "/tmp/next.mp3", "title": "Next", "artist": "Artist"}
+        self.assertTrue(
+            app._consume_next_up_overlay_for_transition(
+                singer,
+                entry,
+                title="Next",
+                artist="Artist",
+                reason="test_play",
+            )
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0]["singer"], "Ada")
+        self.assertEqual(calls[0][0]["title"], "Next")
+        self.assertEqual(calls[0][0]["artist"], "Artist")
+
+        self.assertFalse(
+            app._consume_next_up_overlay_for_transition(
+                singer,
+                entry,
+                title="Next",
+                artist="Artist",
+                reason="test_play_again",
+            )
+        )
+        self.assertEqual(len(calls), 1)
+
     def test_settings_save_scheduler_debounces_ui_thread_writes(self):
         app = make_app(self.singws)
         calls = []

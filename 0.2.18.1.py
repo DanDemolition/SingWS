@@ -5816,12 +5816,17 @@ class VideoAreaWidget(QWidget):
         title = str(payload.get("title", "") or "").strip()
         artist = str(payload.get("artist", "") or "").strip()
         on_deck = str(payload.get("on_deck", "") or "").strip()
+        if on_deck.lower() in {"none", "null", "nil", "n/a", "na", "-", "—"}:
+            on_deck = ""
         if not singer:
             return
 
         panel_w = min(int(w * 0.78), 920)
-        panel_h = min(int(h * 0.52), 430)
-        panel_h = max(260, panel_h)
+        panel_h_ratio = 0.52 if on_deck else 0.44
+        panel_h_max = 430 if on_deck else 360
+        panel_h_min = 260 if on_deck else 225
+        panel_h = min(int(h * panel_h_ratio), panel_h_max)
+        panel_h = max(panel_h_min, panel_h)
         x = int((w - panel_w) / 2)
         y = int((h - panel_h) / 2)
         pad = max(24, int(panel_w * 0.055))
@@ -5834,9 +5839,9 @@ class VideoAreaWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, a(105)))
+        painter.setBrush(QColor(0, 0, 0, a(70)))
         painter.drawRoundedRect(QRectF(x + 10, y + 14, panel_w, panel_h), 22, 22)
-        painter.setBrush(QColor(3, 3, 8, a(244)))
+        painter.setBrush(QColor(3, 3, 8, a(153)))
         painter.drawRoundedRect(QRectF(x, y, panel_w, panel_h), 20, 20)
 
         try:
@@ -5875,7 +5880,7 @@ class VideoAreaWidget(QWidget):
         label_fm = QFontMetrics(label_font)
         painter.setPen(accent)
         painter.drawText(QRect(x + pad, y_cursor, text_w, label_fm.height() + 6),
-                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Next Up:")
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "NEXT UP")
         y_cursor += label_fm.height() + 8
 
         painter.setFont(singer_font)
@@ -5890,7 +5895,7 @@ class VideoAreaWidget(QWidget):
         singing_fm = QFontMetrics(singing_font)
         painter.setPen(QColor(255, 255, 255, a(205)))
         painter.drawText(QRect(x + pad, y_cursor, text_w, singing_fm.height() + 4),
-                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Singing:")
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Singing")
         y_cursor += singing_fm.height() + 5
 
         painter.setFont(title_font)
@@ -13964,6 +13969,11 @@ class KaraokeApp(QWidget):
         self._media_end_cleanup_timer.timeout.connect(self._run_media_end_cleanup)
         self._media_end_cleanup_end_silence_triggered = False
         self._media_end_cleanup_schedule_bg_resume = False
+        self._media_end_overlay_eligible = False
+        self._next_up_overlay_completion_token = 0
+        self._next_up_overlay_consumed_token = 0
+        self._next_up_overlay_pending_payload = {}
+        self._next_up_overlay_pending_reason = ""
         self._preview_overlay_refresh_timer = QTimer(self)
         self._preview_overlay_refresh_timer.setSingleShot(True)
         self._preview_overlay_refresh_timer.timeout.connect(self._refresh_preview_overlay_binding)
@@ -19063,12 +19073,12 @@ class KaraokeApp(QWidget):
         elif mtype == Gst.MessageType.EOS:
             # Only react to EOS from the MAIN pipeline; preview will end too.
             if which == "main":
-                QTimer.singleShot(0, self._handle_media_end_safe)
+                QTimer.singleShot(0, lambda: self._handle_media_end_safe("eos"))
         elif mtype == Gst.MessageType.ERROR:
             err, debug = msg.parse_error()
             print(f"GStreamer ERROR from {which}: {err} ({debug})")
             if which == "main":
-                QTimer.singleShot(0, self._handle_media_end_safe)
+                QTimer.singleShot(0, lambda: self._handle_media_end_safe("error"))
 
     def _prepare_overlay(self, sink, win):
         # Attach sink to a QWidget via VideoOverlay
@@ -19079,13 +19089,15 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 print("VideoOverlay bind failed:", e)
                 
-    def _handle_media_end_safe(self):
+    def _handle_media_end_safe(self, trigger: str = "eos"):
         """Called when the current track finishes or on pipeline ERROR."""
         if getattr(self, "_stop_in_progress", False):
             return
         if bool(getattr(self, "_media_end_handoff_active", False)):
             _diag("[END] duplicate media-end ignored: handoff already active")
             return
+        trigger = str(trigger or "eos").strip().lower()
+        self._media_end_overlay_eligible = (trigger != "error")
         self._media_end_handoff_active = True
         try:
             self._media_end_handoff_timer.start(6000)
@@ -19161,6 +19173,13 @@ class KaraokeApp(QWidget):
                 self._flush_deferred_remote_adds("media_end")
             except Exception as e:
                 _diag(f"[REMOTE-DEFER] media-end flush failed: {e}")
+            try:
+                if bool(getattr(self, "_media_end_overlay_eligible", False)):
+                    self._mark_next_up_overlay_pending_after_completion(reason="media_end")
+                else:
+                    self._clear_next_up_overlay_pending("media_end_not_eligible")
+            except Exception:
+                pass
 
             # Clear the Now Singing line
             try:
@@ -19192,11 +19211,6 @@ class KaraokeApp(QWidget):
                 self.preview_window.update()
             except Exception as e:
                 print("restore background failed:", e)
-
-            try:
-                self._show_next_up_transition_overlay(reason="media_end")
-            except Exception:
-                pass
 
             if not schedule_bg_resume:
                 return
@@ -28133,6 +28147,88 @@ class KaraokeApp(QWidget):
         except Exception:
             return 10.0
 
+    def _clear_next_up_overlay_pending(self, reason: str = ""):
+        self._next_up_overlay_pending_payload = {}
+        self._next_up_overlay_pending_reason = ""
+        if reason:
+            try:
+                _diag(f"[NEXT-UP-OVERLAY] pending cleared reason={reason}")
+            except Exception:
+                pass
+
+    def _mark_next_up_overlay_pending_after_completion(self, *, reason: str = "media_end") -> bool:
+        payload = self._next_up_transition_payload_from_queue()
+        if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
+            self._clear_next_up_overlay_pending("no_next_singer")
+            return False
+        try:
+            token = int(getattr(self, "_next_up_overlay_completion_token", 0) or 0) + 1
+        except Exception:
+            token = 1
+        self._next_up_overlay_completion_token = token
+        self._next_up_overlay_pending_payload = dict(payload)
+        self._next_up_overlay_pending_reason = str(reason or "media_end")
+        try:
+            _diag(
+                f"[NEXT-UP-OVERLAY] armed token={token} reason={reason} "
+                f"singer={payload.get('singer', '')!r} title={payload.get('title', '')!r} "
+                f"artist={payload.get('artist', '')!r} on_deck={payload.get('on_deck', '')!r}"
+            )
+        except Exception:
+            pass
+        return True
+
+    def _consume_next_up_overlay_for_transition(
+        self,
+        singer: dict,
+        entry,
+        *,
+        title: str = "",
+        artist: str = "",
+        reason: str = "play_next",
+    ) -> bool:
+        try:
+            token = int(getattr(self, "_next_up_overlay_completion_token", 0) or 0)
+        except Exception:
+            token = 0
+        try:
+            consumed = int(getattr(self, "_next_up_overlay_consumed_token", 0) or 0)
+        except Exception:
+            consumed = 0
+        try:
+            pending = self.__dict__.get("_next_up_overlay_pending_payload", {}) or {}
+        except Exception:
+            pending = {}
+        if token <= 0 or consumed >= token or not isinstance(pending, dict) or not pending:
+            return False
+
+        self._next_up_overlay_consumed_token = token
+        self._clear_next_up_overlay_pending(f"consumed:{reason}")
+        if not bool(self.settings.get("next_up_overlay_enabled", True)):
+            try:
+                _diag(f"[NEXT-UP-OVERLAY] consumed token={token} but hidden: setting disabled")
+            except Exception:
+                pass
+            return False
+
+        payload = self._next_up_transition_payload_for(
+            singer,
+            entry,
+            following_singer=self._first_active_singer_name_from_queue(),
+        )
+        if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
+            payload = dict(pending)
+        if title:
+            payload["title"] = str(title).strip()
+        if artist:
+            payload["artist"] = str(artist).strip()
+        shown = self._show_next_up_transition_overlay(payload, reason=f"{reason}:completed_song_token")
+        try:
+            _diag(f"[NEXT-UP-OVERLAY] consumed token={token} shown={shown} reason={reason}")
+        except Exception:
+            pass
+        return shown
+
     def _show_next_up_transition_overlay(self, payload: dict | None = None, *, reason: str = "unknown") -> bool:
         if not bool(self.settings.get("next_up_overlay_enabled", True)):
             return False
@@ -35930,16 +36026,13 @@ class KaraokeApp(QWidget):
             title = ""
 
         try:
-            payload = self._next_up_transition_payload_for(
+            self._consume_next_up_overlay_for_transition(
                 singer,
                 entry,
-                following_singer=self._first_active_singer_name_from_queue(),
+                title=title,
+                artist=artist,
+                reason="play_next",
             )
-            if title:
-                payload["title"] = title
-            if artist:
-                payload["artist"] = artist
-            self._show_next_up_transition_overlay(payload, reason="play_next")
         except Exception:
             pass
 
