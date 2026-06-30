@@ -5446,11 +5446,13 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_phase = ""
         self._next_up_overlay_phase_started = 0.0
         self._next_up_overlay_fade_ms = 250
+        self._next_up_overlay_duration_ms = 10000
+        self._next_up_overlay_hide_started = False
         self._next_up_overlay_tick_timer = QTimer(self)
         self._next_up_overlay_tick_timer.timeout.connect(self._tick_next_up_overlay)
         self._next_up_overlay_hide_timer = QTimer(self)
         self._next_up_overlay_hide_timer.setSingleShot(True)
-        self._next_up_overlay_hide_timer.timeout.connect(self.hide_next_up_overlay)
+        self._next_up_overlay_hide_timer.timeout.connect(lambda: self.hide_next_up_overlay(reason="timer"))
 
     def set_background_image(self, image_path):
         if image_path and os.path.exists(image_path):
@@ -5482,9 +5484,37 @@ class VideoAreaWidget(QWidget):
         self._karaoke_scaled_key = None
         self.update()
 
-    def show_next_up_overlay(self, payload: dict, duration_sec: float = 10.0):
+    def _next_up_overlay_log(self, message: str):
+        try:
+            _diag(f"[NEXT-UP-OVERLAY] {message}")
+        except Exception:
+            try:
+                print(f"[NEXT-UP-OVERLAY] {message}")
+            except Exception:
+                pass
+
+    def _start_next_up_overlay_hide_timer(self, reason: str = "visible"):
+        if not self._next_up_overlay_payload or self._next_up_overlay_hide_started:
+            return
+        self._next_up_overlay_hide_started = True
+        duration_ms = max(1000, int(getattr(self, "_next_up_overlay_duration_ms", 10000) or 10000))
+        self._next_up_overlay_hide_timer.stop()
+        self._next_up_overlay_hide_timer.start(duration_ms)
+        self._next_up_overlay_log(
+            f"hide timer started reason={reason} duration_ms={duration_ms} payload={self._next_up_overlay_payload!r}"
+        )
+
+    def next_up_overlay_remaining_sec(self) -> float:
+        try:
+            if self._next_up_overlay_hide_timer.isActive():
+                return max(1.0, float(self._next_up_overlay_hide_timer.remainingTime()) / 1000.0)
+            return max(1.0, float(getattr(self, "_next_up_overlay_duration_ms", 10000) or 10000) / 1000.0)
+        except Exception:
+            return 10.0
+
+    def show_next_up_overlay(self, payload: dict, duration_sec: float = 10.0, *, reason: str = "show"):
         if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
-            self.hide_next_up_overlay(immediate=True)
+            self.hide_next_up_overlay(immediate=True, reason="invalid_payload")
             return
         self._next_up_overlay_payload = dict(payload)
         self._next_up_overlay_phase = "fade_in"
@@ -5493,17 +5523,21 @@ class VideoAreaWidget(QWidget):
             duration_ms = int(max(1.0, min(60.0, float(duration_sec or 10.0))) * 1000)
         except Exception:
             duration_ms = 10000
+        self._next_up_overlay_duration_ms = duration_ms
+        self._next_up_overlay_hide_started = False
         self._next_up_overlay_hide_timer.stop()
-        self._next_up_overlay_hide_timer.start(duration_ms)
         if not self._next_up_overlay_tick_timer.isActive():
             self._next_up_overlay_tick_timer.start(33)
+        self._next_up_overlay_log(f"show requested reason={reason} duration_ms={duration_ms} payload={self._next_up_overlay_payload!r}")
         self.update()
 
-    def hide_next_up_overlay(self, immediate: bool = False):
+    def hide_next_up_overlay(self, immediate: bool = False, reason: str = "unknown"):
         try:
             self._next_up_overlay_hide_timer.stop()
         except Exception:
             pass
+        self._next_up_overlay_hide_started = False
+        self._next_up_overlay_log(f"hide requested reason={reason} immediate={int(bool(immediate))}")
         if immediate or not self._next_up_overlay_payload:
             self._next_up_overlay_payload = {}
             self._next_up_overlay_phase = ""
@@ -5535,10 +5569,13 @@ class VideoAreaWidget(QWidget):
             alpha = min(1.0, max(0.0, elapsed_ms / fade_ms))
             if alpha >= 1.0:
                 self._next_up_overlay_phase = "hold"
+                self._next_up_overlay_log(f"actually visible/rendered duration_ms={int(getattr(self, '_next_up_overlay_duration_ms', 10000) or 10000)}")
+                self._start_next_up_overlay_hide_timer("fade_in_complete")
             return alpha
         if phase == "fade_out":
             alpha = 1.0 - min(1.0, max(0.0, elapsed_ms / fade_ms))
             if alpha <= 0.0:
+                self._next_up_overlay_log("hidden reason=fade_out_complete")
                 self._next_up_overlay_payload = {}
                 self._next_up_overlay_phase = ""
                 try:
@@ -5547,6 +5584,7 @@ class VideoAreaWidget(QWidget):
                     pass
                 return 0.0
             return alpha
+        self._start_next_up_overlay_hide_timer("hold_paint")
         return 1.0
 
     def resizeEvent(self, event):
@@ -10033,7 +10071,12 @@ class VideoWindow(QWidget):
             try:
                 payload = getattr(old, "_next_up_overlay_payload", {}) or {}
                 if isinstance(payload, dict) and payload:
-                    new_area.show_next_up_overlay(payload, 3.0)
+                    duration_sec = 10.0
+                    try:
+                        duration_sec = float(old.next_up_overlay_remaining_sec())
+                    except Exception:
+                        duration_sec = float(getattr(old, "_next_up_overlay_duration_ms", 10000) or 10000) / 1000.0
+                    new_area.show_next_up_overlay(payload, duration_sec, reason="surface_recreate")
             except Exception:
                 pass
 
@@ -15840,9 +15883,16 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_first_frame_pending = False
         self._daw_snapshot_current_media_path = ""
         self._daw_snapshot_generation = 0
+        self._daw_snapshot_pending_image = None
+        self._daw_snapshot_pending_reason = ""
+        self._daw_snapshot_pending_generation = 0
+        self._daw_snapshot_dropped_frames = 0
+        self._daw_snapshot_last_source_key = 0
+        self._daw_snapshot_sent_count = 0
+        self._daw_snapshot_stats_started = time.monotonic()
         self._daw_snapshot_timer = QTimer(self)
         self._daw_snapshot_timer.timeout.connect(self._schedule_daw_singer_screen_snapshot)
-        self._daw_snapshot_timer.start(3500)
+        self._daw_snapshot_timer.start(1000)
 
         self.rotation_view = None
 
@@ -17563,6 +17613,10 @@ class KaraokeApp(QWidget):
                     transport.set_loop(float(loop_seconds[0]), float(loop_seconds[1]))
                 except Exception as e:
                     _diag(f"[INTRO-LOOP] set_loop failed: {e}")
+            try:
+                self._hide_next_up_transition_overlay(reason="playback_started")
+            except Exception:
+                pass
         except Exception as e:
             self.karaoke_transport = None
             try:
@@ -21262,11 +21316,22 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+    def _daw_snapshot_min_interval_sec(self) -> float:
+        try:
+            if bool(getattr(self, "karaoke_playing", False)) and not bool(self._is_karaoke_paused()):
+                return 0.25
+        except Exception:
+            pass
+        return 1.5
+
     def _mark_daw_preview_playback_started(self, media_path: str = "") -> None:
         self._daw_snapshot_generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0) + 1
         self._daw_snapshot_first_frame_pending = True
         self._daw_snapshot_current_media_path = str(media_path or "")
         self._daw_snapshot_last_capture_ts = 0.0
+        self._daw_snapshot_last_source_key = 0
+        self._daw_snapshot_sent_count = 0
+        self._daw_snapshot_stats_started = time.monotonic()
         self._daw_preview_log(
             "playback started "
             f"media={os.path.basename(str(media_path or ''))!r} enabled={int(self._daw_singer_screen_preview_enabled())}"
@@ -21280,6 +21345,8 @@ class KaraokeApp(QWidget):
     def _mark_daw_preview_playback_stopped(self, reason: str = "stop") -> None:
         self._daw_snapshot_generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0) + 1
         self._daw_snapshot_first_frame_pending = False
+        self._daw_snapshot_pending_image = None
+        self._daw_snapshot_pending_reason = ""
         self._daw_preview_log(f"playback stopped reason={reason}")
         try:
             self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
@@ -21299,7 +21366,8 @@ class KaraokeApp(QWidget):
         now = time.monotonic()
         playing = bool(getattr(self, "karaoke_playing", False))
         last_capture = float(getattr(self, "_daw_snapshot_last_capture_ts", 0.0) or 0.0)
-        if (not force or last_capture > 0.0) and now - last_capture < 3.0:
+        min_interval = self._daw_snapshot_min_interval_sec()
+        if (not force or last_capture > 0.0) and now - last_capture < min_interval:
             self._daw_preview_log(f"producer skipped local_throttle age={now - last_capture:.2f}s reason={reason}")
             return
         base_url, tenant, api_key = self._daw_snapshot_config()
@@ -21394,20 +21462,14 @@ class KaraokeApp(QWidget):
                 )
                 return
 
-            scaled = image.scaled(
-                320,
-                180,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
-            )
             self._daw_snapshot_last_capture_ts = time.monotonic()
             self._daw_snapshot_first_frame_pending = False
             self._daw_preview_log(
                 f"frame captured reason={reason} source={image.width()}x{image.height()} "
-                f"scaled={scaled.width()}x{scaled.height()} playing={int(playing)}"
+                f"playing={int(playing)}"
             )
             self._post_daw_singer_screen_snapshot(
-                scaled.copy(),
+                image.copy(),
                 active=True,
                 warning="",
                 reason=reason,
@@ -21431,17 +21493,33 @@ class KaraokeApp(QWidget):
                 return
             if not self._daw_singer_screen_preview_enabled():
                 return
-            if bool(getattr(self, "_daw_snapshot_inflight", False)):
-                return
             now = time.monotonic()
             last_capture = float(getattr(self, "_daw_snapshot_last_capture_ts", 0.0) or 0.0)
             first = bool(getattr(self, "_daw_snapshot_first_frame_pending", False))
-            if not first and now - last_capture < 3.0:
+            min_interval = self._daw_snapshot_min_interval_sec()
+            if not first and now - last_capture < min_interval:
                 return
+            try:
+                source_key = int(image.cacheKey())
+            except Exception:
+                source_key = 0
+            if not first and source_key and source_key == int(getattr(self, "_daw_snapshot_last_source_key", 0) or 0):
+                return
+            frame_copy = image.copy()
+            generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0)
+            if bool(getattr(self, "_daw_snapshot_inflight", False)):
+                if getattr(self, "_daw_snapshot_pending_image", None) is not None:
+                    self._daw_snapshot_dropped_frames = int(getattr(self, "_daw_snapshot_dropped_frames", 0) or 0) + 1
+                self._daw_snapshot_pending_image = frame_copy
+                self._daw_snapshot_pending_reason = "first_frame" if first else reason
+                self._daw_snapshot_pending_generation = generation
+                self._daw_snapshot_last_source_key = source_key
+                return
+            self._daw_snapshot_last_source_key = source_key
             self._daw_snapshot_inflight = True
             self._capture_daw_singer_screen_snapshot(
                 reason="first_frame" if first else reason,
-                preferred_image=image,
+                preferred_image=frame_copy,
             )
         except Exception as e:
             self._daw_snapshot_inflight = False
@@ -21469,6 +21547,7 @@ class KaraokeApp(QWidget):
 
         def encode_and_send():
             try:
+                worker_t0 = time.perf_counter()
                 if active and generation is not None and generation != int(getattr(self, "_daw_snapshot_generation", 0) or 0):
                     self._daw_preview_log(f"frame send skipped stale_generation reason={reason}")
                     return
@@ -21481,18 +21560,31 @@ class KaraokeApp(QWidget):
                 files = None
                 if active and image is not None and not image.isNull():
                     from PyQt6.QtCore import QBuffer, QIODevice
+                    scale_t0 = time.perf_counter()
+                    scaled = image.scaled(
+                        426,
+                        240,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.FastTransformation,
+                    )
+                    scale_ms = (time.perf_counter() - scale_t0) * 1000.0
+                    encode_t0 = time.perf_counter()
                     ba = QByteArray()
                     buf = QBuffer(ba)
                     buf.open(QIODevice.OpenModeFlag.WriteOnly)
-                    image.save(buf, "JPEG", 32)
+                    scaled.save(buf, "JPEG", 28)
                     jpg = bytes(ba)
+                    encode_ms = (time.perf_counter() - encode_t0) * 1000.0
                     files = {"snapshot": ("snapshot.jpg", jpg, "image/jpeg")}
                     self._daw_preview_log(
-                        f"frame encoded reason={reason} bytes={len(jpg)} playback_state={playback_state}"
+                        f"frame encoded reason={reason} source={image.width()}x{image.height()} "
+                        f"scaled={scaled.width()}x{scaled.height()} bytes={len(jpg)} "
+                        f"scale_ms={scale_ms:.1f} encode_ms={encode_ms:.1f} playback_state={playback_state}"
                     )
                 elif active and warning:
                     data["capture_failed"] = "1"
                     data["warning"] = warning[:240]
+                send_t0 = time.perf_counter()
                 resp = requests.post(
                     f"{base_url}/api/show-screen/snapshot.php",
                     data=data,
@@ -21500,16 +21592,45 @@ class KaraokeApp(QWidget):
                     headers={"X-API-Key": api_key, "Accept": "application/json"},
                     timeout=3,
                 )
+                send_ms = (time.perf_counter() - send_t0) * 1000.0
+                total_ms = (time.perf_counter() - worker_t0) * 1000.0
+                if active and files is not None and 200 <= int(getattr(resp, "status_code", 0) or 0) < 300:
+                    self._daw_snapshot_sent_count = int(getattr(self, "_daw_snapshot_sent_count", 0) or 0) + 1
+                elapsed = max(0.001, time.monotonic() - float(getattr(self, "_daw_snapshot_stats_started", time.monotonic()) or time.monotonic()))
+                fps = float(getattr(self, "_daw_snapshot_sent_count", 0) or 0) / elapsed
                 self._daw_preview_log(
                     f"frame sent reason={reason} active={int(active)} status={getattr(resp, 'status_code', '')} "
-                    f"playback_state={playback_state}"
+                    f"send_ms={send_ms:.1f} total_ms={total_ms:.1f} dropped={int(getattr(self, '_daw_snapshot_dropped_frames', 0) or 0)} "
+                    f"fps={fps:.2f} playback_state={playback_state}"
                 )
             except Exception as e:
                 self._daw_preview_log(f"upload failed reason={reason}: {e}")
             finally:
                 self._daw_snapshot_inflight = False
+                if getattr(self, "_daw_snapshot_pending_image", None) is not None:
+                    self._run_on_ui_thread(self._flush_daw_snapshot_pending)
 
         threading.Thread(target=encode_and_send, daemon=True, name="daw-preview-upload").start()
+
+    def _flush_daw_snapshot_pending(self):
+        try:
+            image = getattr(self, "_daw_snapshot_pending_image", None)
+            if image is None or image.isNull():
+                return
+            if bool(getattr(self, "_daw_snapshot_inflight", False)):
+                return
+            if not bool(getattr(self, "karaoke_playing", False)):
+                self._daw_snapshot_pending_image = None
+                self._daw_snapshot_pending_reason = ""
+                return
+            reason = str(getattr(self, "_daw_snapshot_pending_reason", "") or "pending_frame")
+            self._daw_snapshot_pending_image = None
+            self._daw_snapshot_pending_reason = ""
+            self._daw_snapshot_inflight = True
+            self._capture_daw_singer_screen_snapshot(reason=reason, preferred_image=image)
+        except Exception as e:
+            self._daw_snapshot_inflight = False
+            self._daw_preview_log(f"pending flush failed: {e}")
 
     def handle_host_commands_from_thread(self, commands):
         if not isinstance(commands, list):
@@ -29039,7 +29160,9 @@ class KaraokeApp(QWidget):
             area = getattr(getattr(self, "video_window", None), "video_area", None)
             if area is None or not hasattr(area, "show_next_up_overlay"):
                 return False
-            area.show_next_up_overlay(payload, self._next_up_overlay_duration_sec())
+            duration = self._next_up_overlay_duration_sec()
+            _diag(f"[NEXT-UP-OVERLAY] show requested reason={reason} configured_duration_sec={duration:.1f}")
+            area.show_next_up_overlay(payload, duration, reason=reason)
             _diag(
                 f"[NEXT-UP-OVERLAY] show reason={reason} singer={payload.get('singer', '')!r} "
                 f"title={payload.get('title', '')!r} artist={payload.get('artist', '')!r} "
@@ -29049,6 +29172,15 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[NEXT-UP-OVERLAY] show failed reason={reason}: {e}")
             return False
+
+    def _hide_next_up_transition_overlay(self, *, reason: str = "unknown", immediate: bool = True) -> None:
+        try:
+            area = getattr(getattr(self, "video_window", None), "video_area", None)
+            if area is not None and hasattr(area, "hide_next_up_overlay"):
+                area.hide_next_up_overlay(immediate=bool(immediate), reason=reason)
+                _diag(f"[NEXT-UP-OVERLAY] app hide reason={reason} immediate={int(bool(immediate))}")
+        except Exception as e:
+            _diag(f"[NEXT-UP-OVERLAY] app hide failed reason={reason}: {e}")
 
     @staticmethod
     def _split_duet_for_html(value: str):
