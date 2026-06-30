@@ -2592,6 +2592,7 @@ DEFAULTS = {
     "use_waiting_for_add": False,          # server-backed waitlist mode for the current show
     "defer_remote_adds_until_between_singers": False,  # accept remote requests, insert after active song ends
     "host_controls_pin": "",               # optional host-only remote control PIN/password
+    "daw_singer_screen_preview_enabled": None, # None = on unless Performance/Safe Mode is enabled
     "rotation_estimate_include_all_songs": False,  # False=first song only, True=all queued songs
     "rotation_padding_sec": 90,            # seconds added per active singer in queue ETA
     "queue_mode": "classic",               # classic | rotation
@@ -15834,6 +15835,15 @@ class KaraokeApp(QWidget):
         self.idle_bg_timer.timeout.connect(self._tick_idle_background)
         self.idle_bg_timer.start(500)
 
+        self._daw_snapshot_inflight = False
+        self._daw_snapshot_last_capture_ts = 0.0
+        self._daw_snapshot_first_frame_pending = False
+        self._daw_snapshot_current_media_path = ""
+        self._daw_snapshot_generation = 0
+        self._daw_snapshot_timer = QTimer(self)
+        self._daw_snapshot_timer.timeout.connect(self._schedule_daw_singer_screen_snapshot)
+        self._daw_snapshot_timer.start(3500)
+
         self.rotation_view = None
 
                 
@@ -17387,6 +17397,7 @@ class KaraokeApp(QWidget):
     def _on_python_karaoke_frame(self, image):
         _perf_t0 = time.perf_counter()
         try:
+            self._maybe_send_daw_snapshot_from_frame(image, reason="frame")
             stretch = bool(
                 str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg"
                 and self.settings.get("cdg_stretch_fill", False)
@@ -17585,6 +17596,10 @@ class KaraokeApp(QWidget):
 
     def _prepare_python_karaoke_start(self, media_path: str):
         self.karaoke_playing = True
+        try:
+            self._mark_daw_preview_playback_started(media_path)
+        except Exception:
+            pass
         try:
             self.update_bg_button_state()
         except Exception:
@@ -20186,6 +20201,16 @@ class KaraokeApp(QWidget):
         defer_remote_adds_cb.setChecked(bool(self.settings.get("defer_remote_adds_until_between_singers", False)))
         v.addWidget(defer_remote_adds_cb)
 
+        daw_preview_cb = QCheckBox("Enable DAW singer screen preview")
+        daw_preview_cb.setToolTip("Uploads a small cached still image for the DAW remote when a DAW page is open. Disabled by default in Performance/Safe Mode.")
+        daw_preview_cb.setChecked(bool(self._daw_singer_screen_preview_enabled()))
+        v.addWidget(daw_preview_cb)
+
+        def on_daw_preview_toggled(checked: bool):
+            self.settings["daw_singer_screen_preview_enabled"] = bool(checked)
+            self.save_settings()
+        daw_preview_cb.toggled.connect(on_daw_preview_toggled)
+
         v = _section_card(tab_general, "Rotation Estimate")  # ---- General ----
         estimate_all_songs_cb = QCheckBox("Include every queued song per singer in estimate")
         estimate_all_songs_cb.setChecked(bool(self.settings.get("rotation_estimate_include_all_songs", False)))
@@ -21213,6 +21238,279 @@ class KaraokeApp(QWidget):
         else:
             print(f"[REQUESTS] Completed in {elapsed:.2f}s")
 
+    def _daw_singer_screen_preview_enabled(self) -> bool:
+        try:
+            value = self.settings.get("daw_singer_screen_preview_enabled", None)
+            if value is None:
+                return not (self._safe_mode() or self._performance_mode())
+            return bool(value) and not self._safe_mode()
+        except Exception:
+            return False
+
+    def _daw_snapshot_config(self) -> tuple[str, str, str]:
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        return base_url, tenant, api_key
+
+    def _daw_preview_log(self, message: str) -> None:
+        try:
+            _diag(f"[DAW-PREVIEW] {message}")
+        except Exception:
+            try:
+                print(f"[DAW-PREVIEW] {message}")
+            except Exception:
+                pass
+
+    def _mark_daw_preview_playback_started(self, media_path: str = "") -> None:
+        self._daw_snapshot_generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0) + 1
+        self._daw_snapshot_first_frame_pending = True
+        self._daw_snapshot_current_media_path = str(media_path or "")
+        self._daw_snapshot_last_capture_ts = 0.0
+        self._daw_preview_log(
+            "playback started "
+            f"media={os.path.basename(str(media_path or ''))!r} enabled={int(self._daw_singer_screen_preview_enabled())}"
+        )
+        try:
+            QTimer.singleShot(0, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_start"))
+            QTimer.singleShot(250, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_start_retry"))
+        except Exception:
+            pass
+
+    def _mark_daw_preview_playback_stopped(self, reason: str = "stop") -> None:
+        self._daw_snapshot_generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0) + 1
+        self._daw_snapshot_first_frame_pending = False
+        self._daw_preview_log(f"playback stopped reason={reason}")
+        try:
+            self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
+        except Exception as e:
+            self._daw_preview_log(f"inactive post failed reason={reason} error={e}")
+
+    def _schedule_daw_singer_screen_snapshot(self, force: bool = False, reason: str = "timer"):
+        self._daw_preview_log(f"producer tick reason={reason} force={int(bool(force))}")
+        if bool(getattr(self, "_app_closing", False)):
+            return
+        if not self._daw_singer_screen_preview_enabled():
+            self._daw_preview_log(f"producer skipped disabled reason={reason}")
+            return
+        if bool(getattr(self, "_daw_snapshot_inflight", False)):
+            self._daw_preview_log(f"producer skipped inflight reason={reason}")
+            return
+        now = time.monotonic()
+        playing = bool(getattr(self, "karaoke_playing", False))
+        last_capture = float(getattr(self, "_daw_snapshot_last_capture_ts", 0.0) or 0.0)
+        if (not force or last_capture > 0.0) and now - last_capture < 3.0:
+            self._daw_preview_log(f"producer skipped local_throttle age={now - last_capture:.2f}s reason={reason}")
+            return
+        base_url, tenant, api_key = self._daw_snapshot_config()
+        if not base_url or not tenant or not api_key:
+            self._daw_preview_log(f"producer skipped missing_config reason={reason}")
+            return
+
+        self._daw_snapshot_inflight = True
+        self._daw_preview_log(f"preview producer started reason={reason} playing={int(playing)}")
+
+        def check_viewer():
+            should_capture = playing or bool(force)
+            try:
+                resp = requests.get(
+                    f"{base_url}/api/show-screen/snapshot.php",
+                    params={"user": tenant},
+                    headers={"X-API-Key": api_key, "Accept": "application/json"},
+                    timeout=2,
+                )
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    viewer_seen_at = int((payload or {}).get("viewer_seen_at") or 0)
+                    enabled = bool((payload or {}).get("enabled", False))
+                    viewer_recent = viewer_seen_at > 0 and (time.time() - viewer_seen_at) <= 14
+                    should_capture = enabled and (viewer_recent or playing or bool(force))
+                    self._daw_preview_log(
+                        "viewer check "
+                        f"reason={reason} enabled={int(enabled)} viewer_recent={int(viewer_recent)} "
+                        f"playing={int(playing)} capture={int(should_capture)}"
+                    )
+                else:
+                    self._daw_preview_log(f"viewer check HTTP {resp.status_code} reason={reason}")
+            except Exception as e:
+                self._daw_preview_log(f"viewer check failed reason={reason}: {e}")
+            if should_capture:
+                self._run_on_ui_thread(lambda: self._capture_daw_singer_screen_snapshot(reason=reason))
+            else:
+                self._daw_snapshot_inflight = False
+
+        threading.Thread(target=check_viewer, daemon=True, name="daw-preview-check").start()
+
+    def _daw_snapshot_playback_state(self) -> str:
+        try:
+            if bool(getattr(self, "karaoke_playing", False)):
+                return "paused" if bool(self._is_karaoke_paused()) else "playing"
+            bg = getattr(self, "bg_music", None)
+            if bg is not None and bool(getattr(bg, "is_playing", False)):
+                return "bgm"
+        except Exception:
+            pass
+        return "idle"
+
+    def _capture_daw_singer_screen_snapshot(self, *, reason: str = "timer", preferred_image: QImage | None = None):
+        try:
+            if not self._daw_singer_screen_preview_enabled() or bool(getattr(self, "_app_closing", False)):
+                self._daw_snapshot_inflight = False
+                return
+            playing = bool(getattr(self, "karaoke_playing", False))
+            vw = getattr(self, "video_window", None)
+            va = getattr(vw, "video_area", None) if vw is not None else None
+            active = bool(playing)
+            if not active:
+                self._daw_preview_log(f"capture inactive reason={reason} playing=0")
+                self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
+                return
+
+            image = QImage()
+            if preferred_image is not None and not preferred_image.isNull():
+                image = preferred_image.copy()
+            try:
+                frame = getattr(va, "karaoke_frame", QImage()) if va is not None else QImage()
+                if image.isNull() and playing and frame is not None and not frame.isNull():
+                    image = frame.copy()
+            except Exception:
+                pass
+            if image.isNull() and va is not None:
+                try:
+                    image = va.grab().toImage()
+                except Exception:
+                    image = QImage()
+            if image.isNull():
+                if playing:
+                    self._daw_preview_log(f"capture waiting_for_frame reason={reason}")
+                    self._daw_snapshot_first_frame_pending = True
+                    self._daw_snapshot_inflight = False
+                    return
+                self._post_daw_singer_screen_snapshot(
+                    None,
+                    active=True,
+                    warning="Snapshot capture returned an empty frame.",
+                    reason=reason,
+                )
+                return
+
+            scaled = image.scaled(
+                320,
+                180,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+            self._daw_snapshot_last_capture_ts = time.monotonic()
+            self._daw_snapshot_first_frame_pending = False
+            self._daw_preview_log(
+                f"frame captured reason={reason} source={image.width()}x{image.height()} "
+                f"scaled={scaled.width()}x{scaled.height()} playing={int(playing)}"
+            )
+            self._post_daw_singer_screen_snapshot(
+                scaled.copy(),
+                active=True,
+                warning="",
+                reason=reason,
+                generation=int(getattr(self, "_daw_snapshot_generation", 0) or 0),
+            )
+        except Exception as e:
+            self._daw_preview_log(f"capture failed reason={reason}: {e}")
+            self._post_daw_singer_screen_snapshot(
+                None,
+                active=True,
+                warning=str(e),
+                reason=reason,
+                generation=int(getattr(self, "_daw_snapshot_generation", 0) or 0),
+            )
+
+    def _maybe_send_daw_snapshot_from_frame(self, image: QImage | None, *, reason: str = "frame") -> None:
+        try:
+            if image is None or image.isNull():
+                return
+            if not bool(getattr(self, "karaoke_playing", False)):
+                return
+            if not self._daw_singer_screen_preview_enabled():
+                return
+            if bool(getattr(self, "_daw_snapshot_inflight", False)):
+                return
+            now = time.monotonic()
+            last_capture = float(getattr(self, "_daw_snapshot_last_capture_ts", 0.0) or 0.0)
+            first = bool(getattr(self, "_daw_snapshot_first_frame_pending", False))
+            if not first and now - last_capture < 3.0:
+                return
+            self._daw_snapshot_inflight = True
+            self._capture_daw_singer_screen_snapshot(
+                reason="first_frame" if first else reason,
+                preferred_image=image,
+            )
+        except Exception as e:
+            self._daw_snapshot_inflight = False
+            self._daw_preview_log(f"frame-trigger failed reason={reason}: {e}")
+
+    def _post_daw_singer_screen_snapshot(
+        self,
+        image: QImage | None,
+        *,
+        active: bool,
+        warning: str = "",
+        reason: str = "",
+        generation: int | None = None,
+    ):
+        base_url, tenant, api_key = self._daw_snapshot_config()
+        if not base_url or not tenant or not api_key:
+            self._daw_snapshot_inflight = False
+            return
+        state = self._host_control_state()
+        playback = state.get("playback", {}) if isinstance(state, dict) else {}
+        rotation = state.get("rotation", {}) if isinstance(state, dict) else {}
+        current = rotation.get("current", {}) if isinstance(rotation, dict) else {}
+        song_id = str(current.get("item_id") or playback.get("title") or "").strip()
+        playback_state = self._daw_snapshot_playback_state()
+
+        def encode_and_send():
+            try:
+                if active and generation is not None and generation != int(getattr(self, "_daw_snapshot_generation", 0) or 0):
+                    self._daw_preview_log(f"frame send skipped stale_generation reason={reason}")
+                    return
+                data = {
+                    "user": tenant,
+                    "active": "1" if active else "0",
+                    "song_id": song_id,
+                    "playback_state": playback_state,
+                }
+                files = None
+                if active and image is not None and not image.isNull():
+                    from PyQt6.QtCore import QBuffer, QIODevice
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                    image.save(buf, "JPEG", 32)
+                    jpg = bytes(ba)
+                    files = {"snapshot": ("snapshot.jpg", jpg, "image/jpeg")}
+                    self._daw_preview_log(
+                        f"frame encoded reason={reason} bytes={len(jpg)} playback_state={playback_state}"
+                    )
+                elif active and warning:
+                    data["capture_failed"] = "1"
+                    data["warning"] = warning[:240]
+                resp = requests.post(
+                    f"{base_url}/api/show-screen/snapshot.php",
+                    data=data,
+                    files=files,
+                    headers={"X-API-Key": api_key, "Accept": "application/json"},
+                    timeout=3,
+                )
+                self._daw_preview_log(
+                    f"frame sent reason={reason} active={int(active)} status={getattr(resp, 'status_code', '')} "
+                    f"playback_state={playback_state}"
+                )
+            except Exception as e:
+                self._daw_preview_log(f"upload failed reason={reason}: {e}")
+            finally:
+                self._daw_snapshot_inflight = False
+
+        threading.Thread(target=encode_and_send, daemon=True, name="daw-preview-upload").start()
+
     def handle_host_commands_from_thread(self, commands):
         if not isinstance(commands, list):
             return
@@ -21903,22 +22201,27 @@ class KaraokeApp(QWidget):
         self.waiting_for_add_add_button = QPushButton("Add Now")
         self.waiting_for_add_find_button = QPushButton("Find Song…")
         self.waiting_for_add_clear_button = QPushButton("Remove")
+        self.waiting_for_add_clear_all_button = QPushButton("Clear All")
         self.waiting_for_add_add_button.setStyleSheet(button_css(padding="8px 12px", radius=8))
         self.waiting_for_add_find_button.setStyleSheet(subtle_button_css(padding="8px 12px", radius=8))
         self.waiting_for_add_clear_button.setStyleSheet(warning_button_css(padding="8px 12px", radius=8))
+        self.waiting_for_add_clear_all_button.setStyleSheet(warning_button_css(padding="8px 12px", radius=8))
         self.waiting_for_add_add_button.clicked.connect(self._add_selected_waiting_for_add)
         self.waiting_for_add_find_button.clicked.connect(self._find_song_for_selected_waiting_for_add)
         self.waiting_for_add_clear_button.clicked.connect(self._clear_selected_waiting_for_add)
+        self.waiting_for_add_clear_all_button.clicked.connect(self._clear_all_waiting_for_add)
         actions.addStretch(1)
         actions.addWidget(self.waiting_for_add_add_button)
         actions.addWidget(self.waiting_for_add_find_button)
         actions.addWidget(self.waiting_for_add_clear_button)
+        actions.addWidget(self.waiting_for_add_clear_all_button)
         shell_layout.addLayout(actions)
         root.addWidget(shell, 1)
 
         self.waiting_for_add_add_button.setEnabled(False)
         self.waiting_for_add_find_button.setEnabled(False)
         self.waiting_for_add_clear_button.setEnabled(False)
+        self.waiting_for_add_clear_all_button.setEnabled(False)
         return page
 
     def _waiting_for_add_request_id(self, req: dict | None) -> int:
@@ -22521,29 +22824,6 @@ class KaraokeApp(QWidget):
         wait_rows.sort(key=self._waiting_for_add_order_key)
         if wait_rows:
             sections.append({"key": "waitlist", "title": "Waitlist", "rows": wait_rows})
-
-        completed_rows = []
-        removed_rows = []
-        terminal = state.get("_waiting_for_add_recent_terminal_requests", {})
-        if isinstance(terminal, dict):
-            for rid, req in terminal.items():
-                try:
-                    rid_int = int(rid)
-                except Exception:
-                    continue
-                if rid_int <= 0 or rid_int in local_ids or rid_int in deferred_ids:
-                    continue
-                kind = self._waiting_for_add_status_kind(req)
-                if kind == "sung":
-                    completed_rows.append(self._waiting_for_add_row(req, "sung", selectable=False))
-                elif kind == "removed":
-                    removed_rows.append(self._waiting_for_add_row(req, "removed", selectable=False))
-        completed_rows.sort(key=self._waiting_for_add_order_key)
-        removed_rows.sort(key=self._waiting_for_add_order_key)
-        if completed_rows:
-            sections.append({"key": "completed", "title": "Completed", "rows": completed_rows})
-        if removed_rows:
-            sections.append({"key": "removed", "title": "Removed / Skipped", "rows": removed_rows})
         return sections
 
     def _waiting_for_add_row_text(self, row: dict) -> str:
@@ -22805,6 +23085,10 @@ class KaraokeApp(QWidget):
                 meta_label.setText(f"{pending_count} pending")
             else:
                 meta_label.setText("Clear" if count == 0 else f"{count} waiting")
+        clear_all_button = state.get("waiting_for_add_clear_all_button")
+        if clear_all_button is not None:
+            clear_all_button.setEnabled(count > 0)
+            clear_all_button.setToolTip("Remove all waitlisted songs" if count > 0 else "No waitlisted songs to clear")
         detail_label = state.get("waiting_for_add_detail_label")
         if count == 0 and detail_label is not None:
             detail_label.setText("No waitlisted songs.")
@@ -22818,6 +23102,38 @@ class KaraokeApp(QWidget):
                 _perf_log_if_slow("waitlist_refresh", elapsed_ms)
         except Exception:
             pass
+
+    def _waiting_for_add_clearable_requests(self) -> list[dict]:
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
+        pending = state.get("_waiting_for_add_requests", {})
+        if not isinstance(pending, dict):
+            return []
+        try:
+            local_ids = set(int(v) for v in (self._queue_remote_request_ids() or []))
+        except Exception:
+            local_ids = set()
+        identity_sets = self._accepted_request_identity_sets()
+        clearable = []
+        for rid, req in pending.items():
+            try:
+                rid_int = int(rid)
+            except Exception:
+                continue
+            if rid_int <= 0 or rid_int in local_ids:
+                continue
+            if self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
+                continue
+            item = dict(req or {})
+            item["request_id"] = rid_int
+            clearable.append(item)
+        clearable.sort(key=lambda req: self._waiting_for_add_order_key({
+            "request": req,
+            "request_id": self._waiting_for_add_request_id(req),
+        }))
+        return clearable
 
     def _selected_waiting_for_add_request(self) -> dict | None:
         try:
@@ -22845,12 +23161,15 @@ class KaraokeApp(QWidget):
             add_button = state.get("waiting_for_add_add_button")
             find_button = state.get("waiting_for_add_find_button")
             clear_button = state.get("waiting_for_add_clear_button")
+            clear_all_button = state.get("waiting_for_add_clear_all_button")
             if add_button is not None:
                 add_button.setEnabled(enabled)
             if find_button is not None:
                 find_button.setEnabled(enabled)
             if clear_button is not None:
                 clear_button.setEnabled(enabled)
+            if clear_all_button is not None:
+                clear_all_button.setEnabled(self._waiting_for_add_count() > 0)
         except Exception:
             pass
         detail_label = state.get("waiting_for_add_detail_label")
@@ -23522,6 +23841,56 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._schedule_waiting_for_add_view_refresh(reason="clear")
+
+    def _clear_all_waiting_for_add(self):
+        reqs = self._waiting_for_add_clearable_requests()
+        if not reqs:
+            return
+        count = len(reqs)
+        try:
+            answer = QMessageBox.question(
+                self,
+                "Clear Waitlist",
+                f"Remove all {count} waitlisted song{'s' if count != 1 else ''}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        except Exception:
+            pass
+        handled = getattr(self, "_waiting_for_add_handled_ids", None)
+        if not isinstance(handled, set):
+            handled = set()
+            self._waiting_for_add_handled_ids = handled
+        pending = getattr(self, "_waiting_for_add_requests", None)
+        removed = 0
+        for req in reqs:
+            rid = self._waiting_for_add_request_id(req)
+            if rid <= 0:
+                continue
+            handled.add(rid)
+            try:
+                self._delete_remote_request(
+                    rid,
+                    entry={"artist": req.get("artist", ""), "title": req.get("title", "")},
+                    singer_name=str(req.get("singer") or ""),
+                    reason="waiting_for_add_clear_all",
+                )
+            except Exception:
+                pass
+            try:
+                if isinstance(pending, dict):
+                    pending.pop(rid, None)
+            except Exception:
+                pass
+            removed += 1
+        if removed:
+            self._schedule_waiting_for_add_view_refresh(reason="clear_all")
+            self._show_processing_notification(
+                f"Cleared {removed} waitlisted song{'s' if removed != 1 else ''}.",
+                level="success",
+            )
 
     def _tick_waiting_for_add_blink(self):
         self._waiting_for_add_blink_on = not bool(getattr(self, "_waiting_for_add_blink_on", False))
@@ -32968,6 +33337,14 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print("Session location shutdown sync failed:", e)
 
+        try:
+            timer = getattr(self, "_daw_snapshot_timer", None)
+            if timer is not None:
+                timer.stop()
+            self._daw_snapshot_inflight = False
+        except Exception:
+            pass
+
         # --- Stop WebSocket request relay (socket + reconnect timer) ---
         try:
             self._stop_request_relay()
@@ -36801,6 +37178,10 @@ class KaraokeApp(QWidget):
         # Karaoke stopping — clear flag and refresh BG UI
         self.karaoke_playing = False
         try:
+            self._mark_daw_preview_playback_stopped("stop_playback")
+        except Exception:
+            pass
+        try:
             self._update_deferred_remote_add_status()
         except Exception:
             pass
@@ -37005,6 +37386,10 @@ class KaraokeApp(QWidget):
                     
                     # Mark as not playing
                     self.karaoke_playing = False
+                    try:
+                        self._mark_daw_preview_playback_stopped("manual_stop_fade_complete")
+                    except Exception:
+                        pass
                     self._reset_karaoke_tempo_for_track_end()
                     self._reset_end_silence_state()
                     self._eta_hold_current_secs = 0
@@ -37049,6 +37434,10 @@ class KaraokeApp(QWidget):
             
             # Mark as not playing
             self.karaoke_playing = False
+            try:
+                self._mark_daw_preview_playback_stopped("manual_stop_immediate")
+            except Exception:
+                pass
             self._reset_karaoke_tempo_for_track_end()
             self._reset_end_silence_state()
             self._eta_hold_current_secs = 0
