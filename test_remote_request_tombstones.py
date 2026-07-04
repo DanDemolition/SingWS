@@ -682,15 +682,9 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             }
 
             sections = app._waiting_for_add_sections()
-            self.assertEqual([section["key"] for section in sections], ["active_rotation", "waitlist", "completed", "removed"])
+            self.assertEqual([section["key"] for section in sections], ["waitlist", "completed", "removed"])
 
-            active_row = sections[0]["rows"][0]
-            self.assertEqual(active_row["status_label"], "Active Rotation")
-            self.assertEqual(active_row["singer"], "Ada")
-            self.assertFalse(active_row["selectable"])
-            self.assertEqual(active_row["queue_position"], 1)
-
-            row = sections[1]["rows"][0]
+            row = sections[0]["rows"][0]
             text = app._waiting_for_add_row_text(row)
             self.assertEqual(row["status_label"], "Waitlisted")
             self.assertEqual(row["singer"], "Bea")
@@ -701,8 +695,8 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertIn("Version: Requested: SC / SC-123", text)
             self.assertIn("Length: 3:05", text)
             self.assertIn("Server:", text)
-            self.assertEqual(sections[2]["rows"][0]["status_label"], "Sung")
-            self.assertEqual(sections[3]["rows"][0]["status_label"], "Removed")
+            self.assertEqual(sections[1]["rows"][0]["status_label"], "Sung")
+            self.assertEqual(sections[2]["rows"][0]["status_label"], "Removed")
 
     def test_pending_acceptance_section_is_distinct_from_waitlist(self):
         with tempfile.TemporaryDirectory() as td:
@@ -745,6 +739,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(pending_row["status_label"], "Pending Acceptance")
             self.assertFalse(pending_row["selectable"])
             self.assertEqual(pending_row["queue_position"], 1)
+            self.assertEqual(app._pending_acceptance_count(), 1)
             self.assertIn("Queue: #1", app._waiting_for_add_row_text(pending_row))
             self.assertEqual([row["request_id"] for row in sections[1]["rows"]], [1902])
 
