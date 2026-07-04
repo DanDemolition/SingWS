@@ -1950,10 +1950,29 @@ def _loudness_load_cache():
         _loudness_cache_loaded = True
 
 
-def _loudness_save_cache():
+_LOUDNESS_SAVE_INTERVAL_S = 10.0
+_loudness_last_save_ts = 0.0
+
+
+def _loudness_save_cache(force: bool = True):
+    """Persist the loudness cache to disk.
+
+    The dict is snapshotted under _loudness_lock but serialized and written
+    OUTSIDE it: the cache grows to library size, and json.dumps + the disk
+    write while holding the lock stalled GUI-thread lock users for seconds
+    during Analyze Library passes. With force=False the write is debounced to
+    one per _LOUDNESS_SAVE_INTERVAL_S; bulk analysis must call once more with
+    force=True when it finishes. Callers must NOT hold _loudness_lock.
+    """
+    global _loudness_last_save_ts
+    with _loudness_lock:
+        if not force and (time.monotonic() - _loudness_last_save_ts) < _LOUDNESS_SAVE_INTERVAL_S:
+            return
+        snapshot = dict(_loudness_cache)
+        _loudness_last_save_ts = time.monotonic()
     try:
         tmp = LOUDNESS_CACHE_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(_loudness_cache), encoding="utf-8")
+        tmp.write_text(json.dumps(snapshot), encoding="utf-8")
         os.replace(tmp, LOUDNESS_CACHE_PATH)
     except Exception:
         pass
@@ -2170,7 +2189,7 @@ def analyze_loudness_async(audio_path: str):
                     _loudness_cache[audio_path] = {
                         "i": lufs, "peak_db": peak_db, "mtime": sig[0], "size": sig[1],
                     }
-                    _loudness_save_cache()
+                _loudness_save_cache()
                 try:
                     _diag(f"[LOUDNESS] {os.path.basename(audio_path)} I={lufs:.1f} LUFS "
                           f"peak={peak_db if peak_db is not None else 'n/a'}dB "
@@ -10369,7 +10388,7 @@ class AnalyzeLibraryWorker(QObject):
                             "mtime": sig[0],
                             "size": sig[1],
                         }
-                        _loudness_save_cache()
+                    _loudness_save_cache(force=False)
                     analyzed += 1
                     try:
                         _diag(
@@ -10384,6 +10403,7 @@ class AnalyzeLibraryWorker(QObject):
                     _diag(f"[ANALYZE-LIB] failed for {name}: {e}")
                 except Exception:
                     pass
+        _loudness_save_cache()
         self.finished.emit(analyzed, total)
 
 
@@ -15889,6 +15909,7 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_dropped_frames = 0
         self._daw_snapshot_last_source_key = 0
         self._daw_snapshot_sent_count = 0
+        self._daw_snapshot_post_count = 0
         self._daw_snapshot_stats_started = time.monotonic()
         self._daw_snapshot_timer = QTimer(self)
         self._daw_snapshot_timer.timeout.connect(self._schedule_daw_singer_screen_snapshot)
@@ -21316,6 +21337,33 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+    def _daw_preview_log_transition(self, key: str, message: str) -> None:
+        """Log a recurring per-tick preview status line only when it changes.
+
+        The producer ticks every second all night even with no viewer and no
+        playback; logging each identical tick used to be >80% of a night's log.
+        """
+        try:
+            cache = getattr(self, "_daw_preview_last_logged", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._daw_preview_last_logged = cache
+            if cache.get(key) == message:
+                return
+            cache[key] = message
+        except Exception:
+            pass
+        self._daw_preview_log(message)
+
+    def _daw_preview_frame_log_due(self) -> bool:
+        """Sample per-frame preview logs: the first frames after each playback
+        (re)start, then one in every 100 — instead of 3 lines per frame at 4 fps."""
+        try:
+            n = int(getattr(self, "_daw_snapshot_post_count", 0) or 0)
+        except Exception:
+            n = 0
+        return n < 2 or ((n + 1) % 100) == 0
+
     def _daw_snapshot_min_interval_sec(self) -> float:
         try:
             if bool(getattr(self, "karaoke_playing", False)) and not bool(self._is_karaoke_paused()):
@@ -21331,6 +21379,7 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_last_capture_ts = 0.0
         self._daw_snapshot_last_source_key = 0
         self._daw_snapshot_sent_count = 0
+        self._daw_snapshot_post_count = 0
         self._daw_snapshot_stats_started = time.monotonic()
         self._daw_preview_log(
             "playback started "
@@ -21354,29 +21403,32 @@ class KaraokeApp(QWidget):
             self._daw_preview_log(f"inactive post failed reason={reason} error={e}")
 
     def _schedule_daw_singer_screen_snapshot(self, force: bool = False, reason: str = "timer"):
-        self._daw_preview_log(f"producer tick reason={reason} force={int(bool(force))}")
+        if force or reason != "timer":
+            self._daw_preview_log(f"producer tick reason={reason} force={int(bool(force))}")
         if bool(getattr(self, "_app_closing", False)):
             return
         if not self._daw_singer_screen_preview_enabled():
-            self._daw_preview_log(f"producer skipped disabled reason={reason}")
+            self._daw_preview_log_transition("producer_state", f"producer skipped disabled reason={reason}")
             return
         if bool(getattr(self, "_daw_snapshot_inflight", False)):
-            self._daw_preview_log(f"producer skipped inflight reason={reason}")
+            if force:
+                self._daw_preview_log(f"producer skipped inflight reason={reason}")
             return
         now = time.monotonic()
         playing = bool(getattr(self, "karaoke_playing", False))
         last_capture = float(getattr(self, "_daw_snapshot_last_capture_ts", 0.0) or 0.0)
         min_interval = self._daw_snapshot_min_interval_sec()
         if (not force or last_capture > 0.0) and now - last_capture < min_interval:
-            self._daw_preview_log(f"producer skipped local_throttle age={now - last_capture:.2f}s reason={reason}")
+            if force:
+                self._daw_preview_log(f"producer skipped local_throttle age={now - last_capture:.2f}s reason={reason}")
             return
         base_url, tenant, api_key = self._daw_snapshot_config()
         if not base_url or not tenant or not api_key:
-            self._daw_preview_log(f"producer skipped missing_config reason={reason}")
+            self._daw_preview_log_transition("producer_state", f"producer skipped missing_config reason={reason}")
             return
 
         self._daw_snapshot_inflight = True
-        self._daw_preview_log(f"preview producer started reason={reason} playing={int(playing)}")
+        self._daw_preview_log_transition("producer_state", f"preview producer started reason={reason} playing={int(playing)}")
 
         def check_viewer():
             should_capture = playing or bool(force)
@@ -21393,10 +21445,11 @@ class KaraokeApp(QWidget):
                     enabled = bool((payload or {}).get("enabled", False))
                     viewer_recent = viewer_seen_at > 0 and (time.time() - viewer_seen_at) <= 14
                     should_capture = enabled and (viewer_recent or playing or bool(force))
-                    self._daw_preview_log(
+                    self._daw_preview_log_transition(
+                        "viewer_check",
                         "viewer check "
-                        f"reason={reason} enabled={int(enabled)} viewer_recent={int(viewer_recent)} "
-                        f"playing={int(playing)} capture={int(should_capture)}"
+                        f"enabled={int(enabled)} viewer_recent={int(viewer_recent)} "
+                        f"playing={int(playing)} capture={int(should_capture)}",
                     )
                 else:
                     self._daw_preview_log(f"viewer check HTTP {resp.status_code} reason={reason}")
@@ -21430,7 +21483,7 @@ class KaraokeApp(QWidget):
             va = getattr(vw, "video_area", None) if vw is not None else None
             active = bool(playing)
             if not active:
-                self._daw_preview_log(f"capture inactive reason={reason} playing=0")
+                self._daw_preview_log_transition("capture_state", f"capture inactive reason={reason} playing=0")
                 self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
                 return
 
@@ -21464,10 +21517,11 @@ class KaraokeApp(QWidget):
 
             self._daw_snapshot_last_capture_ts = time.monotonic()
             self._daw_snapshot_first_frame_pending = False
-            self._daw_preview_log(
-                f"frame captured reason={reason} source={image.width()}x{image.height()} "
-                f"playing={int(playing)}"
-            )
+            if self._daw_preview_frame_log_due():
+                self._daw_preview_log(
+                    f"frame captured reason={reason} source={image.width()}x{image.height()} "
+                    f"playing={int(playing)}"
+                )
             self._post_daw_singer_screen_snapshot(
                 image.copy(),
                 active=True,
@@ -21551,6 +21605,9 @@ class KaraokeApp(QWidget):
                 if active and generation is not None and generation != int(getattr(self, "_daw_snapshot_generation", 0) or 0):
                     self._daw_preview_log(f"frame send skipped stale_generation reason={reason}")
                     return
+                post_n = int(getattr(self, "_daw_snapshot_post_count", 0) or 0) + 1
+                self._daw_snapshot_post_count = post_n
+                verbose = post_n <= 2 or (post_n % 100) == 0
                 data = {
                     "user": tenant,
                     "active": "1" if active else "0",
@@ -21576,11 +21633,12 @@ class KaraokeApp(QWidget):
                     jpg = bytes(ba)
                     encode_ms = (time.perf_counter() - encode_t0) * 1000.0
                     files = {"snapshot": ("snapshot.jpg", jpg, "image/jpeg")}
-                    self._daw_preview_log(
-                        f"frame encoded reason={reason} source={image.width()}x{image.height()} "
-                        f"scaled={scaled.width()}x{scaled.height()} bytes={len(jpg)} "
-                        f"scale_ms={scale_ms:.1f} encode_ms={encode_ms:.1f} playback_state={playback_state}"
-                    )
+                    if verbose:
+                        self._daw_preview_log(
+                            f"frame encoded reason={reason} source={image.width()}x{image.height()} "
+                            f"scaled={scaled.width()}x{scaled.height()} bytes={len(jpg)} "
+                            f"scale_ms={scale_ms:.1f} encode_ms={encode_ms:.1f} playback_state={playback_state}"
+                        )
                 elif active and warning:
                     data["capture_failed"] = "1"
                     data["warning"] = warning[:240]
@@ -21598,11 +21656,13 @@ class KaraokeApp(QWidget):
                     self._daw_snapshot_sent_count = int(getattr(self, "_daw_snapshot_sent_count", 0) or 0) + 1
                 elapsed = max(0.001, time.monotonic() - float(getattr(self, "_daw_snapshot_stats_started", time.monotonic()) or time.monotonic()))
                 fps = float(getattr(self, "_daw_snapshot_sent_count", 0) or 0) / elapsed
-                self._daw_preview_log(
-                    f"frame sent reason={reason} active={int(active)} status={getattr(resp, 'status_code', '')} "
-                    f"send_ms={send_ms:.1f} total_ms={total_ms:.1f} dropped={int(getattr(self, '_daw_snapshot_dropped_frames', 0) or 0)} "
-                    f"fps={fps:.2f} playback_state={playback_state}"
-                )
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if verbose or not (200 <= status_code < 300):
+                    self._daw_preview_log(
+                        f"frame sent reason={reason} active={int(active)} status={getattr(resp, 'status_code', '')} "
+                        f"send_ms={send_ms:.1f} total_ms={total_ms:.1f} dropped={int(getattr(self, '_daw_snapshot_dropped_frames', 0) or 0)} "
+                        f"fps={fps:.2f} playback_state={playback_state}"
+                    )
             except Exception as e:
                 self._daw_preview_log(f"upload failed reason={reason}: {e}")
             finally:
@@ -38765,6 +38825,29 @@ class KaraokeApp(QWidget):
             self._sync_waitlist_state_from_server_async(reason="remote_reconcile")
         except Exception as e:
             _diag(f"[WAITLIST-STATE] pull schedule failed reason=remote_reconcile: {e}")
+
+        # Session-scoped dedupe for per-request reconcile logging: the server
+        # resends the night's full request history on every sync pass, and
+        # re-logging every historical/terminal row on every pass used to
+        # dominate the log (tens of thousands of lines per night).
+        def _logged_set(attr: str) -> set:
+            try:
+                value = getattr(self, attr, None)
+            except Exception:
+                value = None
+            if not isinstance(value, set):
+                value = set()
+                try:
+                    setattr(self, attr, value)
+                except Exception:
+                    pass
+            return value
+
+        logged_terminal = _logged_set("_remote_sync_logged_terminal")
+        logged_historical = _logged_set("_remote_sync_logged_historical")
+        logged_holding = _logged_set("_remote_sync_logged_holding")
+        logged_tombstone_repush = _logged_set("_remote_sync_logged_tombstone_repush")
+        ignored_historical = 0
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue
@@ -38774,13 +38857,54 @@ class KaraokeApp(QWidget):
                 request_id = 0
             if request_id <= 0:
                 continue
+            state = str(req.get("state", "") or "").strip().lower()
+            try:
+                removed_at = int(float(req.get("removed_at") or 0))
+            except Exception:
+                removed_at = 0
+            try:
+                completed_at = int(float(req.get("completed_at") or 0))
+            except Exception:
+                completed_at = 0
+            server_terminal = state in {"removed", "completed", "sung"} or removed_at > 0 or completed_at > 0
+            if server_terminal:
+                # The server already knows this request is done. Handle it
+                # before the local-tombstone branch: re-pushing removals for
+                # rows the server itself reports as terminal churned the
+                # network and flip-flopped removed_ids on every pass.
+                removed_count = self._remove_local_remote_request_by_id(
+                    request_id,
+                    reason=f"server_{state or ('removed' if removed_at else 'completed')}",
+                )
+                if self._remove_deferred_remote_add_by_id(request_id):
+                    removed_count += 1
+                try:
+                    removed_ids.add(request_id)
+                    self._remote_removed_request_ids = removed_ids
+                except Exception:
+                    pass
+                if removed_count or (request_id, state) not in logged_terminal:
+                    logged_terminal.add((request_id, state))
+                    self._log_remote_request_diag(
+                        req,
+                        status="removed" if state == "removed" or removed_at else "completed",
+                        match_result="server_tombstone",
+                        queue_insert_result="removed" if removed_count else "not_present",
+                        failure_reason="",
+                    )
+                continue
             tombstone = self._remote_request_matches_tombstone(req)
             if tombstone is not None:
-                _diag(
-                    "[REMOTE-TOMBSTONE] poll old request ignored "
-                    f"request_id={request_id} singer={req.get('singer', '')!r} "
-                    f"title={req.get('title', '')!r} reason=tombstone; re-push removed status"
-                )
+                # The server still reports a request the host removed locally:
+                # keep re-pushing the removal (the push helper is throttled and
+                # skips already-acknowledged tombstones), but log once per id.
+                if request_id not in logged_tombstone_repush:
+                    logged_tombstone_repush.add(request_id)
+                    _diag(
+                        "[REMOTE-TOMBSTONE] poll old request ignored "
+                        f"request_id={request_id} singer={req.get('singer', '')!r} "
+                        f"title={req.get('title', '')!r} reason=tombstone; re-push removed status"
+                    )
                 try:
                     removed_ids.add(request_id)
                     self._remote_removed_request_ids = removed_ids
@@ -38795,59 +38919,35 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 _diag(f"[REMOTE-TOMBSTONE] reused request id accepted request_id={request_id} reason=signature_mismatch")
-            state = str(req.get("state", "") or "").strip().lower()
-            try:
-                removed_at = int(float(req.get("removed_at") or 0))
-            except Exception:
-                removed_at = 0
-            try:
-                completed_at = int(float(req.get("completed_at") or 0))
-            except Exception:
-                completed_at = 0
-            server_terminal = state in {"removed", "completed", "sung"} or removed_at > 0 or completed_at > 0
-            if server_terminal:
-                removed_count = self._remove_local_remote_request_by_id(
-                    request_id,
-                    reason=f"server_{state or ('removed' if removed_at else 'completed')}",
-                )
-                if self._remove_deferred_remote_add_by_id(request_id):
-                    removed_count += 1
-                try:
-                    removed_ids.add(request_id)
-                    self._remote_removed_request_ids = removed_ids
-                except Exception:
-                    pass
-                self._log_remote_request_diag(
-                    req,
-                    status="removed" if state == "removed" or removed_at else "completed",
-                    match_result="server_tombstone",
-                    queue_insert_result="removed" if removed_count else "not_present",
-                    failure_reason="",
-                )
-                continue
             delivered = bool(req.get("sent") or req.get("delivered") or state in {"delivered", "completed", "sung", "removed"})
             if delivered and request_id not in local_remote_ids:
-                _diag(
-                    "[REMOTE-SYNC] historical request ignored "
-                    f"request_id={request_id} state={state!r} sent={int(bool(req.get('sent')))} "
-                    f"delivered={int(bool(req.get('delivered')))}"
-                )
-                try:
-                    self._log_remote_request_diag(
-                        req,
-                        status="ignored",
-                        match_result="historical",
-                        queue_insert_result="not_attempted",
-                        failure_reason=f"historical_state:{state or 'sent'}",
+                ignored_historical += 1
+                if (request_id, state) not in logged_historical:
+                    logged_historical.add((request_id, state))
+                    _diag(
+                        "[REMOTE-SYNC] historical request ignored "
+                        f"request_id={request_id} state={state!r} sent={int(bool(req.get('sent')))} "
+                        f"delivered={int(bool(req.get('delivered')))}"
                     )
-                except Exception:
-                    pass
+                    try:
+                        self._log_remote_request_diag(
+                            req,
+                            status="ignored",
+                            match_result="historical",
+                            queue_insert_result="not_attempted",
+                            failure_reason=f"historical_state:{state or 'sent'}",
+                        )
+                    except Exception:
+                        pass
                 continue
             if self._is_waiting_for_add_request(req):
-                _diag(
-                    "[WAITING-FOR-ADD] holding request for host "
-                    f"request_id={request_id} state={state!r} reason={str(req.get('pending_reason') or req.get('attention_reason') or '')!r}"
-                )
+                hold_reason = str(req.get("pending_reason") or req.get("attention_reason") or "")
+                if (request_id, state, hold_reason) not in logged_holding:
+                    logged_holding.add((request_id, state, hold_reason))
+                    _diag(
+                        "[WAITING-FOR-ADD] holding request for host "
+                        f"request_id={request_id} state={state!r} reason={hold_reason!r}"
+                    )
                 continue
             singer = str(req.get("singer", "") or "").strip()
             if not singer:
@@ -38892,6 +38992,12 @@ class KaraokeApp(QWidget):
                 self._log_remote_request_diag(normalized[-1], status="received", match_result="pending", queue_insert_result="pending")
             except Exception:
                 pass
+
+        if ignored_historical:
+            _diag(
+                "[REMOTE-SYNC] historical requests ignored "
+                f"count={ignored_historical} (details logged once per request/state)"
+            )
 
         desired_ids = {item["request_id"] for item in normalized}
         existing_ids = set()
