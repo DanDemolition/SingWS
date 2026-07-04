@@ -103,10 +103,27 @@ class PerformanceSafetyTests(unittest.TestCase):
         refresh = function_source("_refresh_waiting_for_add_view")
         self.assertIn("waiting_model.setRows(model_rows)", refresh)
         self.assertNotIn("QListWidgetItem(self._waiting_for_add_row_text", refresh)
+        sections = function_source("_waiting_for_add_sections")
+        self.assertNotIn("_waiting_for_add_active_rotation_rows", MAIN_SOURCE)
+        self.assertNotIn('"active_rotation"', sections)
+        self.assertNotIn('"active_rotation"', refresh)
+
+    def test_waitlist_nav_uses_pending_acceptance_pulse(self):
+        self.assertIn('_build_nav_item("◈", "Waitlist")', MAIN_SOURCE)
+        self.assertIn("_waiting_for_add_pulse_timer", MAIN_SOURCE)
+        self.assertNotIn("_waiting_for_add_blink_timer", MAIN_SOURCE)
+        update = function_source("_update_waiting_for_add_nav_state")
+        self.assertIn("_pending_acceptance_count()", update)
+        self.assertIn('f"Waitlist ({count})"', update)
+        self.assertIn("rgba(22, 163, 74", update)
+        self.assertIn("_waiting_for_add_nav_css_cache_key", update)
 
     def test_singer_history_song_list_uses_model_backed_view(self):
         self.assertIn("class SingerHistorySongListModel(QAbstractListModel)", MAIN_SOURCE)
         self.assertIn("class SingerHistorySongsBuildWorker(QObject)", MAIN_SOURCE)
+        model = MAIN_SOURCE[MAIN_SOURCE.index("class SingerHistorySongListModel"):MAIN_SOURCE.index("class SingerHistorySingerListModel")]
+        self.assertIn("if rows == self._rows:", model)
+        self.assertIn("self.dataChanged.emit", model)
         page = function_source("_build_singer_history_page")
         self.assertIn("self.singer_history_songs_model = SingerHistorySongListModel(self)", page)
         self.assertIn("self.singer_history_songs_list = QListView()", page)
@@ -126,6 +143,10 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_singer_history_directory_uses_model_backed_view(self):
         self.assertIn("class SingerHistorySingerListModel(QAbstractListModel)", MAIN_SOURCE)
         self.assertIn("class SingerHistoryDirectoryBuildWorker(QObject)", MAIN_SOURCE)
+        self.assertIn("class SingerHistoryBrandChoicesWorker(QObject)", MAIN_SOURCE)
+        model = MAIN_SOURCE[MAIN_SOURCE.index("class SingerHistorySingerListModel"):MAIN_SOURCE.index("class SingerHistoryDirectoryBuildWorker")]
+        self.assertIn("if rows == self._rows:", model)
+        self.assertIn("self.dataChanged.emit", model)
         page = function_source("_build_singer_history_page")
         self.assertIn("self.singer_history_singer_model = SingerHistorySingerListModel(self)", page)
         self.assertIn("self.singer_history_singer_list = QListView()", page)
@@ -142,6 +163,30 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("self.singer_history_singer_list.addItem", refresh)
         selector = function_source("_selected_singer_history_key")
         self.assertIn("model.singerKeyForIndex(view.currentIndex())", selector)
+
+    def test_singer_history_brand_choices_never_scan_library_on_selection(self):
+        choices = function_source("_history_brand_choices")
+        combo = function_source("_refresh_singer_history_brand_combo")
+        self.assertIn("_ensure_history_brand_choices_async()", choices)
+        self.assertIn("SingerHistoryBrandChoicesWorker", MAIN_SOURCE)
+        self.assertIn("worker.moveToThread(thread)", function_source("_ensure_history_brand_choices_async"))
+        self.assertIn("allow_sync_build=False", combo)
+        details = function_source("_update_singer_history_details")
+        self.assertNotIn("allow_sync_build=True", details)
+
+    def test_karaoke_to_bgm_overlap_requires_explicit_setting(self):
+        self.assertIn('"karaoke_bgm_crossfade_enabled": False', MAIN_SOURCE)
+        self.assertIn('"karaoke_allow_early_silence_trim": False', MAIN_SOURCE)
+        end_handler = function_source("_handle_media_end_safe")
+        self.assertIn("self._karaoke_bgm_crossfade_enabled()", end_handler)
+        timer_tick = function_source("update_time_left")
+        self.assertIn("crossfade_enabled = self._karaoke_bgm_crossfade_enabled()", timer_tick)
+        self.assertIn("if (crossfade_enabled", timer_tick)
+        trim = function_source("_maybe_trim_end_silence")
+        self.assertIn("self._karaoke_early_silence_trim_enabled()", trim)
+        self.assertIn("self._karaoke_bgm_crossfade_enabled()", trim)
+        fade = function_source("_start_bg_with_fade")
+        self.assertIn('resume_reason == "karaoke_end_overlap" and self._karaoke_bgm_crossfade_enabled()', fade)
 
     def test_singer_history_edits_use_debounced_save_path(self):
         source = function_source("_commit_singer_history_change")
