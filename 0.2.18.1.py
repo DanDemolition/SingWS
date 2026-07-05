@@ -17881,202 +17881,22 @@ class KaraokeApp(QWidget):
         )
 
     def _gst_teardown(self):
-        """DIAGNOSTIC VERSION - logs timing"""
-        import time as time_module
-        print(f"[GST] Starting synchronous teardown at {time_module.time()}")
-        start = time_module.time()
+        """Stop the karaoke transport and reset per-song modifiers.
+
+        The legacy GStreamer pipeline objects this used to tear down were
+        removed long ago (gst_pipeline & co. were always None), so the
+        transport stop is the whole job now."""
         self._stop_python_karaoke_transport()
         self._karaoke_transport_tempo_ratio = 1.0
-        
-        # Main
-        p = getattr(self, "gst_pipeline", None)
-        vp = getattr(self, "cdg_main_video_pipeline", None)
-        if p:
-            try:
-                self._gst_unwatch_bus(p)          # <-- add this
-                pipe_start = time_module.time()
-                p.set_state(Gst.State.NULL)
-                pipe_elapsed = time_module.time() - pipe_start
-                if pipe_elapsed > 1.0:
-                    print(f"⚠️ Main pipeline set_state(NULL) took {pipe_elapsed:.2f}s!")
-            except Exception as e:
-                print(f"[GST] Main pipeline teardown error: {e}")
-        self.gst_pipeline = None
-
-        if vp:
-            try:
-                self._gst_unwatch_bus(vp)
-                pipe_start = time_module.time()
-                vp.set_state(Gst.State.NULL)
-                pipe_elapsed = time_module.time() - pipe_start
-                if pipe_elapsed > 1.0:
-                    print(f"⚠️ Main video pipeline set_state(NULL) took {pipe_elapsed:.2f}s!")
-            except Exception as e:
-                print(f"[GST] Main video pipeline teardown error: {e}")
-        self.cdg_main_video_pipeline = None
-
-        # Preview (CDG preview pipeline)
-        pp = getattr(self, "preview_pipeline", None)
-        if pp:
-            try:
-                self._gst_unwatch_bus(pp)         # <-- add this (harmless if not watched)
-                pipe_start = time_module.time()
-                pp.set_state(Gst.State.NULL)
-                pipe_elapsed = time_module.time() - pipe_start
-                if pipe_elapsed > 1.0:
-                    print(f"⚠️ Preview pipeline set_state(NULL) took {pipe_elapsed:.2f}s!")
-            except Exception as e:
-                print(f"[GST] Preview pipeline teardown error: {e}")
-        self.preview_pipeline = None
-
-        self.gst_main_video_sink = None
-        self.gst_preview_video_sink = None
-        
-        total = time_module.time() - start
-        print(f"[GST] Teardown completed in {total:.2f}s")
-        
-
-
 
     def _gst_teardown_async(self):
-        """Non-blocking teardown for Stop button.
+        """Stop playback without blocking the UI.
 
-        On Windows, Gst.Element.set_state(NULL) can occasionally block long enough to freeze the Qt UI.
-        This helper:
-          - captures current pipelines
-          - clears UI references immediately (so UI can update / go idle)
-          - performs a more aggressive stop (PAUSED->READY->NULL + flush) in a background thread
-        """
-        p  = getattr(self, "gst_pipeline", None)
-        vp = getattr(self, "cdg_main_video_pipeline", None)
-        pp = getattr(self, "preview_pipeline", None)
+        Kept as a separate entry point for call sites that used to need a
+        worker-thread teardown of legacy pipelines; the transport stops
+        in-place and there is nothing left to defer."""
         self._stop_python_karaoke_transport()
         self._karaoke_transport_tempo_ratio = 1.0
-
-        # Nothing to tear down; avoid leaving stop gate raised.
-        if not p and not vp and not pp:
-            return
-
-        # Guard against re-entrant stop spam
-        if getattr(self, "_stop_in_progress", False):
-            return
-        self._stop_in_progress = True
-        self._teardown_active = True
-        self._stop_started_ts = time.monotonic()
-
-        # macOS FIX (0.2.16.2): detach glimagesink from the window BEFORE clearing refs
-        # and before the background thread sets the pipeline to NULL.
-        # glimagesink on macOS renders via an NSOpenGLView/CALayer sub-view that it inserts
-        # into the Qt window's native NSView hierarchy. When the pipeline is torn down that
-        # sub-view is NOT automatically removed — it stays composited on top of the window,
-        # covering everything Qt draws (idle background image, visualizer overlay) even though
-        # Qt is painting correctly underneath it.
-        # Rebinding to a hidden native parking window detaches glimagesink from the
-        # visible karaoke window, removing its sub-view so Qt regains control of the surface.
-        # This must happen here (main thread, before the worker starts) because NSView
-        # hierarchy changes must be made on the main thread.
-        if sys.platform == "darwin":
-            park_win = self._get_sink_parking_winid()
-            detach_targets = [
-                ("main", getattr(self, "gst_main_video_sink", None)),
-                ("preview", getattr(self, "gst_preview_video_sink", None)),
-            ]
-            # Keep references for a second detach pass after teardown completes.
-            self._teardown_detach_sinks = [s for _, s in detach_targets if s is not None]
-            for _name, _sink in detach_targets:
-                if _sink is not None:
-                    try:
-                        _sink.set_window_handle(int(park_win))
-                        _diag(f"[TEARDOWN] sink_detach phase=async_start sink={_name} result=ok")
-                    except Exception:
-                        _diag(f"[TEARDOWN] sink_detach phase=async_start sink={_name} result=fail")
-            try:
-                _diag(f"[TEARDOWN] macOS sink detach requested (park={int(park_win)})")
-            except Exception:
-                pass
-
-        # Detach from UI immediately so new playback isn't blocked
-        self.gst_pipeline = None
-        self.cdg_main_video_pipeline = None
-        self.preview_pipeline = None
-        self.gst_main_video_sink = None
-        self.gst_preview_video_sink = None
-
-        # Token so an older teardown thread doesn't mess with a newer one
-        token = getattr(self, "_teardown_token", 0) + 1
-        self._teardown_token = token
-
-        def _hard_stop(pipe):
-            if not pipe:
-                return
-            try:
-                # Unhook bus watches first (prevents callbacks into deleted UI)
-                try:
-                    self._gst_unwatch_bus(pipe)
-                except Exception:
-                    pass
-
-                # Flush to halt playback immediately
-                try:
-                    pipe.send_event(Gst.Event.new_flush_start())
-                    pipe.send_event(Gst.Event.new_flush_stop(False))
-                except Exception:
-                    pass
-
-                # Fire-and-forget state changes — no get_state() blocking.
-                # get_state() was added to handle macOS glimagesink hangs but
-                # caused 1-3s of delay per state (up to 6s total) on every normal
-                # teardown. The watchdog at 5s is the safety net for true hangs.
-                for st in (Gst.State.PAUSED, Gst.State.READY, Gst.State.NULL):
-                    try:
-                        pipe.set_state(st)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        def worker(local_p, local_vp, local_pp, local_token):
-            try:
-                _hard_stop(local_pp)
-                _hard_stop(local_vp)
-                _hard_stop(local_p)
-            finally:
-                try:
-                    QMetaObject.invokeMethod(
-                        self,
-                        "_on_gst_teardown_complete",
-                        Qt.ConnectionType.QueuedConnection
-                    )
-                except Exception:
-                    self._stop_in_progress = False
-                    self._teardown_active = False
-
-        threading.Thread(target=worker, args=(p, vp, pp, token), daemon=True).start()
-
-        # Watchdog: if teardown thread hangs beyond 5s, force-clear the stop gate
-        # so Play Next is never permanently broken. This is a safety net only —
-        # the get_state() timeout above should prevent hangs in normal cases.
-        def _teardown_watchdog():
-            if getattr(self, '_stop_in_progress', False):
-                has_pipe = bool(getattr(self, 'gst_pipeline', None) or getattr(self, 'cdg_main_video_pipeline', None) or getattr(self, 'preview_pipeline', None))
-                pending_next = bool(getattr(self, '_playnext_pending', False))
-                _diag(f"[TEARDOWN] WATCHDOG: teardown hung >5s, force-clearing stop gate (has_pipeline={has_pipe})")
-                self._stop_in_progress = False
-                self._teardown_active = False
-                # Only recover to idle when karaoke is truly inactive.
-                if pending_next:
-                    _diag("[TEARDOWN] watchdog idle recovery skipped: play-next pending")
-                elif not bool(getattr(self, "karaoke_playing", False)) and not has_pipe:
-                    self._recover_idle_output("teardown_watchdog", ensure_bg=True)
-                else:
-                    _diag(
-                        f"[TEARDOWN] watchdog recovery skipped: "
-                        f"karaoke_playing={bool(getattr(self, 'karaoke_playing', False))} has_pipeline={has_pipe}"
-                    )
-                if bool(getattr(self, '_playnext_pending', False)):
-                    self._playnext_pending = False
-                    QTimer.singleShot(0, self.play_next_file)
-        QTimer.singleShot(5000, _teardown_watchdog)
 
     def _recover_idle_output(self, reason: str, ensure_bg: bool = True):
         """Single-path idle visual/audio recovery used by teardown success and fallback paths."""
