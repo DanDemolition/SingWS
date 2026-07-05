@@ -1,11 +1,7 @@
-import os
 import math
 import sys
-import gc
-from pathlib import Path
 import logging
 import logging.handlers
-from datetime import datetime
 
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.0.0"
@@ -250,9 +246,6 @@ def _setup_gstreamer_runtime_paths():
             pass
 _setup_gstreamer_runtime_paths()
 
-import shutil
-import subprocess
-import json
 import hashlib
 import song_index  # local module (~/SingWS/singws.db)
 import phrase_markers  # local module (~/SingWS/phrase_markers.db) — Phrase-Aligned Song Start
@@ -261,14 +254,10 @@ try:
     from mutagen import File as MutagenFile
 except Exception:
     MutagenFile = None
-from pathlib import Path
 from datetime import datetime, timedelta
 import requests
-import random
 import platform
 import re
-import zipfile
-import tempfile
 import threading
 import time
 import uuid
@@ -894,7 +883,6 @@ def app_stylesheet() -> str:
 
 import subprocess, tempfile, shutil, glob
 import random
-from pathlib import Path
 import qrcode
 try:
     from PIL import ImageGrab, ImageFilter, ImageEnhance
@@ -906,12 +894,10 @@ except Exception:
     PIL_SCREENSHOT_AVAILABLE = False
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, 
-    QListWidgetItem, QPushButton, QLabel, QSplitter,
-    QFileDialog, QAbstractItemView, QSlider, QFrame, QTreeView, QCheckBox, QMenu
+    QSplitter, QAbstractItemView, QSlider, QTreeView, QCheckBox, QMenu
 )
-from PyQt6.QtCore import Qt, QTimer, QMimeData, QUrl, pyqtSignal, QByteArray, QDir
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QAction, QIcon, QFont, QPalette, QColor
+from PyQt6.QtCore import QMimeData, QDir
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QAction
 
 # Ensure QtSvg is discoverable in frozen builds (SVG icons)
 try:
@@ -1034,9 +1020,8 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QStackedWidget, QSpinBox,
     QTextEdit
 )
-from PyQt6.QtGui import QFont, QPalette, QColor, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, pyqtProperty, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex
-from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery
 
 # WebSocket request relay (wskar.com). Optional: older PyQt6 installs may lack
@@ -1444,7 +1429,6 @@ class SongbookUploadThread(QThread):
 
 
 # ----- GStreamer (with runtime guard + macOS guidance) -----
-from PyQt6.QtWidgets import QApplication, QMessageBox
 
 def _show_gst_error_and_exit(exc: Exception):
     # Build a clear, actionable message, especially for macOS users.
@@ -3564,7 +3548,6 @@ class BackgroundMusicPlayer(QObject):
 
     def load_folder(self, folder_path):
         """Load all audio files from a folder into the playlist"""
-        import os
         from pathlib import Path
         
         audio_extensions = {'.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.mp4'}
@@ -11063,7 +11046,6 @@ class PreviewVideoAreaWidget(QWidget):
 
 class PreviewWindow(QWidget):
     def __init__(self):
-        _startup_started = time.monotonic()
         super().__init__()
         self.setObjectName("previewWindow")
         self.resize(400, 288)
@@ -14047,6 +14029,7 @@ class KaraokeApp(QWidget):
 
     def __init__(self):
         super().__init__()
+        _startup_started = time.monotonic()
         from PyQt6.QtCore import Qt
         self._ui_call_requested.connect(
             self._dispatch_ui_call,
@@ -20094,7 +20077,7 @@ class KaraokeApp(QWidget):
     def configure_settings(self):
         """App settings dialog (list text size + CDG display mode)."""
         from PyQt6.QtWidgets import (
-            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QDialogButtonBox,
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
             QSlider, QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox, QScrollArea, QTabWidget
         )
         from PyQt6.QtGui import QCursor
@@ -31283,13 +31266,6 @@ class KaraokeApp(QWidget):
             return float(bpm)
         return None
 
-    @staticmethod
-    def _fmt_mmss(seconds: float) -> str:
-        seconds = max(0.0, float(seconds or 0.0))
-        m = int(seconds // 60)
-        s = seconds - m * 60
-        return f"{m}:{s:05.2f}"
-
     def _build_phrase_start_submenu(self, menu, singer_idx: int, song_idx: int):
         entry = self._queue_song_entry(singer_idx, song_idx)
         if entry is None:
@@ -34216,7 +34192,7 @@ class KaraokeApp(QWidget):
 
     def scan_folder(self):
         """Scan chooser: Quick Update (incremental) or Full Scan."""
-        import time, os, json
+        import time, os
         self._last_scan_summary_text = ""
 
         # Styled mode chooser (matches Settings/Network visual language).
@@ -41471,7 +41447,6 @@ class ManageFoldersDialog(QDialog):
                 self._list.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
 
 if __name__ == "__main__":
-    from PyQt6.QtWidgets import QApplication
     from PyQt6.QtGui import QPalette, QColor
     from PyQt6.QtCore import Qt, QSharedMemory
     import sys
