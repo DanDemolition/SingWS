@@ -14844,7 +14844,6 @@ class KaraokeApp(QWidget):
         self._current_karaoke_cdg_path = ""
         self._current_karaoke_mp3_path = ""
         self.karaoke_transport = None
-        self.cdg_main_video_pipeline = None
         self._app_closing = False
         self._last_sung_singer_display = ""
         self._last_sung_artist = ""
@@ -17753,11 +17752,6 @@ class KaraokeApp(QWidget):
             pass
         self._current_karaoke_audio_path = str(audio_path or "")
         self.karaoke_transport = transport
-        self.gst_pipeline = None
-        self.cdg_main_video_pipeline = None
-        self.preview_pipeline = None
-        self.gst_main_video_sink = None
-        self.gst_preview_video_sink = None
         self.karaoke_volume = None
         try:
             transport.start(start_seconds)
@@ -17900,7 +17894,7 @@ class KaraokeApp(QWidget):
 
     def _recover_idle_output(self, reason: str, ensure_bg: bool = True):
         """Single-path idle visual/audio recovery used by teardown success and fallback paths."""
-        has_pipe = bool(getattr(self, "gst_pipeline", None) or getattr(self, "cdg_main_video_pipeline", None) or getattr(self, "preview_pipeline", None))
+        has_pipe = False  # legacy pipelines removed; transport owns playback
         karaoke_active = bool(getattr(self, "karaoke_playing", False))
         if karaoke_active or has_pipe:
             _diag(
@@ -17964,7 +17958,7 @@ class KaraokeApp(QWidget):
             bg = getattr(self, "bg_music", None)
             bg_playing = bool(getattr(bg, "is_playing", False)) if bg is not None else False
             pix_ok = not bool(getattr(self.video_window.video_area, "background_pixmap", QPixmap()).isNull())
-            has_pipe = bool(getattr(self, "gst_pipeline", None) or getattr(self, "cdg_main_video_pipeline", None) or getattr(self, "preview_pipeline", None))
+            has_pipe = False  # legacy pipelines removed; transport owns playback
             _diag(
                 f"[IDLE-RECOVER] reason={reason} ensure_bg={bool(ensure_bg)} idle={bool(getattr(self.video_window, 'idle', False))} "
                 f"bg_playing={bg_playing} has_pipeline={has_pipe} pix_ok={pix_ok}"
@@ -17981,7 +17975,7 @@ class KaraokeApp(QWidget):
 
     def _reassert_preview_idle(self, reason: str, phase: str):
         try:
-            has_pipe = bool(getattr(self, "gst_pipeline", None) or getattr(self, "cdg_main_video_pipeline", None) or getattr(self, "preview_pipeline", None))
+            has_pipe = False  # legacy pipelines removed; transport owns playback
             if bool(getattr(self, "karaoke_playing", False)) or has_pipe:
                 return
             pw = getattr(self, "preview_window", None)
@@ -18062,7 +18056,7 @@ class KaraokeApp(QWidget):
         try:
             _diag(
                 f"[TEARDOWN] complete karaoke_playing={bool(getattr(self, 'karaoke_playing', False))} "
-                f"has_pipeline={bool(getattr(self, 'gst_pipeline', None) or getattr(self, 'cdg_main_video_pipeline', None) or getattr(self, 'preview_pipeline', None))}"
+                f"has_pipeline=False"
             )
         except Exception:
             pass
@@ -18102,7 +18096,7 @@ class KaraokeApp(QWidget):
             state_info = {}
             try:
                 state_info['karaoke_playing'] = getattr(self, 'karaoke_playing', False)
-                state_info['pipeline_exists'] = getattr(self, 'gst_pipeline', None) is not None
+                state_info['pipeline_exists'] = False  # legacy pipelines removed
                 state_info['polling_running'] = getattr(self, 'poll_thread', None) and self.poll_thread.isRunning()
                 
                 print(f"  - Karaoke playing: {state_info['karaoke_playing']}")
@@ -18940,12 +18934,7 @@ class KaraokeApp(QWidget):
                 return transport.query_times_ns()
             except Exception:
                 return None, None
-        p = getattr(self, "gst_pipeline", None)
-        if not p:
-            return None, None
-        ok_dur, dur = p.query_duration(Gst.Format.TIME)
-        ok_pos, pos = p.query_position(Gst.Format.TIME)
-        return (dur if ok_dur else None, pos if ok_pos else None)
+        return None, None
 
     def _karaoke_seek_seconds(self, seconds: float) -> bool:
         """Seek karaoke playback to absolute seconds."""
@@ -18964,13 +18953,6 @@ class KaraokeApp(QWidget):
         if transport is not None and hasattr(transport, "is_paused"):
             try:
                 return bool(transport.is_paused())
-            except Exception:
-                pass
-        pipeline = getattr(self, "gst_pipeline", None)
-        if pipeline is not None:
-            try:
-                _ret, state, _pending = pipeline.get_state(0)
-                return state == Gst.State.PAUSED
             except Exception:
                 pass
         return False
@@ -19002,14 +18984,6 @@ class KaraokeApp(QWidget):
                     transport.pause()
             except Exception as e:
                 _diag(f"[PY-KARAOKE] pause/resume failed: {e}")
-        else:
-            pipeline = getattr(self, "gst_pipeline", None)
-            if pipeline is not None:
-                try:
-                    target = Gst.State.PLAYING if paused else Gst.State.PAUSED
-                    pipeline.set_state(target)
-                except Exception as e:
-                    _diag(f"[GST] pause/resume failed: {e}")
         # Refresh the button label to mirror the new state.
         try:
             self._update_karaoke_pause_button()
@@ -28470,20 +28444,7 @@ class KaraokeApp(QWidget):
             transport = getattr(self, "karaoke_transport", None)
             if transport is not None:
                 return transport.cdg_sectors_remaining()
-            p = getattr(self, "gst_pipeline", None)
-            if p is None:
-                return None
-            src = p.get_by_name("v_src")
-            if src is None:
-                return None
-            ok_pos, byte_pos = src.query_position(Gst.Format.BYTES)
-            ok_dur, byte_dur = src.query_duration(Gst.Format.BYTES)
-            if not ok_pos or not ok_dur:
-                return None
-            if byte_dur <= 0 or byte_pos < 0:
-                return None
-            remain_bytes = max(0, int(byte_dur) - int(byte_pos))
-            return float(remain_bytes) / 96.0
+            return None
         except Exception:
             return None
 
@@ -31551,10 +31512,6 @@ class KaraokeApp(QWidget):
         try:
             if getattr(self, "karaoke_transport", None) is not None:
                 return True
-            if getattr(self, "gst_pipeline", None):
-                return True
-            if getattr(self, "preview_pipeline", None):
-                return True
         except Exception:
             pass
         return False
@@ -31565,7 +31522,7 @@ class KaraokeApp(QWidget):
         Clears itself if the preview has already ended/stopped."""
         if not getattr(self, "_phrase_preview_flag", False):
             return False
-        if getattr(self, "karaoke_transport", None) is None and not getattr(self, "gst_pipeline", None):
+        if getattr(self, "karaoke_transport", None) is None:
             self._phrase_preview_flag = False
             return False
         return True
@@ -37074,7 +37031,7 @@ class KaraokeApp(QWidget):
         self._cancel_pending_media_end_cleanup("play_next")
         try:
             q_len = len(self.queue) if hasattr(self, "queue") and self.queue is not None else -1
-            has_pipe = bool(getattr(self, "gst_pipeline", None) or getattr(self, "karaoke_transport", None))
+            has_pipe = bool(getattr(self, "karaoke_transport", None))
             _diag(
                 f"[PLAYNEXT] clicked queue_len={q_len} next_in_progress={bool(getattr(self, '_next_in_progress', False))} "
                 f"stop_in_progress={bool(getattr(self, '_stop_in_progress', False))} has_pipeline={has_pipe}"
@@ -37084,7 +37041,7 @@ class KaraokeApp(QWidget):
         # Prevent overlapping "next" actions when the button is spammed.
         # Without this, multiple pipelines can start and you can end up with multiple tracks playing.
         if getattr(self, "_stop_in_progress", False):
-            has_pipe = bool(getattr(self, "gst_pipeline", None) or getattr(self, "preview_pipeline", None))
+            has_pipe = False  # legacy pipelines removed
             stop_age = max(0.0, time.monotonic() - float(getattr(self, "_stop_started_ts", 0.0) or 0.0))
             teardown_active = bool(getattr(self, "_teardown_active", False))
             # While async teardown is active, never clear the gate based only on refs.
@@ -37104,7 +37061,7 @@ class KaraokeApp(QWidget):
 
         # Serialize transition: if karaoke pipelines are active, request teardown and
         # start the next track only from teardown-complete callback.
-        has_pipe_now = bool(getattr(self, "gst_pipeline", None) or getattr(self, "preview_pipeline", None))
+        has_pipe_now = False  # legacy pipelines removed
         if has_pipe_now:
             self._playnext_pending = True
             _diag("[PLAYNEXT] queued: active pipeline detected, waiting for teardown complete")
@@ -37124,13 +37081,6 @@ class KaraokeApp(QWidget):
         is_playing = False
         if getattr(self, "karaoke_transport", None) is not None:
             is_playing = True
-        if getattr(self, "gst_pipeline", None):
-            try:
-                state = self.gst_pipeline.get_state(0).state
-                is_playing = (state == Gst.State.PLAYING)
-            except Exception:
-                is_playing = False
-
         if is_playing and not skip_confirmation:
             dlg = ConfirmInterruptDialog(self)
             if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -37609,125 +37559,49 @@ class KaraokeApp(QWidget):
                 _diag(f"Manual stop: BG crossfade start failed: {e}")
 
         # If we have a karaoke volume element and a running pipeline, fade it down first
-        vol = getattr(self, "karaoke_volume", None)
-        p   = getattr(self, "gst_pipeline", None)
-
-        if vol is not None and p is not None:
-            try:
-                # Make sure we start fading from whatever the current volume is (cap at 1.0)
-                current = float(self._safe_get_volume(vol) or 1.0)
-            except Exception:
-                current = 1.0
-
-            steps = 20               # 40 x 50ms ≈ 2.0 seconds
-            step  = 0
-            step_down = current / steps if steps else current
-
-            def tick():
-                nonlocal step
-                v_new = 0.0  # ensure defined even if we error before computing it
-                try:
-                    v_now = float(self._safe_get_volume(vol))
-                    v_new = max(0.0, v_now - step_down)
-                    self._safe_set_volume(vol, v_new)
-                except Exception as e:
-                    print("[stop] fade tick error:", e)
-
-                step += 1
-                if step >= steps or v_new <= 0.0:
-                    timer.stop()
-                    self._log_manual_stop_timeline("fade_complete")
-                    # ✅ IMMEDIATE ASYNC TEARDOWN - don't wait
-                    try:
-                        self._remember_last_sung_from_current()
-                    except Exception:
-                        pass
-                    self._gst_teardown_async()
-                    self.clear_now_singing()
-                    
-                    # Update UI immediately
-                    self.video_window.force_black = False
-                    self.video_window.idle = True
-                    self._apply_idle_background(force=True, advance_slideshow=True)
-                    self.preview_window.force_black = True
-                    self.preview_window.update()
-                    
-                    # Mark as not playing
-                    self.karaoke_playing = False
-                    try:
-                        self._mark_daw_preview_playback_stopped("manual_stop_fade_complete")
-                    except Exception:
-                        pass
-                    self._reset_karaoke_tempo_for_track_end()
-                    self._reset_end_silence_state()
-                    self._eta_hold_current_secs = 0
-                    try:
-                        self.update_queue_display()
-                    except Exception:
-                        pass
-                    try:
-                        self.update_bg_button_state()
-                    except Exception:
-                        pass
-
-                    # BG crossfade was already started at press time (3s overlap).
-                    # Only fall back to scheduling if BG is still not playing (e.g. no pipeline/playlist at press time).
-                    if hasattr(self, 'bg_music') and self.bg_music.playlist:
-                        if self.bg_music.is_playing:
-                            _diag("BG already playing after manual stop fade-out; crossfade in progress or complete")
-                        else:
-                            _diag("BG not playing after manual stop fade-out; scheduling fallback resume.")
-                            self._schedule_bg_resume(100, reason="manual_stop")
-                    else:
-                        _diag("Cannot restart background music after manual stop (no playlist/bg)")
-                        self._force_bg_resume_recovery()
-                    self._manual_stop_in_progress = False
-
-            timer = QTimer(self)
-            timer.timeout.connect(tick)
-            timer.start(50)
-
-        else:
-            # No karaoke pipeline/fader found; fall back to immediate async stop
-            self._log_manual_stop_timeline("no_fade_path")
-            self._gst_teardown_async()  # ← Use the non-blocking version
-            self.clear_now_singing()
-            
-            # Update UI immediately
-            self.video_window.force_black = False
-            self.video_window.idle = True
-            self._apply_idle_background(force=True, advance_slideshow=True)
-            self.preview_window.force_black = True
-            self.preview_window.update()
-            
-            # Mark as not playing
-            self.karaoke_playing = False
-            try:
-                self._mark_daw_preview_playback_stopped("manual_stop_immediate")
-            except Exception:
-                pass
-            self._reset_karaoke_tempo_for_track_end()
-            self._reset_end_silence_state()
-            self._eta_hold_current_secs = 0
-            try:
-                self.update_queue_display()
-            except Exception:
-                pass
-            try:
-                self.update_bg_button_state()
-            except Exception:
-                pass
-            
-            if hasattr(self, 'bg_music') and self.bg_music.playlist:
-                if self.bg_music.is_playing:
-                    _diag("BG already playing after manual stop; leaving as-is")
-                else:
-                    _diag("Restarting background music after manual stop.")
-                    self._schedule_bg_resume(100, reason="manual_stop")
+        # The legacy fade-then-teardown path is gone: karaoke_volume and
+        # gst_pipeline were always None, so manual stop always took this
+        # immediate path.
+        # No karaoke pipeline/fader found; fall back to immediate async stop
+        self._log_manual_stop_timeline("no_fade_path")
+        self._gst_teardown_async()  # ← Use the non-blocking version
+        self.clear_now_singing()
+        
+        # Update UI immediately
+        self.video_window.force_black = False
+        self.video_window.idle = True
+        self._apply_idle_background(force=True, advance_slideshow=True)
+        self.preview_window.force_black = True
+        self.preview_window.update()
+        
+        # Mark as not playing
+        self.karaoke_playing = False
+        try:
+            self._mark_daw_preview_playback_stopped("manual_stop_immediate")
+        except Exception:
+            pass
+        self._reset_karaoke_tempo_for_track_end()
+        self._reset_end_silence_state()
+        self._eta_hold_current_secs = 0
+        try:
+            self.update_queue_display()
+        except Exception:
+            pass
+        try:
+            self.update_bg_button_state()
+        except Exception:
+            pass
+        
+        if hasattr(self, 'bg_music') and self.bg_music.playlist:
+            if self.bg_music.is_playing:
+                _diag("BG already playing after manual stop; leaving as-is")
             else:
-                _diag("Cannot restart background music after manual stop (no playlist/bg)")
-                self._force_bg_resume_recovery()
-            self._manual_stop_in_progress = False
+                _diag("Restarting background music after manual stop.")
+                self._schedule_bg_resume(100, reason="manual_stop")
+        else:
+            _diag("Cannot restart background music after manual stop (no playlist/bg)")
+            self._force_bg_resume_recovery()
+        self._manual_stop_in_progress = False
 
     def _log_manual_stop_timeline(self, stage: str):
         """One-shot timing trace for manual stop path: press -> visual handoff -> fade -> teardown."""
