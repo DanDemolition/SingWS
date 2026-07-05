@@ -1,6 +1,7 @@
 """Tests for the OpenKJ GStreamer port: pitch math, scaletempo tuning, the
-CDG adapter (change-driven frames, seek generations, end gate), and the
-brand parser rules. None of these need GStreamer to run."""
+CDG adapter (change-driven QImage frames from the hardened cdg_native
+decoder, seek generations, end gate, corrupt-file tolerance), and the brand
+parser rules. None of these need GStreamer to run."""
 
 import os
 import struct
@@ -100,18 +101,21 @@ class CdgAdapterTests(unittest.TestCase):
         self.assertGreaterEqual(frames, 4)
         self.assertLessEqual(frames, 16)
 
-    def test_frame_shape(self):
-        rgb = self.adapter.frame_for_position_ms(2000)
-        self.assertIsNotNone(rgb)
-        self.assertEqual(rgb.shape, (192, 288, 3))
+    def test_frame_is_indexed_qimage(self):
+        image = self.adapter.frame_for_position_ms(2000)
+        self.assertIsNotNone(image)
+        self.assertEqual((image.width(), image.height()), (288, 192))
+        from PyQt6.QtGui import QImage
+        self.assertEqual(image.format(), QImage.Format.Format_Indexed8)
+        self.assertEqual(len(image.colorTable()), 16)
 
     def test_seek_bumps_generation_and_replays(self):
         g0 = self.adapter.generation
         self.adapter.frame_for_position_ms(4000)
         self.adapter.seek_seconds(1.0)
         self.assertEqual(self.adapter.generation, g0 + 1)
-        rgb = self.adapter.frame_for_position_ms(1500)
-        self.assertIsNotNone(rgb)
+        image = self.adapter.frame_for_position_ms(1500)
+        self.assertIsNotNone(image)
 
     def test_sectors_remaining_decreases(self):
         early = self.adapter.sectors_remaining(1.0)
@@ -125,6 +129,54 @@ class CdgAdapterTests(unittest.TestCase):
         final_ms = self.adapter.reader.position_of_final_frame_ms()
         self.assertGreater(final_ms, 4000)
         self.assertLess(final_ms, 6001)
+
+
+class CdgCorruptionToleranceTests(unittest.TestCase):
+    """The decoder must survive damaged rips: out-of-range tiles, corrupt
+    scroll offsets, and truncated trailing packets."""
+
+    def _reader_for(self, payload: bytes):
+        from cdg_native import CdgFileReader
+        import tempfile, os as _os
+        fd, path = tempfile.mkstemp(suffix=".cdg")
+        with _os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        self.addCleanup(_os.unlink, path)
+        return CdgFileReader(path)
+
+    @staticmethod
+    def _pkt(instr, data16):
+        p = bytearray(24)
+        p[0] = 0x09
+        p[1] = instr
+        p[4:4 + len(data16)] = data16
+        return bytes(p)
+
+    def test_out_of_range_tile_is_rejected(self):
+        bad_tile = self._pkt(6, bytes([0, 1, 30, 60] + [0x3F] * 12))  # row 30 col 60
+        good_tile = self._pkt(6, bytes([0, 1, 4, 4] + [0x3F] * 12))
+        reader = self._reader_for(bytes(24) * 10 + bad_tile + good_tile + bytes(24) * 10)
+        frames = 0
+        while reader.move_to_next_frame():
+            frames += 1
+        self.assertGreaterEqual(frames, 1)  # good tile still renders
+
+    def test_truncated_trailing_packet_ignored(self):
+        tile = self._pkt(6, bytes([0, 1, 4, 4] + [0x3F] * 12))
+        payload = bytes(24) * 5 + tile + b"\x09\x06\x00"  # 3 stray bytes
+        reader = self._reader_for(payload)
+        self.assertEqual(reader._total_packets, 6)
+        while reader.move_to_next_frame():
+            pass  # must terminate cleanly
+
+    def test_corrupt_scroll_offsets_clamped(self):
+        scroll = self._pkt(20, bytes([0, 0x0F, 0x0F] + [0] * 13))  # max offsets
+        reader = self._reader_for(bytes(24) * 5 + scroll + bytes(24) * 5)
+        while reader.move_to_next_frame():
+            pass
+        frame = reader.current_frame()
+        from cdg_native import FRAME_BYTES
+        self.assertEqual(len(frame), FRAME_BYTES)  # crop stayed on-surface
 
 
 class BrandParserTests(unittest.TestCase):

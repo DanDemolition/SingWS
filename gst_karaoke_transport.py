@@ -7,9 +7,10 @@ chain (see okj_audio_backend.py / OKJ_INTEGRATION.md):
     SoundTouch ``pitch`` element (a property set, zero cost live), speed via
     ``scaletempo`` + INSTANT_RATE_CHANGE seeks, EQ via ``equalizer-10bands``.
     No PCM ever flows through Python.
-  * CDG frames come from okj_cdg.CdgReader: change-driven (no pixel change ->
-    no frame -> no render) and presented against the pipeline clock, not a
-    wall-clock timer.
+  * CDG frames come from cdg_native.CdgFileReader (hardened libCDG port,
+    tolerant of damaged rips): change-driven (no pixel change -> no frame ->
+    no render), presented against the pipeline clock, and emitted as
+    Indexed8 QImages so palette expansion happens in Qt's C code.
   * MP4 video decodes through GStreamer (VideoToolbox via vtdec where
     available) into an appsink; frames are paced by the pipeline clock
     (appsink sync=True) and emitted as QImage via frame_ready, so the
@@ -145,41 +146,62 @@ def _diag(message: str) -> None:
 
 
 class _CdgAdapter:
-    """Wraps okj_cdg.CdgReader with the generation/sectors surface the host
-    expects from the old CdgDecoder."""
+    """Wraps cdg_native.CdgFileReader (hardened, dependency-free libCDG port)
+    with the generation/sectors surface the host expects.
+
+    Frames come out as Format_Indexed8 QImages with a 16-entry color table —
+    Qt expands the palette in C when painting, so Python never touches
+    individual pixels on the render path."""
 
     def __init__(self, path: str):
-        from okj_cdg import CdgReader, PACKETS_PER_SECOND
+        from cdg_native import (
+            CdgFileReader,
+            CDG_PACKETS_PER_SECOND,
+            CROP_W,
+            CROP_H,
+        )
 
-        self.reader = CdgReader(path)
-        self.packets_per_second = int(PACKETS_PER_SECOND)
+        self.reader = CdgFileReader(path)
+        self.packets_per_second = int(CDG_PACKETS_PER_SECOND)
+        self._crop_w = int(CROP_W)
+        self._crop_h = int(CROP_H)
         self.generation = 0
         self.duration_seconds = self.reader.total_duration_ms() / 1000.0
-        self._presented_pkt_idx = -1
+        self._presented_idx = -1
 
     def seek_seconds(self, seconds: float):
-        self.reader.seek_ms(int(max(0.0, seconds) * 1000))
+        self.reader.seek(int(max(0.0, seconds) * 1000))
         self.generation += 1
-        self._presented_pkt_idx = -1
+        self._presented_idx = -1
 
     def sectors_remaining(self, seconds: float) -> float:
-        n = self.reader._n_packets
+        n = self.reader._total_packets
         packet = max(0, min(n, int(seconds * self.packets_per_second)))
         return max(0.0, (n - packet) / 4.0)
 
     def frame_for_position_ms(self, pos_ms: int):
-        """Advance the reader to cover pos_ms; return a new RGB ndarray only
-        when the visible frame actually changed (change-driven rendering)."""
+        """Advance the reader to cover pos_ms; return a new Indexed8 QImage
+        only when the visible frame actually changed (change-driven)."""
         r = self.reader
         moved = False
         while r.current_frame_position_ms() + r.current_frame_duration_ms() <= pos_ms:
             if not r.move_to_next_frame():
                 break
             moved = True
-        if not moved and self._presented_pkt_idx == r._cur_pkt_idx:
+        if not moved and self._presented_idx == r._cur_idx:
             return None
-        self._presented_pkt_idx = r._cur_pkt_idx
-        return r.current_frame_rgb()
+        self._presented_idx = r._cur_idx
+        frame = r.current_frame()
+        plane = self._crop_w * self._crop_h
+        image = QImage(
+            frame[:plane], self._crop_w, self._crop_h, self._crop_w,
+            QImage.Format.Format_Indexed8,
+        )
+        pal = frame[plane:]
+        image.setColorTable(
+            [int.from_bytes(pal[i * 4:(i + 1) * 4], "little") for i in range(16)]
+        )
+        return image.copy()
 
 
 class GstKaraokeTransport(QObject):
@@ -740,13 +762,11 @@ class GstKaraokeTransport(QObject):
 
     def _present_cdg(self, pos: float):
         display_pos_ms = int(max(0.0, pos + self.video_offset_seconds) * 1000)
-        rgb = self.cdg.frame_for_position_ms(display_pos_ms)
-        if rgb is None:
+        image = self.cdg.frame_for_position_ms(display_pos_ms)
+        if image is None:
             return
-        h, w, _ = rgb.shape
-        image = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888).copy()
         self._video_frames_delivered += 1
-        self._video_source_size = f"{w}x{h}"
+        self._video_source_size = f"{image.width()}x{image.height()}"
         self.frame_ready.emit(image)
 
     def _pull_video_frame(self):
