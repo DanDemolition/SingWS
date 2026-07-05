@@ -2593,7 +2593,7 @@ DEFAULTS = {
     "auto_update_last_check": 0,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
     "cdg_quality_mode": "standard",  # standard=lower CPU, high=smoother scaling/text edges
-    "cdg_timing_offset_ms": 500,     # CDG-only lyric timing nudge (-3000..+3000ms; +=lyrics earlier)
+    "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "next_up_overlay_enabled": True, # Show temporary audience-facing Next Up transition panel
@@ -5160,6 +5160,36 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             self.volume = target
                 
+    def ensure_audible(self, reason: str = ""):
+        """Recover the 'flag says playing but silent' state: a karaoke-start
+        fade can leave the engine paused or at master volume 0 while
+        self.is_playing stays True (a stale _bass_stop_after_fade generation
+        skips the pause), so resume paths that trust the flag leave silence."""
+        if not self._bass_ready() or not self.is_playing:
+            return
+        eng = self._bass_engine
+        try:
+            paused = bool(eng.is_paused())
+            master = float(getattr(eng, "master_volume", 1.0) or 0.0)
+            really_playing = bool(eng.is_playing())
+        except Exception:
+            return
+        if really_playing and not paused and master > 0.05:
+            return
+        try:
+            target = float(self._target_volume_from_ui())
+        except Exception:
+            target = float(getattr(self, "volume", 0.65) or 0.65)
+        print(f"[BG-RECOVER] flag playing but paused={int(paused)} playing={int(really_playing)} master={master:.2f} reason={reason}; restoring vol={target:.2f}")
+        try:
+            self._bass_fade_generation += 1  # cancel any pending stop-after-fade
+            if paused or not really_playing:
+                eng.set_master_volume(0.0)
+                eng.bass.BASS_ChannelPlay(eng.mixer, False)
+            eng.slide_master_volume(target, 500)
+        except Exception as e:
+            print(f"[BG-RECOVER] failed: {e}")
+
     def fade_out(self, duration_ms=1000):
         """Fade out background music"""
         if self._bass_ready():
@@ -37710,7 +37740,11 @@ class KaraokeApp(QWidget):
         
         if hasattr(self, 'bg_music') and self.bg_music.playlist:
             if self.bg_music.is_playing:
-                _diag("BG already playing after manual stop; leaving as-is")
+                _diag("BG already playing after manual stop; verifying audibility")
+                try:
+                    self.bg_music.ensure_audible("manual_stop")
+                except Exception:
+                    pass
             else:
                 _diag("Restarting background music after manual stop.")
                 self._schedule_bg_resume(100, reason="manual_stop")
@@ -40633,6 +40667,12 @@ class KaraokeApp(QWidget):
     def _start_bg_with_fade(self):
         """Start background music with fade in and update button"""
         _diag("_start_bg_with_fade called")
+        # If a fade left BGM silently 'playing', repair before any early-out
+        # below trusts the is_playing flag.
+        try:
+            self.bg_music.ensure_audible("bg_resume")
+        except Exception:
+            pass
         resume_reason = str(getattr(self, "_bg_resume_reason", "default") or "default")
         # One-shot reason flag.
         self._bg_resume_reason = "default"

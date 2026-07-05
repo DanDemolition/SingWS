@@ -469,11 +469,14 @@ class GstKaraokeTransport(QObject):
         return pos / NS_PER_SECOND
 
     def query_times_ns(self):
+        """Return (duration_ns, position_ns) — the LEGACY transport's order,
+        which the host's progress bar and seek mapping rely on. Returning
+        (pos, dur) made the bar read full and dragging seek to ~0."""
         ok, pos = self.pipeline.query_position(self.Gst.Format.TIME)
         okd, dur = self.pipeline.query_duration(self.Gst.Format.TIME)
         if not okd or dur <= 0:
             dur = int(self.duration_seconds * NS_PER_SECOND) if self.duration_seconds else None
-        return (pos if ok and pos >= 0 else None), (dur if dur and dur > 0 else None)
+        return (dur if dur and dur > 0 else None), (pos if ok and pos >= 0 else None)
 
     # ----------------------------------------------------------- modifiers
     def set_modifiers(self, tempo_ratio: float, semitones: float):
@@ -499,9 +502,17 @@ class GstKaraokeTransport(QObject):
             self._apply_tempo_rate()
 
     def _apply_tempo_rate(self):
-        """Live speed change without pitch change (OpenKJ setTempo port):
-        INSTANT_RATE_CHANGE when supported, flushing rate seek otherwise."""
+        """Live speed change without pitch change.
+
+        OpenKJ's scaletempo + INSTANT_RATE_CHANGE path (see NOTE below on
+        why not SoundTouch's own tempo property)."""
         Gst = self.Gst
+        # NOTE: routing tempo through the SoundTouch element's own `tempo`
+        # property sounds cleaner but rescales downstream timestamps: the
+        # pipeline position then advances at 1.0x while the song runs faster,
+        # silently breaking CDG sync, the progress bar, and end-silence
+        # timing (measured: position rate 1.00 at tempo 1.3). Tempo therefore
+        # stays on scaletempo + rate seeks, which keep source-time positions.
         try:
             optimize_scaletempo_for_rate(self.scaletempo, self.tempo_ratio)
         except Exception:
