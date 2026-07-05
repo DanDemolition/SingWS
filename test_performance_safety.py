@@ -174,6 +174,27 @@ class PerformanceSafetyTests(unittest.TestCase):
         details = function_source("_update_singer_history_details")
         self.assertNotIn("allow_sync_build=True", details)
 
+    def test_singer_history_brand_choices_cache_key_method_is_not_shadowed(self):
+        self.assertIn("def _history_brand_choices_cache_key", MAIN_SOURCE)
+        self.assertIn("_history_brand_choices_cached_key", MAIN_SOURCE)
+        self.assertNotIn("self._history_brand_choices_cache_key =", MAIN_SOURCE)
+
+    def test_daw_preview_network_failures_have_backoff(self):
+        self.assertIn("def _daw_preview_server_backoff_active", MAIN_SOURCE)
+        self.assertIn("def _record_daw_preview_server_failure", MAIN_SOURCE)
+        self.assertIn("def _record_daw_preview_server_success", MAIN_SOURCE)
+        scheduler = function_source("_schedule_daw_singer_screen_snapshot")
+        self.assertIn("_daw_preview_server_backoff_active", scheduler)
+        self.assertLess(
+            scheduler.index("_daw_preview_server_backoff_active"),
+            scheduler.index("requests.get("),
+        )
+        self.assertIn("_record_daw_preview_server_failure", scheduler)
+        self.assertIn("_record_daw_preview_server_success", scheduler)
+        uploader = function_source("_post_daw_singer_screen_snapshot")
+        self.assertIn("_record_daw_preview_server_failure", uploader)
+        self.assertIn("_record_daw_preview_server_success", uploader)
+
     def test_karaoke_to_bgm_overlap_requires_explicit_setting(self):
         self.assertIn('"karaoke_bgm_crossfade_enabled": False', MAIN_SOURCE)
         self.assertIn('"karaoke_allow_early_silence_trim": False', MAIN_SOURCE)

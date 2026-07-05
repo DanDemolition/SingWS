@@ -12625,6 +12625,37 @@ class SingerHistorySongsBuildWorker(QObject):
             })
 
 
+_BRAND_CHOICE_THREADS = None
+
+
+def _register_brand_choice_thread(thread) -> None:
+    """Track brand-choices QThreads and join them at interpreter exit.
+
+    Destroying a running QThread (test teardown, abrupt quit) aborts the
+    whole process with 'QThread: Destroyed while thread is still running';
+    an atexit join runs before Qt/C++ teardown and prevents it."""
+    global _BRAND_CHOICE_THREADS
+    if _BRAND_CHOICE_THREADS is None:
+        import atexit
+
+        _BRAND_CHOICE_THREADS = set()
+
+        def _join_brand_choice_threads():
+            for th in list(_BRAND_CHOICE_THREADS):
+                try:
+                    th.quit()
+                    th.wait(3000)
+                except Exception:
+                    pass
+
+        atexit.register(_join_brand_choice_threads)
+    _BRAND_CHOICE_THREADS.add(thread)
+    try:
+        thread.finished.connect(lambda t=thread: _BRAND_CHOICE_THREADS.discard(t))
+    except Exception:
+        pass
+
+
 class SingerHistoryBrandChoicesWorker(QObject):
     """Build Singer History preferred-brand choices away from the GUI thread."""
 
@@ -21328,6 +21359,41 @@ class KaraokeApp(QWidget):
             pass
         return 1.5
 
+    def _daw_preview_server_backoff_active(self, *, reason: str = "") -> bool:
+        try:
+            until = float(getattr(self, "_daw_preview_server_backoff_until", 0.0) or 0.0)
+        except Exception:
+            until = 0.0
+        now = time.monotonic()
+        if until <= now:
+            return False
+        remaining = until - now
+        self._daw_preview_log_transition(
+            "server_backoff",
+            f"producer skipped server_backoff remaining={remaining:.1f}s reason={reason}",
+        )
+        return True
+
+    def _record_daw_preview_server_success(self) -> None:
+        try:
+            self._daw_preview_server_failures = 0
+            self._daw_preview_server_backoff_until = 0.0
+        except Exception:
+            pass
+
+    def _record_daw_preview_server_failure(self, *, reason: str = "", error: str = "") -> None:
+        try:
+            failures = int(getattr(self, "_daw_preview_server_failures", 0) or 0) + 1
+            self._daw_preview_server_failures = failures
+            delay = min(60.0, 5.0 * (2 ** max(0, failures - 1)))
+            self._daw_preview_server_backoff_until = time.monotonic() + delay
+            self._daw_preview_log_transition(
+                "server_backoff",
+                f"server backoff active delay={delay:.1f}s failures={failures} reason={reason} error={str(error or '')[:120]}",
+            )
+        except Exception:
+            pass
+
     def _mark_daw_preview_playback_started(self, media_path: str = "") -> None:
         self._daw_snapshot_generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0) + 1
         self._daw_snapshot_first_frame_pending = True
@@ -21378,6 +21444,8 @@ class KaraokeApp(QWidget):
             if force:
                 self._daw_preview_log(f"producer skipped local_throttle age={now - last_capture:.2f}s reason={reason}")
             return
+        if self._daw_preview_server_backoff_active(reason=reason):
+            return
         base_url, tenant, api_key = self._daw_snapshot_config()
         if not base_url or not tenant or not api_key:
             self._daw_preview_log_transition("producer_state", f"producer skipped missing_config reason={reason}")
@@ -21396,6 +21464,7 @@ class KaraokeApp(QWidget):
                     timeout=2,
                 )
                 if resp.status_code == 200:
+                    self._record_daw_preview_server_success()
                     payload = resp.json()
                     viewer_seen_at = int((payload or {}).get("viewer_seen_at") or 0)
                     enabled = bool((payload or {}).get("enabled", False))
@@ -21408,8 +21477,10 @@ class KaraokeApp(QWidget):
                         f"playing={int(playing)} capture={int(should_capture)}",
                     )
                 else:
+                    self._record_daw_preview_server_failure(reason=reason, error=f"HTTP {resp.status_code}")
                     self._daw_preview_log(f"viewer check HTTP {resp.status_code} reason={reason}")
             except Exception as e:
+                self._record_daw_preview_server_failure(reason=reason, error=str(e))
                 self._daw_preview_log(f"viewer check failed reason={reason}: {e}")
             if should_capture:
                 self._run_on_ui_thread(lambda: self._capture_daw_singer_screen_snapshot(reason=reason))
@@ -21608,11 +21679,15 @@ class KaraokeApp(QWidget):
                 )
                 send_ms = (time.perf_counter() - send_t0) * 1000.0
                 total_ms = (time.perf_counter() - worker_t0) * 1000.0
-                if active and files is not None and 200 <= int(getattr(resp, "status_code", 0) or 0) < 300:
-                    self._daw_snapshot_sent_count = int(getattr(self, "_daw_snapshot_sent_count", 0) or 0) + 1
                 elapsed = max(0.001, time.monotonic() - float(getattr(self, "_daw_snapshot_stats_started", time.monotonic()) or time.monotonic()))
                 fps = float(getattr(self, "_daw_snapshot_sent_count", 0) or 0) / elapsed
                 status_code = int(getattr(resp, "status_code", 0) or 0)
+                if 200 <= status_code < 300:
+                    if active and files is not None:
+                        self._daw_snapshot_sent_count = int(getattr(self, "_daw_snapshot_sent_count", 0) or 0) + 1
+                    self._record_daw_preview_server_success()
+                else:
+                    self._record_daw_preview_server_failure(reason=reason, error=f"HTTP {status_code}")
                 if verbose or not (200 <= status_code < 300):
                     self._daw_preview_log(
                         f"frame sent reason={reason} active={int(active)} status={getattr(resp, 'status_code', '')} "
@@ -21620,6 +21695,7 @@ class KaraokeApp(QWidget):
                         f"fps={fps:.2f} playback_state={playback_state}"
                     )
             except Exception as e:
+                self._record_daw_preview_server_failure(reason=reason, error=str(e))
                 self._daw_preview_log(f"upload failed reason={reason}: {e}")
             finally:
                 self._daw_snapshot_inflight = False
@@ -22484,8 +22560,8 @@ class KaraokeApp(QWidget):
             identity_sets = self._accepted_request_identity_sets()
         accepted_ids, exact_sigs, loose_sigs = identity_sets
         rid = self._waiting_for_add_request_id(req)
-        if rid > 0 and rid in accepted_ids:
-            return True
+        if rid > 0:
+            return rid in accepted_ids
         sig = self._accepted_request_identity_parts(req)
         if sig[0] and sig[1] and sig[2]:
             if sig in exact_sigs:
@@ -23002,6 +23078,8 @@ class KaraokeApp(QWidget):
         if not isinstance(handled, set):
             handled = set()
             self._waiting_for_add_handled_ids = handled
+        elif "_waiting_for_add_handled_ids" not in state:
+            self._waiting_for_add_handled_ids = handled
         identity_sets = self._accepted_request_identity_sets()
         candidates = {}
         terminal_items = {}
@@ -23024,7 +23102,10 @@ class KaraokeApp(QWidget):
                 continue
             if not self._is_waiting_for_add_request(req):
                 continue
-            if rid in handled or rid in local_ids:
+            if rid in local_ids:
+                handled.add(rid)
+                continue
+            if rid in handled:
                 continue
             if self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
                 self._mark_waiting_for_add_duplicate_accepted(req, reason="set_requests")
@@ -24528,7 +24609,7 @@ class KaraokeApp(QWidget):
             pass
 
         try:
-            thread = QThread(self)
+            thread = QThread()
             worker = SingerHistoryDirectoryBuildWorker(job_id, singers_snapshot, search, render_limit, song_scan_limit)
             worker.moveToThread(thread)
             thread.started.connect(worker.run)
@@ -24550,6 +24631,7 @@ class KaraokeApp(QWidget):
             job_ref = (thread, worker)
             jobs.append(job_ref)
             thread.finished.connect(lambda ref=job_ref: jobs.remove(ref) if ref in jobs else None)
+            _register_brand_choice_thread(thread)
             thread.start()
             self._history_perf_log(
                 "open_request",
@@ -24728,7 +24810,7 @@ class KaraokeApp(QWidget):
                 pass
             return
         try:
-            thread = QThread(self)
+            thread = QThread()
             worker = SingerHistorySongsBuildWorker(job_id, singer_key, songs, render_limit)
             worker.moveToThread(thread)
             thread.started.connect(worker.run)
@@ -24750,6 +24832,7 @@ class KaraokeApp(QWidget):
             job_ref = (thread, worker)
             jobs.append(job_ref)
             thread.finished.connect(lambda ref=job_ref: jobs.remove(ref) if ref in jobs else None)
+            _register_brand_choice_thread(thread)
             thread.start()
         except Exception as e:
             _diag(f"[PERF] singer_history_songs_worker_start_failed singer={singer_key} error={e}")
@@ -24848,7 +24931,7 @@ class KaraokeApp(QWidget):
 
     def _ensure_history_brand_choices_async(self):
         cache_key = self._history_brand_choices_cache_key()
-        if getattr(self, "_history_brand_choices_cache_key", None) == cache_key:
+        if getattr(self, "_history_brand_choices_cached_key", None) == cache_key:
             return
         worker = getattr(self, "_history_brand_choices_worker", None)
         try:
@@ -24856,6 +24939,16 @@ class KaraokeApp(QWidget):
                 worker.cancel()
         except Exception:
             pass
+        # Join the previous thread before replacing it: destroying a QThread
+        # object (e.g. via parent teardown at shutdown) while it is still
+        # running aborts the whole process.
+        old_thread = getattr(self, "_history_brand_choices_thread", None)
+        if old_thread is not None:
+            try:
+                old_thread.quit()
+                old_thread.wait(2000)
+            except Exception:
+                pass
         try:
             self._history_brand_choices_job_id = int(getattr(self, "_history_brand_choices_job_id", 0) or 0) + 1
             job_id = int(self._history_brand_choices_job_id)
@@ -24863,7 +24956,7 @@ class KaraokeApp(QWidget):
             job_id = int(time.time() * 1000)
             self._history_brand_choices_job_id = job_id
         try:
-            thread = QThread(self)
+            thread = QThread()
             worker = SingerHistoryBrandChoicesWorker(job_id, cache_key, getattr(self, "tracks", []))
             worker.moveToThread(thread)
             thread.started.connect(worker.run)
@@ -24873,6 +24966,7 @@ class KaraokeApp(QWidget):
             thread.finished.connect(thread.deleteLater)
             self._history_brand_choices_thread = thread
             self._history_brand_choices_worker = worker
+            _register_brand_choice_thread(thread)
             thread.start()
         except Exception as e:
             _diag(f"[PERF] singer_history_brand_choices_worker_start_failed error={e}")
@@ -24883,7 +24977,7 @@ class KaraokeApp(QWidget):
             if int(job_id) != int(getattr(self, "_history_brand_choices_job_id", 0) or 0):
                 return
             matched_current = True
-            self._history_brand_choices_cache_key = cache_key
+            self._history_brand_choices_cached_key = cache_key
             self._history_brand_choices_cache = list(choices or [])
             self._history_perf_log("brand_choices_worker", float(elapsed_ms), tracks=len(getattr(self, "tracks", []) or []))
             try:
@@ -24899,7 +24993,7 @@ class KaraokeApp(QWidget):
     def _history_brand_choices(self, *, allow_sync_build: bool = False) -> list[str]:
         cache_key = self._history_brand_choices_cache_key()
         try:
-            cached_key = getattr(self, "_history_brand_choices_cache_key", None)
+            cached_key = getattr(self, "_history_brand_choices_cached_key", None)
             cached = getattr(self, "_history_brand_choices_cache", None)
             if cached_key == cache_key and isinstance(cached, list):
                 return list(cached)
@@ -24920,7 +25014,7 @@ class KaraokeApp(QWidget):
             pass
         choices = sorted(brands)
         try:
-            self._history_brand_choices_cache_key = cache_key
+            self._history_brand_choices_cached_key = cache_key
             self._history_brand_choices_cache = list(choices)
         except Exception:
             pass
@@ -30176,6 +30270,22 @@ class KaraokeApp(QWidget):
                 remote_request_id = 0
             if remote_request_id > 0:
                 entry["remote_request_id"] = remote_request_id
+            try:
+                entry["request_order"] = float(remote_meta.get("sort_order") or remote_meta.get("queue_position") or remote_request_id)
+            except Exception:
+                entry["request_order"] = float(remote_request_id or 0)
+            for _request_meta_key in (
+                "host_order_updated_at",
+                "singer_order_updated_at",
+                "order_revision",
+                "last_order_source",
+                "selected_version",
+                "selected_brand",
+                "selected_disc_id",
+                "request_source",
+            ):
+                if remote_meta.get(_request_meta_key) not in (None, ""):
+                    entry[_request_meta_key] = remote_meta.get(_request_meta_key)
         else:
             remote_request_id = 0
         insert_source = self._queue_insert_source_label(remote_meta)
@@ -30470,7 +30580,7 @@ class KaraokeApp(QWidget):
         if not self._is_rotation_mode():
             return 0
         now = time.time()
-        removed = 0
+        cleaned = 0
         for singer_idx in range(len(self.queue) - 1, -1, -1):
             try:
                 singer = self.queue[singer_idx]
@@ -30488,32 +30598,25 @@ class KaraokeApp(QWidget):
             except Exception:
                 expired = True
             if force or expired:
-                self._delete_rotation_singer_row(
-                    singer_idx,
-                    reason="empty_slot_cleanup" if not force else "empty_slot_force_cleanup",
-                )
-                removed += 1
-        return removed
+                if force:
+                    self._delete_rotation_singer_row(singer_idx, reason="empty_slot_force_cleanup")
+                else:
+                    self._clear_temporary_empty_rotation_slot(singer, reason="empty_slot_retained")
+                cleaned += 1
+        return cleaned
 
-    def _should_preserve_rotation_identity(self, singer) -> bool:
-        """Keep played-through rotation rows even when the server has no pending songs."""
+    def _should_preserve_empty_singer_row(self, singer) -> bool:
+        """A singer row is durable state; empty song lists do not imply removal."""
         if not isinstance(singer, dict):
             return False
-        if not self._is_rotation_mode():
+        try:
+            return bool(str(singer.get("name", "") or "").strip())
+        except Exception:
             return False
-        if singer.get("songs"):
-            return True
-        if bool(singer.get("temporary_empty_slot", False)):
-            try:
-                return time.time() < float(singer.get("empty_slot_until") or 0.0)
-            except Exception:
-                return True
-        return bool(
-            singer.get("has_sung", False)
-            or singer.get("round_sung", False)
-            or singer.get("rotation_marker", False)
-            or singer.get("last_sung_at")
-        )
+
+    def _should_preserve_rotation_identity(self, singer) -> bool:
+        """Backward-compatible wrapper for older rotation identity call sites."""
+        return self._should_preserve_empty_singer_row(singer)
 
     def _is_rotation_mode(self) -> bool:
         try:
@@ -30850,9 +30953,9 @@ class KaraokeApp(QWidget):
             if singer_pref:
                 clear_brand_action = menu.addAction(f"Clear Preferred Brand ({singer_pref})")
                 clear_brand_action.triggered.connect(lambda: self.clear_singer_brand_override(singer_idx))
-            if self._is_rotation_mode() and not singer.get("songs") and bool(singer.get("temporary_empty_slot", False)):
+            if not singer.get("songs"):
                 menu.addSeparator()
-                cleanup_action = menu.addAction("Remove Empty Singer Slot")
+                cleanup_action = menu.addAction("Remove Empty Singer")
                 cleanup_action.triggered.connect(lambda: (
                     self._delete_rotation_singer_row(singer_idx, reason="host_cleanup_empty_slot"),
                     self._request_queue_display_refresh(),
@@ -31151,7 +31254,7 @@ class KaraokeApp(QWidget):
         """Decode + estimate tempo/beat off the UI thread (cached under
         cache_path), then call callback(bpm) on the UI thread (0.0 on failure)."""
         try:
-            thread = QThread(self)
+            thread = QThread()
             worker = _BpmDetectWorker(str(audio_path or ""), str(cache_path or audio_path or ""))
             worker.moveToThread(thread)
             thread.started.connect(worker.run)
@@ -31165,6 +31268,7 @@ class KaraokeApp(QWidget):
             job = (thread, worker)
             self._bpm_jobs.append(job)
             thread.finished.connect(lambda j=job: self._bpm_jobs.remove(j) if j in self._bpm_jobs else None)
+            _register_brand_choice_thread(thread)
             thread.start()
         except Exception as e:
             _diag(f"[PHRASE-BPM] async detect failed: {e}")
@@ -33475,6 +33579,18 @@ class KaraokeApp(QWidget):
         - Save main-window geometry to settings.json.
         - Stop playback + background music + polling threads.
         """
+        # Join the brand-choices worker thread first: destroying a running
+        # QThread during teardown aborts the process.
+        try:
+            worker = getattr(self, "_history_brand_choices_worker", None)
+            if worker is not None and hasattr(worker, "cancel"):
+                worker.cancel()
+            thread = getattr(self, "_history_brand_choices_thread", None)
+            if thread is not None:
+                thread.quit()
+                thread.wait(2000)
+        except Exception:
+            pass
         # If a karaoke track is playing, ask before quitting.
         try:
             is_playing = bool(getattr(self, "karaoke_playing", False))
@@ -38021,12 +38137,32 @@ class KaraokeApp(QWidget):
                         pass
                 else:
                     return tombstone
+            return None
         if not song_key or song_key == "||":
             return None
         for tombstone in items.values():
             if isinstance(tombstone, dict) and tombstone.get("song_key") == song_key:
                 return tombstone
         return None
+
+    def _remote_request_mark_already_absent(self, resp) -> bool:
+        try:
+            status_code = int(getattr(resp, "status_code", 0) or 0)
+        except Exception:
+            status_code = 0
+        if status_code not in {404, 410}:
+            return False
+        text = str(getattr(resp, "text", "") or "").lower()
+        if "request_not_found" in text or "not found" in text:
+            return True
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            error = str(payload.get("error") or payload.get("message") or "").lower()
+            return "request_not_found" in error or "not found" in error
+        return False
 
     def _sync_remote_removal_tombstones_async(self, reason: str = "manual") -> None:
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
@@ -38105,6 +38241,9 @@ class KaraokeApp(QWidget):
                     if 200 <= resp.status_code < 300:
                         synced.append(rid)
                         _diag(f"[REMOTE-TOMBSTONE] server acknowledged removal request_id={rid} status={resp.status_code}")
+                    elif self._remote_request_mark_already_absent(resp):
+                        synced.append(rid)
+                        _diag(f"[REMOTE-TOMBSTONE] server already absent request_id={rid} status={resp.status_code}; marking synced")
                     else:
                         _diag(f"[REMOTE-TOMBSTONE] push failed request_id={rid} status={resp.status_code} body={(resp.text or '')[:180]!r}")
             except Exception as e:
@@ -38181,7 +38320,7 @@ class KaraokeApp(QWidget):
                     headers=headers,
                     timeout=5,
                 )
-                if 200 <= mark.status_code < 300:
+                if 200 <= mark.status_code < 300 or self._remote_request_mark_already_absent(mark):
                     latest = self._ensure_remote_request_tombstones()
                     item = latest.get("requests", {}).get(str(request_id))
                     if isinstance(item, dict):
@@ -38244,7 +38383,7 @@ class KaraokeApp(QWidget):
                     headers=headers,
                     timeout=5,
                 )
-                if 200 <= mark.status_code < 300:
+                if 200 <= mark.status_code < 300 or self._remote_request_mark_already_absent(mark):
                     latest = self._ensure_remote_request_tombstones()
                     item = latest.get("requests", {}).get(str(request_id))
                     if isinstance(item, dict):
@@ -38382,7 +38521,7 @@ class KaraokeApp(QWidget):
             if self._is_rotation_mode():
                 singer["songs"] = []
                 self._mark_rotation_slot_temporarily_empty(singer, reason=reason)
-            elif self._should_preserve_rotation_identity(singer):
+            elif self._should_preserve_empty_singer_row(singer):
                 singer["songs"] = []
             else:
                 del self.queue[singer_idx]
@@ -38911,6 +39050,10 @@ class KaraokeApp(QWidget):
             except Exception:
                 tempo = 0
             tempo = max(-30, min(30, tempo))
+            try:
+                sort_order = float(req.get("sort_order") or req.get("queue_position") or request_id)
+            except Exception:
+                sort_order = float(request_id)
             queue_singer, _duet_display = self._parse_duet_singer(singer)
             if not queue_singer:
                 queue_singer = singer
@@ -38923,10 +39066,12 @@ class KaraokeApp(QWidget):
                 "title": str(req.get("title", "") or "").strip(),
                 "key": key,
                 "tempo": tempo,
+                "sort_order": sort_order,
                 "host_order_updated_at": order_meta.get("host_order_updated_at", 0),
                 "singer_order_updated_at": order_meta.get("singer_order_updated_at", 0),
                 "order_revision": order_meta.get("order_revision", 0),
                 "last_order_source": order_meta.get("last_order_source", "server"),
+                "sort_order": req.get("sort_order"),
                 "request_source": str(req.get("request_source") or req.get("source") or ""),
                 "source": str(req.get("request_source") or req.get("source") or ""),
                 "singer_session_id": req.get("singer_session_id") or req.get("session_id") or "",
@@ -39000,7 +39145,7 @@ class KaraokeApp(QWidget):
                 else:
                     existing_ids.add(remote_id)
             if not songs:
-                if self._should_preserve_rotation_identity(singer):
+                if self._should_preserve_empty_singer_row(singer):
                     singer["songs"] = []
                 else:
                     del self.queue[singer_idx]
@@ -39065,12 +39210,40 @@ class KaraokeApp(QWidget):
 
         tempo_by_id = {item["request_id"]: item["tempo"] for item in normalized}
         key_by_id = {item["request_id"]: item["key"] for item in normalized}
+        sort_by_id = {item["request_id"]: item.get("sort_order", item["request_id"]) for item in normalized}
         desired_by_singer = {}
         desired_meta_by_singer = {}
         for req in normalized:
             singer_key = req["queue_singer"].lower()
             desired_by_singer.setdefault(singer_key, []).append(req["request_id"])
             desired_meta_by_singer[singer_key] = self._merge_remote_order_meta(desired_meta_by_singer.get(singer_key), req)
+        for singer_key, request_ids in list(desired_by_singer.items()):
+            # Re-sort by sort_order ONLY when the server actually sent one.
+            # get_requests.php conveys order via ROW ORDER (it already does
+            # ORDER BY sort_order server-side) and does not emit the column,
+            # so falling back to request_id here would destroy the server's
+            # intended order for every payload (host/singer reorders never
+            # reached the desktop).
+            sort_lookup = {}
+            for req in normalized:
+                if req["queue_singer"].lower() != singer_key:
+                    continue
+                raw = req.get("sort_order")
+                if raw in (None, ""):
+                    continue
+                try:
+                    sort_lookup[int(req["request_id"])] = (float(raw), int(req["request_id"]))
+                except Exception:
+                    pass
+            if not sort_lookup:
+                continue  # wire order is authoritative
+            payload_rank = {int(rid): i for i, rid in enumerate(request_ids)}
+            desired_by_singer[singer_key] = sorted(
+                [int(rid) for rid in request_ids],
+                key=lambda rid: sort_lookup.get(
+                    int(rid), (float("inf"), payload_rank.get(int(rid), 0))
+                ),
+            )
 
         try:
             pending = getattr(self, "_pending_remote_order_syncs", {})
@@ -39140,6 +39313,10 @@ class KaraokeApp(QWidget):
                     entry["key"] = server_key
                     server_tempo = max(-30, min(30, int(server_tempo or 0)))
                     entry["tempo_percent"] = 100 + server_tempo
+                    try:
+                        entry["request_order"] = float(sort_by_id.get(remote_id, entry.get("request_order", remote_id)))
+                    except Exception:
+                        pass
         for singer in self.queue:
             singer_key = str(singer.get("name", "") or "").strip().lower()
             order = desired_by_singer.get(singer_key, [])

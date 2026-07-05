@@ -125,6 +125,44 @@ class RotationIdentityTests(unittest.TestCase):
         self.assertEqual(app.queue[0]["songs"], [])
         self.assertTrue(app.queue[0]["has_sung"])
 
+    def test_remote_reconcile_preserves_never_sung_empty_rotation_singer(self):
+        app = make_app(self.singws)
+        app.queue = [
+            {
+                "name": "Ada",
+                "songs": [],
+                "skipped": False,
+                "has_sung": False,
+                "round_sung": False,
+                "rotation_marker": False,
+            },
+            {
+                "name": "Grace",
+                "songs": [
+                    {
+                        "remote_request_id": 77,
+                        "artist": "Artist",
+                        "title": "Title",
+                        "song_info": "/tmp/song.mp3",
+                        "key": 0,
+                        "skipped": False,
+                    }
+                ],
+                "skipped": False,
+                "has_sung": False,
+                "round_sung": False,
+                "rotation_marker": False,
+            },
+        ]
+
+        app._reconcile_remote_requests(
+            [{"request_id": 77, "singer": "Grace", "artist": "Artist", "title": "Title", "key": 0, "tempo": 0}]
+        )
+
+        self.assertEqual([s["name"] for s in app.queue], ["Ada", "Grace"])
+        self.assertEqual(app.queue[0]["songs"], [])
+        self.assertFalse(app.queue[0]["has_sung"])
+
     def test_returning_singer_reuses_existing_empty_row(self):
         app = make_app(self.singws)
         app.queue = [
@@ -238,6 +276,20 @@ class RotationIdentityTests(unittest.TestCase):
         app._mark_rotation_slot_temporarily_empty(app.queue[0], reason="host_remove_song")
         self.assertEqual([s["name"] for s in app.queue], ["Ada", "Grace"])
         self.assertTrue(app.queue[0]["temporary_empty_slot"])
+
+    def test_expired_empty_slot_cleanup_does_not_remove_singer(self):
+        app = make_app(self.singws)
+        app.queue = [
+            {"name": "Ada", "songs": [], "skipped": False, "temporary_empty_slot": True, "empty_slot_until": 1.0},
+            {"name": "Grace", "songs": [{"artist": "Artist", "title": "Next", "song_info": "/tmp/next.mp3", "key": 0, "skipped": False}], "skipped": False},
+        ]
+
+        cleaned = app._prune_expired_empty_rotation_slots()
+
+        self.assertEqual(cleaned, 1)
+        self.assertEqual([s["name"] for s in app.queue], ["Ada", "Grace"])
+        self.assertEqual(app.queue[0]["songs"], [])
+        self.assertNotIn("temporary_empty_slot", app.queue[0])
 
     def test_server_sync_preserves_empty_slot_order(self):
         app = make_app(self.singws)

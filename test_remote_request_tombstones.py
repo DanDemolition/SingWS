@@ -28,14 +28,17 @@ class FakeResponse:
 class RecordingRequests:
     """Stand-in for the `requests` module that records POSTs and can fail."""
 
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, post_response=None):
         self.fail = fail
+        self.post_response = post_response
         self.posts = []
 
     def post(self, url, **kwargs):
         self.posts.append({"url": url, **kwargs})
         if self.fail:
             raise OSError("server unreachable")
+        if self.post_response is not None:
+            return self.post_response
         return FakeResponse(200, {"ok": True})
 
     def get(self, url, **kwargs):
@@ -56,14 +59,14 @@ class _InlineThread:
 
 
 @contextmanager
-def fake_network(module=None, fail=False):
+def fake_network(module=None, fail=False, post_response=None):
     """Make all network paths deterministic.
 
     Methods that do a local ``import requests`` pick up ``sys.modules`` while
     methods that use the module-level ``requests`` global need the loaded
     module patched too. Threads run inline so sync work completes in-test.
     """
-    fake = RecordingRequests(fail=fail)
+    fake = RecordingRequests(fail=fail, post_response=post_response)
     saved_requests = sys.modules.get("requests")
     sys.modules["requests"] = fake
     patches = [mock.patch.object(threading, "Thread", _InlineThread)]
@@ -454,6 +457,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                         "artist": "History Artist",
                         "title": "History Song",
                         "song_info": "/music/history.mp3",
+                        "remote_request_id": 2402,
                         "source": "history",
                     },
                 ],
@@ -483,7 +487,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                 "name": "Dan",
                 "songs": [
                     {"artist": "Manual Artist", "title": "Manual Song", "remote_request_id": 2411},
-                    {"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"},
+                    {"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3", "remote_request_id": 2412},
                 ],
             }]
             pending = {
@@ -509,7 +513,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.queue = [{
                 "name": "Dan",
-                "songs": [{"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"}],
+                "songs": [{"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3", "remote_request_id": 2421}],
             }]
             req = {
                 "request_id": 2421,
@@ -537,12 +541,12 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertNotIn(2421, app._waiting_for_add_requests)
             self.assertIn(2421, app._waiting_for_add_handled_ids)
 
-    def test_resolved_remote_add_does_not_create_duplicate_active_song(self):
+    def test_resolved_remote_add_uses_request_id_not_history_signature_for_dedupe(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.queue = [{
                 "name": "Dan",
-                "songs": [{"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"}],
+                "songs": [{"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3", "remote_request_id": 2430}],
             }]
             added = []
             app._add_song_to_queue = lambda *args, **kwargs: added.append((args, kwargs)) or True
@@ -566,9 +570,52 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             }
 
             self.assertTrue(app._apply_resolved_remote_add(payload, allow_defer=True))
-            self.assertEqual(added, [])
-            self.assertEqual(delivered, [2431])
+            self.assertEqual(len(added), 1)
+            self.assertEqual(added[0][1]["remote_meta"]["request_id"], 2431)
+            self.assertEqual(delivered, [])
             self.assertEqual(len(app.queue[0]["songs"]), 1)
+
+    def test_remote_sync_keeps_host_order_when_server_order_is_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Ada",
+                "songs": [
+                    {"artist": "Artist", "title": "B", "song_info": "/music/b.mp3", "remote_request_id": 3002},
+                    {"artist": "Artist", "title": "A", "song_info": "/music/a.mp3", "remote_request_id": 3001},
+                ],
+                "host_order_updated_at": 2000,
+                "order_revision": 5,
+                "last_order_source": "host",
+            }]
+
+            app._reconcile_remote_requests([
+                {"request_id": 3001, "singer": "Ada", "artist": "Artist", "title": "A", "sort_order": 1, "last_order_source": "server"},
+                {"request_id": 3002, "singer": "Ada", "artist": "Artist", "title": "B", "sort_order": 2, "last_order_source": "server"},
+            ])
+
+            self.assertEqual([song["remote_request_id"] for song in app.queue[0]["songs"]], [3002, 3001])
+
+    def test_remote_sync_applies_newer_host_order_from_server_sort_order(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [{
+                "name": "Ada",
+                "songs": [
+                    {"artist": "Artist", "title": "A", "song_info": "/music/a.mp3", "remote_request_id": 3001},
+                    {"artist": "Artist", "title": "B", "song_info": "/music/b.mp3", "remote_request_id": 3002},
+                ],
+                "host_order_updated_at": 1000,
+                "order_revision": 1,
+                "last_order_source": "host",
+            }]
+
+            app._reconcile_remote_requests([
+                {"request_id": 3001, "singer": "Ada", "artist": "Artist", "title": "A", "sort_order": 2, "host_order_updated_at": 3000, "order_revision": 6, "last_order_source": "host"},
+                {"request_id": 3002, "singer": "Ada", "artist": "Artist", "title": "B", "sort_order": 1, "host_order_updated_at": 3000, "order_revision": 6, "last_order_source": "host"},
+            ])
+
+            self.assertEqual([song["remote_request_id"] for song in app.queue[0]["songs"]], [3002, 3001])
 
     def test_sync_restart_does_not_resurrect_accepted_history_pending_item(self):
         with tempfile.TemporaryDirectory() as td:
@@ -577,7 +624,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                 "name": "Dan",
                 "songs": [
                     {"artist": "Manual Artist", "title": "Manual Song", "remote_request_id": 2441},
-                    {"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3"},
+                    {"artist": "History Artist", "title": "History Song", "song_info": "/music/history.mp3", "remote_request_id": 2442},
                 ],
             }]
             pending = {
@@ -926,7 +973,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(app._queue_remote_request_ids(), [501])
             self.assertEqual(app.queue[0]["songs"][0]["title"], "Queued")
 
-    def test_server_removed_tombstone_drops_matching_local_queue_entry(self):
+    def test_server_removed_tombstone_drops_song_but_preserves_singer_row(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.queue = [{
@@ -956,7 +1003,8 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                 }
             ])
 
-            self.assertEqual(app.queue, [])
+            self.assertEqual([s["name"] for s in app.queue], ["Ada"])
+            self.assertEqual(app.queue[0]["songs"], [])
             self.assertIn(501, app._remote_removed_request_ids)
 
     def test_completed_song_does_not_disable_accepting(self):
@@ -1362,6 +1410,27 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(int(synced_posts[0]["data"]["request_id"]), 404)
 
             tombstone = app._ensure_remote_request_tombstones()["requests"]["404"]
+            self.assertIsNotNone(tombstone["server_synced_at"])
+
+    def test_missing_remote_request_marks_tombstone_synced(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            app._record_remote_request_tombstone(
+                707,
+                entry={"artist": "Artist", "title": "Title"},
+                singer_name="Ada",
+                reason="host_remove_song",
+            )
+            tombstone = app._ensure_remote_request_tombstones()["requests"]["707"]
+            self.assertIsNone(tombstone["server_synced_at"])
+
+            missing = FakeResponse(404, {"ok": False, "error": "request_not_found"}, '{"ok":false,"error":"request_not_found"}')
+            with fake_network(self.singws, post_response=missing) as net:
+                app._sync_remote_removal_tombstones_async("retry")
+
+            removal_posts = [p for p in net.posts if "complete_remote_request.php" in p["url"]]
+            self.assertEqual(len(removal_posts), 1)
+            tombstone = app._ensure_remote_request_tombstones()["requests"]["707"]
             self.assertIsNotNone(tombstone["server_synced_at"])
 
     def test_singer_history_syncs_while_requests_off(self):
