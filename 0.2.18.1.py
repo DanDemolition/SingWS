@@ -1525,6 +1525,18 @@ except Exception as e:
     NS_PER_SECOND = 1_000_000_000
     PythonKaraokeTransport = None
     PYTHON_KARAOKE_IMPORT_ERROR = e
+# GStreamer/OpenKJ karaoke transport (native DSP: soundtouch pitch +
+# scaletempo + equalizer-10bands; change-driven clock-synced CDG). Preferred
+# engine; the ffmpeg/QAudioSink transport above stays as the fallback when
+# GStreamer is unavailable.
+try:
+    if os.environ.get("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS"):
+        raise RuntimeError("GStreamer transport skipped for tests")
+    from gst_karaoke_transport import GstKaraokeTransport
+    GST_KARAOKE_IMPORT_ERROR = None
+except Exception as e:
+    GstKaraokeTransport = None
+    GST_KARAOKE_IMPORT_ERROR = e
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
 
 # ===== RESOURCE MANAGEMENT FOR PYINSTALLER =====
@@ -17593,6 +17605,15 @@ class KaraokeApp(QWidget):
         _diag("[PY-KARAOKE] decoder reached end of stream")
         QTimer.singleShot(0, self._handle_media_end_safe)
 
+    def _on_python_karaoke_hung(self):
+        """Stalled-playback watchdog fired (pipeline PLAYING but the clock
+        frozen ~5s). Recover like a song ending so the rotation moves on and
+        background music comes back instead of leaving dead air."""
+        if getattr(self, "karaoke_transport", None) is None:
+            return
+        _diag("[PY-KARAOKE] playback hung — recovering via media-end path")
+        QTimer.singleShot(0, self._handle_media_end_safe)
+
     def _start_python_karaoke_transport(
         self,
         *,
@@ -17603,8 +17624,14 @@ class KaraokeApp(QWidget):
         start_seconds: float = 0.0,
         loop_seconds=None,
     ):
-        if PythonKaraokeTransport is None:
-            detail = str(PYTHON_KARAOKE_IMPORT_ERROR or "Python karaoke transport is unavailable")
+        transport_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
+        using_gst_engine = transport_cls is GstKaraokeTransport
+        if transport_cls is None:
+            detail = str(
+                GST_KARAOKE_IMPORT_ERROR
+                or PYTHON_KARAOKE_IMPORT_ERROR
+                or "Karaoke playback engine is unavailable"
+            )
             _diag(f"[PY-KARAOKE] unavailable: {detail}")
             try:
                 QMessageBox.warning(
@@ -17628,14 +17655,31 @@ class KaraokeApp(QWidget):
             duration = float(self._get_duration_secs(audio_path) or 0.0)
         except Exception:
             duration = 0.0
-        transport = PythonKaraokeTransport(
-            audio_path,
-            video_path=video_path,
-            mode=mode,
-            duration_seconds=duration,
-            probe_duration_on_init=False,
-            parent=self,
-        )
+        try:
+            transport = transport_cls(
+                audio_path,
+                video_path=video_path,
+                mode=mode,
+                duration_seconds=duration,
+                probe_duration_on_init=False,
+                parent=self,
+            )
+        except Exception as e:
+            # GStreamer engine failed to construct (missing element/plugin):
+            # fall back to the legacy ffmpeg transport rather than dying.
+            if using_gst_engine and PythonKaraokeTransport is not None:
+                _diag(f"[GST-KARAOKE] construct failed, falling back to legacy transport: {e}")
+                using_gst_engine = False
+                transport = PythonKaraokeTransport(
+                    audio_path,
+                    video_path=video_path,
+                    mode=mode,
+                    duration_seconds=duration,
+                    probe_duration_on_init=False,
+                    parent=self,
+                )
+            else:
+                raise
         # MP4 decode-resolution cap (downscale only).  Lower values keep
         # playback smooth on weak GPUs (Intel Macs); 0 = native resolution.
         try:
@@ -17648,6 +17692,14 @@ class KaraokeApp(QWidget):
             pass
         transport.frame_ready.connect(self._on_python_karaoke_frame)
         transport.ended.connect(self._on_python_karaoke_ended)
+        # OpenKJ-style stalled-playback watchdog (GStreamer engine): treat a
+        # frozen pipeline like the song ending so the rotation/BGM recover
+        # instead of leaving dead air.
+        if hasattr(transport, "playback_hung"):
+            try:
+                transport.playback_hung.connect(self._on_python_karaoke_hung)
+            except Exception:
+                pass
         transport.set_modifiers(
             float(self._clamp_karaoke_tempo(self._karaoke_tempo_percent)) / 100.0,
             float(self._clamp_karaoke_key(semitones)),
@@ -17700,6 +17752,12 @@ class KaraokeApp(QWidget):
             mode_l = str(mode or "").lower()
             if mode_l == "cdg":
                 off = int(self.settings.get("cdg_timing_offset_ms", self.settings.get("video_timing_offset_ms", 500)) or 0)
+                # 500ms is the legacy engine's built-in latency compensation
+                # (and the old default, so it's persisted in existing
+                # settings). The GStreamer engine is clock-driven end to end
+                # and needs none — treat a stored 500 as unmigrated there.
+                if using_gst_engine and off == 500:
+                    off = 0
             elif mode_l == "mp4":
                 off = int(self.settings.get("mp4_timing_offset_ms", 0) or 0)
             else:
@@ -28756,6 +28814,25 @@ class KaraokeApp(QWidget):
                         )
                 self._end_silence_accum_s = min(self._end_silence_accum_s, threshold_s)
                 return False
+
+            # OpenKJ CDG end gate: even with an end-worthy reason, never cut
+            # while the playhead is still before the final visible CDG frame.
+            # Sector counts include empty trailing packets, so they can look
+            # "done" while lyrics are still on screen through a quiet outro.
+            if reason and getattr(self, "_end_silence_mode", "") == "cdg":
+                gate = getattr(getattr(self, "karaoke_transport", None), "cdg_lyrics_finished", None)
+                if callable(gate):
+                    try:
+                        finished = bool(gate())
+                    except Exception:
+                        finished = True
+                    if not finished:
+                        last_log = float(getattr(self, "_end_silence_cdg_suppress_log_ts", 0.0) or 0.0)
+                        if (now - last_log) >= 1.5:
+                            self._end_silence_cdg_suppress_log_ts = now
+                            _diag("[END-SILENCE] suppressed; lyrics still ahead (CDG final-frame gate)")
+                        self._end_silence_accum_s = min(self._end_silence_accum_s, threshold_s)
+                        return False
 
             if not reason:
                 return False
