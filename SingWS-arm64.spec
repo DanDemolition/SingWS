@@ -108,6 +108,22 @@ a.binaries = [
     )
 ]
 
+# Self-built soundtouch plugin: provides the "pitch" element for realtime key
+# changes (Homebrew's monolithic gstreamer formula ships without it; the
+# GStreamer.framework used by the x86_64/universal builds already has it).
+# Built by native/gst-soundtouch/build_gst_soundtouch.sh.
+soundtouch_plugin = project_root / "native" / "gst-soundtouch" / "libgstsoundtouch.dylib"
+if soundtouch_plugin.exists():
+    a.binaries += [("gst_plugins/libgstsoundtouch.dylib", str(soundtouch_plugin), "BINARY")]
+    soundtouch_lib = Path("/opt/homebrew/opt/sound-touch/lib/libSoundTouch.1.dylib")
+    if soundtouch_lib.exists():
+        a.binaries += [("libSoundTouch.1.dylib", str(soundtouch_lib), "BINARY")]
+else:
+    raise SystemExit(
+        "native/gst-soundtouch/libgstsoundtouch.dylib missing — run "
+        "native/gst-soundtouch/build_gst_soundtouch.sh first (needs: brew install sound-touch)"
+    )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
