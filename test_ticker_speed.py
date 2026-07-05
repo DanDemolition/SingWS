@@ -51,9 +51,11 @@ class TickerSpeedTests(unittest.TestCase):
         t._frame_dt_ema = None
         t._scroll_speed_px_per_sec = float(speed)
         t._external_settings_owner = FakeOwner(speed)
+        t._last_ticker_log_state = None
         # Stub the Qt bits _on_frame / backoff would otherwise call.
         t.isVisible = lambda: True
         t.width = lambda: 1280
+        t.window = lambda: types.SimpleNamespace(windowTitle=lambda: "Ticker")
         t.update = lambda: None
         t._reset_cycle = lambda start_from_edge=True: None
         t.frame_timer = types.SimpleNamespace(start=lambda *a: None, isActive=lambda: True)
@@ -118,6 +120,23 @@ class TickerSpeedTests(unittest.TestCase):
         t.set_scroll_speed(self.singws.TICKER_SPEED_MAX)
         self.assertEqual(t._frame_interval_ms, self.singws.TICKER_FRAME_INTERVAL_MS)
         self.assertAlmostEqual(t._scroll_speed_px_per_sec, self.singws.TICKER_SPEED_MAX)
+
+    def test_duplicate_speed_logs_are_collapsed(self):
+        t = self.make_ticker(78.0)
+        logs = []
+        original_diag = self.singws._diag
+        self.singws._diag = lambda message, *args, **kwargs: logs.append(str(message))
+        try:
+            t.set_scroll_speed(200.0)
+            t.set_scroll_speed(200.0)
+            t.set_scroll_speed(201.0)
+        finally:
+            self.singws._diag = original_diag
+
+        ticker_logs = [line for line in logs if line.startswith("[TICKER] reason=set_scroll_speed")]
+        self.assertEqual(len(ticker_logs), 2)
+        self.assertIn("Loaded Speed=200.0", ticker_logs[0])
+        self.assertIn("Loaded Speed=201.0", ticker_logs[1])
 
     def test_set_scroll_speed_clamps_to_range(self):
         t = self.make_ticker(78.0)

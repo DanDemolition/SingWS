@@ -69,6 +69,69 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("loudness_inflight", diag)
         self.assertIn("lead_silence_prescan", diag)
 
+    def test_logging_setup_does_not_duplicate_handlers(self):
+        source = MAIN_SOURCE[MAIN_SOURCE.index("def setup_logging"):MAIN_SOURCE.index("# Initialize logging")]
+        self.assertIn("_singws_file_handler", source)
+        self.assertIn("_singws_console_handler", source)
+        self.assertIn("any(bool(getattr(h, \"_singws_file_handler\", False))", source)
+        self.assertIn("any(bool(getattr(h, \"_singws_console_handler\", False))", source)
+        self.assertLess(source.index("_singws_file_handler"), source.index("logger.addHandler(file_handler)"))
+        self.assertLess(source.index("_singws_console_handler"), source.index("logger.addHandler(console_handler)"))
+
+    def test_packaged_app_has_opt_in_smoke_exit(self):
+        main_block = MAIN_SOURCE[MAIN_SOURCE.index('if __name__ == "__main__":'):]
+        self.assertIn("SINGWS_SMOKE_EXIT_MS", main_block)
+        self.assertIn("QTimer.singleShot(smoke_exit_ms, window.close)", main_block)
+        self.assertIn("[SMOKE] scheduled app exit", main_block)
+
+    def test_host_control_state_sync_timer_starts_on_ui_thread(self):
+        source = function_source("_schedule_host_control_state_sync")
+        self.assertIn("QThread.currentThread() != app.thread()", source)
+        self.assertIn("self._run_on_ui_thread(self._schedule_host_control_state_sync)", source)
+        self.assertLess(source.index("QThread.currentThread()"), source.index("timer.start("))
+
+    def test_ticker_debounce_timer_starts_on_ui_thread(self):
+        source = function_source("schedule_ticker_update")
+        self.assertIn("QThread.currentThread() != app.thread()", source)
+        self.assertIn("self._run_on_ui_thread(self.schedule_ticker_update)", source)
+        self.assertLess(source.index("QThread.currentThread()"), source.index("self._ticker_update_timer.start(150)"))
+        queue_refresh = function_source("update_queue_display")
+        self.assertIn("self._finish_queue_display_refresh_side_effects()", queue_refresh)
+        side_effects = function_source("_finish_queue_display_refresh_side_effects")
+        self.assertIn("owner_thread = self.thread()", side_effects)
+        self.assertIn("self._run_on_ui_thread(self._finish_queue_display_refresh_side_effects)", side_effects)
+        self.assertIn("QThread.currentThread() == timer.thread()", side_effects)
+        self.assertIn("timer.start(10000)", side_effects)
+
+    def test_websocket_relay_lifecycle_stays_on_ui_thread(self):
+        for name in (
+            "_start_request_relay",
+            "_stop_request_relay",
+            "_start_host_control_relay",
+            "_stop_host_control_relay",
+        ):
+            source = function_source(name)
+            self.assertIn("QThread.currentThread() != app.thread()", source)
+            self.assertIn("_run_on_ui_thread", source)
+        close_start = MAIN_SOURCE.index('    def closeEvent(self, event):\n        """Close main window -> quit whole app.')
+        close_end = MAIN_SOURCE.index("\n    def load_data", close_start)
+        close = MAIN_SOURCE[close_start:close_end]
+        self.assertIn("self._shutdown_network_transports()", close)
+        shutdown = function_source("_shutdown_network_transports")
+        self.assertIn("_network_transports_shutdown", shutdown)
+        self.assertIn("self._stop_request_relay()", shutdown)
+        self.assertIn("self._stop_host_control_relay()", shutdown)
+        self.assertIn("timer.stop()", shutdown)
+        about_to_quit = function_source("_on_app_about_to_quit")
+        self.assertIn("self._app_closing = True", about_to_quit)
+        self.assertIn("self._shutdown_network_transports()", about_to_quit)
+        main_block = MAIN_SOURCE[MAIN_SOURCE.index('if __name__ == "__main__":'):]
+        self.assertIn("app.aboutToQuit.connect(window._on_app_about_to_quit)", main_block)
+        run_on_ui = function_source("_run_on_ui_thread")
+        self.assertIn('if bool(getattr(self, "_app_closing", False)):', run_on_ui)
+        self.assertIn("owner_thread = self.thread()", run_on_ui)
+        self.assertIn('if bool(getattr(self, "_app_closing", False)):', function_source("_dispatch_ui_call"))
+
     def test_deferred_remote_adds_save_off_thread_during_playback(self):
         source = function_source("_save_deferred_remote_adds")
         self.assertIn("karaoke_playing", source)

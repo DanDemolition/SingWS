@@ -2218,19 +2218,23 @@ def setup_logging():
     # Setup root logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    try:
-        file_handler = logging.handlers.TimedRotatingFileHandler(
-            filename=str(log_filename),
-            when='midnight',
-            interval=1,
-            backupCount=7,
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    except Exception as e:
-        print(f"SingWS log file unavailable ({log_filename}): {e}")
-    logger.addHandler(console_handler)
+    if not any(bool(getattr(h, "_singws_file_handler", False)) for h in logger.handlers):
+        try:
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                filename=str(log_filename),
+                when='midnight',
+                interval=1,
+                backupCount=7,
+                encoding='utf-8'
+            )
+            file_handler.setFormatter(formatter)
+            file_handler._singws_file_handler = True
+            logger.addHandler(file_handler)
+        except Exception as e:
+            print(f"SingWS log file unavailable ({log_filename}): {e}")
+    if not any(bool(getattr(h, "_singws_console_handler", False)) for h in logger.handlers):
+        console_handler._singws_console_handler = True
+        logger.addHandler(console_handler)
     
     return logger
 
@@ -5469,12 +5473,39 @@ class BackgroundMusicPlayer(QObject):
         # If not cached, try to extract (this will cache it automatically)
         return self.get_album_artwork(current_file)
     
+def _scaled_karaoke_image(image, size, aspect_mode, quality_mode, is_cdg):
+    """Scale a karaoke frame for display.
+
+    CDG frames are pixel art: one direct SmoothTransformation pass from the
+    ~300x216 source blurs them. In high quality mode we nearest-neighbor
+    prescale by the largest integer factor that fits (crisp pixel edges),
+    then let a single smooth pass cover only the fractional remainder so
+    non-integer window sizes don't shimmer. MP4 frames keep plain smooth
+    scaling.
+    """
+    if quality_mode != "high":
+        return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
+    if is_cdg:
+        src_w, src_h = image.width(), image.height()
+        if src_w > 0 and src_h > 0:
+            factor = min(size.width() // src_w, size.height() // src_h)
+            if factor >= 2:
+                image = image.scaled(
+                    src_w * factor,
+                    src_h * factor,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+    return image.scaled(size, aspect_mode, Qt.TransformationMode.SmoothTransformation)
+
+
 class VideoAreaWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.background_pixmap = QPixmap()
         self.karaoke_frame = QImage()
         self.karaoke_stretch_fill = False
+        self.karaoke_frame_is_cdg = False
         self.cdg_quality_mode = "standard"
         self._karaoke_scaled_pixmap = QPixmap()
         self._karaoke_scaled_key = None
@@ -5515,12 +5546,13 @@ class VideoAreaWidget(QWidget):
         self._karaoke_scaled_key = None
         self.update()
 
-    def set_karaoke_frame(self, image, stretch_fill: bool = False):
+    def set_karaoke_frame(self, image, stretch_fill: bool = False, is_cdg: bool = False):
         # QImage is implicitly shared; avoid copying here. Scaling is cached per
         # frame/size/quality so fullscreen paints only blit an already-scaled
         # pixmap instead of redoing CDG image processing every repaint.
         self.karaoke_frame = image if image is not None and not image.isNull() else QImage()
         self.karaoke_stretch_fill = bool(stretch_fill)
+        self.karaoke_frame_is_cdg = bool(is_cdg)
         self._ensure_karaoke_scaled_pixmap()
         self.update()
 
@@ -5653,6 +5685,7 @@ class VideoAreaWidget(QWidget):
             int(self.width()),
             int(self.height()),
             bool(self.karaoke_stretch_fill),
+            bool(self.karaoke_frame_is_cdg),
             str(self.cdg_quality_mode),
         )
         if key == self._karaoke_scaled_key and not self._karaoke_scaled_pixmap.isNull():
@@ -5662,13 +5695,14 @@ class VideoAreaWidget(QWidget):
             if bool(self.karaoke_stretch_fill)
             else Qt.AspectRatioMode.KeepAspectRatio
         )
-        transform = (
-            Qt.TransformationMode.SmoothTransformation
-            if self.cdg_quality_mode == "high"
-            else Qt.TransformationMode.FastTransformation
-        )
         t0 = time.perf_counter()
-        scaled = self.karaoke_frame.scaled(self.size(), mode, transform)
+        scaled = _scaled_karaoke_image(
+            self.karaoke_frame,
+            self.size(),
+            mode,
+            self.cdg_quality_mode,
+            bool(self.karaoke_frame_is_cdg),
+        )
         self._karaoke_scaled_pixmap = QPixmap.fromImage(scaled)
         self._karaoke_scaled_pos = QPoint(
             (self.width() - self._karaoke_scaled_pixmap.width()) // 2,
@@ -10973,6 +11007,7 @@ class PreviewVideoAreaWidget(QWidget):
         self._owner = owner
         self.karaoke_frame = QImage()
         self.karaoke_stretch_fill = False
+        self.karaoke_frame_is_cdg = False
         self.cdg_quality_mode = "standard"
         self._karaoke_scaled_pixmap = QPixmap()
         self._karaoke_scaled_key = None
@@ -10995,9 +11030,10 @@ class PreviewVideoAreaWidget(QWidget):
         self._karaoke_scaled_key = None
         self.update()
 
-    def set_karaoke_frame(self, image, stretch_fill: bool = False):
+    def set_karaoke_frame(self, image, stretch_fill: bool = False, is_cdg: bool = False):
         self.karaoke_frame = image if image is not None and not image.isNull() else QImage()
         self.karaoke_stretch_fill = bool(stretch_fill)
+        self.karaoke_frame_is_cdg = bool(is_cdg)
         self._ensure_karaoke_scaled_pixmap()
         self.update()
 
@@ -11027,6 +11063,7 @@ class PreviewVideoAreaWidget(QWidget):
             int(self.width()),
             int(self.height()),
             bool(self.karaoke_stretch_fill),
+            bool(self.karaoke_frame_is_cdg),
             str(self.cdg_quality_mode),
         )
         if key == self._karaoke_scaled_key and not self._karaoke_scaled_pixmap.isNull():
@@ -11036,13 +11073,14 @@ class PreviewVideoAreaWidget(QWidget):
             if bool(self.karaoke_stretch_fill)
             else Qt.AspectRatioMode.KeepAspectRatio
         )
-        transform = (
-            Qt.TransformationMode.SmoothTransformation
-            if self.cdg_quality_mode == "high"
-            else Qt.TransformationMode.FastTransformation
-        )
         t0 = time.perf_counter()
-        scaled = self.karaoke_frame.scaled(self.size(), mode, transform)
+        scaled = _scaled_karaoke_image(
+            self.karaoke_frame,
+            self.size(),
+            mode,
+            self.cdg_quality_mode,
+            bool(self.karaoke_frame_is_cdg),
+        )
         self._karaoke_scaled_pixmap = QPixmap.fromImage(scaled)
         self._karaoke_scaled_pos = QPoint(
             (self.width() - self._karaoke_scaled_pixmap.width()) // 2,
@@ -14012,6 +14050,8 @@ class KaraokeApp(QWidget):
 
     def _dispatch_ui_call(self, fn):
         try:
+            if bool(getattr(self, "_app_closing", False)):
+                return
             fn()
         except Exception as e:
             try:
@@ -14032,10 +14072,13 @@ class KaraokeApp(QWidget):
     def _run_on_ui_thread(self, fn):
         """Run a callable on the Qt GUI thread from any worker thread."""
         try:
+            if bool(getattr(self, "_app_closing", False)):
+                return
             if not self._qt_object_is_initialized():
                 return
             app = QApplication.instance()
-            if app is not None and QThread.currentThread() == app.thread():
+            owner_thread = self.thread() if app is not None else None
+            if app is not None and owner_thread is not None and QThread.currentThread() == owner_thread:
                 self._dispatch_ui_call(fn)
             else:
                 self._ui_call_requested.emit(fn)
@@ -15246,8 +15289,8 @@ class KaraokeApp(QWidget):
         self.rotation_hero_card.setStyleSheet(
             SINGWS_THEME.performance_deck_css("rotationHeroCard") if SINGWS_THEME is not None else content_card_css("rotationHeroCard", radius=8)
         )
-        # Outer layout: top row (avatar | info | level meter), bottom row
-        # (progress bar with elapsed/total time labels stacked alongside it).
+        # Outer layout: top row (avatar | info | level meter), then the
+        # LAST / NEXT footer directly below.
         rotation_hero_layout = QVBoxLayout(self.rotation_hero_card)
         rotation_hero_layout.setContentsMargins(16, 13, 16, 12)
         rotation_hero_layout.setSpacing(10)
@@ -15299,51 +15342,25 @@ class KaraokeApp(QWidget):
             )
         self.rotation_summary_meter = BarLevelMeter(
             level_provider=_karaoke_level_provider,
-            n_bars=12,
+            n_bars=16,
             parent=self.rotation_hero_card,
         )
-        self.rotation_summary_meter.setFixedSize(92, 70)
+        # The progress bar + duration rows are gone (they duplicated the
+        # transport deck), so the meter gets the reclaimed space: larger, and
+        # floated toward the center of the area right of the info column
+        # (stretch on both sides) instead of pinned to the card edge.
+        self.rotation_summary_meter.setFixedSize(150, 92)
+        top_row.addStretch(1)
         top_row.addWidget(self.rotation_summary_meter, 0, Qt.AlignmentFlag.AlignVCenter)
+        top_row.addStretch(1)
 
         rotation_hero_layout.addLayout(top_row, 1)
 
-        # --- Bottom progress row: bar + elapsed/total stacked horizontally ---
-        prog_row = QHBoxLayout()
-        prog_row.setContentsMargins(0, 0, 0, 0)
-        prog_row.setSpacing(10)
-
-        self.rotation_summary_progress_track = QFrame()
-        self.rotation_summary_progress_track.setFixedHeight(8)
-        self.rotation_summary_progress_track.setStyleSheet(
-            "background: rgba(115,144,180,0.16); border:none; border-radius:4px;"
-        )
-        self.rotation_summary_progress_fill = QFrame(self.rotation_summary_progress_track)
-        self.rotation_summary_progress_fill.setGeometry(0, 0, 0, 8)
-        self.rotation_summary_progress_fill.setStyleSheet(
-            f"""
-            background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                stop:0 {_v('accent')},
-                stop:1 {_v('accent_bright')});
-            border:none;
-            border-radius:4px;
-            """
-        )
-        prog_row.addWidget(self.rotation_summary_progress_track, 1)
-
-        # Single elapsed / total label (e.g. "0:04 / 2:56")
-        self.rotation_summary_duration = QLabel("")
-        self.rotation_summary_duration.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.rotation_summary_duration.setStyleSheet(f"color:{_v('text_soft')}; font-size:12px; font-weight:700;")
-        self.rotation_summary_duration.setMinimumWidth(86)
-        prog_row.addWidget(self.rotation_summary_duration, 0)
-
-        rotation_hero_layout.addLayout(prog_row, 0)
-        # LAST / NEXT footer lives INSIDE the hero card (under the progress bar,
-        # separated by a divider rule) so the whole on-deck module is one card.
+        # LAST / NEXT footer lives INSIDE the hero card so the whole on-deck
+        # module is one card.
         rotation_hero_layout.addWidget(self.last_sung_label)
         rotation_summary_layout.addWidget(self.rotation_hero_card)
-        self.karaoke_seek_slider.valueChanged.connect(lambda *_: self._set_rotation_summary_progress(self.karaoke_seek_slider.value() / 1000.0))
-        # Tall enough for the hero (avatar + title + progress) AND the compact
+        # Tall enough for the hero (avatar + title) AND the compact
         # LAST / NEXT footer inside it, so neither gets clipped.
         self.rotation_summary_card.setMinimumHeight(248)
         self.rotation_queue_panel = QWidget()
@@ -17244,31 +17261,6 @@ class KaraokeApp(QWidget):
                     next_entry = candidate
                     break
 
-            # Helper: format "0:04 / 2:56" from existing labels.
-            def _elapsed_total() -> str:
-                try:
-                    pos = float(getattr(self, "_karaoke_last_pos", 0.0) or 0.0)
-                    dur = float(getattr(self, "_karaoke_last_dur", 0.0) or 0.0)
-                    if dur > 1.0:
-                        pos = max(0.0, min(dur, pos))
-                        return f"{self._fmt_karaoke_time(pos)} / {self._fmt_karaoke_time(dur)}"
-                except Exception:
-                    pass
-                e = str(getattr(self, "karaoke_elapsed_label", QLabel()).text() or "").strip()
-                r = str(getattr(self, "karaoke_remaining_label", QLabel()).text() or "").strip().lstrip("-")
-                if e and r:
-                    # Recompute total from elapsed + remaining for the "/ total" display.
-                    def _to_sec(mmss):
-                        try:
-                            parts = mmss.split(":")
-                            return int(parts[0]) * 60 + int(parts[1])
-                        except Exception:
-                            return 0
-                    total = _to_sec(e) + _to_sec(r)
-                    m, s = divmod(total, 60)
-                    return f"{e} / {m}:{s:02d}"
-                return e or ""
-
             if karaoke_active and current_singer:
                 current_artist = ""
                 current_title = ""
@@ -17299,8 +17291,6 @@ class KaraokeApp(QWidget):
                     self.rotation_summary_meter.set_active(True)
                 except Exception:
                     pass
-                self.rotation_summary_duration.setText(_elapsed_total())
-                self._set_rotation_summary_progress(self.karaoke_seek_slider.value() / 1000.0)
                 return
 
             if next_singer and next_entry is not None:
@@ -17321,11 +17311,6 @@ class KaraokeApp(QWidget):
                     self.rotation_summary_meter.set_active(False)
                 except Exception:
                     pass
-                right_text = ""
-                if isinstance(next_entry, dict):
-                    right_text = str(next_entry.get("duration_label", "") or "").strip()
-                self.rotation_summary_duration.setText(right_text)
-                self._set_rotation_summary_progress(0.0)
                 return
 
             self.rotation_summary_kicker.setText("ROTATION WAITING")
@@ -17338,8 +17323,6 @@ class KaraokeApp(QWidget):
                 self.rotation_summary_meter.set_active(False)
             except Exception:
                 pass
-            self.rotation_summary_duration.setText("")
-            self._set_rotation_summary_progress(0.0)
         except Exception:
             pass
 
@@ -17363,13 +17346,9 @@ class KaraokeApp(QWidget):
             return "KJ"
 
     def _set_rotation_summary_progress(self, ratio: float):
-        try:
-            ratio = max(0.0, min(1.0, float(ratio)))
-            track_w = max(1, self.rotation_summary_progress_track.width())
-            fill_w = max(0, int(track_w * ratio))
-            self.rotation_summary_progress_fill.setGeometry(0, 0, fill_w, self.rotation_summary_progress_track.height())
-        except Exception:
-            pass
+        # No-op: the hero card's progress bar was removed (it duplicated the
+        # transport deck's seek slider). Kept so existing callers stay valid.
+        return
 
     def _refresh_rotation_summary_art_preview(self):
         return
@@ -17577,17 +17556,20 @@ class KaraokeApp(QWidget):
 
             if w > 200 and h > 200:
                 rect = QRect(x, y, w, h)
-                # Ensure visible on at least one screen
+                # Ensure visible on at least one screen. The reachability test
+                # uses a padded rect, but clamping uses the full available area
+                # so a near-fullscreen window restores at its saved size
+                # instead of shrinking by the padding on every launch.
                 try:
                     screens = QApplication.screens() or []
                     for s in screens:
                         avail = s.availableGeometry()
                         padded = avail.adjusted(24, 24, -24, -72)
                         if padded.intersects(rect):
-                            clamped_w = min(rect.width(), padded.width())
-                            clamped_h = min(rect.height(), padded.height())
-                            clamped_x = max(padded.x(), min(rect.x(), padded.right() - clamped_w + 1))
-                            clamped_y = max(padded.y(), min(rect.y(), padded.bottom() - clamped_h + 1))
+                            clamped_w = min(rect.width(), avail.width())
+                            clamped_h = min(rect.height(), avail.height())
+                            clamped_x = max(avail.x(), min(rect.x(), avail.right() - clamped_w + 1))
+                            clamped_y = max(avail.y(), min(rect.y(), avail.bottom() - clamped_h + 1))
                             self.setGeometry(clamped_x, clamped_y, clamped_w, clamped_h)
                             return True
                 except Exception:
@@ -17615,10 +17597,8 @@ class KaraokeApp(QWidget):
         _perf_t0 = time.perf_counter()
         try:
             self._maybe_send_daw_snapshot_from_frame(image, reason="frame")
-            stretch = bool(
-                str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg"
-                and self.settings.get("cdg_stretch_fill", False)
-            )
+            is_cdg = str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg"
+            stretch = bool(is_cdg and self.settings.get("cdg_stretch_fill", False))
             quality = self._effective_cdg_quality_mode()
             try:
                 self.video_window.video_area.set_cdg_quality_mode(quality)
@@ -17627,13 +17607,13 @@ class KaraokeApp(QWidget):
                 pass
             try:
                 if self.video_window.isVisible() and not self.video_window.isMinimized():
-                    self.video_window.video_area.set_karaoke_frame(image, stretch_fill=stretch)
+                    self.video_window.video_area.set_karaoke_frame(image, stretch_fill=stretch, is_cdg=is_cdg)
                     self.video_window.force_black = False
             except Exception:
                 pass
             try:
                 if self.preview_window.isVisible() and not self.preview_window.isMinimized():
-                    self.preview_window.video_area.set_karaoke_frame(image, stretch_fill=stretch)
+                    self.preview_window.video_area.set_karaoke_frame(image, stretch_fill=stretch, is_cdg=is_cdg)
                     self.preview_window.force_black = False
             except Exception:
                 pass
@@ -18380,6 +18360,13 @@ class KaraokeApp(QWidget):
         return host in self.RELAY_HOSTS
 
     def _start_request_relay(self, base_url: str, tenant: str, api_key: str):
+        try:
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() != app.thread():
+                self._run_on_ui_thread(lambda: self._start_request_relay(base_url, tenant, api_key))
+                return
+        except Exception:
+            pass
         self._stop_request_relay()
         self._relay_fetch_in_flight = False
         self._relay_fetch_queued = False
@@ -18391,6 +18378,13 @@ class KaraokeApp(QWidget):
         worker.start()
 
     def _stop_request_relay(self):
+        try:
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() != app.thread():
+                self._run_on_ui_thread(self._stop_request_relay)
+                return
+        except Exception:
+            pass
         worker = getattr(self, "relay_worker", None)
         self.relay_worker = None
         if worker is not None:
@@ -18417,6 +18411,13 @@ class KaraokeApp(QWidget):
         return host in self.RELAY_HOSTS
 
     def _start_host_control_relay(self, base_url: str, tenant: str, api_key: str):
+        try:
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() != app.thread():
+                self._run_on_ui_thread(lambda: self._start_host_control_relay(base_url, tenant, api_key))
+                return
+        except Exception:
+            pass
         self._stop_host_control_relay()
         worker = HostControlRelayWorker(base_url, tenant, api_key, APP_VERSION, parent=self)
         worker.command_received.connect(self._on_host_relay_command)
@@ -18436,6 +18437,13 @@ class KaraokeApp(QWidget):
         timer.start(150)
 
     def _stop_host_control_relay(self):
+        try:
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() != app.thread():
+                self._run_on_ui_thread(self._stop_host_control_relay)
+                return
+        except Exception:
+            pass
         timer = getattr(self, "_host_relay_pub_timer", None)
         if timer is not None:
             try:
@@ -18734,6 +18742,102 @@ class KaraokeApp(QWidget):
 
         self.poll_worker = None
         self.poll_thread = None
+
+    def _shutdown_network_transports(self):
+        """Idempotently stop network timers, relays, and poll threads during app quit."""
+        if bool(getattr(self, "_network_transports_shutdown", False)):
+            return
+        self._network_transports_shutdown = True
+        try:
+            timer = getattr(self, "_host_control_state_timer", None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+        try:
+            timer = getattr(self, "_host_relay_pub_timer", None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+        try:
+            self._stop_request_relay()
+        except Exception as e:
+            print("Request relay stop failed:", e)
+        try:
+            self._stop_host_control_relay()
+        except Exception as e:
+            print("Host relay stop failed:", e)
+        t = getattr(self, "poll_thread", None)
+        w = getattr(self, "poll_worker", None)
+        if w is not None:
+            try:
+                w.stop()
+            except Exception as e:
+                print("Poll worker stop failed:", e)
+        if t is not None:
+            try:
+                if t.isRunning():
+                    t.requestInterruption()
+                    t.quit()
+                    if not t.wait(3000):
+                        print("⚠️ Thread didn't quit gracefully, terminating...")
+                        t.terminate()
+                        if not t.wait(2000):
+                            print("⚠️ Thread termination failed")
+                try:
+                    t.deleteLater()
+                except Exception:
+                    pass
+            except Exception as e:
+                print("Poll thread stop failed:", e)
+        self.poll_worker = None
+        self.poll_thread = None
+
+    def _capture_window_geometry_settings(self) -> None:
+        """Snapshot main / show-screen / rotation window geometry into settings.
+
+        Called from both closeEvent and aboutToQuit: quitting with Cmd+Q on
+        macOS skips the main window's closeEvent, which used to silently lose
+        window positions."""
+        try:
+            if not hasattr(self, "settings") or self.settings is None:
+                self.settings = {}
+            g = self.geometry()
+            self.settings["main_window_geometry"] = {"x": int(g.x()), "y": int(g.y()), "w": int(g.width()), "h": int(g.height())}
+        except Exception:
+            pass
+        try:
+            vw = getattr(self, "video_window", None)
+            if vw is not None:
+                vg = vw.geometry()
+                if vg.width() > 0 and vg.height() > 0:
+                    self.settings["karaoke_window_pos"] = {
+                        "x": int(vg.x()), "y": int(vg.y()),
+                        "width": int(vg.width()), "height": int(vg.height()),
+                    }
+        except Exception:
+            pass
+        try:
+            rv = getattr(self, "rotation_view", None)
+            if rv is not None:
+                rg = rv.geometry()
+                self.settings["rotation_window_geometry"] = {
+                    "x": int(rg.x()), "y": int(rg.y()),
+                    "width": int(rg.width()), "height": int(rg.height()),
+                }
+        except Exception:
+            pass
+
+    def _on_app_about_to_quit(self):
+        self._app_closing = True
+        try:
+            self._capture_window_geometry_settings()
+            self._save_operator_splitter_sizes()
+            self.save_settings()
+        except Exception:
+            pass
+        self._shutdown_network_transports()
 
     def restart_request_polling(self):
         """Stop and restart request polling when network settings are present.
@@ -19496,6 +19600,13 @@ class KaraokeApp(QWidget):
 
     def schedule_ticker_update(self):
         """Debounce ticker - only updates 150ms after last change"""
+        try:
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() != app.thread():
+                self._run_on_ui_thread(self.schedule_ticker_update)
+                return
+        except Exception:
+            pass
         self._ticker_update_timer.stop()
         self._ticker_update_timer.start(150)
         self._schedule_next_up_prescan()
@@ -21449,10 +21560,18 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_pending_image = None
         self._daw_snapshot_pending_reason = ""
         self._daw_preview_log(f"playback stopped reason={reason}")
+        # Don't blank the DAW preview here: a forced capture publishes the idle
+        # show screen instead (or posts inactive if the video window is hidden).
+        # 1.6s clears the idle min-interval throttle and lets the show screen
+        # finish painting first.
         try:
-            self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
+            QTimer.singleShot(1600, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped"))
         except Exception as e:
-            self._daw_preview_log(f"inactive post failed reason={reason} error={e}")
+            self._daw_preview_log(f"stop refresh scheduling failed reason={reason} error={e}")
+            try:
+                self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
+            except Exception as e2:
+                self._daw_preview_log(f"inactive post failed reason={reason} error={e2}")
 
     def _schedule_daw_singer_screen_snapshot(self, force: bool = False, reason: str = "timer"):
         if force or reason != "timer":
@@ -21538,7 +21657,15 @@ class KaraokeApp(QWidget):
             playing = bool(getattr(self, "karaoke_playing", False))
             vw = getattr(self, "video_window", None)
             va = getattr(vw, "video_area", None) if vw is not None else None
-            active = bool(playing)
+            show_screen_visible = False
+            try:
+                show_screen_visible = vw is not None and vw.isVisible() and not vw.isMinimized()
+            except Exception:
+                show_screen_visible = False
+            # Between singers the show screen (idle background, next-up overlay)
+            # is still worth previewing on the DAW page; only report inactive
+            # when nothing is on screen at all.
+            active = bool(playing or (show_screen_visible and va is not None))
             if not active:
                 self._daw_preview_log_transition("capture_state", f"capture inactive reason={reason} playing=0")
                 self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
@@ -21924,6 +22051,10 @@ class KaraokeApp(QWidget):
 
     def _schedule_host_control_state_sync(self):
         try:
+            app = QApplication.instance()
+            if app is not None and QThread.currentThread() != app.thread():
+                self._run_on_ui_thread(self._schedule_host_control_state_sync)
+                return
             timer = getattr(self, "_host_control_state_timer", None)
             if timer is None:
                 timer = QTimer(self)
@@ -23024,25 +23155,9 @@ class KaraokeApp(QWidget):
         wait_rows.sort(key=self._waiting_for_add_order_key)
         if wait_rows:
             sections.append({"key": "waitlist", "title": "Waitlist", "rows": wait_rows})
-        terminal = state.get("_waiting_for_add_recent_terminal_requests", {})
-        if not isinstance(terminal, dict):
-            terminal = {}
-        completed_rows = []
-        removed_rows = []
-        for _rid, req in terminal.items():
-            if not isinstance(req, dict):
-                continue
-            kind = self._waiting_for_add_status_kind(req)
-            if kind == "sung":
-                completed_rows.append(self._waiting_for_add_row(req, "sung", selectable=False))
-            elif kind == "removed":
-                removed_rows.append(self._waiting_for_add_row(req, "removed", selectable=False))
-        completed_rows.sort(key=self._waiting_for_add_order_key)
-        removed_rows.sort(key=self._waiting_for_add_order_key)
-        if completed_rows:
-            sections.append({"key": "completed", "title": "Completed", "rows": completed_rows})
-        if removed_rows:
-            sections.append({"key": "removed", "title": "Removed / Skipped", "rows": removed_rows})
+        # Completed and Removed/Skipped are intentionally not rendered: the view
+        # only shows actionable rows. Terminal removed rows are purged from the
+        # server instead (see _cleanup_terminal_removed_requests).
         return sections
 
     def _waiting_for_add_row_text(self, row: dict) -> str:
@@ -23171,6 +23286,10 @@ class KaraokeApp(QWidget):
             self._add_participants_to_song_counts(counts, self._remote_request_participants(req))
         self._waiting_for_add_requests = items
         self._waiting_for_add_recent_terminal_requests = terminal_items
+        try:
+            self._cleanup_terminal_removed_requests(terminal_items)
+        except Exception:
+            pass
         self._cleanup_accepted_waiting_for_add_requests(reason="set_requests_final")
         self._schedule_waiting_for_add_view_refresh(reason="set_requests")
 
@@ -24059,6 +24178,11 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         try:
+            if self._waiting_for_add_failed_add(req):
+                self._notify_singer_waitlist_add_failed(req)
+        except Exception:
+            pass
+        try:
             getattr(self, "_waiting_for_add_requests", {}).pop(rid, None)
         except Exception:
             pass
@@ -24102,6 +24226,11 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             try:
+                if self._waiting_for_add_failed_add(req):
+                    self._notify_singer_waitlist_add_failed(req)
+            except Exception:
+                pass
+            try:
                 if isinstance(pending, dict):
                     pending.pop(rid, None)
             except Exception:
@@ -24113,6 +24242,103 @@ class KaraokeApp(QWidget):
                 f"Cleared {removed} waitlisted song{'s' if removed != 1 else ''}.",
                 level="success",
             )
+
+    def _waiting_for_add_failed_add(self, req: dict | None) -> bool:
+        """True when this waitlist entry is here because the desktop add failed
+        (as opposed to plain waiting for the host)."""
+        req = req or {}
+        state = str(req.get("state") or "").strip().lower()
+        if state in {"failed", "failed_needs_review"}:
+            return True
+        reason = str(req.get("pending_reason") or req.get("last_error") or req.get("attention_reason") or "").strip().lower()
+        if reason.startswith("unsupported_format"):
+            return True
+        return reason in {
+            "sync_failed",
+            "auto_accept_failed",
+            "queue_insert_failed",
+            "no_local_library_match",
+            "previous_auto_match_failure",
+            "cdg_missing_mp3",
+            "invalid_zip_format",
+        }
+
+    def _notify_singer_waitlist_add_failed(self, req: dict | None) -> None:
+        req = req or {}
+        singer = str(req.get("singer") or "").strip()
+        if not singer:
+            return
+        title = str(req.get("title") or "").strip() or "your song"
+        message = (
+            f'Sorry — we couldn\'t add "{title}" tonight, so it was removed from the waitlist. '
+            "Feel free to request a different song!"
+        )
+
+        def worker():
+            ok, err = self._net_send_direct_message(singer, message)
+            if not ok:
+                _diag(f"[WAITING-FOR-ADD] add-failed notice to {singer!r} failed: {err}")
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="waitlist-add-failed-notice").start()
+        except Exception:
+            pass
+
+    def _cleanup_terminal_removed_requests(self, terminal_items: dict) -> None:
+        """Hard-delete server rows for requests that ended up removed/skipped.
+
+        The Removed/Skipped section is no longer rendered, so without this the
+        rows would ride along in every sync response forever."""
+        if not isinstance(terminal_items, dict) or not terminal_items:
+            return
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            return
+        cleaned = state.get("_terminal_removed_cleaned_ids")
+        if not isinstance(cleaned, set):
+            cleaned = set()
+            self._terminal_removed_cleaned_ids = cleaned
+        targets = []
+        for rid, req in terminal_items.items():
+            try:
+                rid_int = int(rid)
+            except Exception:
+                continue
+            if rid_int <= 0 or rid_int in cleaned or not isinstance(req, dict):
+                continue
+            if self._waiting_for_add_status_kind(req) != "removed":
+                continue
+            cleaned.add(rid_int)
+            targets.append(rid_int)
+        if not targets:
+            return
+        try:
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+            tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+            api_key = str(self.settings.get("api_key", "") or "").strip()
+        except Exception:
+            return
+        if not base_url or not tenant or not api_key:
+            return
+
+        def worker():
+            headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/waitlist-cleanup"}
+            for rid in targets:
+                try:
+                    requests.post(
+                        f"{base_url}/api/v1/delete_remote_request.php",
+                        data={"user": tenant, "request_id": rid, "hard_delete": 1},
+                        headers=headers,
+                        timeout=5,
+                    )
+                except Exception as e:
+                    _diag(f"[WAITING-FOR-ADD] terminal removed purge failed request_id={rid}: {e}")
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="waitlist-removed-purge").start()
+        except Exception:
+            pass
 
     def _tick_waiting_for_add_pulse(self):
         self._update_waiting_for_add_nav_state()
@@ -24136,6 +24362,19 @@ class KaraokeApp(QWidget):
             return len(list(pending or []))
         except Exception:
             return 0
+
+    def _needs_review_count(self) -> int:
+        try:
+            pending = object.__getattribute__(self, "__dict__").get("_waiting_for_add_requests", {})
+        except Exception:
+            return 0
+        if not isinstance(pending, dict):
+            return 0
+        count = 0
+        for req in pending.values():
+            if isinstance(req, dict) and str(req.get("state") or "").strip().lower() == "failed_needs_review":
+                count += 1
+        return count
 
     def _waiting_for_add_count(self) -> int:
         try:
@@ -24174,7 +24413,9 @@ class KaraokeApp(QWidget):
                 active = stack is not None and stack.currentWidget() is state.get("waiting_for_add_page")
         except Exception:
             active = False
-        count = self._pending_acceptance_count()
+        # Needs-review arrivals pulse the nav button green just like pending
+        # acceptance, so a failed auto-add can't sit unnoticed.
+        count = self._pending_acceptance_count() + self._needs_review_count()
         timer = state.get("_waiting_for_add_pulse_timer")
         if count > 0:
             if timer is not None and not timer.isActive():
@@ -30565,18 +30806,23 @@ class KaraokeApp(QWidget):
         if singer.get("songs"):
             return False
         now = time.time()
+        reason_text = str(reason or "song_removed")
+        already_preserved = bool(singer.get("temporary_empty_slot", False))
+        previous_reason = str(singer.get("empty_slot_reason", "") or "")
         singer["temporary_empty_slot"] = True
-        singer["empty_slot_reason"] = str(reason or "song_removed")
-        singer["empty_slot_created_at"] = now
+        singer["empty_slot_reason"] = reason_text
+        if not already_preserved:
+            singer["empty_slot_created_at"] = now
         singer["empty_slot_until"] = now + self._empty_rotation_slot_timeout_sec()
         singer.setdefault("has_sung", False)
         singer.setdefault("round_sung", False)
         singer.setdefault("rotation_marker", False)
-        _diag(
-            "[ROTATION-SLOT] preserved empty singer slot "
-            f"singer={str(singer.get('name', '') or '')!r} reason={reason} "
-            f"timeout_sec={int(self._empty_rotation_slot_timeout_sec())}"
-        )
+        if not already_preserved or previous_reason != reason_text:
+            _diag(
+                "[ROTATION-SLOT] preserved empty singer slot "
+                f"singer={str(singer.get('name', '') or '')!r} reason={reason_text} "
+                f"timeout_sec={int(self._empty_rotation_slot_timeout_sec())}"
+            )
         return True
 
     def _clear_temporary_empty_rotation_slot(self, singer: dict, *, reason: str = "replacement_added") -> None:
@@ -30647,6 +30893,24 @@ class KaraokeApp(QWidget):
     def _should_preserve_rotation_identity(self, singer) -> bool:
         """Backward-compatible wrapper for older rotation identity call sites."""
         return self._should_preserve_empty_singer_row(singer)
+
+    def _clear_queue_songs_preserving_singers(self, *, reason: str = "host_clear_queue") -> int:
+        """Clear queued songs without treating empty song lists as singer deletion."""
+        removed = 0
+        next_queue = []
+        for singer in list(self.queue or []):
+            if not isinstance(singer, dict):
+                continue
+            songs = list(singer.get("songs", []) or [])
+            removed += len(songs)
+            if not self._should_preserve_empty_singer_row(singer):
+                continue
+            singer["songs"] = []
+            if self._is_rotation_mode():
+                self._mark_rotation_slot_temporarily_empty(singer, reason=reason)
+            next_queue.append(singer)
+        self.queue = next_queue
+        return removed
 
     def _is_rotation_mode(self) -> bool:
         try:
@@ -33646,30 +33910,9 @@ class KaraokeApp(QWidget):
 
         self._app_closing = True
 
-        # Save main window geometry (position/size) for next launch
+        # Save window geometry (position/size) for next launch
         try:
-            g = self.geometry()
-            if not hasattr(self, "settings") or self.settings is None:
-                self.settings = {}
-            self.settings["main_window_geometry"] = {"x": int(g.x()), "y": int(g.y()), "w": int(g.width()), "h": int(g.height())}
-            try:
-                if hasattr(self, "video_window") and self.video_window:
-                    vg = self.video_window.geometry()
-                    self.settings["karaoke_window_pos"] = {
-                        "x": int(vg.x()), "y": int(vg.y()),
-                        "width": int(vg.width()), "height": int(vg.height()),
-                    }
-            except Exception:
-                pass
-            try:
-                if hasattr(self, "rotation_view") and self.rotation_view:
-                    rg = self.rotation_view.geometry()
-                    self.settings["rotation_window_geometry"] = {
-                        "x": int(rg.x()), "y": int(rg.y()),
-                        "width": int(rg.width()), "height": int(rg.height()),
-                    }
-            except Exception:
-                pass
+            self._capture_window_geometry_settings()
             try:
                 self._save_operator_splitter_sizes()
             except Exception:
@@ -33716,35 +33959,8 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        # --- Stop WebSocket request relay (socket + reconnect timer) ---
-        try:
-            self._stop_request_relay()
-        except Exception as e:
-            print("Relay stop failed:", e)
-
-        # --- Stop polling thread cleanly ---
-        try:
-            if hasattr(self, "poll_worker") and self.poll_worker:
-                try:
-                    self.poll_worker.stop()
-                except Exception as e:
-                    print("Poll worker stop failed:", e)
-
-            if hasattr(self, "poll_thread") and self.poll_thread:
-                if self.poll_thread.isRunning():
-                    self.poll_thread.requestInterruption()
-                    self.poll_thread.quit()
-                    if not self.poll_thread.wait(3000):
-                        print("⚠️ Thread didn't quit gracefully, terminating...")
-                        self.poll_thread.terminate()
-                        if not self.poll_thread.wait(2000):
-                            print("⚠️ Thread termination failed")
-                try:
-                    self.poll_thread.deleteLater()
-                except Exception:
-                    pass
-        except Exception as e:
-            print("Poll thread stop failed:", e)
+        # --- Stop network relays/polling cleanly ---
+        self._shutdown_network_transports()
 
         # Close secondary windows (karaoke output, preview, etc.)
         try:
@@ -36419,14 +36635,7 @@ class KaraokeApp(QWidget):
                 self.queue_display.setUpdatesEnabled(True)
             except Exception:
                 pass
-        self.update_rotation_view()
-        self.rotation_post_timer.start(10000)  # 10,000 ms = 10 seconds debounce
-        self.schedule_ticker_update()  # Debounce ticker
-        try:
-            self._schedule_host_control_state_sync()
-        except Exception:
-            pass
-        self._schedule_next_up_prescan()
+        self._finish_queue_display_refresh_side_effects()
 
         # Release the coalesce lock and replay if more refreshes piled up
         # while we were inside this call.
@@ -36438,6 +36647,29 @@ class KaraokeApp(QWidget):
         except Exception:
             self._queue_display_busy = False
         _perf_log_if_slow("ui_update_queue_display", (time.perf_counter() - _perf_t0) * 1000.0)
+
+    def _finish_queue_display_refresh_side_effects(self):
+        try:
+            app = QApplication.instance()
+            owner_thread = self.thread() if app is not None else None
+            if app is not None and owner_thread is not None and QThread.currentThread() != owner_thread:
+                self._run_on_ui_thread(self._finish_queue_display_refresh_side_effects)
+                return
+        except Exception:
+            pass
+        self.update_rotation_view()
+        try:
+            timer = getattr(self, "rotation_post_timer", None)
+            if timer is not None and QThread.currentThread() == timer.thread():
+                timer.start(10000)  # 10,000 ms = 10 seconds debounce
+        except Exception:
+            pass
+        self.schedule_ticker_update()  # Debounce ticker
+        try:
+            self._schedule_host_control_state_sync()
+        except Exception:
+            pass
+        self._schedule_next_up_prescan()
 
     def eventFilter(self, obj, event):
         """Event filter:
@@ -36615,7 +36847,7 @@ class KaraokeApp(QWidget):
         if not self.queue:
             return
         remote_ids = self._queue_remote_request_ids()
-        message = "This will remove all singers and songs from the local queue."
+        message = "This will remove all songs from the local queue while keeping singers in the rotation."
         if self.is_network_configured():
             message += "\n\nIt will also clear the server queue/public rotation so stale requests do not reappear."
         message += "\nAre you sure you want to continue?"
@@ -36650,7 +36882,7 @@ class KaraokeApp(QWidget):
                         )
         except Exception as e:
             _diag(f"[REMOTE-TOMBSTONE] clear queue tombstone pass failed: {e}")
-        self.queue = []
+        self._clear_queue_songs_preserving_singers(reason="host_clear_queue")
         self._pending_remote_order_syncs = {}
         # Monotonic revision bumped on every host reorder. The app is the source
         # of truth for show order; the revision is sent with order pushes so the
@@ -40805,6 +41037,7 @@ class Ticker(QFrame):
         self._last_frame_ts = None  # monotonic timestamp of previous frame
         self._frame_dt_ema = None   # smoothed real frame interval, for backoff
         self._frame_interval_ms = TICKER_FRAME_INTERVAL_MS
+        self._last_ticker_log_state = None
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.timeout.connect(self._on_frame)
@@ -40910,6 +41143,19 @@ class Ticker(QFrame):
                 window = self.window().windowTitle() or self.__class__.__name__
             except Exception:
                 window = self.__class__.__name__
+            state = (
+                str(reason),
+                str(saved),
+                round(pps, 3),
+                str(requested),
+                int(self._frame_interval_ms),
+                round(anim_ms, 3),
+                int(self._active_width),
+                str(window),
+            )
+            if state == getattr(self, "_last_ticker_log_state", None):
+                return
+            self._last_ticker_log_state = state
             _diag(
                 "[TICKER] "
                 f"reason={reason} "
@@ -41410,5 +41656,16 @@ if __name__ == "__main__":
         window.setWindowIcon(QIcon(get_resource_path(APP_ICON_ICO)))
     except Exception:
         pass
+    try:
+        app.aboutToQuit.connect(window._on_app_about_to_quit)
+    except Exception:
+        pass
     window.show()
+    try:
+        smoke_exit_ms = int(os.environ.get("SINGWS_SMOKE_EXIT_MS", "0") or "0")
+    except Exception:
+        smoke_exit_ms = 0
+    if smoke_exit_ms > 0:
+        _diag(f"[SMOKE] scheduled app exit in {smoke_exit_ms}ms")
+        QTimer.singleShot(smoke_exit_ms, window.close)
     app.exec()

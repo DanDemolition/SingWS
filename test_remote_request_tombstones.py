@@ -729,7 +729,10 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             }
 
             sections = app._waiting_for_add_sections()
-            self.assertEqual([section["key"] for section in sections], ["waitlist", "completed", "removed"])
+            # Completed and Removed/Skipped are no longer rendered; only
+            # actionable rows show. Terminal removed rows are purged from the
+            # server instead.
+            self.assertEqual([section["key"] for section in sections], ["waitlist"])
 
             row = sections[0]["rows"][0]
             text = app._waiting_for_add_row_text(row)
@@ -742,8 +745,6 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertIn("Version: Requested: SC / SC-123", text)
             self.assertIn("Length: 3:05", text)
             self.assertIn("Server:", text)
-            self.assertEqual(sections[1]["rows"][0]["status_label"], "Sung")
-            self.assertEqual(sections[2]["rows"][0]["status_label"], "Removed")
 
     def test_pending_acceptance_section_is_distinct_from_waitlist(self):
         with tempfile.TemporaryDirectory() as td:

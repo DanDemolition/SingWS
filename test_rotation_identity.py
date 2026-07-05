@@ -277,6 +277,32 @@ class RotationIdentityTests(unittest.TestCase):
         self.assertEqual([s["name"] for s in app.queue], ["Ada", "Grace"])
         self.assertTrue(app.queue[0]["temporary_empty_slot"])
 
+    def test_clear_queue_preserves_singers_and_clears_songs(self):
+        app = make_app(self.singws)
+        app.queue = [
+            {"name": "Ada", "songs": [{"artist": "Artist", "title": "Only", "song_info": "/tmp/only.mp3", "key": 0, "skipped": False}], "skipped": False},
+            {"name": "Grace", "songs": [{"artist": "Artist", "title": "Next", "song_info": "/tmp/next.mp3", "key": 0, "skipped": False}], "skipped": False},
+        ]
+
+        removed = app._clear_queue_songs_preserving_singers(reason="host_clear_queue")
+
+        self.assertEqual(removed, 2)
+        self.assertEqual([s["name"] for s in app.queue], ["Ada", "Grace"])
+        self.assertEqual([s["songs"] for s in app.queue], [[], []])
+        self.assertTrue(all(s.get("temporary_empty_slot") for s in app.queue))
+
+    def test_repeated_empty_slot_preservation_keeps_original_created_time(self):
+        app = make_app(self.singws)
+        singer = {"name": "Ada", "songs": [], "skipped": False}
+
+        app._mark_rotation_slot_temporarily_empty(singer, reason="server_removed")
+        first_created_at = singer.get("empty_slot_created_at")
+        app._mark_rotation_slot_temporarily_empty(singer, reason="server_removed")
+
+        self.assertEqual(singer.get("empty_slot_reason"), "server_removed")
+        self.assertEqual(singer.get("empty_slot_created_at"), first_created_at)
+        self.assertTrue(singer.get("empty_slot_until", 0) >= first_created_at)
+
     def test_expired_empty_slot_cleanup_does_not_remove_singer(self):
         app = make_app(self.singws)
         app.queue = [
