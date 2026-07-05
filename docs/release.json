@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.0.0",
+  "version": "0.4.0.1",
   "release_date": "2026-07-04",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.0.0-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.0-arm64-installer.dmg",
+      "filename": "SingWS-0.4.0.1-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.1-arm64-installer.dmg",
       "size": "180 MB",
-      "sha256": "781ffe227d96c2d2beb373ac48b82073a9fc3e3232e06f3d2e066748f46dbb21"
+      "sha256": "21b5571753a8599b433ba0f671cc4b7f5b52ed4ef10458ed46dec2d323a89cb3"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.0.0-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.0-x86_64-installer.dmg",
+      "filename": "SingWS-0.4.0.1-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.1-x86_64-installer.dmg",
       "size": "256 MB",
-      "sha256": "4866a551fd52d75d3c21919f4e80809a05ccb6eafab5a1fac54e44cd57b4a471"
+      "sha256": "f60c5726f4e8063642525f82e186bf0d5ff18f2fe73ae8adf6a6ec54e1284079"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.0.0-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.0-universal-installer.dmg",
+      "filename": "SingWS-0.4.0.1-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.1-universal-installer.dmg",
       "size": "403 MB",
-      "sha256": "e4c087248aa30378a056e767caf8bb1babd42371927327cc0257310351d1c145"
+      "sha256": "090fabaedd049d532f20038abad7420564af0b6f0fa9db2d6b3f74a38e3ba961"
     }
   }
 }
