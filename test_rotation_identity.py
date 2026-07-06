@@ -303,6 +303,22 @@ class RotationIdentityTests(unittest.TestCase):
         self.assertEqual(singer.get("empty_slot_created_at"), first_created_at)
         self.assertTrue(singer.get("empty_slot_until", 0) >= first_created_at)
 
+    def test_server_terminal_empty_slot_reason_churn_logs_once(self):
+        app = make_app(self.singws)
+        singer = {"name": "Ada", "songs": [], "skipped": False}
+        logs = []
+        original_diag = self.singws._diag
+        self.singws._diag = lambda message: logs.append(str(message))
+        try:
+            app._mark_rotation_slot_temporarily_empty(singer, reason="server_removed")
+            app._mark_rotation_slot_temporarily_empty(singer, reason="server_completed")
+            app._mark_rotation_slot_temporarily_empty(singer, reason="server_sung")
+        finally:
+            self.singws._diag = original_diag
+
+        self.assertEqual(singer.get("empty_slot_reason"), "server_removed")
+        self.assertEqual(len([line for line in logs if "[ROTATION-SLOT] preserved empty singer slot" in line]), 1)
+
     def test_expired_empty_slot_cleanup_does_not_remove_singer(self):
         app = make_app(self.singws)
         app.queue = [

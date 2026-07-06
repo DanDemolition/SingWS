@@ -1021,7 +1021,7 @@ from PyQt6.QtWidgets import (
     QTextEdit
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery
 
 # WebSocket request relay (wskar.com). Optional: older PyQt6 installs may lack
@@ -5519,6 +5519,13 @@ class VideoAreaWidget(QWidget):
         self._viz_peaks = [0.12] * 14
         self._viz_audio_level = 0.0
         self._idle_paint_log_ts = 0.0
+        self._background_image_path = ""
+        self._background_previous_pixmap = QPixmap()
+        self._background_fade_started = 0.0
+        self._background_fade_ms = 700
+        self._background_forced_fade_last = 0.0
+        self._background_fade_timer = QTimer(self)
+        self._background_fade_timer.timeout.connect(self._tick_background_fade)
         self._next_up_overlay_payload = {}
         self._next_up_overlay_phase = ""
         self._next_up_overlay_phase_started = 0.0
@@ -5532,11 +5539,62 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_hide_timer.timeout.connect(lambda: self.hide_next_up_overlay(reason="timer"))
 
     def set_background_image(self, image_path):
+        old_pixmap = QPixmap(self.background_pixmap) if not self.background_pixmap.isNull() else QPixmap()
+        old_path = str(getattr(self, "_background_image_path", "") or "")
         if image_path and os.path.exists(image_path):
-            self.background_pixmap = QPixmap(image_path)
+            new_pixmap = QPixmap(image_path)
         else:
-            self.background_pixmap = QPixmap()
+            new_pixmap = QPixmap()
+        new_path = str(image_path or "")
+        path_changed = bool(new_path and new_path != old_path)
+        pixmap_changed = True
+        try:
+            pixmap_changed = int(new_pixmap.cacheKey()) != int(self.background_pixmap.cacheKey())
+        except Exception:
+            pass
+        self.background_pixmap = new_pixmap
+        self._background_image_path = new_path
+        if path_changed or pixmap_changed:
+            self._background_previous_pixmap = old_pixmap
+            self._background_fade_started = time.monotonic()
+            if not self._background_fade_timer.isActive():
+                self._background_fade_timer.start(33)
+        elif self._background_fade_timer.isActive():
+            self._background_fade_timer.stop()
+            self._background_previous_pixmap = QPixmap()
         self.update()
+
+    def fade_background_from_black(self, *, min_interval_sec: float = 0.35):
+        if self.background_pixmap.isNull():
+            return
+        now = time.monotonic()
+        try:
+            if (now - float(getattr(self, "_background_forced_fade_last", 0.0) or 0.0)) < float(min_interval_sec):
+                return
+        except Exception:
+            pass
+        self._background_forced_fade_last = now
+        self._background_previous_pixmap = QPixmap()
+        self._background_fade_started = now
+        if not self._background_fade_timer.isActive():
+            self._background_fade_timer.start(33)
+        self.update()
+
+    def _tick_background_fade(self):
+        if self._background_fade_alpha() >= 1.0:
+            try:
+                self._background_fade_timer.stop()
+            except Exception:
+                pass
+            self._background_previous_pixmap = QPixmap()
+        self.update()
+
+    def _background_fade_alpha(self) -> float:
+        started = float(getattr(self, "_background_fade_started", 0.0) or 0.0)
+        if started <= 0:
+            return 1.0
+        fade_ms = max(1.0, float(getattr(self, "_background_fade_ms", 700) or 700))
+        return min(1.0, max(0.0, ((time.monotonic() - started) * 1000.0) / fade_ms))
 
     def set_cdg_quality_mode(self, mode: str):
         mode = "high" if str(mode or "").lower() == "high" else "standard"
@@ -5664,6 +5722,18 @@ class VideoAreaWidget(QWidget):
             return alpha
         self._start_next_up_overlay_hide_timer("hold_paint")
         return 1.0
+
+    def _draw_background_pixmap(self, painter: QPainter, pixmap: QPixmap):
+        if pixmap.isNull():
+            return
+        pm = pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        x = (self.width() - pm.width()) // 2
+        y = (self.height() - pm.height()) // 2
+        painter.drawPixmap(x, y, pm)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -6030,14 +6100,17 @@ class VideoAreaWidget(QWidget):
             if not self._karaoke_scaled_pixmap.isNull():
                 painter.drawPixmap(self._karaoke_scaled_pos, self._karaoke_scaled_pixmap)
         elif not self.background_pixmap.isNull():
-            pm = self.background_pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            x = (self.width() - pm.width()) // 2
-            y = (self.height() - pm.height()) // 2
-            painter.drawPixmap(x, y, pm)
+            fade_alpha = self._background_fade_alpha()
+            if fade_alpha < 1.0:
+                previous = getattr(self, "_background_previous_pixmap", QPixmap())
+                if not previous.isNull():
+                    self._draw_background_pixmap(painter, previous)
+                painter.save()
+                painter.setOpacity(fade_alpha)
+                self._draw_background_pixmap(painter, self.background_pixmap)
+                painter.restore()
+            else:
+                self._draw_background_pixmap(painter, self.background_pixmap)
 
         info = self._get_idle_bg_overlay_info()
         if info:
@@ -9018,7 +9091,7 @@ class RelayRequestWorker(QObject):
         self._closing = False
         self._open_socket()
 
-    def stop(self):
+    def stop(self, *, delete_later: bool = True):
         self._closing = True
         try:
             self._reconnect_timer.stop()
@@ -9028,9 +9101,29 @@ class RelayRequestWorker(QObject):
         self._socket = None
         if sock is not None:
             try:
-                sock.blockSignals(True)
-                sock.abort()
-                sock.deleteLater()
+                try:
+                    sock.connected.disconnect(self._on_connected)
+                except Exception:
+                    pass
+                try:
+                    sock.disconnected.disconnect(self._on_disconnected)
+                except Exception:
+                    pass
+                try:
+                    sock.textMessageReceived.disconnect(self._on_text_message)
+                except Exception:
+                    pass
+                try:
+                    sock.errorOccurred.disconnect(self._on_error)
+                except Exception:
+                    pass
+                if delete_later:
+                    sock.abort()
+                    sock.deleteLater()
+                else:
+                    sock.blockSignals(True)
+                    sock.abort()
+                    sock.deleteLater()
             except Exception:
                 pass
 
@@ -9171,7 +9264,7 @@ class HostControlRelayWorker(QObject):
         self._closing = False
         self._open_socket()
 
-    def stop(self):
+    def stop(self, *, delete_later: bool = True):
         self._closing = True
         self._connected = False
         try:
@@ -9182,9 +9275,29 @@ class HostControlRelayWorker(QObject):
         self._socket = None
         if sock is not None:
             try:
-                sock.blockSignals(True)
-                sock.abort()
-                sock.deleteLater()
+                try:
+                    sock.connected.disconnect(self._on_connected)
+                except Exception:
+                    pass
+                try:
+                    sock.disconnected.disconnect(self._on_disconnected)
+                except Exception:
+                    pass
+                try:
+                    sock.textMessageReceived.disconnect(self._on_text_message)
+                except Exception:
+                    pass
+                try:
+                    sock.errorOccurred.disconnect(self._on_error)
+                except Exception:
+                    pass
+                if delete_later:
+                    sock.abort()
+                    sock.deleteLater()
+                else:
+                    sock.blockSignals(True)
+                    sock.abort()
+                    sock.deleteLater()
             except Exception:
                 pass
 
@@ -18337,7 +18450,8 @@ class KaraokeApp(QWidget):
 
     def _request_transport_setting(self) -> str:
         """Transport preference: auto (default) | websocket/relay | polling."""
-        value = str(self.settings.get("request_transport", "auto") or "auto").strip().lower()
+        env_value = str(os.environ.get("SINGWS_REQUEST_TRANSPORT", "") or "").strip().lower()
+        value = env_value or str(self.settings.get("request_transport", "auto") or "auto").strip().lower()
         if value in ("websocket", "relay"):
             return "websocket"
         if value == "polling":
@@ -18389,8 +18503,17 @@ class KaraokeApp(QWidget):
         self.relay_worker = None
         if worker is not None:
             try:
-                worker.stop()
-                worker.deleteLater()
+                app_closing = bool(getattr(self, "_app_closing", False))
+                worker.stop(delete_later=not app_closing)
+                if not app_closing:
+                    worker.deleteLater()
+                else:
+                    worker.setParent(None)
+                    orphans = getattr(self, "_shutdown_relay_workers", None)
+                    if not isinstance(orphans, list):
+                        orphans = []
+                        self._shutdown_relay_workers = orphans
+                    orphans.append(worker)
             except Exception:
                 pass
 
@@ -18454,8 +18577,17 @@ class KaraokeApp(QWidget):
         self.host_relay_worker = None
         if worker is not None:
             try:
-                worker.stop()
-                worker.deleteLater()
+                app_closing = bool(getattr(self, "_app_closing", False))
+                worker.stop(delete_later=not app_closing)
+                if not app_closing:
+                    worker.deleteLater()
+                else:
+                    worker.setParent(None)
+                    orphans = getattr(self, "_shutdown_relay_workers", None)
+                    if not isinstance(orphans, list):
+                        orphans = []
+                        self._shutdown_relay_workers = orphans
+                    orphans.append(worker)
             except Exception:
                 pass
 
@@ -18768,6 +18900,12 @@ class KaraokeApp(QWidget):
             self._stop_host_control_relay()
         except Exception as e:
             print("Host relay stop failed:", e)
+        try:
+            QApplication.processEvents()
+            QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            QApplication.processEvents()
+        except Exception:
+            pass
         t = getattr(self, "poll_thread", None)
         w = getattr(self, "poll_worker", None)
         if w is not None:
@@ -21561,17 +21699,14 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_pending_reason = ""
         self._daw_preview_log(f"playback stopped reason={reason}")
         # Don't blank the DAW preview here: a forced capture publishes the idle
-        # show screen instead (or posts inactive if the video window is hidden).
-        # 1.6s clears the idle min-interval throttle and lets the show screen
-        # finish painting first.
+        # show screen / next-up overlay instead of flashing the browser back to
+        # a placeholder between singers.
         try:
-            QTimer.singleShot(1600, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped"))
+            QTimer.singleShot(0, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped_immediate"))
+            QTimer.singleShot(450, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped"))
+            QTimer.singleShot(1000, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped_retry"))
         except Exception as e:
             self._daw_preview_log(f"stop refresh scheduling failed reason={reason} error={e}")
-            try:
-                self._post_daw_singer_screen_snapshot(None, active=False, warning="", reason=reason)
-            except Exception as e2:
-                self._daw_preview_log(f"inactive post failed reason={reason} error={e2}")
 
     def _schedule_daw_singer_screen_snapshot(self, force: bool = False, reason: str = "timer"):
         if force or reason != "timer":
@@ -22323,6 +22458,14 @@ class KaraokeApp(QWidget):
 
     def _schedule_singer_history_refresh(self, delay_ms: int | None = None, *, reason: str = "coalesced"):
         try:
+            app = QApplication.instance()
+            owner_thread = self.thread() if app is not None else None
+            if app is not None and owner_thread is not None and QThread.currentThread() != owner_thread:
+                self._run_on_ui_thread(lambda: self._schedule_singer_history_refresh(delay_ms, reason=reason))
+                return
+        except Exception:
+            pass
+        try:
             state = object.__getattribute__(self, "__dict__")
         except Exception:
             return
@@ -22363,6 +22506,14 @@ class KaraokeApp(QWidget):
             pass
 
     def _schedule_waiting_for_add_view_refresh(self, delay_ms: int | None = None, *, reason: str = "coalesced"):
+        try:
+            app = QApplication.instance()
+            owner_thread = self.thread() if app is not None else None
+            if app is not None and owner_thread is not None and QThread.currentThread() != owner_thread:
+                self._run_on_ui_thread(lambda: self._schedule_waiting_for_add_view_refresh(delay_ms, reason=reason))
+                return
+        except Exception:
+            pass
         try:
             state = object.__getattribute__(self, "__dict__")
         except Exception:
@@ -22919,6 +23070,67 @@ class KaraokeApp(QWidget):
                 return text
         return "Unknown time"
 
+    def _remote_request_timestamp(self, req: dict | None) -> float:
+        req = req or {}
+        for key in (
+            "received_at_server",
+            "server_received_at",
+            "waitlisted_at",
+            "attention_at",
+            "requested_at_client",
+            "requested_at",
+            "created_at",
+            "submitted_at",
+            "received_at",
+            "request_time",
+            "ts",
+            "time",
+        ):
+            value = req.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                stamp = float(value)
+                if stamp > 1000000000:
+                    return stamp
+                continue
+            except Exception:
+                pass
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                continue
+        return 0.0
+
+    def _waiting_for_add_stale_cutoff_seconds(self) -> float:
+        try:
+            hours = float(self.settings.get("waitlist_stale_hours", 24) or 24)
+        except Exception:
+            hours = 24.0
+        return max(1.0, min(168.0, hours)) * 3600.0
+
+    def _is_stale_waiting_for_add_request(self, req: dict | None) -> bool:
+        if not isinstance(req, dict) or not self._is_waiting_for_add_request(req):
+            return False
+        state = str(req.get("state") or "").strip().lower()
+        if state in {"accepted", "active", "delivered", "completed", "sung", "removed", "skipped"}:
+            return False
+        stamp = self._remote_request_timestamp(req)
+        if stamp <= 0:
+            return False
+        return (time.time() - stamp) > self._waiting_for_add_stale_cutoff_seconds()
+
+    def _stale_waiting_for_add_tombstone(self, req: dict) -> dict:
+        item = dict(req or {})
+        item["state"] = "removed"
+        item["removed_at"] = int(time.time())
+        item["removed_by"] = "desktop_stale_waitlist_cleanup"
+        item["removal_reason"] = "stale_waitlist_startup_cleanup"
+        return item
+
     def _pending_acceptance_enabled(self) -> bool:
         try:
             return bool(self.settings.get("defer_remote_adds_until_between_singers", False))
@@ -23195,10 +23407,23 @@ class KaraokeApp(QWidget):
         if rid <= 0:
             return
         handled = state.get("_waiting_for_add_handled_ids", set())
+        if not isinstance(handled, set):
+            handled = set()
+            self._waiting_for_add_handled_ids = handled
+        elif "_waiting_for_add_handled_ids" not in state:
+            self._waiting_for_add_handled_ids = handled
         if isinstance(handled, set) and rid in handled:
             return
         if self._request_matches_accepted_queue_item(req):
             self._mark_waiting_for_add_duplicate_accepted(req, reason=f"upsert:{reason or 'waitlist'}")
+            return
+        if self._is_stale_waiting_for_add_request(req):
+            handled.add(rid)
+            try:
+                self._cleanup_terminal_removed_requests({rid: self._stale_waiting_for_add_tombstone(req)})
+            except Exception:
+                pass
+            _diag(f"[WAITING-FOR-ADD] stale past-show request ignored request_id={rid} reason={reason!r}")
             return
         item = dict(req)
         if reason and not item.get("pending_reason") and not item.get("attention_reason"):
@@ -23255,11 +23480,23 @@ class KaraokeApp(QWidget):
             if self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
                 self._mark_waiting_for_add_duplicate_accepted(req, reason="set_requests")
                 continue
+            if self._is_stale_waiting_for_add_request(req):
+                handled.add(rid)
+                terminal_items[rid] = self._stale_waiting_for_add_tombstone(req)
+                _diag(f"[WAITING-FOR-ADD] stale past-show request queued for purge request_id={rid}")
+                continue
             candidates[rid] = dict(req)
         try:
             for rid, req in state.get("_remote_attention_requests", {}).items():
                 rid = int(rid)
-                if rid > 0 and rid not in handled and rid not in local_ids and not self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
+                if rid <= 0 or rid in handled or rid in local_ids or self._request_matches_accepted_queue_item(req, identity_sets=identity_sets):
+                    continue
+                if self._is_stale_waiting_for_add_request(req):
+                    handled.add(rid)
+                    terminal_items[rid] = self._stale_waiting_for_add_tombstone(req)
+                    _diag(f"[WAITING-FOR-ADD] stale local attention request queued for purge request_id={rid}")
+                    continue
+                if rid > 0:
                     candidates.setdefault(rid, dict(req))
         except Exception:
             pass
@@ -23316,7 +23553,7 @@ class KaraokeApp(QWidget):
             colors = {
                 "pending_acceptance": QColor("#bae6fd"),
                 "waitlist": QColor("#e2e8f0"),
-                "needs_review": QColor("#fde68a"),
+                "needs_review": QColor("#86efac"),
                 "sung": QColor("#c4b5fd"),
                 "removed": QColor("#fca5a5"),
             }
@@ -23360,12 +23597,17 @@ class KaraokeApp(QWidget):
                         + (f"\nQueue Position: #{int(row.get('queue_position'))}" if str(row.get("queue_position") or "").isdigit() else "")
                         + ("\nFirst turn this show" if row.get("first_time_singer") else "")
                     )
+                    status_kind = str(row.get("status_kind") or "")
+                    row_bg = QColor(22, 101, 52, 42) if row.get("first_time_singer") else None
+                    if status_kind == "needs_review":
+                        pulse = self._waiting_for_add_pulse_value()
+                        row_bg = QColor(22, 163, 74, int(42 + 54 * pulse))
                     model_rows.append({
                         "text": self._waiting_for_add_row_text(row),
                         "request_id": rid,
                         "selectable": bool(row.get("selectable")),
-                        "foreground": colors.get(row.get("status_kind"), QColor("#e2e8f0")),
-                        "background": QColor(22, 101, 52, 42) if row.get("first_time_singer") else None,
+                        "foreground": colors.get(status_kind, QColor("#e2e8f0")),
+                        "background": row_bg,
                         "tooltip": tooltip,
                         "height": 76,
                     })
@@ -24275,7 +24517,7 @@ class KaraokeApp(QWidget):
         )
 
         def worker():
-            ok, err = self._net_send_direct_message(singer, message)
+            ok, err = self._net_send_direct_message(singer, message, system_notice=True)
             if not ok:
                 _diag(f"[WAITING-FOR-ADD] add-failed notice to {singer!r} failed: {err}")
 
@@ -24342,6 +24584,11 @@ class KaraokeApp(QWidget):
 
     def _tick_waiting_for_add_pulse(self):
         self._update_waiting_for_add_nav_state()
+        try:
+            if self._needs_review_count() > 0:
+                self._schedule_waiting_for_add_view_refresh(delay_ms=0, reason="needs_review_pulse")
+        except Exception:
+            pass
 
     def _waiting_for_add_pulse_value(self) -> float:
         try:
@@ -26932,6 +27179,11 @@ class KaraokeApp(QWidget):
             if force or path != self._idle_bg_current_path:
                 self._idle_bg_current_path = path
                 self.video_window.set_background_image(path)
+                if force:
+                    try:
+                        self.video_window.video_area.fade_background_from_black()
+                    except Exception:
+                        pass
                 self.video_window.update()
                 try:
                     pix_ok = not bool(getattr(self.video_window.video_area, "background_pixmap", QPixmap()).isNull())
@@ -28331,7 +28583,6 @@ class KaraokeApp(QWidget):
         super().resizeEvent(event)
         self._apply_responsive_operator_polish()
         self._sync_now_singing_width()
-        self._set_rotation_summary_progress(self.karaoke_seek_slider.value() / 1000.0)
         self._schedule_preview_overlay_refresh(0)
         self._schedule_preview_overlay_refresh(120, recreate_surface=True)
         self._schedule_preview_overlay_refresh(240)
@@ -28445,15 +28696,6 @@ class KaraokeApp(QWidget):
             try:
                 self.performance_waveform.set_progress(ratio)
                 self.performance_waveform.set_active(bool(getattr(self, "karaoke_playing", False)))
-            except Exception:
-                pass
-            # The slider's valueChanged signal is blocked above (to avoid
-            # signal loops with the seek-drag logic), so we must explicitly
-            # push the new ratio to the rotation "now singing" progress bar
-            # here — otherwise it only updates from rarer code paths and
-            # appears to jump every ~10 seconds instead of advancing smoothly.
-            try:
-                self._set_rotation_summary_progress(ratio)
             except Exception:
                 pass
         except Exception:
@@ -29197,6 +29439,11 @@ class KaraokeApp(QWidget):
         _perf_t0 = time.perf_counter()
         try:
             if self.rotation_view is None:
+                return
+            app = QApplication.instance()
+            owner_thread = self.rotation_view.thread() if app is not None else None
+            if app is not None and owner_thread is not None and QThread.currentThread() != owner_thread:
+                self._run_on_ui_thread(self.update_rotation_view)
                 return
             now_singing_text = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
             if not now_singing_text:
@@ -30800,15 +31047,30 @@ class KaraokeApp(QWidget):
         except Exception:
             return 180.0
 
+    def _is_server_terminal_empty_slot_reason(self, reason: str) -> bool:
+        return str(reason or "").strip().lower() in {
+            "server_removed",
+            "server_completed",
+            "server_sung",
+            "server_skipped",
+        }
+
     def _mark_rotation_slot_temporarily_empty(self, singer: dict, *, reason: str = "song_removed") -> bool:
         if not isinstance(singer, dict) or not self._is_rotation_mode():
             return False
         if singer.get("songs"):
             return False
         now = time.time()
-        reason_text = str(reason or "song_removed")
+        reason_text = str(reason or "song_removed").strip() or "song_removed"
         already_preserved = bool(singer.get("temporary_empty_slot", False))
         previous_reason = str(singer.get("empty_slot_reason", "") or "")
+        server_terminal_repeat = (
+            already_preserved
+            and self._is_server_terminal_empty_slot_reason(previous_reason)
+            and self._is_server_terminal_empty_slot_reason(reason_text)
+        )
+        if server_terminal_repeat:
+            reason_text = previous_reason
         singer["temporary_empty_slot"] = True
         singer["empty_slot_reason"] = reason_text
         if not already_preserved:
@@ -31711,7 +31973,7 @@ class KaraokeApp(QWidget):
             try:
                 _, _w, _d = getattr(self, "_analyze_lib_job", (None, None, None))
                 if _d is not None:
-                    _d.show(); _d.raise_(); _d.activateWindow()
+                    self._bring_analyze_dialog_to_front(_d)
             except Exception:
                 pass
             return
@@ -31746,6 +32008,7 @@ class KaraokeApp(QWidget):
         try:
             dlg.setWindowFlags(
                 Qt.WindowType.Window
+                | Qt.WindowType.WindowStaysOnTopHint
                 | Qt.WindowType.CustomizeWindowHint
                 | Qt.WindowType.WindowTitleHint
                 | Qt.WindowType.WindowMinimizeButtonHint
@@ -31791,9 +32054,22 @@ class KaraokeApp(QWidget):
         self._analyze_running = True
         self._analyze_lib_job = (thread, worker, dlg)
         thread.start()
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+        self._bring_analyze_dialog_to_front(dlg)
+
+    def _bring_analyze_dialog_to_front(self, dlg) -> None:
+        if dlg is None:
+            return
+        try:
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception:
+            pass
+        for delay_ms in (75, 250, 750):
+            try:
+                QTimer.singleShot(delay_ms, lambda d=dlg: (d.show(), d.raise_(), d.activateWindow()))
+            except Exception:
+                pass
 
     # ── marker cloud sync + file backup ──────────────────────────────────────
     def _phrase_sync_config(self):
@@ -32902,7 +33178,7 @@ class KaraokeApp(QWidget):
         message_edit.setFocus()
         dlg.exec()
 
-    def _net_send_direct_message(self, singer_name: str, message: str) -> tuple[bool, str]:
+    def _net_send_direct_message(self, singer_name: str, message: str, *, system_notice: bool = False) -> tuple[bool, str]:
         try:
             base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             tenant = (self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
@@ -32919,12 +33195,13 @@ class KaraokeApp(QWidget):
                     "user": tenant,
                     "singer": singer_name,
                     "message": message,
+                    "system_notice": "1" if system_notice else "0",
                 },
                 timeout=8,
                 headers={
                     "X-API-Key": api_key,
                     "Accept": "application/json",
-                    "User-Agent": "SingWS/direct-message",
+                    "User-Agent": "SingWS/system-notice" if system_notice else "SingWS/direct-message",
                 },
             )
 
@@ -36335,7 +36612,8 @@ class KaraokeApp(QWidget):
         try:
             from PyQt6.QtCore import QThread as _QThread
             _qapp = QApplication.instance()
-            if _qapp is not None and _QThread.currentThread() != _qapp.thread():
+            _owner_thread = self.thread() if _qapp is not None else None
+            if _qapp is not None and _owner_thread is not None and _QThread.currentThread() != _owner_thread:
                 self._run_on_ui_thread(self.update_queue_display)
                 return
         except Exception:

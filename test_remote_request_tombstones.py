@@ -508,6 +508,52 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(app._waiting_for_add_count(), 0)
             self.assertNotIn(2412, app._waiting_for_add_requests)
 
+    def test_startup_purges_stale_past_show_waitlist_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["waitlist_stale_hours"] = 24
+            purged = {}
+            app._cleanup_terminal_removed_requests = lambda items: purged.update(items)
+
+            old_stamp = int(self.singws.time.time() - (3 * 24 * 3600))
+            app._set_waiting_for_add_requests([{
+                "request_id": 2501,
+                "singer": "Past Singer",
+                "artist": "Past Artist",
+                "title": "Past Song",
+                "state": "waiting",
+                "pending_reason": "rotation_full",
+                "received_at_server": old_stamp,
+            }])
+
+            self.assertEqual(app._waiting_for_add_count(), 0)
+            self.assertNotIn(2501, app._waiting_for_add_requests)
+            self.assertIn(2501, app._waiting_for_add_handled_ids)
+            self.assertEqual(purged[2501]["state"], "removed")
+            self.assertEqual(purged[2501]["removal_reason"], "stale_waitlist_startup_cleanup")
+
+    def test_startup_keeps_recent_same_show_waitlist_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["waitlist_stale_hours"] = 24
+            purged = {}
+            app._cleanup_terminal_removed_requests = lambda items: purged.update(items)
+
+            recent_stamp = int(self.singws.time.time() - 3600)
+            app._set_waiting_for_add_requests([{
+                "request_id": 2502,
+                "singer": "Current Singer",
+                "artist": "Current Artist",
+                "title": "Current Song",
+                "state": "waiting",
+                "pending_reason": "rotation_full",
+                "received_at_server": recent_stamp,
+            }])
+
+            self.assertEqual(app._waiting_for_add_count(), 1)
+            self.assertIn(2502, app._waiting_for_add_requests)
+            self.assertEqual(purged, {})
+
     def test_waiting_add_now_cannot_duplicate_already_queued_history_request(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
