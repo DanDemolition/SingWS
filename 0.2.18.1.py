@@ -582,12 +582,12 @@ def list_widget_css() -> str:
         return SINGWS_THEME.list_css()
     return f"""
         QListWidget, QListView, QTreeView, QTableView {{
-            background-color: {_v('surface_deep')};
+            background-color: {_v('surface_alt')};
             alternate-background-color: rgba(255,255,255,0.014);
             color: {_v('text')};
             selection-background-color: {_v('accent')};
             selection-color: {_v('accent_text')};
-            border: 1px solid rgba(255,255,255,0.030);
+            border: 1px solid rgba(115,144,180,0.14);
             border-radius: 8px;
             outline: none;
             padding: 2px;
@@ -1021,7 +1021,7 @@ from PyQt6.QtWidgets import (
     QTextEdit
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery
 
 # WebSocket request relay (wskar.com). Optional: older PyQt6 installs may lack
@@ -1032,6 +1032,39 @@ try:
 except Exception:
     QWebSocket = None
     QTWEBSOCKETS_AVAILABLE = False
+
+
+_QT_APP_SHUTTING_DOWN = False
+_QT_PREVIOUS_MESSAGE_HANDLER = None
+_QT_SOCKET_TEARDOWN_WARNING_PARTS = (
+    "QObject::disconnect: wildcard call disconnects from destroyed signal of QNativeSocketEngine",
+    "QObject::disconnect: wildcard call disconnects from destroyed signal of QSslSocket",
+    "QObject::disconnect: wildcard call disconnects from destroyed signal of QWebSocketDataProcessor",
+)
+
+
+def _singws_qt_message_handler(mode, context, message):
+    msg = str(message or "")
+    if bool(_QT_APP_SHUTTING_DOWN) and any(part in msg for part in _QT_SOCKET_TEARDOWN_WARNING_PARTS):
+        return
+    previous = globals().get("_QT_PREVIOUS_MESSAGE_HANDLER")
+    if previous is not None:
+        try:
+            previous(mode, context, message)
+            return
+        except Exception:
+            pass
+    try:
+        sys.__stderr__.write(msg + "\n")
+        sys.__stderr__.flush()
+    except Exception:
+        pass
+
+
+try:
+    _QT_PREVIOUS_MESSAGE_HANDLER = qInstallMessageHandler(_singws_qt_message_handler)
+except Exception:
+    _QT_PREVIOUS_MESSAGE_HANDLER = None
 
 
 # --- SQLite search/index workers (no UI-thread blocking) ---
@@ -2198,6 +2231,162 @@ def analyze_loudness_async(audio_path: str):
 
     threading.Thread(target=_work, daemon=True).start()
 
+
+_LOG_SECRET_PATTERNS = [
+    (re.compile(r"(?i)(api[_-]?key|x-api-key|token|password|passwd|secret|pin)(\s*[:=]\s*)([^\s,'\"&]+)"), r"\1\2***"),
+    (re.compile(r"(?i)(token=)([^&\s]+)"), r"\1***"),
+    (re.compile(r"(?i)(key=)([^&\s]+)"), r"\1***"),
+    (re.compile(r"(?i)(Authorization:\s*Bearer\s+)([^\s]+)"), r"\1***"),
+]
+
+
+def _sanitize_log_text(text: str) -> str:
+    """Redact credentials from diagnostic logs before packaging/emailing."""
+    out = str(text or "")
+    for pattern, repl in _LOG_SECRET_PATTERNS:
+        try:
+            out = pattern.sub(repl, out)
+        except Exception:
+            pass
+    return out
+
+
+def _recent_log_files(days: int = 3, *, now: float | None = None) -> list[Path]:
+    try:
+        days = max(1, min(30, int(days)))
+    except Exception:
+        days = 3
+    cutoff = float(now if now is not None else time.time()) - (days * 86400)
+    out = []
+    try:
+        for path in LOGS_DIR.glob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in {".log", ".txt"}:
+                continue
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    out.append(path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return sorted(out, key=lambda p: p.name)
+
+
+def prepare_log_email_package(days: int = 3, *, crash_log: str | Path | None = None) -> tuple[Path | None, list[Path], str]:
+    """Create a sanitized ZIP of recent SingWS log/crash files only.
+
+    Queue/history/settings JSON files are intentionally excluded so singer data
+    and credentials are not sent as part of routine diagnostics.
+    """
+    import zipfile
+
+    files = _recent_log_files(days)
+    if crash_log:
+        try:
+            cp = Path(crash_log)
+            if cp.exists() and cp.is_file() and cp not in files:
+                files.append(cp)
+        except Exception:
+            pass
+    files = sorted({Path(p) for p in files}, key=lambda p: p.name)
+    if not files:
+        return None, [], "No SingWS log files from the requested window."
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        package = LOGS_DIR / f"singws_logs_last_{int(days)}_days_{stamp}.zip"
+        with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in files:
+                try:
+                    raw = path.read_text(encoding="utf-8", errors="replace")
+                    zf.writestr(path.name, _sanitize_log_text(raw))
+                except Exception as exc:
+                    zf.writestr(f"{path.name}.error.txt", f"Failed to read {path.name}: {exc}")
+        return package, files, ""
+    except Exception as exc:
+        return None, files, f"Failed to package logs: {exc}"
+
+
+def _log_email_config_from_settings(settings: dict | None) -> dict:
+    s = settings if isinstance(settings, dict) else {}
+    try:
+        port = int(s.get("log_smtp_port", 587) or 587)
+    except Exception:
+        port = 587
+    return {
+        "to": str(s.get("crash_log_email_to", "") or "").strip(),
+        "host": str(s.get("log_smtp_host", "") or "").strip(),
+        "port": port,
+        "username": str(s.get("log_smtp_username", "") or "").strip(),
+        "password": str(s.get("log_smtp_password", "") or ""),
+        "from": str(s.get("log_smtp_from", "") or "").strip() or str(s.get("log_smtp_username", "") or "").strip(),
+        "tls": bool(s.get("log_smtp_tls", True)),
+    }
+
+
+def _log_email_missing_config(config: dict) -> list[str]:
+    required = ("to", "host", "username", "password", "from")
+    return [key for key in required if not str(config.get(key, "") or "").strip()]
+
+
+def send_log_package_via_smtp(settings: dict, package_path: Path, *, subject: str | None = None) -> tuple[bool, str]:
+    import smtplib
+    from email.message import EmailMessage
+
+    config = _log_email_config_from_settings(settings)
+    missing = _log_email_missing_config(config)
+    if missing:
+        return False, "Email is not configured. Fill in recipient, SMTP host, username, app password, and sender."
+    if not package_path or not Path(package_path).exists():
+        return False, "Log package was not created."
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject or f"SingWS logs {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        msg["From"] = config["from"]
+        msg["To"] = config["to"]
+        msg.set_content(
+            "Attached is a sanitized SingWS diagnostic log bundle.\n\n"
+            "The bundle contains recent app/crash logs only. API keys, tokens, passwords, and PIN-like values are redacted."
+        )
+        data = Path(package_path).read_bytes()
+        msg.add_attachment(data, maintype="application", subtype="zip", filename=Path(package_path).name)
+        with smtplib.SMTP(config["host"], int(config["port"]), timeout=20) as smtp:
+            if config["tls"]:
+                smtp.starttls()
+            smtp.login(config["username"], config["password"])
+            smtp.send_message(msg)
+        logging.info(f"[LOG-EMAIL] sent package={Path(package_path).name} to={config['to']}")
+        return True, f"Sent {Path(package_path).name} to {config['to']}."
+    except Exception as exc:
+        logging.error(f"[LOG-EMAIL] send failed package={Path(package_path).name}: {exc}")
+        return False, f"Send failed: {exc}"
+
+
+def send_recent_logs_email(settings: dict, days: int = 3, *, crash_log: str | Path | None = None) -> tuple[bool, str, Path | None]:
+    package, files, package_error = prepare_log_email_package(days, crash_log=crash_log)
+    if package_error:
+        logging.warning(f"[LOG-EMAIL] package failed: {package_error}")
+        return False, package_error, package
+    logging.info(f"[LOG-EMAIL] packaged files={len(files)} package={package.name if package else ''}")
+    ok, msg = send_log_package_via_smtp(settings, package, subject=f"SingWS last {int(days)} days of logs")
+    return ok, msg, package
+
+
+def maybe_auto_send_crash_logs(crash_log: str | Path | None):
+    try:
+        settings = {}
+        if SETTINGS_PATH.exists():
+            settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8") or "{}")
+        if not isinstance(settings, dict) or not bool(settings.get("crash_auto_send_logs", False)):
+            return
+        def _work():
+            ok, msg, package = send_recent_logs_email(settings, 3, crash_log=crash_log)
+            logging.info(f"[LOG-EMAIL] auto crash send ok={int(ok)} package={Path(package).name if package else ''} msg={msg}")
+        threading.Thread(target=_work, daemon=True, name="singws-crash-log-email").start()
+    except Exception as exc:
+        logging.error(f"[LOG-EMAIL] auto crash send setup failed: {exc}")
+
 # --- Logging Setup ---
 def setup_logging():
     """Setup comprehensive logging system"""
@@ -2574,6 +2763,73 @@ def _perf_log_if_slow(name: str, ms: float):
     except Exception:
         pass
 
+
+def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
+    """Log the GUI-thread stack when the event loop stalls.
+
+    Observation only: a tiny GUI heartbeat timer plus a daemon watcher thread.
+    It follows the existing runtime diagnostic setting and can be disabled with
+    SINGWS_NO_WATCHDOG=1.
+    """
+    try:
+        if os.environ.get("SINGWS_NO_WATCHDOG"):
+            return
+        if getattr(owner, "_mt_watch_thread", None) is not None:
+            return
+        try:
+            if not bool(getattr(owner, "settings", {}).get("performance_debug_enabled", True)):
+                return
+        except Exception:
+            return
+        import traceback as _traceback
+
+        main_ident = threading.main_thread().ident
+        owner._mt_hb = time.monotonic()
+        owner._mt_watch_stop = False
+
+        hb_timer = QTimer(owner)
+        hb_timer.timeout.connect(lambda: setattr(owner, "_mt_hb", time.monotonic()))
+        hb_timer.start(50)
+        owner._mt_hb_timer = hb_timer
+
+        threshold = max(0.05, float(threshold_ms) / 1000.0)
+
+        def _watch():
+            stall_logged = False
+            peak = 0.0
+            while not bool(getattr(owner, "_mt_watch_stop", False)):
+                time.sleep(0.03)
+                hb = getattr(owner, "_mt_hb", None)
+                if hb is None:
+                    continue
+                gap = time.monotonic() - float(hb)
+                if gap >= threshold:
+                    peak = max(peak, gap)
+                    if not stall_logged:
+                        frame = sys._current_frames().get(main_ident)
+                        stack = "".join(_traceback.format_stack(frame, limit=14)) if frame is not None else "(main-thread frame unavailable)"
+                        _diag(
+                            f"[STALL] GUI thread blocked >{int(threshold * 1000)}ms; "
+                            f"main-thread stack at detection:\n{stack}"
+                        )
+                        stall_logged = True
+                else:
+                    if stall_logged:
+                        _diag(f"[STALL] GUI thread recovered after ~{int(peak * 1000)}ms")
+                    stall_logged = False
+                    peak = 0.0
+
+        watch_thread = threading.Thread(target=_watch, name="singws-main-thread-watchdog", daemon=True)
+        owner._mt_watch_thread = watch_thread
+        watch_thread.start()
+        _diag(f"[STALL] main-thread watchdog armed threshold={threshold_ms}ms")
+    except Exception as e:
+        try:
+            _diag(f"[STALL] watchdog install failed: {e}")
+        except Exception:
+            pass
+
+
 # Settings defaults
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
@@ -2584,8 +2840,6 @@ DEFAULTS = {
     "ticker_size_index": 2,          # 2 smaller, default, 2 larger
     "ticker_bold": False,            # ticker uses same OS/Qt font family; toggles weight only
     "ticker_speed_px_per_sec": 78.0, # persisted ticker scroll speed; do not overwrite saved values
-    "performance_mode": False,       # slower machines: reduce background/UI pressure without removing features
-    "safe_mode": False,              # isolate slow subsystems: no BGM/server scans/animations/fuzzy/HQ CDG
     "performance_debug_enabled": True, # emit periodic top bottleneck summaries to the log/terminal
     "performance_log_interval_sec": 15,
     "auto_update_enabled": True,        # check GitHub Releases in the background at startup
@@ -2596,7 +2850,14 @@ DEFAULTS = {
     "auto_update_download_dir": "",     # blank = ~/Downloads/SingWS Updates
     "auto_update_last_check": 0,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
+    "cdg_display_mode": "fit",       # fit | sidefill | stretch; cdg_stretch_fill kept for migration
     "cdg_quality_mode": "standard",  # standard=lower CPU, high=smoother scaling/text edges
+    "cdg_near_black_cleanup": True,  # Clamp near-black CDG backgrounds to true black
+    "cdg_near_black_threshold": 10,  # RGB values <= this are treated as black for CDG only
+    "lyrics_background_video_opacity": 0, # 0..100; shows the background (video/idle/slideshow) through near-black CDG only
+    "bg_video_enabled": False,        # play MP4 background videos behind CDG lyrics
+    "bg_video_folder": "",            # folder of MP4 background videos
+    "bg_video_shuffle": True,         # shuffle-bag order; False = alphabetical loop
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
@@ -2611,7 +2872,7 @@ DEFAULTS = {
     "use_waiting_for_add": False,          # server-backed waitlist mode for the current show
     "defer_remote_adds_until_between_singers": False,  # accept remote requests, insert after active song ends
     "host_controls_pin": "",               # optional host-only remote control PIN/password
-    "daw_singer_screen_preview_enabled": None, # None = on unless Performance/Safe Mode is enabled
+    "daw_singer_screen_preview_enabled": None, # None = use the default DAW preview cadence
     "rotation_estimate_include_all_songs": False,  # False=first song only, True=all queued songs
     "rotation_padding_sec": 90,            # seconds added per active singer in queue ETA
     "queue_mode": "classic",               # classic | rotation
@@ -2628,14 +2889,13 @@ DEFAULTS = {
     "bg_end_silence_trim_enabled": False,  # Background music: skip trailing silence between BG tracks (opt-in)
     "request_poll_interval_sec": 2,        # how often the app checks the server for new requests (seconds)
     # --- Audio processing master switch ---
-    # Simple Audio Mode (default ON) keeps the signal path clean: NO normalization,
-    # NO EQ, NO compression — just clean volume controls + optional per-track trim.
-    # A live engineer / personal mixer handles tone shaping. Turn OFF to enable the
-    # experimental advanced processing below.
+    # Simple Audio Mode (default ON) keeps the signal path clean: no normalization
+    # and no graphic EQ — just clean volume controls + optional per-track trim.
+    # Master Audio Processing remains an explicit opt-in master-bus chain.
     "simple_audio_mode": True,
     # Master "mix bus" processing (gate/comp/limiter/EQ) for a more consistent,
     # polished song output. Opt-in; conservative defaults live in
-    # singws_master_audio.DEFAULT_PARAMS. Never runs in Performance Mode.
+    # singws_master_audio.DEFAULT_PARAMS.
     "master_audio_enabled": False,
     # Per-stage enables (each independently toggleable in Settings).
     "master_audio_gate_enabled": False,
@@ -2652,6 +2912,14 @@ DEFAULTS = {
     "karaoke_track_trims": {},             # {track_path_or_id: gain_db} manual per-track playback trim
     "karaoke_normalize_enabled": True,     # [advanced only] Loudness-normalize karaoke songs
     "bg_normalize_enabled": True,          # [advanced only] Loudness-normalize background music
+    "crash_log_email_to": "",              # recipient for manual/automatic diagnostic log bundles
+    "crash_auto_send_logs": False,         # auto-send sanitized crash logs after a crash when SMTP is configured
+    "log_smtp_host": "",                   # SMTP host for log email, e.g. smtp.gmail.com
+    "log_smtp_port": 587,                  # SMTP STARTTLS port
+    "log_smtp_username": "",               # SMTP username / sender login
+    "log_smtp_password": "",               # SMTP/app password; never written to logs
+    "log_smtp_from": "",                   # optional sender address; defaults to SMTP username
+    "log_smtp_tls": True,                  # use STARTTLS
     "mp4_max_height": 720,                  # Cap MP4 decode resolution (downscale only): 720/1080/0=native. Lower = smoother on weak GPUs (Intel).
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
@@ -3481,9 +3749,8 @@ class BackgroundMusicPlayer(QObject):
                 _diag(f"[BG-BASS] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
             except Exception:
                 pass
-            # Full master chain (gate/tilt EQ/exciter/compressor/limiter;
-            # independent of Simple/Advanced; off in Performance Mode) so BGM is
-            # processed in tandem with karaoke songs.
+            # Full master chain (gate/tilt EQ/exciter/compressor/limiter) so
+            # BGM is processed in tandem with karaoke songs when enabled.
             try:
                 if (parent is not None and hasattr(parent, "_bgm_master_active")
                         and hasattr(self._bass_engine, "set_master_processor")):
@@ -3789,19 +4056,8 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             audiosink = Gst.ElementFactory.make("autoaudiosink", f"{pipeline_name}_audiosink")
 
-        # Meter branch (appsink) - optional visualizer input. Keep it alive in
-        # Performance Mode so the show screen still visualizes BGM; Safe Mode
-        # disables it for subsystem isolation.
-        try:
-            parent = self.parent()
-            meter_disabled = bool(
-                parent is not None
-                and (
-                    (hasattr(parent, "_safe_mode") and parent._safe_mode())
-                )
-            )
-        except Exception:
-            meter_disabled = False
+        # Meter branch (appsink) - optional visualizer input.
+        meter_disabled = False
         meter_queue = meter_convert = meter_resample = meter_caps = meter_sink = None
         if not meter_disabled:
             meter_queue = Gst.ElementFactory.make("queue", f"{pipeline_name}_meter_q")
@@ -4019,10 +4275,17 @@ class BackgroundMusicPlayer(QObject):
             gain = f"{float(info.get('gain_db', 0.0)):+.1f}"
             pk = info.get("peak_db")
             peak = "n/a" if pk is None else f"{float(pk):.1f}"
+        master = "off"
+        try:
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "_master_chain_label"):
+                master = parent._master_chain_label("bgm")
+        except Exception:
+            master = "unknown"
         return (
             f"BASSmix -> deck_gain(norm={norm}, LUFS={lufs}, peak={peak}dB, gain={gain}dB) "
             f"-> deck_fade/crossfade -> mixer_master(slider/fade={float(self.volume):.3f}) "
-            f"-> EQ({eq_chain}) -> output"
+            f"-> EQ({eq_chain}) -> master_audio({master}) -> output"
         )
 
     def _bg_normalize_active(self) -> bool:
@@ -4032,10 +4295,6 @@ class BackgroundMusicPlayer(QObject):
         try:
             host = self.parent()
             if host is None or not hasattr(host, "settings"):
-                return False
-            if hasattr(host, "_safe_mode") and host._safe_mode():
-                return False
-            if hasattr(host, "_performance_mode") and host._performance_mode():
                 return False
             if bool(host.settings.get("simple_audio_mode", True)):
                 return False
@@ -5473,7 +5732,82 @@ class BackgroundMusicPlayer(QObject):
         # If not cached, try to extract (this will cache it automatically)
         return self.get_album_artwork(current_file)
     
-def _scaled_karaoke_image(image, size, aspect_mode, quality_mode, is_cdg):
+def _clean_cdg_near_black(image: QImage, threshold: int = 10, transparent_black: bool = False) -> QImage:
+    """Clamp only CDG near-black RGB pixels to true black.
+
+    This is intentionally narrow: CDG source frames are small, and only pixels
+    whose R/G/B channels are all near black are touched. Saturated lyric colors,
+    outlines, and intentionally dark colored graphics survive. When
+    transparent_black is true, those same near-black background pixels become
+    transparent so a subtle host-selected background can show behind lyrics.
+    """
+    if image is None or image.isNull():
+        return QImage()
+    try:
+        threshold = max(0, min(32, int(threshold)))
+    except Exception:
+        threshold = 10
+    if threshold <= 0 and not transparent_black:
+        return image
+    try:
+        if image.format() == QImage.Format.Format_Indexed8:
+            table = list(image.colorTable())
+            if not table:
+                return image
+            changed = False
+            for idx, value in enumerate(table):
+                try:
+                    v = int(value)
+                    a = (v >> 24) & 0xFF
+                    r = (v >> 16) & 0xFF
+                    g = (v >> 8) & 0xFF
+                    b = v & 0xFF
+                except Exception:
+                    continue
+                if a and r <= threshold and g <= threshold and b <= threshold and (r or g or b or transparent_black):
+                    new_a = 0 if transparent_black else a
+                    new_value = (new_a << 24)
+                    if new_value != v:
+                        table[idx] = new_value
+                        changed = True
+            if changed:
+                cleaned = QImage(image)
+                cleaned.setColorTable(table)
+                return cleaned
+            return image
+
+        cleaned = image.convertToFormat(QImage.Format.Format_ARGB32)
+        ptr = cleaned.bits()
+        ptr.setsize(cleaned.sizeInBytes())
+        buf = memoryview(ptr)
+        changed = False
+        for i in range(0, len(buf), 4):
+            b = int(buf[i])
+            g = int(buf[i + 1])
+            r = int(buf[i + 2])
+            a = int(buf[i + 3])
+            if a and r <= threshold and g <= threshold and b <= threshold and (r or g or b or transparent_black):
+                buf[i] = 0
+                buf[i + 1] = 0
+                buf[i + 2] = 0
+                if transparent_black:
+                    buf[i + 3] = 0
+                changed = True
+        return cleaned if changed else image
+    except Exception:
+        return image
+
+
+def _scaled_karaoke_image(
+    image,
+    size,
+    aspect_mode,
+    quality_mode,
+    is_cdg,
+    clean_near_black: bool = True,
+    black_threshold: int = 10,
+    transparent_black: bool = False,
+):
     """Scale a karaoke frame for display.
 
     CDG frames are pixel art: one direct SmoothTransformation pass from the
@@ -5483,6 +5817,8 @@ def _scaled_karaoke_image(image, size, aspect_mode, quality_mode, is_cdg):
     non-integer window sizes don't shimmer. MP4 frames keep plain smooth
     scaling.
     """
+    if is_cdg and (clean_near_black or transparent_black):
+        image = _clean_cdg_near_black(image, black_threshold, transparent_black=transparent_black)
     if quality_mode != "high":
         return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
     if is_cdg:
@@ -5497,6 +5833,246 @@ def _scaled_karaoke_image(image, size, aspect_mode, quality_mode, is_cdg):
                     Qt.TransformationMode.FastTransformation,
                 )
     return image.scaled(size, aspect_mode, Qt.TransformationMode.SmoothTransformation)
+
+
+BG_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov"}
+
+
+def scan_background_video_folder(folder: str) -> list[str]:
+    """MP4 files in the configured background-video folder, sorted for a
+    stable baseline order. Missing/empty folder -> [] and the caller falls
+    back to the normal CDG background."""
+    try:
+        if not folder:
+            return []
+        base = Path(folder).expanduser()
+        if not base.is_dir():
+            return []
+        return [
+            str(p) for p in sorted(base.iterdir())
+            if p.is_file() and p.suffix.lower() in BG_VIDEO_EXTENSIONS
+        ]
+    except Exception:
+        return []
+
+
+class BackgroundVideoShuffleBag:
+    """No-repeat shuffle for background videos: every file plays once before
+    any repeats, and a refill never starts with the video that just ended
+    (when more than one exists). shuffle=False plays the alphabetical loop."""
+
+    def __init__(self, files, shuffle: bool = True, rng=None):
+        self._files = list(files)
+        self._shuffle = bool(shuffle)
+        self._rng = rng if rng is not None else random.Random()
+        self._queue: list[str] = []
+        self._last: str | None = None
+
+    def next(self) -> str | None:
+        if not self._files:
+            return None
+        if not self._queue:
+            order = list(self._files)
+            if self._shuffle:
+                self._rng.shuffle(order)
+                if len(order) > 1 and order[0] == self._last:
+                    order[0], order[-1] = order[-1], order[0]
+            self._queue = order
+        pick = self._queue.pop(0)
+        self._last = pick
+        return pick
+
+
+class LyricsBackgroundVideoPlayer(QObject):
+    """Shuffled, muted MP4 loop rendered behind CDG lyrics.
+
+    Runs a private GStreamer pipeline whose audio branch terminates in a
+    fakesink (no audio device, no audio clock), so the clips' soundtracks are
+    silenced and cannot touch karaoke audio, key/tempo, or lyric sync.
+    Frames are pulled on a UI timer from an appsink
+    (sync=True paces them against the pipeline's own clock; drop=True keeps
+    a slow UI from backing up the decoder) and handed to the video window,
+    which composites them under the transparent-black CDG frame at the
+    host-selected opacity."""
+
+    def __init__(self, parent=None, *, on_frame=None, max_height: int = 720):
+        super().__init__(parent)
+        self.on_frame = on_frame
+        self.max_height = int(max_height or 0)
+        self._bag = None
+        self._pipeline = None
+        self._appsink = None
+        self._current_path = ""
+        self._frames_delivered = 0
+        self._advance_failures = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self, files: list[str], shuffle: bool = True) -> bool:
+        if Gst is None or not files:
+            return False
+        self._bag = BackgroundVideoShuffleBag(files, shuffle=shuffle)
+        self._advance_failures = 0
+        if not self._advance("start"):
+            return False
+        self._timer.start()
+        return True
+
+    def stop(self, reason: str = "stop"):
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        self._teardown_pipeline()
+        if self._current_path:
+            _diag(f"[BG-VIDEO] stopped reason={reason} frames_delivered={self._frames_delivered}")
+        self._current_path = ""
+        if self.on_frame is not None:
+            try:
+                self.on_frame(None)
+            except Exception:
+                pass
+
+    def _teardown_pipeline(self):
+        pipeline = self._pipeline
+        self._pipeline = None
+        self._appsink = None
+        if pipeline is not None:
+            try:
+                pipeline.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+
+    def _advance(self, reason: str) -> bool:
+        self._teardown_pipeline()
+        if self._bag is None:
+            return False
+        path = self._bag.next()
+        if not path or not os.path.exists(path):
+            self._advance_failures += 1
+            if path and self._advance_failures <= 3:
+                _diag(f"[BG-VIDEO] file missing, skipping file={os.path.basename(path)!r}")
+                return self._advance("missing_file")
+            return False
+        try:
+            pipeline = Gst.Pipeline.new("singws-bg-video")
+            dec = Gst.ElementFactory.make("uridecodebin", "bgVideoDecoder")
+            vq = Gst.ElementFactory.make("queue", "bgVideoQueue")
+            vconv = Gst.ElementFactory.make("videoconvert", "bgVideoConvert")
+            vscale = Gst.ElementFactory.make("videoscale", "bgVideoScale")
+            vcaps = Gst.ElementFactory.make("capsfilter", "bgVideoCaps")
+            sink = Gst.ElementFactory.make("appsink", "bgVideoSink")
+            if any(el is None for el in (dec, vq, vconv, vscale, vcaps, sink)):
+                raise RuntimeError("bg video GStreamer elements unavailable")
+            dec.set_property("uri", Gst.filename_to_uri(path))
+            caps = "video/x-raw,format=RGBx"
+            if self.max_height > 0:
+                caps += f",height=[1,{int(self.max_height)}]"
+            vcaps.set_property("caps", Gst.Caps.from_string(caps))
+            sink.set_property("sync", True)
+            sink.set_property("max-buffers", 2)
+            sink.set_property("drop", True)
+            sink.set_property("emit-signals", False)
+            for el in (dec, vq, vconv, vscale, vcaps, sink):
+                pipeline.add(el)
+            for a, b in zip((vq, vconv, vscale, vcaps), (vconv, vscale, vcaps, sink)):
+                if not a.link(b):
+                    raise RuntimeError("bg video link failed")
+
+            def on_pad(_dec, pad, q=vq, pl=pipeline):
+                try:
+                    pad_caps = pad.get_current_caps()
+                    s = pad_caps.to_string() if pad_caps else ""
+                    if s.startswith("video/"):
+                        target = q.get_static_pad("sink")
+                        if target is not None and not target.is_linked():
+                            pad.link(target)
+                    elif s.startswith("audio/"):
+                        # The clip's soundtrack is discarded into a fakesink:
+                        # no audio device is opened, no clock is provided, so
+                        # it cannot reach the speakers or influence karaoke
+                        # audio timing. (Leaving the pad unlinked would error
+                        # the pipeline instead.)
+                        fs = Gst.ElementFactory.make("fakesink", None)
+                        if fs is not None:
+                            fs.set_property("sync", False)
+                            fs.set_property("async", False)
+                            pl.add(fs)
+                            fs.sync_state_with_parent()
+                            pad.link(fs.get_static_pad("sink"))
+                except Exception:
+                    pass
+
+            dec.connect("pad-added", on_pad)
+            pipeline.set_state(Gst.State.PLAYING)
+        except Exception as e:
+            _diag(f"[BG-VIDEO] pipeline start failed file={os.path.basename(path)!r}: {e}")
+            self._advance_failures += 1
+            if self._advance_failures <= 3:
+                return self._advance("pipeline_error")
+            return False
+        self._advance_failures = 0
+        self._pipeline = pipeline
+        self._appsink = sink
+        self._current_path = path
+        _diag(f"[BG-VIDEO] playing file={os.path.basename(path)!r} reason={reason} max_height={self.max_height}")
+        return True
+
+    def _tick(self):
+        pipeline = self._pipeline
+        sink = self._appsink
+        if pipeline is None or sink is None:
+            return
+        try:
+            bus = pipeline.get_bus()
+            msg = bus.pop_filtered(Gst.MessageType.EOS | Gst.MessageType.ERROR) if bus is not None else None
+            if msg is not None:
+                if msg.type == Gst.MessageType.ERROR:
+                    err, _dbg = msg.parse_error()
+                    _diag(f"[BG-VIDEO] decode error file={os.path.basename(self._current_path)!r}: {err}")
+                # Continuous shuffle: next video on EOS (or on a bad file).
+                if not self._advance("eos" if msg.type == Gst.MessageType.EOS else "error"):
+                    self.stop("no_playable_files")
+                return
+        except Exception:
+            pass
+        try:
+            # Action signal (like the karaoke transport): works without the
+            # GstApp gi overrides being imported.
+            sample = sink.emit("try-pull-sample", 0)
+        except Exception:
+            sample = None
+        if sample is None:
+            return
+        try:
+            buf = sample.get_buffer()
+            caps = sample.get_caps()
+            s = caps.get_structure(0)
+            width = int(s.get_value("width"))
+            height = int(s.get_value("height"))
+            ok, mapinfo = buf.map(Gst.MapFlags.READ)
+            if not ok:
+                return
+            try:
+                image = QImage(
+                    bytes(mapinfo.data), width, height,
+                    width * 4, QImage.Format.Format_RGBX8888,
+                ).copy()
+            finally:
+                buf.unmap(mapinfo)
+            self._frames_delivered += 1
+            if self.on_frame is not None:
+                self.on_frame(image)
+        except Exception:
+            pass
+
+    def diagnostics(self) -> dict:
+        return {
+            "current": os.path.basename(self._current_path) if self._current_path else "",
+            "frames_delivered": int(self._frames_delivered),
+            "running": bool(self._pipeline is not None),
+        }
 
 
 class VideoAreaWidget(QWidget):
@@ -5519,6 +6095,7 @@ class VideoAreaWidget(QWidget):
         self._viz_peaks = [0.12] * 14
         self._viz_audio_level = 0.0
         self._idle_paint_log_ts = 0.0
+        self.background_video_pixmap = QPixmap()
         self._background_image_path = ""
         self._background_previous_pixmap = QPixmap()
         self._background_fade_started = 0.0
@@ -5537,6 +6114,33 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_hide_timer = QTimer(self)
         self._next_up_overlay_hide_timer.setSingleShot(True)
         self._next_up_overlay_hide_timer.timeout.connect(lambda: self.hide_next_up_overlay(reason="timer"))
+
+    def set_background_video_frame(self, image):
+        """Live MP4 background frame (behind CDG lyrics). None clears it and
+        the widget falls back to the normal background pixmap."""
+        if image is None or (hasattr(image, "isNull") and image.isNull()):
+            had = not self.background_video_pixmap.isNull()
+            self.background_video_pixmap = QPixmap()
+            if had:
+                self.update()
+            return
+        self.background_video_pixmap = QPixmap.fromImage(image) if isinstance(image, QImage) else QPixmap(image)
+        self.update()
+
+    def _draw_background_video_pixmap(self, painter: QPainter, pixmap: QPixmap):
+        """Fill the widget (crop-to-fill) with FastTransformation: this runs
+        per video frame, so it must stay cheap; the decode is already capped
+        to the MP4 max height."""
+        if pixmap.isNull():
+            return
+        pm = pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.FastTransformation,
+        )
+        x = (self.width() - pm.width()) // 2
+        y = (self.height() - pm.height()) // 2
+        painter.drawPixmap(x, y, pm)
 
     def set_background_image(self, image_path):
         old_pixmap = QPixmap(self.background_pixmap) if not self.background_pixmap.isNull() else QPixmap()
@@ -5741,6 +6345,31 @@ class VideoAreaWidget(QWidget):
         if not self.karaoke_frame.isNull():
             self._ensure_karaoke_scaled_pixmap()
 
+    def _cdg_near_black_settings(self) -> tuple[bool, int]:
+        try:
+            vw = self.parent()
+            owner = getattr(vw, "_external_owner", None) if vw is not None else None
+            if owner is None and vw is not None:
+                owner = vw.parent()
+            settings = getattr(owner, "settings", {}) if owner is not None else {}
+            enabled = bool(settings.get("cdg_near_black_cleanup", True))
+            threshold = int(settings.get("cdg_near_black_threshold", 10) or 10)
+            return enabled, threshold
+        except Exception:
+            return True, 10
+
+    def _lyrics_background_opacity(self) -> float:
+        try:
+            vw = self.parent()
+            owner = getattr(vw, "_external_owner", None) if vw is not None else None
+            if owner is None and vw is not None:
+                owner = vw.parent()
+            settings = getattr(owner, "settings", {}) if owner is not None else {}
+            value = float(settings.get("lyrics_background_video_opacity", 0) or 0)
+            return max(0.0, min(1.0, value / 100.0))
+        except Exception:
+            return 0.0
+
     def _ensure_karaoke_scaled_pixmap(self):
         if self.karaoke_frame.isNull() or self.width() <= 0 or self.height() <= 0:
             self._karaoke_scaled_pixmap = QPixmap()
@@ -5757,6 +6386,8 @@ class VideoAreaWidget(QWidget):
             bool(self.karaoke_stretch_fill),
             bool(self.karaoke_frame_is_cdg),
             str(self.cdg_quality_mode),
+            self._cdg_near_black_settings() if bool(self.karaoke_frame_is_cdg) else (False, 0),
+            round(self._lyrics_background_opacity(), 3) if bool(self.karaoke_frame_is_cdg) else 0.0,
         )
         if key == self._karaoke_scaled_key and not self._karaoke_scaled_pixmap.isNull():
             return
@@ -5772,6 +6403,8 @@ class VideoAreaWidget(QWidget):
             mode,
             self.cdg_quality_mode,
             bool(self.karaoke_frame_is_cdg),
+            *self._cdg_near_black_settings(),
+            transparent_black=bool(self.karaoke_frame_is_cdg and self._lyrics_background_opacity() > 0.0),
         )
         self._karaoke_scaled_pixmap = QPixmap.fromImage(scaled)
         self._karaoke_scaled_pos = QPoint(
@@ -6011,10 +6644,10 @@ class VideoAreaWidget(QWidget):
         if not singer:
             return
 
-        panel_w = min(int(w * 0.78), 920)
-        panel_h_ratio = 0.52 if on_deck else 0.44
-        panel_h_max = 430 if on_deck else 360
-        panel_h_min = 260 if on_deck else 225
+        panel_w = min(int(w * 0.84), 1100)
+        panel_h_ratio = 0.58 if on_deck else 0.50
+        panel_h_max = 500 if on_deck else 420
+        panel_h_min = 300 if on_deck else 260
         panel_h = min(int(h * panel_h_ratio), panel_h_max)
         panel_h = max(panel_h_min, panel_h)
         x = int((w - panel_w) / 2)
@@ -6029,9 +6662,9 @@ class VideoAreaWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, a(38)))
+        painter.setBrush(QColor(0, 0, 0, a(96)))
         painter.drawRoundedRect(QRectF(x + 10, y + 14, panel_w, panel_h), 22, 22)
-        painter.setBrush(QColor(3, 3, 8, a(102)))
+        painter.setBrush(QColor(1, 2, 6, a(188)))
         painter.drawRoundedRect(QRectF(x, y, panel_w, panel_h), 20, 20)
 
         try:
@@ -6040,38 +6673,59 @@ class VideoAreaWidget(QWidget):
             accent = QColor("#8B5CF6")
         accent.setAlpha(a(255))
 
+        label_font = painter.font()
+        label_font.setBold(True)
+        label_font.setPointSize(max(18, int(panel_h * 0.074)))
+
         singer_font = painter.font()
         singer_font.setBold(True)
-        singer_font.setPointSize(max(30, int(panel_h * 0.132)))
+        singer_font.setPointSize(max(42, int(panel_h * 0.168)))
 
-        singing_font = painter.font()
-        singing_font.setBold(True)
-        singing_font.setPointSize(max(16, int(panel_h * 0.066)))
+        title_font = painter.font()
+        title_font.setBold(True)
+        title_font.setPointSize(max(26, int(panel_h * 0.105)))
+
+        artist_font = painter.font()
+        artist_font.setBold(False)
+        artist_font.setPointSize(max(22, int(panel_h * 0.082)))
 
         deck_font = painter.font()
         deck_font.setBold(True)
-        deck_font.setPointSize(max(15, int(panel_h * 0.06)))
+        deck_font.setPointSize(max(18, int(panel_h * 0.062)))
 
         y_cursor = y + pad
 
+        painter.setFont(label_font)
+        label_fm = QFontMetrics(label_font)
+        painter.setPen(QColor(255, 255, 255, a(210)))
+        painter.drawText(QRect(x + pad, y_cursor, text_w, label_fm.height() + 6),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "NEXT UP")
+        y_cursor += label_fm.height() + 12
+
         painter.setFont(singer_font)
         singer_fm = QFontMetrics(singer_font)
-        singer_text = singer_fm.elidedText(f"Next up: {singer}", Qt.TextElideMode.ElideRight, text_w)
+        singer_text = singer_fm.elidedText(singer, Qt.TextElideMode.ElideRight, text_w)
         painter.setPen(accent)
-        painter.drawText(QRect(x + pad, y_cursor, text_w, singer_fm.height() + 10),
+        painter.drawText(QRect(x + pad, y_cursor, text_w, singer_fm.height() + 14),
                          Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, singer_text)
-        y_cursor += singer_fm.height() + 24
+        y_cursor += singer_fm.height() + 22
 
-        painter.setFont(singing_font)
-        singing_fm = QFontMetrics(singing_font)
-        singing_text = f"Singing: {title or 'Unknown Song'}"
+        painter.setFont(title_font)
+        title_fm = QFontMetrics(title_font)
+        title_text = title_fm.elidedText(title or "Unknown Song", Qt.TextElideMode.ElideRight, text_w)
+        painter.setPen(QColor(255, 255, 255, a(242)))
+        painter.drawText(QRect(x + pad, y_cursor, text_w, title_fm.height() + 8),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, title_text)
+        y_cursor += title_fm.height() + 8
+
         if artist:
-            singing_text = f"{singing_text} by {artist}"
-        singing_text = singing_fm.elidedText(singing_text, Qt.TextElideMode.ElideRight, text_w)
-        painter.setPen(QColor(255, 255, 255, a(230)))
-        painter.drawText(QRect(x + pad, y_cursor, text_w, singing_fm.height() + 8),
-                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, singing_text)
-        y_cursor += singing_fm.height() + 22
+            painter.setFont(artist_font)
+            artist_fm = QFontMetrics(artist_font)
+            artist_text = artist_fm.elidedText(artist, Qt.TextElideMode.ElideRight, text_w)
+            painter.setPen(QColor(221, 226, 238, a(228)))
+            painter.drawText(QRect(x + pad, y_cursor, text_w, artist_fm.height() + 8),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, artist_text)
+            y_cursor += artist_fm.height() + 18
 
         if on_deck:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -6083,7 +6737,7 @@ class VideoAreaWidget(QWidget):
             painter.setFont(deck_font)
             deck_fm = QFontMetrics(deck_font)
             deck_text = deck_fm.elidedText(f"On deck: {on_deck}", Qt.TextElideMode.ElideRight, text_w)
-            painter.setPen(QColor(255, 255, 255, a(230)))
+            painter.setPen(QColor(255, 255, 255, a(220)))
             painter.drawText(QRect(x + pad, y_cursor, text_w, deck_fm.height() + 8),
                              Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, deck_text)
 
@@ -6094,6 +6748,21 @@ class VideoAreaWidget(QWidget):
         painter.fillRect(self.rect(), QColor("black"))
 
         if not self.karaoke_frame.isNull():
+            bg_opacity = self._lyrics_background_opacity() if bool(self.karaoke_frame_is_cdg) else 0.0
+            if bg_opacity > 0.0:
+                # Live MP4 background video wins; otherwise the normal
+                # idle/slideshow background shows through (graceful fallback
+                # when the video folder is empty/missing/disabled).
+                if not self.background_video_pixmap.isNull():
+                    painter.save()
+                    painter.setOpacity(bg_opacity)
+                    self._draw_background_video_pixmap(painter, self.background_video_pixmap)
+                    painter.restore()
+                elif not self.background_pixmap.isNull():
+                    painter.save()
+                    painter.setOpacity(bg_opacity)
+                    self._draw_background_pixmap(painter, self.background_pixmap)
+                    painter.restore()
             self._ensure_karaoke_scaled_pixmap()
             if self.cdg_quality_mode == "high":
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -8871,6 +9540,7 @@ class SingWSLogger:
 def exception_handler(exc_type, exc_value, exc_traceback):
     """Global exception handler - logs crashes"""
     crash_log = SingWSLogger.log_crash(exc_type, exc_value, exc_traceback)
+    maybe_auto_send_crash_logs(crash_log)
     
     # Show user-friendly message
     try:
@@ -9102,28 +9772,29 @@ class RelayRequestWorker(QObject):
         if sock is not None:
             try:
                 try:
-                    sock.connected.disconnect(self._on_connected)
+                    sock.blockSignals(True)
                 except Exception:
                     pass
                 try:
-                    sock.disconnected.disconnect(self._on_disconnected)
+                    sock.close()
                 except Exception:
                     pass
                 try:
-                    sock.textMessageReceived.disconnect(self._on_text_message)
+                    sock.abort()
                 except Exception:
                     pass
                 try:
-                    sock.errorOccurred.disconnect(self._on_error)
+                    sock.setParent(None)
                 except Exception:
                     pass
                 if delete_later:
-                    sock.abort()
                     sock.deleteLater()
                 else:
-                    sock.blockSignals(True)
-                    sock.abort()
-                    sock.deleteLater()
+                    retired = getattr(self, "_retired_sockets", None)
+                    if not isinstance(retired, list):
+                        retired = []
+                        self._retired_sockets = retired
+                    retired.append(sock)
             except Exception:
                 pass
 
@@ -9276,28 +9947,29 @@ class HostControlRelayWorker(QObject):
         if sock is not None:
             try:
                 try:
-                    sock.connected.disconnect(self._on_connected)
+                    sock.blockSignals(True)
                 except Exception:
                     pass
                 try:
-                    sock.disconnected.disconnect(self._on_disconnected)
+                    sock.close()
                 except Exception:
                     pass
                 try:
-                    sock.textMessageReceived.disconnect(self._on_text_message)
+                    sock.abort()
                 except Exception:
                     pass
                 try:
-                    sock.errorOccurred.disconnect(self._on_error)
+                    sock.setParent(None)
                 except Exception:
                     pass
                 if delete_later:
-                    sock.abort()
                     sock.deleteLater()
                 else:
-                    sock.blockSignals(True)
-                    sock.abort()
-                    sock.deleteLater()
+                    retired = getattr(self, "_retired_sockets", None)
+                    if not isinstance(retired, list):
+                        retired = []
+                        self._retired_sockets = retired
+                    retired.append(sock)
             except Exception:
                 pass
 
@@ -9422,10 +10094,7 @@ class DurationProbeWorker(QObject):
         logging.info("=" * 80)
         logging.info("DURATION SCAN START")
         logging.info(f"Total files to probe: {total:,}")
-        try:
-            max_workers = 4 if self.app._performance_mode() else 12
-        except Exception:
-            max_workers = 12
+        max_workers = 12
         logging.info(f"Parallel workers: {max_workers}")
         logging.info(f"Method: CDG size calculation (OpenKJ method) with MP3 fallback")
         logging.info("=" * 80)
@@ -10163,26 +10832,14 @@ class VideoWindow(QWidget):
             bg = getattr(owner, "bg_music", None) if owner is not None else None
 
             should_draw = bool(getattr(self, "idle", False)) and bool(bg) and bool(getattr(bg, "is_playing", False))
-            perf_mode = bool(
-                owner is not None
-                and hasattr(owner, "_performance_mode")
-                and owner._performance_mode()
-            )
-            safe_mode = bool(
-                owner is not None
-                and hasattr(owner, "_safe_mode")
-                and owner._safe_mode()
-            )
             try:
-                target_interval = 500 if safe_mode else (120 if perf_mode else 50)
+                target_interval = 50
                 if self._idle_overlay_timer.interval() != target_interval:
                     self._idle_overlay_timer.start(target_interval)
             except Exception:
                 pass
-            if safe_mode:
-                should_draw = False
             try:
-                level = 0.0 if safe_mode else (float(getattr(bg, "_meter_level", 0.0)) if bg is not None else 0.0)
+                level = float(getattr(bg, "_meter_level", 0.0)) if bg is not None else 0.0
             except Exception:
                 level = 0.0
 
@@ -10324,8 +10981,7 @@ class VideoWindow(QWidget):
                 self.ticker.scroll_timer.start(max(6, interval))
             if hasattr(self.ticker, "queue_update_timer"): self.ticker.queue_update_timer.start(5000)
             if hasattr(self.ticker, "right_update_timer"):
-                right_interval = 1000 if (owner and hasattr(owner, "_performance_mode") and owner._performance_mode()) else 300
-                self.ticker.right_update_timer.start(right_interval)
+                self.ticker.right_update_timer.start(300)
         else:
             # stop timers to save CPU while hidden
             if hasattr(self.ticker, "stop_scrolling"):
@@ -11162,6 +11818,17 @@ class PreviewVideoAreaWidget(QWidget):
         if not self.karaoke_frame.isNull():
             self._ensure_karaoke_scaled_pixmap()
 
+    def _cdg_near_black_settings(self) -> tuple[bool, int]:
+        try:
+            owner = getattr(self, "_owner", None)
+            app = getattr(owner, "parent", lambda: None)()
+            settings = getattr(app, "settings", {}) if app is not None else {}
+            enabled = bool(settings.get("cdg_near_black_cleanup", True))
+            threshold = int(settings.get("cdg_near_black_threshold", 10) or 10)
+            return enabled, threshold
+        except Exception:
+            return True, 10
+
     def _ensure_karaoke_scaled_pixmap(self):
         if self.karaoke_frame.isNull() or self.width() <= 0 or self.height() <= 0:
             self._karaoke_scaled_pixmap = QPixmap()
@@ -11178,6 +11845,7 @@ class PreviewVideoAreaWidget(QWidget):
             bool(self.karaoke_stretch_fill),
             bool(self.karaoke_frame_is_cdg),
             str(self.cdg_quality_mode),
+            self._cdg_near_black_settings() if bool(self.karaoke_frame_is_cdg) else (False, 0),
         )
         if key == self._karaoke_scaled_key and not self._karaoke_scaled_pixmap.isNull():
             return
@@ -11193,6 +11861,7 @@ class PreviewVideoAreaWidget(QWidget):
             mode,
             self.cdg_quality_mode,
             bool(self.karaoke_frame_is_cdg),
+            *self._cdg_near_black_settings(),
         )
         self._karaoke_scaled_pixmap = QPixmap.fromImage(scaled)
         self._karaoke_scaled_pos = QPoint(
@@ -14341,7 +15010,6 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
-        _had_perf_setting = "performance_mode" in self.settings
         self._remote_request_tombstones = self._load_remote_request_tombstones()
         self._deferred_remote_adds = self._load_deferred_remote_adds()
         self._remote_request_intake_inflight = set()
@@ -14354,8 +15022,8 @@ class KaraokeApp(QWidget):
         self.bgm_eq = None
         self._eq_init_error = None
         # Optional master "mix bus" processor (gate/comp/limiter/EQ). Built
-        # lazily only when Master Audio Processing is enabled and not in
-        # Performance Mode. None = fully bypassed.
+        # lazily only when Master Audio Processing is enabled. None = fully
+        # bypassed.
         self.karaoke_master = None
         self._master_init_error = None
         # Separate processor instance for the BGM mixer (own filter/compressor
@@ -14467,22 +15135,21 @@ class KaraokeApp(QWidget):
 
         # Merge defaults (non-destructive) and persist if anything was missing
         changed = False
+        for obsolete_key in ("performance_mode", "safe_mode"):
+            if obsolete_key in self.settings:
+                self.settings.pop(obsolete_key, None)
+                changed = True
         for k, v in DEFAULTS.items():
             if k not in self.settings:
                 self.settings[k] = v
                 changed = True
-        if not _had_perf_setting and sys.platform == "darwin":
-            try:
-                import platform as _platform
-                if str(_platform.machine()).lower() == "x86_64":
-                    self.settings["performance_mode"] = True
-                    changed = True
-                    _diag("[PERF] Performance Mode enabled by default on Intel macOS")
-            except Exception:
-                pass
         if changed:
             try: self.save_settings()
             except Exception: pass
+        try:
+            _install_main_thread_watchdog(self)
+        except Exception:
+            pass
         try:
             self._sync_loudness_worker_gate("startup")
         except Exception:
@@ -15317,8 +15984,8 @@ class KaraokeApp(QWidget):
             + f"""
                 QListWidget {{
                     border-radius: 8px;
-                    background-color: #0a0a0a;
-                    alternate-background-color: #151515;
+                    background-color: {_v('surface_alt')};
+                    alternate-background-color: rgba(255,255,255,0.022);
                     border: 1px solid rgba(115,144,180,0.10);
                     padding: 3px;
                     font-weight: 650;
@@ -15327,10 +15994,10 @@ class KaraokeApp(QWidget):
                     padding: 6px 12px;
                     margin: 0px;
                     border-radius: 0px;
-                    background-color: #0a0a0a;
+                    background-color: transparent;
                 }}
                 QListWidget::item:alternate {{
-                    background-color: #151515;
+                    background-color: rgba(255,255,255,0.022);
                 }}
                 QListWidget::item:hover {{
                     background-color: rgba(124,61,255,0.18);
@@ -15509,7 +16176,7 @@ class KaraokeApp(QWidget):
             + f"""
                 QListWidget {{
                     border-radius: 8px;
-                    background-color: rgba(3,8,15,0.96);
+                    background-color: {_v('surface_alt')};
                     alternate-background-color: rgba(255,255,255,0.022);
                     border: 1px solid rgba(115,144,180,0.10);
                     padding: 3px;
@@ -16187,9 +16854,10 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_sent_count = 0
         self._daw_snapshot_post_count = 0
         self._daw_snapshot_stats_started = time.monotonic()
+        self._daw_snapshot_viewer_recent_until = 0.0
         self._daw_snapshot_timer = QTimer(self)
         self._daw_snapshot_timer.timeout.connect(self._schedule_daw_singer_screen_snapshot)
-        self._daw_snapshot_timer.start(1000)
+        self._retune_daw_snapshot_timer("startup")
 
         self.rotation_view = None
 
@@ -16201,33 +16869,23 @@ class KaraokeApp(QWidget):
         self.load_data()
         self._bootstrap_bg_playlist_on_startup()
         self.search_tracks()
-        if self._safe_mode():
-            print("[SAFE-MODE] Skipping startup singer-history refresh")
-        else:
-            QTimer.singleShot(1500, lambda: self._schedule_singer_history_refresh(0, reason="startup"))
+        QTimer.singleShot(1500, lambda: self._schedule_singer_history_refresh(0, reason="startup"))
         self.update_queue_display()
         self._update_rotation_lock_button()
-        if not self._safe_mode():
-            self.update_bg_track_display()
+        self.update_bg_track_display()
         #self.start_request_polling()
         
-        if self._safe_mode():
-            print("[SAFE-MODE] Skipping startup duration scan")
-        else:
-            try:
-                QTimer.singleShot(5000 if self._performance_mode() else 1200, self._start_missing_duration_probe_if_needed)
-            except Exception:
-                pass
+        try:
+            QTimer.singleShot(1200, self._start_missing_duration_probe_if_needed)
+        except Exception:
+            pass
         
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self.save_data)
         self.auto_save_timer.start(60000)
 
-        # Only start polling if network is properly configured. Safe Mode keeps
-        # the app offline so server sync can be isolated during profiling.
-        if self._safe_mode():
-            print("[SAFE-MODE] Server polling disabled")
-        elif self.is_network_configured():
+        # Only start polling if network is properly configured.
+        if self.is_network_configured():
             base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
             api_key = self.settings.get("api_key", "")
@@ -16351,14 +17009,67 @@ class KaraokeApp(QWidget):
             return False
 
     def _master_processing_active(self) -> bool:
-        """Master Audio Processing runs only when the user enabled it AND we're
-        not in Performance Mode (which bypasses everything but core playback)."""
+        """Master Audio Processing runs only when the user enabled it."""
         try:
-            if self._performance_mode():
-                return False
             return bool(self.settings.get("master_audio_enabled", False))
         except Exception:
             return False
+
+    def _master_chain_label(self, stream: str = "karaoke") -> str:
+        if not self._master_processing_active():
+            return "off"
+        try:
+            p = self._compute_master_audio_params()
+            stages = []
+            if float(p.get("gate_enabled", 0) or 0) > 0:
+                stages.append("gate")
+            if float(p.get("eq_enabled", 0) or 0) > 0:
+                stages.append("tilt-eq")
+            if float(p.get("exciter_mix", 0) or 0) > 0:
+                stages.append("exciter")
+            if float(p.get("comp_enabled", 0) or 0) > 0:
+                stages.append("compressor")
+            if float(p.get("limiter_enabled", 0) or 0) > 0:
+                stages.append(f"limiter@{float(p.get('limiter_ceiling_db', -1.0)):+.1f}dB")
+            return "+".join(stages) if stages else "enabled-no-stages"
+        except Exception:
+            return "enabled"
+
+    def _eq_chain_label(self, eq_obj, *, simple_audio: bool) -> str:
+        if simple_audio:
+            return "bypassed-simple-audio"
+        if eq_obj is None:
+            return "off"
+        try:
+            if not eq_obj.enabled():
+                return "off"
+            if eq_obj.is_flat():
+                return "flat"
+            return "on"
+        except Exception:
+            return "attached"
+
+    def _log_karaoke_audio_chain(self, *, audio_path: str, mode: str, transport, simple_audio: bool, normalize_active: bool):
+        try:
+            eq_label = self._eq_chain_label(getattr(transport, "eq", None), simple_audio=simple_audio)
+            master_label = self._master_chain_label("karaoke") if getattr(transport, "master", None) is not None else "off"
+            normalize_db = float(getattr(transport, "normalize_gain_db", 0.0) or 0.0)
+            engine = transport.__class__.__name__ if transport is not None else "unknown"
+            try:
+                machine = platform.machine() or ""
+            except Exception:
+                machine = ""
+            _diag(
+                f"[KARAOKE-AUDIO] track={Path(audio_path).name} mode={mode} platform={sys.platform}/{machine} "
+                f"engine={engine} simple_audio={int(bool(simple_audio))} "
+                f"chain=decoder -> tempo/key -> normalize({int(bool(normalize_active))},{normalize_db:+.1f}dB) "
+                f"-> EQ({eq_label}) -> master_audio({master_label}) -> output"
+            )
+        except Exception as exc:
+            try:
+                _diag(f"[KARAOKE-AUDIO] chain log failed: {exc}")
+            except Exception:
+                pass
 
     def _compute_master_audio_params(self) -> dict:
         """Translate the friendly per-stage toggles + key knobs in settings into
@@ -16471,7 +17182,7 @@ class KaraokeApp(QWidget):
 
     def _apply_bgm_master_processing(self):
         """Attach/detach the full BGM master processor to match the karaoke
-        chain + Performance Mode — in tandem with the karaoke chain."""
+        chain in tandem with the karaoke chain."""
         try:
             bg = getattr(self, "bg_music", None)
             engine = getattr(bg, "_bass_engine", None) if bg is not None else None
@@ -16546,6 +17257,20 @@ class KaraokeApp(QWidget):
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(14)
 
+        if self._simple_audio_mode():
+            notice = QLabel(
+                "Simple Audio Mode is ON — the EQ is bypassed for karaoke AND "
+                "background music. Turn it off in Settings → Audio to hear EQ changes."
+            )
+            notice.setWordWrap(True)
+            notice.setStyleSheet(
+                "color:#ffd479; font-size:12px; font-weight:700; "
+                "background: rgba(255,196,0,0.08); border: 1px solid rgba(255,196,0,0.25); "
+                "border-radius: 8px; padding: 8px;"
+            )
+            root.addWidget(notice)
+            _diag("[EQ-ROUTE] eq_dialog_opened simple_audio=1 (EQ bypassed on both paths)")
+
         # ---- one column builder, reused for Karaoke and BGM ----
         def build_column(title: str, eq, settings_key: str, enabled_key: str) -> QFrame:
             card = QFrame()
@@ -16619,7 +17344,10 @@ class KaraokeApp(QWidget):
                     if bass is not None and hasattr(bass, "set_eq"):
                         # Detaches the BASS DSP entirely when BGM EQ is off or
                         # flat, so disabled EQ has zero audio-callback cost.
-                        bass.set_eq(eq)
+                        # Simple Audio Mode keeps BGM EQ out of the chain even
+                        # while the dialog is open (same rule as karaoke).
+                        bass.set_eq(None if self._simple_audio_mode() else eq)
+                    self._log_bgm_eq_route("eq_dialog_change")
                 except Exception:
                     pass
 
@@ -17705,13 +18433,77 @@ class KaraokeApp(QWidget):
                 transport.stop()
             except Exception as e:
                 _diag(f"[PY-KARAOKE] stop failed: {e}")
+        self._stop_lyrics_background_video("karaoke_stopped")
+
+    # -------------------- MP4 background videos behind CDG lyrics ----------
+    def _start_lyrics_background_video(self):
+        """Start the shuffled MP4 background loop for a CDG song, when the
+        host enabled it. Falls back silently (normal CDG background) when the
+        feature is off, the opacity is 0, or the folder is empty/missing."""
+        self._stop_lyrics_background_video("restart")
+        try:
+            enabled = bool(self.settings.get("bg_video_enabled", False))
+            folder = str(self.settings.get("bg_video_folder", "") or "")
+            shuffle = bool(self.settings.get("bg_video_shuffle", True))
+            opacity = int(float(self.settings.get("lyrics_background_video_opacity", 0) or 0))
+        except Exception:
+            return
+        if not enabled:
+            return
+        if opacity <= 0:
+            _diag("[BG-VIDEO] not started reason=opacity_zero (set Background Video Opacity > 0)")
+            return
+        if Gst is None:
+            _diag("[BG-VIDEO] not started reason=gstreamer_unavailable")
+            return
+        files = scan_background_video_folder(folder)
+        if not files:
+            _diag(f"[BG-VIDEO] fallback to normal CDG background reason=no_videos folder={folder!r}")
+            return
+        try:
+            player = LyricsBackgroundVideoPlayer(
+                self,
+                on_frame=self._on_lyrics_bg_video_frame,
+                max_height=self._effective_mp4_max_height() or 720,
+            )
+            if player.start(files, shuffle=shuffle):
+                self._lyrics_bg_video_player = player
+                _diag(
+                    f"[BG-VIDEO] started files={len(files)} shuffle={int(shuffle)} "
+                    f"opacity={opacity}% folder={folder!r}"
+                )
+            else:
+                player.stop("start_failed")
+        except Exception as e:
+            _diag(f"[BG-VIDEO] start failed: {e}")
+
+    def _stop_lyrics_background_video(self, reason: str = "stop"):
+        player = getattr(self, "_lyrics_bg_video_player", None)
+        self._lyrics_bg_video_player = None
+        if player is not None:
+            try:
+                player.stop(reason)
+            except Exception:
+                pass
+        try:
+            self.video_window.video_area.set_background_video_frame(None)
+        except Exception:
+            pass
+
+    def _on_lyrics_bg_video_frame(self, image):
+        try:
+            if self.video_window.isVisible() and not self.video_window.isMinimized():
+                self.video_window.video_area.set_background_video_frame(image)
+        except Exception:
+            pass
 
     def _on_python_karaoke_frame(self, image):
         _perf_t0 = time.perf_counter()
         try:
             self._maybe_send_daw_snapshot_from_frame(image, reason="frame")
             is_cdg = str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg"
-            stretch = bool(is_cdg and self.settings.get("cdg_stretch_fill", False))
+            cdg_display_mode = self._effective_cdg_display_mode() if is_cdg else "fit"
+            stretch = bool(is_cdg and cdg_display_mode == "stretch")
             quality = self._effective_cdg_quality_mode()
             try:
                 self.video_window.video_area.set_cdg_quality_mode(quality)
@@ -17792,14 +18584,16 @@ class KaraokeApp(QWidget):
         except Exception:
             duration = 0.0
         try:
-            transport = transport_cls(
-                audio_path,
-                video_path=video_path,
-                mode=mode,
-                duration_seconds=duration,
-                probe_duration_on_init=False,
-                parent=self,
-            )
+            transport_kwargs = {
+                "video_path": video_path,
+                "mode": mode,
+                "duration_seconds": duration,
+                "probe_duration_on_init": False,
+                "parent": self,
+            }
+            if str(mode or "").lower() == "cdg" and getattr(transport_cls, "__name__", "") == "GstKaraokeTransport":
+                transport_kwargs["cdg_sidefill"] = self._effective_cdg_display_mode() == "sidefill"
+            transport = transport_cls(audio_path, **transport_kwargs)
         except Exception as e:
             # GStreamer engine failed to construct (missing element/plugin):
             # fall back to the legacy ffmpeg transport rather than dying.
@@ -17850,9 +18644,18 @@ class KaraokeApp(QWidget):
             transport.eq = None if simple_audio else getattr(self, "karaoke_eq", None)
         except Exception:
             pass
-        # Master "mix bus" processing is an independent opt-in (works in either
-        # Simple or Advanced mode). It is fully bypassed when disabled or in
-        # Performance Mode — _ensure_master_processor() returns None there.
+        try:
+            eq_obj = getattr(transport, "eq", None)
+            _diag(
+                f"[EQ-ROUTE] path=karaoke mode={mode} routed={int(eq_obj is not None)} "
+                f"reason={'simple_audio_mode' if simple_audio else ('attached' if eq_obj is not None else 'eq_engines_unavailable')} "
+                f"enabled={int(bool(eq_obj is not None and eq_obj.enabled()))} "
+                f"flat={int(bool(eq_obj is None or eq_obj.is_flat()))}"
+            )
+        except Exception:
+            pass
+        # Master "mix bus" processing is an independent opt-in; it is fully
+        # bypassed when disabled.
         try:
             transport.master = self._ensure_master_processor()
         except Exception:
@@ -17881,6 +18684,13 @@ class KaraokeApp(QWidget):
                     _diag(f"[LOUDNESS] song_start_gain gain={float(gain):+.1f}dB trim={trim_db:+.1f}dB total={transport.normalize_gain_db:+.1f}dB file={os.path.basename(audio_path)}")
         except Exception:
             transport.normalize_gain_db = 0.0
+        self._log_karaoke_audio_chain(
+            audio_path=audio_path,
+            mode=mode,
+            transport=transport,
+            simple_audio=simple_audio,
+            normalize_active=want_normalize,
+        )
         # Visual-only timing calibration (audio stays the master clock). CDG
         # lyrics are calibrated separately because MP4 timing does not show the
         # same display latency.
@@ -18014,6 +18824,13 @@ class KaraokeApp(QWidget):
             start_seconds=start_seconds,
             loop_seconds=loop_seconds,
         )
+        # Optional shuffled MP4 background behind the CDG lyrics. Runs on its
+        # own muted video-only pipeline so audio timing/key/tempo are
+        # untouched; falls back to the normal background when disabled/empty.
+        try:
+            self._start_lyrics_background_video()
+        except Exception as e:
+            _diag(f"[BG-VIDEO] start hook failed: {e}")
 
     def _play_python_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
@@ -18323,7 +19140,6 @@ class KaraokeApp(QWidget):
                 "[PERF-SUMMARY] "
                 f"cpu={cpu} mem={mem} threads={threading.active_count()} "
                 f"tracks={track_count} queue={q_count} results={result_count} "
-                f"safe={int(self._safe_mode())} perf={int(self._performance_mode())} "
                 f"{self._active_worker_snapshot()} top=[{top}]"
             )
         except Exception as e:
@@ -18788,9 +19604,6 @@ class KaraokeApp(QWidget):
             self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
 
     def start_request_polling(self):
-        if self._safe_mode():
-            print("[SAFE-MODE] Polling start ignored")
-            return
         base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
         tenant   = self.settings.get("user", self.settings.get("tenant", ""))
 
@@ -18880,6 +19693,12 @@ class KaraokeApp(QWidget):
         if bool(getattr(self, "_network_transports_shutdown", False)):
             return
         self._network_transports_shutdown = True
+        if bool(getattr(self, "_app_closing", False)):
+            try:
+                global _QT_APP_SHUTTING_DOWN
+                _QT_APP_SHUTTING_DOWN = True
+            except Exception:
+                pass
         try:
             timer = getattr(self, "_host_control_state_timer", None)
             if timer is not None:
@@ -18970,6 +19789,11 @@ class KaraokeApp(QWidget):
     def _on_app_about_to_quit(self):
         self._app_closing = True
         try:
+            global _QT_APP_SHUTTING_DOWN
+            _QT_APP_SHUTTING_DOWN = True
+        except Exception:
+            pass
+        try:
             self._capture_window_geometry_settings()
             self._save_operator_splitter_sizes()
             self.save_settings()
@@ -18985,10 +19809,6 @@ class KaraokeApp(QWidget):
         be partial or temporarily unavailable while request intake still works.
         """
         self.stop_request_polling()
-        if self._safe_mode():
-            print("[SAFE-MODE] Polling restart ignored")
-            return
-        
         if self.is_network_configured():
             base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
             user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
@@ -20068,8 +20888,6 @@ class KaraokeApp(QWidget):
                 pass
 
     def _start_update_check(self, *, manual: bool = False, download: bool = False):
-        if self._safe_mode() and not manual:
-            return
         try:
             worker = getattr(self, "_github_update_worker", None)
             if worker is not None and worker.isRunning():
@@ -20099,7 +20917,7 @@ class KaraokeApp(QWidget):
 
     def _maybe_auto_check_for_updates(self):
         try:
-            if self._safe_mode() or not bool(self.settings.get("auto_update_enabled", True)):
+            if not bool(self.settings.get("auto_update_enabled", True)):
                 return
             now = int(time.time())
             last = int(self.settings.get("auto_update_last_check", 0) or 0)
@@ -20356,9 +21174,19 @@ class KaraokeApp(QWidget):
 
         v.addLayout(row)
 
-        cdg_stretch_cb = QCheckBox("Stretch CDG to fill video output")
-        cdg_stretch_cb.setChecked(bool(self.settings.get("cdg_stretch_fill", False)))
-        v.addWidget(cdg_stretch_cb)
+        cdg_display_row = QHBoxLayout()
+        cdg_display_row.addWidget(QLabel("CDG Display:"))
+        cdg_display_combo = QComboBox(dlg)
+        cdg_display_combo.addItem("Fit original lyrics", "fit")
+        cdg_display_combo.addItem("Widescreen side fill", "sidefill")
+        cdg_display_combo.addItem("Stretch to fill", "stretch")
+        cdg_display_combo.setToolTip("Side fill keeps lyrics unstretched and fills widescreen side bars from the CDG background/border color.")
+        cur_cdg_display = self._effective_cdg_display_mode()
+        cdg_display_idx = cdg_display_combo.findData(cur_cdg_display)
+        cdg_display_combo.setCurrentIndex(cdg_display_idx if cdg_display_idx >= 0 else 0)
+        cdg_display_row.addWidget(cdg_display_combo)
+        cdg_display_row.addStretch(1)
+        v.addLayout(cdg_display_row)
 
         cdg_quality_row = QHBoxLayout()
         cdg_quality_row.addWidget(QLabel("CDG Quality:"))
@@ -20371,6 +21199,85 @@ class KaraokeApp(QWidget):
         cdg_quality_row.addWidget(cdg_quality_combo)
         cdg_quality_row.addStretch(1)
         v.addLayout(cdg_quality_row)
+
+        cdg_black_cleanup_cb = QCheckBox("Clean near-black CDG backgrounds")
+        cdg_black_cleanup_cb.setToolTip("Clamps only very dark CDG background pixels to true black. Lyrics and colored graphics are left alone.")
+        cdg_black_cleanup_cb.setChecked(bool(self.settings.get("cdg_near_black_cleanup", True)))
+        v.addWidget(cdg_black_cleanup_cb)
+
+        cdg_black_row = QHBoxLayout()
+        cdg_black_row.addWidget(QLabel("Black cleanup threshold:"))
+        cdg_black_threshold_spin = QSpinBox(dlg)
+        cdg_black_threshold_spin.setRange(0, 32)
+        cdg_black_threshold_spin.setSingleStep(1)
+        try:
+            cdg_black_threshold_spin.setValue(max(0, min(32, int(self.settings.get("cdg_near_black_threshold", 10) or 10))))
+        except Exception:
+            cdg_black_threshold_spin.setValue(10)
+        cdg_black_row.addWidget(cdg_black_threshold_spin)
+        cdg_black_row.addStretch(1)
+        v.addLayout(cdg_black_row)
+
+        lyric_bg_opacity_row = QHBoxLayout()
+        lyric_bg_opacity_row.addWidget(QLabel("Background video opacity/transparency:"))
+        lyric_bg_opacity_spin = QSpinBox(dlg)
+        lyric_bg_opacity_spin.setRange(0, 100)
+        lyric_bg_opacity_spin.setSingleStep(5)
+        lyric_bg_opacity_spin.setSuffix("%")
+        lyric_bg_opacity_spin.setToolTip("Shows the background (video/idle/slideshow) subtly through near-black CDG background pixels only. Lyrics stay opaque.")
+        try:
+            lyric_bg_opacity_spin.setValue(max(0, min(100, int(float(self.settings.get("lyrics_background_video_opacity", 0) or 0)))))
+        except Exception:
+            lyric_bg_opacity_spin.setValue(0)
+        lyric_bg_opacity_row.addWidget(lyric_bg_opacity_spin)
+        lyric_bg_opacity_row.addStretch(1)
+        v.addLayout(lyric_bg_opacity_row)
+
+        # ---- Background videos behind CDG lyrics ----
+        v = _section_card(tab_display, "Background Videos Behind Lyrics",
+                          "Plays muted MP4s from a folder behind CDG lyrics at the "
+                          "opacity above. Needs opacity > 0. Falls back to the normal "
+                          "background when the folder is empty or missing.")
+        bg_video_enable_cb = QCheckBox("Enable Background Videos Behind Lyrics")
+        bg_video_enable_cb.setChecked(bool(self.settings.get("bg_video_enabled", False)))
+        v.addWidget(bg_video_enable_cb)
+
+        bg_video_shuffle_cb = QCheckBox("Shuffle Background Videos")
+        bg_video_shuffle_cb.setToolTip("Every video plays once before any repeats. Off = alphabetical loop.")
+        bg_video_shuffle_cb.setChecked(bool(self.settings.get("bg_video_shuffle", True)))
+        v.addWidget(bg_video_shuffle_cb)
+
+        bg_video_folder_row = QHBoxLayout()
+        bg_video_folder_btn = QPushButton("Choose Background Video Folder…")
+        bg_video_folder_row.addWidget(bg_video_folder_btn)
+        bg_video_folder_label = QLabel()
+        bg_video_folder_label.setWordWrap(True)
+
+        def _refresh_bg_video_folder_label():
+            folder = str(self.settings.get("bg_video_folder", "") or "")
+            if not folder:
+                bg_video_folder_label.setText("No folder selected")
+                return
+            count = len(scan_background_video_folder(folder))
+            bg_video_folder_label.setText(f"{folder}  ({count} video{'s' if count != 1 else ''})")
+
+        _refresh_bg_video_folder_label()
+        bg_video_folder_row.addWidget(bg_video_folder_label, 1)
+        v.addLayout(bg_video_folder_row)
+
+        def on_choose_bg_video_folder():
+            start_dir = str(self.settings.get("bg_video_folder", "") or "") or str(Path.home())
+            folder = QFileDialog.getExistingDirectory(dlg, "Choose Background Video Folder", start_dir)
+            if folder:
+                self.settings["bg_video_folder"] = folder
+                try:
+                    self.save_settings()
+                except Exception:
+                    pass
+                _refresh_bg_video_folder_label()
+                _diag(f"[BG-VIDEO] folder selected folder={folder!r} videos={len(scan_background_video_folder(folder))}")
+
+        bg_video_folder_btn.clicked.connect(on_choose_bg_video_folder)
 
         v = _section_card(tab_display, "Show Screen Transition")
         next_up_overlay_cb = QCheckBox('Show "Next Up" Transition Overlay')
@@ -20414,25 +21321,8 @@ class KaraokeApp(QWidget):
         video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(500))
 
         v = _section_card(tab_general, "General")  # ---- General ----
-        performance_mode_cb = QCheckBox("Performance Mode")
-        performance_mode_cb.setToolTip(
-            "Reduces nonessential visual/background work for slower machines. "
-            "Search waits longer, fuzzy search is skipped, polling slows down, "
-            "CDG uses Standard quality, and background visualizer meters are bypassed."
-        )
-        performance_mode_cb.setChecked(bool(self.settings.get("performance_mode", False)))
-        v.addWidget(performance_mode_cb)
-
-        safe_mode_cb = QCheckBox("Safe Mode")
-        safe_mode_cb.setToolTip(
-            "Profiling isolation mode. Temporarily disables BGM startup/preload, "
-            "server polling, duration scans, fuzzy search, heavy CDG mode, and nonessential animations."
-        )
-        safe_mode_cb.setChecked(bool(self.settings.get("safe_mode", False)))
-        v.addWidget(safe_mode_cb)
-
-        perf_debug_cb = QCheckBox("Performance debug logging")
-        perf_debug_cb.setToolTip("Prints periodic [PERF-SUMMARY] lines with slowest tasks, CPU, memory, and worker counts.")
+        perf_debug_cb = QCheckBox("Runtime diagnostic logging")
+        perf_debug_cb.setToolTip("Prints periodic diagnostic summaries with slowest tasks, CPU, memory, and worker counts.")
         perf_debug_cb.setChecked(bool(self.settings.get("performance_debug_enabled", True)))
         v.addWidget(perf_debug_cb)
 
@@ -20531,13 +21421,14 @@ class KaraokeApp(QWidget):
         v.addWidget(defer_remote_adds_cb)
 
         daw_preview_cb = QCheckBox("Enable DAW singer screen preview")
-        daw_preview_cb.setToolTip("Uploads a small cached still image for the DAW remote when a DAW page is open. Disabled by default in Performance/Safe Mode.")
+        daw_preview_cb.setToolTip("Uploads a small cached still image for the DAW remote when a DAW page is open.")
         daw_preview_cb.setChecked(bool(self._daw_singer_screen_preview_enabled()))
         v.addWidget(daw_preview_cb)
 
         def on_daw_preview_toggled(checked: bool):
             self.settings["daw_singer_screen_preview_enabled"] = bool(checked)
             self.save_settings()
+            self._retune_daw_snapshot_timer("settings_toggle")
         daw_preview_cb.toggled.connect(on_daw_preview_toggled)
 
         v = _section_card(tab_general, "Rotation Estimate")  # ---- General ----
@@ -20627,7 +21518,7 @@ class KaraokeApp(QWidget):
         master_audio_cb.setToolTip(
             "A light 'mix bus' chain (in the spirit of a dbx 266 + BBE Sonic Maximizer)\n"
             "for a steadier perceived volume. Each stage can be toggled below.\n"
-            "Pairs with loudness normalization. Always bypassed in Performance Mode."
+            "Applies to karaoke and BGM only when this setting is explicitly enabled."
         )
         master_audio_cb.setChecked(bool(self.settings.get("master_audio_enabled", False)))
         v.addWidget(master_audio_cb)
@@ -20815,11 +21706,11 @@ class KaraokeApp(QWidget):
         logs_btn = QPushButton("Logs")
         logs_btn.setToolTip(f"Open logs folder: {LOGS_DIR}")
 
-        analyze_lib_btn = QPushButton("Analyze Library Volume")
-        analyze_lib_btn.setToolTip("Pre-analyze loudness/gain for karaoke and background-music tracks. Incremental — only analyzes files that are not already cached.")
+        analyze_lib_btn = QPushButton("Cache Loudness Levels")
+        analyze_lib_btn.setToolTip("Measures LUFS/peak for karaoke and background-music files so normalization can apply a cached gain on future playback. Incremental — skips files already cached.")
         analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False))
-        reanalyze_lib_btn = QPushButton("Re-analyze Volume")
-        reanalyze_lib_btn.setToolTip("Force a fresh loudness/gain analysis for karaoke and background-music tracks.")
+        reanalyze_lib_btn = QPushButton("Rebuild Loudness Cache")
+        reanalyze_lib_btn.setToolTip("Force a fresh LUFS/peak measurement for karaoke and background-music files.")
         reanalyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=True))
 
         _search_actions_card = _section_card(tab_search, "Library Tools")
@@ -20841,12 +21732,60 @@ class KaraokeApp(QWidget):
         _display_actions.addStretch(1)
         _display_actions_card.addLayout(_display_actions)
 
-        _adv_actions_card = _section_card(tab_advanced, "Diagnostics",
-                          "Open the logs folder for troubleshooting.")
+        _adv_actions_card = _section_card(tab_advanced, "Logs & Crash Reporting",
+                          "Send sanitized app/crash logs for troubleshooting. Configure SMTP with an app password; credentials are saved locally and never written to logs.")
         _adv_actions = QHBoxLayout()
         _adv_actions.addWidget(logs_btn)
+        send_logs_btn = QPushButton("Send Last 3 Days of Logs")
+        _adv_actions.addWidget(send_logs_btn)
         _adv_actions.addStretch(1)
         _adv_actions_card.addLayout(_adv_actions)
+
+        log_email_row = QHBoxLayout()
+        log_email_row.addWidget(QLabel("Send logs to:"))
+        log_email_edit = QLineEdit(str(self.settings.get("crash_log_email_to", "") or ""))
+        log_email_edit.setPlaceholderText("debug@example.com")
+        log_email_row.addWidget(log_email_edit, 1)
+        _adv_actions_card.addLayout(log_email_row)
+
+        auto_crash_logs_cb = QCheckBox("Automatically send crash logs after a crash")
+        auto_crash_logs_cb.setChecked(bool(self.settings.get("crash_auto_send_logs", False)))
+        _adv_actions_card.addWidget(auto_crash_logs_cb)
+
+        smtp_grid = QGridLayout()
+        smtp_grid.setHorizontalSpacing(8)
+        smtp_grid.setVerticalSpacing(7)
+
+        smtp_host_edit = QLineEdit(str(self.settings.get("log_smtp_host", "") or ""))
+        smtp_host_edit.setPlaceholderText("smtp.gmail.com")
+        smtp_port_spin = QSpinBox(dlg)
+        smtp_port_spin.setRange(1, 65535)
+        try:
+            smtp_port_spin.setValue(max(1, min(65535, int(self.settings.get("log_smtp_port", 587) or 587))))
+        except Exception:
+            smtp_port_spin.setValue(587)
+        smtp_user_edit = QLineEdit(str(self.settings.get("log_smtp_username", "") or ""))
+        smtp_user_edit.setPlaceholderText("SMTP username")
+        smtp_password_edit = QLineEdit(str(self.settings.get("log_smtp_password", "") or ""))
+        smtp_password_edit.setPlaceholderText("SMTP app password")
+        smtp_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        smtp_from_edit = QLineEdit(str(self.settings.get("log_smtp_from", "") or ""))
+        smtp_from_edit.setPlaceholderText("optional sender email")
+        smtp_tls_cb = QCheckBox("Use STARTTLS")
+        smtp_tls_cb.setChecked(bool(self.settings.get("log_smtp_tls", True)))
+
+        smtp_grid.addWidget(QLabel("SMTP host:"), 0, 0)
+        smtp_grid.addWidget(smtp_host_edit, 0, 1)
+        smtp_grid.addWidget(QLabel("Port:"), 0, 2)
+        smtp_grid.addWidget(smtp_port_spin, 0, 3)
+        smtp_grid.addWidget(QLabel("Username:"), 1, 0)
+        smtp_grid.addWidget(smtp_user_edit, 1, 1, 1, 3)
+        smtp_grid.addWidget(QLabel("App password:"), 2, 0)
+        smtp_grid.addWidget(smtp_password_edit, 2, 1, 1, 3)
+        smtp_grid.addWidget(QLabel("From:"), 3, 0)
+        smtp_grid.addWidget(smtp_from_edit, 3, 1, 1, 2)
+        smtp_grid.addWidget(smtp_tls_cb, 3, 3)
+        _adv_actions_card.addLayout(smtp_grid)
 
         # Push each tab's content to the top so controls don't stretch apart.
         for _t in _setting_tabs:
@@ -20906,55 +21845,72 @@ class KaraokeApp(QWidget):
             pending_text_size["applied"] = False
             self.save_settings()
 
-        def on_cdg_stretch_toggled(checked: bool):
-            self.settings["cdg_stretch_fill"] = bool(checked)
+        def on_cdg_display_mode_changed(_idx: int):
+            mode = str(cdg_display_combo.currentData() or "fit")
+            if mode not in {"fit", "sidefill", "stretch"}:
+                mode = "fit"
+            self.settings["cdg_display_mode"] = mode
+            self.settings["cdg_stretch_fill"] = bool(mode == "stretch")
             self.save_settings()
+            try:
+                if str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg" and bool(getattr(self, "karaoke_playing", False)):
+                    _diag(f"[CDG-RENDER] display_mode_changed mode={mode} applies_next_cdg=1")
+            except Exception:
+                pass
 
         def on_cdg_quality_changed(_idx: int):
             mode = str(cdg_quality_combo.currentData() or "standard")
             self.settings["cdg_quality_mode"] = "high" if mode == "high" else "standard"
             self.save_settings()
             try:
-                self._apply_performance_mode_runtime()
+                self._apply_runtime_media_settings()
             except Exception:
                 pass
 
-        def on_performance_mode_toggled(checked: bool):
-            self.settings["performance_mode"] = bool(checked)
+        def on_cdg_black_cleanup_changed(_checked=None):
+            self.settings["cdg_near_black_cleanup"] = bool(cdg_black_cleanup_cb.isChecked())
+            self.settings["cdg_near_black_threshold"] = int(cdg_black_threshold_spin.value())
+            self.settings["lyrics_background_video_opacity"] = int(lyric_bg_opacity_spin.value())
             self.save_settings()
             try:
-                self._sync_loudness_worker_gate("performance_mode_toggled")
+                if hasattr(self, "video_window") and hasattr(self.video_window, "video_area"):
+                    self.video_window.video_area._karaoke_scaled_key = None
+                    self.video_window.video_area.update()
+                if hasattr(self, "preview_window") and hasattr(self.preview_window, "video_area"):
+                    self.preview_window.video_area._karaoke_scaled_key = None
+                    self.preview_window.video_area.update()
             except Exception:
                 pass
+            # Opacity going 0 -> N mid-song should start the background video
+            # loop right away (it is skipped at song start while opacity is 0).
             try:
-                self._apply_performance_mode_runtime()
-            except Exception:
-                pass
-            try:
-                self.restart_request_polling()
+                opacity_now = int(lyric_bg_opacity_spin.value())
+                cdg_live = str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg" and bool(getattr(self, "karaoke_playing", False))
+                if cdg_live and bool(self.settings.get("bg_video_enabled", False)):
+                    if opacity_now > 0 and getattr(self, "_lyrics_bg_video_player", None) is None:
+                        self._start_lyrics_background_video()
+                    elif opacity_now <= 0:
+                        self._stop_lyrics_background_video("opacity_zero")
             except Exception:
                 pass
 
-        def on_safe_mode_toggled(checked: bool):
-            self.settings["safe_mode"] = bool(checked)
+        def on_bg_video_settings_changed(_checked=None):
+            self.settings["bg_video_enabled"] = bool(bg_video_enable_cb.isChecked())
+            self.settings["bg_video_shuffle"] = bool(bg_video_shuffle_cb.isChecked())
             self.save_settings()
+            # Apply live: (re)start or stop the background loop for the
+            # currently playing CDG song instead of waiting for the next one.
             try:
-                self._sync_loudness_worker_gate("safe_mode_toggled")
+                if str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg" and bool(getattr(self, "karaoke_playing", False)):
+                    if self.settings["bg_video_enabled"]:
+                        self._start_lyrics_background_video()
+                    else:
+                        self._stop_lyrics_background_video("disabled_in_settings")
             except Exception:
                 pass
-            try:
-                self._apply_performance_mode_runtime()
-            except Exception:
-                pass
-            try:
-                if checked:
-                    self.stop_request_polling()
-                    if hasattr(self, "bg_music") and self.bg_music is not None:
-                        self.bg_music.stop()
-                else:
-                    self.restart_request_polling()
-            except Exception:
-                pass
+
+        bg_video_enable_cb.toggled.connect(on_bg_video_settings_changed)
+        bg_video_shuffle_cb.toggled.connect(on_bg_video_settings_changed)
 
         def on_perf_debug_toggled(checked: bool):
             self.settings["performance_debug_enabled"] = bool(checked)
@@ -21092,21 +22048,10 @@ class KaraokeApp(QWidget):
                 self._sync_loudness_worker_gate("simple_audio_toggled")
             except Exception:
                 pass
-            # Apply to the running BG engine immediately: drop/restore the EQ and
-            # re-evaluate normalization so the change is live, not just on the
-            # next song.
-            try:
-                bg = getattr(self, "bg_music", None)
-                if bg is not None:
-                    eng = getattr(bg, "_bass_engine", None)
-                    if eng is not None and hasattr(eng, "set_eq"):
-                        if not checked:
-                            self._ensure_eq_engines()
-                        eng.set_eq(None if checked else getattr(self, "bgm_eq", None))
-                    bg._refresh_bg_normalize()
-            except Exception:
-                pass
-            # Karaoke EQ/normalization re-evaluate on the next song start.
+            # Apply to BOTH running audio paths immediately (BGM engine EQ +
+            # the current karaoke transport EQ); normalization gains still
+            # re-evaluate on the next song start.
+            self._apply_simple_audio_mode_live(checked)
 
         def on_normalize_toggled(checked: bool):
             self.settings["karaoke_normalize_enabled"] = bool(checked)
@@ -21197,8 +22142,6 @@ class KaraokeApp(QWidget):
                 return
 
             slider.setValue(LIST_FONT_SCALE_DEFAULT_INDEX)
-            performance_mode_cb.setChecked(False)
-            safe_mode_cb.setChecked(False)
             perf_debug_cb.setChecked(True)
             auto_update_cb.setChecked(True)
             auto_update_download_cb.setChecked(True)
@@ -21206,8 +22149,11 @@ class KaraokeApp(QWidget):
             update_manifest_edit.setText("https://dandemolition.github.io/SingWS/release.json")
             update_interval_spin.setValue(12)
             update_dir_edit.setText(str(Path.home() / "Downloads" / "SingWS Updates"))
-            cdg_stretch_cb.setChecked(False)
+            cdg_display_combo.setCurrentIndex(cdg_display_combo.findData("fit"))
             cdg_quality_combo.setCurrentIndex(cdg_quality_combo.findData("standard"))
+            cdg_black_cleanup_cb.setChecked(True)
+            cdg_black_threshold_spin.setValue(10)
+            lyric_bg_opacity_spin.setValue(0)
             next_up_overlay_cb.setChecked(True)
             next_up_duration_spin.setValue(10)
             show_tooltips_cb.setChecked(False)
@@ -21236,17 +22182,26 @@ class KaraokeApp(QWidget):
             exciter_mix_slider.setValue(20)
             ceiling_slider.setValue(-10)
             mp4_quality_combo.setCurrentIndex(mp4_quality_combo.findData(720))
+            log_email_edit.setText("")
+            auto_crash_logs_cb.setChecked(False)
+            smtp_host_edit.setText("")
+            smtp_port_spin.setValue(587)
+            smtp_user_edit.setText("")
+            smtp_password_edit.setText("")
+            smtp_from_edit.setText("")
+            smtp_tls_cb.setChecked(True)
             self._set_audio_output_id("default")
             _populate_audio_combo("default")
 
         slider.valueChanged.connect(on_slider)
         slider.sliderReleased.connect(apply_text_size_from_slider)
-        cdg_stretch_cb.toggled.connect(on_cdg_stretch_toggled)
+        cdg_display_combo.currentIndexChanged.connect(on_cdg_display_mode_changed)
         cdg_quality_combo.currentIndexChanged.connect(on_cdg_quality_changed)
+        cdg_black_cleanup_cb.toggled.connect(on_cdg_black_cleanup_changed)
+        cdg_black_threshold_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
+        lyric_bg_opacity_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
         next_up_overlay_cb.toggled.connect(on_next_up_overlay_toggled)
         next_up_duration_spin.valueChanged.connect(on_next_up_duration_changed)
-        performance_mode_cb.toggled.connect(on_performance_mode_toggled)
-        safe_mode_cb.toggled.connect(on_safe_mode_toggled)
         perf_debug_cb.toggled.connect(on_perf_debug_toggled)
         auto_update_cb.toggled.connect(on_auto_update_toggled)
         auto_update_download_cb.toggled.connect(on_auto_update_download_toggled)
@@ -21346,6 +22301,64 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 print(f"Failed to open logs folder: {e}")
         logs_btn.clicked.connect(on_open_logs)
+
+        def save_log_email_settings(*_):
+            self.settings["crash_log_email_to"] = log_email_edit.text().strip()
+            self.settings["crash_auto_send_logs"] = bool(auto_crash_logs_cb.isChecked())
+            self.settings["log_smtp_host"] = smtp_host_edit.text().strip()
+            self.settings["log_smtp_port"] = int(smtp_port_spin.value())
+            self.settings["log_smtp_username"] = smtp_user_edit.text().strip()
+            self.settings["log_smtp_password"] = smtp_password_edit.text()
+            self.settings["log_smtp_from"] = smtp_from_edit.text().strip()
+            self.settings["log_smtp_tls"] = bool(smtp_tls_cb.isChecked())
+            try:
+                self._schedule_save_settings(700)
+            except Exception:
+                self.save_settings()
+
+        def send_last_three_days_logs():
+            save_log_email_settings()
+            config = _log_email_config_from_settings(self.settings)
+            missing = _log_email_missing_config(config)
+            if missing:
+                QMessageBox.information(
+                    dlg,
+                    "Log Email Setup Required",
+                    "Configure the recipient and SMTP/app-password fields first.\n\n"
+                    "For Gmail or iCloud, create an app password and use it here instead of your normal password."
+                )
+                return
+            send_logs_btn.setEnabled(False)
+            try:
+                self._show_processing_notification("Packaging and sending logs...", level="info", persistent=True)
+            except Exception:
+                pass
+
+            def _worker():
+                ok, msg, package = send_recent_logs_email(dict(self.settings), 3)
+
+                def _finish():
+                    send_logs_btn.setEnabled(True)
+                    try:
+                        self._show_processing_notification(msg, level="success" if ok else "error")
+                    except Exception:
+                        pass
+                    QMessageBox.information(
+                        dlg,
+                        "Send Logs",
+                        f"{msg}\n\nPackage: {package}" if package else msg,
+                    )
+
+                self._run_on_ui_thread(_finish)
+
+            threading.Thread(target=_worker, daemon=True, name="singws-manual-log-email").start()
+
+        for _w in (log_email_edit, smtp_host_edit, smtp_user_edit, smtp_password_edit, smtp_from_edit):
+            _w.textChanged.connect(save_log_email_settings)
+        smtp_port_spin.valueChanged.connect(save_log_email_settings)
+        smtp_tls_cb.toggled.connect(save_log_email_settings)
+        auto_crash_logs_cb.toggled.connect(save_log_email_settings)
+        send_logs_btn.clicked.connect(send_last_three_days_logs)
         reset_btn.clicked.connect(on_reset)
 
         def apply_settings():
@@ -21368,7 +22381,7 @@ class KaraokeApp(QWidget):
                 self._apply_list_font_scale()
                 self._apply_tooltip_visibility()
                 self._transition_gap_sec = max(-3.0, min(3.0, float(self.settings.get("bg_to_karaoke_gap_sec", 0.0))))
-                self._apply_performance_mode_runtime()
+                self._apply_runtime_media_settings()
                 self.set_cdg_timing_offset_ms(int(self.settings.get("cdg_timing_offset_ms", 500) or 0))
                 if hasattr(self, "bg_music") and self.bg_music is not None:
                     self.bg_music._refresh_bg_normalize()
@@ -21583,8 +22596,8 @@ class KaraokeApp(QWidget):
         try:
             value = self.settings.get("daw_singer_screen_preview_enabled", None)
             if value is None:
-                return not (self._safe_mode() or self._performance_mode())
-            return bool(value) and not self._safe_mode()
+                return True
+            return bool(value)
         except Exception:
             return False
 
@@ -21638,6 +22651,50 @@ class KaraokeApp(QWidget):
             pass
         return 1.5
 
+    def _daw_snapshot_viewer_recent(self) -> bool:
+        try:
+            until = float(getattr(self, "_daw_snapshot_viewer_recent_until", 0.0) or 0.0)
+        except Exception:
+            until = 0.0
+        return until > time.monotonic()
+
+    def _daw_snapshot_timer_target_ms(self) -> int:
+        if not self._daw_singer_screen_preview_enabled() or bool(getattr(self, "_app_closing", False)):
+            return 0
+        try:
+            if bool(getattr(self, "karaoke_playing", False)):
+                return 1000
+        except Exception:
+            pass
+        try:
+            if bool(getattr(self, "_daw_snapshot_first_frame_pending", False)):
+                return 1000
+        except Exception:
+            pass
+        if self._daw_snapshot_viewer_recent():
+            return 1000
+        return 5000
+
+    def _retune_daw_snapshot_timer(self, reason: str = "") -> None:
+        try:
+            timer = getattr(self, "_daw_snapshot_timer", None)
+            if timer is None:
+                return
+            target_ms = int(self._daw_snapshot_timer_target_ms())
+            if target_ms <= 0:
+                if timer.isActive():
+                    timer.stop()
+                self._daw_preview_log_transition("timer_interval", f"timer stopped reason={reason}")
+                return
+            if (not timer.isActive()) or int(timer.interval()) != target_ms:
+                timer.start(target_ms)
+                self._daw_preview_log_transition(
+                    "timer_interval",
+                    f"timer interval={target_ms}ms reason={reason}",
+                )
+        except Exception:
+            pass
+
     def _daw_preview_server_backoff_active(self, *, reason: str = "") -> bool:
         try:
             until = float(getattr(self, "_daw_preview_server_backoff_until", 0.0) or 0.0)
@@ -21686,6 +22743,7 @@ class KaraokeApp(QWidget):
             "playback started "
             f"media={os.path.basename(str(media_path or ''))!r} enabled={int(self._daw_singer_screen_preview_enabled())}"
         )
+        self._retune_daw_snapshot_timer("playback_start")
         try:
             QTimer.singleShot(0, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_start"))
             QTimer.singleShot(250, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_start_retry"))
@@ -21701,6 +22759,7 @@ class KaraokeApp(QWidget):
         # Don't blank the DAW preview here: a forced capture publishes the idle
         # show screen / next-up overlay instead of flashing the browser back to
         # a placeholder between singers.
+        self._retune_daw_snapshot_timer("playback_stop")
         try:
             QTimer.singleShot(0, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped_immediate"))
             QTimer.singleShot(450, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped"))
@@ -21715,6 +22774,7 @@ class KaraokeApp(QWidget):
             return
         if not self._daw_singer_screen_preview_enabled():
             self._daw_preview_log_transition("producer_state", f"producer skipped disabled reason={reason}")
+            self._retune_daw_snapshot_timer("disabled")
             return
         if bool(getattr(self, "_daw_snapshot_inflight", False)):
             if force:
@@ -21753,6 +22813,10 @@ class KaraokeApp(QWidget):
                     viewer_seen_at = int((payload or {}).get("viewer_seen_at") or 0)
                     enabled = bool((payload or {}).get("enabled", False))
                     viewer_recent = viewer_seen_at > 0 and (time.time() - viewer_seen_at) <= 14
+                    try:
+                        self._daw_snapshot_viewer_recent_until = time.monotonic() + 16.0 if viewer_recent else 0.0
+                    except Exception:
+                        pass
                     should_capture = enabled and (viewer_recent or playing or bool(force))
                     self._daw_preview_log_transition(
                         "viewer_check",
@@ -21767,9 +22831,15 @@ class KaraokeApp(QWidget):
                 self._record_daw_preview_server_failure(reason=reason, error=str(e))
                 self._daw_preview_log(f"viewer check failed reason={reason}: {e}")
             if should_capture:
-                self._run_on_ui_thread(lambda: self._capture_daw_singer_screen_snapshot(reason=reason))
+                self._run_on_ui_thread(
+                    lambda: (
+                        self._retune_daw_snapshot_timer("viewer_check"),
+                        self._capture_daw_singer_screen_snapshot(reason=reason),
+                    )
+                )
             else:
                 self._daw_snapshot_inflight = False
+                self._run_on_ui_thread(lambda: self._retune_daw_snapshot_timer("viewer_check"))
 
         threading.Thread(target=check_viewer, daemon=True, name="daw-preview-check").start()
 
@@ -22196,7 +23266,7 @@ class KaraokeApp(QWidget):
                 timer.setSingleShot(True)
                 timer.timeout.connect(self._sync_host_control_state_now)
                 self._host_control_state_timer = timer
-            timer.start(750 if self._performance_mode() else 120)
+            timer.start(120)
         except Exception:
             self._sync_host_control_state_now()
 
@@ -24300,7 +25370,7 @@ class KaraokeApp(QWidget):
                 job_id,
                 query,
                 limit=250,
-                fuzzy=not (self._performance_mode() or self._safe_mode()),
+                fuzzy=True,
             )
             thread.results_ready.connect(on_results)
             try:
@@ -26502,8 +27572,6 @@ class KaraokeApp(QWidget):
 
     def _tick_live_state_polish(self):
         _perf_t0 = time.perf_counter()
-        if self._safe_mode():
-            return
         try:
             self._apply_live_state_styles()
         except Exception:
@@ -26512,14 +27580,10 @@ class KaraokeApp(QWidget):
             _perf_log_if_slow("ui_tick_live_state_polish", (time.perf_counter() - _perf_t0) * 1000.0)
 
     def _live_state_interval_ms(self, active: bool | None = None) -> int:
-        if self._safe_mode():
-            return 500
         try:
             active = bool(getattr(self, "karaoke_playing", False)) if active is None else bool(active)
         except Exception:
             active = False
-        if self._performance_mode():
-            return 300 if active else 250
         if active and sys.platform == "darwin":
             try:
                 import platform as _platform
@@ -27199,8 +28263,6 @@ class KaraokeApp(QWidget):
 
     def _tick_idle_background(self):
         _perf_t0 = time.perf_counter()
-        if self._safe_mode():
-            return
         try:
             if not hasattr(self, "video_window") or self.video_window is None:
                 return
@@ -28481,9 +29543,6 @@ class KaraokeApp(QWidget):
     def _start_new_polling_thread(self):
         """Start the new polling thread (called after cleanup delay)"""
         try:
-            if self._safe_mode():
-                print("[SAFE-MODE] Polling thread start ignored")
-                return
             # Create completely new thread and worker
             self.poll_thread = QThread()
             base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
@@ -31963,8 +33022,8 @@ class KaraokeApp(QWidget):
             _diag("[LOUDNESS-LIB] skipped reason=normalization_disabled")
             QMessageBox.information(
                 self,
-                "Analyze Library",
-                "Normalization is disabled, so no volume analysis is needed.",
+                "Cache Loudness Levels",
+                "Normalization is disabled, so no loudness cache work is needed.",
             )
             return
         # Don't start a second pass while one is running — just resurface the
@@ -31981,8 +33040,8 @@ class KaraokeApp(QWidget):
         items = self._library_loudness_analysis_items(force=force)
 
         if not items:
-            QMessageBox.information(self, "Analyze Library",
-                                    "Nothing to analyze — library volume is already cached."
+            QMessageBox.information(self, "Cache Loudness Levels",
+                                    "Nothing to measure — library loudness is already cached."
                                     if tracks or self._bgm_analysis_items()
                                     else "No karaoke or background-music tracks found. Scan karaoke or add BGM first.")
             return
@@ -31995,8 +33054,8 @@ class KaraokeApp(QWidget):
             _prog_parent = QApplication.activeModalWidget()
         except Exception:
             _prog_parent = None
-        dlg = QProgressDialog(f"Analyzing volume for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
-        dlg.setWindowTitle("Analyze Library Volume")
+        dlg = QProgressDialog(f"Measuring loudness for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
+        dlg.setWindowTitle("Cache Loudness Levels")
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(True)
         dlg.setAutoReset(True)
@@ -32024,7 +33083,7 @@ class KaraokeApp(QWidget):
         def _on_progress(done, total, name):
             try:
                 dlg.setValue(done - 1)
-                dlg.setLabelText(f"Analyzing {done}/{total}…\n{name}")
+                dlg.setLabelText(f"Measuring loudness {done}/{total}…\n{name}")
             except Exception:
                 pass
 
@@ -32040,9 +33099,9 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             if cancelled:
-                self._set_processing_text(f"Cancelled volume analysis after {analyzed} of {total} track(s).")
+                self._set_processing_text(f"Cancelled loudness cache rebuild after {analyzed} of {total} track(s).")
             else:
-                self._set_processing_text(f"Analyzed volume for {analyzed} of {total} track(s).")
+                self._set_processing_text(f"Cached loudness levels for {analyzed} of {total} track(s).")
 
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
@@ -33859,7 +34918,7 @@ class KaraokeApp(QWidget):
                 job_id,
                 query,
                 limit=250,
-                fuzzy=not (self._performance_mode() or self._safe_mode()),
+                fuzzy=True,
             )
             thread.results_ready.connect(on_results)
             try:
@@ -34186,6 +35245,12 @@ class KaraokeApp(QWidget):
                 return
 
         self._app_closing = True
+        try:
+            global _QT_APP_SHUTTING_DOWN
+            _QT_APP_SHUTTING_DOWN = True
+        except Exception:
+            pass
+        self._mt_watch_stop = True
 
         # Save window geometry (position/size) for next launch
         try:
@@ -34378,9 +35443,6 @@ class KaraokeApp(QWidget):
 
     def _bootstrap_bg_playlist_on_startup(self):
         """Load persisted BG playlist into player so main BG card is populated on launch."""
-        if self._safe_mode():
-            print("[SAFE-MODE] Skipping BGM startup/preload")
-            return
         try:
             if getattr(self.bg_music, "playlist", None):
                 return
@@ -35208,12 +36270,77 @@ class KaraokeApp(QWidget):
             pass
 
     def _simple_audio_mode(self) -> bool:
-        """Simple Audio Mode (default ON): clean signal path — no normalization,
-        no EQ, no compression. Only clean volume + optional per-track trim."""
+        """Simple Audio Mode (default ON): no normalization and no graphic EQ.
+
+        Master Audio Processing is a separate explicit opt-in.
+        """
         try:
             return bool(self.settings.get("simple_audio_mode", True))
         except Exception:
             return True
+
+    def _apply_simple_audio_mode_live(self, simple: bool) -> None:
+        """Apply a Simple Audio Mode change to BOTH running audio paths.
+
+        Historically only the BGM engine was updated live and karaoke waited
+        for the next song start, so toggling advanced audio mid-song made the
+        EQ appear to work on one path and not the other. The karaoke transport
+        reads .eq each visual tick (_mirror_eq), so swapping it mid-song is
+        safe and takes effect immediately.
+        """
+        simple = bool(simple)
+        if not simple:
+            try:
+                self._ensure_eq_engines()
+            except Exception:
+                pass
+        # Background music engine (BASS): attach/detach the BGM EQ.
+        try:
+            bg = getattr(self, "bg_music", None)
+            eng = getattr(bg, "_bass_engine", None) if bg is not None else None
+            if eng is not None and hasattr(eng, "set_eq"):
+                eng.set_eq(None if simple else getattr(self, "bgm_eq", None))
+                self._log_bgm_eq_route("simple_audio_toggle")
+            if bg is not None:
+                bg._refresh_bg_normalize()
+        except Exception:
+            pass
+        # Karaoke transport: swap the EQ live instead of waiting for the next
+        # song (normalization gain still re-evaluates on the next song start).
+        try:
+            transport = getattr(self, "karaoke_transport", None)
+            if transport is not None and hasattr(transport, "eq"):
+                transport.eq = None if simple else getattr(self, "karaoke_eq", None)
+                eq_obj = getattr(transport, "eq", None)
+                _diag(
+                    f"[EQ-ROUTE] path=karaoke mode={getattr(self, '_current_karaoke_mode', '?')} "
+                    f"routed={int(eq_obj is not None)} reason=simple_audio_toggle live=1"
+                )
+        except Exception:
+            pass
+
+    def _log_bgm_eq_route(self, reason: str) -> None:
+        try:
+            bg = getattr(self, "bg_music", None)
+            eng = getattr(bg, "_bass_engine", None) if bg is not None else None
+            if eng is None:
+                _diag(f"[EQ-ROUTE] path=bgm routed=0 chain=gstreamer_fallback reason={reason}")
+                return
+            if getattr(eng, "_eq_fx_handles", None):
+                chain = "native-bass"
+            elif getattr(eng, "_eq_dsp_handle", 0):
+                chain = "python-dsp"
+            else:
+                chain = "off"
+            eq_obj = getattr(self, "bgm_eq", None)
+            _diag(
+                f"[EQ-ROUTE] path=bgm routed={int(chain != 'off')} chain={chain} reason={reason} "
+                f"enabled={int(bool(eq_obj is not None and eq_obj.enabled()))} "
+                f"flat={int(bool(eq_obj is None or eq_obj.is_flat()))} "
+                f"simple_audio={int(self._simple_audio_mode())}"
+            )
+        except Exception:
+            pass
 
     def _karaoke_normalize_active(self, master_active: bool | None = None) -> bool:
         """True only when karaoke loudness work is allowed to read/cache/analyze.
@@ -35224,8 +36351,6 @@ class KaraokeApp(QWidget):
         """
         try:
             if not bool(self.settings.get("karaoke_normalize_enabled", True)):
-                return False
-            if self._performance_mode() or self._safe_mode():
                 return False
             if not self._simple_audio_mode():
                 return True
@@ -35239,10 +36364,6 @@ class KaraokeApp(QWidget):
         try:
             if not bool(self.settings.get("karaoke_normalize_enabled", True)):
                 return "setting_off"
-            if self._safe_mode():
-                return "safe_mode"
-            if self._performance_mode():
-                return "performance_mode"
             if self._simple_audio_mode():
                 if master_active is None:
                     master_active = self._master_processing_active()
@@ -35260,8 +36381,6 @@ class KaraokeApp(QWidget):
         """
         try:
             if bool(self.settings.get("simple_audio_mode", True)):
-                return False
-            if self._performance_mode() or self._safe_mode():
                 return False
             return bool(self.settings.get("bg_normalize_enabled", True))
         except Exception:
@@ -35370,48 +36489,36 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _performance_mode(self) -> bool:
-        """Performance Mode lowers nonessential background/UI work for slower Macs."""
-        try:
-            return bool(self.settings.get("performance_mode", False))
-        except Exception:
-            return False
-
-    def _safe_mode(self) -> bool:
-        """Safe Mode isolates expensive subsystems for profiling and show recovery."""
-        try:
-            return bool(self.settings.get("safe_mode", False))
-        except Exception:
-            return False
-
     def _effective_search_debounce_ms(self) -> int:
-        return 500 if self._safe_mode() else (450 if self._performance_mode() else 300)
+        return 300
 
     def _effective_request_poll_interval_sec(self) -> int:
         try:
             base = max(1, int(float(self.settings.get("request_poll_interval_sec", 2))))
         except Exception:
             base = 2
-        if self._safe_mode():
-            return max(base, 30)
-        return max(base, 6) if self._performance_mode() else base
+        return base
 
     def _effective_host_poll_interval_sec(self) -> int:
-        if self._safe_mode():
-            return 30
-        return 8 if self._performance_mode() else 2
+        return 2
 
     def _effective_cdg_quality_mode(self) -> str:
-        if self._safe_mode() or self._performance_mode():
-            return "standard"
         return str(self.settings.get("cdg_quality_mode", "standard") or "standard").lower()
+
+    def _effective_cdg_display_mode(self) -> str:
+        mode = str(self.settings.get("cdg_display_mode", "") or "").strip().lower()
+        if mode in {"fit", "sidefill", "stretch"}:
+            return mode
+        # Migration fallback for older settings files.
+        try:
+            if bool(self.settings.get("cdg_stretch_fill", False)):
+                return "stretch"
+        except Exception:
+            pass
+        return "fit"
 
     def _effective_mp4_max_height(self) -> int:
         """MP4 decode cap; lower pixel throughput is a major Intel win."""
-        if self._safe_mode():
-            return 480
-        if self._performance_mode():
-            return 540
         try:
             return int(self.settings.get("mp4_max_height", 720) or 0)
         except Exception:
@@ -35419,9 +36526,7 @@ class KaraokeApp(QWidget):
 
     def _effective_visual_timer_interval_ms(self) -> int:
         """Throttle visual polling only. Audio timing remains authoritative."""
-        if self._safe_mode():
-            return 50
-        return 33 if self._performance_mode() else 15
+        return 15
 
     def _effective_ticker_speed_px_per_sec(self, saved_speed=None) -> float:
         try:
@@ -35431,8 +36536,8 @@ class KaraokeApp(QWidget):
         speed = max(TICKER_SPEED_MIN, min(TICKER_SPEED_MAX, speed))
         return speed
 
-    def _apply_performance_mode_runtime(self):
-        """Apply runtime-only performance governors without overwriting user choices."""
+    def _apply_runtime_media_settings(self):
+        """Apply runtime media settings without overwriting user choices."""
         try:
             quality = self._effective_cdg_quality_mode()
             if hasattr(self, "video_window") and hasattr(self.video_window, "video_area"):
@@ -35455,8 +36560,7 @@ class KaraokeApp(QWidget):
                     transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             pass
-        # Performance Mode bypasses master processing; toggling it (or the master
-        # setting) live re-evaluates the attachment for the current song.
+        # Re-evaluate the attachment for the current song when settings change.
         try:
             transport = getattr(self, "karaoke_transport", None)
             if transport is not None and hasattr(transport, "master"):
@@ -35752,7 +36856,7 @@ class KaraokeApp(QWidget):
             job_id,
             query,
             limit=500,
-            fuzzy=not (self._performance_mode() or self._safe_mode()),
+            fuzzy=True,
         )
         self._search_thread.results_ready.connect(self._apply_db_search_results)
         self._search_thread.start()
@@ -35781,8 +36885,7 @@ class KaraokeApp(QWidget):
                 pass
             return
 
-        # Debounce so big libraries stay snappy while typing. Performance Mode
-        # waits a little longer and disables fuzzy search for that request run.
+        # Debounce so big libraries stay snappy while typing.
         try:
             self._search_debounce.start(self._effective_search_debounce_ms())
         except Exception:
@@ -35972,7 +37075,7 @@ class KaraokeApp(QWidget):
         self.track_map = {}
 
         # Add items in SMALLER batches with proper yielding to avoid freezing the ticker
-        BATCH_SIZE = 15 if self._safe_mode() else 25  # Smaller batches for smoother updates
+        BATCH_SIZE = 25
         batch_idx = [0]  # Use list to avoid nonlocal issues
         
         def add_next_batch():
@@ -36727,14 +37830,20 @@ class KaraokeApp(QWidget):
                 for song in singer.get("songs", [])
             )
             
-            display_number = number if not is_singer_skipped else 0
-            singer_left = f"{display_number}. {singer['name']}"
-            singer_right = ""
+            if is_singer_skipped:
+                singer_left = f"— {singer['name']}"
+                singer_right = "SKIPPED"
+            elif has_songs:
+                singer_left = f"{number}. {singer['name']}"
+                singer_right = ""
+                number += 1
+            else:
+                singer_left = f"— {singer['name']}"
+                singer_right = "NO ACTIVE SONG"
 
             if not is_singer_skipped:
                 item = QListWidgetItem(singer_left)
                 self._set_queue_row_identity(item, "singer", singer_idx, -1)
-                number += 1
             else:
                 item = QListWidgetItem(singer_left)
                 self._set_queue_row_identity(item, "singer", singer_idx, -1)
@@ -37319,8 +38428,6 @@ class KaraokeApp(QWidget):
 
     def _lead_silence_prescan_enabled(self) -> bool:
         try:
-            if self._safe_mode() or self._performance_mode():
-                return False
             return bool(self.settings.get("end_silence_trim_enabled", True))
         except Exception:
             return False
@@ -39594,10 +40701,6 @@ class KaraokeApp(QWidget):
             except Exception:
                 tempo = 0
             tempo = max(-30, min(30, tempo))
-            try:
-                sort_order = float(req.get("sort_order") or req.get("queue_position") or request_id)
-            except Exception:
-                sort_order = float(request_id)
             queue_singer, _duet_display = self._parse_duet_singer(singer)
             if not queue_singer:
                 queue_singer = singer
@@ -39610,11 +40713,12 @@ class KaraokeApp(QWidget):
                 "title": str(req.get("title", "") or "").strip(),
                 "key": key,
                 "tempo": tempo,
-                "sort_order": sort_order,
                 "host_order_updated_at": order_meta.get("host_order_updated_at", 0),
                 "singer_order_updated_at": order_meta.get("singer_order_updated_at", 0),
                 "order_revision": order_meta.get("order_revision", 0),
                 "last_order_source": order_meta.get("last_order_source", "server"),
+                # Raw wire value on purpose: absence (None/"") means the server
+                # conveyed order via row order only; see sort_lookup below.
                 "sort_order": req.get("sort_order"),
                 "request_source": str(req.get("request_source") or req.get("source") or ""),
                 "source": str(req.get("request_source") or req.get("source") or ""),
@@ -39754,7 +40858,12 @@ class KaraokeApp(QWidget):
 
         tempo_by_id = {item["request_id"]: item["tempo"] for item in normalized}
         key_by_id = {item["request_id"]: item["key"] for item in normalized}
-        sort_by_id = {item["request_id"]: item.get("sort_order", item["request_id"]) for item in normalized}
+        sort_by_id = {}
+        for item in normalized:
+            try:
+                sort_by_id[item["request_id"]] = float(item.get("sort_order"))
+            except (TypeError, ValueError):
+                sort_by_id[item["request_id"]] = float(item["request_id"])
         desired_by_singer = {}
         desired_meta_by_singer = {}
         for req in normalized:
@@ -39911,15 +41020,32 @@ class KaraokeApp(QWidget):
                     f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision=ignored"
                 )
                 continue
-            indexed = list(enumerate(songs))
-            indexed.sort(
-                key=lambda pair: (
-                    rank.get(self._queue_entry_remote_request_id(pair[1]), len(rank) + pair[0]),
-                    pair[0],
-                )
+            # The server only knows about its own request rows, so an incoming
+            # order may only permute those entries relative to each other.
+            # Host-added local songs (no remote_request_id) and queued requests
+            # the payload no longer lists keep their exact positions. A global
+            # sort here would force every server-known song ahead of them and
+            # snap back host reorders of mixed local/remote queues on every poll.
+            ranked_positions = [
+                pos for pos, entry in enumerate(songs)
+                if rank.get(self._queue_entry_remote_request_id(entry)) is not None
+            ]
+            ranked_entries = sorted(
+                (songs[pos] for pos in ranked_positions),
+                key=lambda entry: rank[self._queue_entry_remote_request_id(entry)],
             )
-            singer["songs"] = [entry for _idx, entry in indexed]
+            new_songs = list(songs)
+            for pos, entry in zip(ranked_positions, ranked_entries):
+                new_songs[pos] = entry
+            singer["songs"] = new_songs
             after = [self._queue_entry_remote_request_id(entry) for entry in singer["songs"]]
+            pinned_count = len(songs) - len(ranked_positions)
+            if pinned_count:
+                _diag(
+                    "[QUEUE_SYNC_AUTHORITY] partial remote reorder singer="
+                    f"{singer.get('name','')!r} ranked={len(ranked_positions)} pinned_local={pinned_count} "
+                    f"incoming_order={order} before={before} after={after} decision={decision_reason}"
+                )
             self._apply_order_meta_to_singer(singer, incoming_meta)
             if before != after:
                 _diag(
@@ -40383,13 +41509,12 @@ class KaraokeApp(QWidget):
     def get_rotation_data(self):
         rotation = []
         number = 1
-        for singer in self.queue:
-            # Skip if singer is skipped or has no active songs
-            if not self.is_singer_active(singer):
+        for rotation_position, singer in enumerate(self.queue, start=1):
+            if not isinstance(singer, dict) or bool(singer.get("skipped", False)):
                 continue
-            
+
             songs = []
-            for entry in singer["songs"]:
+            for entry in singer.get("songs", []):
                 # Handle both dict and tuple format
                 if isinstance(entry, dict):
                     # Skip if song is skipped
@@ -40407,13 +41532,29 @@ class KaraokeApp(QWidget):
                     song_path = song_info[0]
                 else:
                     song_path = song_info
-                songs.append(self.lookup_display_name(song_path, artist_title_only=True))
-            
-            # Only add if has non-skipped songs
+                if song_path:
+                    songs.append(self.lookup_display_name(song_path, artist_title_only=True))
+
             if songs:
                 display_name = self._queue_singer_display_for_entry(singer, self._first_active_entry_for_singer(singer))
-                rotation.append({"number": number, "name": display_name or singer["name"], "songs": songs})
+                rotation.append({
+                    "number": number,
+                    "rotation_position": rotation_position,
+                    "name": display_name or singer.get("name", ""),
+                    "songs": songs,
+                    "active": True,
+                    "status": "active",
+                })
                 number += 1
+            else:
+                rotation.append({
+                    "number": None,
+                    "rotation_position": rotation_position,
+                    "name": singer.get("name", ""),
+                    "songs": [],
+                    "active": False,
+                    "status": "no_active_song",
+                })
         return {"rotation": rotation}
 
     def clear_all_selections(self):
@@ -40826,8 +41967,6 @@ class KaraokeApp(QWidget):
 
     def _tick_bg_main_seek(self):
         _perf_t0 = time.perf_counter()
-        if self._safe_mode():
-            return
         try:
             if not hasattr(self, "bg_music"):
                 return
@@ -40860,7 +41999,7 @@ class KaraokeApp(QWidget):
                 self.bg_main_art_label.clear()
                 self.bg_main_art_label.setText("♪")
                 self.bg_main_art_label.setStyleSheet(
-                    f"background:{_v('surface_deep')}; color:{_v('text_soft')}; border:1px solid rgba(255,255,255,0.055); border-radius:6px;"
+                    f"background:{_v('surface_alt')}; color:{_v('text_soft')}; border:1px solid rgba(115,144,180,0.14); border-radius:6px;"
                 )
                 self._bg_panel_current_path = ""
                 self._render_bg_main_text()
@@ -40897,13 +42036,13 @@ class KaraokeApp(QWidget):
                     )
                     self.bg_main_art_label.setText("")
                     self.bg_main_art_label.setStyleSheet(
-                        f"background:{_v('surface_deep')}; border:1px solid rgba(255,255,255,0.055); border-radius:6px;"
+                        f"background:{_v('surface_alt')}; border:1px solid rgba(115,144,180,0.14); border-radius:6px;"
                     )
                 else:
                     self.bg_main_art_label.clear()
                     self.bg_main_art_label.setText("♪")
                     self.bg_main_art_label.setStyleSheet(
-                        f"background:{_v('surface_deep')}; color:{_v('text_soft')}; border:1px solid rgba(255,255,255,0.055); border-radius:6px;"
+                        f"background:{_v('surface_alt')}; color:{_v('text_soft')}; border:1px solid rgba(115,144,180,0.14); border-radius:6px;"
                     )
 
             self._render_bg_main_text()

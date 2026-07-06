@@ -1,6 +1,9 @@
 import pathlib
 import re
 import unittest
+import importlib.util
+
+from PyQt6.QtGui import QColor, QImage
 
 
 MAIN_SOURCE = pathlib.Path("0.2.18.1.py").read_text(encoding="utf-8")
@@ -19,6 +22,13 @@ def function_source(name: str) -> str:
 
 
 class PerformanceSafetyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("singws_main_perf", "0.2.18.1.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        cls.singws = module
+
     def test_preview_overlay_refresh_does_not_force_synchronous_repaint(self):
         source = function_source("_refresh_preview_overlay_binding")
         self.assertNotIn(".repaint(", source)
@@ -57,9 +67,9 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_lead_silence_prescan_enabled", prescan)
         self.assertIn("_next_prescan_inflight", prescan)
         gate = function_source("_lead_silence_prescan_enabled")
-        self.assertIn("_performance_mode", gate)
-        self.assertIn("_safe_mode", gate)
         self.assertIn("end_silence_trim_enabled", gate)
+        self.assertNotIn("_performance_mode", gate)
+        self.assertNotIn("_safe_mode", gate)
 
     def test_playback_worker_diagnostics_are_logged(self):
         refresh = function_source("_request_queue_display_refresh")
@@ -130,8 +140,12 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("self._stop_request_relay()", shutdown)
         self.assertIn("self._stop_host_control_relay()", shutdown)
         self.assertIn("timer.stop()", shutdown)
-        self.assertIn("if delete_later:\n                    sock.abort()", MAIN_SOURCE)
-        self.assertIn("sock.blockSignals(True)\n                    sock.abort()\n                    sock.deleteLater()", MAIN_SOURCE)
+        self.assertIn("_QT_APP_SHUTTING_DOWN = True", shutdown)
+        self.assertIn("sock.blockSignals(True)", MAIN_SOURCE)
+        self.assertIn("sock.close()", MAIN_SOURCE)
+        self.assertIn("sock.abort()", MAIN_SOURCE)
+        self.assertIn("sock.setParent(None)", MAIN_SOURCE)
+        self.assertIn("_retired_sockets", MAIN_SOURCE)
         self.assertIn("QApplication.processEvents()", shutdown)
         self.assertIn("QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)", shutdown)
         request_stop = function_source("_stop_request_relay")
@@ -146,12 +160,26 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_shutdown_relay_workers", host_stop)
         about_to_quit = function_source("_on_app_about_to_quit")
         self.assertIn("self._app_closing = True", about_to_quit)
+        self.assertIn("_QT_APP_SHUTTING_DOWN = True", about_to_quit)
         self.assertIn("self._shutdown_network_transports()", about_to_quit)
         main_block = MAIN_SOURCE[MAIN_SOURCE.index('if __name__ == "__main__":'):]
         self.assertIn("app.aboutToQuit.connect(window._on_app_about_to_quit)", main_block)
         run_on_ui = function_source("_run_on_ui_thread")
         self.assertIn('if bool(getattr(self, "_app_closing", False)):', run_on_ui)
         self.assertIn("owner_thread = self.thread()", run_on_ui)
+
+    def test_qt_websocket_shutdown_warnings_are_filtered_only_during_shutdown(self):
+        self.assertIn("qInstallMessageHandler", MAIN_SOURCE)
+        start = MAIN_SOURCE.index("def _singws_qt_message_handler")
+        end = MAIN_SOURCE.index("\n\ntry:\n    _QT_PREVIOUS_MESSAGE_HANDLER", start)
+        handler = MAIN_SOURCE[start:end]
+        self.assertIn("_QT_APP_SHUTTING_DOWN", handler)
+        self.assertIn("_QT_SOCKET_TEARDOWN_WARNING_PARTS", handler)
+        self.assertIn("previous(mode, context, message)", handler)
+        self.assertIn("sys.__stderr__.write", handler)
+        self.assertIn("QNativeSocketEngine", MAIN_SOURCE)
+        self.assertIn("QSslSocket", MAIN_SOURCE)
+        self.assertIn("QWebSocketDataProcessor", MAIN_SOURCE)
 
     def test_waitlist_needs_review_and_daw_preview_live_guards(self):
         wait_refresh = function_source("_refresh_waiting_for_add_view")
@@ -304,6 +332,25 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_record_daw_preview_server_failure", uploader)
         self.assertIn("_record_daw_preview_server_success", uploader)
 
+    def test_daw_preview_timer_is_adaptive(self):
+        init_source = MAIN_SOURCE[MAIN_SOURCE.index("self._daw_snapshot_timer = QTimer(self)"):]
+        init_source = init_source[:init_source.index("self.rotation_view = None")]
+        self.assertIn('self._retune_daw_snapshot_timer("startup")', init_source)
+        self.assertNotIn("self._daw_snapshot_timer.start(1000)", init_source)
+        target = function_source("_daw_snapshot_timer_target_ms")
+        self.assertIn("return 1000", target)
+        self.assertIn("return 5000", target)
+        self.assertIn("_daw_snapshot_viewer_recent()", target)
+        tuner = function_source("_retune_daw_snapshot_timer")
+        self.assertIn("timer.stop()", tuner)
+        self.assertIn("timer.start(target_ms)", tuner)
+        scheduler = function_source("_schedule_daw_singer_screen_snapshot")
+        self.assertIn("_daw_snapshot_viewer_recent_until", scheduler)
+        self.assertIn('_retune_daw_snapshot_timer("viewer_check")', scheduler)
+        settings = MAIN_SOURCE[MAIN_SOURCE.index("def on_daw_preview_toggled"):]
+        settings = settings[:settings.index("daw_preview_cb.toggled.connect")]
+        self.assertIn('_retune_daw_snapshot_timer("settings_toggle")', settings)
+
     def test_idle_show_screen_background_changes_fade(self):
         self.assertIn("_background_fade_timer = QTimer(self)", MAIN_SOURCE)
         setter = function_source("set_background_image")
@@ -324,6 +371,7 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_volume_analysis_dialog_is_resurfaced_frontmost(self):
         analyze = function_source("analyze_library")
         self.assertIn("WindowStaysOnTopHint", analyze)
+        self.assertIn("Measuring loudness", analyze)
         self.assertIn("self._bring_analyze_dialog_to_front(_d)", analyze)
         self.assertIn("self._bring_analyze_dialog_to_front(dlg)", analyze)
         bring = function_source("_bring_analyze_dialog_to_front")
@@ -331,6 +379,70 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("dlg.raise_()", bring)
         self.assertIn("dlg.activateWindow()", bring)
         self.assertIn("QTimer.singleShot", bring)
+
+    def test_cdg_near_black_cleanup_clamps_only_black_pixels(self):
+        image = QImage(3, 1, QImage.Format.Format_ARGB32)
+        image.setPixelColor(0, 0, QColor(4, 6, 8))
+        image.setPixelColor(1, 0, QColor(9, 2, 30))
+        image.setPixelColor(2, 0, QColor(220, 220, 220))
+        cleaned = self.singws._clean_cdg_near_black(image, 10)
+        self.assertEqual(cleaned.pixelColor(0, 0).getRgb()[:3], (0, 0, 0))
+        self.assertEqual(cleaned.pixelColor(1, 0).getRgb()[:3], (9, 2, 30))
+        self.assertEqual(cleaned.pixelColor(2, 0).getRgb()[:3], (220, 220, 220))
+        transparent = self.singws._clean_cdg_near_black(image, 10, transparent_black=True)
+        self.assertEqual(transparent.pixelColor(0, 0).alpha(), 0)
+        self.assertEqual(transparent.pixelColor(1, 0).alpha(), 255)
+        self.assertEqual(transparent.pixelColor(2, 0).alpha(), 255)
+
+    def test_cdg_near_black_cleanup_uses_indexed_palette_fast_path(self):
+        image = QImage(3, 1, QImage.Format.Format_Indexed8)
+        image.setColorTable([
+            QColor(4, 6, 8).rgba(),
+            QColor(9, 2, 30).rgba(),
+            QColor(220, 220, 220).rgba(),
+        ])
+        image.setPixel(0, 0, 0)
+        image.setPixel(1, 0, 1)
+        image.setPixel(2, 0, 2)
+
+        cleaned = self.singws._clean_cdg_near_black(image, 10)
+        self.assertEqual(cleaned.format(), QImage.Format.Format_Indexed8)
+        self.assertEqual(cleaned.pixelColor(0, 0).getRgb()[:3], (0, 0, 0))
+        self.assertEqual(cleaned.pixelColor(1, 0).getRgb()[:3], (9, 2, 30))
+        self.assertEqual(cleaned.pixelColor(2, 0).getRgb()[:3], (220, 220, 220))
+
+        transparent = self.singws._clean_cdg_near_black(image, 10, transparent_black=True)
+        self.assertEqual(transparent.format(), QImage.Format.Format_Indexed8)
+        self.assertEqual(transparent.pixelColor(0, 0).alpha(), 0)
+        self.assertEqual(transparent.pixelColor(1, 0).alpha(), 255)
+        self.assertEqual(transparent.pixelColor(2, 0).alpha(), 255)
+
+    def test_audio_chain_logs_cover_bgm_and_karaoke(self):
+        bg_chain = function_source("_bg_dsp_chain_label")
+        self.assertIn("master_audio", bg_chain)
+        karaoke_log = function_source("_log_karaoke_audio_chain")
+        self.assertIn("[KARAOKE-AUDIO]", karaoke_log)
+        self.assertIn("normalize", karaoke_log)
+        self.assertIn("master_audio", karaoke_log)
+
+    def test_main_thread_stall_watchdog_is_diagnostic_gated(self):
+        self.assertIn("def _install_main_thread_watchdog", MAIN_SOURCE)
+        start = MAIN_SOURCE.index("def _install_main_thread_watchdog")
+        end = MAIN_SOURCE.index("# Settings defaults", start)
+        watchdog = MAIN_SOURCE[start:end]
+        self.assertIn("SINGWS_NO_WATCHDOG", watchdog)
+        self.assertIn("performance_debug_enabled", watchdog)
+        self.assertIn("[STALL]", watchdog)
+        self.assertIn("sys._current_frames()", watchdog)
+        self.assertIn("singws-main-thread-watchdog", watchdog)
+        self.assertIn("_install_main_thread_watchdog(self)", MAIN_SOURCE)
+        self.assertIn("self._mt_watch_stop = True", MAIN_SOURCE)
+
+    def test_removed_slow_computer_settings_are_migrated(self):
+        source = MAIN_SOURCE
+        self.assertNotIn('"performance_mode": False', source)
+        self.assertNotIn('"safe_mode": False', source)
+        self.assertIn('for obsolete_key in ("performance_mode", "safe_mode")', source)
 
     def test_karaoke_to_bgm_overlap_requires_explicit_setting(self):
         self.assertIn('"karaoke_bgm_crossfade_enabled": False', MAIN_SOURCE)

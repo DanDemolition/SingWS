@@ -160,7 +160,7 @@ class HostBgmGatingTests(unittest.TestCase):
 
     def make_app(self, **settings):
         app = self.singws.KaraokeApp.__new__(self.singws.KaraokeApp)
-        base = {"performance_mode": False, "master_audio_enabled": False, "master_audio_params": {}}
+        base = {"master_audio_enabled": False, "master_audio_params": {}}
         base.update(settings)
         app.settings = base
         app.bgm_master = None
@@ -195,12 +195,6 @@ class HostBgmGatingTests(unittest.TestCase):
         app = self.make_app(master_audio_enabled=False)
         app._apply_bgm_master_processing()
         self.assertIsNone(app.bg_music._bass_engine.calls[-1])
-
-    def test_performance_mode_detaches(self):
-        app = self.make_app(master_audio_enabled=True, performance_mode=True)
-        app._apply_bgm_master_processing()
-        self.assertIsNone(app.bg_music._bass_engine.calls[-1])
-
 
 class NormalizeRetryTests(unittest.TestCase):
     @classmethod

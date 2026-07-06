@@ -11,7 +11,7 @@ def load_main_module():
 
 def make_app(module, **settings):
     app = module.KaraokeApp.__new__(module.KaraokeApp)
-    base = {"performance_mode": False, "master_audio_enabled": False, "master_audio_params": {}}
+    base = {"master_audio_enabled": False, "master_audio_params": {}}
     base.update(settings)
     app.settings = base
     # Bare __new__ widget can't getattr missing attrs; pre-set what we touch.
@@ -30,17 +30,12 @@ class MasterGatingTests(unittest.TestCase):
         self.assertFalse(app._master_processing_active())
         self.assertIsNone(app._ensure_master_processor())
 
-    def test_enabled_when_on_and_not_performance(self):
+    def test_enabled_when_on(self):
         app = make_app(self.singws, master_audio_enabled=True)
         self.assertTrue(app._master_processing_active())
         proc = app._ensure_master_processor()
         self.assertIsNotNone(proc)
         self.assertTrue(proc.enabled())
-
-    def test_performance_mode_bypasses(self):
-        app = make_app(self.singws, master_audio_enabled=True, performance_mode=True)
-        self.assertFalse(app._master_processing_active())
-        self.assertIsNone(app._ensure_master_processor())
 
     def test_toggling_off_disables_existing_instance(self):
         app = make_app(self.singws, master_audio_enabled=True)
@@ -110,17 +105,15 @@ class PerStageMappingTests(unittest.TestCase):
 
     def test_bgm_active_follows_master_processing(self):
         # BGM now runs the full chain (Python DSP), so it tracks master
-        # processing as a whole — not just the compressor stage — and stays off
-        # in Performance Mode. Disabling a single stage (e.g. compressor) keeps
-        # BGM active; that stage is simply bypassed inside the processor.
+        # processing as a whole — not just the compressor stage. Disabling a
+        # single stage keeps BGM active; that stage is simply bypassed inside
+        # the processor.
         on = make_app(self.singws, master_audio_enabled=True, master_audio_comp_enabled=True)
         comp_off = make_app(self.singws, master_audio_enabled=True, master_audio_comp_enabled=False)
         disabled = make_app(self.singws, master_audio_enabled=False)
-        perf = make_app(self.singws, master_audio_enabled=True, performance_mode=True)
         self.assertTrue(on._bgm_master_active())
         self.assertTrue(comp_off._bgm_master_active())
         self.assertFalse(disabled._bgm_master_active())
-        self.assertFalse(perf._bgm_master_active())
 
 
 if __name__ == "__main__":

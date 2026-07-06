@@ -6,9 +6,9 @@ src/mediabackend.cpp, OpenKJ 2.1.39-unstable).
 
 Reproduces the parts that matter for live performance:
 
-  * scaletempo-based speed change (no pitch shift), applied via seek-with-rate
-    - INSTANT_RATE_CHANGE on GStreamer >= 1.18 (zero-cost, no flush)
-    - flushing accurate seek fallback otherwise
+  * scaletempo-based speed change (no pitch shift), applied via a flushing
+    seek-with-rate (INSTANT_RATE_CHANGE is deliberately not used: scaletempo
+    does not consume the multiplier, so the sink resamples = pitch shifts)
   * scaletempo stride/search auto-tuning per rate (SoundTouch TDStretch logic,
     copied from OpenKJ's optimize_scaletempo_for_rate)
   * live key change via the SoundTouch "pitch" element (semitones -> ratio),
@@ -169,8 +169,6 @@ class AudioBackend:
         ghost_pad.set_active(True)
         self.audio_bin.add_pad(ghost_pad)
         self.pipeline.add(self.audio_bin)
-
-        self._gst_1_18 = Gst.version()[:2] >= (1, 18)
 
         # ---------------- monitoring: RMS level + hung-playback watchdog ----
         # RMS comes from the `level` element's bus messages (OpenKJ's
@@ -350,23 +348,17 @@ class AudioBackend:
         """Live speed change without pitch change (OpenKJ setTempo port).
 
         percent: 100 = normal, 80 = slower, 125 = faster.
-        Uses INSTANT_RATE_CHANGE when available: no flush, no audible gap.
+
+        Always a flushing rate seek. INSTANT_RATE_CHANGE must not be used:
+        scaletempo does not consume the instant-rate multiplier, so it reaches
+        the audio sink, which honors it by resampling — speed and pitch change
+        together (chipmunk on MP4/qtdemux, the only demuxer here that accepts
+        instant-rate seeks). See GstKaraokeTransport._apply_tempo_rate.
         """
         self.playback_rate = percent / 100.0
         optimize_scaletempo_for_rate(self.scaletempo, self.playback_rate)
 
-        if self._gst_1_18:
-            ev = Gst.Event.new_seek(
-                self.playback_rate,
-                Gst.Format.TIME,
-                Gst.SeekFlags.INSTANT_RATE_CHANGE,
-                Gst.SeekType.NONE, Gst.CLOCK_TIME_NONE,
-                Gst.SeekType.NONE, Gst.CLOCK_TIME_NONE,
-            )
-            if self.pipeline.send_event(ev):
-                return
-
-        # Fallback: flushing accurate seek to current position at new rate
+        # Flushing accurate seek to current position at the new rate.
         ok, curpos = self.pipeline.query_position(Gst.Format.TIME)
         if not ok:
             curpos = 0

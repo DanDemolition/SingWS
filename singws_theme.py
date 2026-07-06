@@ -522,8 +522,8 @@ def scroll_bar_css() -> str:
 def list_css() -> str:
     return f"""
         QListWidget, QListView, QTreeView, QTableView {{
-            background-color: rgba(2,7,14,0.92);
-            alternate-background-color: rgba(255,255,255,0.010);
+            background-color: {color('surface_alt')};
+            alternate-background-color: rgba(255,255,255,0.020);
             color: {color('text')};
             selection-background-color: {color('accent')};
             selection-color: {color('accent_text')};

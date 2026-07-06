@@ -729,6 +729,12 @@ class BassBackgroundEngine:
         if self.mixer:
             self._detach_native_eq_fx()
             self._detach_eq_dsp()
+            # Also zero the master FX/DSP handles: they die with the mixer,
+            # and _ensure_mixer only re-attaches when the handle is 0 — a
+            # stale handle here silently dropped the master chain (and the
+            # compressor) from BGM after the first track change.
+            self._detach_master_fx()
+            self._detach_master_dsp()
             try:
                 self.bass.BASS_ChannelStop(self.mixer)
             except Exception:

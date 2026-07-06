@@ -2,7 +2,9 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import time
 import unittest
+import zipfile
 from unittest import mock
 
 
@@ -71,6 +73,52 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(int(self.singws.DEFAULTS["video_timing_offset_ms"]), 0)
         self.assertTrue(self.singws.DEFAULTS["next_up_overlay_enabled"])
         self.assertEqual(int(self.singws.DEFAULTS["next_up_overlay_duration_sec"]), 10)
+        self.assertIn("lyrics_background_video_opacity", self.singws.DEFAULTS)
+        self.assertIn("crash_log_email_to", self.singws.DEFAULTS)
+
+    def test_log_package_redacts_credentials_and_skips_old_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_logs_dir = self.singws.LOGS_DIR
+            self.singws.LOGS_DIR = Path(td)
+            try:
+                recent = Path(td) / "singws_recent.log"
+                recent.write_text("api_key=secret token=abc password: hunter2 ok", encoding="utf-8")
+                old = Path(td) / "singws_old.log"
+                old.write_text("old secret", encoding="utf-8")
+                old_time = time.time() - (5 * 86400)
+                old.touch()
+                import os
+                os.utime(old, (old_time, old_time))
+
+                package, files, error = self.singws.prepare_log_email_package(days=3)
+                self.assertEqual(error, "")
+                self.assertIsNotNone(package)
+                self.assertEqual([p.name for p in files], ["singws_recent.log"])
+                with zipfile.ZipFile(package, "r") as zf:
+                    text = zf.read("singws_recent.log").decode("utf-8")
+                self.assertNotIn("secret", text)
+                self.assertNotIn("hunter2", text)
+                self.assertIn("api_key=***", text)
+                self.assertIn("token=***", text)
+                self.assertIn("password: ***", text)
+            finally:
+                self.singws.LOGS_DIR = old_logs_dir
+
+    def test_rotation_data_preserves_empty_singer_without_active_number(self):
+        app = make_app(self.singws)
+        app._first_active_entry_for_singer = lambda singer: next((s for s in singer.get("songs", []) if not s.get("skipped", False)), None)
+        app._queue_singer_display_for_entry = lambda singer, entry: singer.get("name", "")
+        app.queue = [
+            {"name": "Dan", "songs": [{"song_info": "/tmp/a.mp3", "skipped": False}]},
+            {"name": "Steve", "songs": []},
+            {"name": "Bill", "songs": [{"song_info": "/tmp/b.mp3", "skipped": False}]},
+        ]
+
+        rotation = self.singws.KaraokeApp.get_rotation_data(app)["rotation"]
+        self.assertEqual([row["name"] for row in rotation], ["Dan", "Steve", "Bill"])
+        self.assertEqual([row["number"] for row in rotation], [1, None, 2])
+        self.assertEqual(rotation[1]["status"], "no_active_song")
+        self.assertFalse(rotation[1]["active"])
 
     def test_host_rotation_state_empty_defaults(self):
         app = make_app(self.singws)
@@ -322,8 +370,6 @@ class RecentRegressionTests(unittest.TestCase):
                 "simple_audio_mode": False,
                 "karaoke_normalize_enabled": True,
                 "bg_normalize_enabled": True,
-                "performance_mode": False,
-                "safe_mode": False,
             }
 
             with mock.patch.object(self.singws.Path, "home", return_value=root):

@@ -5,7 +5,8 @@ chain (see okj_audio_backend.py / OKJ_INTEGRATION.md):
 
   * ALL audio DSP runs in native GStreamer elements — key change via the
     SoundTouch ``pitch`` element (a property set, zero cost live), speed via
-    ``scaletempo`` + INSTANT_RATE_CHANGE seeks, EQ via ``equalizer-10bands``.
+    ``scaletempo`` + flushing rate seeks (INSTANT_RATE_CHANGE is deliberately
+    NOT used — see _apply_tempo_rate), EQ via ``equalizer-10bands``.
     No PCM ever flows through Python.
   * CDG frames come from cdg_native.CdgFileReader (hardened libCDG port,
     tolerant of damaged rips): change-driven (no pixel change -> no frame ->
@@ -153,7 +154,7 @@ class _CdgAdapter:
     Qt expands the palette in C when painting, so Python never touches
     individual pixels on the render path."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, sidefill: bool = False):
         from cdg_native import (
             CdgFileReader,
             CDG_PACKETS_PER_SECOND,
@@ -161,10 +162,11 @@ class _CdgAdapter:
             CROP_H,
         )
 
-        self.reader = CdgFileReader(path)
+        self.reader = CdgFileReader(path, sidefill=bool(sidefill))
         self.packets_per_second = int(CDG_PACKETS_PER_SECOND)
-        self._crop_w = int(CROP_W)
-        self._crop_h = int(CROP_H)
+        self._crop_w = int(getattr(self.reader, "width", CROP_W))
+        self._crop_h = int(getattr(self.reader, "height", CROP_H))
+        self.sidefill = bool(sidefill)
         self.generation = 0
         self.duration_seconds = self.reader.total_duration_ms() / 1000.0
         self._presented_idx = -1
@@ -218,6 +220,7 @@ class GstKaraokeTransport(QObject):
         mode: str = "audio",
         duration_seconds: float = 0.0,
         probe_duration_on_init: bool = False,
+        cdg_sidefill: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -226,6 +229,7 @@ class GstKaraokeTransport(QObject):
         self.video_path = str(video_path or "") or None
         self.mode = str(mode or "audio").lower()
         self.duration_seconds = float(duration_seconds or 0.0)
+        self.cdg_sidefill = bool(cdg_sidefill)
 
         # Host-facing attributes (same names/semantics as the old transport).
         self.max_video_height = 720
@@ -257,7 +261,7 @@ class GstKaraokeTransport(QObject):
         self._video_output_size = ""
         self._started_monotonic = 0.0
 
-        self.cdg = _CdgAdapter(self.video_path) if self.mode == "cdg" and self.video_path else None
+        self.cdg = _CdgAdapter(self.video_path, sidefill=self.cdg_sidefill) if self.mode == "cdg" and self.video_path else None
         if self.cdg is not None:
             self.duration_seconds = max(self.duration_seconds, self.cdg.duration_seconds)
 
@@ -412,7 +416,8 @@ class GstKaraokeTransport(QObject):
         self.timer.start()
         _diag(
             f"[GST-KARAOKE] started mode={self.mode} start={self._pending_start_seconds:.3f}s "
-            f"pitch_element={int(self.pitch is not None)} file={os.path.basename(self.audio_path)!r}"
+            f"pitch_element={int(self.pitch is not None)} cdg_sidefill={int(self.cdg_sidefill)} "
+            f"file={os.path.basename(self.audio_path)!r}"
         )
 
     def stop(self):
@@ -483,6 +488,7 @@ class GstKaraokeTransport(QObject):
         tempo_ratio = max(0.5, min(2.0, float(tempo_ratio or 1.0)))
         semitones = max(-24.0, min(24.0, float(semitones or 0.0)))
         tempo_changed = abs(tempo_ratio - self.tempo_ratio) > 1e-6
+        key_changed = abs(semitones - self.semitones) > 1e-6
         self.semitones = semitones
         if self.pitch is not None:
             try:
@@ -491,6 +497,13 @@ class GstKaraokeTransport(QObject):
                 _diag(f"[GST-KARAOKE] pitch set failed: {e}")
         elif semitones:
             _diag("[GST-KARAOKE] key change requested but pitch element unavailable")
+        if key_changed or tempo_changed:
+            _diag(
+                f"[GST-KARAOKE] modifiers mode={self.mode} tempo={tempo_ratio:.3f} "
+                f"key={semitones:+.1f} key_path="
+                f"{'soundtouch_pitch_property' if self.pitch is not None else 'unavailable'} "
+                f"tempo_path=scaletempo_rate_seek"
+            )
         if tempo_changed:
             self.tempo_ratio = tempo_ratio
             self._apply_tempo_rate()
@@ -504,8 +517,8 @@ class GstKaraokeTransport(QObject):
     def _apply_tempo_rate(self):
         """Live speed change without pitch change.
 
-        OpenKJ's scaletempo + INSTANT_RATE_CHANGE path (see NOTE below on
-        why not SoundTouch's own tempo property)."""
+        OpenKJ's scaletempo + flushing rate-seek path (see NOTEs below on why
+        not SoundTouch's own tempo property and why not INSTANT_RATE_CHANGE)."""
         Gst = self.Gst
         # NOTE: routing tempo through the SoundTouch element's own `tempo`
         # property sounds cleaner but rescales downstream timestamps: the
@@ -513,26 +526,25 @@ class GstKaraokeTransport(QObject):
         # silently breaking CDG sync, the progress bar, and end-silence
         # timing (measured: position rate 1.00 at tempo 1.3). Tempo therefore
         # stays on scaletempo + rate seeks, which keep source-time positions.
+        #
+        # NOTE: INSTANT_RATE_CHANGE seeks must NOT be used here. scaletempo
+        # does not consume the instant-rate multiplier (verified on GStreamer
+        # 1.26/1.28: the INSTANT_RATE_CHANGE event passes through scaletempo
+        # AND pitch untouched), so the multiplier reaches the audio sink and
+        # GstAudioBaseSink honors it by resampling — speed and pitch change
+        # together. Of the demuxers used here only qtdemux accepts the
+        # instant-rate seek, which made MP4 tempo chipmunk while CDG/MP3
+        # (whose pipelines reject it and fell through to the flushing seek)
+        # stayed pitch-correct. The flushing rate seek keeps the rate inside
+        # the segment where scaletempo consumes it: time-stretch, key kept.
         try:
             optimize_scaletempo_for_rate(self.scaletempo, self.tempo_ratio)
         except Exception:
             pass
-        if Gst.version()[:2] >= (1, 18):
-            ev = Gst.Event.new_seek(
-                self.tempo_ratio,
-                Gst.Format.TIME,
-                Gst.SeekFlags.INSTANT_RATE_CHANGE,
-                Gst.SeekType.NONE,
-                -1,
-                Gst.SeekType.NONE,
-                -1,
-            )
-            if self.pipeline.send_event(ev):
-                return
         ok, curpos = self.pipeline.query_position(Gst.Format.TIME)
         if not ok:
             curpos = 0
-        self.pipeline.send_event(
+        accepted = self.pipeline.send_event(
             Gst.Event.new_seek(
                 self.tempo_ratio,
                 Gst.Format.TIME,
@@ -542,6 +554,11 @@ class GstKaraokeTransport(QObject):
                 Gst.SeekType.NONE,
                 0,
             )
+        )
+        _diag(
+            f"[GST-KARAOKE] tempo applied mode={self.mode} tempo={self.tempo_ratio:.3f} "
+            f"key={self.semitones:+.1f} path=scaletempo_rate_seek accepted={int(bool(accepted))} "
+            f"pos={curpos / NS_PER_SECOND:.3f}s"
         )
 
     # -------------------------------------------------------- gain staging

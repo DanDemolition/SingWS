@@ -119,8 +119,6 @@ class BgmVolumeInitTests(unittest.TestCase):
             "simple_audio_mode": True,
             "karaoke_normalize_enabled": False,
             "bg_normalize_enabled": False,
-            "performance_mode": False,
-            "safe_mode": False,
         }
         app.tracks = [{"path": "/tmp/song.mp3", "display": "Song"}]
         app._bgm_analysis_items = lambda: [("BGM", "/tmp/bg.mp3", "BG")]

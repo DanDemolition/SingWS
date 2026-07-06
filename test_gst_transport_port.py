@@ -109,6 +109,15 @@ class CdgAdapterTests(unittest.TestCase):
         self.assertEqual(image.format(), QImage.Format.Format_Indexed8)
         self.assertEqual(len(image.colorTable()), 16)
 
+    def test_sidefill_adapter_keeps_indexed_frame_and_widens_only(self):
+        adapter = _CdgAdapter(self.cdg_path, sidefill=True)
+        image = adapter.frame_for_position_ms(2000)
+        self.assertIsNotNone(image)
+        self.assertEqual((image.width(), image.height()), (340, 192))
+        from PyQt6.QtGui import QImage
+        self.assertEqual(image.format(), QImage.Format.Format_Indexed8)
+        self.assertEqual(len(image.colorTable()), 16)
+
     def test_seek_bumps_generation_and_replays(self):
         g0 = self.adapter.generation
         self.adapter.frame_for_position_ms(4000)
@@ -177,6 +186,32 @@ class CdgCorruptionToleranceTests(unittest.TestCase):
         frame = reader.current_frame()
         from cdg_native import FRAME_BYTES
         self.assertEqual(len(frame), FRAME_BYTES)  # crop stayed on-surface
+
+    def test_sidefill_preserves_cropped_center_pixels(self):
+        payload = (
+            bytes(24) * 5
+            + self._pkt(1, bytes([0, 0] + [0] * 14))
+            + self._pkt(2, bytes([2] + [0] * 15))
+            + self._pkt(6, bytes([0, 1, 4, 4] + [0x3F] * 12))
+            + bytes(24) * 5
+        )
+        import tempfile, os as _os
+        from cdg_native import CdgFileReader
+        fd, path = tempfile.mkstemp(suffix=".cdg")
+        with _os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        self.addCleanup(_os.unlink, path)
+        cropped = CdgFileReader(path)
+        sidefill = CdgFileReader(path, sidefill=True)
+        cropped.move_to_next_frame()
+        sidefill.move_to_next_frame()
+        from cdg_native import CROP_W, CROP_H, SIDEFILL_W, SIDEFILL_PAD_X
+        crop_plane = cropped.current_frame()[: CROP_W * CROP_H]
+        side_plane = sidefill.current_frame()[: SIDEFILL_W * CROP_H]
+        for y in range(CROP_H):
+            crop_row = crop_plane[y * CROP_W:(y + 1) * CROP_W]
+            side_row = side_plane[y * SIDEFILL_W + SIDEFILL_PAD_X:y * SIDEFILL_W + SIDEFILL_PAD_X + CROP_W]
+            self.assertEqual(side_row, crop_row)
 
 
 class BrandParserTests(unittest.TestCase):

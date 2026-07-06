@@ -13,8 +13,8 @@ Why this exists (vs the gst-plugins-rs cdgparse/cdgdec elements):
     trusted (memory preset / border colors, tile row+column range, repeated
     memory presets). Extra hardening beyond OpenKJ: scroll offsets are clamped
     to the croppable window and a truncated trailing packet is ignored.
-  * Frames are emitted only when the image visibly changes, capped at 60fps —
-    cdgdec pushes 300 buffers/sec regardless, which costs real CPU downstream.
+  * Frames are emitted only when the image visibly changes — cdgdec pushes
+    300 buffers/sec regardless, which costs real CPU downstream.
 
 Usage from the app:
     src = CdgAppSource(Gst)          # pass the already-initialized Gst module
@@ -39,8 +39,11 @@ MIN_PACKETS_PER_FRAME = 1
 
 FULL_W, FULL_H = 300, 216      # paintable surface per the CDG spec
 CROP_W, CROP_H = 288, 192      # intended-visible center region
+SIDEFILL_W, SIDEFILL_H = 340, CROP_H  # near-16:9 output with unstretched CDG center
+SIDEFILL_PAD_X = (SIDEFILL_W - CROP_W) // 2
 PALETTE_BYTES = 1024           # 256 x 32-bit entries (only 16 used)
 FRAME_BYTES = CROP_W * CROP_H + PALETTE_BYTES  # RGB8P: indexed plane + palette
+SIDEFILL_FRAME_BYTES = SIDEFILL_W * SIDEFILL_H + PALETTE_BYTES
 
 # CD redbook command values
 _CMD_MEMORY_PRESET = 1
@@ -198,12 +201,35 @@ class CdgSurface:
         out[pos:] = self.palette
         return bytes(out)
 
+    def render_sidefill(self) -> bytes:
+        """Visible CDG centered in a widescreen RGB8P frame.
+
+        The original 288x192 lyric image is left pixel-perfect. Side bars are
+        filled from the current border/background color so hosts can fill a
+        widescreen output without stretching lyric glyphs.
+        """
+        top = 12 + self.v_offset
+        left = 6 + self.h_offset
+        px = self.pixels
+        out = bytearray(SIDEFILL_FRAME_BYTES)
+        pos = 0
+        for y in range(top, top + CROP_H):
+            src_row = y * FULL_W
+            side_color = px[src_row] & 0x0F
+            out[pos:pos + SIDEFILL_W] = bytes((side_color,)) * SIDEFILL_W
+            dst = pos + SIDEFILL_PAD_X
+            out[dst:dst + CROP_W] = px[src_row + left:src_row + left + CROP_W]
+            pos += SIDEFILL_W
+        out[pos:] = self.palette
+        return bytes(out)
+
 
 class CdgFileReader:
     """Iterates a .cdg file as visibly-distinct frames (port of OpenKJ's
     CdgFileReader). Frames are grouped so at most MAX_FPS are emitted/sec."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, sidefill: bool = False):
+        self._sidefill = bool(sidefill)
         with open(path, "rb") as f:
             data = f.read()
         # Ignore a truncated trailing packet from a damaged rip.
@@ -212,11 +238,26 @@ class CdgFileReader:
         self._total_packets = usable // CDG_PACKET_SIZE
         self.rewind()
 
+    @property
+    def width(self) -> int:
+        return SIDEFILL_W if self._sidefill else CROP_W
+
+    @property
+    def height(self) -> int:
+        return SIDEFILL_H if self._sidefill else CROP_H
+
+    @property
+    def frame_bytes(self) -> int:
+        return SIDEFILL_FRAME_BYTES if self._sidefill else FRAME_BYTES
+
+    def _render_frame(self) -> bytes:
+        return self._surface.render_sidefill() if self._sidefill else self._surface.render_cropped()
+
     def rewind(self):
         self._surface = CdgSurface()
         self._next_idx = 0  # packets applied to the surface so far
         self._cur_idx = 0   # packet index of the snapshotted current frame
-        self._cur_frame = self._surface.render_cropped()  # black
+        self._cur_frame = self._render_frame()  # black
         self._last_change_idx = -1
 
     # -- internals ---------------------------------------------------------
@@ -243,7 +284,7 @@ class CdgFileReader:
             while not self._is_eof() and not self._process_next_packet():
                 pass
 
-        self._cur_frame = self._surface.render_cropped()
+        self._cur_frame = self._render_frame()
         self._cur_idx = self._next_idx
 
         image_changed = False
@@ -288,13 +329,11 @@ class CdgAppSource:
     """GStreamer appsrc wrapper feeding decoded CDG frames (port of OpenKJ's
     CdgAppSrc). Pass the app's already-initialized Gst module."""
 
-    CAPS = (
-        f"video/x-raw,format=RGB8P,width={CROP_W},height={CROP_H},"
-        "framerate=0/1,pixel-aspect-ratio=1/1"
-    )
-
-    def __init__(self, gst, name: str = "cdg_native_src", diag=None):
+    def __init__(self, gst, name: str = "cdg_native_src", diag=None, sidefill: bool = False):
         self._Gst = gst
+        self.sidefill = bool(sidefill)
+        self.width, self.height = output_size(self.sidefill)
+        self.frame_bytes = SIDEFILL_FRAME_BYTES if self.sidefill else FRAME_BYTES
         self._lock = threading.Lock()
         self._reader = None
         self._want_data = False
@@ -304,10 +343,14 @@ class CdgAppSource:
         src = gst.ElementFactory.make("appsrc", name)
         if src is None:
             raise RuntimeError("Failed to create appsrc for native CDG decoder")
-        src.set_property("caps", gst.Caps.from_string(self.CAPS))
+        caps = (
+            f"video/x-raw,format=RGB8P,width={self.width},height={self.height},"
+            "framerate=0/1,pixel-aspect-ratio=1/1"
+        )
+        src.set_property("caps", gst.Caps.from_string(caps))
         src.set_property("format", gst.Format.TIME)
         src.set_property("stream-type", 1)  # GST_APP_STREAM_TYPE_SEEKABLE
-        src.set_property("max-bytes", FRAME_BYTES * 20)
+        src.set_property("max-bytes", self.frame_bytes * 20)
         src.set_property("emit-signals", True)
         src.connect("need-data", self._on_need_data)
         src.connect("enough-data", self._on_enough_data)
@@ -316,14 +359,15 @@ class CdgAppSource:
 
     def load(self, cdg_path: str):
         with self._lock:
-            self._reader = CdgFileReader(cdg_path)
+            self._reader = CdgFileReader(cdg_path, sidefill=self.sidefill)
             self._frames_pushed = 0
             self.element.set_property(
                 "duration", self._reader.total_duration_ms() * self._Gst.MSECOND
             )
             self._diag(
                 f"[CDG-NATIVE] loaded: {self._reader._total_packets} packets, "
-                f"{self._reader.total_duration_ms() / 1000:.1f}s"
+                f"{self._reader.total_duration_ms() / 1000:.1f}s "
+                f"size={self.width}x{self.height} sidefill={self.sidefill}"
             )
 
     def reset(self):
@@ -374,6 +418,10 @@ class CdgAppSource:
             ok = self._reader.seek(int(offset_ns) // self._Gst.MSECOND)
         self._diag(f"[CDG-NATIVE] seek to {int(offset_ns) // self._Gst.MSECOND}ms ok={ok}")
         return ok
+
+
+def output_size(sidefill: bool = False) -> tuple[int, int]:
+    return (SIDEFILL_W, SIDEFILL_H) if sidefill else (CROP_W, CROP_H)
 
 
 def selftest(path: str, dump_png_prefix: str | None = None):
