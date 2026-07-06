@@ -2858,6 +2858,7 @@ DEFAULTS = {
     "bg_video_enabled": False,        # play MP4 background videos behind CDG lyrics
     "bg_video_folder": "",            # folder of MP4 background videos
     "bg_video_shuffle": True,         # shuffle-bag order; False = alphabetical loop
+    "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
@@ -6114,6 +6115,57 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_hide_timer = QTimer(self)
         self._next_up_overlay_hide_timer.setSingleShot(True)
         self._next_up_overlay_hide_timer.timeout.connect(lambda: self.hide_next_up_overlay(reason="timer"))
+        # Request QR shown on the show screen, bottom-right, right-aligned with
+        # the ticker countdown timer. Host pushes the pixmap; None hides it.
+        self._request_qr_pixmap = QPixmap()
+        self._request_qr_margin = 24
+
+    def set_request_qr(self, pixmap):
+        """Set (or clear with None) the request QR painted on the show screen.
+        The host builds it from the network request link and pushes it here."""
+        if pixmap is None or (hasattr(pixmap, "isNull") and pixmap.isNull()):
+            had = not self._request_qr_pixmap.isNull()
+            self._request_qr_pixmap = QPixmap()
+            if had:
+                self.update()
+            return
+        self._request_qr_pixmap = pixmap if isinstance(pixmap, QPixmap) else QPixmap(pixmap)
+        self.update()
+
+    def _ticker_timer_right_margin(self) -> int:
+        """The ticker preset's right_margin (px): the QR's right edge aligns to
+        where the countdown timer text ends, so the QR sits by the song
+        duration. Falls back to the default margin if unavailable."""
+        try:
+            vw = self.parent()
+            owner = getattr(vw, "_external_owner", None) if vw is not None else None
+            if owner is None and vw is not None:
+                owner = vw.parent()
+            settings = getattr(owner, "settings", {}) if owner is not None else {}
+            idx = int(settings.get("ticker_size_index", TICKER_SIZE_DEFAULT_INDEX))
+            idx = max(0, min(len(TICKER_SIZE_PRESETS) - 1, idx))
+            return int(TICKER_SIZE_PRESETS[idx][3])
+        except Exception:
+            return self._request_qr_margin
+
+    def _draw_request_qr(self, painter: QPainter):
+        pm = self._request_qr_pixmap
+        if pm.isNull() or self.width() <= 120 or self.height() <= 120:
+            return
+        # Scale the QR responsively with the window (cap so it stays a tasteful
+        # corner badge), then align its right edge to the timer and pin it to
+        # the bottom of the video area (just above the ticker).
+        target = max(72, min(180, int(self.height() * 0.20)))
+        scaled = pm.scaled(
+            target, target,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        right_margin = self._ticker_timer_right_margin()
+        x = self.width() - right_margin - scaled.width()
+        y = self.height() - self._request_qr_margin - scaled.height()
+        x = max(self._request_qr_margin, x)
+        painter.drawPixmap(int(x), int(y), scaled)
 
     def set_background_video_frame(self, image):
         """Live MP4 background frame (behind CDG lyrics). None clears it and
@@ -6786,6 +6838,9 @@ class VideoAreaWidget(QWidget):
             self._draw_idle_bg_overlay(painter, info)
 
         self._draw_next_up_overlay(painter)
+
+        # Request QR sits on top of everything, bottom-right by the timer.
+        self._draw_request_qr(painter)
 
         painter.end()
 
@@ -10797,20 +10852,37 @@ class VideoWindow(QWidget):
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
 
-        # Native pre-rendered ticker at the bottom: time-based pixel-perfect
-        # scrolling (no QML / QPropertyAnimation).
-        self.ticker = Ticker(
-            get_singer_list_callback,
-            self,
-            get_time_left_callback=get_time_left_callback
-        )
+        # Bottom ticker. Preferred backend is the Qt Quick render-thread ticker
+        # (RenderThreadTicker): the scroll animation runs on the scene-graph
+        # render thread, so it stays glass-smooth even while the GUI/Python
+        # thread is busy with queue updates, GStreamer state, or dialogs. If
+        # Qt Quick can't load on a machine, fall back to the legacy in-process
+        # QPainter Ticker (still functional, just GUI-thread paced).
+        self.ticker = None
+        self.ticker_backend = "none"
+        try:
+            self.ticker = RenderThreadTicker(
+                get_singer_list_callback,
+                self,
+                get_time_left_callback=get_time_left_callback,
+            )
+            self.ticker_backend = "quick-render-thread"
+        except Exception as e:
+            _diag(f"[TICKER] Qt Quick unavailable, using legacy painter ticker: {e}")
+            self.ticker = Ticker(
+                get_singer_list_callback,
+                self,
+                get_time_left_callback=get_time_left_callback,
+            )
+            self.ticker_backend = "legacy-painter"
         layout.addWidget(self.ticker)
         # Keep video area dominant and ticker fixed at bottom.
         layout.setStretch(0, 1)
         layout.setStretch(1, 0)
 
         _diag(
-            f"[TICKER] init title={title} winId={int(self.video_area.winId())} backend=native"
+            f"[TICKER] init title={title} winId={int(self.video_area.winId())} "
+            f"backend={self.ticker_backend}"
         )
 
         # Keep idle BG overlay repainting even when this window is not focused.
@@ -15203,6 +15275,11 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._apply_idle_background(force=True)
+        # Paint the request QR on the show screen now that the video area exists.
+        try:
+            self._refresh_show_screen_qr("video_window_ready", force=True)
+        except Exception:
+            pass
 
         # --- Video window: smaller, more square, bottom-right of screen ---
         try:
@@ -19011,6 +19088,11 @@ class KaraokeApp(QWidget):
         try:
             if hasattr(self, "preview_window") and self.preview_window is not None:
                 self.preview_window.recreate_video_surface(reason)
+        except Exception:
+            pass
+        # A fresh VideoAreaWidget starts with no QR; re-push it.
+        try:
+            self._refresh_show_screen_qr(f"surface_recreate:{reason}", force=True)
         except Exception:
             pass
 
@@ -27734,6 +27816,35 @@ class KaraokeApp(QWidget):
         self.header_qr_widget.setText("QR")
         self.header_qr_widget.setMinimumSize(38, 30)
         self.header_qr_widget.setToolTip("Set a request QR URL in Settings")
+        self._refresh_show_screen_qr("header_update")
+
+    def _refresh_show_screen_qr(self, reason: str = "update", *, force: bool = False):
+        """Push (or clear) the request QR painted on the show screen. Shown when
+        the 'show_request_qr' setting is on AND requests are accepting; the URL
+        is the same network request link the header QR uses."""
+        vw = getattr(self, "video_window", None)
+        area = getattr(vw, "video_area", None) if vw is not None else None
+        if area is None or not hasattr(area, "set_request_qr"):
+            return
+        show = bool(self.settings.get("show_request_qr", True)) and self._is_requests_accepting_cached()
+        url = self._header_qr_url() if show else ""
+        if not url:
+            show = False
+        key = (bool(show), url)
+        if not force and key == getattr(self, "_show_screen_qr_key", None):
+            return
+        self._show_screen_qr_key = key
+        if not show:
+            area.set_request_qr(None)
+            _diag(f"[QR-SHOW] cleared reason={reason} "
+                  f"enabled={int(bool(self.settings.get('show_request_qr', True)))} "
+                  f"accepting={int(self._is_requests_accepting_cached())}")
+            return
+        # Build at a generous resolution so the responsive downscale in
+        # VideoAreaWidget stays crisp on a fullscreen output.
+        pix = self._build_qr_pixmap(url, size=300)
+        area.set_request_qr(None if pix.isNull() else pix)
+        _diag(f"[QR-SHOW] shown url={url} reason={reason} built={int(not pix.isNull())}")
 
     def _set_header_qr_url(self, url: str):
         self.settings["header_qr_url"] = str(url or "").strip()
@@ -27945,6 +28056,10 @@ class KaraokeApp(QWidget):
             pass
         try:
             self._apply_idle_background(force=False, advance_slideshow=False)
+        except Exception:
+            pass
+        try:
+            self._refresh_show_screen_qr("accepting_change")
         except Exception:
             pass
         return new_value
@@ -28572,6 +28687,21 @@ class KaraokeApp(QWidget):
             qr_hint.setStyleSheet(_network_label_css())
             qr_hint.setWordWrap(True)
             v.addWidget(qr_hint)
+
+            show_qr_cb = QCheckBox("Show request QR on the show screen (by the song countdown timer)")
+            show_qr_cb.setChecked(bool(self.settings.get("show_request_qr", True)))
+            show_qr_cb.setToolTip("Paints the request QR in the bottom-right of the karaoke/idle output, aligned with the ticker countdown timer. Only visible while requests are accepting.")
+
+            def on_show_qr_toggled(checked: bool):
+                self.settings["show_request_qr"] = bool(checked)
+                try:
+                    self.save_settings()
+                except Exception:
+                    pass
+                self._refresh_show_screen_qr("settings_toggle", force=True)
+
+            show_qr_cb.toggled.connect(on_show_qr_toggled)
+            v.addWidget(show_qr_cb)
 
             v.addSpacing(10)
 
@@ -42393,6 +42523,386 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             return False
+
+
+QML_TICKER_RT_SOURCE = """
+import QtQuick
+
+Rectangle {
+    id: root
+    color: "black"
+    clip: true
+
+    property string displayText: ""
+    property string pendingText: ""
+    property string rightText: "--:--"
+    property string fontFamily: ""
+    property real speedPxPerSec: 78
+    property real rightMargin: 32
+    property real gap: 16
+    property real timerPad: 8
+    property int namesPx: 40
+    property int timerPx: 40
+    property color tickerColor: "#FBD000"
+    property bool tickerBold: false
+    property bool running: true
+    // Freeze-in-place during native window churn (sink detach/surface swap):
+    // pausing the animator idles the render thread without hiding anything,
+    // and the scroll resumes mid-pass when released.
+    property bool churnHold: false
+    property int passCount: 0   // diagnostics: counts animation (re)starts
+
+    readonly property real timerWidth: Math.max(1, timerText.contentWidth + (timerPad * 2))
+    readonly property real scrollAreaW: Math.max(0, width - timerWidth - rightMargin - gap)
+
+    function restartPass() {
+        // Frozen for a native window transition (e.g. fullscreen toggle): do
+        // NOTHING. Resize-driven restarts here are what churn the render thread
+        // and stall the GUI thread during the macOS fullscreen animation. The
+        // release handler does one clean restart for the settled geometry.
+        if (root.churnHold) return
+        anim.stop()
+        if (!root.running || root.displayText === "" || nameText.contentWidth <= 0 || root.scrollAreaW <= 0) {
+            nameText.x = root.scrollAreaW
+            return
+        }
+        var travel = root.scrollAreaW + nameText.contentWidth
+        anim.from = root.scrollAreaW
+        anim.to = -nameText.contentWidth
+        anim.duration = Math.max(900, Math.round((travel / Math.max(1, root.speedPxPerSec)) * 1000))
+        anim.start()
+        if (root.churnHold) anim.paused = true
+        root.passCount += 1
+    }
+    function scheduleRestart() { Qt.callLater(restartPass) }
+
+    Item {
+        id: leftClip
+        x: 0; y: 0
+        width: root.scrollAreaW
+        height: root.height
+        clip: true
+
+        Text {
+            id: nameText
+            text: root.displayText
+            color: root.tickerColor
+            font.pixelSize: root.namesPx
+            font.bold: root.tickerBold
+            font.family: root.fontFamily
+            y: Math.round((leftClip.height - height) / 2)
+            x: root.scrollAreaW
+            onContentWidthChanged: root.scheduleRestart()
+        }
+    }
+
+    Text {
+        id: timerText
+        text: root.rightText
+        color: root.tickerColor
+        font.pixelSize: root.timerPx
+        font.bold: root.tickerBold
+        font.family: root.fontFamily
+        x: Math.max(0, root.width - root.timerWidth - root.rightMargin + root.timerPad)
+        y: Math.round((root.height - height) / 2)
+    }
+
+    // XAnimator executes on the scene-graph RENDER thread: the scroll keeps
+    // gliding even while the application (GUI/Python) thread is busy. One
+    // pass per run; queue-text changes are deferred and applied at the wrap
+    // (onFinished fires only on natural completion, not on manual stop).
+    XAnimator {
+        id: anim
+        target: nameText
+        easing.type: Easing.Linear
+        loops: 1
+        onFinished: {
+            if (root.pendingText !== "" && root.pendingText !== root.displayText) {
+                root.displayText = root.pendingText   // triggers restart below
+                root.pendingText = ""
+            } else {
+                root.pendingText = ""
+                root.restartPass()
+            }
+        }
+    }
+
+    onDisplayTextChanged: scheduleRestart()
+    onWidthChanged: scheduleRestart()
+    onHeightChanged: scheduleRestart()
+    onRunningChanged: scheduleRestart()
+    onSpeedPxPerSecChanged: scheduleRestart()
+    onChurnHoldChanged: {
+        if (churnHold) {
+            // Entering hold: pause in place, idle the render thread.
+            if (anim.running) anim.paused = true
+        } else {
+            // Released: geometry may have changed a lot during the transition,
+            // so the paused pass is stale — start one fresh pass at the new size.
+            restartPass()
+        }
+    }
+    // NOTE: no restart on scrollAreaW changes — the right-side countdown's
+    // width shifts by a pixel every second during karaoke, and restarting on
+    // that made the ticker loop endlessly. The clip width simply re-binds.
+}
+"""
+
+
+class RenderThreadTicker(QFrame):
+    """Vsync-locked ticker rendered on Qt Quick's render thread.
+
+    The scroll animation (XAnimator) runs entirely on the scene-graph render
+    thread — a C++ thread that never executes Python — so queue updates,
+    GStreamer state changes, dialogs, and GIL contention on the GUI thread
+    cannot make it stutter. Python is only involved when the TEXT changes.
+
+    Public surface mirrors the legacy Ticker so VideoWindow can use either.
+    Speed stays on the app's continuous px/sec model (set_scroll_speed) rather
+    than the reference's preset-index model, so the existing speed slider and
+    ticker_speed_px_per_sec setting keep working unchanged."""
+
+    def __init__(self, get_singer_list_callback, parent=None, get_time_left_callback=None):
+        super().__init__(parent)
+        from PyQt6.QtQuick import QQuickView  # raises -> caller falls back to legacy Ticker
+
+        self.get_singer_list_callback = get_singer_list_callback
+        self.get_time_left_callback = get_time_left_callback
+        self.setStyleSheet("background-color: black;")
+        self.setContentsMargins(0, 0, 0, 0)
+
+        self._bold = False
+        self._size_idx = TICKER_SIZE_DEFAULT_INDEX
+        self._active_text = None  # None forces first update through
+        self._last_queue_text = None  # legacy-name alias some callers clear
+        self._right_text = ""
+
+        self._view = QQuickView()
+        self._view.setColor(QColor("black"))
+        self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
+
+        self._qml_temp_path = None
+        fd, qml_path = tempfile.mkstemp(prefix="singws_ticker_rt_", suffix=".qml")
+        self._qml_temp_path = qml_path
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(QML_TICKER_RT_SOURCE)
+        self._view.setSource(QUrl.fromLocalFile(qml_path))
+        if self._view.status() == QQuickView.Status.Error:
+            errs = []
+            try:
+                for er in self._view.errors():
+                    errs.append(er.toString())
+            except Exception:
+                pass
+            raise RuntimeError("QML load error: " + (" | ".join(errs) or "unknown"))
+
+        self._root = self._view.rootObject()
+        if self._root is None:
+            raise RuntimeError("QML ticker has no root object")
+        try:
+            self._root.setProperty("fontFamily", QApplication.font().family())
+        except Exception:
+            pass
+
+        self._container = QWidget.createWindowContainer(self._view, self)
+        self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._container)
+
+        # Same timer names as the legacy Ticker (VideoWindow.set_ticker_enabled
+        # starts/stops them via hasattr).
+        self.queue_update_timer = QTimer(self)
+        self.queue_update_timer.timeout.connect(self.update_queue_text)
+        self.queue_update_timer.start(5000)
+
+        self.right_update_timer = QTimer(self)
+        self.right_update_timer.timeout.connect(self.update_right_text)
+        self.right_update_timer.start(300)
+
+        size_idx = TICKER_SIZE_DEFAULT_INDEX
+        bold = False
+        saved_speed = TICKER_SPEED_DEFAULT
+        try:
+            owner = self._settings_owner()
+            if owner is not None and hasattr(owner, "settings"):
+                size_idx = int(owner.settings.get("ticker_size_index", TICKER_SIZE_DEFAULT_INDEX))
+                bold = bool(owner.settings.get("ticker_bold", False))
+                saved_speed = float(owner.settings.get("ticker_speed_px_per_sec", TICKER_SPEED_DEFAULT))
+        except Exception:
+            size_idx = TICKER_SIZE_DEFAULT_INDEX
+        self.set_size_preset(size_idx)
+        self.set_bold(bold)
+        self.set_scroll_speed(saved_speed)
+        self.update_queue_text()
+        self.update_right_text()
+        self.start_scrolling()
+
+    def _settings_owner(self):
+        try:
+            owner = getattr(self, "_external_settings_owner", None)
+            if owner is not None and hasattr(owner, "settings"):
+                return owner
+        except Exception:
+            pass
+        w = self.parent()
+        while w is not None:
+            if hasattr(w, "settings"):
+                return w
+            w = w.parent()
+        return None
+
+    def _format_queue_text(self):
+        custom_msg = ""
+        singer_list = []
+        try:
+            res = self.get_singer_list_callback()
+            if isinstance(res, tuple) and len(res) == 2:
+                singer_list, custom_msg = res
+            elif isinstance(res, dict):
+                singer_list = res.get("singers", []) or []
+                custom_msg = (res.get("message", "") or "").strip()
+            else:
+                singer_list = res or []
+        except Exception:
+            singer_list = []
+            custom_msg = ""
+
+        singer_list = singer_list or []
+        custom_msg = (custom_msg or "").strip()
+        formatted_singers = "   |   ".join([f"{idx + 1}. {name}" for idx, name in enumerate(singer_list)])
+        if custom_msg:
+            return f"{custom_msg}   |   {formatted_singers}" if formatted_singers else custom_msg
+        return formatted_singers
+
+    def set_size_preset(self, idx: int):
+        idx = max(0, min(len(TICKER_SIZE_PRESETS) - 1, int(idx)))
+        self._size_idx = idx
+        h, names_px, timer_px, right_margin, gap, timer_pad = TICKER_SIZE_PRESETS[idx]
+        self.setFixedHeight(int(h))
+        try:
+            self._root.setProperty("namesPx", int(names_px))
+            self._root.setProperty("timerPx", int(timer_px))
+            self._root.setProperty("rightMargin", float(right_margin))
+            self._root.setProperty("gap", float(gap))
+            self._root.setProperty("timerPad", float(timer_pad))
+        except Exception:
+            pass
+
+    def set_scroll_speed(self, px_per_sec) -> None:
+        """Continuous px/sec speed (matches the legacy Ticker API). Honors the
+        host's effective-speed clamp when available so the speed slider and the
+        ticker_speed_px_per_sec setting drive this identically to before."""
+        try:
+            speed = float(px_per_sec)
+        except Exception:
+            speed = TICKER_SPEED_DEFAULT
+        try:
+            owner = self._settings_owner()
+            if owner is not None and hasattr(owner, "_effective_ticker_speed_px_per_sec"):
+                speed = float(owner._effective_ticker_speed_px_per_sec(speed))
+        except Exception:
+            pass
+        speed = max(TICKER_SPEED_MIN, min(TICKER_SPEED_MAX, speed))
+        try:
+            self._root.setProperty("speedPxPerSec", float(speed))
+        except Exception:
+            pass
+
+    def set_color(self, hex_color: str):
+        try:
+            self._root.setProperty("tickerColor", str(hex_color or "#FBD000"))
+        except Exception:
+            pass
+
+    def set_bold(self, enabled: bool):
+        self._bold = bool(enabled)
+        try:
+            self._root.setProperty("tickerBold", self._bold)
+        except Exception:
+            pass
+
+    def update_queue_text(self, force: bool = False):
+        txt = self._format_queue_text()
+        if not force and txt == self._active_text:
+            return
+        self._active_text = txt
+        self._last_queue_text = txt
+        try:
+            current = str(self._root.property("displayText") or "")
+            if force or txt == "" or current == "":
+                # Apply immediately: first text, explicit refresh, or a clear
+                # (empty queue must not wait a full pass to disappear).
+                self._root.setProperty("pendingText", "")
+                self._root.setProperty("displayText", txt)
+            else:
+                # Mid-scroll change: defer to the end of the current pass so
+                # the marquee never visibly restarts on queue edits.
+                self._root.setProperty("pendingText", txt)
+        except Exception:
+            pass
+
+    def update_right_text(self):
+        if not self.get_time_left_callback:
+            return
+        txt = self.get_time_left_callback() or "--:--"
+        if txt != self._right_text:
+            self._right_text = txt
+            try:
+                self._root.setProperty("rightText", txt)
+            except Exception:
+                pass
+
+    def start_scrolling(self):
+        try:
+            self._root.setProperty("running", True)
+        except Exception:
+            pass
+
+    def stop_scrolling(self):
+        try:
+            self._root.setProperty("running", False)
+        except Exception:
+            pass
+
+    def force_refresh_now(self):
+        self._active_text = None
+        self._last_queue_text = None
+        self.update_queue_text(force=True)
+
+    # --- freeze-in-place hold (used around the fullscreen transition) -------
+    # Pausing the animator idles the render thread between frames: nothing is
+    # hidden (no flash), and on release the scroll continues where it froze.
+    def hold_rendering(self, max_ms: int = 6000):
+        self._hold_count = getattr(self, "_hold_count", 0) + 1
+        token = self._hold_token = getattr(self, "_hold_token", 0) + 1
+        try:
+            self._root.setProperty("churnHold", True)
+        except Exception:
+            pass
+        QTimer.singleShot(int(max_ms), lambda: self._failsafe_resume(token))
+
+    def resume_rendering(self):
+        self._hold_count = max(0, getattr(self, "_hold_count", 0) - 1)
+        if self._hold_count == 0:
+            self._release_hold()
+
+    def _failsafe_resume(self, token: int):
+        if getattr(self, "_hold_token", 0) == token and getattr(self, "_hold_count", 0) > 0:
+            self._hold_count = 0
+            self._release_hold()
+
+    def _release_hold(self):
+        try:
+            self._root.setProperty("churnHold", False)
+        except Exception:
+            pass
+        try:
+            self.update_queue_text()
+            self.update_right_text()
+        except Exception:
+            pass
 
 
 class Ticker(QFrame):
