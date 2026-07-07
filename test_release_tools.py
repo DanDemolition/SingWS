@@ -89,5 +89,21 @@ class UpdateManifestDefaultsTests(unittest.TestCase):
         self.assertNotIn("https://dandemolition.github.io/SingWS/release.json", source)
 
 
+class PackagingSpecTests(unittest.TestCase):
+    def test_release_specs_exclude_gst_python_plugin(self):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+            with self.subTest(spec=spec):
+                source = Path(spec).read_text(encoding="utf-8")
+                self.assertIn('"libgstpython.dylib"', source)
+                self.assertIn("excluded_optional_gst_plugins", source)
+
+    def test_framework_specs_skip_gst_python_before_analysis(self):
+        for spec in ("SingWS-x86_64.spec", "SingWS-universal.spec"):
+            with self.subTest(spec=spec):
+                source = Path(spec).read_text(encoding="utf-8")
+                self.assertIn("if plug.name in excluded_optional_gst_plugins:", source)
+                self.assertIn("continue\n        binaries.append((str(plug), \"gst_plugins\"))", source)
+
+
 if __name__ == "__main__":
     unittest.main()

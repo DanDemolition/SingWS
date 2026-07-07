@@ -21,6 +21,19 @@ glibunix_typelib_candidates = (
 
 extra_datas = []
 binaries = []
+excluded_optional_gst_plugins = {
+    "libgstanalyticsoverlay.dylib",
+    "libgstgtk.dylib",
+    "libgstgtk4.dylib",
+    "libgstpango.dylib",
+    # Optional Python plugin loader. It depends on @rpath/Python3 and emits a
+    # startup warning in packaged apps; SingWS does not use Python Gst plugins.
+    "libgstpython.dylib",
+    "libgstrsclosedcaption.dylib",
+    "libgstrsonvif.dylib",
+    "libgstrsvg.dylib",
+    "libgstttmlsubs.dylib",
+}
 if gst_framework_scanner.exists():
     extra_datas.append((str(gst_framework_scanner), "libexec/gstreamer-1.0"))
 elif gst_scanner.exists():
@@ -58,6 +71,8 @@ gst_framework_lib = gst_framework_root / "lib"
 gst_framework_plugins = gst_framework_lib / "gstreamer-1.0"
 if gst_framework_plugins.exists():
     for plug in gst_framework_plugins.glob("*.dylib"):
+        if plug.name in excluded_optional_gst_plugins:
+            continue
         binaries.append((str(plug), "gst_plugins"))
     # GLib typelibs needed by gi.repository.Gst at runtime
     typelib_dir = gst_framework_lib / "girepository-1.0"
@@ -128,16 +143,6 @@ a = Analysis(
     optimize=0,
 )
 
-excluded_optional_gst_plugins = {
-    "libgstanalyticsoverlay.dylib",
-    "libgstgtk.dylib",
-    "libgstgtk4.dylib",
-    "libgstpango.dylib",
-    "libgstrsclosedcaption.dylib",
-    "libgstrsonvif.dylib",
-    "libgstrsvg.dylib",
-    "libgstttmlsubs.dylib",
-}
 a.binaries = [
     item for item in a.binaries
     if not (

@@ -95,6 +95,9 @@ excluded_optional_gst_plugins = {
     "libgstgtk.dylib",
     "libgstgtk4.dylib",
     "libgstpango.dylib",
+    # Optional Python plugin loader. It depends on @rpath/Python3 and emits a
+    # startup warning in packaged apps; SingWS does not use Python Gst plugins.
+    "libgstpython.dylib",
     "libgstrsclosedcaption.dylib",
     "libgstrsonvif.dylib",
     "libgstrsvg.dylib",
