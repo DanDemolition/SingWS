@@ -5760,6 +5760,9 @@ class BackgroundMusicPlayer(QObject):
         # If not cached, try to extract (this will cache it automatically)
         return self.get_album_artwork(current_file)
     
+_CLEAN_CDG_CACHE = {"key": None, "threshold": None, "transparent": None, "result": None}
+
+
 def _clean_cdg_near_black(image: QImage, threshold: int = 10, transparent_black: bool = False) -> QImage:
     """Clamp only CDG near-black RGB pixels to true black.
 
@@ -5768,6 +5771,11 @@ def _clean_cdg_near_black(image: QImage, threshold: int = 10, transparent_black:
     outlines, and intentionally dark colored graphics survive. When
     transparent_black is true, those same near-black background pixels become
     transparent so a subtle host-selected background can show behind lyrics.
+
+    The result is cached for the last (frame, threshold, transparent) combo:
+    each karaoke frame is cleaned once even though BOTH the output and preview
+    windows call this per frame — at full-resolution mpv frames that redundant
+    second scan cost ~10 ms/frame.
     """
     if image is None or image.isNull():
         return QImage()
@@ -5778,79 +5786,94 @@ def _clean_cdg_near_black(image: QImage, threshold: int = 10, transparent_black:
     if threshold <= 0 and not transparent_black:
         return image
     try:
-        if image.format() == QImage.Format.Format_Indexed8:
-            table = list(image.colorTable())
-            if not table:
+        cache_key = int(image.cacheKey())
+    except Exception:
+        cache_key = None
+    _cc = _CLEAN_CDG_CACHE
+    if (cache_key is not None and _cc["key"] == cache_key
+            and _cc["threshold"] == threshold and _cc["transparent"] == transparent_black
+            and _cc["result"] is not None):
+        return _cc["result"]
+    def _compute():
+        try:
+            if image.format() == QImage.Format.Format_Indexed8:
+                table = list(image.colorTable())
+                if not table:
+                    return image
+                changed = False
+                for idx, value in enumerate(table):
+                    try:
+                        v = int(value)
+                        a = (v >> 24) & 0xFF
+                        r = (v >> 16) & 0xFF
+                        g = (v >> 8) & 0xFF
+                        b = v & 0xFF
+                    except Exception:
+                        continue
+                    if a and r <= threshold and g <= threshold and b <= threshold and (r or g or b or transparent_black):
+                        new_a = 0 if transparent_black else a
+                        new_value = (new_a << 24)
+                        if new_value != v:
+                            table[idx] = new_value
+                            changed = True
+                if changed:
+                    cleaned = QImage(image)
+                    cleaned.setColorTable(table)
+                    return cleaned
                 return image
-            changed = False
-            for idx, value in enumerate(table):
-                try:
-                    v = int(value)
-                    a = (v >> 24) & 0xFF
-                    r = (v >> 16) & 0xFF
-                    g = (v >> 8) & 0xFF
-                    b = v & 0xFF
-                except Exception:
-                    continue
-                if a and r <= threshold and g <= threshold and b <= threshold and (r or g or b or transparent_black):
-                    new_a = 0 if transparent_black else a
-                    new_value = (new_a << 24)
-                    if new_value != v:
-                        table[idx] = new_value
-                        changed = True
-            if changed:
-                cleaned = QImage(image)
-                cleaned.setColorTable(table)
+
+            cleaned = image.convertToFormat(QImage.Format.Format_ARGB32)
+            ptr = cleaned.bits()
+            ptr.setsize(cleaned.sizeInBytes())
+            buf = memoryview(ptr)
+            try:
+                # Vectorized near-black clamp. The per-pixel Python fallback
+                # below is fine for the tiny 300x216 CDG frames the GStreamer
+                # path emits, but a full-resolution RGBA frame (e.g. the mpv
+                # renderer's ~1000x720 up to 4K) has millions of pixels —
+                # looping in Python blocks the GUI thread for hundreds of ms
+                # per frame and freezes playback. Treat each ARGB32 pixel as
+                # one uint32 so the scan/rewrite stays in numpy.
+                import numpy as np
+                v = np.asarray(buf).view(np.uint32)
+                b = v & 0xFF
+                g = (v >> 8) & 0xFF
+                r = (v >> 16) & 0xFF
+                a = (v >> 24) & 0xFF
+                mask = (a > 0) & (r <= threshold) & (g <= threshold) & (b <= threshold)
+                if not transparent_black:
+                    mask &= (r > 0) | (g > 0) | (b > 0)
+                if not mask.any():
+                    return image
+                if transparent_black:
+                    v[mask] = 0
+                else:
+                    v[mask] = a[mask].astype(np.uint32) << 24  # zero RGB, keep alpha
                 return cleaned
+            except Exception:
+                pass
+            # Fallback: pure-Python per-pixel loop (numpy unavailable).
+            changed = False
+            for i in range(0, len(buf), 4):
+                b = int(buf[i])
+                g = int(buf[i + 1])
+                r = int(buf[i + 2])
+                a = int(buf[i + 3])
+                if a and r <= threshold and g <= threshold and b <= threshold and (r or g or b or transparent_black):
+                    buf[i] = 0
+                    buf[i + 1] = 0
+                    buf[i + 2] = 0
+                    if transparent_black:
+                        buf[i + 3] = 0
+                    changed = True
+            return cleaned if changed else image
+        except Exception:
             return image
 
-        cleaned = image.convertToFormat(QImage.Format.Format_ARGB32)
-        ptr = cleaned.bits()
-        ptr.setsize(cleaned.sizeInBytes())
-        buf = memoryview(ptr)
-        try:
-            # Vectorized near-black clamp. The per-pixel Python fallback below
-            # is fine for the tiny 300x216 CDG frames the GStreamer path emits,
-            # but a full-resolution RGBA frame (e.g. the mpv renderer's
-            # ~1000x720) has ~720k pixels — looping in Python blocks the GUI
-            # thread for hundreds of ms per frame and freezes playback. Treat
-            # each ARGB32 pixel as one uint32 so the scan/rewrite stays in
-            # numpy (~2 ms for a 720p frame vs ~hundreds in Python).
-            import numpy as np
-            v = np.asarray(buf).view(np.uint32)
-            b = v & 0xFF
-            g = (v >> 8) & 0xFF
-            r = (v >> 16) & 0xFF
-            a = (v >> 24) & 0xFF
-            mask = (a > 0) & (r <= threshold) & (g <= threshold) & (b <= threshold)
-            if not transparent_black:
-                mask &= (r > 0) | (g > 0) | (b > 0)
-            if not mask.any():
-                return image
-            if transparent_black:
-                v[mask] = 0
-            else:
-                v[mask] = a[mask].astype(np.uint32) << 24  # zero RGB, keep alpha
-            return cleaned
-        except Exception:
-            pass
-        # Fallback: pure-Python per-pixel loop (numpy unavailable).
-        changed = False
-        for i in range(0, len(buf), 4):
-            b = int(buf[i])
-            g = int(buf[i + 1])
-            r = int(buf[i + 2])
-            a = int(buf[i + 3])
-            if a and r <= threshold and g <= threshold and b <= threshold and (r or g or b or transparent_black):
-                buf[i] = 0
-                buf[i + 1] = 0
-                buf[i + 2] = 0
-                if transparent_black:
-                    buf[i + 3] = 0
-                changed = True
-        return cleaned if changed else image
-    except Exception:
-        return image
+    result = _compute()
+    if cache_key is not None:
+        _cc.update(key=cache_key, threshold=threshold, transparent=transparent_black, result=result)
+    return result
 
 
 def _scaled_karaoke_image(
@@ -18733,10 +18756,11 @@ class KaraokeApp(QWidget):
             h = 0
         if h <= 0:
             h = 1080
-        # Clamp: >=720 keeps it sharp; <=1600 bounds the software-render cost at
-        # 30 fps (a 1080p external projector renders 1:1; Retina fullscreen gets
-        # a much sharper frame than the old fixed 1080).
-        h = max(720, min(1600, h))
+        # Clamp: >=720 keeps it sharp; <=2160 renders up to full 4K so a 4K
+        # display/projector is a crisp 1:1 (the earlier 1080p render looked
+        # soft because the display upscaled it). The near-black cleanup is
+        # cached per frame, so 4K stays within the 30 fps budget.
+        h = max(720, min(2160, h))
         if int(getattr(t, "max_video_height", 0) or 0) != h:
             t.max_video_height = h
             _diag(f"[MPV-CDG] render height set to {h}px (physical output, dpr-aware)")
