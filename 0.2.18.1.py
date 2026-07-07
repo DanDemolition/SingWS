@@ -2879,6 +2879,7 @@ DEFAULTS = {
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
     "cdg_display_mode": "fit",       # fit | sidefill | stretch; cdg_stretch_fill kept for migration
     "cdg_quality_mode": "standard",  # standard=lower CPU, high=smoother scaling/text edges
+    "cdg_mpv_crisp": True,           # High/mpv CDG scaling: True=crisp (nearest, sharp pixels), False=smooth (anti-aliased)
     "cdg_near_black_cleanup": True,  # Clamp near-black CDG backgrounds to true black
     "cdg_near_black_threshold": 10,  # RGB values <= this are treated as black for CDG only
     "lyrics_background_video_opacity": 0, # 0..100; shows the background (video/idle/slideshow) through near-black CDG only
@@ -18737,33 +18738,51 @@ class KaraokeApp(QWidget):
         _diag("[PY-KARAOKE] playback hung — recovering via media-end path")
         QTimer.singleShot(0, self._handle_media_end_safe)
 
+    def _mpv_cdg_crisp_enabled(self) -> bool:
+        """Crisp (nearest-neighbor / pixel-art) vs Smooth (anti-aliased) CDG
+        scaling. Crisp gives hard, 'genuinely clear' pixel edges; Smooth is
+        soft. Mirrors the reference build's SINGWS_MPV_SHARED_NEAREST toggle."""
+        try:
+            return bool(self.settings.get("cdg_mpv_crisp", True))
+        except Exception:
+            return True
+
     def _sync_mpv_render_size(self, transport=None):
-        """Drive the mpv CDG transport's render height from the PHYSICAL output
-        size (logical height x device pixel ratio), so the frame is a sharp 1:1
-        on the show screen instead of a soft upscale (HiDPI/Retina blur).
-        No-op for the GStreamer transport. Called on start and on resize."""
+        """Drive the mpv CDG transport's render height for the chosen scaling
+        look. No-op for the GStreamer transport. Called on start and on resize.
+
+        - Crisp: render at CDG NATIVE height (216). The app's CDG scaler then
+          nearest-neighbor integer-prescales that to the screen -> hard,
+          pixel-perfect edges (and mpv renders a tiny frame, so it's cheap).
+        - Smooth: render at the PHYSICAL output height (logical x dpr, up to
+          4K) so mpv's own resampler produces a soft 1:1 frame with no blurry
+          second upscale on HiDPI/Retina."""
         if MpvCdgTransport is None:
             return
         t = transport if transport is not None else getattr(self, "karaoke_transport", None)
         if not isinstance(t, MpvCdgTransport):
             return
-        h = 0
-        try:
-            area = self.video_window.video_area
-            dpr = float(area.devicePixelRatioF() or 1.0)
-            h = int(round(area.height() * dpr))
-        except Exception:
+        if self._mpv_cdg_crisp_enabled():
+            h = 216  # native CDG height; app scaler does the crisp upscale
+            mode = "crisp-native"
+        else:
             h = 0
-        if h <= 0:
-            h = 1080
-        # Clamp: >=720 keeps it sharp; <=2160 renders up to full 4K so a 4K
-        # display/projector is a crisp 1:1 (the earlier 1080p render looked
-        # soft because the display upscaled it). The near-black cleanup is
-        # cached per frame, so 4K stays within the 30 fps budget.
-        h = max(720, min(2160, h))
+            try:
+                area = self.video_window.video_area
+                dpr = float(area.devicePixelRatioF() or 1.0)
+                h = int(round(area.height() * dpr))
+            except Exception:
+                h = 0
+            if h <= 0:
+                h = 1080
+            # >=720 keeps it sharp; <=2160 renders up to full 4K so a 4K
+            # display is a soft 1:1 (no blurry HiDPI upscale). Cleanup is
+            # cached per frame, so 4K stays within the 30 fps budget.
+            h = max(720, min(2160, h))
+            mode = "smooth-physical"
         if int(getattr(t, "max_video_height", 0) or 0) != h:
             t.max_video_height = h
-            _diag(f"[MPV-CDG] render height set to {h}px (physical output, dpr-aware)")
+            _diag(f"[MPV-CDG] render height set to {h}px ({mode})")
 
     def _start_python_karaoke_transport(
         self,
@@ -21499,6 +21518,33 @@ class KaraokeApp(QWidget):
         cdg_quality_row.addWidget(cdg_quality_combo)
         cdg_quality_row.addStretch(1)
         v.addLayout(cdg_quality_row)
+
+        # Crisp vs Smooth scaling for the High (mpv) CDG renderer.
+        cdg_scale_row = QHBoxLayout()
+        cdg_scale_row.addWidget(QLabel("High CDG scaling:"))
+        cdg_scale_combo = QComboBox(dlg)
+        cdg_scale_combo.addItem("Crisp (sharp pixels)", True)
+        cdg_scale_combo.addItem("Smooth (anti-aliased)", False)
+        cdg_scale_combo.setToolTip("Crisp = hard, pixel-perfect edges (clearest, slightly blocky). Smooth = soft anti-aliased edges. Applies to the High (mpv) renderer; takes effect on the next song or immediately if one is playing.")
+        cur_crisp = bool(self.settings.get("cdg_mpv_crisp", True))
+        cdg_scale_combo.setCurrentIndex(0 if cur_crisp else 1)
+
+        def on_cdg_scale_changed(_idx=None):
+            self.settings["cdg_mpv_crisp"] = bool(cdg_scale_combo.currentData())
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            # Apply live if an mpv CDG song is playing.
+            try:
+                self._sync_mpv_render_size()
+            except Exception:
+                pass
+
+        cdg_scale_combo.currentIndexChanged.connect(on_cdg_scale_changed)
+        cdg_scale_row.addWidget(cdg_scale_combo)
+        cdg_scale_row.addStretch(1)
+        v.addLayout(cdg_scale_row)
 
         cdg_black_cleanup_cb = QCheckBox("Clean near-black CDG backgrounds")
         cdg_black_cleanup_cb.setToolTip("Clamps only very dark CDG background pixels to true black. Lyrics and colored graphics are left alone.")
