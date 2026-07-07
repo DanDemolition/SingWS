@@ -11024,6 +11024,14 @@ class VideoWindow(QWidget):
                 self._resize_diag_last_ts = now
         except Exception:
             pass
+        # Keep the mpv CDG render resolution matched to the (physical) output
+        # size so it stays sharp across resize/fullscreen on HiDPI displays.
+        try:
+            owner = getattr(self, "_external_owner", None)
+            if owner is not None and hasattr(owner, "_sync_mpv_render_size"):
+                owner._sync_mpv_render_size()
+        except Exception:
+            pass
 
     def mouseDoubleClickEvent(self, event):
         """Toggle fullscreen on double-click"""
@@ -18706,6 +18714,33 @@ class KaraokeApp(QWidget):
         _diag("[PY-KARAOKE] playback hung — recovering via media-end path")
         QTimer.singleShot(0, self._handle_media_end_safe)
 
+    def _sync_mpv_render_size(self, transport=None):
+        """Drive the mpv CDG transport's render height from the PHYSICAL output
+        size (logical height x device pixel ratio), so the frame is a sharp 1:1
+        on the show screen instead of a soft upscale (HiDPI/Retina blur).
+        No-op for the GStreamer transport. Called on start and on resize."""
+        if MpvCdgTransport is None:
+            return
+        t = transport if transport is not None else getattr(self, "karaoke_transport", None)
+        if not isinstance(t, MpvCdgTransport):
+            return
+        h = 0
+        try:
+            area = self.video_window.video_area
+            dpr = float(area.devicePixelRatioF() or 1.0)
+            h = int(round(area.height() * dpr))
+        except Exception:
+            h = 0
+        if h <= 0:
+            h = 1080
+        # Clamp: >=720 keeps it sharp; <=1600 bounds the software-render cost at
+        # 30 fps (a 1080p external projector renders 1:1; Retina fullscreen gets
+        # a much sharper frame than the old fixed 1080).
+        h = max(720, min(1600, h))
+        if int(getattr(t, "max_video_height", 0) or 0) != h:
+            t.max_video_height = h
+            _diag(f"[MPV-CDG] render height set to {h}px (physical output, dpr-aware)")
+
     def _start_python_karaoke_transport(
         self,
         *,
@@ -18820,13 +18855,15 @@ class KaraokeApp(QWidget):
             transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             transport.max_video_height = 720
-        # High-quality mpv CDG renders at ~1080p so the on-screen scale is a
-        # sharp 1:1/downscale instead of a soft SECOND upscale — the "blurry"
-        # double-scale (mpv 216->720, then the app's CDG rescale 720->window).
-        # CDG graphics are tiny, so 1080p software render stays cheap.
+        # High-quality mpv CDG renders at the PHYSICAL output resolution so the
+        # on-screen scale is a sharp 1:1/downscale instead of a soft upscale
+        # (the "blurry" look, worst on HiDPI/Retina where a 1080p frame is
+        # stretched to the display's true pixel count). _sync_mpv_render_size
+        # feeds it the device-pixel-ratio-aware output height; the video
+        # window's resizeEvent keeps it current across resize/fullscreen.
         try:
             if MpvCdgTransport is not None and isinstance(transport, MpvCdgTransport):
-                transport.max_video_height = 1080
+                self._sync_mpv_render_size(transport)
         except Exception:
             pass
         try:

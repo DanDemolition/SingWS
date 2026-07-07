@@ -637,7 +637,10 @@ class MpvCdgTransport(QObject):
             vw, vh = 300, 216
         if vw <= 0 or vh <= 0:
             vw, vh = 300, 216
-        h = max(240, min(1080, int(self.max_video_height or 720)))
+        # Cap at ~4K height. The host drives max_video_height from the physical
+        # (device-pixel-ratio-aware) output height so the on-screen result is a
+        # sharp 1:1 on HiDPI/Retina rather than a soft upscale of a 1080p frame.
+        h = max(240, min(2160, int(self.max_video_height or 720)))
         w = int(round(h * vw / vh))
         w += w % 2
         return w, h
