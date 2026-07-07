@@ -418,10 +418,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertEqual(transparent.pixelColor(2, 0).alpha(), 255)
 
     def test_cdg_near_black_cleanup_scales_to_full_resolution_rgba(self):
-        # The RGBA path must handle a full-resolution frame (the mpv renderer
-        # emits ~1000x720) without the old per-pixel Python loop that froze the
-        # GUI thread. This exercises the vectorized clamp on a non-trivial frame
-        # and pins its correctness at scale.
+        # The RGBA path must handle a full-resolution frame (e.g. an MP4 frame,
+        # up to 4K) without the old per-pixel Python loop that froze the GUI
+        # thread. This exercises the vectorized clamp on a non-trivial frame and
+        # pins its correctness at scale.
         w, h = 640, 480
         image = QImage(w, h, QImage.Format.Format_ARGB32)
         image.fill(QColor(3, 5, 7))                 # near-black background

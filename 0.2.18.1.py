@@ -1555,19 +1555,6 @@ except Exception as e:
     GstKaraokeTransport = None
     GST_KARAOKE_IMPORT_ERROR = e
 
-# The libmpv CDG renderer was removed: field testing showed laggy show-screen
-# startup and blurry output, and macOS libmpv could abort inside AppKit when
-# embedded in Qt. Live karaoke runs on the proven GStreamer/OpenKJ path, and
-# "High" CDG quality means GStreamer decode + sharper on-screen scaling. These
-# names are kept (permanently disabled) so the remaining `is not None` guards
-# short-circuit cleanly.
-MpvCdgTransport = None
-MPV_CDG_IMPORT_ERROR = None
-
-
-def _mpv_cdg_available() -> bool:
-    return False
-
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
 
 # ===== RESOURCE MANAGEMENT FOR PYINSTALLER =====
@@ -5762,7 +5749,7 @@ def _clean_cdg_near_black(image: QImage, threshold: int = 10, transparent_black:
 
     The result is cached for the last (frame, threshold, transparent) combo:
     each karaoke frame is cleaned once even though BOTH the output and preview
-    windows call this per frame — at full-resolution mpv frames that redundant
+    windows call this per frame — at full-resolution frames that redundant
     second scan cost ~10 ms/frame.
     """
     if image is None or image.isNull():
@@ -5817,10 +5804,10 @@ def _clean_cdg_near_black(image: QImage, threshold: int = 10, transparent_black:
             try:
                 # Vectorized near-black clamp. The per-pixel Python fallback
                 # below is fine for the tiny 300x216 CDG frames the GStreamer
-                # path emits, but a full-resolution RGBA frame (e.g. the mpv
-                # renderer's ~1000x720 up to 4K) has millions of pixels —
-                # looping in Python blocks the GUI thread for hundreds of ms
-                # per frame and freezes playback. Treat each ARGB32 pixel as
+                # path emits, but a full-resolution RGBA frame (e.g. an MP4
+                # frame, up to 4K) has millions of pixels — looping in Python
+                # blocks the GUI thread for hundreds of ms per frame and
+                # freezes playback. Treat each ARGB32 pixel as
                 # one uint32 so the scan/rewrite stays in numpy.
                 import numpy as np
                 v = np.asarray(buf).view(np.uint32)
@@ -18730,7 +18717,7 @@ class KaraokeApp(QWidget):
     ):
         # Engine selection: live karaoke runs on the proven GStreamer/OpenKJ
         # (native CDG) path. "High" CDG quality is GStreamer decode plus sharper
-        # on-screen scaling — there is no separate mpv renderer.
+        # on-screen scaling (the legacy ffmpeg transport is the fallback).
         base_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
         transport_cls = base_cls
         using_gst_engine = transport_cls is GstKaraokeTransport
