@@ -67,6 +67,8 @@ a = Analysis(
     binaries=binaries,
     datas=extra_datas,
     hiddenimports=[
+        'mpv',
+        'mpv_cdg_transport',
         'signalsmith_audio_native',
         'mutagen',
         'python_karaoke_transport',

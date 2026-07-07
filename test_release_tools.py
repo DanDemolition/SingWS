@@ -104,6 +104,13 @@ class PackagingSpecTests(unittest.TestCase):
                 self.assertIn("if plug.name in excluded_optional_gst_plugins:", source)
                 self.assertIn("continue\n        binaries.append((str(plug), \"gst_plugins\"))", source)
 
+    def test_release_specs_include_mpv_cdg_hidden_imports(self):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+            with self.subTest(spec=spec):
+                source = Path(spec).read_text(encoding="utf-8")
+                self.assertIn("'mpv'", source)
+                self.assertIn("'mpv_cdg_transport'", source)
+
 
 if __name__ == "__main__":
     unittest.main()

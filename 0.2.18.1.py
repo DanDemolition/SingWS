@@ -1554,6 +1554,22 @@ try:
 except Exception as e:
     GstKaraokeTransport = None
     GST_KARAOKE_IMPORT_ERROR = e
+
+# Optional high-quality CDG engine (libmpv). Imported lazily-safe: the module
+# import itself is cheap and does NOT load libmpv (that happens on first use),
+# so a machine without libmpv still imports fine and simply falls back to the
+# GStreamer CDG path. It is additionally gated behind
+# SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG because current macOS libmpv can abort
+# inside AppKit when embedded in a Qt process.
+try:
+    from mpv_cdg_transport import MpvCdgTransport, mpv_available as _mpv_cdg_available
+    MPV_CDG_IMPORT_ERROR = None
+except Exception as e:
+    MpvCdgTransport = None
+    MPV_CDG_IMPORT_ERROR = e
+    def _mpv_cdg_available() -> bool:
+        return False
+
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
 
 # ===== RESOURCE MANAGEMENT FOR PYINSTALLER =====
@@ -18629,7 +18645,24 @@ class KaraokeApp(QWidget):
         start_seconds: float = 0.0,
         loop_seconds=None,
     ):
-        transport_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
+        # Engine selection. High-quality CDG runs on libmpv when it's available
+        # (mpv decodes + scales the 300x216 CDG far better than the GStreamer
+        # 300x216 -> Qt upscale). Standard-quality CDG and every other mode stay
+        # on the GStreamer engine. mpv falls back to GStreamer (then the legacy
+        # ffmpeg transport) if it can't load or construct.
+        base_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
+        want_mpv_cdg = False
+        try:
+            want_mpv_cdg = (
+                str(mode or "").lower() == "cdg"
+                and str(self._effective_cdg_quality_mode() or "").lower() == "high"
+                and os.environ.get("SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG") == "1"
+                and MpvCdgTransport is not None
+                and _mpv_cdg_available()
+            )
+        except Exception:
+            want_mpv_cdg = False
+        transport_cls = MpvCdgTransport if want_mpv_cdg else base_cls
         using_gst_engine = transport_cls is GstKaraokeTransport
         if transport_cls is None:
             detail = str(
@@ -18660,21 +18693,44 @@ class KaraokeApp(QWidget):
             duration = float(self._get_duration_secs(audio_path) or 0.0)
         except Exception:
             duration = 0.0
-        try:
-            transport_kwargs = {
+
+        def _construct(cls):
+            kwargs = {
                 "video_path": video_path,
                 "mode": mode,
                 "duration_seconds": duration,
                 "probe_duration_on_init": False,
                 "parent": self,
             }
-            if str(mode or "").lower() == "cdg" and getattr(transport_cls, "__name__", "") == "GstKaraokeTransport":
-                transport_kwargs["cdg_sidefill"] = self._effective_cdg_display_mode() == "sidefill"
-            transport = transport_cls(audio_path, **transport_kwargs)
+            if str(mode or "").lower() == "cdg" and getattr(cls, "__name__", "") == "GstKaraokeTransport":
+                kwargs["cdg_sidefill"] = self._effective_cdg_display_mode() == "sidefill"
+            return cls(audio_path, **kwargs)
+
+        try:
+            transport = _construct(transport_cls)
+            if transport_cls is MpvCdgTransport:
+                _diag("[MPV-CDG] high-quality CDG engine selected")
         except Exception as e:
-            # GStreamer engine failed to construct (missing element/plugin):
-            # fall back to the legacy ffmpeg transport rather than dying.
-            if using_gst_engine and PythonKaraokeTransport is not None:
+            if transport_cls is MpvCdgTransport:
+                # mpv couldn't construct: drop to the GStreamer CDG path.
+                _diag(f"[MPV-CDG] construct failed, falling back to GStreamer: {e}")
+                transport_cls = base_cls
+                using_gst_engine = transport_cls is GstKaraokeTransport
+                try:
+                    transport = _construct(transport_cls)
+                except Exception as e2:
+                    if using_gst_engine and PythonKaraokeTransport is not None:
+                        _diag(f"[GST-KARAOKE] construct failed, falling back to legacy transport: {e2}")
+                        using_gst_engine = False
+                        transport = PythonKaraokeTransport(
+                            audio_path, video_path=video_path, mode=mode,
+                            duration_seconds=duration, probe_duration_on_init=False, parent=self,
+                        )
+                    else:
+                        raise
+            elif using_gst_engine and PythonKaraokeTransport is not None:
+                # GStreamer engine failed to construct (missing element/plugin):
+                # fall back to the legacy ffmpeg transport rather than dying.
                 _diag(f"[GST-KARAOKE] construct failed, falling back to legacy transport: {e}")
                 using_gst_engine = False
                 transport = PythonKaraokeTransport(
@@ -21274,7 +21330,26 @@ class KaraokeApp(QWidget):
         cdg_quality_row.addWidget(QLabel("CDG Quality:"))
         cdg_quality_combo = QComboBox(dlg)
         cdg_quality_combo.addItem("Standard (lower CPU)", "standard")
-        cdg_quality_combo.addItem("High (sharper scaling)", "high")
+        _mpv_ok = False
+        try:
+            _mpv_ok = (
+                os.environ.get("SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG") == "1"
+                and MpvCdgTransport is not None
+                and _mpv_cdg_available()
+            )
+        except Exception:
+            _mpv_ok = False
+        cdg_quality_combo.addItem(
+            "High (mpv renderer)" if _mpv_ok else "High (sharper scaling)", "high"
+        )
+        cdg_quality_combo.setToolTip(
+            "High renders CDG through the libmpv engine (much better upscaling) with the "
+            "same key/tempo/EQ/normalization audio. Standard uses the GStreamer renderer."
+            if _mpv_ok else
+            "High uses the existing safer GStreamer sharpening path. The experimental "
+            "mpv renderer is disabled by default because current macOS libmpv can abort "
+            "when embedded in a Qt app."
+        )
         cur_cdg_quality = str(self.settings.get("cdg_quality_mode", "standard") or "standard").lower()
         cdg_quality_idx = cdg_quality_combo.findData(cur_cdg_quality)
         cdg_quality_combo.setCurrentIndex(cdg_quality_idx if cdg_quality_idx >= 0 else 0)
