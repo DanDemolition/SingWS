@@ -5808,6 +5808,33 @@ def _clean_cdg_near_black(image: QImage, threshold: int = 10, transparent_black:
         ptr = cleaned.bits()
         ptr.setsize(cleaned.sizeInBytes())
         buf = memoryview(ptr)
+        try:
+            # Vectorized near-black clamp. The per-pixel Python fallback below
+            # is fine for the tiny 300x216 CDG frames the GStreamer path emits,
+            # but a full-resolution RGBA frame (e.g. the mpv renderer's
+            # ~1000x720) has ~720k pixels — looping in Python blocks the GUI
+            # thread for hundreds of ms per frame and freezes playback. Treat
+            # each ARGB32 pixel as one uint32 so the scan/rewrite stays in
+            # numpy (~2 ms for a 720p frame vs ~hundreds in Python).
+            import numpy as np
+            v = np.asarray(buf).view(np.uint32)
+            b = v & 0xFF
+            g = (v >> 8) & 0xFF
+            r = (v >> 16) & 0xFF
+            a = (v >> 24) & 0xFF
+            mask = (a > 0) & (r <= threshold) & (g <= threshold) & (b <= threshold)
+            if not transparent_black:
+                mask &= (r > 0) | (g > 0) | (b > 0)
+            if not mask.any():
+                return image
+            if transparent_black:
+                v[mask] = 0
+            else:
+                v[mask] = a[mask].astype(np.uint32) << 24  # zero RGB, keep alpha
+            return cleaned
+        except Exception:
+            pass
+        # Fallback: pure-Python per-pixel loop (numpy unavailable).
         changed = False
         for i in range(0, len(buf), 4):
             b = int(buf[i])

@@ -417,6 +417,28 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertEqual(transparent.pixelColor(1, 0).alpha(), 255)
         self.assertEqual(transparent.pixelColor(2, 0).alpha(), 255)
 
+    def test_cdg_near_black_cleanup_scales_to_full_resolution_rgba(self):
+        # The RGBA path must handle a full-resolution frame (the mpv renderer
+        # emits ~1000x720) without the old per-pixel Python loop that froze the
+        # GUI thread. This exercises the vectorized clamp on a non-trivial frame
+        # and pins its correctness at scale.
+        w, h = 640, 480
+        image = QImage(w, h, QImage.Format.Format_ARGB32)
+        image.fill(QColor(3, 5, 7))                 # near-black background
+        for x in range(0, w, 40):
+            image.setPixelColor(x, 5, QColor(255, 190, 0))   # bright "lyrics"
+        image.setPixelColor(1, 1, QColor(0, 0, 0))  # pure black stays pure black
+
+        cleaned = self.singws._clean_cdg_near_black(image, 10)
+        # near-black background clamped to pure black
+        self.assertEqual(cleaned.pixelColor(300, 300).getRgb()[:3], (0, 0, 0))
+        # bright text preserved
+        self.assertEqual(cleaned.pixelColor(0, 5).getRgb()[:3], (255, 190, 0))
+
+        transparent = self.singws._clean_cdg_near_black(image, 10, transparent_black=True)
+        self.assertEqual(transparent.pixelColor(300, 300).alpha(), 0)     # bg see-through
+        self.assertEqual(transparent.pixelColor(0, 5).alpha(), 255)       # text opaque
+
     def test_audio_chain_logs_cover_bgm_and_karaoke(self):
         bg_chain = function_source("_bg_dsp_chain_label")
         self.assertIn("master_audio", bg_chain)
