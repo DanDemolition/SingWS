@@ -1555,12 +1555,12 @@ except Exception as e:
     GstKaraokeTransport = None
     GST_KARAOKE_IMPORT_ERROR = e
 
-# Optional high-quality CDG engine (libmpv). Imported lazily-safe: the module
-# import itself is cheap and does NOT load libmpv (that happens on first use),
-# so a machine without libmpv still imports fine and simply falls back to the
-# GStreamer CDG path. It is additionally gated behind
-# SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG because current macOS libmpv can abort
-# inside AppKit when embedded in a Qt process.
+# Optional lab-only CDG engine (libmpv). Imported lazily-safe: the module import
+# itself is cheap and does NOT load libmpv (that happens on first use), so a
+# machine without libmpv still imports fine. Do not select this for live app
+# playback: field testing showed laggy show-screen startup and blurry output,
+# and current macOS libmpv can also abort inside AppKit when embedded in a Qt
+# process.
 try:
     from mpv_cdg_transport import MpvCdgTransport, mpv_available as _mpv_cdg_available
     MPV_CDG_IMPORT_ERROR = None
@@ -1569,6 +1569,16 @@ except Exception as e:
     MPV_CDG_IMPORT_ERROR = e
     def _mpv_cdg_available() -> bool:
         return False
+
+
+def _mpv_cdg_live_playback_enabled() -> bool:
+    """Hard gate for the experimental mpv CDG path in the desktop app.
+
+    The module remains available for isolated lab tests, but live karaoke must
+    stay on the proven GStreamer/native CDG path until mpv has a reliable
+    frame-delivery/show-screen story on macOS.
+    """
+    return False
 
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
 
@@ -2793,7 +2803,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         if getattr(owner, "_mt_watch_thread", None) is not None:
             return
         try:
-            if not bool(getattr(owner, "settings", {}).get("performance_debug_enabled", True)):
+            if not bool(getattr(owner, "settings", {}).get("performance_debug_enabled", False)):
                 return
         except Exception:
             return
@@ -2856,7 +2866,8 @@ DEFAULTS = {
     "ticker_size_index": 2,          # 2 smaller, default, 2 larger
     "ticker_bold": False,            # ticker uses same OS/Qt font family; toggles weight only
     "ticker_speed_px_per_sec": 78.0, # persisted ticker scroll speed; do not overwrite saved values
-    "performance_debug_enabled": True, # emit periodic top bottleneck summaries to the log/terminal
+    "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
+    "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
     "auto_update_enabled": True,        # check GitHub Releases in the background at startup
     "auto_update_download": True,       # automatically download a newer DMG after an auto-check
@@ -6268,6 +6279,21 @@ class VideoAreaWidget(QWidget):
         fade_ms = max(1.0, float(getattr(self, "_background_fade_ms", 700) or 700))
         return min(1.0, max(0.0, ((time.monotonic() - started) * 1000.0) / fade_ms))
 
+    def _is_live_karaoke_active(self) -> bool:
+        try:
+            vw = self.parent()
+            owner = getattr(vw, "_external_owner", None) if vw is not None else None
+            if owner is not None and bool(getattr(owner, "karaoke_playing", False)):
+                return True
+            # The show window flips idle=False as soon as playback starts.
+            # Treat that as active even before the first frame arrives so a
+            # transient empty frame/surface rebuild cannot flash the idle BG.
+            if vw is not None and not bool(getattr(vw, "idle", True)):
+                return True
+        except Exception:
+            pass
+        return False
+
     def set_cdg_quality_mode(self, mode: str):
         mode = "high" if str(mode or "").lower() == "high" else "standard"
         if mode == self.cdg_quality_mode:
@@ -6836,7 +6862,7 @@ class VideoAreaWidget(QWidget):
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             if not self._karaoke_scaled_pixmap.isNull():
                 painter.drawPixmap(self._karaoke_scaled_pos, self._karaoke_scaled_pixmap)
-        elif not self.background_pixmap.isNull():
+        elif not self.background_pixmap.isNull() and not self._is_live_karaoke_active():
             fade_alpha = self._background_fade_alpha()
             if fade_alpha < 1.0:
                 previous = getattr(self, "_background_previous_pixmap", QPixmap())
@@ -11004,6 +11030,15 @@ class VideoWindow(QWidget):
             try:
                 if hasattr(old, "background_pixmap") and not old.background_pixmap.isNull():
                     new_area.background_pixmap = QPixmap(old.background_pixmap)
+            except Exception:
+                pass
+            try:
+                if hasattr(old, "karaoke_frame") and not old.karaoke_frame.isNull():
+                    new_area.karaoke_frame = QImage(old.karaoke_frame)
+                    new_area.karaoke_stretch_fill = bool(getattr(old, "karaoke_stretch_fill", False))
+                    new_area.karaoke_frame_is_cdg = bool(getattr(old, "karaoke_frame_is_cdg", False))
+                    new_area.cdg_quality_mode = str(getattr(old, "cdg_quality_mode", "standard") or "standard")
+                    new_area._ensure_karaoke_scaled_pixmap()
             except Exception:
                 pass
             try:
@@ -15227,6 +15262,13 @@ class KaraokeApp(QWidget):
             if obsolete_key in self.settings:
                 self.settings.pop(obsolete_key, None)
                 changed = True
+        if not bool(self.settings.get("performance_debug_default_migrated", False)):
+            # Runtime diagnostics used to default on and were often persisted
+            # without the host making an explicit choice. Make them opt-in.
+            if bool(self.settings.get("performance_debug_enabled", True)):
+                self.settings["performance_debug_enabled"] = False
+            self.settings["performance_debug_default_migrated"] = True
+            changed = True
         for k, v in DEFAULTS.items():
             if k not in self.settings:
                 self.settings[k] = v
@@ -16999,19 +17041,21 @@ class KaraokeApp(QWidget):
         QTimer.singleShot(9000, self._maybe_auto_check_for_updates)
 
         # DIAGNOSTIC: Freeze detector
-        self.start_freeze_detector()
+        if bool(self.settings.get("performance_debug_enabled", False)):
+            self.start_freeze_detector()
 
         # Log session start with system info
         SingWSLogger.log_session_start(self)
-        SingWSLogger.log_gstreamer_runtime_diagnostics()
-        
-        # Log library statistics
-        try:
-            import song_index
-            db_file = song_index.db_path()
-            SingWSLogger.log_library_stats(self.tracks, db_path=db_file)
-        except Exception as e:
-            logging.warning(f"Could not log library stats: {e}")
+        if bool(self.settings.get("performance_debug_enabled", False)):
+            SingWSLogger.log_gstreamer_runtime_diagnostics()
+
+            # Log library statistics
+            try:
+                import song_index
+                db_file = song_index.db_path()
+                SingWSLogger.log_library_stats(self.tracks, db_path=db_file)
+            except Exception as e:
+                logging.warning(f"Could not log library stats: {e}")
 
         self.setup_selection_behavior()
 
@@ -18645,17 +18689,17 @@ class KaraokeApp(QWidget):
         start_seconds: float = 0.0,
         loop_seconds=None,
     ):
-        # Engine selection. High-quality CDG runs on libmpv when it's available
-        # (mpv decodes + scales the 300x216 CDG far better than the GStreamer
-        # 300x216 -> Qt upscale). Standard-quality CDG and every other mode stay
-        # on the GStreamer engine. mpv falls back to GStreamer (then the legacy
-        # ffmpeg transport) if it can't load or construct.
+        # Engine selection. Live CDG playback stays on the proven
+        # GStreamer/native path. The experimental libmpv renderer remains
+        # lab-only after field testing showed laggy show-screen startup and
+        # blurry output.
         base_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
         want_mpv_cdg = False
         try:
             want_mpv_cdg = (
                 str(mode or "").lower() == "cdg"
                 and str(self._effective_cdg_quality_mode() or "").lower() == "high"
+                and _mpv_cdg_live_playback_enabled()
                 and os.environ.get("SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG") == "1"
                 and MpvCdgTransport is not None
                 and _mpv_cdg_available()
@@ -19221,7 +19265,7 @@ class KaraokeApp(QWidget):
 
     def _start_perf_summary_timer(self):
         try:
-            if not bool(self.settings.get("performance_debug_enabled", True)):
+            if not bool(self.settings.get("performance_debug_enabled", False)):
                 return
             timer = getattr(self, "_perf_summary_timer", None)
             if timer is None:
@@ -19248,7 +19292,7 @@ class KaraokeApp(QWidget):
         return " ".join(pairs)
 
     def _log_perf_summary(self):
-        if not bool(self.settings.get("performance_debug_enabled", True)):
+        if not bool(self.settings.get("performance_debug_enabled", False)):
             return
         try:
             cpu = "n/a"
@@ -19299,7 +19343,7 @@ class KaraokeApp(QWidget):
         """Periodically log playback diagnostics ([MP4-PERF]) to the log file.
         There is no on-screen overlay; this is invisible during normal use."""
         try:
-            enabled = bool(self.settings.get("performance_debug_enabled", True))
+            enabled = bool(self.settings.get("performance_debug_enabled", False))
             transport = getattr(self, "karaoke_transport", None)
             active = bool(enabled and transport is not None and getattr(self, "karaoke_playing", False))
             if not active or not hasattr(transport, "diagnostics"):
@@ -21333,6 +21377,8 @@ class KaraokeApp(QWidget):
         _mpv_ok = False
         try:
             _mpv_ok = (
+                _mpv_cdg_live_playback_enabled()
+                and
                 os.environ.get("SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG") == "1"
                 and MpvCdgTransport is not None
                 and _mpv_cdg_available()
@@ -21347,8 +21393,8 @@ class KaraokeApp(QWidget):
             "same key/tempo/EQ/normalization audio. Standard uses the GStreamer renderer."
             if _mpv_ok else
             "High uses the existing safer GStreamer sharpening path. The experimental "
-            "mpv renderer is disabled by default because current macOS libmpv can abort "
-            "when embedded in a Qt app."
+            "mpv renderer is disabled for live playback because field testing showed "
+            "laggy show-screen startup and blurry output."
         )
         cur_cdg_quality = str(self.settings.get("cdg_quality_mode", "standard") or "standard").lower()
         cdg_quality_idx = cdg_quality_combo.findData(cur_cdg_quality)
@@ -21480,7 +21526,7 @@ class KaraokeApp(QWidget):
         v = _section_card(tab_general, "General")  # ---- General ----
         perf_debug_cb = QCheckBox("Runtime diagnostic logging")
         perf_debug_cb.setToolTip("Prints periodic diagnostic summaries with slowest tasks, CPU, memory, and worker counts.")
-        perf_debug_cb.setChecked(bool(self.settings.get("performance_debug_enabled", True)))
+        perf_debug_cb.setChecked(bool(self.settings.get("performance_debug_enabled", False)))
         v.addWidget(perf_debug_cb)
 
         v = _section_card(tab_general, "App Updates",

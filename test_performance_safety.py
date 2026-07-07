@@ -438,6 +438,31 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_install_main_thread_watchdog(self)", MAIN_SOURCE)
         self.assertIn("self._mt_watch_stop = True", MAIN_SOURCE)
 
+    def test_runtime_diagnostics_are_opt_in_by_default(self):
+        self.assertIn('"performance_debug_enabled": False', MAIN_SOURCE)
+        self.assertIn('"performance_debug_default_migrated": False', MAIN_SOURCE)
+        self.assertIn('self.settings["performance_debug_enabled"] = False', MAIN_SOURCE)
+        startup = MAIN_SOURCE[
+            MAIN_SOURCE.index("# DIAGNOSTIC: Freeze detector"):
+            MAIN_SOURCE.index("self.setup_selection_behavior()", MAIN_SOURCE.index("# DIAGNOSTIC: Freeze detector"))
+        ]
+        self.assertIn('self.settings.get("performance_debug_enabled", False)', startup)
+        self.assertIn("SingWSLogger.log_gstreamer_runtime_diagnostics()", startup)
+        self.assertIn("SingWSLogger.log_library_stats", startup)
+
+    def test_show_screen_does_not_paint_idle_background_during_active_karaoke(self):
+        start = MAIN_SOURCE.index("class VideoAreaWidget")
+        end = MAIN_SOURCE.index("class MusicDatabaseWidget", start)
+        video_area = MAIN_SOURCE[start:end]
+        self.assertIn("def _is_live_karaoke_active", video_area)
+        self.assertIn('getattr(owner, "karaoke_playing", False)', video_area)
+        self.assertIn('getattr(vw, "idle", True)', video_area)
+        paint = function_source("paintEvent")
+        self.assertIn("not self._is_live_karaoke_active()", paint)
+        recreate = function_source("recreate_video_surface")
+        self.assertIn("new_area.karaoke_frame = QImage(old.karaoke_frame)", recreate)
+        self.assertIn("new_area._ensure_karaoke_scaled_pixmap()", recreate)
+
     def test_removed_slow_computer_settings_are_migrated(self):
         source = MAIN_SOURCE
         self.assertNotIn('"performance_mode": False', source)

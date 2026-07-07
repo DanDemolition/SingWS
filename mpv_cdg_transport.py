@@ -1,10 +1,11 @@
 """High-quality CDG karaoke transport backed by libmpv.
 
-Used ONLY when the CDG quality setting is "high" and libmpv is available; the
-standard-quality path stays on GstKaraokeTransport. The motivation is video
-quality: the GStreamer path decodes the CDG to a 300x216 Indexed8 image and
-lets Qt upscale it, which looks blocky/soft on a big output. mpv decodes the
-CDG (ffmpeg's cdgraphics decoder) and scales it with a proper resampler.
+Lab-only experiment. The desktop app does not select this for live playback:
+field testing showed laggy show-screen startup and blurry output, and macOS
+libmpv embedding can still abort inside AppKit. The motivation was video
+quality: the GStreamer path decodes CDG to a 300x216 image and lets Qt upscale
+it, while mpv can decode CDG through ffmpeg's cdgraphics decoder and scale with
+its own resampler.
 
 Design (validated against real CDG+MP3 pairs):
 

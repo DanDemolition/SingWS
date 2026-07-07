@@ -144,6 +144,16 @@ class MpvAvailabilityTests(unittest.TestCase):
             if old_run is not None:
                 os.environ["SINGWS_RUN_MPV_INTEGRATION"] = old_run
 
+    def test_desktop_app_never_selects_mpv_for_live_playback(self):
+        app_source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn("def _mpv_cdg_live_playback_enabled", app_source)
+        self.assertIn("return False", app_source[app_source.index("def _mpv_cdg_live_playback_enabled"):])
+        start = app_source.index("def _start_python_karaoke_transport")
+        end = app_source.index("duration = 0.0", start)
+        selection = app_source[start:end]
+        self.assertIn("_mpv_cdg_live_playback_enabled()", selection)
+        self.assertIn("SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG", selection)
+
 
 def _write_test_cdg(path: str, seconds: int = 8):
     """Minimal valid CDG: memory preset + palette, then a visible tile/sec."""
