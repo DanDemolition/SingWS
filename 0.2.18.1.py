@@ -18820,6 +18820,15 @@ class KaraokeApp(QWidget):
             transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             transport.max_video_height = 720
+        # High-quality mpv CDG renders at ~1080p so the on-screen scale is a
+        # sharp 1:1/downscale instead of a soft SECOND upscale — the "blurry"
+        # double-scale (mpv 216->720, then the app's CDG rescale 720->window).
+        # CDG graphics are tiny, so 1080p software render stays cheap.
+        try:
+            if MpvCdgTransport is not None and isinstance(transport, MpvCdgTransport):
+                transport.max_video_height = 1080
+        except Exception:
+            pass
         try:
             transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
         except Exception:
