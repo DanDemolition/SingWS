@@ -59,6 +59,11 @@ _MPV_RENDER_PARAM_SW_POINTER = 20
 # Same ISO 10-band centre frequencies as singws_eq.GraphicEQ.
 _EQ_BANDS_HZ = (31.5, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0)
 
+# Frame-rate cap for the CDG video track (see _attach_cdg_video): the
+# cdgraphics decoder floods mpv with hundreds of fps and stalls presentation
+# without this. CDG lyric highlights are low-motion, so 30 fps is ample.
+CDG_VIDEO_FPS_CAP = 30
+
 _STUP = 1.0594630943592952645618252949461  # semitone up ratio (OpenKJ)
 
 _mpv = None
@@ -351,6 +356,17 @@ class MpvCdgTransport(QObject):
                 self.player["demuxer-lavf-format"] = ""
             except Exception:
                 pass
+        # Cap the CDG video frame rate. ffmpeg's cdgraphics decoder emits a new
+        # frame per graphics change — CDG streams 300 packets/sec, so the
+        # opening lyric sweep floods mpv with ~hundreds of fps. mpv then drops
+        # hundreds of frames and STALLS video presentation for ~5s early in the
+        # song (audio keeps playing; the host's hung-watchdog then ends the
+        # song). Capping to 30 fps — plenty for CDG's low-motion lyric
+        # highlight — eliminates the flood: no drops, no stall, realtime.
+        try:
+            self.player["vf"] = f"fps={CDG_VIDEO_FPS_CAP}"
+        except Exception as e:
+            _diag(f"[MPV-CDG] fps-cap vf set failed: {e}")
 
     def stop(self):
         global _ACTIVE_TRANSPORT
