@@ -1555,29 +1555,17 @@ except Exception as e:
     GstKaraokeTransport = None
     GST_KARAOKE_IMPORT_ERROR = e
 
-# Optional lab-only CDG engine (libmpv). Imported lazily-safe: the module import
-# itself is cheap and does NOT load libmpv (that happens on first use), so a
-# machine without libmpv still imports fine. Do not select this for live app
-# playback: field testing showed laggy show-screen startup and blurry output,
-# and current macOS libmpv can also abort inside AppKit when embedded in a Qt
-# process.
-try:
-    from mpv_cdg_transport import MpvCdgTransport, mpv_available as _mpv_cdg_available
-    MPV_CDG_IMPORT_ERROR = None
-except Exception as e:
-    MpvCdgTransport = None
-    MPV_CDG_IMPORT_ERROR = e
-    def _mpv_cdg_available() -> bool:
-        return False
+# The libmpv CDG renderer was removed: field testing showed laggy show-screen
+# startup and blurry output, and macOS libmpv could abort inside AppKit when
+# embedded in Qt. Live karaoke runs on the proven GStreamer/OpenKJ path, and
+# "High" CDG quality means GStreamer decode + sharper on-screen scaling. These
+# names are kept (permanently disabled) so the remaining `is not None` guards
+# short-circuit cleanly.
+MpvCdgTransport = None
+MPV_CDG_IMPORT_ERROR = None
 
 
-def _mpv_cdg_live_playback_enabled() -> bool:
-    """Hard gate for the experimental mpv CDG path in the desktop app.
-
-    The module remains available for isolated lab tests, but live karaoke must
-    stay on the proven GStreamer/native CDG path until mpv has a reliable
-    frame-delivery/show-screen story on macOS.
-    """
+def _mpv_cdg_available() -> bool:
     return False
 
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
@@ -2879,7 +2867,6 @@ DEFAULTS = {
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
     "cdg_display_mode": "fit",       # fit | sidefill | stretch; cdg_stretch_fill kept for migration
     "cdg_quality_mode": "standard",  # standard=lower CPU, high=smoother scaling/text edges
-    "cdg_mpv_crisp": True,           # High/mpv CDG scaling: True=crisp (nearest, sharp pixels), False=smooth (anti-aliased)
     "cdg_near_black_cleanup": True,  # Clamp near-black CDG backgrounds to true black
     "cdg_near_black_threshold": 10,  # RGB values <= this are treated as black for CDG only
     "lyrics_background_video_opacity": 0, # 0..100; shows the background (video/idle/slideshow) through near-black CDG only
@@ -11048,14 +11035,6 @@ class VideoWindow(QWidget):
                 self._resize_diag_last_ts = now
         except Exception:
             pass
-        # Keep the mpv CDG render resolution matched to the (physical) output
-        # size so it stays sharp across resize/fullscreen on HiDPI displays.
-        try:
-            owner = getattr(self, "_external_owner", None)
-            if owner is not None and hasattr(owner, "_sync_mpv_render_size"):
-                owner._sync_mpv_render_size()
-        except Exception:
-            pass
 
     def mouseDoubleClickEvent(self, event):
         """Toggle fullscreen on double-click"""
@@ -18738,51 +18717,6 @@ class KaraokeApp(QWidget):
         _diag("[PY-KARAOKE] playback hung — recovering via media-end path")
         QTimer.singleShot(0, self._handle_media_end_safe)
 
-    def _mpv_cdg_crisp_enabled(self) -> bool:
-        """Crisp (nearest-neighbor / pixel-art) vs Smooth (anti-aliased) CDG
-        scaling. Crisp gives hard, 'genuinely clear' pixel edges; Smooth is
-        soft. Mirrors the reference build's SINGWS_MPV_SHARED_NEAREST toggle."""
-        try:
-            return bool(self.settings.get("cdg_mpv_crisp", True))
-        except Exception:
-            return True
-
-    def _sync_mpv_render_size(self, transport=None):
-        """Drive the mpv CDG transport's render height for the chosen scaling
-        look. No-op for the GStreamer transport. Called on start and on resize.
-
-        - Crisp: render at CDG NATIVE height (216). The app's CDG scaler then
-          nearest-neighbor integer-prescales that to the screen -> hard,
-          pixel-perfect edges (and mpv renders a tiny frame, so it's cheap).
-        - Smooth: render at the PHYSICAL output height (logical x dpr, up to
-          4K) so mpv's own resampler produces a soft 1:1 frame with no blurry
-          second upscale on HiDPI/Retina."""
-        if MpvCdgTransport is None:
-            return
-        t = transport if transport is not None else getattr(self, "karaoke_transport", None)
-        if not isinstance(t, MpvCdgTransport):
-            return
-        if self._mpv_cdg_crisp_enabled():
-            h = 216  # native CDG height; app scaler does the crisp upscale
-            mode = "crisp-native"
-        else:
-            h = 0
-            try:
-                area = self.video_window.video_area
-                dpr = float(area.devicePixelRatioF() or 1.0)
-                h = int(round(area.height() * dpr))
-            except Exception:
-                h = 0
-            if h <= 0:
-                h = 1080
-            # >=720 keeps it sharp; <=2160 renders up to full 4K so a 4K
-            # display is a soft 1:1 (no blurry HiDPI upscale). Cleanup is
-            # cached per frame, so 4K stays within the 30 fps budget.
-            h = max(720, min(2160, h))
-            mode = "smooth-physical"
-        if int(getattr(t, "max_video_height", 0) or 0) != h:
-            t.max_video_height = h
-            _diag(f"[MPV-CDG] render height set to {h}px ({mode})")
 
     def _start_python_karaoke_transport(
         self,
@@ -18794,24 +18728,11 @@ class KaraokeApp(QWidget):
         start_seconds: float = 0.0,
         loop_seconds=None,
     ):
-        # Engine selection. Live CDG playback stays on the proven
-        # GStreamer/native path. The experimental libmpv renderer remains
-        # lab-only after field testing showed laggy show-screen startup and
-        # blurry output.
+        # Engine selection: live karaoke runs on the proven GStreamer/OpenKJ
+        # (native CDG) path. "High" CDG quality is GStreamer decode plus sharper
+        # on-screen scaling — there is no separate mpv renderer.
         base_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
-        want_mpv_cdg = False
-        try:
-            want_mpv_cdg = (
-                str(mode or "").lower() == "cdg"
-                and str(self._effective_cdg_quality_mode() or "").lower() == "high"
-                and _mpv_cdg_live_playback_enabled()
-                and os.environ.get("SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG") == "1"
-                and MpvCdgTransport is not None
-                and _mpv_cdg_available()
-            )
-        except Exception:
-            want_mpv_cdg = False
-        transport_cls = MpvCdgTransport if want_mpv_cdg else base_cls
+        transport_cls = base_cls
         using_gst_engine = transport_cls is GstKaraokeTransport
         if transport_cls is None:
             detail = str(
@@ -18857,27 +18778,8 @@ class KaraokeApp(QWidget):
 
         try:
             transport = _construct(transport_cls)
-            if transport_cls is MpvCdgTransport:
-                _diag("[MPV-CDG] high-quality CDG engine selected")
         except Exception as e:
-            if transport_cls is MpvCdgTransport:
-                # mpv couldn't construct: drop to the GStreamer CDG path.
-                _diag(f"[MPV-CDG] construct failed, falling back to GStreamer: {e}")
-                transport_cls = base_cls
-                using_gst_engine = transport_cls is GstKaraokeTransport
-                try:
-                    transport = _construct(transport_cls)
-                except Exception as e2:
-                    if using_gst_engine and PythonKaraokeTransport is not None:
-                        _diag(f"[GST-KARAOKE] construct failed, falling back to legacy transport: {e2}")
-                        using_gst_engine = False
-                        transport = PythonKaraokeTransport(
-                            audio_path, video_path=video_path, mode=mode,
-                            duration_seconds=duration, probe_duration_on_init=False, parent=self,
-                        )
-                    else:
-                        raise
-            elif using_gst_engine and PythonKaraokeTransport is not None:
+            if using_gst_engine and PythonKaraokeTransport is not None:
                 # GStreamer engine failed to construct (missing element/plugin):
                 # fall back to the legacy ffmpeg transport rather than dying.
                 _diag(f"[GST-KARAOKE] construct failed, falling back to legacy transport: {e}")
@@ -18898,17 +18800,6 @@ class KaraokeApp(QWidget):
             transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             transport.max_video_height = 720
-        # High-quality mpv CDG renders at the PHYSICAL output resolution so the
-        # on-screen scale is a sharp 1:1/downscale instead of a soft upscale
-        # (the "blurry" look, worst on HiDPI/Retina where a 1080p frame is
-        # stretched to the display's true pixel count). _sync_mpv_render_size
-        # feeds it the device-pixel-ratio-aware output height; the video
-        # window's resizeEvent keeps it current across resize/fullscreen.
-        try:
-            if MpvCdgTransport is not None and isinstance(transport, MpvCdgTransport):
-                self._sync_mpv_render_size(transport)
-        except Exception:
-            pass
         try:
             transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
         except Exception:
@@ -21490,27 +21381,11 @@ class KaraokeApp(QWidget):
         cdg_quality_row.addWidget(QLabel("CDG Quality:"))
         cdg_quality_combo = QComboBox(dlg)
         cdg_quality_combo.addItem("Standard (lower CPU)", "standard")
-        _mpv_ok = False
-        try:
-            _mpv_ok = (
-                _mpv_cdg_live_playback_enabled()
-                and
-                os.environ.get("SINGWS_ENABLE_EXPERIMENTAL_MPV_CDG") == "1"
-                and MpvCdgTransport is not None
-                and _mpv_cdg_available()
-            )
-        except Exception:
-            _mpv_ok = False
-        cdg_quality_combo.addItem(
-            "High (mpv renderer)" if _mpv_ok else "High (sharper scaling)", "high"
-        )
+        cdg_quality_combo.addItem("High (sharper scaling)", "high")
         cdg_quality_combo.setToolTip(
-            "High renders CDG through the libmpv engine (much better upscaling) with the "
-            "same key/tempo/EQ/normalization audio. Standard uses the GStreamer renderer."
-            if _mpv_ok else
-            "High uses the existing safer GStreamer sharpening path. The experimental "
-            "mpv renderer is disabled for live playback because field testing showed "
-            "laggy show-screen startup and blurry output."
+            "High renders CDG through the GStreamer/OpenKJ engine with sharper "
+            "on-screen scaling (smoother upscaling of the lyrics). Standard uses "
+            "the lower-CPU scaling. Both use the same key/tempo/EQ/normalization audio."
         )
         cur_cdg_quality = str(self.settings.get("cdg_quality_mode", "standard") or "standard").lower()
         cdg_quality_idx = cdg_quality_combo.findData(cur_cdg_quality)
@@ -21518,33 +21393,6 @@ class KaraokeApp(QWidget):
         cdg_quality_row.addWidget(cdg_quality_combo)
         cdg_quality_row.addStretch(1)
         v.addLayout(cdg_quality_row)
-
-        # Crisp vs Smooth scaling for the High (mpv) CDG renderer.
-        cdg_scale_row = QHBoxLayout()
-        cdg_scale_row.addWidget(QLabel("High CDG scaling:"))
-        cdg_scale_combo = QComboBox(dlg)
-        cdg_scale_combo.addItem("Crisp (sharp pixels)", True)
-        cdg_scale_combo.addItem("Smooth (anti-aliased)", False)
-        cdg_scale_combo.setToolTip("Crisp = hard, pixel-perfect edges (clearest, slightly blocky). Smooth = soft anti-aliased edges. Applies to the High (mpv) renderer; takes effect on the next song or immediately if one is playing.")
-        cur_crisp = bool(self.settings.get("cdg_mpv_crisp", True))
-        cdg_scale_combo.setCurrentIndex(0 if cur_crisp else 1)
-
-        def on_cdg_scale_changed(_idx=None):
-            self.settings["cdg_mpv_crisp"] = bool(cdg_scale_combo.currentData())
-            try:
-                self.save_settings()
-            except Exception:
-                pass
-            # Apply live if an mpv CDG song is playing.
-            try:
-                self._sync_mpv_render_size()
-            except Exception:
-                pass
-
-        cdg_scale_combo.currentIndexChanged.connect(on_cdg_scale_changed)
-        cdg_scale_row.addWidget(cdg_scale_combo)
-        cdg_scale_row.addStretch(1)
-        v.addLayout(cdg_scale_row)
 
         cdg_black_cleanup_cb = QCheckBox("Clean near-black CDG backgrounds")
         cdg_black_cleanup_cb.setToolTip("Clamps only very dark CDG background pixels to true black. Lyrics and colored graphics are left alone.")
