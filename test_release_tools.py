@@ -80,5 +80,14 @@ class ManifestTests(unittest.TestCase):
                 wm.build_manifest("0.9.9", Path(tmp))
 
 
+class UpdateManifestDefaultsTests(unittest.TestCase):
+    def test_default_update_manifest_uses_live_raw_github_url(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        expected = "https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json"
+        self.assertIn(f'"auto_update_manifest_url": "{expected}"', source)
+        self.assertIn(f'update_manifest_edit.setText("{expected}")', source)
+        self.assertNotIn("https://dandemolition.github.io/SingWS/release.json", source)
+
+
 if __name__ == "__main__":
     unittest.main()

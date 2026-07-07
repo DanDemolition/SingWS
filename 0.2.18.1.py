@@ -2846,7 +2846,7 @@ DEFAULTS = {
     "auto_update_download": True,       # automatically download a newer DMG after an auto-check
     "auto_update_check_interval_hours": 12, # minimum hours between automatic GitHub checks
     "auto_update_repo": "DanDemolition/SingWS",
-    "auto_update_manifest_url": "https://dandemolition.github.io/SingWS/release.json",
+    "auto_update_manifest_url": "https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json",
     "auto_update_download_dir": "",     # blank = ~/Downloads/SingWS Updates
     "auto_update_last_check": 0,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
@@ -22228,7 +22228,7 @@ class KaraokeApp(QWidget):
             auto_update_cb.setChecked(True)
             auto_update_download_cb.setChecked(True)
             update_repo_edit.setText("DanDemolition/SingWS")
-            update_manifest_edit.setText("https://dandemolition.github.io/SingWS/release.json")
+            update_manifest_edit.setText("https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json")
             update_interval_spin.setValue(12)
             update_dir_edit.setText(str(Path.home() / "Downloads" / "SingWS Updates"))
             cdg_display_combo.setCurrentIndex(cdg_display_combo.findData("fit"))
