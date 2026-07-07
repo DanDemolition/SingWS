@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.0.4",
+  "version": "0.4.0.5",
   "release_date": "2026-07-06",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.0.4-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.4-arm64-installer.dmg",
-      "size": "204 MB",
-      "sha256": "352a33dd2c2b301fb6906cb42fb20c1d725720649e26da74007d6ea19820f13b"
+      "filename": "SingWS-0.4.0.5-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.5-arm64-installer.dmg",
+      "size": "211 MB",
+      "sha256": "49378ddbda443fbe2c39562e80350e993439b74f75caf0f09c735bd6a07935c0"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.0.4-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.4-x86_64-installer.dmg",
+      "filename": "SingWS-0.4.0.5-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.5-x86_64-installer.dmg",
       "size": "285 MB",
-      "sha256": "c9124dbb57ea0c85938e4bbd864bb7f7109930dc05a8f22394c8aceeba90dd41"
+      "sha256": "6a91b6dfdc335a591c294fe7a269dc5bc23fa176c86031ac3ede27516bcbd8a2"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.0.4-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.4-universal-installer.dmg",
+      "filename": "SingWS-0.4.0.5-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.5-universal-installer.dmg",
       "size": "455 MB",
-      "sha256": "6e319ed4178a56ececf925b3069117c51250c84ffd2c6248a9e12b7d642d8a93"
+      "sha256": "3d449a5d21345fa84e85b75b95b4fd0cd4c65069502293f429e4ba44f1cdf33a"
     }
   }
 }
