@@ -13,6 +13,7 @@ os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
 
 from gst_karaoke_transport import (
     _CdgAdapter,
+    GstKaraokeTransport,
     optimize_scaletempo_for_rate,
     pitch_ratio_for_semitones,
 )
@@ -101,6 +102,17 @@ class CdgAdapterTests(unittest.TestCase):
         self.assertGreaterEqual(frames, 4)
         self.assertLessEqual(frames, 16)
 
+    def test_forced_frames_repeat_current_state_without_advancing_early(self):
+        first = self.adapter.frame_for_position_ms(1000, force=True)
+        pos_after_first = self.adapter.reader.current_frame_position_ms()
+        second = self.adapter.frame_for_position_ms(1005, force=True)
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(self.adapter.reader.current_frame_position_ms(), pos_after_first)
+        # Normal change-driven polling at the same timestamp still suppresses
+        # duplicate frames after the smooth renderer has sampled the state.
+        self.assertIsNone(self.adapter.frame_for_position_ms(1005))
+
     def test_frame_is_indexed_qimage(self):
         image = self.adapter.frame_for_position_ms(2000)
         self.assertIsNotNone(image)
@@ -138,6 +150,13 @@ class CdgAdapterTests(unittest.TestCase):
         final_ms = self.adapter.reader.position_of_final_frame_ms()
         self.assertGreater(final_ms, 4000)
         self.assertLess(final_ms, 6001)
+
+    def test_bgra_bytes_use_gstreamer_bgra_order(self):
+        from PyQt6.QtGui import QColor, QImage
+
+        image = QImage(1, 1, QImage.Format.Format_ARGB32)
+        image.fill(QColor(10, 20, 30, 255))
+        self.assertEqual(GstKaraokeTransport._qimage_bgra_bytes(image), bytes([30, 20, 10, 255]))
 
 
 class CdgCorruptionToleranceTests(unittest.TestCase):

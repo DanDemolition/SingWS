@@ -355,7 +355,7 @@ class ModelBackedViewQATests(unittest.TestCase):
         left_role = app._row_left_role
         right_role = app._row_right_role
         self.assertEqual([row.get("roles", {}).get(left_role) for row in singer_rows], ["1. Dan", "— Steve", "2. Bill"])
-        self.assertEqual(singer_rows[1].get("roles", {}).get(right_role), "NO ACTIVE SONG")
+        self.assertEqual(singer_rows[1].get("roles", {}).get(right_role), "")
 
 
 if __name__ == "__main__":
