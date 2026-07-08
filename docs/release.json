@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.0.5",
-  "release_date": "2026-07-06",
+  "version": "0.4.0.6",
+  "release_date": "2026-07-07",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.0.5-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.5-arm64-installer.dmg",
-      "size": "211 MB",
-      "sha256": "49378ddbda443fbe2c39562e80350e993439b74f75caf0f09c735bd6a07935c0"
+      "filename": "SingWS-0.4.0.6-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.6-arm64-installer.dmg",
+      "size": "204 MB",
+      "sha256": "cf07dbb1cec391d23e138ea74f96870ff6b9bb79650c1b4b60a37125fad98c05"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.0.5-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.5-x86_64-installer.dmg",
-      "size": "285 MB",
-      "sha256": "6a91b6dfdc335a591c294fe7a269dc5bc23fa176c86031ac3ede27516bcbd8a2"
+      "filename": "SingWS-0.4.0.6-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.6-x86_64-installer.dmg",
+      "size": "284 MB",
+      "sha256": "9dfb8281793e5f12fdbbe1ff5bc3f01d6ff876a2fa11643e3c08325868ea53e5"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.0.5-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.5-universal-installer.dmg",
+      "filename": "SingWS-0.4.0.6-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.0.6-universal-installer.dmg",
       "size": "455 MB",
-      "sha256": "3d449a5d21345fa84e85b75b95b4fd0cd4c65069502293f429e4ba44f1cdf33a"
+      "sha256": "0aceaa4256668d4edac8bb2ee5fe76c67c9b85b74616737b29b774aa222253ef"
     }
   }
 }
