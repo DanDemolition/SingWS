@@ -1,5 +1,5 @@
 """Tests for the OpenKJ GStreamer port: pitch math, scaletempo tuning, the
-CDG adapter (change-driven QImage frames from the hardened cdg_native
+CDG adapter (sampled QImage frames from the hardened cdg_native
 decoder, seek generations, end gate, corrupt-file tolerance), and the brand
 parser rules. None of these need GStreamer to run."""
 
@@ -13,7 +13,6 @@ os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
 
 from gst_karaoke_transport import (
     _CdgAdapter,
-    GstKaraokeTransport,
     optimize_scaletempo_for_rate,
     pitch_ratio_for_semitones,
 )
@@ -109,8 +108,8 @@ class CdgAdapterTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         self.assertEqual(self.adapter.reader.current_frame_position_ms(), pos_after_first)
-        # Normal change-driven polling at the same timestamp still suppresses
-        # duplicate frames after the smooth renderer has sampled the state.
+        # Normal polling at the same timestamp still suppresses duplicate
+        # frames after a forced sample.
         self.assertIsNone(self.adapter.frame_for_position_ms(1005))
 
     def test_frame_is_indexed_qimage(self):
@@ -150,14 +149,6 @@ class CdgAdapterTests(unittest.TestCase):
         final_ms = self.adapter.reader.position_of_final_frame_ms()
         self.assertGreater(final_ms, 4000)
         self.assertLess(final_ms, 6001)
-
-    def test_bgra_bytes_use_gstreamer_bgra_order(self):
-        from PyQt6.QtGui import QColor, QImage
-
-        image = QImage(1, 1, QImage.Format.Format_ARGB32)
-        image.fill(QColor(10, 20, 30, 255))
-        self.assertEqual(GstKaraokeTransport._qimage_bgra_bytes(image), bytes([30, 20, 10, 255]))
-
 
 class CdgCorruptionToleranceTests(unittest.TestCase):
     """The decoder must survive damaged rips: out-of-range tiles, corrupt

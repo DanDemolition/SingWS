@@ -13,8 +13,9 @@ Why this exists (vs the gst-plugins-rs cdgparse/cdgdec elements):
     trusted (memory preset / border colors, tile row+column range, repeated
     memory presets). Extra hardening beyond OpenKJ: scroll offsets are clamped
     to the croppable window and a truncated trailing packet is ignored.
-  * Frames are emitted only when the image visibly changes — cdgdec pushes
-    300 buffers/sec regardless, which costs real CPU downstream.
+  * By default, decoded CDG state is sampled at 60fps presentation cadence and
+    emitted only when that sampled image changed. Set SINGWS_CDG_PRESENT_FPS=0
+    to emit every visible CDG packet change instead.
 
 Usage from the app:
     src = CdgAppSource(Gst)          # pass the already-initialized Gst module
@@ -26,24 +27,34 @@ The decoder half (CdgSurface / CdgFileReader) has no GStreamer dependency and
 can be exercised standalone:  python3 cdg_native.py file.cdg [png-prefix]
 """
 
+import os
 import threading
 
 CDG_PACKET_SIZE = 24
 CDG_PACKETS_PER_SECOND = 300
-# Emit a frame for EVERY visible change (up to 300/sec during heavy drawing).
-# OpenKJ groups changes to cap at 60fps, but that makes tile "crawl" (lines
-# painting in) visibly chunkier than the old cdgdec path — one dropped frame
-# at 60fps is a 33ms hole in the sweep. Idle stretches still emit nothing,
-# which is where the real CPU savings over cdgdec live.
+# Change-driven fallback granularity. The default presentation mode below
+# samples decoded CDG state at 60fps instead; set SINGWS_CDG_PRESENT_FPS=0 to
+# use this per-visible-change path for A/B testing.
 MIN_PACKETS_PER_FRAME = 1
+DEFAULT_PRESENT_FPS = 60
 
 FULL_W, FULL_H = 300, 216      # paintable surface per the CDG spec
 CROP_W, CROP_H = 288, 192      # intended-visible center region
-SIDEFILL_W, SIDEFILL_H = 340, CROP_H  # near-16:9 output with unstretched CDG center
+SIDEFILL_W, SIDEFILL_H = 340, CROP_H  # aligned near-16:9 frame with unstretched CDG center
 SIDEFILL_PAD_X = (SIDEFILL_W - CROP_W) // 2
 PALETTE_BYTES = 1024           # 256 x 32-bit entries (only 16 used)
 FRAME_BYTES = CROP_W * CROP_H + PALETTE_BYTES  # RGB8P: indexed plane + palette
 SIDEFILL_FRAME_BYTES = SIDEFILL_W * SIDEFILL_H + PALETTE_BYTES
+
+
+def _env_present_fps() -> int:
+    raw = os.environ.get("SINGWS_CDG_PRESENT_FPS", "").strip()
+    if not raw:
+        return DEFAULT_PRESENT_FPS
+    try:
+        return max(0, int(float(raw)))
+    except Exception:
+        return DEFAULT_PRESENT_FPS
 
 # CD redbook command values
 _CMD_MEMORY_PRESET = 1
@@ -204,9 +215,9 @@ class CdgSurface:
     def render_sidefill(self) -> bytes:
         """Visible CDG centered in a widescreen RGB8P frame.
 
-        The original 288x192 lyric image is left pixel-perfect. Side bars are
-        filled from the current border/background color so hosts can fill a
-        widescreen output without stretching lyric glyphs.
+        The center keeps the exact 288x192 CDG pixels. The side bars are filled
+        from the current border/background color so widescreen output fills
+        naturally without stretching lyrics.
         """
         top = 12 + self.v_offset
         left = 6 + self.h_offset
@@ -228,8 +239,9 @@ class CdgFileReader:
     """Iterates a .cdg file as visibly-distinct frames (port of OpenKJ's
     CdgFileReader). Frames are grouped so at most MAX_FPS are emitted/sec."""
 
-    def __init__(self, path: str, sidefill: bool = False):
+    def __init__(self, path: str, sidefill: bool = False, present_fps: int | None = None):
         self._sidefill = bool(sidefill)
+        self._present_fps = _env_present_fps() if present_fps is None else max(0, int(present_fps))
         with open(path, "rb") as f:
             data = f.read()
         # Ignore a truncated trailing packet from a damaged rip.
@@ -257,6 +269,9 @@ class CdgFileReader:
         self._surface = CdgSurface()
         self._next_idx = 0  # packets applied to the surface so far
         self._cur_idx = 0   # packet index of the snapshotted current frame
+        self._cur_pts_ns = 0
+        self._cur_dur_ns = 0
+        self._present_tick_idx = 0
         self._cur_frame = self._render_frame()  # black
         self._last_change_idx = -1
 
@@ -279,6 +294,9 @@ class CdgFileReader:
     def move_to_next_frame(self) -> bool:
         """Snapshot the next frame as 'current'. Returns False when the file
         is exhausted and the current frame is the last one."""
+        if self._present_fps > 0:
+            return self._move_to_next_present_frame()
+
         if self._cur_idx == 0:
             # Skip the silent lead-in: scan until the first visible change.
             while not self._is_eof() and not self._process_next_packet():
@@ -297,17 +315,78 @@ class CdgFileReader:
                 image_changed = True
                 self._last_change_idx = self._next_idx
 
+    def _move_to_next_present_frame(self) -> bool:
+        """Sample the CDG state at display cadence.
+
+        CDG packets can visibly change the surface at 300Hz. Most displays only
+        present at about 60Hz, so this mode applies all packets up to each
+        presentation tick and emits one frame only when that tick changed the
+        visible image.
+        """
+        total_ns = self.total_duration_ns()
+        while True:
+            pts_ns = (self._present_tick_idx * 1_000_000_000) // self._present_fps
+            if pts_ns > total_ns:
+                while self._next_idx < self._total_packets:
+                    if self._process_next_packet():
+                        self._last_change_idx = self._next_idx
+                return False
+
+            target_packet = min(
+                self._total_packets,
+                (pts_ns * CDG_PACKETS_PER_SECOND) // 1_000_000_000,
+            )
+            image_changed = False
+            while self._next_idx < target_packet:
+                if self._process_next_packet():
+                    image_changed = True
+                    self._last_change_idx = self._next_idx
+
+            self._present_tick_idx += 1
+            next_pts_ns = (self._present_tick_idx * 1_000_000_000) // self._present_fps
+
+            if image_changed:
+                self._cur_frame = self._render_frame()
+                self._cur_idx = target_packet
+                self._cur_pts_ns = pts_ns
+                self._cur_dur_ns = max(1, next_pts_ns - pts_ns)
+                return True
+
+            if target_packet >= self._total_packets:
+                return False
+
     def current_frame(self) -> bytes:
         return self._cur_frame
 
     def current_frame_position_ms(self) -> int:
+        if self._present_fps > 0:
+            return self._cur_pts_ns // 1_000_000
         return (self._cur_idx * 1000) // CDG_PACKETS_PER_SECOND
 
     def current_frame_duration_ms(self) -> int:
+        if self._present_fps > 0:
+            return self._cur_dur_ns // 1_000_000
         return ((self._next_idx - self._cur_idx) * 1000) // CDG_PACKETS_PER_SECOND
+
+    @staticmethod
+    def _packet_position_ns(packet_idx: int) -> int:
+        return (packet_idx * 1_000_000_000) // CDG_PACKETS_PER_SECOND
+
+    def current_frame_position_ns(self) -> int:
+        if self._present_fps > 0:
+            return self._cur_pts_ns
+        return self._packet_position_ns(self._cur_idx)
+
+    def current_frame_duration_ns(self) -> int:
+        if self._present_fps > 0:
+            return self._cur_dur_ns
+        return self._packet_position_ns(self._next_idx) - self._packet_position_ns(self._cur_idx)
 
     def total_duration_ms(self) -> int:
         return (self._total_packets * 1000) // CDG_PACKETS_PER_SECOND
+
+    def total_duration_ns(self) -> int:
+        return self._packet_position_ns(self._total_packets)
 
     def position_of_final_frame_ms(self) -> int:
         if self._is_eof() and self._last_change_idx >= 0:
@@ -322,6 +401,11 @@ class CdgFileReader:
             self.rewind()
         while self._next_idx < pkg_idx:
             self._process_next_packet()
+        if self._present_fps > 0:
+            position_ns = int(position_ms) * 1_000_000
+            self._present_tick_idx = (position_ns * self._present_fps + 999_999_999) // 1_000_000_000
+            self._cur_pts_ns = position_ns
+            self._cur_dur_ns = 0
         return True
 
 
@@ -332,6 +416,7 @@ class CdgAppSource:
     def __init__(self, gst, name: str = "cdg_native_src", diag=None, sidefill: bool = False):
         self._Gst = gst
         self.sidefill = bool(sidefill)
+        self.present_fps = _env_present_fps()
         self.width, self.height = output_size(self.sidefill)
         self.frame_bytes = SIDEFILL_FRAME_BYTES if self.sidefill else FRAME_BYTES
         self._lock = threading.Lock()
@@ -345,7 +430,7 @@ class CdgAppSource:
             raise RuntimeError("Failed to create appsrc for native CDG decoder")
         caps = (
             f"video/x-raw,format=RGB8P,width={self.width},height={self.height},"
-            "framerate=0/1,pixel-aspect-ratio=1/1"
+            f"framerate={self.present_fps or CDG_PACKETS_PER_SECOND}/1,pixel-aspect-ratio=1/1"
         )
         src.set_property("caps", gst.Caps.from_string(caps))
         src.set_property("format", gst.Format.TIME)
@@ -359,15 +444,16 @@ class CdgAppSource:
 
     def load(self, cdg_path: str):
         with self._lock:
-            self._reader = CdgFileReader(cdg_path, sidefill=self.sidefill)
+            self._reader = CdgFileReader(cdg_path, sidefill=self.sidefill, present_fps=self.present_fps)
             self._frames_pushed = 0
             self.element.set_property(
-                "duration", self._reader.total_duration_ms() * self._Gst.MSECOND
+                "duration", self._reader.total_duration_ns()
             )
             self._diag(
                 f"[CDG-NATIVE] loaded: {self._reader._total_packets} packets, "
                 f"{self._reader.total_duration_ms() / 1000:.1f}s "
-                f"size={self.width}x{self.height} sidefill={self.sidefill}"
+                f"size={self.width}x{self.height} sidefill={self.sidefill} "
+                f"present_fps={self.present_fps or 'change-driven'}"
             )
 
     def reset(self):
@@ -393,17 +479,17 @@ class CdgAppSource:
                 if not reader.move_to_next_frame():
                     break
                 data = reader.current_frame()
-                pts_ms = reader.current_frame_position_ms()
-                dur_ms = reader.current_frame_duration_ms()
+                pts_ns = reader.current_frame_position_ns()
+                dur_ns = reader.current_frame_duration_ns()
             buf = gst.Buffer.new_wrapped(data)
-            buf.pts = pts_ms * gst.MSECOND
-            buf.duration = dur_ms * gst.MSECOND
+            buf.pts = pts_ns
+            buf.duration = dur_ns
             # push-buffer may fire enough-data synchronously, clearing the flag.
             if src.emit("push-buffer", buf) != gst.FlowReturn.OK:
                 return
             self._frames_pushed += 1
             if self._frames_pushed == 1:
-                self._diag(f"[CDG-NATIVE] first frame pushed pts={pts_ms}ms")
+                self._diag(f"[CDG-NATIVE] first frame pushed pts={pts_ns / 1_000_000:.3f}ms")
         if self._want_data:  # loop ended because the file is exhausted
             self._diag(f"[CDG-NATIVE] EOS after {self._frames_pushed} frames")
             src.emit("end-of-stream")

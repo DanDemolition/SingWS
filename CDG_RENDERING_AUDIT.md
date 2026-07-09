@@ -17,12 +17,10 @@
 
 ## Implemented
 
-- Added `cdg_quality_mode` setting:
-  - `standard`: fast scaling, lower CPU.
-  - `high`: smooth scaling and smooth pixmap paint hints.
+- Kept CDG on the standard fast scaling path.
 - Moved CDG scaling out of `paintEvent()` into a cached scaled pixmap.
 - Invalidates the scaled cache only when frame, widget size, stretch mode, or
-  quality mode changes.
+  CDG display mode changes.
 - Avoids copying incoming CDG `QImage` objects in audience and preview widgets.
 - Optimized CDG scroll packets with row-slice copies instead of per-pixel loops.
 - Added `[CDG-RENDER]` diagnostics every 300 scaled audience frames with average

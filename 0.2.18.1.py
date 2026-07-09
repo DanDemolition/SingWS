@@ -2853,11 +2853,6 @@ DEFAULTS = {
     "auto_update_last_check": 0,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
     "cdg_display_mode": "fit",       # fit | sidefill | stretch; cdg_stretch_fill kept for migration
-    "cdg_quality_mode": "standard",  # standard=Low CPU, high=Smooth 60fps + sharp CDG
-    "smooth_cdg_60fps": False,       # hidden legacy/migration field; driven by cdg_quality_mode
-    "cdg_full_hd_output": False,     # hidden legacy field; kept off because Python 1080p frames are too heavy
-    "cdg_full_hd_scale_mode": "fit", # hidden: high quality uses fit
-    "cdg_full_hd_scale_filter": "sharp", # hidden: high quality uses sharp text
     "cdg_near_black_cleanup": True,  # Clamp near-black CDG backgrounds to true black
     "cdg_near_black_threshold": 10,  # RGB values <= this are treated as black for CDG only
     "lyrics_background_video_opacity": 0, # 0..100; shows the background (video/idle/slideshow) through near-black CDG only
@@ -5859,7 +5854,6 @@ def _scaled_karaoke_image(
     image,
     size,
     aspect_mode,
-    quality_mode,
     is_cdg,
     clean_near_black: bool = True,
     black_threshold: int = 10,
@@ -5868,16 +5862,14 @@ def _scaled_karaoke_image(
     """Scale a karaoke frame for display.
 
     CDG frames are pixel art: SmoothTransformation softens lyric edges, so CDG
-    always uses nearest-style scaling. High quality affects frame cadence in
-    the transport, not a heavier/blurry scaler. MP4 frames keep smooth scaling.
+    always uses nearest-style scaling. Other video frames keep the same light
+    scaling path.
     """
     if is_cdg and (clean_near_black or transparent_black):
         image = _clean_cdg_near_black(image, black_threshold, transparent_black=transparent_black)
     if is_cdg:
         return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
-    if quality_mode != "high":
-        return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
-    return image.scaled(size, aspect_mode, Qt.TransformationMode.SmoothTransformation)
+    return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
 
 
 BG_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov"}
@@ -6127,7 +6119,6 @@ class VideoAreaWidget(QWidget):
         self.karaoke_frame = QImage()
         self.karaoke_stretch_fill = False
         self.karaoke_frame_is_cdg = False
-        self.cdg_quality_mode = "standard"
         self._karaoke_scaled_pixmap = QPixmap()
         self._karaoke_scaled_key = None
         self._karaoke_scaled_pos = QPoint(0, 0)
@@ -6311,17 +6302,9 @@ class VideoAreaWidget(QWidget):
             pass
         return False
 
-    def set_cdg_quality_mode(self, mode: str):
-        mode = "high" if str(mode or "").lower() == "high" else "standard"
-        if mode == self.cdg_quality_mode:
-            return
-        self.cdg_quality_mode = mode
-        self._karaoke_scaled_key = None
-        self.update()
-
     def set_karaoke_frame(self, image, stretch_fill: bool = False, is_cdg: bool = False):
         # QImage is implicitly shared; avoid copying here. Scaling is cached per
-        # frame/size/quality so fullscreen paints only blit an already-scaled
+        # frame/size/display mode so fullscreen paints only blit an already-scaled
         # pixmap instead of redoing CDG image processing every repaint.
         self.karaoke_frame = image if image is not None and not image.isNull() else QImage()
         self.karaoke_stretch_fill = bool(stretch_fill)
@@ -6496,7 +6479,6 @@ class VideoAreaWidget(QWidget):
             int(self.height()),
             bool(self.karaoke_stretch_fill),
             bool(self.karaoke_frame_is_cdg),
-            str(self.cdg_quality_mode),
             self._cdg_near_black_settings() if bool(self.karaoke_frame_is_cdg) else (False, 0),
             round(self._lyrics_background_opacity(), 3) if bool(self.karaoke_frame_is_cdg) else 0.0,
         )
@@ -6512,7 +6494,6 @@ class VideoAreaWidget(QWidget):
             self.karaoke_frame,
             self.size(),
             mode,
-            self.cdg_quality_mode,
             bool(self.karaoke_frame_is_cdg),
             *self._cdg_near_black_settings(),
             transparent_black=bool(self.karaoke_frame_is_cdg and self._lyrics_background_opacity() > 0.0),
@@ -6528,7 +6509,7 @@ class VideoAreaWidget(QWidget):
         if self._karaoke_frame_count % 300 == 0:
             try:
                 avg = self._karaoke_scale_time_ms / max(1, self._karaoke_frame_count)
-                _diag(f"[CDG-RENDER] mode={self.cdg_quality_mode} frames={self._karaoke_frame_count} avg_scale_ms={avg:.3f}")
+                _diag(f"[CDG-RENDER] frames={self._karaoke_frame_count} avg_scale_ms={avg:.3f}")
                 _perf_log_if_slow("cdg_frame_render", avg)
             except Exception:
                 pass
@@ -6875,8 +6856,6 @@ class VideoAreaWidget(QWidget):
                     self._draw_background_pixmap(painter, self.background_pixmap)
                     painter.restore()
             self._ensure_karaoke_scaled_pixmap()
-            if self.cdg_quality_mode == "high" and not bool(self.karaoke_frame_is_cdg):
-                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             if not self._karaoke_scaled_pixmap.isNull():
                 painter.drawPixmap(self._karaoke_scaled_pos, self._karaoke_scaled_pixmap)
         elif not self.background_pixmap.isNull() and not self._is_live_karaoke_active():
@@ -11054,7 +11033,6 @@ class VideoWindow(QWidget):
                     new_area.karaoke_frame = QImage(old.karaoke_frame)
                     new_area.karaoke_stretch_fill = bool(getattr(old, "karaoke_stretch_fill", False))
                     new_area.karaoke_frame_is_cdg = bool(getattr(old, "karaoke_frame_is_cdg", False))
-                    new_area.cdg_quality_mode = str(getattr(old, "cdg_quality_mode", "standard") or "standard")
                     new_area._ensure_karaoke_scaled_pixmap()
             except Exception:
                 pass
@@ -11917,7 +11895,6 @@ class PreviewVideoAreaWidget(QWidget):
         self.karaoke_frame = QImage()
         self.karaoke_stretch_fill = False
         self.karaoke_frame_is_cdg = False
-        self.cdg_quality_mode = "standard"
         self._karaoke_scaled_pixmap = QPixmap()
         self._karaoke_scaled_key = None
         self._karaoke_scaled_pos = QPoint(0, 0)
@@ -11930,14 +11907,6 @@ class PreviewVideoAreaWidget(QWidget):
             self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         except Exception:
             pass
-
-    def set_cdg_quality_mode(self, mode: str):
-        mode = "high" if str(mode or "").lower() == "high" else "standard"
-        if mode == self.cdg_quality_mode:
-            return
-        self.cdg_quality_mode = mode
-        self._karaoke_scaled_key = None
-        self.update()
 
     def set_karaoke_frame(self, image, stretch_fill: bool = False, is_cdg: bool = False):
         self.karaoke_frame = image if image is not None and not image.isNull() else QImage()
@@ -11984,7 +11953,6 @@ class PreviewVideoAreaWidget(QWidget):
             int(self.height()),
             bool(self.karaoke_stretch_fill),
             bool(self.karaoke_frame_is_cdg),
-            str(self.cdg_quality_mode),
             self._cdg_near_black_settings() if bool(self.karaoke_frame_is_cdg) else (False, 0),
         )
         if key == self._karaoke_scaled_key and not self._karaoke_scaled_pixmap.isNull():
@@ -11999,7 +11967,6 @@ class PreviewVideoAreaWidget(QWidget):
             self.karaoke_frame,
             self.size(),
             mode,
-            self.cdg_quality_mode,
             bool(self.karaoke_frame_is_cdg),
             *self._cdg_near_black_settings(),
         )
@@ -12024,8 +11991,6 @@ class PreviewVideoAreaWidget(QWidget):
             painter.fillRect(self.rect(), QColor('black'))
             if not bool(getattr(self._owner, 'force_black', True)) and not self.karaoke_frame.isNull():
                 self._ensure_karaoke_scaled_pixmap()
-                if self.cdg_quality_mode == "high" and not bool(self.karaoke_frame_is_cdg):
-                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 if not self._karaoke_scaled_pixmap.isNull():
                     painter.drawPixmap(self._karaoke_scaled_pos, self._karaoke_scaled_pixmap)
             painter.end()
@@ -18658,12 +18623,6 @@ class KaraokeApp(QWidget):
             is_cdg = str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg"
             cdg_display_mode = self._effective_cdg_display_mode() if is_cdg else "fit"
             stretch = bool(is_cdg and cdg_display_mode == "stretch")
-            quality = self._effective_cdg_quality_mode()
-            try:
-                self.video_window.video_area.set_cdg_quality_mode(quality)
-                self.preview_window.video_area.set_cdg_quality_mode(quality)
-            except Exception:
-                pass
             try:
                 if self.video_window.isVisible() and not self.video_window.isMinimized():
                     self.video_window.video_area.set_karaoke_frame(image, stretch_fill=stretch, is_cdg=is_cdg)
@@ -18708,8 +18667,7 @@ class KaraokeApp(QWidget):
         loop_seconds=None,
     ):
         # Engine selection: live karaoke runs on the proven GStreamer/OpenKJ
-        # (native CDG) path. "High" CDG quality is GStreamer decode plus sharper
-        # on-screen scaling (the legacy ffmpeg transport is the fallback).
+        # (native CDG) path; the legacy ffmpeg transport is the fallback.
         base_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
         transport_cls = base_cls
         using_gst_engine = transport_cls is GstKaraokeTransport
@@ -18752,12 +18710,7 @@ class KaraokeApp(QWidget):
                 "parent": self,
             }
             if str(mode or "").lower() == "cdg" and getattr(cls, "__name__", "") == "GstKaraokeTransport":
-                cdg_high_quality = self._effective_cdg_quality_mode() == "high"
                 kwargs["cdg_sidefill"] = self._effective_cdg_display_mode() == "sidefill"
-                kwargs["smooth_cdg_60fps"] = cdg_high_quality
-                kwargs["cdg_full_hd_output"] = False
-                kwargs["cdg_full_hd_scale_mode"] = "fit"
-                kwargs["cdg_full_hd_scale_filter"] = "sharp"
             return cls(audio_path, **kwargs)
 
         try:
@@ -21355,22 +21308,6 @@ class KaraokeApp(QWidget):
         cdg_display_row.addStretch(1)
         v.addLayout(cdg_display_row)
 
-        cdg_quality_row = QHBoxLayout()
-        cdg_quality_row.addWidget(QLabel("CDG Quality:"))
-        cdg_quality_combo = QComboBox(dlg)
-        cdg_quality_combo.addItem("Low", "standard")
-        cdg_quality_combo.addItem("High", "high")
-        cdg_quality_combo.setToolTip(
-            "Low uses the lighter CDG display path. High enables Smooth 60 FPS "
-            "with sharp CDG lyric scaling."
-        )
-        cur_cdg_quality = str(self.settings.get("cdg_quality_mode", "standard") or "standard").lower()
-        cdg_quality_idx = cdg_quality_combo.findData(cur_cdg_quality)
-        cdg_quality_combo.setCurrentIndex(cdg_quality_idx if cdg_quality_idx >= 0 else 0)
-        cdg_quality_row.addWidget(cdg_quality_combo)
-        cdg_quality_row.addStretch(1)
-        v.addLayout(cdg_quality_row)
-
         cdg_black_cleanup_cb = QCheckBox("Clean near-black CDG backgrounds")
         cdg_black_cleanup_cb.setToolTip("Clamps only very dark CDG background pixels to true black. Lyrics and colored graphics are left alone.")
         cdg_black_cleanup_cb.setChecked(bool(self.settings.get("cdg_near_black_cleanup", True)))
@@ -22029,20 +21966,6 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-        def on_cdg_quality_changed(_idx: int):
-            mode = str(cdg_quality_combo.currentData() or "standard")
-            high = mode == "high"
-            self.settings["cdg_quality_mode"] = "high" if high else "standard"
-            self.settings["smooth_cdg_60fps"] = bool(high)
-            self.settings["cdg_full_hd_output"] = False
-            self.settings["cdg_full_hd_scale_mode"] = "fit"
-            self.settings["cdg_full_hd_scale_filter"] = "sharp"
-            self.save_settings()
-            try:
-                self._apply_runtime_media_settings()
-            except Exception:
-                pass
-
         def on_cdg_black_cleanup_changed(_checked=None):
             self.settings["cdg_near_black_cleanup"] = bool(cdg_black_cleanup_cb.isChecked())
             self.settings["cdg_near_black_threshold"] = int(cdg_black_threshold_spin.value())
@@ -22326,7 +22249,6 @@ class KaraokeApp(QWidget):
             update_interval_spin.setValue(12)
             update_dir_edit.setText(str(Path.home() / "Downloads" / "SingWS Updates"))
             cdg_display_combo.setCurrentIndex(cdg_display_combo.findData("fit"))
-            cdg_quality_combo.setCurrentIndex(cdg_quality_combo.findData("standard"))
             cdg_black_cleanup_cb.setChecked(True)
             cdg_black_threshold_spin.setValue(10)
             lyric_bg_opacity_spin.setValue(0)
@@ -22372,7 +22294,6 @@ class KaraokeApp(QWidget):
         slider.valueChanged.connect(on_slider)
         slider.sliderReleased.connect(apply_text_size_from_slider)
         cdg_display_combo.currentIndexChanged.connect(on_cdg_display_mode_changed)
-        cdg_quality_combo.currentIndexChanged.connect(on_cdg_quality_changed)
         cdg_black_cleanup_cb.toggled.connect(on_cdg_black_cleanup_changed)
         cdg_black_threshold_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
         lyric_bg_opacity_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
@@ -36772,9 +36693,6 @@ class KaraokeApp(QWidget):
     def _effective_host_poll_interval_sec(self) -> int:
         return 2
 
-    def _effective_cdg_quality_mode(self) -> str:
-        return str(self.settings.get("cdg_quality_mode", "standard") or "standard").lower()
-
     def _effective_cdg_display_mode(self) -> str:
         mode = str(self.settings.get("cdg_display_mode", "") or "").strip().lower()
         if mode in {"fit", "sidefill", "stretch"}:
@@ -36808,14 +36726,6 @@ class KaraokeApp(QWidget):
 
     def _apply_runtime_media_settings(self):
         """Apply runtime media settings without overwriting user choices."""
-        try:
-            quality = self._effective_cdg_quality_mode()
-            if hasattr(self, "video_window") and hasattr(self.video_window, "video_area"):
-                self.video_window.video_area.set_cdg_quality_mode(quality)
-            if hasattr(self, "preview_window") and hasattr(self.preview_window, "video_area"):
-                self.preview_window.video_area.set_cdg_quality_mode(quality)
-        except Exception:
-            pass
         try:
             ticker = getattr(getattr(self, "video_window", None), "ticker", None)
             if ticker is not None and hasattr(ticker, "set_scroll_speed"):

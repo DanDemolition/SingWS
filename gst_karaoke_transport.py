@@ -12,10 +12,6 @@ chain (see okj_audio_backend.py / OKJ_INTEGRATION.md):
     tolerant of damaged rips): change-driven (no pixel change -> no frame ->
     no render), presented against the pipeline clock, and emitted as
     Indexed8 QImages so palette expansion happens in Qt's C code.
-  * Experimental Full HD CDG can optionally be pushed through a local appsrc branch
-    as timestamped BGRA frames at 1920x1080/60, with the audio pipeline
-    position as the master clock. If that branch is unavailable, CDG falls
-    back to direct QImage presentation.
   * MP4 video decodes through GStreamer (VideoToolbox via vtdec where
     available) into an appsink; frames are paced by the pipeline clock
     (appsink sync=True) and emitted as QImage via frame_ready, so the
@@ -48,7 +44,7 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPainter
+from PyQt6.QtGui import QImage
 
 NS_PER_SECOND = 1_000_000_000
 
@@ -233,10 +229,6 @@ class GstKaraokeTransport(QObject):
         duration_seconds: float = 0.0,
         probe_duration_on_init: bool = False,
         cdg_sidefill: bool = False,
-        smooth_cdg_60fps: bool = False,
-        cdg_full_hd_output: bool = False,
-        cdg_full_hd_scale_mode: str = "fit",
-        cdg_full_hd_scale_filter: str = "sharp",
         parent=None,
     ):
         super().__init__(parent)
@@ -246,10 +238,6 @@ class GstKaraokeTransport(QObject):
         self.mode = str(mode or "audio").lower()
         self.duration_seconds = float(duration_seconds or 0.0)
         self.cdg_sidefill = bool(cdg_sidefill)
-        self.smooth_cdg_60fps = bool(smooth_cdg_60fps)
-        self.cdg_full_hd_output = bool(cdg_full_hd_output)
-        self.cdg_full_hd_scale_mode = str(cdg_full_hd_scale_mode or "fit").lower()
-        self.cdg_full_hd_scale_filter = str(cdg_full_hd_scale_filter or "sharp").lower()
 
         # Host-facing attributes (same names/semantics as the old transport).
         self.max_video_height = 720
@@ -280,17 +268,6 @@ class GstKaraokeTransport(QObject):
         self._video_source_size = ""
         self._video_output_size = ""
         self._started_monotonic = 0.0
-        self._smooth_cdg_last_present_ns = 0
-        self._smooth_cdg_render_total_ms = 0.0
-        self._smooth_cdg_render_count = 0
-        self._smooth_cdg_last_diag_ts = 0.0
-        self._smooth_cdg_cpu_last = (time.monotonic(), time.process_time())
-        self._cdg_appsrc_enabled = (
-            self.mode == "cdg" and self.smooth_cdg_60fps and self.cdg_full_hd_output
-        )
-        self._cdg_appsrc_failed = False
-        self._cdg_appsrc_frame_bytes = 1920 * 1080 * 4
-        self._cdg_appsrc_frames_pushed = 0
 
         self.cdg = _CdgAdapter(self.video_path, sidefill=self.cdg_sidefill) if self.mode == "cdg" and self.video_path else None
         if self.cdg is not None:
@@ -298,11 +275,7 @@ class GstKaraokeTransport(QObject):
 
         self._build_pipeline()
 
-        if self.smooth_cdg_60fps and self.mode == "cdg":
-            self.visual_timer_interval_ms = 16
         self.timer = QTimer(self)
-        if self.smooth_cdg_60fps and self.mode == "cdg":
-            self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.setInterval(self.visual_timer_interval_ms)
         self.timer.timeout.connect(self._tick)
 
@@ -377,8 +350,6 @@ class GstKaraokeTransport(QObject):
 
         # --- video bin (MP4 only): decode -> convert/scale -> RGB appsink.
         self.appsink = None
-        self.cdg_appsrc = None
-        self.cdg_appsink = None
         if self.mode == "mp4":
             self.video_bin = Gst.Bin.new("videoBin")
 
@@ -410,51 +381,6 @@ class GstKaraokeTransport(QObject):
             vghost.set_active(True)
             self.video_bin.add_pad(vghost)
             self.pipeline.add(self.video_bin)
-
-        # --- Experimental Full HD CDG video branch. This does not decode anything:
-        # the CDG state machine remains in Python/OpenKJ logic, but final
-        # 1920x1080 BGRA frames are timestamped with the audio running time and
-        # passed through appsrc/appsink so GStreamer owns frame pacing/drop.
-        if self._cdg_appsrc_enabled:
-            try:
-                self.cdg_appsrc = Gst.ElementFactory.make("appsrc", "cdgSmoothSrc")
-                self.cdg_appsink = Gst.ElementFactory.make("appsink", "cdgSmoothSink")
-                cdg_queue = Gst.ElementFactory.make("queue", "queueCdgSmooth")
-                if self.cdg_appsrc is None or self.cdg_appsink is None or cdg_queue is None:
-                    raise RuntimeError("missing appsrc/appsink/queue element")
-                caps = Gst.Caps.from_string(
-                    "video/x-raw,format=BGRA,width=1920,height=1080,"
-                    "framerate=60/1,pixel-aspect-ratio=1/1"
-                )
-                self.cdg_appsrc.set_property("caps", caps)
-                self.cdg_appsrc.set_property("format", Gst.Format.TIME)
-                self.cdg_appsrc.set_property("is-live", True)
-                self.cdg_appsrc.set_property("block", False)
-                self.cdg_appsrc.set_property("do-timestamp", False)
-                self.cdg_appsrc.set_property("emit-signals", False)
-                self.cdg_appsrc.set_property("max-bytes", self._cdg_appsrc_frame_bytes * 2)
-                try:
-                    cdg_queue.set_property("leaky", 2)  # downstream
-                    cdg_queue.set_property("max-size-buffers", 1)
-                    cdg_queue.set_property("max-size-bytes", 0)
-                    cdg_queue.set_property("max-size-time", 0)
-                except Exception:
-                    pass
-                self.cdg_appsink.set_property("sync", True)
-                self.cdg_appsink.set_property("max-buffers", 1)
-                self.cdg_appsink.set_property("drop", True)
-                self.cdg_appsink.set_property("emit-signals", False)
-                for el in (self.cdg_appsrc, cdg_queue, self.cdg_appsink):
-                    self.pipeline.add(el)
-                if not self.cdg_appsrc.link(cdg_queue) or not cdg_queue.link(self.cdg_appsink):
-                    raise RuntimeError("link failed")
-                _diag("[CDG-SMOOTH] appsrc backend enabled caps=BGRA/1920x1080/60")
-            except Exception as e:
-                self._cdg_appsrc_enabled = False
-                self._cdg_appsrc_failed = True
-                self.cdg_appsrc = None
-                self.cdg_appsink = None
-                _diag(f"[CDG-SMOOTH] appsrc backend unavailable; using direct frames: {e}")
 
         self.bus = self.pipeline.get_bus()
 
@@ -499,8 +425,7 @@ class GstKaraokeTransport(QObject):
         _diag(
             f"[GST-KARAOKE] started mode={self.mode} start={self._pending_start_seconds:.3f}s "
             f"pitch_element={int(self.pitch is not None)} cdg_sidefill={int(self.cdg_sidefill)} "
-            f"smooth_cdg={int(bool(self.smooth_cdg_60fps))} "
-            f"cdg_backend={'appsrc_bgra_1080p60' if self.cdg_appsrc is not None else 'direct_qimage'} "
+            f"cdg_backend=direct_qimage "
             f"file={os.path.basename(self.audio_path)!r}"
         )
 
@@ -792,8 +717,6 @@ class GstKaraokeTransport(QObject):
             interval = max(15, min(80, int(interval_ms)))
         except Exception:
             interval = 15
-        if self.smooth_cdg_60fps and self.mode == "cdg":
-            interval = 16
         self.visual_timer_interval_ms = interval
         try:
             self.timer.setInterval(interval)
@@ -810,12 +733,8 @@ class GstKaraokeTransport(QObject):
             pos = self.position_seconds()
             if pos >= 0:
                 self._check_loop(pos)
-                if self.cdg is not None and self.cdg_appsrc is not None:
-                    self._push_cdg_appsrc_frame(pos)
-                elif self.cdg is not None:
+                if self.cdg is not None:
                     self._present_cdg(pos)
-            if self.cdg_appsink is not None:
-                self._pull_cdg_appsrc_frame()
             if self.appsink is not None:
                 self._pull_video_frame()
             self._mirror_eq()
@@ -879,137 +798,14 @@ class GstKaraokeTransport(QObject):
             self.seek(a)
 
     def _present_cdg(self, pos: float):
-        render_t0 = time.perf_counter()
         display_pos_ms = int(max(0.0, pos + self.video_offset_seconds) * 1000)
-        force_frame = bool(self.smooth_cdg_60fps)
-        image = self.cdg.frame_for_position_ms(display_pos_ms, force=force_frame)
+        image = self.cdg.frame_for_position_ms(display_pos_ms)
         if image is None:
             return
-        if self.cdg_full_hd_output:
-            image = self._scale_cdg_to_full_hd(image)
         self._video_frames_delivered += 1
         self._video_source_size = f"{image.width()}x{image.height()}"
         self._video_output_size = self._video_source_size
         self.frame_ready.emit(image)
-        render_ms = (time.perf_counter() - render_t0) * 1000.0
-        if self.smooth_cdg_60fps:
-            self._smooth_cdg_render_total_ms += render_ms
-            self._smooth_cdg_render_count += 1
-            target_ns = NS_PER_SECOND // 60
-            now_ns = int(max(0.0, pos) * NS_PER_SECOND)
-            last_ns = int(getattr(self, "_smooth_cdg_last_present_ns", 0) or 0)
-            if last_ns > 0:
-                late_frames = max(0, int((now_ns - last_ns) // target_ns) - 1)
-                if late_frames:
-                    self._video_frames_dropped += late_frames
-            self._smooth_cdg_last_present_ns = now_ns
-            self._log_smooth_cdg_perf(render_ms)
-
-    def _push_cdg_appsrc_frame(self, pos: float):
-        if self.cdg_appsrc is None or self.cdg is None:
-            return
-        render_t0 = time.perf_counter()
-        display_pos_ms = int(max(0.0, pos + self.video_offset_seconds) * 1000)
-        image = self.cdg.frame_for_position_ms(display_pos_ms, force=True)
-        if image is None:
-            return
-        image = self._scale_cdg_to_full_hd(image).convertToFormat(QImage.Format.Format_ARGB32)
-        data = self._qimage_bgra_bytes(image)
-        if len(data) != self._cdg_appsrc_frame_bytes:
-            self._video_frames_dropped += 1
-            return
-        Gst = self.Gst
-        buf = Gst.Buffer.new_wrapped(data)
-        pts_ns = int(max(0.0, pos) * NS_PER_SECOND)
-        buf.pts = pts_ns
-        buf.dts = pts_ns
-        buf.duration = NS_PER_SECOND // 60
-        flow = self.cdg_appsrc.emit("push-buffer", buf)
-        if flow != Gst.FlowReturn.OK:
-            self._video_frames_dropped += 1
-            if flow != Gst.FlowReturn.FLUSHING:
-                _diag(f"[CDG-SMOOTH] appsrc push failed flow={flow}")
-            return
-        self._cdg_appsrc_frames_pushed += 1
-        render_ms = (time.perf_counter() - render_t0) * 1000.0
-        self._smooth_cdg_render_total_ms += render_ms
-        self._smooth_cdg_render_count += 1
-        target_ns = NS_PER_SECOND // 60
-        last_ns = int(getattr(self, "_smooth_cdg_last_present_ns", 0) or 0)
-        if last_ns > 0:
-            late_frames = max(0, int((pts_ns - last_ns) // target_ns) - 1)
-            if late_frames:
-                self._video_frames_dropped += late_frames
-        self._smooth_cdg_last_present_ns = pts_ns
-        self._video_source_size = "1920x1080"
-        self._video_output_size = "1920x1080"
-        self._log_smooth_cdg_perf(render_ms)
-
-    @staticmethod
-    def _qimage_bgra_bytes(image: QImage) -> bytes:
-        if image.isNull():
-            return b""
-        bgra = image.convertToFormat(QImage.Format.Format_ARGB32)
-        ptr = bgra.bits()
-        ptr.setsize(bgra.sizeInBytes())
-        return bytes(ptr)
-
-    def _scale_cdg_to_full_hd(self, image: QImage) -> QImage:
-        """Pre-scale CDG to a fixed 1920x1080 frame for the show screen.
-
-        This keeps the command/state timing upstream and only changes the final
-        presentation surface. Sharp mode uses nearest-style scaling so CDG text
-        does not get softened by bilinear filtering.
-        """
-        if image.isNull():
-            return image
-        out_w, out_h = 1920, 1080
-        mode = str(getattr(self, "cdg_full_hd_scale_mode", "fit") or "fit").lower()
-        transform = (
-            Qt.TransformationMode.SmoothTransformation
-            if str(getattr(self, "cdg_full_hd_scale_filter", "sharp") or "sharp").lower() in {"linear", "smooth", "lanczos"}
-            else Qt.TransformationMode.FastTransformation
-        )
-        aspect = Qt.AspectRatioMode.KeepAspectRatio
-        if mode == "stretch":
-            aspect = Qt.AspectRatioMode.IgnoreAspectRatio
-        elif mode in {"fill", "crop"}:
-            aspect = Qt.AspectRatioMode.KeepAspectRatioByExpanding
-        scaled = image.scaled(out_w, out_h, aspect, transform)
-        if mode in {"stretch"}:
-            return scaled.convertToFormat(QImage.Format.Format_RGB32)
-        canvas = QImage(out_w, out_h, QImage.Format.Format_RGB32)
-        canvas.fill(QColor("black"))
-        painter = QPainter(canvas)
-        try:
-            x = (out_w - scaled.width()) // 2
-            y = (out_h - scaled.height()) // 2
-            painter.drawImage(x, y, scaled)
-        finally:
-            painter.end()
-        return canvas
-
-    def _log_smooth_cdg_perf(self, render_ms: float):
-        now = time.monotonic()
-        if (now - float(getattr(self, "_smooth_cdg_last_diag_ts", 0.0) or 0.0)) < 5.0:
-            return
-        self._smooth_cdg_last_diag_ts = now
-        try:
-            avg = self._smooth_cdg_render_total_ms / max(1, self._smooth_cdg_render_count)
-            last_wall, last_cpu = self._smooth_cdg_cpu_last
-            wall_now = time.monotonic()
-            cpu_now = time.process_time()
-            wall_delta = max(0.001, wall_now - float(last_wall or wall_now))
-            cpu_pct = max(0.0, (cpu_now - float(last_cpu or cpu_now)) / wall_delta * 100.0)
-            self._smooth_cdg_cpu_last = (wall_now, cpu_now)
-            _diag(
-                f"[CDG-SMOOTH] fps=60 render_ms={render_ms:.2f} avg_ms={avg:.2f} "
-                f"dropped={int(self._video_frames_dropped)} full_hd={int(bool(self.cdg_full_hd_output))} "
-                f"backend={'appsrc_bgra_1080p60' if self.cdg_appsrc is not None else 'direct_qimage'} "
-                f"cpu_pct={cpu_pct:.1f} source={self._video_source_size or 'n/a'}"
-            )
-        except Exception:
-            pass
 
     def _pull_video_frame(self):
         sample = self.appsink.emit("try-pull-sample", 0)
@@ -1026,39 +822,6 @@ class GstKaraokeTransport(QObject):
         try:
             image = QImage(
                 bytes(mapinfo.data), w, h, 4 * w, QImage.Format.Format_RGBX8888
-            ).copy()
-        finally:
-            buf.unmap(mapinfo)
-        self._video_frames_delivered += 1
-        self._video_source_size = f"{w}x{h}"
-        self._video_output_size = self._video_source_size
-        self.frame_ready.emit(image)
-
-    def _pull_cdg_appsrc_frame(self):
-        latest = None
-        stale = 0
-        while True:
-            sample = self.cdg_appsink.emit("try-pull-sample", 0)
-            if sample is None:
-                break
-            if latest is not None:
-                stale += 1
-            latest = sample
-        if latest is None:
-            return
-        if stale:
-            self._video_frames_dropped += stale
-        buf = latest.get_buffer()
-        caps = latest.get_caps()
-        s = caps.get_structure(0)
-        w = int(s.get_value("width"))
-        h = int(s.get_value("height"))
-        ok, mapinfo = buf.map(self.Gst.MapFlags.READ)
-        if not ok:
-            return
-        try:
-            image = QImage(
-                bytes(mapinfo.data), w, h, 4 * w, QImage.Format.Format_ARGB32
             ).copy()
         finally:
             buf.unmap(mapinfo)
@@ -1130,10 +893,7 @@ class GstKaraokeTransport(QObject):
                 "decoder": "gstreamer",
                 "hardware_acceleration": "vtdec" if self.mode == "mp4" else "n/a",
                 "hardware_acceleration_checked": self.mode == "mp4",
-                "smooth_cdg_appsrc": bool(self.cdg_appsrc is not None),
-                "smooth_cdg_appsrc_failed": bool(self._cdg_appsrc_failed),
-                "smooth_cdg_appsrc_pushed": int(self._cdg_appsrc_frames_pushed),
-                "smooth_cdg_backend": "appsrc_bgra_1080p60" if self.cdg_appsrc is not None else "direct_qimage",
+                "cdg_backend": "direct_qimage" if self.mode == "cdg" else "n/a",
                 "source_size": self._video_source_size,
                 "output_size": self._video_output_size,
                 "delivered_fps": self._video_frames_delivered / elapsed,
