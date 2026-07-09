@@ -4,7 +4,7 @@ import logging
 import logging.handlers
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.0.6"
+APP_VERSION = "0.4.0.7"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 
 # Try to import psutil for system info (optional but recommended)
