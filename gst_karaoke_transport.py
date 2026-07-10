@@ -172,6 +172,13 @@ class _CdgAdapter:
         self._presented_idx = -1
         self._cached_image_idx = -1
         self._cached_image = QImage()
+        # Optional diagnostics (off by default): SINGWS_CDG_DEBUG=1 rate-limits
+        # a once-per-second publish summary; SINGWS_CDG_SNAPSHOT_DIR saves each
+        # published native frame as PNG for offline artifact comparison.
+        self._debug = os.environ.get("SINGWS_CDG_DEBUG", "").strip() == "1"
+        self._snapshot_dir = os.environ.get("SINGWS_CDG_SNAPSHOT_DIR", "").strip()
+        self._dbg_last_log = 0.0
+        self._dbg_published = 0
 
     def seek_seconds(self, seconds: float):
         self.reader.seek(int(max(0.0, seconds) * 1000))
@@ -179,6 +186,11 @@ class _CdgAdapter:
         self._presented_idx = -1
         self._cached_image_idx = -1
         self._cached_image = QImage()
+        if self._debug:
+            _diag(
+                f"[CDG-DEBUG] seek rebuild to {seconds:.3f}s "
+                f"packet={self.reader._next_idx} gen={self.generation}"
+            )
 
     def sectors_remaining(self, seconds: float) -> float:
         n = self.reader._total_packets
@@ -186,17 +198,29 @@ class _CdgAdapter:
         return max(0.0, (n - packet) / 4.0)
 
     def frame_for_position_ms(self, pos_ms: int, force: bool = False):
-        """Advance the reader to cover pos_ms; return a new Indexed8 QImage
-        only when the visible frame actually changed unless force=True."""
+        """Apply every CDG packet due at or before pos_ms; return a new
+        Indexed8 QImage only when the visible frame actually changed unless
+        force=True.
+
+        Root cause note (2026-07-10): this path must NEVER present decoder
+        state from beyond pos_ms. It previously stepped move_to_next_frame(),
+        an iterator that decodes ahead to the NEXT visible change and stamps
+        frames with a one-display-tick (16.7ms) duration — a contract meant
+        for the appsrc path, where GStreamer holds each frame until its pts.
+        Presented directly, the "current" frame expired 16ms into any idle gap
+        between lyric lines, so the loop fetched the next change frame and
+        showed the upcoming line's first packet batch (partial tiles, wipes,
+        palette swaps) seconds early — the intermittent line-start artifacts.
+        advance_to_position_ms() decodes exactly the packets due and no
+        further, so a partially/future-rendered state can't be published.
+        """
         r = self.reader
-        moved = False
-        while r.current_frame_position_ms() + r.current_frame_duration_ms() <= pos_ms:
-            if not r.move_to_next_frame():
-                break
-            moved = True
-        if not moved and self._presented_idx == r._cur_idx and not force:
+        changed = r.advance_to_position_ms(pos_ms)
+        if not changed and self._presented_idx == r._cur_idx and not force:
             return None
         self._presented_idx = r._cur_idx
+        if self._debug:
+            self._debug_note_publish(pos_ms, r)
         if self._cached_image_idx == r._cur_idx and not self._cached_image.isNull():
             return self._cached_image
         frame = r.current_frame()
@@ -211,7 +235,36 @@ class _CdgAdapter:
         )
         self._cached_image_idx = r._cur_idx
         self._cached_image = image.copy()
+        if self._snapshot_dir:
+            self._debug_save_snapshot(pos_ms, r._cur_idx)
         return self._cached_image
+
+    # -- diagnostics (SINGWS_CDG_DEBUG / SINGWS_CDG_SNAPSHOT_DIR only) -------
+
+    def _debug_note_publish(self, pos_ms: int, r):
+        self._dbg_published += 1
+        now = time.monotonic()
+        if now - self._dbg_last_log < 1.0:  # rate-limited: ~1 line/sec
+            return
+        self._dbg_last_log = now
+        _diag(
+            f"[CDG-DEBUG] publish pos={pos_ms}ms packet={r._next_idx}"
+            f"/{r._total_packets} frames_published={self._dbg_published} "
+            f"gen={self.generation}"
+        )
+
+    def _debug_save_snapshot(self, pos_ms: int, packet_idx: int):
+        try:
+            os.makedirs(self._snapshot_dir, exist_ok=True)
+            self._cached_image.save(
+                os.path.join(
+                    self._snapshot_dir,
+                    f"cdg-{int(pos_ms):07d}ms-p{int(packet_idx):07d}.png",
+                )
+            )
+        except Exception as e:
+            _diag(f"[CDG-DEBUG] snapshot save failed: {e}")
+            self._snapshot_dir = ""  # don't retry every frame
 
 
 class GstKaraokeTransport(QObject):

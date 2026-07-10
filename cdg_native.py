@@ -119,11 +119,15 @@ class CdgSurface:
         return updated
 
     def _border_preset(self, color: int):
+        # Border = the outer one-tile ring: rows 0-11 / 204-215, cols 0-5 /
+        # 294-299. The visible interior is rows 12-203 (288x192 crop); an
+        # earlier off-by-one started the bottom band at row 203, which wiped
+        # the last visible pixel row on every border preset.
         px, cb = self.pixels, bytes((color,))
         px[: 12 * FULL_W] = cb * (12 * FULL_W)            # top 12 rows
-        px[203 * FULL_W:] = cb * ((FULL_H - 203) * FULL_W)  # bottom 13 rows
+        px[204 * FULL_W:] = cb * ((FULL_H - 204) * FULL_W)  # bottom 12 rows
         left_fill, right_fill = cb * 6, cb * 6
-        for y in range(12, 203):
+        for y in range(12, 204):
             row = y * FULL_W
             px[row:row + 6] = left_fill
             px[row + 294:row + 300] = right_fill
@@ -355,6 +359,33 @@ class CdgFileReader:
             if target_packet >= self._total_packets:
                 return False
 
+    def advance_to_position_ms(self, position_ms: int) -> bool:
+        """Direct-presentation path (no lookahead): apply every packet due at
+        or before position_ms and, if the visible image changed, re-snapshot
+        it as the current frame. Returns True when the image changed.
+
+        Unlike move_to_next_frame() — which iterates ahead to the NEXT visible
+        change and is only correct when a downstream clock presents the frame
+        at its pts (the appsrc path) — this never decodes past the playback
+        position, so a caller that displays the returned frame immediately can
+        never show future CDG state early. Don't mix both APIs on one reader.
+        """
+        target = min(
+            self._total_packets,
+            (max(0, int(position_ms)) * CDG_PACKETS_PER_SECOND) // 1000,
+        )
+        changed = False
+        while self._next_idx < target:
+            if self._process_next_packet():
+                changed = True
+                self._last_change_idx = self._next_idx
+        if changed:
+            self._cur_frame = self._render_frame()
+            self._cur_idx = self._next_idx
+            self._cur_pts_ns = self._packet_position_ns(self._cur_idx)
+            self._cur_dur_ns = 0
+        return changed
+
     def current_frame(self) -> bytes:
         return self._cur_frame
 
@@ -397,10 +428,18 @@ class CdgFileReader:
         pkg_idx = (position_ms * CDG_PACKETS_PER_SECOND) // 1000
         if pkg_idx > self._total_packets:
             return False
-        if pkg_idx < self._cur_idx:
+        # Backward seeks must compare against _next_idx (packets actually
+        # applied to the surface), not _cur_idx (the snapshot): CDG state is
+        # cumulative, so any target behind the applied position needs a
+        # deterministic rebuild from packet zero.
+        if pkg_idx < self._next_idx:
             self.rewind()
         while self._next_idx < pkg_idx:
             self._process_next_packet()
+        # Re-snapshot so current_frame() reflects the seek target instead of
+        # the pre-seek image (callers present it before the next change).
+        self._cur_frame = self._render_frame()
+        self._cur_idx = self._next_idx
         if self._present_fps > 0:
             position_ns = int(position_ms) * 1_000_000
             self._present_tick_idx = (position_ns * self._present_fps + 999_999_999) // 1_000_000_000

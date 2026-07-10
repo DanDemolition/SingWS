@@ -224,6 +224,196 @@ class CdgCorruptionToleranceTests(unittest.TestCase):
             self.assertEqual(side_row, crop_row)
 
 
+def _cdg_pkt(instr, data16):
+    p = bytearray(24)
+    p[0] = 0x09
+    p[1] = instr
+    p[4:4 + len(data16)] = data16
+    return bytes(p)
+
+
+def _tile(row, col, bits=0x3F, c0=0, c1=1, xor=False):
+    return _cdg_pkt(38 if xor else 6, bytes([c0, c1, row, col] + [bits] * 12))
+
+
+def _write_stream(path, packets):
+    Path(path).write_bytes(b"".join(packets))
+
+
+class CdgNoLookaheadTests(unittest.TestCase):
+    """Regression: the direct-QImage presentation path must never display CDG
+    state from beyond the playback position. Before 2026-07-10 the adapter
+    stepped the appsrc frame iterator, whose one-tick frame durations made it
+    fetch the NEXT change frame during idle gaps — the next lyric line's first
+    packet batch appeared seconds early as garbage blocks at line starts."""
+
+    EMPTY = bytes(24)
+
+    def _adapter_for(self, packets):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        path = os.path.join(self.tmp.name, "t.cdg")
+        _write_stream(path, packets)
+        return _CdgAdapter(path)
+
+    def _gap_track(self):
+        """preset+palette @0.5s, tile A @1.5s, 4s gap, tile B @5.5s."""
+        pkts = [self.EMPTY] * 150
+        pkts.append(_cdg_pkt(1, bytes([0, 0] + [0] * 14)))
+        pkts.append(_cdg_pkt(30, struct.pack(">8H", *[0x0FFF] * 8)))
+        pkts += [self.EMPTY] * 298
+        pkts.append(_tile(6, 6))               # packet 450 -> 1500ms
+        pkts += [self.EMPTY] * 1199
+        pkts.append(_tile(10, 20))             # packet 1650 -> 5500ms
+        pkts += [self.EMPTY] * 300
+        return pkts
+
+    @staticmethod
+    def _tile_b_lit(img):
+        # tile row 10 col 20 -> surface (120,120); crop offset (-6,-12)
+        return img is not None and img.pixelIndex(120 - 6 + 3, 120 - 12 + 6) != 0
+
+    def test_future_frames_never_presented_early(self):
+        adapter = self._adapter_for(self._gap_track())
+        last = None
+        for ms in range(0, 6100, 16):
+            img = adapter.frame_for_position_ms(ms)
+            if img is not None:
+                last = img
+            # The decoder must never have consumed packets beyond those due.
+            self.assertLessEqual(adapter.reader._next_idx, (ms * 300) // 1000)
+            if ms < 5500:
+                self.assertFalse(
+                    self._tile_b_lit(last),
+                    f"tile due at 5500ms visible at {ms}ms",
+                )
+        self.assertTrue(self._tile_b_lit(last))
+
+    def test_consecutive_tiles_in_one_batch_publish_together(self):
+        """Several tile blocks due within a single poll interval (near-equal
+        presentation times) must land in ONE published frame, fully drawn."""
+        pkts = [self.EMPTY] * 300
+        for i in range(6):                     # packets 300-305, all ~1000ms
+            pkts.append(_tile(4, 10 + i))
+        pkts += [self.EMPTY] * 300
+        adapter = self._adapter_for(pkts)
+        adapter.frame_for_position_ms(900)     # black baseline
+        img = adapter.frame_for_position_ms(1100)
+        self.assertIsNotNone(img)
+        for i in range(6):
+            x = (10 + i) * 6 - 6 + 3
+            self.assertEqual(img.pixelIndex(x, 4 * 12 - 12 + 6), 1)
+
+    def test_memory_preset_then_tiles_same_batch(self):
+        pkts = [self.EMPTY] * 300
+        pkts.append(_cdg_pkt(1, bytes([2, 0] + [0] * 14)))  # clear to color 2
+        pkts.append(_tile(4, 10, c0=2, c1=5))
+        adapter = self._adapter_for(pkts + [self.EMPTY] * 300)
+        img = adapter.frame_for_position_ms(1100)
+        self.assertEqual(img.pixelIndex(0, 0), 2)                    # cleared
+        self.assertEqual(img.pixelIndex(10 * 6 - 6 + 3, 4 * 12 - 12 + 6), 5)
+
+    def test_palette_change_immediately_before_draw(self):
+        pkts = [self.EMPTY] * 300
+        # CDG color word: byte0 = 00rrrrgg, byte1 = 00ggbbbb -> red F = 0x3C00
+        pkts.append(_cdg_pkt(30, struct.pack(">8H", *[0x3C00] * 8)))
+        pkts.append(_tile(4, 10))
+        adapter = self._adapter_for(pkts + [self.EMPTY] * 300)
+        img = adapter.frame_for_position_ms(1100)
+        color = img.colorTable()[img.pixelIndex(10 * 6 - 6 + 3, 4 * 12 - 12 + 6)]
+        self.assertEqual(color & 0x00FFFFFF, 0x00FF0000)  # opaque red
+
+    def test_seek_backward_matches_fresh_decode(self):
+        adapter = self._adapter_for(self._gap_track())
+        adapter.frame_for_position_ms(6000)    # decode everything
+        adapter.seek_seconds(2.0)
+        replayed = bytes(adapter.reader.current_frame())
+        fresh = _CdgAdapter(os.path.join(self.tmp.name, "t.cdg"))
+        fresh.frame_for_position_ms(2000)
+        self.assertEqual(replayed, bytes(fresh.reader.current_frame()))
+
+    def test_seek_presents_target_frame_not_stale_image(self):
+        """After a backward seek into a stretch with no upcoming changes, the
+        published frame must reflect the seek target, not the pre-seek image."""
+        adapter = self._adapter_for(self._gap_track())
+        img = adapter.frame_for_position_ms(6000)
+        self.assertTrue(self._tile_b_lit(img))
+        adapter.seek_seconds(0.2)              # before anything is drawn
+        img = adapter.frame_for_position_ms(210, force=True)
+        self.assertFalse(self._tile_b_lit(img))
+
+    def test_rewind_resets_all_state(self):
+        adapter = self._adapter_for(self._gap_track())
+        adapter.frame_for_position_ms(6000)
+        r = adapter.reader
+        r.rewind()
+        self.assertEqual((r._next_idx, r._cur_idx), (0, 0))
+        from cdg_native import FRAME_BYTES, PALETTE_BYTES, CROP_W, CROP_H
+        frame = r.current_frame()
+        self.assertEqual(len(frame), FRAME_BYTES)
+        self.assertEqual(frame[: CROP_W * CROP_H], bytes(CROP_W * CROP_H))
+        # palette back to opaque black
+        pal = frame[CROP_W * CROP_H:]
+        for i in range(16):
+            self.assertEqual(pal[i * 4:(i + 1) * 4], bytes((0, 0, 0, 255)))
+
+
+class CdgSurfaceCommandTests(unittest.TestCase):
+    """Exact command behavior on the raw 300x216 surface."""
+
+    def _surface(self):
+        from cdg_native import CdgSurface
+        return CdgSurface()
+
+    def test_xor_tile_xors_existing_indices(self):
+        s = self._surface()
+        s.apply_packet(_tile(4, 10, bits=0x3F, c0=0, c1=0x05))       # set 5
+        s.apply_packet(_tile(4, 10, bits=0x3F, c0=0, c1=0x03, xor=True))
+        from cdg_native import FULL_W
+        self.assertEqual(s.pixels[(4 * 12) * FULL_W + 10 * 6], 5 ^ 3)
+
+    def test_border_preset_leaves_visible_interior_untouched(self):
+        """Regression: the bottom border band started one row early (203) and
+        wiped the last visible pixel row on every border preset."""
+        s = self._surface()
+        s.apply_packet(_cdg_pkt(1, bytes([5, 0] + [0] * 14)))  # fill color 5
+        s.apply_packet(_cdg_pkt(2, bytes([9] + [0] * 15)))     # border color 9
+        from cdg_native import FULL_W
+        for y in (12, 107, 203):                # first, middle, last visible
+            row = s.pixels[y * FULL_W + 6: y * FULL_W + 294]
+            self.assertEqual(row, bytes([5] * 288), f"row {y} corrupted")
+        for y in (0, 11, 204, 215):             # border rows repainted
+            self.assertEqual(s.pixels[y * FULL_W], 9)
+        self.assertEqual(s.pixels[12 * FULL_W], 9)      # left edge
+        self.assertEqual(s.pixels[12 * FULL_W + 299], 9)  # right edge
+
+    def test_scroll_preset_fills_no_stale_edges(self):
+        s = self._surface()
+        s.apply_packet(_cdg_pkt(1, bytes([7, 0] + [0] * 14)))
+        s.apply_packet(_cdg_pkt(20, bytes([3, 0x20, 0] + [0] * 13)))  # left 6px
+        from cdg_native import FULL_W
+        for y in range(216):
+            self.assertEqual(
+                s.pixels[y * FULL_W + 294: (y + 1) * FULL_W], bytes([3] * 6)
+            )
+            self.assertEqual(s.pixels[y * FULL_W], 7)
+
+    def test_scroll_copy_wraps_pixels(self):
+        s = self._surface()
+        s.apply_packet(_tile(0, 0, bits=0x3F, c0=0, c1=4))  # tile at far left
+        s.apply_packet(_cdg_pkt(24, bytes([0, 0x20, 0] + [0] * 13)))  # copy left
+        from cdg_native import FULL_W
+        # the leftmost 6 columns wrapped to the right edge
+        self.assertEqual(s.pixels[294:300], bytes([4] * 6))
+
+    def test_color_index_masking(self):
+        s = self._surface()
+        # color fields carry junk in the high nibble; must be masked to 0-15
+        s.apply_packet(_cdg_pkt(6, bytes([0xF0 | 2, 0xF0 | 7, 4, 10] + [0x3F] * 12)))
+        from cdg_native import FULL_W
+        self.assertEqual(s.pixels[(4 * 12) * FULL_W + 10 * 6], 7)
+
+
 class BrandParserTests(unittest.TestCase):
     def test_cc_and_cb_are_separate_brands(self):
         self.assertEqual(okj_fileinfo.brand_of("CC"), "CC")

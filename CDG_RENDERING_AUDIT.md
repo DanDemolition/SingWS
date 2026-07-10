@@ -1,4 +1,35 @@
-# SingWS CDG Rendering Audit - 2026-05-31
+# SingWS CDG Rendering Audit
+
+## 2026-07-10 — Intermittent line-start artifacts (root cause + fix)
+
+Symptom: some tracks briefly showed garbage at the start of a new lyric line
+(random blocks, partial characters, pieces of the previous line).
+
+Confirmed root cause: the direct-QImage presentation path (`_CdgAdapter`)
+stepped `CdgFileReader.move_to_next_frame()`, an iterator built for the
+appsrc pull model that decodes ahead to the NEXT visible change and stamps
+frames with a one-display-tick (16.7 ms) duration. Presented directly, the
+current frame "expired" 16 ms into any idle gap between lyric lines, so the
+adapter fetched the next change frame — future packets — and displayed the
+upcoming line's first packet batch (partial tiles, wipes, palette swaps)
+early. Measured on a real rip (CC - Billy Joel - Pressure): 687 of 5275
+published frames were >33 ms early, worst 10.9 s ahead of playback.
+
+Fix: new `CdgFileReader.advance_to_position_ms()` applies exactly the packets
+due at or before the playback position (never past it) and re-snapshots only
+when the image changed; the adapter now uses it, so a future or partial state
+can never be published. Also fixed while auditing: border preset painted the
+bottom border band one row early (wiping visible row 203), and `seek()` now
+compares backward seeks against packets actually applied and re-renders the
+snapshot at the seek target (previously the pre-seek image lingered until the
+next visible change).
+
+Diagnostics (default off): `SINGWS_CDG_DEBUG=1` logs a rate-limited publish /
+seek-rebuild summary; `SINGWS_CDG_SNAPSHOT_DIR=<dir>` saves each published
+native frame as PNG. Regression tests: `CdgNoLookaheadTests` /
+`CdgSurfaceCommandTests` in `test_gst_transport_port.py`.
+
+# Earlier audit - 2026-05-31
 
 ## Findings
 
