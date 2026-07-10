@@ -253,6 +253,7 @@ class RenameMergeTests(unittest.TestCase):
         """Server redelivers waitlist rows under the retired name after a
         reconnect; ingest must map them to the surviving singer."""
         app = self._app()
+        app.settings["use_waiting_for_add"] = True
         app.queue = [singer("Dan", ["A"]), singer("Daniel", ["C"])]
         app._rename_rotation_singer(1, "Dan")
 

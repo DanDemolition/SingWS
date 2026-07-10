@@ -2859,6 +2859,7 @@ DEFAULTS = {
     "bg_video_enabled": False,        # play MP4 background videos behind CDG lyrics
     "bg_video_folder": "",            # folder of MP4 background videos
     "bg_video_shuffle": True,         # shuffle-bag order; False = alphabetical loop
+    "bg_video_quality": "auto",       # auto | 1080 | 720 | 540 | off; decorative layer only
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
@@ -5873,6 +5874,30 @@ def _scaled_karaoke_image(
 
 
 BG_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov"}
+BG_VIDEO_QUALITY_PROFILES = {
+    "auto": {"label": "Auto", "max_width": 1280, "max_height": 720, "max_fps": 30},
+    "1080": {"label": "1080p", "max_width": 1920, "max_height": 1080, "max_fps": 30},
+    "720": {"label": "720p", "max_width": 1280, "max_height": 720, "max_fps": 30},
+    "540": {"label": "540p", "max_width": 960, "max_height": 540, "max_fps": 24},
+    "off": {"label": "Off", "max_width": 0, "max_height": 0, "max_fps": 0},
+}
+
+
+def background_video_quality_profile(value) -> dict:
+    key = str(value or "auto").strip().lower()
+    if key in {"1080p", "1920x1080"}:
+        key = "1080"
+    elif key in {"720p", "1280x720"}:
+        key = "720"
+    elif key in {"540p", "960x540"}:
+        key = "540"
+    elif key in {"false", "disabled", "none"}:
+        key = "off"
+    if key not in BG_VIDEO_QUALITY_PROFILES:
+        key = "auto"
+    profile = dict(BG_VIDEO_QUALITY_PROFILES[key])
+    profile["key"] = key
+    return profile
 
 
 def scan_background_video_folder(folder: str) -> list[str]:
@@ -5932,18 +5957,31 @@ class LyricsBackgroundVideoPlayer(QObject):
     which composites them under the transparent-black CDG frame at the
     host-selected opacity."""
 
-    def __init__(self, parent=None, *, on_frame=None, max_height: int = 720):
+    def __init__(self, parent=None, *, on_frame=None, max_width: int = 1280, max_height: int = 720, max_fps: int = 30, quality_label: str = "auto"):
         super().__init__(parent)
         self.on_frame = on_frame
+        self.max_width = int(max_width or 0)
         self.max_height = int(max_height or 0)
+        self.max_fps = int(max_fps or 0)
+        self.quality_label = str(quality_label or "auto")
         self._bag = None
         self._pipeline = None
         self._appsink = None
         self._current_path = ""
+        self._source_size = ""
+        self._source_fps = 0.0
+        self._working_size = ""
         self._frames_delivered = 0
+        self._frames_decoded = 0
+        self._frames_dropped = 0
+        self._decode_copy_time_ms = 0.0
+        self._frame_handoff_time_ms = 0.0
+        self._last_stats_log = 0.0
+        self._last_frame_pts_ns = None
         self._advance_failures = 0
+        self._runtime_errors = 0
         self._timer = QTimer(self)
-        self._timer.setInterval(33)
+        self._timer.setInterval(max(16, int(1000 / max(1, self.max_fps or 30))))
         self._timer.timeout.connect(self._tick)
 
     def start(self, files: list[str], shuffle: bool = True) -> bool:
@@ -5977,6 +6015,7 @@ class LyricsBackgroundVideoPlayer(QObject):
         self._appsink = None
         if pipeline is not None:
             try:
+                self._maybe_log_stats(force=True)
                 pipeline.set_state(Gst.State.NULL)
             except Exception:
                 pass
@@ -5996,24 +6035,40 @@ class LyricsBackgroundVideoPlayer(QObject):
             pipeline = Gst.Pipeline.new("singws-bg-video")
             dec = Gst.ElementFactory.make("uridecodebin", "bgVideoDecoder")
             vq = Gst.ElementFactory.make("queue", "bgVideoQueue")
+            vrate = Gst.ElementFactory.make("videorate", "bgVideoRate")
             vconv = Gst.ElementFactory.make("videoconvert", "bgVideoConvert")
             vscale = Gst.ElementFactory.make("videoscale", "bgVideoScale")
             vcaps = Gst.ElementFactory.make("capsfilter", "bgVideoCaps")
             sink = Gst.ElementFactory.make("appsink", "bgVideoSink")
-            if any(el is None for el in (dec, vq, vconv, vscale, vcaps, sink)):
+            if any(el is None for el in (dec, vq, vrate, vconv, vscale, vcaps, sink)):
                 raise RuntimeError("bg video GStreamer elements unavailable")
             dec.set_property("uri", Gst.filename_to_uri(path))
+            try:
+                vq.set_property("max-size-buffers", 2)
+                vq.set_property("max-size-bytes", 0)
+                vq.set_property("max-size-time", 0)
+                vq.set_property("leaky", 2)  # downstream: drop old decorative frames when the UI is busy
+                if self.max_fps > 0:
+                    vrate.set_property("drop-only", True)
+                    if vrate.find_property("max-rate") is not None:
+                        vrate.set_property("max-rate", int(self.max_fps))
+            except Exception:
+                pass
             caps = "video/x-raw,format=RGBx"
+            if self.max_width > 0:
+                caps += f",width=[1,{int(self.max_width)}]"
             if self.max_height > 0:
                 caps += f",height=[1,{int(self.max_height)}]"
+            if self.max_fps > 0:
+                caps += f",framerate=(fraction)[0/1,{int(self.max_fps)}/1]"
             vcaps.set_property("caps", Gst.Caps.from_string(caps))
             sink.set_property("sync", True)
             sink.set_property("max-buffers", 2)
             sink.set_property("drop", True)
             sink.set_property("emit-signals", False)
-            for el in (dec, vq, vconv, vscale, vcaps, sink):
+            for el in (dec, vq, vrate, vconv, vscale, vcaps, sink):
                 pipeline.add(el)
-            for a, b in zip((vq, vconv, vscale, vcaps), (vconv, vscale, vcaps, sink)):
+            for a, b in zip((vq, vrate, vconv, vscale, vcaps), (vrate, vconv, vscale, vcaps, sink)):
                 if not a.link(b):
                     raise RuntimeError("bg video link failed")
 
@@ -6022,6 +6077,7 @@ class LyricsBackgroundVideoPlayer(QObject):
                     pad_caps = pad.get_current_caps()
                     s = pad_caps.to_string() if pad_caps else ""
                     if s.startswith("video/"):
+                        self._capture_source_caps(pad_caps)
                         target = q.get_static_pad("sink")
                         if target is not None and not target.is_linked():
                             pad.link(target)
@@ -6053,8 +6109,73 @@ class LyricsBackgroundVideoPlayer(QObject):
         self._pipeline = pipeline
         self._appsink = sink
         self._current_path = path
-        _diag(f"[BG-VIDEO] playing file={os.path.basename(path)!r} reason={reason} max_height={self.max_height}")
+        self._last_stats_log = time.monotonic()
+        _diag(
+            f"[BG-VIDEO] playing file={os.path.basename(path)!r} reason={reason} "
+            f"quality={self.quality_label} work_cap={self.max_width}x{self.max_height}@{self.max_fps}fps "
+            f"source={self._source_size or 'pending'} source_fps={self._source_fps:.2f} "
+            f"decoder=gstreamer renderer=qt_qimage_widget queue=max2_leaky"
+        )
         return True
+
+    def _capture_source_caps(self, caps):
+        try:
+            s = caps.get_structure(0)
+            width = int(s.get_value("width") or 0)
+            height = int(s.get_value("height") or 0)
+            self._source_size = f"{width}x{height}" if width and height else ""
+            fps_value = s.get_value("framerate")
+            try:
+                self._source_fps = float(fps_value.num) / float(fps_value.denom or 1)
+            except Exception:
+                self._source_fps = 0.0
+        except Exception:
+            pass
+
+    def _queue_depth(self) -> int:
+        try:
+            if self._appsink is not None and self._appsink.find_property("current-level-buffers") is not None:
+                return max(0, int(self._appsink.get_property("current-level-buffers") or 0))
+        except Exception:
+            pass
+        return 0
+
+    def _refresh_sink_stats(self):
+        try:
+            if self._appsink is None or self._appsink.find_property("stats") is None:
+                return
+            stats = self._appsink.get_property("stats")
+            if stats is None:
+                return
+            for key in ("dropped", "rendered"):
+                try:
+                    value = int(stats.get_value(key) or 0)
+                except Exception:
+                    continue
+                if key == "dropped":
+                    self._frames_dropped = max(self._frames_dropped, value)
+                elif key == "rendered":
+                    self._frames_decoded = max(self._frames_decoded, value)
+        except Exception:
+            pass
+
+    def _maybe_log_stats(self, *, force: bool = False):
+        now = time.monotonic()
+        if not force and (now - float(self._last_stats_log or 0.0)) < 15.0:
+            return
+        self._last_stats_log = now
+        self._refresh_sink_stats()
+        decoded = max(1, int(self._frames_decoded))
+        delivered = max(1, int(self._frames_delivered))
+        _diag(
+            f"[BG-VIDEO] stats file={os.path.basename(self._current_path)!r} quality={self.quality_label} "
+            f"source={self._source_size or 'unknown'} source_fps={self._source_fps:.2f} "
+            f"working={self._working_size or 'unknown'} cap={self.max_width}x{self.max_height}@{self.max_fps}fps "
+            f"decoded={self._frames_decoded} rendered={self._frames_delivered} dropped={self._frames_dropped} "
+            f"queue={self._queue_depth()} avg_decode_copy_ms={self._decode_copy_time_ms / decoded:.3f} "
+            f"avg_handoff_ms={self._frame_handoff_time_ms / delivered:.3f} "
+            f"last_pts_ns={self._last_frame_pts_ns} decoder=gstreamer renderer=qt_qimage_widget"
+        )
 
     def _tick(self):
         pipeline = self._pipeline
@@ -6068,6 +6189,10 @@ class LyricsBackgroundVideoPlayer(QObject):
                 if msg.type == Gst.MessageType.ERROR:
                     err, _dbg = msg.parse_error()
                     _diag(f"[BG-VIDEO] decode error file={os.path.basename(self._current_path)!r}: {err}")
+                    self._runtime_errors += 1
+                    if self._runtime_errors >= 3:
+                        self.stop("repeated_decode_errors")
+                        return
                 # Continuous shuffle: next video on EOS (or on a bad file).
                 if not self._advance("eos" if msg.type == Gst.MessageType.EOS else "error"):
                     self.stop("no_playable_files")
@@ -6082,12 +6207,14 @@ class LyricsBackgroundVideoPlayer(QObject):
             sample = None
         if sample is None:
             return
+        t0 = time.perf_counter()
         try:
             buf = sample.get_buffer()
             caps = sample.get_caps()
             s = caps.get_structure(0)
             width = int(s.get_value("width"))
             height = int(s.get_value("height"))
+            self._working_size = f"{width}x{height}"
             ok, mapinfo = buf.map(Gst.MapFlags.READ)
             if not ok:
                 return
@@ -6098,9 +6225,20 @@ class LyricsBackgroundVideoPlayer(QObject):
                 ).copy()
             finally:
                 buf.unmap(mapinfo)
+            try:
+                if buf.pts != Gst.CLOCK_TIME_NONE:
+                    self._last_frame_pts_ns = int(buf.pts)
+            except Exception:
+                pass
+            self._frames_decoded += 1
+            self._decode_copy_time_ms += (time.perf_counter() - t0) * 1000.0
             self._frames_delivered += 1
+            self._runtime_errors = 0
             if self.on_frame is not None:
+                h0 = time.perf_counter()
                 self.on_frame(image)
+                self._frame_handoff_time_ms += (time.perf_counter() - h0) * 1000.0
+            self._maybe_log_stats()
         except Exception:
             pass
 
@@ -6108,6 +6246,16 @@ class LyricsBackgroundVideoPlayer(QObject):
         return {
             "current": os.path.basename(self._current_path) if self._current_path else "",
             "frames_delivered": int(self._frames_delivered),
+            "frames_decoded": int(self._frames_decoded),
+            "frames_dropped": int(self._frames_dropped),
+            "source_size": self._source_size,
+            "source_fps": float(self._source_fps or 0.0),
+            "working_size": self._working_size,
+            "queue_size": self._queue_depth(),
+            "quality": self.quality_label,
+            "max_width": int(self.max_width or 0),
+            "max_height": int(self.max_height or 0),
+            "max_fps": int(self.max_fps or 0),
             "running": bool(self._pipeline is not None),
         }
 
@@ -6132,6 +6280,10 @@ class VideoAreaWidget(QWidget):
         self._viz_audio_level = 0.0
         self._idle_paint_log_ts = 0.0
         self.background_video_pixmap = QPixmap()
+        self._background_video_upload_count = 0
+        self._background_video_upload_time_ms = 0.0
+        self._background_video_paint_count = 0
+        self._background_video_paint_time_ms = 0.0
         self._background_image_path = ""
         self._background_previous_pixmap = QPixmap()
         self._background_fade_started = 0.0
@@ -6211,23 +6363,36 @@ class VideoAreaWidget(QWidget):
             if had:
                 self.update()
             return
+        t0 = time.perf_counter()
         self.background_video_pixmap = QPixmap.fromImage(image) if isinstance(image, QImage) else QPixmap(image)
+        self._background_video_upload_count += 1
+        self._background_video_upload_time_ms += (time.perf_counter() - t0) * 1000.0
         self.update()
 
     def _draw_background_video_pixmap(self, painter: QPainter, pixmap: QPixmap):
-        """Fill the widget (crop-to-fill) with FastTransformation: this runs
-        per video frame, so it must stay cheap; the decode is already capped
-        to the MP4 max height."""
+        """Fill the widget (crop-to-fill) without allocating a scaled pixmap.
+
+        The background layer is decorative and already decoded to a small
+        working size.  Let QPainter scale from a cropped source rect during the
+        draw instead of materializing a new Full HD pixmap every video frame.
+        """
         if pixmap.isNull():
             return
-        pm = pixmap.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.FastTransformation,
-        )
-        x = (self.width() - pm.width()) // 2
-        y = (self.height() - pm.height()) // 2
-        painter.drawPixmap(x, y, pm)
+        pw = max(1, int(pixmap.width()))
+        ph = max(1, int(pixmap.height()))
+        tw = max(1, int(self.width()))
+        th = max(1, int(self.height()))
+        src_w = pw
+        src_h = ph
+        target_ratio = tw / float(th)
+        pix_ratio = pw / float(ph)
+        if pix_ratio > target_ratio:
+            src_w = max(1, int(ph * target_ratio))
+        elif pix_ratio < target_ratio:
+            src_h = max(1, int(pw / target_ratio))
+        src_x = max(0, (pw - src_w) // 2)
+        src_y = max(0, (ph - src_h) // 2)
+        painter.drawPixmap(self.rect(), pixmap, QRect(src_x, src_y, src_w, src_h))
 
     def set_background_image(self, image_path):
         old_pixmap = QPixmap(self.background_pixmap) if not self.background_pixmap.isNull() else QPixmap()
@@ -6848,7 +7013,22 @@ class VideoAreaWidget(QWidget):
                 if not self.background_video_pixmap.isNull():
                     painter.save()
                     painter.setOpacity(bg_opacity)
+                    t0 = time.perf_counter()
                     self._draw_background_video_pixmap(painter, self.background_video_pixmap)
+                    self._background_video_paint_count += 1
+                    self._background_video_paint_time_ms += (time.perf_counter() - t0) * 1000.0
+                    if self._background_video_paint_count % 300 == 0:
+                        try:
+                            avg_paint = self._background_video_paint_time_ms / max(1, self._background_video_paint_count)
+                            avg_upload = self._background_video_upload_time_ms / max(1, self._background_video_upload_count)
+                            _diag(
+                                f"[BG-VIDEO] compose stats frames={self._background_video_paint_count} "
+                                f"avg_upload_ms={avg_upload:.3f} avg_compose_ms={avg_paint:.3f} "
+                                f"pixmap={self.background_video_pixmap.width()}x{self.background_video_pixmap.height()} "
+                                f"target={self.width()}x{self.height()}"
+                            )
+                        except Exception:
+                            pass
                     painter.restore()
                 elif not self.background_pixmap.isNull():
                     painter.save()
@@ -18569,9 +18749,13 @@ class KaraokeApp(QWidget):
             folder = str(self.settings.get("bg_video_folder", "") or "")
             shuffle = bool(self.settings.get("bg_video_shuffle", True))
             opacity = int(float(self.settings.get("lyrics_background_video_opacity", 0) or 0))
+            quality = background_video_quality_profile(self.settings.get("bg_video_quality", "auto"))
         except Exception:
             return
         if not enabled:
+            return
+        if quality.get("key") == "off":
+            _diag("[BG-VIDEO] not started reason=quality_off")
             return
         if opacity <= 0:
             _diag("[BG-VIDEO] not started reason=opacity_zero (set Background Video Opacity > 0)")
@@ -18587,13 +18771,18 @@ class KaraokeApp(QWidget):
             player = LyricsBackgroundVideoPlayer(
                 self,
                 on_frame=self._on_lyrics_bg_video_frame,
-                max_height=self._effective_mp4_max_height() or 720,
+                max_width=int(quality.get("max_width") or 1280),
+                max_height=int(quality.get("max_height") or 720),
+                max_fps=int(quality.get("max_fps") or 30),
+                quality_label=str(quality.get("key") or "auto"),
             )
             if player.start(files, shuffle=shuffle):
                 self._lyrics_bg_video_player = player
                 _diag(
                     f"[BG-VIDEO] started files={len(files)} shuffle={int(shuffle)} "
-                    f"opacity={opacity}% folder={folder!r}"
+                    f"opacity={opacity}% quality={quality.get('key')} "
+                    f"work_cap={quality.get('max_width')}x{quality.get('max_height')}@{quality.get('max_fps')}fps "
+                    f"folder={folder!r}"
                 )
             else:
                 player.stop("start_failed")
@@ -19303,12 +19492,15 @@ class KaraokeApp(QWidget):
                 video = diag.get("video") if isinstance(diag.get("video"), dict) else {}
                 _diag(
                     "[MP4-PERF] "
-                    f"media={diag.get('media_type')} decoder={video.get('decoder', 'n/a')} "
+                    f"media={diag.get('media_type')} decoder={video.get('decoder', 'n/a')} codec={video.get('codec', 'n/a')} "
+                    f"renderer={video.get('renderer', 'n/a')} "
                     f"hw={video.get('hardware_acceleration', 'n/a')} hw_checked={int(bool(video.get('hardware_acceleration_checked')))} "
                     f"src={video.get('source_size', '')} out={video.get('output_size', '')} "
                     f"fps={float(video.get('delivered_fps', 0.0) or 0.0):.1f}/{float(video.get('fps', 0.0) or 0.0):.1f} "
                     f"queue={int(video.get('queue_size', 0) or 0)}/{int(video.get('max_buffered_frames', 0) or 0)} "
                     f"drops={int(video.get('dropped_frames', 0) or 0)} "
+                    f"video_eof={int(bool(video.get('eof_received')))} drained={int(bool(video.get('eof_drained')))} "
+                    f"holding_last={int(bool(video.get('holding_last_frame')))} last_frame_pts_ns={video.get('last_frame_pts_ns')} "
                     f"render_ms={float(diag.get('last_visual_render_ms', 0.0) or 0.0):.1f} "
                     f"render_max_ms={float(diag.get('visual_render_max_ms', 0.0) or 0.0):.1f} "
                     f"audible_time_s={float(diag.get('audible_position_seconds', diag.get('position_seconds', 0.0)) or 0.0):.3f} "
@@ -21359,6 +21551,22 @@ class KaraokeApp(QWidget):
         bg_video_shuffle_cb.setChecked(bool(self.settings.get("bg_video_shuffle", True)))
         v.addWidget(bg_video_shuffle_cb)
 
+        bg_video_quality_row = QHBoxLayout()
+        bg_video_quality_row.addWidget(QLabel("Background video quality:"))
+        bg_video_quality_combo = QComboBox(dlg)
+        bg_video_quality_combo.addItem("Auto (720p, adaptive-ready)", "auto")
+        bg_video_quality_combo.addItem("1080p", "1080")
+        bg_video_quality_combo.addItem("720p", "720")
+        bg_video_quality_combo.addItem("540p", "540")
+        bg_video_quality_combo.addItem("Off", "off")
+        bg_video_quality_combo.setToolTip("Limits only the decorative video layer behind transparent CDG lyrics. CDG lyrics still render at full show-screen resolution.")
+        bg_video_quality = background_video_quality_profile(self.settings.get("bg_video_quality", "auto"))
+        bg_video_quality_idx = bg_video_quality_combo.findData(bg_video_quality.get("key", "auto"))
+        bg_video_quality_combo.setCurrentIndex(bg_video_quality_idx if bg_video_quality_idx >= 0 else 0)
+        bg_video_quality_row.addWidget(bg_video_quality_combo)
+        bg_video_quality_row.addStretch(1)
+        v.addLayout(bg_video_quality_row)
+
         bg_video_folder_row = QHBoxLayout()
         bg_video_folder_btn = QPushButton("Choose Background Video Folder…")
         bg_video_folder_row.addWidget(bg_video_folder_btn)
@@ -22000,6 +22208,7 @@ class KaraokeApp(QWidget):
         def on_bg_video_settings_changed(_checked=None):
             self.settings["bg_video_enabled"] = bool(bg_video_enable_cb.isChecked())
             self.settings["bg_video_shuffle"] = bool(bg_video_shuffle_cb.isChecked())
+            self.settings["bg_video_quality"] = str(bg_video_quality_combo.currentData() or "auto")
             self.save_settings()
             # Apply live: (re)start or stop the background loop for the
             # currently playing CDG song instead of waiting for the next one.
@@ -22014,6 +22223,7 @@ class KaraokeApp(QWidget):
 
         bg_video_enable_cb.toggled.connect(on_bg_video_settings_changed)
         bg_video_shuffle_cb.toggled.connect(on_bg_video_settings_changed)
+        bg_video_quality_combo.currentIndexChanged.connect(on_bg_video_settings_changed)
 
         def on_perf_debug_toggled(checked: bool):
             self.settings["performance_debug_enabled"] = bool(checked)
@@ -22256,6 +22466,7 @@ class KaraokeApp(QWidget):
             cdg_black_cleanup_cb.setChecked(True)
             cdg_black_threshold_spin.setValue(10)
             lyric_bg_opacity_spin.setValue(0)
+            bg_video_quality_combo.setCurrentIndex(bg_video_quality_combo.findData("auto"))
             next_up_overlay_cb.setChecked(True)
             next_up_duration_spin.setValue(10)
             show_tooltips_cb.setChecked(False)
@@ -24570,6 +24781,9 @@ class KaraokeApp(QWidget):
     def _upsert_waiting_for_add_request(self, req: dict | None, reason: str = "") -> None:
         if not isinstance(req, dict):
             return
+        if not self._is_waitlist_enabled_cached():
+            _diag(f"[WAITING-FOR-ADD] ignored upsert because waitlist disabled reason={reason!r}")
+            return
         try:
             state = object.__getattribute__(self, "__dict__")
         except Exception:
@@ -24611,16 +24825,23 @@ class KaraokeApp(QWidget):
             state = object.__getattribute__(self, "__dict__")
         except Exception:
             return
-        try:
-            local_ids = set(int(v) for v in (local_remote_ids or self._queue_remote_request_ids() or []))
-        except Exception:
-            local_ids = set()
         handled = state.get("_waiting_for_add_handled_ids", set())
         if not isinstance(handled, set):
             handled = set()
             self._waiting_for_add_handled_ids = handled
         elif "_waiting_for_add_handled_ids" not in state:
             self._waiting_for_add_handled_ids = handled
+        if not self._is_waitlist_enabled_cached():
+            if state.get("_waiting_for_add_requests"):
+                _diag("[WAITING-FOR-ADD] cleared local waitlist because waitlist disabled")
+            self._waiting_for_add_requests = {}
+            self._waiting_for_add_recent_terminal_requests = {}
+            self._schedule_waiting_for_add_view_refresh(reason="waitlist_disabled")
+            return
+        try:
+            local_ids = set(int(v) for v in (local_remote_ids or self._queue_remote_request_ids() or []))
+        except Exception:
+            local_ids = set()
         identity_sets = self._accepted_request_identity_sets()
         candidates = {}
         terminal_items = {}
@@ -24672,6 +24893,10 @@ class KaraokeApp(QWidget):
                     continue
                 if rid > 0:
                     candidates.setdefault(rid, dict(req))
+        except Exception:
+            pass
+        try:
+            self._cleanup_duplicate_singer_songs(reason="waitlist_rebuild_precheck")
         except Exception:
             pass
         items = {}
@@ -31470,7 +31695,14 @@ class KaraokeApp(QWidget):
 
     def _check_queue_song_limit(self, participants: list[str], *, exclude_request_id: int | None = None, counts: dict[str, int] | None = None) -> tuple[bool, str]:
         limit = self._active_song_limit()
-        counts = counts if isinstance(counts, dict) else self._live_song_counts_by_singer(exclude_request_id=exclude_request_id)
+        if isinstance(counts, dict):
+            counts = counts
+        else:
+            try:
+                self._cleanup_duplicate_singer_songs(reason="limit_precheck")
+            except Exception:
+                pass
+            counts = self._live_song_counts_by_singer(exclude_request_id=exclude_request_id)
         for participant in participants:
             key = self._queue_limit_name_key(participant)
             if key and counts.get(key, 0) >= limit:
@@ -32200,6 +32432,45 @@ class KaraokeApp(QWidget):
         else:
             remote_request_id = 0
         insert_source = self._queue_insert_source_label(remote_meta)
+
+        duplicate = self._find_existing_duplicate_song_entry(primary, entry)
+        if duplicate is not None:
+            dup_singer_idx, _dup_song_idx, existing = duplicate
+            existing_rid = self._queue_entry_remote_request_id(existing)
+            if existing_rid is None and remote_request_id > 0:
+                existing["remote_request_id"] = int(remote_request_id)
+                try:
+                    existing["request_order"] = float(entry.get("request_order") or remote_request_id)
+                except Exception:
+                    pass
+            elif existing_rid is not None and remote_request_id > 0 and int(existing_rid) != int(remote_request_id):
+                try:
+                    self._record_remote_request_tombstone(
+                        int(remote_request_id),
+                        entry=entry,
+                        singer_name=primary,
+                        reason=f"duplicate_insert_suppressed:{insert_source}",
+                        status="removed",
+                    )
+                except Exception:
+                    pass
+            try:
+                if remote_request_id > 0:
+                    self._mark_waiting_for_add_duplicate_accepted(remote_meta or {"request_id": remote_request_id}, reason="queue_duplicate_preflight")
+            except Exception:
+                pass
+            _diag(
+                "[QUEUE-DEDUP] suppressed duplicate insert "
+                f"singer={primary!r} title={entry.get('title', '')!r} request_id={remote_request_id or ''} "
+                f"kept_request_id={self._queue_entry_remote_request_id(existing)} source={insert_source}"
+            )
+            try:
+                self._request_queue_display_refresh()
+            except Exception:
+                pass
+            if not is_remote:
+                self._select_queue_singer_for_host(dup_singer_idx)
+            return True
 
         # Pre-measure loudness in the background so the song is normalized by the
         # time it actually plays (it usually sits in the queue behind others).
@@ -32934,8 +33205,6 @@ class KaraokeApp(QWidget):
             action = menu.addAction("✓ Unmark Song Skip" if is_song_skipped else "Mark Song Skip")
             action.triggered.connect(lambda: self.toggle_song_skip(singer_idx, song_idx))
             menu.addSeparator()
-            change_disc_action = menu.addAction("Change Disc ID...")
-            change_disc_action.triggered.connect(lambda: self.open_change_discid_dialog(singer_idx, song_idx))
             replace_track_action = menu.addAction("Replace Track...")
             replace_track_action.triggered.connect(lambda: self.open_replace_track_dialog(singer_idx, song_idx))
             menu.addSeparator()
@@ -34228,17 +34497,25 @@ class KaraokeApp(QWidget):
                 for song_key, song_value in songs.items():
                     if not isinstance(song_value, dict):
                         continue
+                    artist = str(song_value.get("artist", "") or "").strip()
+                    title = str(song_value.get("title", "") or "").strip()
+                    if (not artist or not title) and isinstance(song_key, str) and "|" in song_key:
+                        parts = song_key.split("|")
+                        if not artist and len(parts) > 0:
+                            artist = parts[0].strip()
+                        if not title and len(parts) > 1:
+                            title = parts[1].strip()
                     skey = self._normalize_history_song_key(
-                        song_value.get("artist", ""),
-                        song_value.get("title", ""),
+                        artist,
+                        title,
                         song_value.get("songid", ""),
                         song_value.get("path", song_key),
                     )
                     if not skey:
                         continue
                     normalized_song = {
-                        "artist": str(song_value.get("artist", "") or "").strip(),
-                        "title": str(song_value.get("title", "") or "").strip(),
+                        "artist": artist,
+                        "title": title,
                         "songid": str(song_value.get("songid", "") or "").strip(),
                         "disc_id": str(song_value.get("disc_id", "") or "").strip(),
                         "song_type": str(song_value.get("song_type", "") or "").strip().upper(),
@@ -34251,9 +34528,17 @@ class KaraokeApp(QWidget):
                         "last_performed_at": int(song_value.get("last_performed_at") or 0),
                         "updated_at": int(song_value.get("updated_at") or 0),
                     }
-                    songs_out[skey] = normalized_song
+                    existing_song = songs_out.get(skey)
+                    songs_out[skey] = self._merge_history_song_records(existing_song, normalized_song) if isinstance(existing_song, dict) else normalized_song
             record["songs"] = songs_out
-            record["unique_song_count"] = int(raw_value.get("unique_song_count") or len(songs_out))
+            record["unique_song_count"] = len(songs_out)
+            try:
+                record["total_performances"] = max(
+                    int(record.get("total_performances") or 0),
+                    sum(int(song.get("play_count") or 0) for song in songs_out.values() if isinstance(song, dict)),
+                )
+            except Exception:
+                pass
             singers_out[norm_key] = record
 
         deletions_out = {}
@@ -34298,9 +34583,17 @@ class KaraokeApp(QWidget):
                 for raw_song_key, raw_value in raw_items.items():
                     if not isinstance(raw_value, dict):
                         continue
+                    artist = str(raw_value.get("artist", "") or "").strip()
+                    title = str(raw_value.get("title", "") or "").strip()
+                    if (not artist or not title) and isinstance(raw_song_key, str) and "|" in raw_song_key:
+                        parts = raw_song_key.split("|")
+                        if not artist and len(parts) > 0:
+                            artist = parts[0].strip()
+                        if not title and len(parts) > 1:
+                            title = parts[1].strip()
                     song_key = self._normalize_history_song_key(
-                        raw_value.get("artist", ""),
-                        raw_value.get("title", ""),
+                        artist,
+                        title,
                         raw_value.get("songid", ""),
                         raw_value.get("path", ""),
                     )
@@ -34321,8 +34614,8 @@ class KaraokeApp(QWidget):
                     bucket[song_key] = {
                         "name": str(raw_value.get("name", raw_singer_key) or raw_singer_key).strip(),
                         "song_key": song_key,
-                        "artist": str(raw_value.get("artist", "") or "").strip(),
-                        "title": str(raw_value.get("title", "") or "").strip(),
+                        "artist": artist,
+                        "title": title,
                         "songid": str(raw_value.get("songid", "") or "").strip(),
                         "deleted_at": deleted_at,
                     }
@@ -34330,13 +34623,46 @@ class KaraokeApp(QWidget):
         return {"singers": singers_out, "deletions": deletions_out, "song_deletions": song_deletions_out}
 
     def _normalize_history_song_key(self, artist: str = "", title: str = "", songid: str = "", path: str = "") -> str:
-        artist = str(artist or "").strip().lower()
-        title = str(title or "").strip().lower()
-        songid = str(songid or "").strip().lower()
-        path = str(path or "").strip().lower()
-        if artist or title or songid:
-            return "|".join([artist, title, songid])
-        return path
+        def fold(value) -> str:
+            text = str(value or "").strip().lower()
+            text = re.sub(r"['’`´]", "", text)
+            text = re.sub(r"[^a-z0-9]+", " ", text)
+            return re.sub(r"\s+", " ", text).strip()
+
+        artist_key = fold(artist)
+        title_key = fold(title)
+        if artist_key or title_key:
+            return "|".join([artist_key, title_key])
+        return fold(path or songid)
+
+    def _merge_history_song_records(self, existing: dict | None, incoming: dict | None) -> dict:
+        if not isinstance(existing, dict):
+            return dict(incoming or {})
+        if not isinstance(incoming, dict):
+            return dict(existing)
+        merged = dict(existing)
+        existing_updated = int(existing.get("updated_at") or 0)
+        incoming_updated = int(incoming.get("updated_at") or 0)
+        newer = incoming if incoming_updated >= existing_updated else existing
+        for key in ("artist", "title", "songid", "disc_id", "song_type", "duet_display", "path", "last_key", "last_tempo_percent"):
+            value = newer.get(key)
+            if value not in (None, ""):
+                merged[key] = value
+            elif merged.get(key) in (None, "") and incoming.get(key) not in (None, ""):
+                merged[key] = incoming.get(key)
+        try:
+            merged["play_count"] = int(existing.get("play_count") or 0) + int(incoming.get("play_count") or 0)
+        except Exception:
+            merged["play_count"] = max(int(existing.get("play_count") or 0), int(incoming.get("play_count") or 0))
+        first_existing = int(existing.get("first_performed_at") or 0)
+        first_incoming = int(incoming.get("first_performed_at") or 0)
+        if first_existing and first_incoming:
+            merged["first_performed_at"] = min(first_existing, first_incoming)
+        else:
+            merged["first_performed_at"] = first_existing or first_incoming
+        merged["last_performed_at"] = max(int(existing.get("last_performed_at") or 0), int(incoming.get("last_performed_at") or 0))
+        merged["updated_at"] = max(existing_updated, incoming_updated)
+        return merged
 
     def _get_singer_history_record(self, singer_name: str, create: bool = False) -> dict | None:
         singer_key = self._normalize_singer_pref_key(singer_name)
@@ -40470,13 +40796,10 @@ class KaraokeApp(QWidget):
         """Collapse accidental duplicate active songs within each singer.
 
         Duplicates share the same singer record and normalized artist/title/
-        version. Two entries that carry two DIFFERENT live request ids are an
-        intentional repeat (e.g. requested again after the first completed)
-        and are kept. Otherwise the oldest entry survives; if the newer copy
-        was the server-synced one, its request id migrates to the survivor so
-        the next sync refreshes the surviving entry instead of recreating a
-        new queue item (nothing needs deleting server-side — the id stays
-        live and attached)."""
+        version. The host's current queue order is authoritative: the earliest
+        active copy in the singer's queue survives, later copies are removed.
+        If the removed copy has its own remote request id, record a tombstone so
+        server reconciliation cannot recreate it."""
         removed = 0
         for singer in self.queue or []:
             if not isinstance(singer, dict):
@@ -40500,14 +40823,19 @@ class KaraokeApp(QWidget):
                 rid_dup = self._queue_entry_remote_request_id(entry)
                 if rid_survivor is None and rid_dup is None:
                     continue  # two local host adds: deliberate, not a sync artifact
-                if (
-                    rid_survivor is not None
-                    and rid_dup is not None
-                    and int(rid_survivor) != int(rid_dup)
-                ):
-                    continue  # two distinct live requests: intentional repeat
                 if rid_survivor is None and rid_dup is not None:
                     survivor["remote_request_id"] = int(rid_dup)
+                elif rid_survivor is not None and rid_dup is not None and int(rid_survivor) != int(rid_dup):
+                    try:
+                        self._record_remote_request_tombstone(
+                            int(rid_dup),
+                            entry=entry,
+                            singer_name=str(singer.get("name", "") or ""),
+                            reason=f"duplicate_self_heal:{reason or 'cleanup'}",
+                            status="removed",
+                        )
+                    except Exception:
+                        pass
                 drop_indices.append(idx)
                 removed += 1
                 _diag(
@@ -40528,6 +40856,25 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
         return removed
+
+    def _find_existing_duplicate_song_entry(self, singer_name: str, entry: dict) -> tuple[int, int, dict] | None:
+        if not isinstance(entry, dict):
+            return None
+        sig = self._queue_entry_dup_signature(entry)
+        if sig is None:
+            return None
+        target_name = self._queue_limit_name_key(singer_name)
+        for singer_idx, singer in enumerate(self.queue or []):
+            if not isinstance(singer, dict):
+                continue
+            if self._queue_limit_name_key(singer.get("name", "")) != target_name:
+                continue
+            for song_idx, existing in enumerate(singer.get("songs", []) or []):
+                if not isinstance(existing, dict) or bool(existing.get("skipped", False)):
+                    continue
+                if self._queue_entry_dup_signature(existing) == sig:
+                    return singer_idx, song_idx, existing
+        return None
 
     def _remote_request_mark_already_absent(self, resp) -> bool:
         try:
@@ -40991,7 +41338,13 @@ class KaraokeApp(QWidget):
             self._upsert_waiting_for_add_request(item, str(reason or "unknown"))
         except Exception:
             pass
-        self._report_remote_attention_request_async(req, str(reason or "unknown"))
+        if self._is_waitlist_enabled_cached():
+            self._report_remote_attention_request_async(req, str(reason or "unknown"))
+        else:
+            _diag(
+                "[REQUEST-ATTENTION] report suppressed because waitlist disabled "
+                f"request_id={rid} reason={reason!r}"
+            )
 
     def _record_remote_limit_blocked_request(self, req: dict | None, message: str, *, report: bool = True) -> None:
         """Reject a public request at the singer cap without placing it in the host waitlist."""
@@ -41018,8 +41371,13 @@ class KaraokeApp(QWidget):
             f"request_id={self._request_limit_request_id(req)} singer={str(req.get('singer', '') or '')!r} "
             f"reason={reason!r} message={str(message or '')!r}"
         )
-        if report:
+        if report and self._is_waitlist_enabled_cached():
             self._report_remote_attention_request_async(req, reason)
+        elif report:
+            _diag(
+                "[REQUEST-LIMIT] server pending-review report suppressed because waitlist disabled "
+                f"request_id={self._request_limit_request_id(req)}"
+            )
 
     def _report_remote_attention_request_async(self, req: dict, reason: str) -> None:
         try:
@@ -41294,10 +41652,11 @@ class KaraokeApp(QWidget):
             self._ensure_server_accepting_matches_host_intent_async(reason="remote_reconcile")
         except Exception as e:
             _diag(f"[SERVER-STATE] accepting watchdog schedule failed reason=remote_reconcile: {e}")
-        try:
-            self._sync_waitlist_state_from_server_async(reason="remote_reconcile")
-        except Exception as e:
-            _diag(f"[WAITLIST-STATE] pull schedule failed reason=remote_reconcile: {e}")
+        if self._is_waitlist_enabled_cached():
+            try:
+                self._sync_waitlist_state_from_server_async(reason="remote_reconcile")
+            except Exception as e:
+                _diag(f"[WAITLIST-STATE] pull schedule failed reason=remote_reconcile: {e}")
 
         # Session-scoped dedupe for per-request reconcile logging: the server
         # resends the night's full request history on every sync pass, and
@@ -41594,6 +41953,10 @@ class KaraokeApp(QWidget):
         failed &= desired_ids
 
         accepted_remote_add = False
+        try:
+            self._cleanup_duplicate_singer_songs(reason="remote_reconcile_precheck")
+        except Exception:
+            pass
         intake_counts = self._live_song_counts_by_singer()
         try:
             waiting_ids = {int(v) for v in getattr(self, "_waiting_for_add_requests", {}).keys()}

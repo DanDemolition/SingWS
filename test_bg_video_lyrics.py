@@ -105,9 +105,12 @@ class FakeVideoWindow:
 class FakePlayer:
     instances = []
 
-    def __init__(self, parent=None, *, on_frame=None, max_height=720):
+    def __init__(self, parent=None, *, on_frame=None, max_width=1280, max_height=720, max_fps=30, quality_label="auto"):
         self.on_frame = on_frame
+        self.max_width = max_width
         self.max_height = max_height
+        self.max_fps = max_fps
+        self.quality_label = quality_label
         self.started_with = None
         self.stopped = None
         FakePlayer.instances.append(self)
@@ -140,6 +143,7 @@ class StartStopGatingTests(unittest.TestCase):
             "bg_video_enabled": True,
             "bg_video_folder": self.tmp.name,
             "bg_video_shuffle": True,
+            "bg_video_quality": "auto",
             "lyrics_background_video_opacity": 40,
             "mp4_max_height": 720,
         }
@@ -164,6 +168,10 @@ class StartStopGatingTests(unittest.TestCase):
         files, shuffle = player.started_with
         self.assertEqual(sorted(os.path.basename(f) for f in files), ["one.mp4", "two.mp4"])
         self.assertTrue(shuffle)
+        self.assertEqual(player.max_width, 1280)
+        self.assertEqual(player.max_height, 720)
+        self.assertEqual(player.max_fps, 30)
+        self.assertEqual(player.quality_label, "auto")
 
     def test_disabled_does_not_start(self):
         app = self.make_app(bg_video_enabled=False)
@@ -174,6 +182,21 @@ class StartStopGatingTests(unittest.TestCase):
         app = self.make_app(lyrics_background_video_opacity=0)
         self.start(app)
         self.assertIsNone(getattr(app, "_lyrics_bg_video_player", None))
+
+    def test_quality_off_does_not_start(self):
+        app = self.make_app(bg_video_quality="off")
+        self.start(app)
+        self.assertIsNone(getattr(app, "_lyrics_bg_video_player", None))
+
+    def test_540p_quality_uses_lower_decorative_layer_cap(self):
+        app = self.make_app(bg_video_quality="540")
+        self.start(app)
+        player = getattr(app, "_lyrics_bg_video_player", None)
+        self.assertIsNotNone(player)
+        self.assertEqual(player.max_width, 960)
+        self.assertEqual(player.max_height, 540)
+        self.assertEqual(player.max_fps, 24)
+        self.assertEqual(player.quality_label, "540")
 
     def test_missing_folder_falls_back(self):
         app = self.make_app(bg_video_folder="/does/not/exist")
@@ -208,8 +231,15 @@ class StartStopGatingTests(unittest.TestCase):
         self.assertIn("bg_video_enabled", defaults)
         self.assertIn("bg_video_folder", defaults)
         self.assertIn("bg_video_shuffle", defaults)
+        self.assertIn("bg_video_quality", defaults)
         self.assertFalse(defaults["bg_video_enabled"])
         self.assertTrue(defaults["bg_video_shuffle"])
+        self.assertEqual(defaults["bg_video_quality"], "auto")
+
+    def test_quality_profile_aliases(self):
+        self.assertEqual(self.singws.background_video_quality_profile("720p")["max_width"], 1280)
+        self.assertEqual(self.singws.background_video_quality_profile("960x540")["key"], "540")
+        self.assertEqual(self.singws.background_video_quality_profile("surprise")["key"], "auto")
 
 
 if __name__ == "__main__":

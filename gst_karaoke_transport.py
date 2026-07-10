@@ -320,6 +320,19 @@ class GstKaraokeTransport(QObject):
         self._video_frames_dropped = 0
         self._video_source_size = ""
         self._video_output_size = ""
+        self._video_decoder_name = ""
+        self._audio_decoder_name = ""
+        self._video_codec = ""
+        self._audio_codec = ""
+        self._last_video_image = QImage()
+        self._last_video_frame_pts_ns = None
+        self._last_audio_buffer_pts_ns = None
+        self._video_eof_received = False
+        self._video_eof_drained = False
+        self._video_eof_hold_emitted = False
+        self._video_eof_monotonic = 0.0
+        self._audio_eof_received = False
+        self._audio_eof_monotonic = 0.0
         self._started_monotonic = 0.0
 
         self.cdg = _CdgAdapter(self.video_path, sidefill=self.cdg_sidefill) if self.mode == "cdg" and self.video_path else None
@@ -388,6 +401,7 @@ class GstKaraokeTransport(QObject):
         self.fade_volume = mk("volume", "faderVolumeElement")
         conv_end = mk("audioconvert", "aConvEnd")
         sink = mk("autoaudiosink", "audioSink")
+        self.audio_sink = sink
         chain += [q_end, self.volume, self.fade_volume, conv_end, sink]
 
         for a, b in zip(chain, chain[1:]):
@@ -436,6 +450,78 @@ class GstKaraokeTransport(QObject):
             self.pipeline.add(self.video_bin)
 
         self.bus = self.pipeline.get_bus()
+        try:
+            self.pipeline.connect("deep-element-added", self._on_deep_element_added)
+        except Exception:
+            pass
+
+        # Decoder EOS is branch-local: an MP4 video stream may finish before
+        # its audio stream.  These probes deliberately record that fact but do
+        # not stop the pipeline; only whole-pipeline EOS ends playback.
+        self._install_stream_probe(q_in.get_static_pad("sink"), "audio")
+        if self.mode == "mp4":
+            self._install_stream_probe(vq.get_static_pad("sink"), "video")
+
+    def _install_stream_probe(self, pad, stream: str):
+        if pad is None:
+            return
+        try:
+            flags = self.Gst.PadProbeType.BUFFER | self.Gst.PadProbeType.EVENT_DOWNSTREAM
+            pad.add_probe(flags, self._on_stream_probe, str(stream))
+        except Exception as e:
+            _diag(f"[GST-KARAOKE] {stream} stream probe unavailable: {e}")
+
+    def _on_stream_probe(self, _pad, info, stream: str):
+        """Capture branch timestamps without letting a branch EOS own playback."""
+        try:
+            if info.type & self.Gst.PadProbeType.BUFFER:
+                buf = info.get_buffer()
+                if buf is not None and buf.pts != self.Gst.CLOCK_TIME_NONE:
+                    if stream == "video":
+                        self._last_video_frame_pts_ns = int(buf.pts)
+                    else:
+                        self._last_audio_buffer_pts_ns = int(buf.pts)
+            if info.type & self.Gst.PadProbeType.EVENT_DOWNSTREAM:
+                event = info.get_event()
+                if event is not None and event.type == self.Gst.EventType.EOS:
+                    now = time.monotonic()
+                    if stream == "video":
+                        self._video_eof_received = True
+                        self._video_eof_monotonic = now
+                    else:
+                        self._audio_eof_received = True
+                        self._audio_eof_monotonic = now
+        except Exception:
+            pass
+        return self.Gst.PadProbeReturn.OK
+
+    def _on_deep_element_added(self, _pipeline, _sub_bin, element):
+        """Record the actual decoder selected by GStreamer/VideoToolbox."""
+        try:
+            factory = element.get_factory()
+            if factory is None:
+                return
+            klass = str(factory.get_klass() or "")
+            if "Decoder/Video" in klass:
+                self._video_decoder_name = str(factory.get_name() or "")
+            elif "Decoder/Audio" in klass:
+                self._audio_decoder_name = str(factory.get_name() or "")
+            elif "Parser/Video" in klass and not self._video_codec:
+                self._video_codec = str(factory.get_name() or "")
+            elif "Parser/Audio" in klass and not self._audio_codec:
+                self._audio_codec = str(factory.get_name() or "")
+        except Exception:
+            pass
+
+    def _reset_stream_eof_state(self, reason: str):
+        self._video_eof_received = False
+        self._video_eof_drained = False
+        self._video_eof_hold_emitted = False
+        self._video_eof_monotonic = 0.0
+        self._audio_eof_received = False
+        self._audio_eof_monotonic = 0.0
+        if self.mode == "mp4":
+            _diag(f"[GST-KARAOKE] stream lifecycle reset reason={reason} file={self.audio_path!r}")
 
     def _on_pad_added(self, _decoder, pad):
         caps = pad.get_current_caps()
@@ -461,6 +547,7 @@ class GstKaraokeTransport(QObject):
         self._stopped = False
         self._paused = False
         self._eos_emitted = False
+        self._reset_stream_eof_state("start")
         self._started_monotonic = time.monotonic()
 
         self.pipeline.set_state(Gst.State.PAUSED)
@@ -479,22 +566,37 @@ class GstKaraokeTransport(QObject):
             f"[GST-KARAOKE] started mode={self.mode} start={self._pending_start_seconds:.3f}s "
             f"pitch_element={int(self.pitch is not None)} cdg_sidefill={int(self.cdg_sidefill)} "
             f"cdg_backend=direct_qimage "
-            f"file={os.path.basename(self.audio_path)!r}"
+            f"file={self.audio_path!r} renderer=qt_qimage_appsink "
+            f"video_decoder={self._video_decoder_name or 'pending'} video_caps={self._video_codec or 'pending'} "
+            f"audio_decoder={self._audio_decoder_name or 'pending'} audio_codec={self._audio_codec or 'pending'}"
         )
 
     def stop(self):
         self._stopped = True
+        _diag(
+            f"[GST-KARAOKE] shutdown requested mode={self.mode} file={self.audio_path!r} "
+            f"renderer=qt_qimage_appsink video_eof={int(self._video_eof_received)} "
+            f"audio_eof={int(self._audio_eof_received)} last_video_pts_ns={self._last_video_frame_pts_ns}"
+        )
         try:
             self.timer.stop()
         except Exception:
             pass
         try:
             self.pipeline.set_state(self.Gst.State.NULL)
+            _diag(
+                f"[GST-KARAOKE] decoder/renderer shutdown complete mode={self.mode} file={self.audio_path!r} "
+                f"video_decoder={self._video_decoder_name or 'unknown'} audio_decoder={self._audio_decoder_name or 'unknown'} "
+                f"renderer=qt_qimage_appsink video_eof={int(self._video_eof_received)} "
+                f"audio_eof={int(self._audio_eof_received)} queue={self._video_queue_depth()} "
+                f"last_rendered_frame_pts_ns={self._last_video_frame_pts_ns}"
+            )
         except Exception:
             pass
 
     def pause(self):
         self._paused = True
+        _diag(f"[GST-KARAOKE] playback state=paused pos={self.position_seconds():.3f}s")
         try:
             self.pipeline.set_state(self.Gst.State.PAUSED)
         except Exception:
@@ -502,6 +604,7 @@ class GstKaraokeTransport(QObject):
 
     def resume(self):
         self._paused = False
+        _diag(f"[GST-KARAOKE] playback state=playing reason=resume pos={self.position_seconds():.3f}s")
         try:
             self.pipeline.set_state(self.Gst.State.PLAYING)
         except Exception:
@@ -518,6 +621,7 @@ class GstKaraokeTransport(QObject):
 
     def _do_seek(self, seconds: float):
         Gst = self.Gst
+        self._reset_stream_eof_state("seek")
         self.pipeline.seek(
             self.tempo_ratio,
             Gst.Format.TIME,
@@ -822,6 +926,12 @@ class GstKaraokeTransport(QObject):
                     except Exception:
                         pass
             elif msg.type == Gst.MessageType.EOS:
+                _diag(
+                    f"[GST-KARAOKE] pipeline EOS file={self.audio_path!r} "
+                    f"audio_eof={int(self._audio_eof_received)} audio_last_pts_ns={self._last_audio_buffer_pts_ns} "
+                    f"video_eof={int(self._video_eof_received)} video_last_pts_ns={self._last_video_frame_pts_ns} "
+                    f"video_hold={int(self._video_eof_hold_emitted)} queue={self._video_queue_depth()}"
+                )
                 self._emit_ended("eos")
             elif msg.type == Gst.MessageType.ERROR:
                 err, dbg = msg.parse_error()
@@ -835,7 +945,12 @@ class GstKaraokeTransport(QObject):
         if self._eos_emitted or self._stopped:
             return
         self._eos_emitted = True
-        _diag(f"[GST-KARAOKE] ended reason={reason}")
+        _diag(
+            f"[GST-KARAOKE] playback state=completed reason={reason} file={self.audio_path!r} "
+            f"audio_eof_t={self._audio_eof_monotonic:.3f} audio_last_pts_ns={self._last_audio_buffer_pts_ns} "
+            f"video_eof_t={self._video_eof_monotonic:.3f} video_last_pts_ns={self._last_video_frame_pts_ns} "
+            f"last_rendered_frame_pts_ns={self._last_video_frame_pts_ns}"
+        )
         try:
             self.timer.stop()
         except Exception:
@@ -863,6 +978,29 @@ class GstKaraokeTransport(QObject):
     def _pull_video_frame(self):
         sample = self.appsink.emit("try-pull-sample", 0)
         if sample is None:
+            # Appsink reaches EOS independently when a muxed video stream is
+            # shorter than its audio stream.  Preserve the final decoded image
+            # and reassert it once only after every queued sample is drained.
+            # This is deliberately event-driven, not a timer-based duration
+            # extension; audio/pipeline EOS remains the sole completion signal.
+            try:
+                video_eos = bool(self.appsink.get_property("eos"))
+            except Exception:
+                video_eos = False
+            if video_eos and not self._video_eof_drained:
+                self._video_eof_drained = True
+                self._video_eof_received = True
+                if not self._video_eof_monotonic:
+                    self._video_eof_monotonic = time.monotonic()
+                if not self._last_video_image.isNull():
+                    self.frame_ready.emit(self._last_video_image)
+                    self._video_eof_hold_emitted = True
+                _diag(
+                    f"[GST-KARAOKE] video EOS drained; holding last frame "
+                    f"file={self.audio_path!r} pts_ns={self._last_video_frame_pts_ns} "
+                    f"frames={self._video_frames_delivered} queue={self._video_queue_depth()} "
+                    f"audio_eof={int(self._audio_eof_received)} renderer=qt_qimage_appsink"
+                )
             return
         buf = sample.get_buffer()
         caps = sample.get_caps()
@@ -881,7 +1019,24 @@ class GstKaraokeTransport(QObject):
         self._video_frames_delivered += 1
         self._video_source_size = f"{w}x{h}"
         self._video_output_size = self._video_source_size
+        self._last_video_image = image
+        try:
+            if buf.pts != self.Gst.CLOCK_TIME_NONE:
+                self._last_video_frame_pts_ns = int(buf.pts)
+        except Exception:
+            pass
         self.frame_ready.emit(image)
+
+    def _video_queue_depth(self) -> int:
+        """Return appsink's buffered frame count where the runtime exposes it."""
+        if self.appsink is None:
+            return 0
+        try:
+            if self.appsink.find_property("current-level-buffers") is not None:
+                return max(0, int(self.appsink.get_property("current-level-buffers") or 0))
+        except Exception:
+            pass
+        return 0
 
     def _mirror_eq(self):
         """Mirror the host's GraphicEQ object (if attached) onto the native
@@ -943,7 +1098,9 @@ class GstKaraokeTransport(QObject):
             "last_visual_render_ms": self._last_visual_render_ms,
             "visual_render_max_ms": self._visual_render_max_ms,
             "video": {
-                "decoder": "gstreamer",
+                "decoder": self._video_decoder_name or "gstreamer",
+                "codec": self._video_codec,
+                "renderer": "qt_qimage_appsink",
                 "hardware_acceleration": "vtdec" if self.mode == "mp4" else "n/a",
                 "hardware_acceleration_checked": self.mode == "mp4",
                 "cdg_backend": "direct_qimage" if self.mode == "cdg" else "n/a",
@@ -951,8 +1108,18 @@ class GstKaraokeTransport(QObject):
                 "output_size": self._video_output_size,
                 "delivered_fps": self._video_frames_delivered / elapsed,
                 "fps": 0.0,
-                "queue_size": 0,
+                "queue_size": self._video_queue_depth(),
                 "max_buffered_frames": 4,
                 "dropped_frames": self._video_frames_dropped,
+                "eof_received": bool(self._video_eof_received),
+                "eof_drained": bool(self._video_eof_drained),
+                "holding_last_frame": bool(self._video_eof_hold_emitted),
+                "last_frame_pts_ns": self._last_video_frame_pts_ns,
+            },
+            "audio": {
+                "decoder": self._audio_decoder_name or "gstreamer",
+                "codec": self._audio_codec,
+                "eof_received": bool(self._audio_eof_received),
+                "last_buffer_pts_ns": self._last_audio_buffer_pts_ns,
             },
         }

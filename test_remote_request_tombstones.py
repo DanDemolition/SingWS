@@ -295,6 +295,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
     def test_waiting_or_failed_requests_feed_app_waiting_list_not_rotation(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["use_waiting_for_add"] = True
 
             app._reconcile_remote_requests([
                 {
@@ -443,6 +444,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
     def test_waiting_list_excludes_history_request_already_in_singer_queue(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["use_waiting_for_add"] = True
             app.queue = [{
                 "name": "Dan",
                 "songs": [
@@ -511,6 +513,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
     def test_startup_purges_stale_past_show_waitlist_request(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["use_waiting_for_add"] = True
             app.settings["waitlist_stale_hours"] = 24
             purged = {}
             app._cleanup_terminal_removed_requests = lambda items: purged.update(items)
@@ -535,6 +538,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
     def test_startup_keeps_recent_same_show_waitlist_request(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["use_waiting_for_add"] = True
             app.settings["waitlist_stale_hours"] = 24
             purged = {}
             app._cleanup_terminal_removed_requests = lambda items: purged.update(items)
@@ -1430,7 +1434,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(app.queue[0]["songs"][0]["key"], 4)
             self.assertEqual(app.queue[0]["songs"][0]["tempo_percent"], 91)
             exported = app._export_singer_history_payload()
-            self.assertIn("old artist|old title|old-1", exported["song_deletions"]["ada"])
+            self.assertIn("old artist|old title", exported["song_deletions"]["ada"])
 
     def test_server_unreachable_queues_tombstone_then_syncs_later(self):
         """Server down at removal time: tombstone is queued unsynced, and a
@@ -1493,6 +1497,69 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             history_posts = [p for p in net.posts if "singer_history_sync.php" in p["url"]]
             self.assertTrue(history_posts, "history should sync even when requests are off")
             self.assertEqual(history_posts[0]["json"]["user"], "venue")
+
+    def test_singer_history_normalizes_duplicate_song_versions(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            normalized = app._normalize_singer_history_store({
+                "singers": {
+                    "John Smith": {
+                        "name": "John Smith",
+                        "updated_at": 300,
+                        "last_seen_at": 300,
+                        "songs": {
+                            "journey|don't stop believin'|SC-1": {
+                                "artist": "Journey",
+                                "title": "Don't Stop Believin'",
+                                "songid": "SC-1",
+                                "disc_id": "SC-1",
+                                "play_count": 1,
+                                "first_performed_at": 100,
+                                "last_performed_at": 100,
+                                "updated_at": 100,
+                            },
+                            "journey|dont stop believin|KV-2": {
+                                "artist": "JOURNEY",
+                                "title": "dont stop believin",
+                                "songid": "KV-2",
+                                "disc_id": "KV-2",
+                                "play_count": 4,
+                                "first_performed_at": 200,
+                                "last_performed_at": 300,
+                                "updated_at": 300,
+                            },
+                        },
+                    },
+                },
+            })
+
+            songs = normalized["singers"]["john smith"]["songs"]
+            self.assertEqual(list(songs.keys()), ["journey|dont stop believin"])
+            song = songs["journey|dont stop believin"]
+            self.assertEqual(song["play_count"], 5)
+            self.assertEqual(song["last_performed_at"], 300)
+            self.assertEqual(song["disc_id"], "KV-2")
+
+    def test_repeated_singer_history_play_updates_one_item(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app._karaoke_tempo_percent = 100
+            for idx in range(5):
+                app._record_singer_history_play(
+                    "John Smith",
+                    {
+                        "artist": "Journey",
+                        "title": "Don't Stop Believin'" if idx % 2 == 0 else "dont stop believin",
+                        "disc_id": f"DISC-{idx}",
+                    },
+                    f"/music/DISC-{idx}.mp3",
+                    key=0,
+                    tempo_percent=100,
+                )
+
+            songs = app.singer_history["singers"]["john smith"]["songs"]
+            self.assertEqual(list(songs.keys()), ["journey|dont stop believin"])
+            self.assertEqual(songs["journey|dont stop believin"]["play_count"], 5)
 
 
 class HostRemovalAuthorityTests(unittest.TestCase):
@@ -1705,18 +1772,20 @@ class HostRemovalAuthorityTests(unittest.TestCase):
             self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
             self.assertEqual(len(app.queue[0]["songs"]), 2)
 
-    def test_intentional_repeat_with_two_request_ids_untouched(self):
-        """Singer re-requested the same song with a new request id (e.g. after
-        the first completed but both briefly coexist): two distinct live ids are
-        intentional and must both stay."""
+    def test_live_duplicate_with_two_request_ids_self_heals(self):
+        """Two live ids for the same singer/song are treated as a replay/race
+        duplicate. The host queue copy wins and the extra id is tombstoned so
+        sync cannot recreate it."""
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.queue = [self._singer("Dan", [
                 self._entry("Song A", rid=1),
                 self._entry("Song A", rid=2),
             ])]
-            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
-            self.assertEqual(len(app.queue[0]["songs"]), 2)
+            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 1)
+            self.assertEqual(len(app.queue[0]["songs"]), 1)
+            tombstones = app._ensure_remote_request_tombstones().get("requests", {})
+            self.assertIn("2", tombstones)
 
     def test_intentional_repeat_after_completion_not_blocked(self):
         """After request 1 completes (tombstone status=completed), the singer

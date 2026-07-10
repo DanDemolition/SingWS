@@ -98,6 +98,16 @@ def local_song(artist, title):
     return entry
 
 
+def track(title, artist="Artist"):
+    return {
+        "artist": artist,
+        "title": title,
+        "display": f"{artist} • {title}",
+        "path": f"/tmp/{title.replace(' ', '_')}.mp3",
+        "duration": 180,
+    }
+
+
 def req_row(request_id, singer, artist, title, **extra):
     row = {
         "request_id": request_id,
@@ -131,6 +141,10 @@ def make_app(module, tmp_dir: Path, settings=None):
     app._karaoke_pitch_supported = True
     app.update_queue_display = lambda: None
     app.save_data = lambda: None
+    app._schedule_save_data = lambda *a, **k: None
+    app._request_queue_display_refresh = lambda *a, **k: None
+    app._schedule_waiting_for_add_view_refresh = lambda *a, **k: None
+    app._mark_waiting_for_add_delivered_async = lambda *a, **k: None
     app._set_processing_text = lambda *a, **k: None
     app._select_queue_singer_for_host = lambda idx: None
     app._unmatched_remote_request_ids = set()
@@ -142,6 +156,8 @@ def make_app(module, tmp_dir: Path, settings=None):
     app._deferred_remote_adds = []
     app._remote_request_intake_inflight = set()
     app._remote_attention_requests = {}
+    app._waiting_for_add_requests = {}
+    app._waiting_for_add_handled_ids = set()
     app._disable_accepting_watchdog = True
     app._disable_waitlist_state_pull = True
     app.lookup_display_name = lambda song_path, artist_title_only=False: "Artist • Title"
@@ -311,6 +327,64 @@ class QueueSyncAuthorityTests(unittest.TestCase):
             self.app._reconcile_remote_requests([dict(row) for row in payload])
             self.assertEqual(self._titles(), ["Song B", "Song E"])
         self.assertNotIn("Song A", self._titles())
+
+    def test_disabled_waitlist_does_not_store_attention_or_sync_rows(self):
+        self.app.settings["use_waiting_for_add"] = False
+        reported = []
+        self.app._report_remote_attention_request_async = lambda req, reason: reported.append((req, reason))
+
+        self.app._record_remote_attention_request(
+            {"request_id": 701, "singer": "Grace", "artist": "Artist", "title": "Needs Review"},
+            "auto_accept_failed",
+        )
+        self.assertEqual(self.app._waiting_for_add_requests, {})
+        self.assertEqual(reported, [])
+
+        self.app._set_waiting_for_add_requests([
+            {"request_id": 702, "singer": "Grace", "artist": "Artist", "title": "Waitlisted", "state": "waiting"}
+        ])
+        self.assertEqual(self.app._waiting_for_add_requests, {})
+
+        self.app._record_remote_limit_blocked_request(
+            {"request_id": 703, "singer": "Grace", "artist": "Artist", "title": "Limit Blocked"},
+            "Grace already has too many songs.",
+            report=True,
+        )
+        self.assertEqual(reported, [])
+
+    def test_remote_duplicate_insert_self_heals_before_song_limit(self):
+        self.app.settings["use_waiting_for_add"] = False
+        self.app.settings["limit_pending_max"] = 1
+        self._seed_grace([remote_song(801, "Artist", "Same Song")])
+
+        ok = self.app._add_song_to_queue(
+            "Grace",
+            ("/tmp/Same_Song.mp3", 0, 100),
+            track=track("Same Song"),
+            remote_meta={"request_id": 802, "singer": "Grace", "source": "server"},
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(self._titles(), ["Same Song"])
+        self.assertEqual(self._ids(), [801])
+        self.assertEqual(self.app._waiting_for_add_requests, {})
+        tombstones = self.app._ensure_remote_request_tombstones().get("requests", {})
+        self.assertIn("802", tombstones)
+
+    def test_reconcile_collapses_existing_duplicate_remote_rows(self):
+        self.app.settings["use_waiting_for_add"] = False
+        self._seed_grace([
+            remote_song(901, "Artist", "Same Song"),
+            remote_song(902, "Artist", "Same Song"),
+        ])
+
+        removed = self.app._cleanup_duplicate_singer_songs(reason="test")
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(self._titles(), ["Same Song"])
+        self.assertEqual(self._ids(), [901])
+        tombstones = self.app._ensure_remote_request_tombstones().get("requests", {})
+        self.assertIn("902", tombstones)
 
 
 if __name__ == "__main__":
