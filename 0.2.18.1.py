@@ -16868,6 +16868,10 @@ class KaraokeApp(QWidget):
         self.bottom_settings_button.clicked.connect(self.configure_settings)
         self._waiting_for_add_requests = {}
         self._waiting_for_add_handled_ids = set()
+        # Session map of retired singer-name keys -> surviving singer name,
+        # written by rename-merges so later syncs/accepts can't resurrect a
+        # duplicate singer under the old name.
+        self._singer_rename_aliases = {}
         self._waiting_for_add_pulse_started_at = time.monotonic()
         self._waiting_for_add_pulse_timer = QTimer(self)
         self._waiting_for_add_pulse_timer.setInterval(100)
@@ -24623,6 +24627,9 @@ class KaraokeApp(QWidget):
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue
+            # A rename-merge may have retired this request's singer name this
+            # session; map it so the sync can't resurrect the duplicate.
+            req = self._alias_mapped_request(req)
             rid = self._waiting_for_add_request_id(req)
             if rid <= 0:
                 continue
@@ -26819,6 +26826,17 @@ class KaraokeApp(QWidget):
             # The old name no longer exists; tombstone it so the rename syncs.
             self._record_singer_tombstone(old_name)
         self._commit_singer_history_change("history_singer_rename")
+        # If that singer is in the current rotation, apply the same rename
+        # there — merging into an existing singer instead of duplicating
+        # (prefs/history were already merged above).
+        try:
+            rotation_idx = self._queue_singer_match_index(old_name)
+            if rotation_idx >= 0:
+                self._rename_rotation_singer(
+                    rotation_idx, new_name, source="history", merge_prefs_history=False
+                )
+        except Exception:
+            pass
         try:
             index = self.singer_history_singer_model.indexForSingerKey(new_key)
             if index.isValid():
@@ -31506,6 +31524,118 @@ class KaraokeApp(QWidget):
             self._queue_display_batch_dirty = False
             self._request_queue_display_refresh()
 
+    def _mark_server_queue_mutation(self, reason: str = "") -> None:
+        """Flag that the next queue rebuild came from a server-originated
+        change (auto-accept, waitlist promotion, between-songs add, sync).
+
+        Server inserts shift singer/song indexes, so restoring the previous
+        selection by stale index can leave the NEW server row highlighted and
+        make it look like the next singer. When this flag is set, the rebuild
+        re-selects the top actionable rotation row instead. Manual host
+        actions never set the flag, so host selections are untouched."""
+        self._queue_select_top_after_server_update = True
+        try:
+            _diag(f"[QUEUE-SELECT] server mutation flagged reason={reason}")
+        except Exception:
+            pass
+
+    def _host_is_interacting_elsewhere(self) -> bool:
+        """True while the host is typing in a field or working another
+        list/section — then the queue keeps its scroll position (selection is
+        still reset, but the view must not jump and focus must not move)."""
+        try:
+            app = QApplication.instance()
+            focus = app.focusWidget() if app is not None else None
+        except Exception:
+            return False
+        if focus is None or focus is object.__getattribute__(self, "__dict__").get("queue_display"):
+            return False
+        try:
+            from PyQt6.QtWidgets import QPlainTextEdit as _QPlainTextEdit
+            if isinstance(focus, (QLineEdit, QTextEdit, _QPlainTextEdit, QComboBox)):
+                return True
+            if isinstance(focus, QAbstractItemView):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _queue_top_actionable_row(self) -> int:
+        """Model row of the first actionable rotation entry: the first
+        non-skipped singer with a playable song. Falls back to the first
+        singer/song row of the next section (empty slots, waiting singers)
+        when no one has an active song; rows of any other kind (headers,
+        separators) are never selected. -1 when the list is empty."""
+        model = getattr(self, "queue_display_model", None)
+        rows = list(getattr(model, "_rows", None) or [])
+        target_singer = -1
+        try:
+            for i, s in enumerate(self.queue or []):
+                if not isinstance(s, dict) or s.get("skipped", False):
+                    continue
+                songs = s.get("songs") or []
+                if any((not e.get("skipped", False)) if isinstance(e, dict) else True for e in songs):
+                    target_singer = i
+                    break
+        except Exception:
+            target_singer = -1
+        fallback = -1
+        for row_num, row in enumerate(rows):
+            kind = str(row.get("kind") or "")
+            if kind not in ("singer", "song"):
+                continue
+            if fallback < 0:
+                fallback = row_num
+            if kind == "singer" and target_singer >= 0 and int(row.get("singer_idx", -1)) == target_singer:
+                return row_num
+        return fallback
+
+    def _restore_queue_selection_after_rebuild(self, selected_identity) -> None:
+        """Apply the post-rebuild selection while widget updates are still
+        suspended, so it lands atomically with the model sync (no visible
+        flicker onto the new row, even for bursts of server requests).
+
+        Server-flagged rebuilds always select the top actionable rotation row
+        and return the list to the top (unless the host is typing/working in
+        another section — then only the selection changes, never the scroll
+        or keyboard focus). Host-driven rebuilds keep the old identity-based
+        restore untouched."""
+        select_top_pending = False
+        try:
+            select_top_pending = bool(
+                object.__getattribute__(self, "__dict__").get("_queue_select_top_after_server_update", False)
+            )
+        except Exception:
+            select_top_pending = False
+        if select_top_pending:
+            # Never leave the freshly inserted server row (or a stale
+            # index-shifted row) highlighted as if it were the next singer.
+            self._queue_select_top_after_server_update = False
+            top_row = self._queue_top_actionable_row()
+            self.queue_display.setCurrentRow(top_row)  # -1 clears selection
+            if not self._host_is_interacting_elsewhere():
+                try:
+                    self.queue_display.scrollToTop()
+                except Exception:
+                    pass
+            try:
+                _diag(f"[QUEUE-SELECT] server update -> selected top rotation row={top_row}")
+            except Exception:
+                pass
+            return
+        if selected_identity and getattr(self, "queue_display_model", None) is not None:
+            selected_row = -1
+            for row_num, row in enumerate(self.queue_display_model._rows):
+                if (
+                    row.get("kind") == selected_identity[0]
+                    and int(row.get("singer_idx", -1)) == int(selected_identity[1])
+                    and int(row.get("song_idx", -1)) == int(selected_identity[2])
+                ):
+                    selected_row = row_num
+                    break
+            if selected_row >= 0:
+                self.queue_display.setCurrentRow(selected_row)
+
     def _request_queue_display_refresh(self):
         """Mark the queue UI dirty, batching remote bursts into one rebuild."""
         try:
@@ -31991,6 +32121,19 @@ class KaraokeApp(QWidget):
         # local adds move the selection.
         is_remote = isinstance(remote_meta, dict)
 
+        # A rename-merge earlier in the session may have retired this singer
+        # name; map remote adds through the alias so a pending server request
+        # under the old name attaches to the surviving singer instead of
+        # recreating the duplicate.
+        if is_remote:
+            try:
+                mapped = self._resolve_singer_alias(primary)
+                if mapped != primary:
+                    _diag(f"[SINGER-MERGE] remote add singer alias {primary!r} -> {mapped!r}")
+                    primary = mapped
+            except Exception:
+                pass
+
         # song_data is normally (song_info, key) and may optionally include tempo_percent
         try:
             song_info = song_data[0]
@@ -32126,6 +32269,12 @@ class KaraokeApp(QWidget):
                 active_count=active_count,
                 singer_idx=singer_idx,
             )
+            if is_remote:
+                self._mark_server_queue_mutation(reason=f"{insert_source}_append_existing_singer")
+                try:
+                    self._cleanup_duplicate_singer_songs(reason=f"{insert_source}_append")
+                except Exception:
+                    pass
             self._request_queue_display_refresh()
             if not is_remote:
                 self._select_queue_singer_for_host(singer_idx)
@@ -32133,7 +32282,7 @@ class KaraokeApp(QWidget):
                 self.key_selector.setCurrentIndex(self.key_selector.findText("Key: 0"))
             return True
 
-        new_singer = {"name": primary, "songs": [entry], "skipped": False, "has_sung": False, "round_sung": False, "rotation_marker": False}
+        new_singer = {"name": primary, "songs": [entry], "skipped": False, "has_sung": False, "round_sung": False, "rotation_marker": False, "created_at": time.time()}
         if self._is_rotation_mode():
             self._rotation_recompute_round_state(force_reset=False)
             if self._is_rotation_locked():
@@ -32175,6 +32324,8 @@ class KaraokeApp(QWidget):
         )
         if not is_remote:
             self.singer_input.clear()
+        else:
+            self._mark_server_queue_mutation(reason=f"{insert_source}_new_singer")
         self._request_queue_display_refresh()
         if not is_remote:
             self._select_queue_singer_for_host(ins)
@@ -33542,7 +33693,336 @@ class KaraokeApp(QWidget):
         new_name = str(new_name or "").strip()
         if not new_name or new_name == old_name:
             return
+        self._rename_rotation_singer(singer_idx, new_name, source="rotation_menu")
 
+    def _rename_rotation_singer(self, singer_idx: int, new_name: str, *, source: str = "host", merge_prefs_history: bool = True) -> bool:
+        """Rename a rotation singer, merging into an existing singer when the
+        new name already exists (case/whitespace-insensitive) anywhere in the
+        rotation instead of leaving a duplicate entry.
+
+        The original (oldest) record survives with its songs/positions intact;
+        the renamed singer's songs are appended in their original relative
+        order. Local waitlist/pending request rows and the now-playing
+        references are re-pointed at the survivor, a session alias is recorded
+        so later syncs/accepts can't resurrect the old name, and the rename is
+        pushed to the server's request store immediately."""
+        if singer_idx < 0 or singer_idx >= len(self.queue):
+            return False
+        singer = self.queue[singer_idx]
+        old_name = str(singer.get("name", "") or "").strip()
+        new_name = str(new_name or "").strip()
+        if not old_name or not new_name or new_name == old_name:
+            return False
+
+        if merge_prefs_history:
+            try:
+                self._merge_singer_prefs_and_history(old_name, new_name)
+            except Exception:
+                pass
+
+        singer["name"] = new_name
+        try:
+            duet_display = str(singer.get("duet_display", "") or "").strip()
+            if duet_display and duet_display == old_name:
+                singer["duet_display"] = new_name
+        except Exception:
+            pass
+
+        try:
+            merged = self._merge_duplicate_rotation_singers(reason=f"singer_rename:{source}")
+        except Exception:
+            merged = 0
+        # Canonical surviving name: when a merge happened the original
+        # record's casing wins over what the host just typed.
+        canonical = new_name
+        try:
+            surv_idx = self._queue_singer_match_index(new_name)
+            if surv_idx >= 0:
+                canonical = str(self.queue[surv_idx].get("name") or new_name)
+        except Exception:
+            pass
+
+        self._record_singer_rename_alias(old_name, canonical)
+        self._apply_singer_rename_to_requests(old_name, canonical)
+        self._update_current_singer_refs_for_rename(old_name, canonical)
+        self._push_singer_rename_to_server(old_name, canonical)
+        try:
+            _diag(
+                f"[SINGER-MERGE] rename source={source} old={old_name!r} "
+                f"new={canonical!r} merged_duplicates={merged}"
+            )
+        except Exception:
+            pass
+
+        try:
+            self.save_data()
+        except Exception:
+            pass
+        try:
+            self.update_queue_display()
+            self.update_rotation_summary_card()
+            self._update_last_sung_card()
+            self._schedule_singer_history_refresh(reason="singer_rename")
+        except Exception:
+            pass
+        # Push the merged rotation now (async) instead of waiting for the 10s
+        # debounce, so connected clients can't briefly show the duplicate.
+        try:
+            self.post_rotation()
+        except Exception:
+            pass
+        return True
+
+    def _merge_duplicate_rotation_singers(self, *, reason: str = "") -> int:
+        """Idempotent safety net: collapse rotation entries whose names match
+        case/whitespace-insensitively into one singer record.
+
+        Survivor selection follows the spec: oldest created_at when known
+        (records without a timestamp predate the field, so they count as
+        oldest), then first appearance in the rotation. The merged record
+        takes the earliest queue slot of its group; the survivor's songs keep
+        their order and every duplicate's songs are appended in their original
+        relative order. Runs after renames, on load, and is safe to call from
+        sync paths — merging twice is a no-op, which is what protects against
+        two clients racing the same rename."""
+        queue = self.queue or []
+        groups = {}
+        order = []  # ("raw", obj) | ("key", k) at first appearance
+        for entry in queue:
+            key = ""
+            if isinstance(entry, dict):
+                key = self._queue_limit_name_key(entry.get("name", ""))
+            if not key:
+                order.append(("raw", entry))
+                continue
+            if key in groups:
+                groups[key].append(entry)
+            else:
+                groups[key] = [entry]
+                order.append(("key", key))
+
+        merged_count = 0
+        new_queue = []
+        for kind, val in order:
+            if kind == "raw":
+                new_queue.append(val)
+                continue
+            group = groups[val]
+            if len(group) == 1:
+                new_queue.append(group[0])
+                continue
+
+            def _created(s):
+                try:
+                    return float(s.get("created_at") or 0.0)
+                except Exception:
+                    return 0.0
+
+            best_i = min(range(len(group)), key=lambda i: (_created(group[i]), i))
+            survivor = group[best_i]
+            for i, dup in enumerate(group):
+                if i == best_i:
+                    continue
+                self._absorb_duplicate_singer(survivor, dup)
+                merged_count += 1
+            new_queue.append(survivor)
+            # Re-point now-playing references from any duplicate to the survivor.
+            try:
+                state = object.__getattribute__(self, "__dict__")
+                survivor_name = str(survivor.get("name") or "")
+                for attr in (
+                    "_current_karaoke_singer_name",
+                    "_current_karaoke_singer_display",
+                    "_last_sung_singer_display",
+                ):
+                    if self._queue_limit_name_key(str(state.get(attr) or "")) == val:
+                        setattr(self, attr, survivor_name)
+            except Exception:
+                pass
+
+        if merged_count:
+            self.queue = new_queue
+            try:
+                if self._is_rotation_mode():
+                    self._rotation_repair_marker()
+                    self._rotation_recompute_round_state(force_reset=False)
+            except Exception:
+                pass
+            try:
+                _diag(f"[SINGER-MERGE] merged {merged_count} duplicate singer entries reason={reason}")
+            except Exception:
+                pass
+        return merged_count
+
+    @staticmethod
+    def _absorb_duplicate_singer(survivor: dict, dup: dict) -> None:
+        """Fold a duplicate singer record into the survivor. Songs append after
+        the survivor's existing songs, preserving the duplicate's order."""
+        songs = survivor.setdefault("songs", [])
+        songs.extend(dup.get("songs", []) or [])
+        survivor["has_sung"] = bool(survivor.get("has_sung")) or bool(dup.get("has_sung"))
+        survivor["round_sung"] = bool(survivor.get("round_sung")) or bool(dup.get("round_sung"))
+        # Only stay skipped if every merged record was skipped.
+        survivor["skipped"] = bool(survivor.get("skipped")) and bool(dup.get("skipped"))
+        if dup.get("rotation_marker"):
+            survivor["rotation_marker"] = True
+        try:
+            last = max(float(survivor.get("last_sung_at") or 0), float(dup.get("last_sung_at") or 0))
+            if last > 0:
+                survivor["last_sung_at"] = last
+        except Exception:
+            pass
+        try:
+            created = [float(v) for v in (survivor.get("created_at"), dup.get("created_at")) if v]
+            if created:
+                survivor["created_at"] = min(created)
+        except Exception:
+            pass
+        for key in ("preferred_disc_priority", "duet_display", "rotation_lock_order"):
+            if not survivor.get(key) and dup.get(key):
+                survivor[key] = dup[key]
+        if dup.get("rotation_lock_new") and "rotation_lock_new" not in survivor:
+            survivor["rotation_lock_new"] = dup["rotation_lock_new"]
+
+    # -- singer rename aliases (retired name -> surviving singer) -----------
+
+    def _singer_rename_alias_map(self) -> dict:
+        # __dict__ access: getattr on a half-built QWidget raises RuntimeError.
+        state = object.__getattribute__(self, "__dict__")
+        m = state.get("_singer_rename_aliases")
+        if not isinstance(m, dict):
+            m = {}
+            self._singer_rename_aliases = m
+        return m
+
+    def _record_singer_rename_alias(self, old_name: str, new_name: str) -> None:
+        old_key = self._queue_limit_name_key(old_name)
+        new_key = self._queue_limit_name_key(new_name)
+        if not old_key or not new_key or old_key == new_key:
+            return
+        aliases = self._singer_rename_alias_map()
+        aliases[old_key] = str(new_name)
+        # Compress chains: anything that resolved to the old name now points
+        # straight at the new survivor.
+        for k, v in list(aliases.items()):
+            if self._queue_limit_name_key(v) == old_key:
+                aliases[k] = str(new_name)
+
+    def _resolve_singer_alias(self, name: str) -> str:
+        aliases = object.__getattribute__(self, "__dict__").get("_singer_rename_aliases")
+        if not aliases:
+            return name
+        key = self._queue_limit_name_key(name)
+        seen = set()
+        while key in aliases and key not in seen:
+            seen.add(key)
+            name = str(aliases[key])
+            key = self._queue_limit_name_key(name)
+        return name
+
+    def _alias_mapped_request(self, req: dict) -> dict:
+        """Return the request with its singer mapped through rename aliases
+        (copy-on-write) so a server sync can't resurrect a retired name."""
+        try:
+            singer = str(req.get("singer") or "")
+            mapped = self._resolve_singer_alias(singer) if singer else singer
+            if mapped != singer:
+                req = dict(req)
+                req["singer"] = mapped
+        except Exception:
+            pass
+        return req
+
+    def _apply_singer_rename_to_requests(self, old_name: str, new_name: str) -> None:
+        """Re-point local waitlist / pending / deferred request rows at the
+        surviving singer name."""
+        old_key = self._queue_limit_name_key(old_name)
+        if not old_key or old_key == self._queue_limit_name_key(new_name):
+            return
+        changed = 0
+        state = object.__getattribute__(self, "__dict__")
+        for store_name in ("_waiting_for_add_requests", "_remote_attention_requests",
+                           "_waiting_for_add_recent_terminal_requests"):
+            store = state.get(store_name)
+            if not isinstance(store, dict):
+                continue
+            for item in store.values():
+                if isinstance(item, dict) and self._queue_limit_name_key(str(item.get("singer") or "")) == old_key:
+                    item["singer"] = new_name
+                    changed += 1
+        deferred = state.get("_deferred_remote_adds")
+        if isinstance(deferred, list):
+            for item in deferred:
+                req = item.get("request") if isinstance(item, dict) else None
+                for d in (item, req):
+                    if isinstance(d, dict) and self._queue_limit_name_key(str(d.get("singer") or "")) == old_key:
+                        d["singer"] = new_name
+                        changed += 1
+        if changed:
+            try:
+                self._schedule_waiting_for_add_view_refresh(reason="singer_rename")
+            except Exception:
+                pass
+
+    def _update_current_singer_refs_for_rename(self, old_name: str, new_name: str) -> None:
+        """Keep playback uninterrupted: if the renamed/merged singer is on
+        stage, only the name references move to the surviving record."""
+        old_key = self._queue_limit_name_key(old_name)
+        if not old_key:
+            return
+        try:
+            state = object.__getattribute__(self, "__dict__")
+            for attr in (
+                "_current_karaoke_singer_name",
+                "_current_karaoke_singer_display",
+                "_last_sung_singer_display",
+            ):
+                if self._queue_limit_name_key(str(state.get(attr) or "")) == old_key:
+                    setattr(self, attr, new_name)
+        except Exception:
+            pass
+
+    def _push_singer_rename_to_server(self, old_name: str, new_name: str) -> None:
+        """Host-wins: rewrite the server's request rows for the old singer so
+        the next sync/reconnect can't reintroduce the duplicate. The endpoint
+        is a single atomic UPDATE, so two clients racing the same rename
+        converge on the same final name."""
+        if self._queue_limit_name_key(old_name) == self._queue_limit_name_key(new_name):
+            return
+        try:
+            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+            tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+            api_key = str(self.settings.get("api_key", "") or "").strip()
+        except Exception:
+            return
+        if not base_url or not tenant or not api_key:
+            _diag(f"[SINGER-RENAME] server push skipped (network not configured) old={old_name!r}")
+            return
+
+        import threading, requests
+
+        def send():
+            try:
+                resp = requests.post(
+                    f"{base_url}/api/v1/rename_request_singer.php",
+                    data={"user": tenant, "old_singer": old_name, "new_singer": new_name},
+                    headers={
+                        "X-API-Key": api_key,
+                        "Accept": "application/json",
+                        "User-Agent": "SingWS/rename-singer",
+                    },
+                    timeout=8,
+                )
+                _diag(
+                    f"[SINGER-RENAME] server push status={resp.status_code} "
+                    f"old={old_name!r} new={new_name!r}"
+                )
+            except Exception as e:
+                _diag(f"[SINGER-RENAME] server push failed: {e}")
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def _merge_singer_prefs_and_history(self, old_name: str, new_name: str) -> None:
         old_pref_key = self._normalize_singer_pref_key(old_name)
         new_pref_key = self._normalize_singer_pref_key(new_name)
         if old_pref_key and new_pref_key and old_pref_key != new_pref_key:
@@ -33604,37 +34084,6 @@ class KaraokeApp(QWidget):
                 existing_history = history_singers.get(new_pref_key)
                 if isinstance(existing_history, dict):
                     existing_history["name"] = new_name
-
-        singer["name"] = new_name
-        try:
-            duet_display = str(singer.get("duet_display", "") or "").strip()
-            if duet_display and duet_display == old_name:
-                singer["duet_display"] = new_name
-        except Exception:
-            pass
-
-        old_name_l = old_name.lower()
-        try:
-            if str(getattr(self, "_current_karaoke_singer_name", "") or "").strip().lower() == old_name_l:
-                self._current_karaoke_singer_name = new_name
-            if str(getattr(self, "_current_karaoke_singer_display", "") or "").strip().lower() == old_name_l:
-                self._current_karaoke_singer_display = new_name
-            if str(getattr(self, "_last_sung_singer_display", "") or "").strip().lower() == old_name_l:
-                self._last_sung_singer_display = new_name
-        except Exception:
-            pass
-
-        try:
-            self.save_data()
-        except Exception:
-            pass
-        try:
-            self.update_queue_display()
-            self.update_rotation_summary_card()
-            self._update_last_sung_card()
-            self._schedule_singer_history_refresh(reason="singer_rename")
-        except Exception:
-            pass
 
     def open_singer_brand_override_dialog(self, singer_idx: int):
         if singer_idx < 0 or singer_idx >= len(self.queue):
@@ -35631,6 +36080,13 @@ class KaraokeApp(QWidget):
                     singer.pop("preferred_disc_priority", None)
             valid_queue.append(singer)
         self.queue = valid_queue
+        # Safety net: a queue saved by an older build (or a racing client)
+        # may contain duplicate singer names — collapse them on load so
+        # duplicates never survive a restart.
+        try:
+            self._merge_duplicate_rotation_singers(reason="load_data")
+        except Exception:
+            pass
 
     def _bootstrap_bg_playlist_on_startup(self):
         """Load persisted BG playlist into player so main BG card is populated on launch."""
@@ -38183,18 +38639,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         try:
-            if selected_identity and getattr(self, "queue_display_model", None) is not None:
-                selected_row = -1
-                for row_num, row in enumerate(self.queue_display_model._rows):
-                    if (
-                        row.get("kind") == selected_identity[0]
-                        and int(row.get("singer_idx", -1)) == int(selected_identity[1])
-                        and int(row.get("song_idx", -1)) == int(selected_identity[2])
-                    ):
-                        selected_row = row_num
-                        break
-                if selected_row >= 0:
-                    self.queue_display.setCurrentRow(selected_row)
+            self._restore_queue_selection_after_rebuild(selected_identity)
         except Exception:
             pass
         if queue_updates_suspended:
@@ -39941,28 +40386,148 @@ class KaraokeApp(QWidget):
             rid = 0
         song_key = remote_request_song_key(req.get("singer", ""), req.get("artist", ""), req.get("title", ""))
         if rid > 0:
+            # Pure lookup by id: whether a signature mismatch means the id was
+            # truly reused (vs normal metadata drift) is the CALLER's decision
+            # via _tombstone_signature_conflicts(). This used to pop the
+            # tombstone on any song_key difference, but the tombstone key is
+            # built from library-canonical queue metadata and the primary
+            # singer, while server rows carry the singer's typed artist/title
+            # and duet display ("Dan & Amy") — routine drift was destroying
+            # tombstones and letting stale rows resurrect host-removed songs.
             tombstone = items.get(str(rid))
-            if isinstance(tombstone, dict):
-                tombstone_key = str(tombstone.get("song_key") or "").strip()
-                if tombstone_key and song_key and tombstone_key != song_key:
-                    _diag(
-                        "[REMOTE-TOMBSTONE] id reused with different song signature; ignoring stale tombstone "
-                        f"request_id={rid} tombstone_key={tombstone_key!r} request_key={song_key!r}"
-                    )
-                    try:
-                        items.pop(str(rid), None)
-                        self._save_remote_request_tombstones(data)
-                    except Exception:
-                        pass
-                else:
-                    return tombstone
-            return None
+            return tombstone if isinstance(tombstone, dict) else None
         if not song_key or song_key == "||":
             return None
         for tombstone in items.values():
             if isinstance(tombstone, dict) and tombstone.get("song_key") == song_key:
                 return tombstone
         return None
+
+    @staticmethod
+    def _tombstone_signature_conflicts(tombstone, req) -> bool:
+        """True only when the server row is clearly a DIFFERENT song than the
+        one the host removed — the only legitimate way a request id can come
+        back to life (a server-side wipe reset the id counter and the id was
+        handed to a brand-new request).
+
+        Anything less than a clear title conflict keeps the tombstone: request
+        rows carry the singer's typed artist/title and duet display while the
+        queue stores library metadata and the primary singer, so formatting
+        drift is normal and must never resurrect a host-removed song. The
+        newest authoritative host action wins over incomplete/older data."""
+
+        def norm(value) -> str:
+            # squash everything to lowercase alphanumerics so spacing and
+            # punctuation drift ("Rocket Man" vs "Rocketman") can't conflict
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+        t_title = norm((tombstone or {}).get("title"))
+        r_title = norm((req or {}).get("title"))
+        if not t_title or not r_title:
+            return False  # incomplete data — host removal stands
+        if t_title == r_title or t_title in r_title or r_title in t_title:
+            return False  # same song modulo formatting drift
+        return True
+
+    def _drop_remote_request_tombstone(self, request_id: int, *, reason: str = "") -> None:
+        """Retire a tombstone (confirmed id reuse after a server reset)."""
+        try:
+            data = self._ensure_remote_request_tombstones()
+            if (data.get("requests") or {}).pop(str(int(request_id)), None) is not None:
+                self._save_remote_request_tombstones(data)
+                _diag(f"[REMOTE-TOMBSTONE] retired request_id={request_id} reason={reason}")
+        except Exception:
+            pass
+
+    def _queue_entry_dup_signature(self, entry):
+        """Signature for accidental-duplicate detection within ONE singer:
+        normalized artist + title + karaoke version (disc id, else the actual
+        library file). None when there isn't enough data to compare safely.
+        Never used across singers — other singers' copies are unrelated."""
+        if not isinstance(entry, dict):
+            return None
+        artist, title = self._queue_entry_artist_title_for_tombstone(entry)
+        if not str(title or "").strip():
+            return None
+
+        def norm(value) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+        version = str(
+            entry.get("selected_disc_id")
+            or entry.get("disc_id")
+            or entry.get("selected_version")
+            or ""
+        ).strip()
+        if not version:
+            try:
+                version = str(self._song_info_primary_path(entry.get("song_info")) or "")
+            except Exception:
+                version = ""
+        return (norm(artist), norm(title), norm(version))
+
+    def _cleanup_duplicate_singer_songs(self, *, reason: str = "") -> int:
+        """Collapse accidental duplicate active songs within each singer.
+
+        Duplicates share the same singer record and normalized artist/title/
+        version. Two entries that carry two DIFFERENT live request ids are an
+        intentional repeat (e.g. requested again after the first completed)
+        and are kept. Otherwise the oldest entry survives; if the newer copy
+        was the server-synced one, its request id migrates to the survivor so
+        the next sync refreshes the surviving entry instead of recreating a
+        new queue item (nothing needs deleting server-side — the id stays
+        live and attached)."""
+        removed = 0
+        for singer in self.queue or []:
+            if not isinstance(singer, dict):
+                continue
+            songs = singer.get("songs") or []
+            if len(songs) < 2:
+                continue
+            survivors_by_sig = {}
+            drop_indices = []
+            for idx, entry in enumerate(songs):
+                if not isinstance(entry, dict) or entry.get("skipped", False):
+                    continue
+                sig = self._queue_entry_dup_signature(entry)
+                if sig is None:
+                    continue
+                survivor = survivors_by_sig.get(sig)
+                if survivor is None:
+                    survivors_by_sig[sig] = entry
+                    continue
+                rid_survivor = self._queue_entry_remote_request_id(survivor)
+                rid_dup = self._queue_entry_remote_request_id(entry)
+                if rid_survivor is None and rid_dup is None:
+                    continue  # two local host adds: deliberate, not a sync artifact
+                if (
+                    rid_survivor is not None
+                    and rid_dup is not None
+                    and int(rid_survivor) != int(rid_dup)
+                ):
+                    continue  # two distinct live requests: intentional repeat
+                if rid_survivor is None and rid_dup is not None:
+                    survivor["remote_request_id"] = int(rid_dup)
+                drop_indices.append(idx)
+                removed += 1
+                _diag(
+                    "[QUEUE-DEDUP] removed accidental duplicate "
+                    f"singer={singer.get('name', '')!r} title={entry.get('title', '')!r} "
+                    f"request_id={rid_dup} kept_request_id={self._queue_entry_remote_request_id(survivor)} "
+                    f"reason={reason}"
+                )
+            for idx in reversed(drop_indices):
+                songs.pop(idx)
+        if removed:
+            try:
+                self._request_queue_display_refresh()
+            except Exception:
+                pass
+            try:
+                self._schedule_save_data(500)
+            except Exception:
+                pass
+        return removed
 
     def _remote_request_mark_already_absent(self, resp) -> bool:
         try:
@@ -40789,6 +41354,14 @@ class KaraokeApp(QWidget):
                 try:
                     removed_ids.add(request_id)
                     self._remote_removed_request_ids = removed_ids
+                    # Remember what song this terminal id was for, so a later
+                    # row with the same id can be told apart: same title =
+                    # stale restore (ignore), different title = id reused by
+                    # a new request after a server-side reset (accept).
+                    terminal_titles = object.__getattribute__(self, "__dict__").setdefault(
+                        "_remote_terminal_titles", {}
+                    )
+                    terminal_titles[request_id] = str(req.get("title") or "")
                 except Exception:
                     pass
                 if removed_count or (request_id, state) not in logged_terminal:
@@ -40802,10 +41375,26 @@ class KaraokeApp(QWidget):
                     )
                 continue
             tombstone = self._remote_request_matches_tombstone(req)
-            if tombstone is not None:
+            if tombstone is not None and self._tombstone_signature_conflicts(tombstone, req):
+                # Confirmed id reuse (clearly a different song): retire the
+                # old tombstone and treat this row as a brand-new request.
+                self._drop_remote_request_tombstone(request_id, reason="id_reuse_confirmed")
+                try:
+                    removed_ids.discard(request_id)
+                    self._remote_removed_request_ids = removed_ids
+                except Exception:
+                    pass
+                _diag(
+                    "[REMOTE-TOMBSTONE] reused request id accepted "
+                    f"request_id={request_id} tombstone_title={tombstone.get('title', '')!r} "
+                    f"request_title={req.get('title', '')!r}"
+                )
+                tombstone = None
+            elif tombstone is not None:
                 # The server still reports a request the host removed locally:
-                # keep re-pushing the removal (the push helper is throttled and
-                # skips already-acknowledged tombstones), but log once per id.
+                # the host removal is authoritative — keep re-pushing the
+                # removal (the push helper is throttled and skips
+                # already-acknowledged tombstones), but log once per id.
                 if request_id not in logged_tombstone_repush:
                     logged_tombstone_repush.add(request_id)
                     _diag(
@@ -40821,12 +41410,38 @@ class KaraokeApp(QWidget):
                     pass
                 continue
             if request_id in removed_ids:
+                # Known-terminal id with no live tombstone (the server itself
+                # reported it removed/completed earlier this session). A stale
+                # row flipping back to 'pending' — e.g. another client posting
+                # old data — must not resurrect the host-deleted item. Only a
+                # clear title conflict (id genuinely reused by a NEW request
+                # after a server-side reset) is allowed through.
+                terminal_title = ""
                 try:
-                    removed_ids.discard(request_id)
-                    self._remote_removed_request_ids = removed_ids
+                    terminal_title = str(
+                        object.__getattribute__(self, "__dict__").get("_remote_terminal_titles", {}).get(request_id) or ""
+                    )
                 except Exception:
-                    pass
-                _diag(f"[REMOTE-TOMBSTONE] reused request id accepted request_id={request_id} reason=signature_mismatch")
+                    terminal_title = ""
+                if terminal_title and self._tombstone_signature_conflicts({"title": terminal_title}, req):
+                    try:
+                        removed_ids.discard(request_id)
+                        self._remote_removed_request_ids = removed_ids
+                    except Exception:
+                        pass
+                    _diag(
+                        "[REMOTE-TOMBSTONE] terminal id reused by new request; accepting "
+                        f"request_id={request_id} old_title={terminal_title!r} new_title={req.get('title', '')!r}"
+                    )
+                else:
+                    if request_id not in logged_tombstone_repush:
+                        logged_tombstone_repush.add(request_id)
+                        _diag(
+                            "[REMOTE-TOMBSTONE] stale non-terminal row for terminal id ignored "
+                            f"request_id={request_id} singer={req.get('singer', '')!r} "
+                            f"title={req.get('title', '')!r}"
+                        )
+                    continue
             delivered = bool(req.get("sent") or req.get("delivered") or state in {"delivered", "completed", "sung", "removed"})
             if delivered and request_id not in local_remote_ids:
                 ignored_historical += 1
@@ -41230,7 +41845,16 @@ class KaraokeApp(QWidget):
                     f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision=no_change"
                 )
 
+        try:
+            self._cleanup_duplicate_singer_songs(reason="reconcile")
+        except Exception as e:
+            _diag(f"[QUEUE-DEDUP] reconcile pass failed: {e}")
+
         self._queue_display_batch_dirty = False
+        if accepted_remote_add:
+            # A server sync inserted requests (e.g. after a reconnect): the
+            # rebuild must re-select the top rotation row, not the new rows.
+            self._mark_server_queue_mutation(reason="reconcile_remote_requests")
         self._request_queue_display_refresh()
         try:
             if accepted_remote_add or bool(getattr(self, "karaoke_playing", False)):

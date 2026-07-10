@@ -1495,5 +1495,252 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(history_posts[0]["json"]["user"], "venue")
 
 
+class HostRemovalAuthorityTests(unittest.TestCase):
+    """Host removals must be authoritative: stale server rows must never
+    resurrect a removed song, and accidental duplicates from sync drift are
+    collapsed. Regression for the re-add-after-manual-remove bug: the old
+    tombstone matcher deleted the tombstone on ANY song-signature drift
+    (duet display 'Dan & Amy' vs queue singer 'Dan', typed vs library
+    metadata), treating it as id reuse."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def _entry(self, title, rid=None, artist="Artist", path=None, disc=None):
+        e = {"song_info": path or f"/tmp/{title.lower().replace(' ', '_')}.mp3",
+             "key": 0, "skipped": False, "artist": artist, "title": title}
+        if rid is not None:
+            e["remote_request_id"] = rid
+        if disc is not None:
+            e["disc_id"] = disc
+        return e
+
+    def _singer(self, name, entries):
+        return {"name": name, "songs": entries, "skipped": False,
+                "has_sung": False, "round_sung": False, "rotation_marker": False}
+
+    # -- manual removal followed by normal sync --------------------------------
+
+    def test_manual_remove_then_sync_does_not_readd(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            entry = self._entry("Song A", rid=123)
+            app.queue = [self._singer("Dan", [entry])]
+
+            with fake_network(self.singws) as net:
+                app._delete_remote_request(123, entry=entry, singer_name="Dan", reason="host_remove_song")
+            del app.queue[0]["songs"][0]
+            # exact item id was sent to the server
+            posts = [p for p in net.posts if "complete_remote_request.php" in p["url"]]
+            self.assertEqual(int(posts[0]["data"]["request_id"]), 123)
+            self.assertEqual(posts[0]["data"]["state"], "removed")
+
+            app._reconcile_remote_requests([
+                {"request_id": 123, "singer": "Dan", "artist": "Artist", "title": "Song A",
+                 "key": 0, "tempo": 0, "state": "pending"}
+            ])
+            self.assertEqual(app.processed_requests, [])
+            self.assertEqual(app.queue[0]["songs"], [])
+
+    # -- signature drift must NOT destroy the tombstone (the actual bug) -------
+
+    def test_stale_row_with_drifted_signature_stays_removed(self):
+        """Duet display + typed-metadata drift used to delete the tombstone
+        and resurrect the song on the same pass."""
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            entry = self._entry("Rocket Man", rid=123, artist="Elton John")
+            app.queue = [self._singer("Dan", [entry])]
+            app._record_remote_request_tombstone(123, entry=entry, singer_name="Dan",
+                                                 reason="host_remove_song")
+            del app.queue[0]["songs"][0]
+
+            stale = {"request_id": 123, "singer": "Dan & Amy", "artist": "Elton  John",
+                     "title": "Rocketman", "key": 0, "tempo": 0, "state": "pending"}
+            app._reconcile_remote_requests([stale])
+
+            self.assertEqual(app.processed_requests, [])
+            self.assertIn("123", app._ensure_remote_request_tombstones()["requests"])
+            # repeated polls stay ignored (idempotent)
+            app._reconcile_remote_requests([stale])
+            self.assertEqual(app.processed_requests, [])
+
+    def test_true_id_reuse_still_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app._record_remote_request_tombstone(
+                123, entry=self._entry("Song A"), singer_name="Dan", reason="host_remove_song")
+            app._reconcile_remote_requests([
+                {"request_id": 123, "singer": "Zoe", "artist": "Other",
+                 "title": "Completely Different Track", "key": 0, "tempo": 0}
+            ])
+            self.assertEqual([r["request_id"] for r in app.processed_requests], [123])
+            self.assertNotIn("123", app._ensure_remote_request_tombstones()["requests"])
+
+    # -- manual removal while offline followed by reconnect ---------------------
+
+    def test_offline_removal_survives_reconnect_sync(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = Path(td) / "tombstones.json"
+            app = make_app(self.singws, store)  # no network configured
+            entry = self._entry("Song A", rid=123)
+            app.queue = [self._singer("Dan", [entry])]
+            app._delete_remote_request(123, entry=entry, singer_name="Dan", reason="host_remove_song")
+            del app.queue[0]["songs"][0]
+            tombstone = app._ensure_remote_request_tombstones()["requests"]["123"]
+            self.assertIsNone(tombstone["server_synced_at"])  # queued, unsynced
+
+            # "Restart"/reconnect: fresh app instance loads the persisted store.
+            app2 = make_app(self.singws, store, settings=CONNECTED_SETTINGS)
+            app2.queue = [self._singer("Dan", [])]
+            with fake_network(self.singws) as net:
+                app2._reconcile_remote_requests([
+                    {"request_id": 123, "singer": "Dan", "artist": "Artist",
+                     "title": "Song A", "key": 0, "tempo": 0, "state": "pending"}
+                ])
+                self.assertEqual(app2.processed_requests, [])
+                # removal was re-pushed to the server on reconnect
+                repush = [p for p in net.posts if "complete_remote_request.php" in p["url"]]
+                self.assertTrue(repush)
+                self.assertEqual(int(repush[0]["data"]["request_id"]), 123)
+
+    # -- removal during an incoming server update -------------------------------
+
+    def test_removal_mid_sync_wins_on_next_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            row = {"request_id": 123, "singer": "Dan", "artist": "Artist",
+                   "title": "Song A", "key": 0, "tempo": 0, "state": "pending"}
+
+            def process(req):
+                # First sync accepts the row; host removes it immediately,
+                # while the same payload is still being re-delivered.
+                app.processed_requests.append(req)
+                entry = self._entry("Song A", rid=req["request_id"])
+                app.queue = [self._singer("Dan", [entry])]
+                app._delete_remote_request(req["request_id"], entry=entry,
+                                           singer_name="Dan", reason="host_remove_song")
+                del app.queue[0]["songs"][0]
+                return True
+
+            app.process_external_request = process
+            app._reconcile_remote_requests([row])
+            self.assertEqual(len(app.processed_requests), 1)
+
+            app.process_external_request = lambda req: app.processed_requests.append(req) or True
+            app._reconcile_remote_requests([row])  # stale re-delivery
+            self.assertEqual(len(app.processed_requests), 1)  # not re-added
+
+    # -- stale client attempting to restore the deleted item ---------------------
+
+    def test_stale_client_cannot_restore_server_terminal_item(self):
+        """Server reported the id terminal earlier; a stale client later flips
+        the same id (same song) back to pending — must stay dead."""
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app._reconcile_remote_requests([
+                {"request_id": 500, "singer": "Dan", "artist": "Artist",
+                 "title": "Song A", "key": 0, "tempo": 0, "state": "removed",
+                 "removed_at": 1000}
+            ])
+            self.assertEqual(app.processed_requests, [])
+
+            app._reconcile_remote_requests([
+                {"request_id": 500, "singer": "Dan", "artist": "Artist",
+                 "title": "Song A", "key": 0, "tempo": 0, "state": "pending"}
+            ])
+            self.assertEqual(app.processed_requests, [])
+
+            # ...but the same id carrying a clearly different song (true reuse
+            # after a server reset) is accepted.
+            app._reconcile_remote_requests([
+                {"request_id": 500, "singer": "Zoe", "artist": "Other",
+                 "title": "Brand New Different Song", "key": 0, "tempo": 0}
+            ])
+            self.assertEqual([r["request_id"] for r in app.processed_requests], [500])
+
+    # -- duplicate cleanup -------------------------------------------------------
+
+    def test_duplicate_cleanup_preserves_oldest_and_migrates_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            older = self._entry("Song A")             # host-added local copy (older)
+            newer = self._entry("Song A", rid=123)    # server re-add (newer)
+            app.queue = [self._singer("Dan", [older, newer])]
+            removed = app._cleanup_duplicate_singer_songs(reason="test")
+            self.assertEqual(removed, 1)
+            songs = app.queue[0]["songs"]
+            self.assertEqual(len(songs), 1)
+            self.assertIs(songs[0], older)                      # oldest preserved
+            self.assertEqual(songs[0]["remote_request_id"], 123)  # id migrated, not recreated
+
+    def test_duplicate_cleanup_same_id_twice(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            a = self._entry("Song A", rid=123)
+            b = self._entry("Song A", rid=123)
+            app.queue = [self._singer("Dan", [a, b])]
+            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 1)
+            self.assertEqual(app.queue[0]["songs"], [a])
+
+    def test_same_title_two_singers_untouched(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [
+                self._singer("Dan", [self._entry("Song A", rid=1)]),
+                self._singer("Zoe", [self._entry("Song A", rid=2)]),
+            ]
+            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
+            self.assertEqual(len(app.queue[0]["songs"]), 1)
+            self.assertEqual(len(app.queue[1]["songs"]), 1)
+
+    def test_two_versions_same_singer_untouched(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [self._singer("Dan", [
+                self._entry("Song A", rid=1, path="/lib/sc/song_a.mp3", disc="SC1001"),
+                self._entry("Song A", rid=None, path="/lib/kv/song_a.mp4", disc="KV2002"),
+            ])]
+            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
+            self.assertEqual(len(app.queue[0]["songs"]), 2)
+
+    def test_intentional_repeat_with_two_request_ids_untouched(self):
+        """Singer re-requested the same song with a new request id (e.g. after
+        the first completed but both briefly coexist): two distinct live ids are
+        intentional and must both stay."""
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [self._singer("Dan", [
+                self._entry("Song A", rid=1),
+                self._entry("Song A", rid=2),
+            ])]
+            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
+            self.assertEqual(len(app.queue[0]["songs"]), 2)
+
+    def test_intentional_repeat_after_completion_not_blocked(self):
+        """After request 1 completes (tombstone status=completed), the singer
+        requests the same title again with a NEW id — it must be accepted."""
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            entry = self._entry("Song A", rid=1)
+            app._complete_remote_request(1, entry=entry, singer_name="Dan",
+                                         reason="song_completed")
+            app._reconcile_remote_requests([
+                {"request_id": 2, "singer": "Dan", "artist": "Artist",
+                 "title": "Song A", "key": 0, "tempo": 0, "state": "pending"}
+            ])
+            self.assertEqual([r["request_id"] for r in app.processed_requests], [2])
+
+    def test_local_double_add_left_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.queue = [self._singer("Dan", [
+                self._entry("Song A"), self._entry("Song A"),
+            ])]
+            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
+            self.assertEqual(len(app.queue[0]["songs"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
