@@ -4,7 +4,7 @@ import logging
 import logging.handlers
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.0.10"
+APP_VERSION = "0.4.1.0"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 
 # Try to import psutil for system info (optional but recommended)
@@ -24176,6 +24176,10 @@ class KaraokeApp(QWidget):
             state = object.__getattribute__(self, "__dict__")
         except Exception:
             return
+        try:
+            self._update_waiting_for_add_nav_state()
+        except Exception:
+            pass
         if state.get("waiting_for_add_list") is None:
             return
         try:
@@ -24640,9 +24644,31 @@ class KaraokeApp(QWidget):
         if not isinstance(req, dict):
             return False
         state = str(req.get("state") or "").strip().lower()
+        if self._remote_request_is_non_actionable(req):
+            return False
         if state in {"waiting", "failed", "failed_needs_review"}:
             return True
         return bool(str(req.get("pending_reason") or req.get("last_error") or req.get("attention_reason") or "").strip())
+
+    def _remote_request_is_non_actionable(self, req: dict | None) -> bool:
+        """Rows already accepted/delivered by the server must not re-enter waitlist intake."""
+        if not isinstance(req, dict):
+            return False
+        state = str(req.get("state") or req.get("status") or "").strip().lower()
+        if state in {"accepted", "active", "delivered", "completed", "sung", "removed", "skipped"}:
+            return True
+        try:
+            if bool(req.get("sent") or req.get("delivered")):
+                return True
+        except Exception:
+            pass
+        for key in ("accepted_at", "added_at", "queued_at", "completed_at", "removed_at"):
+            try:
+                if float(req.get(key) or 0) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _waiting_for_add_status_kind(self, req: dict | None) -> str:
         req = req or {}
@@ -25067,6 +25093,14 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
+        if self._remote_request_is_non_actionable(req):
+            _diag(
+                "[WAITING-FOR-ADD] ignored non-actionable upsert "
+                f"request_id={rid} singer={str(req.get('singer') or '')!r} title={str(req.get('title') or '')!r} "
+                f"state={str(req.get('state') or req.get('status') or '')!r} sent={int(bool(req.get('sent') or req.get('delivered')))} "
+                f"reason={reason!r}"
+            )
+            return
         handled = state.get("_waiting_for_add_handled_ids", set())
         if not isinstance(handled, set):
             handled = set()
@@ -25093,7 +25127,14 @@ class KaraokeApp(QWidget):
         if not isinstance(pending, dict):
             pending = {}
             self._waiting_for_add_requests = pending
+        existed = rid in pending
         pending[rid] = item
+        _diag(
+            "[WAITING-FOR-ADD] upsert "
+            f"request_id={rid} singer={str(item.get('singer') or '')!r} title={str(item.get('title') or '')!r} "
+            f"source={str(item.get('request_source') or item.get('source') or '')!r} state={str(item.get('state') or '')!r} "
+            f"action={'updated' if existed else 'created'} reason={reason!r} pending_count={len(pending)}"
+        )
         self._schedule_waiting_for_add_view_refresh(reason="upsert")
 
     def _set_waiting_for_add_requests(self, reqs, *, local_remote_ids=None) -> None:
@@ -25140,6 +25181,14 @@ class KaraokeApp(QWidget):
             if state_name in {"removed", "skipped", "completed", "sung"} or completed_at > 0 or removed_at > 0:
                 if rid not in local_ids:
                     terminal_items[rid] = dict(req)
+                continue
+            if self._remote_request_is_non_actionable(req):
+                handled.add(rid)
+                _diag(
+                    "[WAITING-FOR-ADD] ignored accepted/delivered server row "
+                    f"request_id={rid} singer={str(req.get('singer') or '')!r} title={str(req.get('title') or '')!r} "
+                    f"state={state_name!r} sent={int(bool(req.get('sent') or req.get('delivered')))}"
+                )
                 continue
             if not self._is_waiting_for_add_request(req):
                 continue
@@ -25198,6 +25247,10 @@ class KaraokeApp(QWidget):
             self._add_participants_to_song_counts(counts, self._remote_request_participants(req))
         self._waiting_for_add_requests = items
         self._waiting_for_add_recent_terminal_requests = terminal_items
+        _diag(
+            "[WAITING-FOR-ADD] rebuilt "
+            f"pending_count={len(items)} terminal_count={len(terminal_items)} candidate_count={len(candidates)}"
+        )
         try:
             self._cleanup_terminal_removed_requests(terminal_items)
         except Exception:
@@ -26277,11 +26330,7 @@ class KaraokeApp(QWidget):
         if not self._pending_acceptance_enabled():
             return 0
         try:
-            pending = object.__getattribute__(self, "__dict__").get("_deferred_remote_adds", [])
-        except Exception:
-            pending = []
-        try:
-            return len(list(pending or []))
+            return len(self._pending_acceptance_rows())
         except Exception:
             return 0
 
@@ -26335,9 +26384,8 @@ class KaraokeApp(QWidget):
                 active = stack is not None and stack.currentWidget() is state.get("waiting_for_add_page")
         except Exception:
             active = False
-        # Needs-review arrivals pulse the nav button green just like pending
-        # acceptance, so a failed auto-add can't sit unnoticed.
-        count = self._pending_acceptance_count() + self._needs_review_count()
+        # Any actionable host decision should pulse the nav button green.
+        count = self._pending_acceptance_count() + self._waiting_for_add_count()
         timer = state.get("_waiting_for_add_pulse_timer")
         if count > 0:
             if timer is not None and not timer.isActive():

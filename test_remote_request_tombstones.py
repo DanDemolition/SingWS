@@ -841,6 +841,73 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertIn("Queue: #1", app._waiting_for_add_row_text(pending_row))
             self.assertEqual([row["request_id"] for row in sections[1]["rows"]], [1902])
 
+    def test_waitlist_action_count_includes_ordinary_waitlisted_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["use_waiting_for_add"] = True
+            app._waiting_for_add_requests = {
+                1911: {
+                    "request_id": 1911,
+                    "singer": "Bea",
+                    "artist": "Wait Artist",
+                    "title": "Wait Title",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                },
+            }
+
+            self.assertEqual(app._pending_acceptance_count(), 0)
+            self.assertEqual(app._waiting_for_add_count(), 1)
+
+    def test_delivered_rows_do_not_reappear_as_waitlisted(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["use_waiting_for_add"] = True
+
+            app._set_waiting_for_add_requests([
+                {
+                    "request_id": 1912,
+                    "singer": "Ada",
+                    "artist": "Old Artist",
+                    "title": "Old Title",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                    "sent": 1,
+                },
+                {
+                    "request_id": 1913,
+                    "singer": "Bea",
+                    "artist": "Accepted Artist",
+                    "title": "Accepted Title",
+                    "state": "accepted",
+                    "pending_reason": "rotation_full",
+                },
+            ])
+
+            self.assertEqual(app._waiting_for_add_requests, {})
+            self.assertIn(1912, app._waiting_for_add_handled_ids)
+            self.assertIn(1913, app._waiting_for_add_handled_ids)
+
+    def test_reconcile_does_not_reprocess_delivered_pending_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            app.settings["use_waiting_for_add"] = True
+
+            app._reconcile_remote_requests([
+                {
+                    "request_id": 1914,
+                    "singer": "Cal",
+                    "artist": "Done Artist",
+                    "title": "Done Title",
+                    "state": "waiting",
+                    "pending_reason": "rotation_full",
+                    "delivered": 1,
+                },
+            ])
+
+            self.assertEqual(app.processed_requests, [])
+            self.assertEqual(app._waiting_for_add_requests, {})
+
     def test_add_pending_now_flushes_during_playback(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
