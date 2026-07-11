@@ -1871,28 +1871,10 @@ def fast_mp3_duration_from_zip(zip_path):
         print(f"zip fast duration failed: {zip_path} :: {e}")
         return None, None
 
-# FFmpeg/VLC code removed - all key changes now use GStreamer pitch element
-
-def check_dependencies():
-    """Check for required dependencies and show user-friendly messages"""
-    issues = []
-    
-    # GStreamer is the only required dependency now
-    # (already checked in earlier _show_gst_error_and_exit)
-    
-    return issues
-
-# QIcon patch removed - we call get_resource_path() explicitly in button creation
-# (The patch was causing path duplication on macOS)
-
 print("🎤 SingWS (GStreamer) starting…")
-
-# Continue with your original code below this point...
 
 APP_USER_DIR = Path.home() / "SingWS"
 APP_USER_DIR.mkdir(exist_ok=True)
-
-# PROCESSED_DIR removed - no longer needed (GStreamer does key change in realtime)
 
 # --- Logs directory ---
 LOGS_DIR = APP_USER_DIR / "logs"
@@ -2757,7 +2739,9 @@ def _perf_log_if_slow(name: str, ms: float):
             now = time.monotonic()
             key = str(name)
             last = float(_PERF_LAST_PRINT.get(key, 0.0) or 0.0)
-            if now - last < 1.0:
+            low_key = key.lower()
+            repeat_sec = 15.0 if any(token in low_key for token in ("server", "sync", "json", "save", "db")) else 1.0
+            if now - last < repeat_sec:
                 return
             _PERF_LAST_PRINT[key] = now
             print(f"[PERF-DIAG] {name} took {float(ms):.0f}ms")
@@ -11249,55 +11233,7 @@ def parse_filename_stem(stem: str, fmt: str = DEFAULT_FILENAME_FORMAT) -> tuple[
     # Unknown / unrecognised format — best-effort default.
     return parts[0], " - ".join(parts[1:-1]) if n > 2 else (parts[1] if n > 1 else ""), parts[-1] if n > 2 else ""
 
-# VLC code removed - now using GStreamer exclusively
-
 class VideoWindow(QWidget):
-
-    def style_buttons_to_match_queue(self):
-        """Style only QPushButtons so they match the queue's empty background area (palette Base).
-        This intentionally avoids touching table/list widgets so your results/queue keep their clean system look.
-        """
-        try:
-            base_color = QColor(BASE_COLOR)
-        except Exception:
-            return
-
-        # Subtle deltas for hover/pressed; keep it very close to the queue background.
-        try:
-            border_color = base_color.lighter(115)
-            hover_color = base_color.lighter(110)
-            pressed_color = base_color.darker(110)
-        except Exception:
-            border_color = base_color
-            hover_color = base_color
-            pressed_color = base_color
-
-        button_style = f"""
-            QPushButton {{
-                background-color: {base_color.name()};
-                border: 1px solid {border_color.name()};
-                border-radius: 6px;
-                padding: 6px 12px;
-            }}
-            QPushButton:hover {{
-                background-color: {hover_color.name()};
-            }}
-            QPushButton:pressed {{
-                background-color: {pressed_color.name()};
-            }}
-        """
-
-        try:
-            for btn in self.findChildren(QPushButton):
-                # Don't override buttons that already have a custom style (e.g., icon tiles)
-                try:
-                    if btn.styleSheet().strip():
-                        continue
-                except Exception:
-                    pass
-                btn.setStyleSheet(button_style)
-        except Exception:
-            pass
 
     def __init__(self, title='Karaoke Video Output', width=640, height=480,
                  get_singer_list_callback=None, get_time_left_callback=None):
@@ -23249,6 +23185,11 @@ class KaraokeApp(QWidget):
     def _daw_snapshot_timer_target_ms(self) -> int:
         if not self._daw_singer_screen_preview_enabled() or bool(getattr(self, "_app_closing", False)):
             return 0
+        try:
+            if float(getattr(self, "_daw_preview_server_backoff_until", 0.0) or 0.0) > time.monotonic():
+                return 5000
+        except Exception:
+            pass
         try:
             if bool(getattr(self, "karaoke_playing", False)):
                 return 1000

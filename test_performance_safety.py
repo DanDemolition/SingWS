@@ -340,6 +340,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         target = function_source("_daw_snapshot_timer_target_ms")
         self.assertIn("return 1000", target)
         self.assertIn("return 5000", target)
+        self.assertLess(
+            target.index("_daw_preview_server_backoff_until"),
+            target.index("karaoke_playing"),
+        )
         self.assertIn("_daw_snapshot_viewer_recent()", target)
         tuner = function_source("_retune_daw_snapshot_timer")
         self.assertIn("timer.stop()", tuner)
@@ -350,6 +354,14 @@ class PerformanceSafetyTests(unittest.TestCase):
         settings = MAIN_SOURCE[MAIN_SOURCE.index("def on_daw_preview_toggled"):]
         settings = settings[:settings.index("daw_preview_cb.toggled.connect")]
         self.assertIn('_retune_daw_snapshot_timer("settings_toggle")', settings)
+
+    def test_slow_sync_perf_logs_are_rate_limited(self):
+        source = self.singws._perf_log_if_slow.__code__.co_consts
+        joined = " ".join(str(item) for item in source)
+        self.assertIn("server", joined)
+        self.assertIn("sync", joined)
+        self.assertIn("json", joined)
+        self.assertIn("15.0", joined)
 
     def test_idle_show_screen_background_changes_fade(self):
         self.assertIn("_background_fade_timer = QTimer(self)", MAIN_SOURCE)
