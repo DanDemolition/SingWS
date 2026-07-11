@@ -252,8 +252,23 @@ class PerformanceSafetyTests(unittest.TestCase):
         update = function_source("_update_waiting_for_add_nav_state")
         self.assertIn("_pending_acceptance_count()", update)
         self.assertIn('f"Waitlist ({count})"', update)
+        self.assertIn("Waitlist: no pending host action", update)
+        self.assertIn("need host action", update)
         self.assertIn("rgba(22, 163, 74", update)
         self.assertIn("_waiting_for_add_nav_css_cache_key", update)
+
+    def test_header_status_shows_request_and_waitlist_state(self):
+        init_source = MAIN_SOURCE[MAIN_SOURCE.index("accepting_text = \"Requests Open\""):]
+        init_source = init_source[:init_source.index("self.header_location_label")]
+        self.assertIn("Requests Open", init_source)
+        self.assertIn("Waitlist On", init_source)
+        refresh = function_source("_refresh_header_status")
+        self.assertIn("Requests Open", refresh)
+        self.assertIn("Waitlist On", refresh)
+        self.assertIn("Waitlist mode:", refresh)
+        self.assertIn('self.settings.get("location_name")', refresh)
+        self.assertIn('or self.settings.get("venue_name")', refresh)
+        self.assertIn('or self.settings.get("tenant")\n                    or self.settings.get("user")', refresh)
 
     def test_singer_history_song_list_uses_model_backed_view(self):
         self.assertIn("class SingerHistorySongListModel(QAbstractListModel)", MAIN_SOURCE)

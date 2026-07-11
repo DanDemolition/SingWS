@@ -17030,9 +17030,11 @@ class KaraokeApp(QWidget):
             or "Offline"
         ).strip()
         accepting = bool(self.settings.get("requests_accepting", True))
+        waitlist_enabled = bool(self.settings.get("use_waiting_for_add", False))
         accepting_dot = "●"
-        accepting_text = "Accepting Requests" if accepting else "Requests Closed"
+        accepting_text = "Requests Open" if accepting else "Requests Closed"
         accepting_color = _v("now_singing") if accepting else _v("warning")
+        waitlist_text = "Waitlist On" if waitlist_enabled else "Waitlist Off"
 
         self.header_status_group = QFrame()
         self.header_status_group.setObjectName("headerStatusGroup")
@@ -17044,7 +17046,7 @@ class KaraokeApp(QWidget):
         header_status_layout.setSpacing(9)
 
         self.header_status_label = QLabel(
-            f'<span style="color:{accepting_color};">{accepting_dot}</span>  {accepting_text}'
+            f'<span style="color:{accepting_color};">{accepting_dot}</span>  {accepting_text} • {waitlist_text}'
         )
         self.header_status_label.setTextFormat(Qt.TextFormat.RichText)
         self.header_status_label.setStyleSheet(f"color:{_v('text')}; font-size:12px; font-weight:700;")
@@ -26342,6 +26344,13 @@ class KaraokeApp(QWidget):
                 text = "Waitlist" if count == 0 else f"Waitlist ({count})"
                 if label.text() != text:
                     label.setText(text)
+            tooltip = (
+                f"Waitlist: {count} request{'s' if count != 1 else ''} need host action"
+                if count > 0
+                else "Waitlist: no pending host action"
+            )
+            if btn.toolTip() != tooltip:
+                btn.setToolTip(tooltip)
         except Exception:
             pass
         if count > 0:
@@ -28379,9 +28388,11 @@ class KaraokeApp(QWidget):
     def _refresh_header_status(self):
         try:
             accepting = bool(self.settings.get("requests_accepting", True))
+            waitlist_enabled = bool(self.settings.get("use_waiting_for_add", False))
             accepting_dot = "●"
-            accepting_text = "Accepting Requests" if accepting else "Requests Closed"
+            accepting_text = "Requests Open" if accepting else "Requests Closed"
             accepting_color = _v("now_singing") if accepting else _v("warning")
+            waitlist_text = "Waitlist On" if waitlist_enabled else "Waitlist Off"
             connection = str(getattr(self, "_server_connection_state", "") or ("Connected" if self.is_network_configured() else "Offline"))
             try:
                 queue_rev = int(getattr(self, "_queue_revision", 0) or 0)
@@ -28390,7 +28401,7 @@ class KaraokeApp(QWidget):
             if hasattr(self, "header_status_label"):
                 self.header_status_label.setText(
                     f'<span style="color:{accepting_color};">{accepting_dot}</span>  '
-                    f'{accepting_text} • {connection}'
+                    f'{accepting_text} • {waitlist_text} • {connection}'
                 )
                 last_received = str(getattr(self, "_last_request_received_summary", "") or "None")
                 last_accepted = str(getattr(self, "_last_request_accepted_summary", "") or "None")
@@ -28401,6 +28412,7 @@ class KaraokeApp(QWidget):
                 self.header_status_label.setToolTip(
                     "Server diagnostics\n"
                     f"Enabled: {'Yes' if accepting else 'No'}\n"
+                    f"Waitlist mode: {'On' if waitlist_enabled else 'Off'}\n"
                     f"Connection: {connection}\n"
                     f"Last request received: {last_received}\n"
                     f"Last request accepted: {last_accepted}\n"
@@ -28411,8 +28423,10 @@ class KaraokeApp(QWidget):
                 )
             if hasattr(self, "header_location_label"):
                 tenant_name = str(
-                    self.settings.get("user")
+                    self.settings.get("location_name")
+                    or self.settings.get("venue_name")
                     or self.settings.get("tenant")
+                    or self.settings.get("user")
                     or "Local"
                 ).strip()
                 self.header_location_label.setText(f"• {tenant_name}")

@@ -268,3 +268,66 @@ When asked to improve playback:
 - keep Python as the application shell
 - keep native code focused on performance-critical audio logic
 - stop after each milestone and report clearly
+
+## Queue and server synchronization rules
+
+Host actions are authoritative.
+
+If the host:
+- deletes a song
+- reorders songs
+- replaces a song
+- moves a song between sections
+
+the server must adopt the host state.
+
+The server must never recreate songs that the host intentionally removed.
+
+Reconnects, sync operations, queue rebuilds, or startup restoration must not override host actions.
+
+Requests should transition state rather than creating replacement objects.
+
+Every request must have a permanent unique identifier that survives:
+- reconnects
+- application restarts
+- websocket reconnects
+- queue rebuilds
+- waitlist transitions
+- server synchronization passes
+
+If a request already exists in memory or storage, update the existing request rather than creating a new one.
+
+Duplicate detection should:
+- preserve the oldest accepted copy
+- discard newer duplicates automatically
+- preserve singer order and request timestamps where possible
+
+Queue synchronization should favor state transitions over object recreation.
+
+Preferred request lifecycle:
+
+- requested
+- pending
+- waitlisted
+- accepted
+- active rotation
+- currently singing
+- completed
+- skipped
+- removed
+
+A request should move through these states rather than being destroyed and recreated during synchronization.
+
+The host application is the source of truth for active rotation state unless the task explicitly requires otherwise.
+
+Requests must not be identified solely by:
+- singer name
+- song title
+- artist
+- queue position
+
+Multiple requests may share those values legitimately.
+
+Duplicate detection should use the permanent request identifier rather than metadata comparisons whenever possible.
+
+Request identifiers must be generated once at request creation time and must never change during the request lifetime.
