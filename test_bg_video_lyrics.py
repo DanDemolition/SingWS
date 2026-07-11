@@ -105,7 +105,7 @@ class FakeVideoWindow:
 class FakePlayer:
     instances = []
 
-    def __init__(self, parent=None, *, on_frame=None, max_width=1280, max_height=720, max_fps=30, quality_label="auto"):
+    def __init__(self, parent=None, *, on_frame=None, max_width=1280, max_height=720, max_fps=60, quality_label="auto"):
         self.on_frame = on_frame
         self.max_width = max_width
         self.max_height = max_height
@@ -170,7 +170,7 @@ class StartStopGatingTests(unittest.TestCase):
         self.assertTrue(shuffle)
         self.assertEqual(player.max_width, 1280)
         self.assertEqual(player.max_height, 720)
-        self.assertEqual(player.max_fps, 30)
+        self.assertEqual(player.max_fps, 60)
         self.assertEqual(player.quality_label, "auto")
 
     def test_disabled_does_not_start(self):
@@ -195,7 +195,7 @@ class StartStopGatingTests(unittest.TestCase):
         self.assertIsNotNone(player)
         self.assertEqual(player.max_width, 960)
         self.assertEqual(player.max_height, 540)
-        self.assertEqual(player.max_fps, 24)
+        self.assertEqual(player.max_fps, 30)
         self.assertEqual(player.quality_label, "540")
 
     def test_missing_folder_falls_back(self):
@@ -232,9 +232,11 @@ class StartStopGatingTests(unittest.TestCase):
         self.assertIn("bg_video_folder", defaults)
         self.assertIn("bg_video_shuffle", defaults)
         self.assertIn("bg_video_quality", defaults)
+        self.assertIn("bg_video_auto_transcode_720p", defaults)
         self.assertFalse(defaults["bg_video_enabled"])
         self.assertTrue(defaults["bg_video_shuffle"])
         self.assertEqual(defaults["bg_video_quality"], "auto")
+        self.assertFalse(defaults["bg_video_auto_transcode_720p"])
 
     def test_quality_profile_aliases(self):
         self.assertEqual(self.singws.background_video_quality_profile("720p")["max_width"], 1280)

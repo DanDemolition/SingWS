@@ -2860,6 +2860,7 @@ DEFAULTS = {
     "bg_video_folder": "",            # folder of MP4 background videos
     "bg_video_shuffle": True,         # shuffle-bag order; False = alphabetical loop
     "bg_video_quality": "auto",       # auto | 1080 | 720 | 540 | off; decorative layer only
+    "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
@@ -5875,10 +5876,10 @@ def _scaled_karaoke_image(
 
 BG_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov"}
 BG_VIDEO_QUALITY_PROFILES = {
-    "auto": {"label": "Auto", "max_width": 1280, "max_height": 720, "max_fps": 30},
-    "1080": {"label": "1080p", "max_width": 1920, "max_height": 1080, "max_fps": 30},
-    "720": {"label": "720p", "max_width": 1280, "max_height": 720, "max_fps": 30},
-    "540": {"label": "540p", "max_width": 960, "max_height": 540, "max_fps": 24},
+    "auto": {"label": "Auto", "max_width": 1280, "max_height": 720, "max_fps": 60},
+    "1080": {"label": "1080p", "max_width": 1920, "max_height": 1080, "max_fps": 60},
+    "720": {"label": "720p", "max_width": 1280, "max_height": 720, "max_fps": 60},
+    "540": {"label": "540p", "max_width": 960, "max_height": 540, "max_fps": 30},
     "off": {"label": "Off", "max_width": 0, "max_height": 0, "max_fps": 0},
 }
 
@@ -5918,6 +5919,120 @@ def scan_background_video_folder(folder: str) -> list[str]:
         return []
 
 
+_BG_VIDEO_TRANSCODE_INFLIGHT = set()
+_BG_VIDEO_TRANSCODE_LOCK = threading.Lock()
+
+
+def _background_video_cache_dir() -> Path:
+    try:
+        if sys.platform == "darwin":
+            base = Path.home() / "Library" / "Caches" / "SingWS"
+        else:
+            base = Path.home() / ".cache" / "SingWS"
+        return base / "transparent-bg-video-720p-v1"
+    except Exception:
+        return Path(tempfile.gettempdir()) / "singws-transparent-bg-video-720p-v1"
+
+
+def _background_video_cache_path(source: str) -> Path | None:
+    try:
+        p = Path(source).expanduser().resolve()
+        st = p.stat()
+        sig = f"{p}|{int(st.st_size)}|{int(st.st_mtime_ns)}"
+        digest = hashlib.sha1(sig.encode("utf-8", "replace")).hexdigest()[:24]
+        stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in p.stem)[:42] or "video"
+        return _background_video_cache_dir() / f"{stem}-{digest}.mp4"
+    except Exception:
+        return None
+
+
+def _transcode_background_video_copy(source: str, dest: Path):
+    tmp = dest.with_name(dest.stem + ".tmp.mp4")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from python_karaoke_transport import _ffmpeg_path
+            ffmpeg = _ffmpeg_path("ffmpeg")
+        except Exception:
+            ffmpeg = "ffmpeg"
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-nostdin",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            "scale=w=1280:h=720:force_original_aspect_ratio=decrease",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-tune",
+            "fastdecode",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(tmp),
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.replace(str(tmp), str(dest))
+        _diag(f"[BG-VIDEO] optimized cache ready source={Path(source).name!r} cache={dest.name!r}")
+    except Exception as e:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        _diag(f"[BG-VIDEO] optimized cache failed source={Path(source).name!r}: {e}")
+    finally:
+        with _BG_VIDEO_TRANSCODE_LOCK:
+            _BG_VIDEO_TRANSCODE_INFLIGHT.discard(str(dest))
+
+
+def prepare_background_video_playback_files(files: list[str], auto_transcode_720p: bool = False) -> list[str]:
+    """Return cached 720p copies when available and enqueue missing copies.
+
+    First playback never waits for transcoding: uncached originals are used for
+    the current run while a single background job creates the optimized copy for
+    future songs/sessions. Originals are never modified.
+    """
+    if not auto_transcode_720p:
+        return list(files or [])
+    prepared = []
+    for src in list(files or []):
+        cache = _background_video_cache_path(src)
+        if cache is not None and cache.exists() and cache.stat().st_size > 0:
+            prepared.append(str(cache))
+            continue
+        prepared.append(src)
+        if cache is None:
+            continue
+        key = str(cache)
+        with _BG_VIDEO_TRANSCODE_LOCK:
+            if key in _BG_VIDEO_TRANSCODE_INFLIGHT:
+                continue
+            _BG_VIDEO_TRANSCODE_INFLIGHT.add(key)
+        t = threading.Thread(
+            target=_transcode_background_video_copy,
+            args=(src, cache),
+            name="SingWS-bg-video-transcode",
+            daemon=True,
+        )
+        t.start()
+    return prepared
+
+
 class BackgroundVideoShuffleBag:
     """No-repeat shuffle for background videos: every file plays once before
     any repeats, and a refill never starts with the video that just ended
@@ -5945,21 +6060,13 @@ class BackgroundVideoShuffleBag:
         return pick
 
 
-class LyricsBackgroundVideoPlayer(QObject):
-    """Shuffled, muted MP4 loop rendered behind CDG lyrics.
-
-    Runs a private GStreamer pipeline whose audio branch terminates in a
-    fakesink (no audio device, no audio clock), so the clips' soundtracks are
-    silenced and cannot touch karaoke audio, key/tempo, or lyric sync.
-    Frames are pulled on a UI timer from an appsink
-    (sync=True paces them against the pipeline's own clock; drop=True keeps
-    a slow UI from backing up the decoder) and handed to the video window,
-    which composites them under the transparent-black CDG frame at the
-    host-selected opacity."""
+class _LyricsBackgroundVideoWorker(QObject):
+    frame_ready = pyqtSignal(object)
+    stats_ready = pyqtSignal(dict)
+    stopped = pyqtSignal(str)
 
     def __init__(self, parent=None, *, on_frame=None, max_width: int = 1280, max_height: int = 720, max_fps: int = 30, quality_label: str = "auto"):
         super().__init__(parent)
-        self.on_frame = on_frame
         self.max_width = int(max_width or 0)
         self.max_height = int(max_height or 0)
         self.max_fps = int(max_fps or 0)
@@ -5980,34 +6087,52 @@ class LyricsBackgroundVideoPlayer(QObject):
         self._last_frame_pts_ns = None
         self._advance_failures = 0
         self._runtime_errors = 0
-        self._timer = QTimer(self)
-        self._timer.setInterval(max(16, int(1000 / max(1, self.max_fps or 30))))
-        self._timer.timeout.connect(self._tick)
+        self._frames_inflight = 0
+        self._frames_inflight_lock = threading.Lock()
+        self._timer = None
+        self._running = False
 
+    @pyqtSlot(list, bool)
     def start(self, files: list[str], shuffle: bool = True) -> bool:
         if Gst is None or not files:
+            self.stopped.emit("unavailable")
             return False
         self._bag = BackgroundVideoShuffleBag(files, shuffle=shuffle)
         self._advance_failures = 0
         if not self._advance("start"):
+            self.stopped.emit("start_failed")
             return False
+        self._running = True
+        if self._timer is None:
+            self._timer = QTimer(self)
+            self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+            self._timer.setInterval(max(5, min(16, int(500 / max(1, self.max_fps or 60)))))
+            self._timer.timeout.connect(self._tick)
         self._timer.start()
         return True
 
+    @pyqtSlot(str)
     def stop(self, reason: str = "stop"):
         try:
-            self._timer.stop()
+            if self._timer is not None:
+                self._timer.stop()
         except Exception:
             pass
+        self._running = False
         self._teardown_pipeline()
         if self._current_path:
             _diag(f"[BG-VIDEO] stopped reason={reason} frames_delivered={self._frames_delivered}")
         self._current_path = ""
-        if self.on_frame is not None:
-            try:
-                self.on_frame(None)
-            except Exception:
-                pass
+        self.frame_ready.emit(None)
+        self.stopped.emit(str(reason or "stop"))
+
+    @pyqtSlot()
+    def acknowledge_frame(self):
+        try:
+            with self._frames_inflight_lock:
+                self._frames_inflight = max(0, int(self._frames_inflight) - 1)
+        except Exception:
+            self._frames_inflight = 0
 
     def _teardown_pipeline(self):
         pipeline = self._pipeline
@@ -6032,6 +6157,7 @@ class LyricsBackgroundVideoPlayer(QObject):
                 return self._advance("missing_file")
             return False
         try:
+            self._prefer_macos_hardware_decoders()
             pipeline = Gst.Pipeline.new("singws-bg-video")
             dec = Gst.ElementFactory.make("uridecodebin", "bgVideoDecoder")
             vq = Gst.ElementFactory.make("queue", "bgVideoQueue")
@@ -6063,7 +6189,7 @@ class LyricsBackgroundVideoPlayer(QObject):
                 caps += f",framerate=(fraction)[0/1,{int(self.max_fps)}/1]"
             vcaps.set_property("caps", Gst.Caps.from_string(caps))
             sink.set_property("sync", True)
-            sink.set_property("max-buffers", 2)
+            sink.set_property("max-buffers", 3)
             sink.set_property("drop", True)
             sink.set_property("emit-signals", False)
             for el in (dec, vq, vrate, vconv, vscale, vcaps, sink):
@@ -6114,9 +6240,21 @@ class LyricsBackgroundVideoPlayer(QObject):
             f"[BG-VIDEO] playing file={os.path.basename(path)!r} reason={reason} "
             f"quality={self.quality_label} work_cap={self.max_width}x{self.max_height}@{self.max_fps}fps "
             f"source={self._source_size or 'pending'} source_fps={self._source_fps:.2f} "
-            f"decoder=gstreamer renderer=qt_qimage_widget queue=max2_leaky"
+            f"decoder=gstreamer renderer=qt_qimage_widget queue=max3_leaky latest_only=1"
         )
         return True
+
+    def _prefer_macos_hardware_decoders(self):
+        try:
+            if sys.platform != "darwin" or Gst is None:
+                return
+            registry = Gst.Registry.get()
+            for name in ("vtdec_hw", "vtdec"):
+                feature = registry.find_feature(name, Gst.ElementFactory)
+                if feature is not None:
+                    feature.set_rank(max(int(feature.get_rank()), int(Gst.Rank.PRIMARY + 100)))
+        except Exception:
+            pass
 
     def _capture_source_caps(self, caps):
         try:
@@ -6176,6 +6314,7 @@ class LyricsBackgroundVideoPlayer(QObject):
             f"avg_handoff_ms={self._frame_handoff_time_ms / delivered:.3f} "
             f"last_pts_ns={self._last_frame_pts_ns} decoder=gstreamer renderer=qt_qimage_widget"
         )
+        self.stats_ready.emit(self.diagnostics())
 
     def _tick(self):
         pipeline = self._pipeline
@@ -6232,12 +6371,16 @@ class LyricsBackgroundVideoPlayer(QObject):
                 pass
             self._frames_decoded += 1
             self._decode_copy_time_ms += (time.perf_counter() - t0) * 1000.0
+            with self._frames_inflight_lock:
+                if self._frames_inflight >= 2:
+                    self._frames_dropped += 1
+                    return
+                self._frames_inflight += 1
             self._frames_delivered += 1
             self._runtime_errors = 0
-            if self.on_frame is not None:
-                h0 = time.perf_counter()
-                self.on_frame(image)
-                self._frame_handoff_time_ms += (time.perf_counter() - h0) * 1000.0
+            h0 = time.perf_counter()
+            self.frame_ready.emit(image)
+            self._frame_handoff_time_ms += (time.perf_counter() - h0) * 1000.0
             self._maybe_log_stats()
         except Exception:
             pass
@@ -6258,6 +6401,111 @@ class LyricsBackgroundVideoPlayer(QObject):
             "max_fps": int(self.max_fps or 0),
             "running": bool(self._pipeline is not None),
         }
+
+
+class LyricsBackgroundVideoPlayer(QObject):
+    """Shuffled, muted MP4 loop rendered behind CDG lyrics.
+
+    The GStreamer pipeline, appsink pulling, buffer mapping, and QImage copy run
+    on a dedicated worker thread. The GUI thread receives the newest immutable
+    QImage, uploads it to a QPixmap, and composites it in paintEvent only. This
+    keeps host UI actions and CDG frame generation from starving video decode."""
+
+    _worker_start_requested = pyqtSignal(list, bool)
+    _worker_stop_requested = pyqtSignal(str)
+    _worker_frame_ack_requested = pyqtSignal()
+
+    def __init__(self, parent=None, *, on_frame=None, max_width: int = 1280, max_height: int = 720, max_fps: int = 60, quality_label: str = "auto"):
+        super().__init__(parent)
+        self.on_frame = on_frame
+        self.max_width = int(max_width or 0)
+        self.max_height = int(max_height or 0)
+        self.max_fps = int(max_fps or 0)
+        self.quality_label = str(quality_label or "auto")
+        self._last_stats = {
+            "running": False,
+            "quality": self.quality_label,
+            "max_width": self.max_width,
+            "max_height": self.max_height,
+            "max_fps": self.max_fps,
+        }
+        self._thread = QThread(self)
+        self._worker = _LyricsBackgroundVideoWorker(
+            None,
+            max_width=self.max_width,
+            max_height=self.max_height,
+            max_fps=self.max_fps,
+            quality_label=self.quality_label,
+        )
+        self._worker.moveToThread(self._thread)
+        self._worker_start_requested.connect(self._worker.start, Qt.ConnectionType.QueuedConnection)
+        self._worker_stop_requested.connect(self._worker.stop, Qt.ConnectionType.QueuedConnection)
+        self._worker_frame_ack_requested.connect(self._worker.acknowledge_frame, Qt.ConnectionType.QueuedConnection)
+        self._worker.frame_ready.connect(self._on_worker_frame, Qt.ConnectionType.QueuedConnection)
+        self._worker.stats_ready.connect(self._on_worker_stats, Qt.ConnectionType.QueuedConnection)
+        self._worker.stopped.connect(self._on_worker_stopped, Qt.ConnectionType.QueuedConnection)
+        self._thread.finished.connect(self._worker.deleteLater)
+        self._thread.start()
+
+    def start(self, files: list[str], shuffle: bool = True) -> bool:
+        if Gst is None or not files:
+            return False
+        self._last_stats["running"] = True
+        self._worker_start_requested.emit(list(files), bool(shuffle))
+        return True
+
+    def stop(self, reason: str = "stop"):
+        try:
+            self._worker_stop_requested.emit(str(reason or "stop"))
+        except Exception:
+            pass
+        deadline = time.monotonic() + 1.5
+        while self._thread.isRunning() and bool(self._last_stats.get("running", False)) and time.monotonic() < deadline:
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+            time.sleep(0.01)
+        try:
+            self._thread.quit()
+            self._thread.wait(1500)
+        except Exception:
+            pass
+        if self._thread.isRunning():
+            try:
+                self._thread.terminate()
+                self._thread.wait(500)
+            except Exception:
+                pass
+        if self.on_frame is not None:
+            try:
+                self.on_frame(None)
+            except Exception:
+                pass
+        self._last_stats["running"] = False
+
+    def _on_worker_frame(self, image):
+        try:
+            if self.on_frame is not None:
+                self.on_frame(image)
+        except Exception:
+            pass
+        finally:
+            if image is not None:
+                try:
+                    self._worker_frame_ack_requested.emit()
+                except Exception:
+                    pass
+
+    def _on_worker_stats(self, stats: dict):
+        if isinstance(stats, dict):
+            self._last_stats.update(stats)
+
+    def _on_worker_stopped(self, _reason: str):
+        self._last_stats["running"] = False
+
+    def diagnostics(self) -> dict:
+        return dict(self._last_stats)
 
 
 class VideoAreaWidget(QWidget):
@@ -18750,6 +18998,7 @@ class KaraokeApp(QWidget):
             shuffle = bool(self.settings.get("bg_video_shuffle", True))
             opacity = int(float(self.settings.get("lyrics_background_video_opacity", 0) or 0))
             quality = background_video_quality_profile(self.settings.get("bg_video_quality", "auto"))
+            auto_transcode = bool(self.settings.get("bg_video_auto_transcode_720p", False))
         except Exception:
             return
         if not enabled:
@@ -18767,6 +19016,7 @@ class KaraokeApp(QWidget):
         if not files:
             _diag(f"[BG-VIDEO] fallback to normal CDG background reason=no_videos folder={folder!r}")
             return
+        files = prepare_background_video_playback_files(files, auto_transcode_720p=auto_transcode)
         try:
             player = LyricsBackgroundVideoPlayer(
                 self,
@@ -18781,6 +19031,7 @@ class KaraokeApp(QWidget):
                 _diag(
                     f"[BG-VIDEO] started files={len(files)} shuffle={int(shuffle)} "
                     f"opacity={opacity}% quality={quality.get('key')} "
+                    f"auto_transcode_720p={int(auto_transcode)} "
                     f"work_cap={quality.get('max_width')}x{quality.get('max_height')}@{quality.get('max_fps')}fps "
                     f"folder={folder!r}"
                 )
@@ -21551,10 +21802,15 @@ class KaraokeApp(QWidget):
         bg_video_shuffle_cb.setChecked(bool(self.settings.get("bg_video_shuffle", True)))
         v.addWidget(bg_video_shuffle_cb)
 
+        bg_video_transcode_cb = QCheckBox("Automatically transcode transparent background videos to optimized 720p playback copies")
+        bg_video_transcode_cb.setToolTip("Creates cached H.264 720p copies in the SingWS cache folder. Originals are never modified; uncached videos play normally while the copy is prepared for next time.")
+        bg_video_transcode_cb.setChecked(bool(self.settings.get("bg_video_auto_transcode_720p", False)))
+        v.addWidget(bg_video_transcode_cb)
+
         bg_video_quality_row = QHBoxLayout()
         bg_video_quality_row.addWidget(QLabel("Background video quality:"))
         bg_video_quality_combo = QComboBox(dlg)
-        bg_video_quality_combo.addItem("Auto (720p, adaptive-ready)", "auto")
+        bg_video_quality_combo.addItem("Auto (720p, 60 FPS target)", "auto")
         bg_video_quality_combo.addItem("1080p", "1080")
         bg_video_quality_combo.addItem("720p", "720")
         bg_video_quality_combo.addItem("540p", "540")
@@ -22208,6 +22464,7 @@ class KaraokeApp(QWidget):
         def on_bg_video_settings_changed(_checked=None):
             self.settings["bg_video_enabled"] = bool(bg_video_enable_cb.isChecked())
             self.settings["bg_video_shuffle"] = bool(bg_video_shuffle_cb.isChecked())
+            self.settings["bg_video_auto_transcode_720p"] = bool(bg_video_transcode_cb.isChecked())
             self.settings["bg_video_quality"] = str(bg_video_quality_combo.currentData() or "auto")
             self.save_settings()
             # Apply live: (re)start or stop the background loop for the
@@ -22223,6 +22480,7 @@ class KaraokeApp(QWidget):
 
         bg_video_enable_cb.toggled.connect(on_bg_video_settings_changed)
         bg_video_shuffle_cb.toggled.connect(on_bg_video_settings_changed)
+        bg_video_transcode_cb.toggled.connect(on_bg_video_settings_changed)
         bg_video_quality_combo.currentIndexChanged.connect(on_bg_video_settings_changed)
 
         def on_perf_debug_toggled(checked: bool):
