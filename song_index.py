@@ -145,6 +145,24 @@ def fuzzy_match_key(s: str) -> str:
 def _get_track_path(track: Dict[str, Any]) -> str:
     return str(track.get("path") or track.get("file") or "")
 
+def _get_provider(track: Dict[str, Any]) -> str:
+    return str(track.get("provider") or "local").strip().lower() or "local"
+
+def _get_provider_track_id(track: Dict[str, Any]) -> str:
+    return str(track.get("provider_track_id") or "").strip()
+
+def _get_provider_url(track: Dict[str, Any]) -> str:
+    return str(track.get("provider_url") or "").strip()
+
+def _get_local_reference_path(track: Dict[str, Any]) -> str:
+    return str(track.get("local_reference_path") or "").strip()
+
+def _get_authorization_requirement(track: Dict[str, Any]) -> str:
+    return str(track.get("authorization_requirement") or "").strip()
+
+def _get_availability_status(track: Dict[str, Any]) -> str:
+    return str(track.get("availability_status") or "").strip()
+
 def _get_duration_secs(track: Dict[str, Any]) -> Optional[int]:
     for k in ("duration_secs","duration","dur","length_secs","len_secs"):
         v = track.get(k)
@@ -196,7 +214,11 @@ def build_search_string(track: Dict[str, Any]) -> str:
     discid = str(track.get("discid") or track.get("disc_id") or track.get("DiscID") or track.get("Vendor") or "")
     display = str(track.get("display") or "")
     path = _get_track_path(track)
-    blob = f"{artist} {title} {discid} {display} {os.path.basename(path)}"
+    provider = _get_provider(track)
+    provider_track_id = _get_provider_track_id(track)
+    provider_url = _get_provider_url(track)
+    local_reference_path = _get_local_reference_path(track)
+    blob = f"{artist} {title} {discid} {display} {provider} {provider_track_id} {provider_url} {os.path.basename(path)} {os.path.basename(local_reference_path)}"
     return normalize_text(blob)
 
 def init_schema(con: sqlite3.Connection) -> None:
@@ -218,6 +240,12 @@ def init_schema(con: sqlite3.Connection) -> None:
             size_bytes INTEGER,
             song_type TEXT,
             display TEXT,
+            provider TEXT DEFAULT 'local',
+            provider_track_id TEXT,
+            provider_url TEXT,
+            local_reference_path TEXT,
+            authorization_requirement TEXT,
+            availability_status TEXT,
             searchstring TEXT NOT NULL
         );
     """)
@@ -236,7 +264,19 @@ def init_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE songs ADD COLUMN artist_norm TEXT;")
     if "title_norm" not in existing_cols:
         con.execute("ALTER TABLE songs ADD COLUMN title_norm TEXT;")
+    provider_cols = {
+        "provider": "TEXT DEFAULT 'local'",
+        "provider_track_id": "TEXT",
+        "provider_url": "TEXT",
+        "local_reference_path": "TEXT",
+        "authorization_requirement": "TEXT",
+        "availability_status": "TEXT",
+    }
+    for col, decl in provider_cols.items():
+        if col not in existing_cols:
+            con.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl};")
     con.execute("CREATE INDEX IF NOT EXISTS idx_songs_fuzzy ON songs(artist_norm, title_norm);")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_songs_provider ON songs(provider, provider_track_id);")
 
     cur_ver = None
     try:
@@ -244,14 +284,15 @@ def init_schema(con: sqlite3.Connection) -> None:
         cur_ver = r[0] if r else None
     except Exception:
         cur_ver = None
-    if cur_ver != "3":
+    if cur_ver != "4":
         # One-time backfill of normalized columns for an existing library.
         try:
             con.create_function("fuzzykey", 1, fuzzy_match_key, deterministic=True)
         except TypeError:
             con.create_function("fuzzykey", 1, fuzzy_match_key)
         con.execute("UPDATE songs SET artist_norm = fuzzykey(artist), title_norm = fuzzykey(title);")
-        con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('schema_version','3');")
+        con.execute("UPDATE songs SET provider = COALESCE(NULLIF(provider, ''), 'local');")
+        con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('schema_version','4');")
     con.commit()
 
 def rebuild_from_tracks_json(
@@ -310,20 +351,32 @@ def rebuild_from_tracks_json(
         discid = track.get("discid") or track.get("disc_id") or track.get("DiscID") or track.get("Vendor")
         display = track.get("display")
         song_type = track.get("type") or track.get("song_type")
+        provider = _get_provider(track)
+        provider_track_id = _get_provider_track_id(track)
+        provider_url = _get_provider_url(track)
+        local_reference_path = _get_local_reference_path(track)
+        authorization_requirement = _get_authorization_requirement(track)
+        availability_status = _get_availability_status(track)
         dur = _get_duration_secs(track)
         mt  = _get_mtime(track)
         sz  = _get_size(track)
         ss  = build_search_string(track)
         an  = fuzzy_match_key(str(artist or ""))
         tn  = fuzzy_match_key(str(title or ""))
-        batch.append((path, artist, title, discid, dur, mt, sz, song_type, display, ss, an, tn))
+        batch.append((
+            path, artist, title, discid, dur, mt, sz, song_type, display,
+            provider, provider_track_id, provider_url, local_reference_path,
+            authorization_requirement, availability_status, ss, an, tn,
+        ))
         rows += 1
 
         if len(batch) >= 2000:
             con.executemany("""
                 INSERT OR REPLACE INTO songs
-                (path, artist, title, discid, duration_secs, mtime, size_bytes, song_type, display, searchstring, artist_norm, title_norm)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (path, artist, title, discid, duration_secs, mtime, size_bytes, song_type, display,
+                 provider, provider_track_id, provider_url, local_reference_path, authorization_requirement,
+                 availability_status, searchstring, artist_norm, title_norm)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, batch)
             batch.clear()
             
@@ -336,8 +389,10 @@ def rebuild_from_tracks_json(
     if batch:
         con.executemany("""
             INSERT OR REPLACE INTO songs
-            (path, artist, title, discid, duration_secs, mtime, size_bytes, song_type, display, searchstring, artist_norm, title_norm)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (path, artist, title, discid, duration_secs, mtime, size_bytes, song_type, display,
+             provider, provider_track_id, provider_url, local_reference_path, authorization_requirement,
+             availability_status, searchstring, artist_norm, title_norm)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, batch)
 
     con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('last_rebuild_epoch', ?);", (str(int(time.time())),))

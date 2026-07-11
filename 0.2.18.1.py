@@ -2867,6 +2867,8 @@ DEFAULTS = {
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "next_up_overlay_enabled": True, # Show temporary audience-facing Next Up transition panel
     "next_up_overlay_duration_sec": 10, # seconds the Next Up transition panel stays visible
+    "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
+    "karafun_open_automatically": True, # Focus/open KaraFun when an external KaraFun queue item becomes active
     "disc_id_priority": "",          # comma-separated prefixes for remote request matching (blank = no priority)
     "background_closed_image_path": "",   # optional background shown when requests are closed
     "background_slideshow_enabled": False, # rotate images while idle
@@ -15507,6 +15509,8 @@ class KaraokeApp(QWidget):
         self._media_end_cleanup_timer.timeout.connect(self._run_media_end_cleanup)
         self._media_end_cleanup_end_silence_triggered = False
         self._media_end_cleanup_schedule_bg_resume = False
+        self._active_external_karafun = None
+        self._active_external_karafun_dialog = None
         self._media_end_overlay_eligible = False
         self._next_up_overlay_completion_token = 0
         self._next_up_overlay_consumed_token = 0
@@ -16507,6 +16511,12 @@ class KaraokeApp(QWidget):
         self.library_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         library_header_row.addWidget(self.library_title_label)
         library_header_row.addStretch(1)
+        self.add_karafun_button = QPushButton("Add KaraFun")
+        self.add_karafun_button.setToolTip("Add an externally controlled KaraFun song reference to the SingWS rotation.")
+        self.add_karafun_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_karafun_button.setStyleSheet(subtle_button_css(padding="6px 9px", radius=8).replace("font-size: 13px;", "font-size: 12px;"))
+        self.add_karafun_button.clicked.connect(self.add_karafun_reference_to_queue)
+        library_header_row.addWidget(self.add_karafun_button)
         library_card_layout.addLayout(library_header_row)
         library_card_layout.addLayout(search_row)
         self.library_hint_label.hide()
@@ -18459,10 +18469,16 @@ class KaraokeApp(QWidget):
         left = f"{artist} • {title}" if artist else (title or (track.get("display") or "").strip())
         right_parts = []
         media_badge = self._track_media_badge(track)
+        provider = str(track.get("provider") or "local").strip().lower()
+        provider_badge = ""
+        if provider and provider != "local":
+            provider_badge = "KaraFun" if "karafun" in provider else provider.replace("_", " ").title()
         # Disc ID / company first (bolded by the delegate) so it's easy to scan,
         # then the file-type badge, then duration.
         if disc_id:
             right_parts.append(disc_id)
+        if provider_badge:
+            right_parts.append(provider_badge)
         if media_badge:
             right_parts.append(media_badge)
         if dur:
@@ -18474,6 +18490,8 @@ class KaraokeApp(QWidget):
         meta_bits = []
         if media_badge:
             meta_bits.append(f"Format: {media_badge}")
+        if provider_badge:
+            meta_bits.append(f"Provider: {provider_badge}")
         if disc_id:
             meta_bits.append(f"Disc: {disc_id}")
         if dur:
@@ -27405,6 +27423,8 @@ class KaraokeApp(QWidget):
                 new_song.get("title", ""),
                 new_song.get("songid", ""),
                 new_song.get("path", ""),
+                new_song.get("provider", ""),
+                new_song.get("provider_track_id", ""),
             )
             if not new_key:
                 new_key = song_key or f"manual|{time.time()}"
@@ -32664,6 +32684,17 @@ class KaraokeApp(QWidget):
             "disc_id": (track.get("discid") or track.get("disc_id") if track else None),
             "skipped": False
         }
+        if isinstance(track, dict):
+            for _provider_key in (
+                "provider",
+                "provider_track_id",
+                "provider_url",
+                "local_reference_path",
+                "authorization_requirement",
+                "availability_status",
+            ):
+                if track.get(_provider_key) not in (None, ""):
+                    entry[_provider_key] = track.get(_provider_key)
         if isinstance(remote_meta, dict):
             try:
                 remote_request_id = int(remote_meta.get("request_id", remote_meta.get("id", 0)) or 0)
@@ -32733,7 +32764,10 @@ class KaraokeApp(QWidget):
         # Pre-measure loudness in the background so the song is normalized by the
         # time it actually plays (it usually sits in the queue behind others).
         try:
-            if self._karaoke_normalize_active():
+            entry_provider = str(entry.get("provider") or "local").strip().lower()
+            if entry_provider and entry_provider != "local":
+                _diag(f"[LOUDNESS] queue_preanalysis_skipped reason=external_provider provider={entry_provider} song={display_name!r}")
+            elif self._karaoke_normalize_active():
                 _ap = self._loudness_audio_path(song_info)
                 if _ap:
                     analyze_loudness_async(_ap)
@@ -34768,6 +34802,8 @@ class KaraokeApp(QWidget):
                         title,
                         song_value.get("songid", ""),
                         song_value.get("path", song_key),
+                        song_value.get("provider", ""),
+                        song_value.get("provider_track_id", ""),
                     )
                     if not skey:
                         continue
@@ -34779,6 +34815,12 @@ class KaraokeApp(QWidget):
                         "song_type": str(song_value.get("song_type", "") or "").strip().upper(),
                         "duet_display": str(song_value.get("duet_display", "") or "").strip(),
                         "path": str(song_value.get("path", "") or "").strip(),
+                        "provider": str(song_value.get("provider", "local") or "local").strip().lower(),
+                        "provider_track_id": str(song_value.get("provider_track_id", "") or "").strip(),
+                        "provider_url": str(song_value.get("provider_url", "") or "").strip(),
+                        "local_reference_path": str(song_value.get("local_reference_path", "") or "").strip(),
+                        "authorization_requirement": str(song_value.get("authorization_requirement", "") or "").strip(),
+                        "availability_status": str(song_value.get("availability_status", "") or "").strip(),
                         "last_key": int(song_value.get("last_key") or 0),
                         "last_tempo_percent": int(song_value.get("last_tempo_percent") or 100),
                         "play_count": int(song_value.get("play_count") or 0),
@@ -34854,6 +34896,8 @@ class KaraokeApp(QWidget):
                         title,
                         raw_value.get("songid", ""),
                         raw_value.get("path", ""),
+                        raw_value.get("provider", ""),
+                        raw_value.get("provider_track_id", ""),
                     )
                     if not song_key:
                         song_key = str(raw_value.get("song_key", raw_song_key) or raw_song_key).strip().lower()
@@ -34880,15 +34924,27 @@ class KaraokeApp(QWidget):
 
         return {"singers": singers_out, "deletions": deletions_out, "song_deletions": song_deletions_out}
 
-    def _normalize_history_song_key(self, artist: str = "", title: str = "", songid: str = "", path: str = "") -> str:
+    def _normalize_history_song_key(
+        self,
+        artist: str = "",
+        title: str = "",
+        songid: str = "",
+        path: str = "",
+        provider: str = "",
+        provider_track_id: str = "",
+    ) -> str:
         def fold(value) -> str:
             text = str(value or "").strip().lower()
             text = re.sub(r"['’`´]", "", text)
             text = re.sub(r"[^a-z0-9]+", " ", text)
             return re.sub(r"\s+", " ", text).strip()
 
+        provider_key = fold(provider)
+        provider_track_key = fold(provider_track_id)
         artist_key = fold(artist)
         title_key = fold(title)
+        if provider_key and provider_key != "local" and provider_track_key:
+            return "|".join([provider_key, provider_track_key, artist_key, title_key])
         if artist_key or title_key:
             return "|".join([artist_key, title_key])
         return fold(path or songid)
@@ -34902,7 +34958,12 @@ class KaraokeApp(QWidget):
         existing_updated = int(existing.get("updated_at") or 0)
         incoming_updated = int(incoming.get("updated_at") or 0)
         newer = incoming if incoming_updated >= existing_updated else existing
-        for key in ("artist", "title", "songid", "disc_id", "song_type", "duet_display", "path", "last_key", "last_tempo_percent"):
+        for key in (
+            "artist", "title", "songid", "disc_id", "song_type", "duet_display", "path",
+            "provider", "provider_track_id", "provider_url", "local_reference_path",
+            "authorization_requirement", "availability_status",
+            "last_key", "last_tempo_percent",
+        ):
             value = newer.get(key)
             if value not in (None, ""):
                 merged[key] = value
@@ -34951,12 +35012,24 @@ class KaraokeApp(QWidget):
         song_type = ""
         songid = ""
         path = str(song_path or "").strip()
+        provider = "local"
+        provider_track_id = ""
+        provider_url = ""
+        local_reference_path = ""
+        authorization_requirement = ""
+        availability_status = ""
 
         if isinstance(entry, dict):
             artist = str(entry.get("artist", "") or "").strip()
             title = str(entry.get("title", "") or "").strip()
             disc_id = str(entry.get("disc_id", "") or "").strip()
             duet_display = str(entry.get("duet_display", "") or "").strip()
+            provider = str(entry.get("provider", provider) or provider).strip().lower()
+            provider_track_id = str(entry.get("provider_track_id", "") or "").strip()
+            provider_url = str(entry.get("provider_url", "") or "").strip()
+            local_reference_path = str(entry.get("local_reference_path", "") or "").strip()
+            authorization_requirement = str(entry.get("authorization_requirement", "") or "").strip()
+            availability_status = str(entry.get("availability_status", "") or "").strip()
             try:
                 tempo_percent = int(entry.get("tempo_percent") if entry.get("tempo_percent") is not None else tempo_percent)
             except Exception:
@@ -34984,9 +35057,11 @@ class KaraokeApp(QWidget):
             song_type = "MP3"
         if not disc_id and isinstance(entry, dict):
             disc_id = str(entry.get("discid", "") or "").strip()
-        songid = disc_id or Path(path).stem
+        if provider and provider != "local":
+            song_type = provider.upper()
+        songid = provider_track_id or disc_id or Path(path).stem
 
-        song_key = self._normalize_history_song_key(artist, title, songid, path)
+        song_key = self._normalize_history_song_key(artist, title, songid, path, provider, provider_track_id)
         if not song_key:
             return
         songs = record.setdefault("songs", {})
@@ -35001,6 +35076,12 @@ class KaraokeApp(QWidget):
             "song_type": song_type,
             "duet_display": duet_display,
             "path": path,
+            "provider": provider or "local",
+            "provider_track_id": provider_track_id,
+            "provider_url": provider_url,
+            "local_reference_path": local_reference_path,
+            "authorization_requirement": authorization_requirement,
+            "availability_status": availability_status,
             "last_key": int(key or 0),
             "last_tempo_percent": int(tempo_percent if tempo_percent is not None else self._karaoke_tempo_percent),
             "play_count": prior_count + 1,
@@ -35190,6 +35271,8 @@ class KaraokeApp(QWidget):
                             candidate_song.get("title", ""),
                             candidate_song.get("songid", ""),
                             candidate_song.get("path", ""),
+                            candidate_song.get("provider", ""),
+                            candidate_song.get("provider_track_id", ""),
                         )
                         if normalized_candidate == song_key:
                             if not any(existing_key == candidate_key for existing_key, _song in matching):
@@ -35802,6 +35885,12 @@ class KaraokeApp(QWidget):
             "type": row.get("song_type") or row.get("type") or "",
             "display": row.get("display") or "",
             "songid": row.get("songid") or row.get("song_id") or row.get("id") or "",
+            "provider": row.get("provider") or "local",
+            "provider_track_id": row.get("provider_track_id") or "",
+            "provider_url": row.get("provider_url") or "",
+            "local_reference_path": row.get("local_reference_path") or "",
+            "authorization_requirement": row.get("authorization_requirement") or "",
+            "availability_status": row.get("availability_status") or "",
         }
 
     def _build_queue_entry_from_track_choice(self, old_entry, track: dict):
@@ -35853,6 +35942,16 @@ class KaraokeApp(QWidget):
             "path": path,
             "type": song_type,
         })
+        for _provider_key in (
+            "provider",
+            "provider_track_id",
+            "provider_url",
+            "local_reference_path",
+            "authorization_requirement",
+            "availability_status",
+        ):
+            if track.get(_provider_key) not in (None, ""):
+                new_entry[_provider_key] = track.get(_provider_key)
         if "songid" in track or "song_id" in track:
             new_entry["songid"] = str(track.get("songid") or track.get("song_id") or "").strip()
         if "tempo_percent" not in new_entry and isinstance(old_entry, (tuple, list)) and len(old_entry) >= 3:
@@ -38499,6 +38598,104 @@ class KaraokeApp(QWidget):
 
         self._enqueue_track_path_for_singer(track_path, singer_name, key_offset)
 
+    def add_karafun_reference_to_queue(self):
+        """Add a KaraFun song reference for assisted external playback."""
+        if not bool(self.settings.get("karafun_provider_enabled", True)):
+            QMessageBox.information(self, "KaraFun Disabled", "Enable the KaraFun provider before adding KaraFun references.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add KaraFun Song")
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+
+        note = QLabel("KaraFun will play externally. SingWS will hold the singer active until you confirm completion.")
+        note.setWordWrap(True)
+        note.setStyleSheet(section_meta_css())
+        layout.addWidget(note)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+
+        singer_edit = QLineEdit()
+        singer_edit.setPlaceholderText("Singer")
+        try:
+            singer_edit.setText(str(self.singer_input.text() or "").strip())
+        except Exception:
+            pass
+        artist_edit = QLineEdit()
+        artist_edit.setPlaceholderText("Artist")
+        title_edit = QLineEdit()
+        title_edit.setPlaceholderText("Song title")
+        url_edit = QLineEdit()
+        url_edit.setPlaceholderText("KaraFun URL or app/file reference (optional)")
+        track_id_edit = QLineEdit()
+        track_id_edit.setPlaceholderText("KaraFun track ID or search term (optional)")
+
+        for row, (label_text, widget) in enumerate((
+            ("Singer", singer_edit),
+            ("Artist", artist_edit),
+            ("Title", title_edit),
+            ("URL / File", url_edit),
+            ("Track ID", track_id_edit),
+        )):
+            label = QLabel(label_text)
+            label.setStyleSheet(section_meta_css())
+            grid.addWidget(label, row, 0)
+            grid.addWidget(widget, row, 1)
+        layout.addLayout(grid)
+
+        buttons = QDialogButtonBox(dlg)
+        add_btn = buttons.addButton("Add to Rotation", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        layout.addWidget(buttons)
+        buttons.rejected.connect(dlg.reject)
+
+        def accept_if_valid():
+            singer = str(singer_edit.text() or "").strip()
+            title = str(title_edit.text() or "").strip()
+            if not singer or not title:
+                QMessageBox.warning(dlg, "Missing Info", "Enter at least a singer and song title.")
+                return
+            dlg.accept()
+
+        add_btn.clicked.connect(accept_if_valid)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        singer = str(singer_edit.text() or "").strip()
+        artist = str(artist_edit.text() or "").strip()
+        title = str(title_edit.text() or "").strip()
+        provider_url = str(url_edit.text() or "").strip()
+        provider_track_id = str(track_id_edit.text() or "").strip()
+        if not provider_track_id:
+            provider_track_id = " - ".join([p for p in (artist, title) if p]) or title
+        reference_id = provider_track_id or provider_url or title
+        song_path = f"karafun_streaming:{reference_id}"
+        display = " - ".join([p for p in (artist, title, "KaraFun") if p])
+        track = {
+            "artist": artist,
+            "title": title,
+            "display": display,
+            "path": song_path,
+            "type": "external",
+            "provider": "karafun_streaming",
+            "provider_track_id": provider_track_id,
+            "provider_url": provider_url,
+            "authorization_requirement": "official_karafun_app",
+            "availability_status": "externally_controlled",
+        }
+        song_data = (song_path, 0, None)
+        if self._add_song_to_queue(singer, song_data, track=track):
+            try:
+                self._show_processing_notification(f"Added KaraFun: {title}", level="success")
+            except Exception:
+                pass
+
     def _on_search_result_double_clicked(self, item):
         """Double-click in song results → same add-to-queue flow as before."""
         try:
@@ -39989,6 +40186,296 @@ class KaraokeApp(QWidget):
         self._bg_transition_advance_gen = current_gen
         self._bg_transition_advance_timer.start(max(0, int(advance_after_ms)))
 
+    def _is_external_karafun_entry(self, entry) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        provider = str(entry.get("provider") or "").strip().lower()
+        if provider in {"karafun_local", "karafun_streaming", "external_karafun"}:
+            return True
+        path = self._song_info_primary_path(entry.get("song_info"))
+        return str(path or "").lower().startswith(("karafun_streaming:", "karafun_local:", "external_karafun:"))
+
+    def _karafun_entry_artist_title(self, entry: dict) -> tuple[str, str]:
+        artist = str((entry or {}).get("artist") or "").strip()
+        title = str((entry or {}).get("title") or "").strip()
+        if title:
+            return artist, title
+        display = str((entry or {}).get("display_name") or (entry or {}).get("display") or "").strip()
+        if " - " in display:
+            parts = [p.strip() for p in display.split(" - ") if p.strip()]
+            if len(parts) >= 2:
+                return artist or parts[0], title or parts[1]
+        return artist, title or display or "KaraFun Song"
+
+    def _karafun_lookup_text(self, entry: dict) -> str:
+        artist, title = self._karafun_entry_artist_title(entry)
+        bits = []
+        if artist or title:
+            bits.append(" - ".join([p for p in (artist, title) if p]))
+        provider_track_id = str((entry or {}).get("provider_track_id") or "").strip()
+        provider_url = str((entry or {}).get("provider_url") or "").strip()
+        local_ref = str((entry or {}).get("local_reference_path") or "").strip()
+        if provider_track_id:
+            bits.append(f"KaraFun ID/search: {provider_track_id}")
+        if provider_url:
+            bits.append(provider_url)
+        elif local_ref:
+            bits.append(local_ref)
+        return "\n".join([b for b in bits if b]).strip()
+
+    def _open_karafun_for_entry(self, entry: dict) -> bool:
+        provider_url = str((entry or {}).get("provider_url") or "").strip()
+        local_ref = str((entry or {}).get("local_reference_path") or "").strip()
+        target = provider_url or local_ref
+        try:
+            if target:
+                if "://" in target:
+                    ok = QDesktopServices.openUrl(QUrl(target))
+                else:
+                    ok = QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+                _diag(f"[KARAFUN] open target={target!r} ok={int(bool(ok))}")
+                return bool(ok)
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-a", "KaraFun"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _diag("[KARAFUN] focused KaraFun app")
+                return True
+        except Exception as e:
+            _diag(f"[KARAFUN] open failed: {e}")
+        return False
+
+    def _copy_karafun_lookup_text(self, entry: dict) -> bool:
+        text = self._karafun_lookup_text(entry)
+        if not text:
+            return False
+        try:
+            QApplication.clipboard().setText(text)
+            _diag("[KARAFUN] copied lookup text")
+            return True
+        except Exception as e:
+            _diag(f"[KARAFUN] copy failed: {e}")
+            return False
+
+    def _fade_bg_for_external_karafun(self):
+        try:
+            self._bg_transition_gen = int(getattr(self, "_bg_transition_gen", 0)) + 1
+            self._clear_bg_transition_timers()
+        except Exception:
+            pass
+        bg = getattr(self, "bg_music", None)
+        if bg is None:
+            return
+        try:
+            if bool(getattr(bg, "is_playing", False)):
+                fade_ms = max(200, int(getattr(self, "_bg_fade_duration_ms", 1000) or 1000))
+                bg.fade_out(fade_ms)
+                _diag(f"[KARAFUN] BGM fade_out duration_ms={fade_ms}")
+        except Exception as e:
+            _diag(f"[KARAFUN] BGM fade failed: {e}")
+
+    def _start_external_karafun_playback(self, *, singer: dict, entry: dict, song_info, key=0, tempo_percent=None, duet_display=None, marker_was_top: bool = False):
+        artist, title = self._karafun_entry_artist_title(entry)
+        singer_display = duet_display or str((singer or {}).get("name", "") or "").strip()
+        self._active_external_karafun = {
+            "singer": singer,
+            "entry": entry,
+            "song_info": song_info,
+            "key": key,
+            "tempo_percent": tempo_percent,
+            "duet_display": duet_display,
+            "marker_was_top": bool(marker_was_top),
+            "started_at": time.time(),
+        }
+        self.karaoke_playing = True
+        self._eta_hold_current_secs = max(0, int((entry or {}).get("duration") or 0))
+        self._current_karaoke_singer_name = str((singer or {}).get("name", "") or "")
+        self._current_karaoke_singer_display = str(singer_display or "")
+        self._current_karaoke_song_path = str(self._song_info_primary_path(song_info) or "")
+        try:
+            self._clear_next_up_overlay_pending("external_karafun_start")
+        except Exception:
+            pass
+        try:
+            self._set_now_singing_3line(singer_display, artist, title)
+        except Exception:
+            pass
+        try:
+            self._fade_bg_for_external_karafun()
+        except Exception:
+            pass
+        try:
+            self._show_idle_background_after_karaoke(reason="external_karafun_active", advance_slideshow=False)
+        except Exception:
+            pass
+        if bool(self.settings.get("karafun_open_automatically", True)):
+            opened = self._open_karafun_for_entry(entry)
+            if not opened:
+                self._copy_karafun_lookup_text(entry)
+        else:
+            self._copy_karafun_lookup_text(entry)
+        try:
+            _diag(f"[KARAFUN] companion active singer={singer_display!r} artist={artist!r} title={title!r}")
+        except Exception:
+            pass
+        self._show_external_karafun_dialog()
+        self.queue = self.queue.copy()
+        QTimer.singleShot(0, self.update_queue_display)
+
+    def _show_external_karafun_dialog(self):
+        active = self._active_external_karafun
+        if not isinstance(active, dict):
+            return
+        old = getattr(self, "_active_external_karafun_dialog", None)
+        try:
+            if old is not None:
+                old.close()
+        except Exception:
+            pass
+        entry = active.get("entry") or {}
+        singer = active.get("singer") or {}
+        artist, title = self._karafun_entry_artist_title(entry)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("KaraFun Active")
+        dlg.setModal(False)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+        heading = QLabel(f"{str(singer.get('name', '') or '').strip()}")
+        heading.setStyleSheet(f"color:{_v('text_bright')}; font-size:18px; font-weight:800;")
+        layout.addWidget(heading)
+        song_label = QLabel(" - ".join([p for p in (artist, title) if p]) or "KaraFun Song")
+        song_label.setWordWrap(True)
+        song_label.setStyleSheet(f"color:{_v('text')}; font-size:14px; font-weight:700;")
+        layout.addWidget(song_label)
+        note = QLabel("KaraFun is externally controlled. SingWS will not advance the rotation until you confirm completion.")
+        note.setWordWrap(True)
+        note.setStyleSheet(section_meta_css())
+        layout.addWidget(note)
+        actions = QHBoxLayout()
+        complete_btn = QPushButton("Complete")
+        open_btn = QPushButton("Open KaraFun")
+        copy_btn = QPushButton("Copy Info")
+        return_btn = QPushButton("Return to Queue")
+        for btn in (complete_btn, open_btn, copy_btn, return_btn):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setMinimumHeight(34)
+        complete_btn.setStyleSheet(button_css(padding="7px 10px", radius=8))
+        open_btn.setStyleSheet(subtle_button_css(padding="7px 10px", radius=8))
+        copy_btn.setStyleSheet(subtle_button_css(padding="7px 10px", radius=8))
+        return_btn.setStyleSheet(warning_button_css(padding="7px 10px", radius=8))
+        actions.addWidget(complete_btn)
+        actions.addWidget(open_btn)
+        actions.addWidget(copy_btn)
+        actions.addWidget(return_btn)
+        layout.addLayout(actions)
+        complete_btn.clicked.connect(lambda: self._finish_external_karafun_playback("complete"))
+        open_btn.clicked.connect(lambda: self._open_karafun_for_entry(entry))
+        copy_btn.clicked.connect(lambda: self._copy_karafun_lookup_text(entry))
+        return_btn.clicked.connect(lambda: self._finish_external_karafun_playback("return_to_queue"))
+        self._active_external_karafun_dialog = dlg
+        try:
+            dlg.resize(520, dlg.sizeHint().height())
+        except Exception:
+            pass
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _finish_external_karafun_playback(self, action: str):
+        active = self._active_external_karafun
+        if not isinstance(active, dict):
+            return
+        action = str(action or "").strip().lower()
+        singer = active.get("singer") if isinstance(active.get("singer"), dict) else {}
+        entry = active.get("entry") if isinstance(active.get("entry"), dict) else {}
+        song_info = active.get("song_info")
+        key = active.get("key", 0)
+        tempo_percent = active.get("tempo_percent")
+        marker_was_top = bool(active.get("marker_was_top", False))
+        singer_name = str(singer.get("name", "") or "").strip()
+        try:
+            dlg = getattr(self, "_active_external_karafun_dialog", None)
+            if dlg is not None:
+                dlg.close()
+        except Exception:
+            pass
+        self._active_external_karafun_dialog = None
+        self._active_external_karafun = None
+        self.karaoke_playing = False
+        self._eta_hold_current_secs = 0
+
+        if action == "return_to_queue":
+            try:
+                singer.setdefault("songs", []).insert(0, entry)
+                self.queue.insert(0, singer)
+                self.queue = self.queue.copy()
+                self._show_processing_notification("KaraFun song returned to queue.", level="info")
+                _diag(f"[KARAFUN] returned to queue singer={singer_name!r}")
+            except Exception as e:
+                _diag(f"[KARAFUN] return_to_queue failed: {e}")
+            try:
+                self.clear_now_singing()
+            except Exception:
+                pass
+            try:
+                self._schedule_bg_resume(120, reason="external_karafun_return")
+            except Exception:
+                pass
+            self.update_queue_display()
+            self.save_data()
+            return
+
+        try:
+            rid = self._queue_entry_remote_request_id(entry)
+            if rid is not None:
+                self._complete_remote_request(rid, entry=entry, singer_name=singer_name, reason="external_karafun_completed")
+        except Exception:
+            pass
+        try:
+            self._record_singer_history_play(singer_name, entry, str(self._song_info_primary_path(song_info) or ""), key=key, tempo_percent=tempo_percent)
+            self._sync_singer_history_async("external_karafun_complete")
+        except Exception:
+            pass
+        singer["has_sung"] = True
+        singer["last_sung_at"] = time.time()
+        if self._is_rotation_mode():
+            singer["round_sung"] = True
+        self.queue.append(singer)
+        if self._is_rotation_locked():
+            self._rotation_reweave_locked_tail()
+        if self._is_rotation_mode():
+            if marker_was_top:
+                for s in self.queue:
+                    if isinstance(s, dict):
+                        s["rotation_marker"] = False
+                singer["rotation_marker"] = True
+            self._rotation_repair_marker()
+            self._rotation_recompute_round_state(force_reset=False)
+        self.queue = self.queue.copy()
+        try:
+            self._mark_next_up_overlay_pending_after_completion(reason="external_karafun_complete")
+        except Exception:
+            pass
+        try:
+            self.clear_now_singing()
+        except Exception:
+            pass
+        try:
+            self._schedule_waiting_for_add_view_refresh(reason="external_karafun_completed")
+        except Exception:
+            pass
+        try:
+            self._schedule_bg_resume(120, reason="external_karafun_complete")
+        except Exception:
+            pass
+        self.update_queue_display()
+        self._schedule_save_data(500)
+        try:
+            self.post_rotation()
+        except Exception:
+            pass
+        _diag(f"[KARAFUN] completed singer={singer_name!r}")
+
     def play_next_file(self, skip_confirmation=False):
         # Intro Loop release: if the next song is held in a looping intro, a
         # Play/Next press just lets it continue past the loop — no teardown, no
@@ -40115,6 +40602,7 @@ class KaraokeApp(QWidget):
         entry = None
         song_info = None
         key = 0
+        remote_request_id = None
         duet_display = None
         while True:
             first_non_skipped_idx = -1
@@ -40145,15 +40633,8 @@ class KaraokeApp(QWidget):
             entry = singer['songs'].pop(first_non_skipped_idx)
             try:
                 remote_request_id = self._queue_entry_remote_request_id(entry)
-                if remote_request_id is not None:
-                    self._complete_remote_request(
-                        remote_request_id,
-                        entry=entry,
-                        singer_name=str(singer.get("name", "") or ""),
-                        reason="song_completed",
-                    )
             except Exception:
-                pass
+                remote_request_id = None
 
             # Handle both dict and tuple format
             if isinstance(entry, dict):
@@ -40173,6 +40654,17 @@ class KaraokeApp(QWidget):
                     song_info, key, tempo_percent, duet_display = entry, 0, None, None
 
             primary_path = self._song_info_primary_path(song_info)
+            if self._is_external_karafun_entry(entry):
+                self._start_external_karafun_playback(
+                    singer=singer,
+                    entry=entry,
+                    song_info=song_info,
+                    key=key,
+                    tempo_percent=tempo_percent,
+                    duet_display=duet_display,
+                    marker_was_top=marker_was_top,
+                )
+                return
             if primary_path and (not os.path.exists(primary_path)):
                 try:
                     _diag(f"[PLAYNEXT] dropped stale queue entry (missing file): {primary_path}")
@@ -40180,6 +40672,16 @@ class KaraokeApp(QWidget):
                     pass
                 # Keep looking for next valid song for this singer.
                 continue
+            try:
+                if remote_request_id is not None:
+                    self._complete_remote_request(
+                        remote_request_id,
+                        entry=entry,
+                        singer_name=str(singer.get("name", "") or ""),
+                        reason="song_completed",
+                    )
+            except Exception:
+                pass
             break
 
         # Keep this song in ETA while it is actively playing.
@@ -40359,6 +40861,9 @@ class KaraokeApp(QWidget):
         QTimer.singleShot(50, self.update_queue_display)
 
     def stop_playback(self, skip_confirmation=False):
+        if isinstance(getattr(self, "_active_external_karafun", None), dict):
+            self._finish_external_karafun_playback("return_to_queue")
+            return
         self._cancel_pending_karaoke_start_transition()
         self._cancel_pending_media_end_cleanup("stop_playback")
         try:
@@ -41038,11 +41543,15 @@ class KaraokeApp(QWidget):
             return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
         version = str(
-            entry.get("selected_disc_id")
+            entry.get("provider_track_id")
+            or entry.get("selected_disc_id")
             or entry.get("disc_id")
             or entry.get("selected_version")
             or ""
         ).strip()
+        provider = str(entry.get("provider") or "local").strip().lower()
+        if provider and provider != "local" and version:
+            version = f"{provider}:{version}"
         if not version:
             try:
                 version = str(self._song_info_primary_path(entry.get("song_info")) or "")
