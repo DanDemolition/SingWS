@@ -882,6 +882,9 @@ def app_stylesheet() -> str:
 
 
 import subprocess, tempfile, shutil, glob
+import copy
+import urllib.parse
+import ctypes
 import random
 import qrcode
 try:
@@ -894,7 +897,7 @@ except Exception:
     PIL_SCREENSHOT_AVAILABLE = False
 
 from PyQt6.QtWidgets import (
-    QSplitter, QAbstractItemView, QSlider, QTreeView, QCheckBox, QMenu
+    QSplitter, QAbstractItemView, QSlider, QTreeView, QCheckBox, QMenu, QMenuBar
 )
 from PyQt6.QtCore import QMimeData, QDir
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QAction
@@ -1018,7 +1021,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QDialog, QDialogButtonBox, QListWidgetItem, QStyledItemDelegate, QStyle,
     QInputDialog, QMessageBox, QFrame, QMainWindow, QToolButton, QStyleOptionViewItem,
     QGraphicsDropShadowEffect, QStackedWidget, QSpinBox,
-    QTextEdit
+    QTextEdit, QPlainTextEdit
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
@@ -1071,12 +1074,56 @@ except Exception:
 class SongSearchThread(QThread):
     results_ready = pyqtSignal(int, list)
 
-    def __init__(self, job_id: int, query: str, limit: int = 500, fuzzy: bool = True):
+    def __init__(self, job_id: int, query: str, limit: int = 500, fuzzy: bool = True,
+                 karafun_search_url: str = "", karafun_tenant: str = ""):
         super().__init__()
         self.job_id = job_id
         self.query = query
         self.limit = limit
         self.fuzzy = bool(fuzzy)
+        self.karafun_search_url = str(karafun_search_url or "").strip()
+        self.karafun_tenant = str(karafun_tenant or "").strip()
+
+    def _karafun_rows(self, local_rows: list) -> list:
+        if not self.karafun_search_url or not self.karafun_tenant or self.isInterruptionRequested():
+            return []
+        try:
+            response = requests.get(
+                self.karafun_search_url,
+                params={"user": self.karafun_tenant, "q": self.query, "offset": 0},
+                timeout=4,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as e:
+            _diag(f"[KARAFUN-SEARCH] catalog lookup unavailable: {e}")
+            return []
+        local_keys = {
+            (str(row.get("artist") or "").strip().lower(), str(row.get("title") or "").strip().lower())
+            for row in (local_rows or []) if isinstance(row, dict)
+        }
+        rows = []
+        for row in (payload.get("results") or []) if isinstance(payload, dict) else []:
+            if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "karafun":
+                continue
+            artist = str(row.get("artist") or "").strip()
+            title = str(row.get("title") or "").strip()
+            track_id = str(row.get("song_id") or "").strip()
+            if not artist or not title or not track_id or (artist.lower(), title.lower()) in local_keys:
+                continue
+            rows.append({
+                "artist": artist,
+                "title": title,
+                "song_id": track_id,
+                "path": f"karafun_streaming:{track_id}",
+                "type": "online",
+                "provider": "karafun_streaming",
+                "provider_track_id": track_id,
+                "availability_status": "externally_controlled",
+                "authorization_requirement": "official_karafun_app",
+                "karafun_catalog_only": True,
+            })
+        return rows
 
     def run(self):
         started = time.monotonic()
@@ -1087,7 +1134,8 @@ class SongSearchThread(QThread):
             rows = []
         strict_ms = (time.monotonic() - started) * 1000.0
         _perf_log_if_slow("search_query", strict_ms)
-        self.results_ready.emit(self.job_id, rows)
+        karafun_rows = self._karafun_rows(rows)
+        self.results_ready.emit(self.job_id, rows + karafun_rows)
         if self.isInterruptionRequested() or not self.fuzzy:
             return
         # Fuzzy is helpful for typos, but it is the expensive part. Only run it
@@ -1104,7 +1152,7 @@ class SongSearchThread(QThread):
             if self.isInterruptionRequested():
                 return
             if fuzzy_rows:
-                self.results_ready.emit(self.job_id, fuzzy_rows)
+                self.results_ready.emit(self.job_id, fuzzy_rows + self._karafun_rows(fuzzy_rows))
         except Exception:
             return
 
@@ -1892,6 +1940,7 @@ SINGER_PREFS_PATH = APP_USER_DIR / "singer_preferences.json"
 SINGER_HISTORY_PATH = APP_USER_DIR / "singer_history.json"
 REMOTE_REQUEST_TOMBSTONES_PATH = APP_USER_DIR / "remote_request_tombstones.json"
 DEFERRED_REMOTE_ADDS_PATH = APP_USER_DIR / "deferred_remote_adds.json"
+HOST_REQUEST_SYNC_PATH = APP_USER_DIR / "host_request_sync.json"
 IMAGES_DIR = APP_USER_DIR / "images"
 IMAGES_DIR.mkdir(exist_ok=True)
 
@@ -2852,7 +2901,16 @@ DEFAULTS = {
     "next_up_overlay_enabled": True, # Show temporary audience-facing Next Up transition panel
     "next_up_overlay_duration_sec": 10, # seconds the Next Up transition panel stays visible
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
+    "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "karafun_open_automatically": True, # Focus/open KaraFun when an external KaraFun queue item becomes active
+    "karafun_manage_show_screen": True, # macOS: hand the show display to KaraFun, then restore SingWS on completion
+    "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
+    "karafun_request_url": "",       # Private KaraFun host/session link; never included in public/server payloads
+    "karafun_auto_submit_server": True,
+    "karafun_auto_submit_host": True,
+    "karafun_require_host_approval": False,
+    "karafun_submission_timeout_sec": 12,
+    "karafun_submission_retries": 1,
     "disc_id_priority": "",          # comma-separated prefixes for remote request matching (blank = no priority)
     "background_closed_image_path": "",   # optional background shown when requests are closed
     "background_slideshow_enabled": False, # rotate images while idle
@@ -2917,6 +2975,7 @@ DEFAULTS = {
     "session_location_latitude": "",      # current SingWS session venue latitude
     "session_location_longitude": "",     # current SingWS session venue longitude
     "session_location_auto_detect": True, # auto-detect current device location on macOS
+    "session_location_permission_requested": False, # request macOS authorization once per local settings profile
     "session_location_source": "",        # auto_detected | manual | manual_fallback
     "operator_column_splitter_sizes": [], # left workspace width / preview-controls width
     "library_rotation_splitter_sizes": [], # search library width / rotation width
@@ -8702,6 +8761,165 @@ class BackgroundMusicManager(QMainWindow):
         self.playlist_count.setText(f"{len(self.current_playlist)} tracks")
         self._refresh_workspace_meta()
         
+    # ── Session undo -------------------------------------------------------
+    # Commands intentionally hold complete model records.  Queue entries carry
+    # request IDs and server-order metadata which cannot safely be reconstructed
+    # from the visible list rows.
+    def _setup_undo_system(self):
+        self._undo_stack = []
+        self._undo_limit = 20
+        self._undo_restoring = False
+        self._undo_action = None
+        try:
+            menu_bar = QMenuBar(self)
+            menu_bar.setNativeMenuBar(True)
+            edit_menu = menu_bar.addMenu("Edit")
+            action = QAction("Undo", self)
+            action.setShortcut(QKeySequence.StandardKey.Undo)
+            action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+            action.setEnabled(False)
+            action.triggered.connect(self._dispatch_undo)
+            edit_menu.addAction(action)
+            self._app_menu_bar = menu_bar
+            self._edit_menu = edit_menu
+            self._undo_action = action
+        except Exception as e:
+            _diag(f"[UNDO] menu setup failed: {e}")
+        KaraokeApp._update_undo_action(self)
+
+    def _undo_snapshot(self) -> dict:
+        """Capture durable host state affected by queue/waitlist commands."""
+        state = object.__getattribute__(self, "__dict__")
+        return copy.deepcopy({
+            "queue": state.get("queue", []),
+            "waiting_for_add_requests": state.get("_waiting_for_add_requests", {}),
+            "waiting_for_add_handled_ids": state.get("_waiting_for_add_handled_ids", set()),
+            "remote_attention_requests": state.get("_remote_attention_requests", {}),
+            "remote_request_tombstones": state.get("_remote_request_tombstones", {"requests": {}}),
+            "remote_removed_request_ids": state.get("_remote_removed_request_ids", set()),
+            "pending_remote_order_syncs": state.get("_pending_remote_order_syncs", {}),
+            "queue_revision": state.get("_queue_revision", 0),
+        })
+
+    def _begin_undoable_action(self, name: str) -> dict | None:
+        state = object.__getattribute__(self, "__dict__")
+        if bool(state.get("_undo_restoring", False)):
+            return None
+        return {"name": str(name or "Change"), "before": KaraokeApp._undo_snapshot(self)}
+
+    def _commit_undoable_action(self, command: dict | None, message: str = "") -> bool:
+        state = object.__getattribute__(self, "__dict__")
+        if not command or bool(state.get("_undo_restoring", False)):
+            return False
+        try:
+            if command.get("before") == KaraokeApp._undo_snapshot(self):
+                return False
+        except Exception:
+            pass
+        stack = state.get("_undo_stack")
+        if not isinstance(stack, list):
+            stack = []
+            self._undo_stack = stack
+        stack.append(command)
+        del stack[:-max(1, int(state.get("_undo_limit", 20) or 20))]
+        KaraokeApp._update_undo_action(self)
+        # Routine queue actions stay quiet. The Edit menu exposes Undo without
+        # turning the search-area status line into an activity feed.
+        return True
+
+    def _update_undo_action(self):
+        state = object.__getattribute__(self, "__dict__")
+        action = state.get("_undo_action")
+        if action is None:
+            return
+        stack = state.get("_undo_stack", [])
+        command = stack[-1] if stack else None
+        action.setText(f"Undo {command.get('name', 'Change')}" if command else "Undo")
+        action.setEnabled(bool(command))
+
+    def _dispatch_undo(self):
+        """Keep normal editor undo when Command+Z is used while typing."""
+        try:
+            focus = QApplication.focusWidget()
+            if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit)) and hasattr(focus, "undo"):
+                focus.undo()
+                return
+        except Exception:
+            pass
+        self.undo_last_action()
+
+    def undo_last_action(self) -> bool:
+        state = object.__getattribute__(self, "__dict__")
+        stack = state.get("_undo_stack")
+        if not isinstance(stack, list) or not stack:
+            KaraokeApp._update_undo_action(self)
+            return False
+        command = stack.pop()
+        before_restore = copy.deepcopy(state.get("queue", []))
+        snapshot = copy.deepcopy(command.get("before") or {})
+        self._undo_restoring = True
+        try:
+            self.queue = snapshot.get("queue", [])
+            self._waiting_for_add_requests = snapshot.get("waiting_for_add_requests", {})
+            self._waiting_for_add_handled_ids = set(snapshot.get("waiting_for_add_handled_ids", set()))
+            self._remote_attention_requests = snapshot.get("remote_attention_requests", {})
+            self._remote_request_tombstones = snapshot.get("remote_request_tombstones", {"requests": {}})
+            self._remote_removed_request_ids = set(snapshot.get("remote_removed_request_ids", set()))
+            self._pending_remote_order_syncs = snapshot.get("pending_remote_order_syncs", {})
+            # A new host revision supersedes any deletion/reorder already in flight.
+            self._queue_revision = max(
+                int(getattr(self, "_queue_revision", 0) or 0),
+                int(snapshot.get("queue_revision", 0) or 0),
+            ) + 1
+            self.save_data()
+            self._save_remote_request_tombstones(self._remote_request_tombstones)
+            self.update_queue_display()
+            try:
+                self._schedule_waiting_for_add_view_refresh(reason="undo")
+            except Exception:
+                pass
+            try:
+                self.update_rotation_summary_card()
+            except Exception:
+                pass
+            KaraokeApp._sync_undo_server_state(self, before_restore)
+            try:
+                self._show_processing_notification(
+                    f"{command.get('name', 'Change')} restored", level="success"
+                )
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            stack.append(command)
+            _diag(f"[UNDO] restore failed action={command.get('name')!r}: {e}")
+            return False
+        finally:
+            self._undo_restoring = False
+            KaraokeApp._update_undo_action(self)
+
+    def _sync_undo_server_state(self, previous_queue=None):
+        """Publish restored host state and supersede stale remote mutations."""
+        try:
+            self.post_rotation()
+        except Exception:
+            pass
+        for singer_idx, singer in enumerate(self.queue or []):
+            try:
+                self._sync_remote_singer_order(singer_idx, reason="host_undo")
+            except Exception:
+                pass
+            for entry in list((singer or {}).get("songs", []) or []):
+                try:
+                    if self._queue_entry_remote_request_id(entry) is not None:
+                        self._push_remote_request_replacement(
+                            entry,
+                            singer_name=str((singer or {}).get("name", "") or ""),
+                            source="host_undo",
+                        )
+                except Exception:
+                    pass
+
     def load_data(self):
         """Load saved current playlist (no database)"""
         # Load playlist
@@ -10849,7 +11067,9 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
             "artist": artist,
             "title": title,
             "disc_id": disc_id,
-            "duration": old_duration_by_path.get(full_path),
+            # Incremental Update preserves duration work. Full Scan rebuilds
+            # every track record and deliberately re-probes every duration.
+            "duration": old_duration_by_path.get(full_path) if quick_mode else None,
         }
         if scan_mtime is not None:
             track["scan_mtime"] = scan_mtime
@@ -13015,11 +13235,13 @@ class RightAlignedMetaDelegate(QStyledItemDelegate):
         gap_px: int = 12,
         force_scrollbar_reserve_px: int | None = None,
         duet_role: int | None = None,
+        status_role: int | None = None,
     ):
         super().__init__(parent)
         self.left_role = left_role
         self.right_role = right_role
         self.duet_role = duet_role
+        self.status_role = status_role
         self.gap_px = max(4, int(gap_px))
         self.edge_pad_px = max(0, int(edge_pad_px))
         self.force_scrollbar_reserve_px = force_scrollbar_reserve_px
@@ -13059,11 +13281,27 @@ class RightAlignedMetaDelegate(QStyledItemDelegate):
         left = str(left or "")
         right = str(right or "")
 
+        status = ""
+        if self.status_role is not None:
+            try:
+                status = str(index.data(self.status_role) or "")
+            except Exception:
+                status = ""
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+        # Current/next are playback presentation states, not selection states.
+        # Never let Qt's selected-row palette cover their dedicated treatment.
+        if status in {"current", "next"}:
+            opt.state &= ~QStyle.StateFlag.State_Selected
         style = opt.widget.style() if opt.widget is not None else QApplication.style()
         opt.text = ""
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        if status in {"current", "next"}:
+            painter.save()
+            marker = QColor("#22C55E" if status == "current" else "#F4C542")
+            marker_w = 6 if status == "current" else 3
+            painter.fillRect(QRect(option.rect.left(), option.rect.top(), marker_w, option.rect.height()), marker)
+            painter.restore()
 
         text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
         if not text_rect.isValid():
@@ -13108,7 +13346,7 @@ class RightAlignedMetaDelegate(QStyledItemDelegate):
                 pass
 
         fg = index.data(Qt.ItemDataRole.ForegroundRole)
-        if option.state & QStyle.StateFlag.State_Selected:
+        if opt.state & QStyle.StateFlag.State_Selected:
             pen_color = option.palette.color(QPalette.ColorRole.HighlightedText)
         elif hasattr(fg, "color"):
             pen_color = fg.color()
@@ -14106,6 +14344,7 @@ class QueueListModel(QAbstractListModel):
             user + 30,
             user + 31,
             user + 32,
+            user + 33,
         ]
 
     def _row_payload_equal(self, a: dict, b: dict) -> bool:
@@ -15299,6 +15538,18 @@ class SoundboardStrip(QWidget):
 
 
 class KaraokeApp(QWidget):
+    # Session undo implementation is shared as a small command mixin.  Keeping
+    # aliases here makes the API explicit on the main app without changing its
+    # QWidget inheritance or moving queue ownership out of Python.
+    _setup_undo_system = BackgroundMusicManager._setup_undo_system
+    _undo_snapshot = BackgroundMusicManager._undo_snapshot
+    _begin_undoable_action = BackgroundMusicManager._begin_undoable_action
+    _commit_undoable_action = BackgroundMusicManager._commit_undoable_action
+    _update_undo_action = BackgroundMusicManager._update_undo_action
+    _dispatch_undo = BackgroundMusicManager._dispatch_undo
+    undo_last_action = BackgroundMusicManager.undo_last_action
+    _sync_undo_server_state = BackgroundMusicManager._sync_undo_server_state
+
     _ui_call_requested = pyqtSignal(object)
 
     def _dispatch_ui_call(self, fn):
@@ -15485,6 +15736,10 @@ class KaraokeApp(QWidget):
         self.settings = self.load_settings()
         self._remote_request_tombstones = self._load_remote_request_tombstones()
         self._deferred_remote_adds = self._load_deferred_remote_adds()
+        self._host_request_sync_ops = _load_json_file(
+            HOST_REQUEST_SYNC_PATH, [], expected_type=list, label="Host request sync"
+        )
+        self._host_request_sync_inflight = set()
         self._remote_request_intake_inflight = set()
 
         # EQ is intentionally lazy. Importing scipy/numpy on every launch made
@@ -16080,6 +16335,7 @@ class KaraokeApp(QWidget):
         self._queue_row_kind_role = int(Qt.ItemDataRole.UserRole) + 30
         self._queue_singer_index_role = int(Qt.ItemDataRole.UserRole) + 31
         self._queue_song_index_role = int(Qt.ItemDataRole.UserRole) + 32
+        self._queue_presentation_role = int(Qt.ItemDataRole.UserRole) + 33
 
         # Match queue behavior: alternating rows + visible selection + fixed row height
         self.results_list.setAlternatingRowColors(True)
@@ -16208,6 +16464,8 @@ class KaraokeApp(QWidget):
         self.now_singing_label.setStyleSheet(self._now_singing_idle_css)
         self._current_karaoke_singer_name = ""
         self._current_karaoke_singer_display = ""
+        self._current_karaoke_singer_id = ""
+        self._current_karaoke_request_id = ""
         self._current_karaoke_song_path = ""
         self._current_karaoke_mode = ""
         self._current_karaoke_cdg_path = ""
@@ -16299,7 +16557,14 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        self.queue_display.setStyleSheet(list_widget_css())
+        self.queue_display.setStyleSheet(list_widget_css() + """
+            QListView::item:selected, QListView::item:selected:active,
+            QListView::item:selected:!active {
+                background-color: rgba(124,61,255,0.18);
+                color: #E8E4F5;
+                border: 1px solid rgba(167,139,250,0.28);
+            }
+        """)
         self.queue_display.setUniformItemSizes(True)
 
         # Set native font with macOS size adjustment (14pt for Mac, 10pt for Windows/Linux)
@@ -16320,7 +16585,8 @@ class KaraokeApp(QWidget):
         self.queue_display.viewport().installEventFilter(self)
         self.queue_display.setItemDelegate(
             RightAlignedMetaDelegate(self._row_left_role, self._row_right_role, self.queue_display,
-                                     duet_role=self._row_duet_role)
+                                     duet_role=self._row_duet_role,
+                                     status_role=self._queue_presentation_role)
         )
         
         # Reformat when the vertical scrollbar appears/disappears (viewport width changes without a resize event)
@@ -17364,6 +17630,7 @@ class KaraokeApp(QWidget):
         self.rotation_post_timer.timeout.connect(self.post_rotation)
         
         self.load_data()
+        self._setup_undo_system()
         self._bootstrap_bg_playlist_on_startup()
         self.search_tracks()
         QTimer.singleShot(1500, lambda: self._schedule_singer_history_refresh(0, reason="startup"))
@@ -18162,6 +18429,82 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    @staticmethod
+    def _ensure_singer_id(singer: dict) -> str:
+        if not isinstance(singer, dict):
+            return ""
+        singer_id = str(singer.get("singer_id") or "").strip()
+        if not singer_id:
+            singer_id = uuid.uuid4().hex
+            singer["singer_id"] = singer_id
+        return singer_id
+
+    @staticmethod
+    def _ensure_queue_entry_id(entry) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        request_id = entry.get("remote_request_id")
+        if request_id not in (None, "", 0, "0"):
+            return f"remote:{request_id}"
+        entry_id = str(entry.get("request_uid") or "").strip()
+        if not entry_id:
+            entry_id = uuid.uuid4().hex
+            entry["request_uid"] = entry_id
+        return f"local:{entry_id}"
+
+    def _authoritative_rotation_indices(self) -> tuple[int, int, bool]:
+        """Return (current singer index, next singer index, mapping warning).
+
+        Playback IDs are authoritative. Names are deliberately not used because
+        renames, duplicates, reorders, and server rebuilds make them ambiguous.
+        """
+        current_idx = -1
+        next_idx = -1
+        warning = False
+        active = bool(getattr(self, "karaoke_playing", False))
+        current_singer_id = str(getattr(self, "_current_karaoke_singer_id", "") or "").strip()
+        current_request_id = str(getattr(self, "_current_karaoke_request_id", "") or "").strip()
+        if active:
+            for idx, singer in enumerate(self.queue or []):
+                if current_singer_id and str((singer or {}).get("singer_id") or "") == current_singer_id:
+                    current_idx = idx
+                    break
+                if current_request_id:
+                    for entry in (singer or {}).get("songs", []) or []:
+                        if str(self._ensure_queue_entry_id(entry)) == current_request_id:
+                            current_idx = idx
+                            break
+                    if current_idx >= 0:
+                        break
+            warning = current_idx < 0
+        for idx, singer in enumerate(self.queue or []):
+            if idx == current_idx or singer.get("skipped", False):
+                continue
+            if self._first_active_entry_for_singer(singer) is not None:
+                next_idx = idx
+                break
+        return current_idx, next_idx, warning
+
+    def _reapply_rotation_presentation(self, *, scroll_current: bool = False) -> None:
+        """Refresh playback roles without changing selection or keyboard focus."""
+        self.update_queue_display()
+        if not scroll_current or not bool(getattr(self, "karaoke_playing", False)):
+            return
+        current_idx, _next_idx, warning = self._authoritative_rotation_indices()
+        if warning or current_idx < 0:
+            return
+        singer_id = self._ensure_singer_id(self.queue[current_idx])
+        if singer_id == str(getattr(self, "_last_scrolled_current_singer_id", "") or ""):
+            return
+        try:
+            model = getattr(self, "queue_display_model", None)
+            index = model.indexForSinger(current_idx) if isinstance(model, QueueListModel) else QModelIndex()
+            if index.isValid():
+                self.queue_display.scrollTo(index, QAbstractItemView.ScrollHint.EnsureVisible)
+                self._last_scrolled_current_singer_id = singer_id
+        except Exception:
+            pass
+
     def _set_queue_row_identity(self, item: QListWidgetItem, kind: str, singer_idx: int = -1, song_idx: int = -1):
         """Attach stable queue row identity independent of visible row text."""
         try:
@@ -18186,6 +18529,7 @@ class KaraokeApp(QWidget):
                 int(getattr(self, "_queue_row_kind_role", int(Qt.ItemDataRole.UserRole) + 30)),
                 int(getattr(self, "_queue_singer_index_role", int(Qt.ItemDataRole.UserRole) + 31)),
                 int(getattr(self, "_queue_song_index_role", int(Qt.ItemDataRole.UserRole) + 32)),
+                int(getattr(self, "_queue_presentation_role", int(Qt.ItemDataRole.UserRole) + 33)),
             }
             for role in role_ids:
                 value = item.data(role)
@@ -18403,17 +18747,18 @@ class KaraokeApp(QWidget):
         # FIXED: Handle both 'discid' (from DB) and 'disc_id' (from JSON)
         disc_id = (track.get("discid") or track.get("disc_id") or "").strip()
         dur = track.get("duration") or track.get("duration_secs")
+        karafun_catalog_only = bool(track.get("karafun_catalog_only", False))
 
         left = f"{artist} • {title}" if artist else (title or (track.get("display") or "").strip())
         right_parts = []
-        media_badge = self._track_media_badge(track)
+        media_badge = "" if karafun_catalog_only else self._track_media_badge(track)
         provider = str(track.get("provider") or "local").strip().lower()
         provider_badge = ""
         if provider and provider != "local":
-            provider_badge = "KaraFun" if "karafun" in provider else provider.replace("_", " ").title()
+            provider_badge = "KaraFun ONLINE" if "karafun" in provider else provider.replace("_", " ").title()
         # Disc ID / company first (bolded by the delegate) so it's easy to scan,
         # then the file-type badge, then duration.
-        if disc_id:
+        if disc_id and not karafun_catalog_only:
             right_parts.append(disc_id)
         if provider_badge:
             right_parts.append(provider_badge)
@@ -18430,7 +18775,7 @@ class KaraokeApp(QWidget):
             meta_bits.append(f"Format: {media_badge}")
         if provider_badge:
             meta_bits.append(f"Provider: {provider_badge}")
-        if disc_id:
+        if disc_id and not karafun_catalog_only:
             meta_bits.append(f"Disc: {disc_id}")
         if dur:
             meta_bits.append(f"Duration: {self._fmt_right_time(dur)}")
@@ -18597,6 +18942,12 @@ class KaraokeApp(QWidget):
                 pass
             current_singer = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
             current_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip()
+            mapping_warning = False
+            if karaoke_active:
+                try:
+                    _current_idx, _next_idx, mapping_warning = self._authoritative_rotation_indices()
+                except Exception:
+                    mapping_warning = True
 
             next_singer = None
             next_entry = None
@@ -18608,6 +18959,19 @@ class KaraokeApp(QWidget):
                     next_singer = singer
                     next_entry = candidate
                     break
+
+            if karaoke_active and mapping_warning:
+                self.rotation_summary_kicker.setText("PLAYBACK MAPPING WARNING")
+                self.rotation_summary_title.setText(current_singer or "Unknown current singer")
+                self.rotation_summary_subtitle.setText("Active playback no longer maps to a rotation ID")
+                self.rotation_summary_meta.setText("Do not use row selection to identify the singer")
+                self.rotation_summary_art.set_mode("live")
+                self.rotation_summary_art.set_name(current_singer or "?")
+                try:
+                    self.rotation_summary_meter.set_active(True)
+                except Exception:
+                    pass
+                return
 
             if karaoke_active and current_singer:
                 current_artist = ""
@@ -18745,6 +19109,9 @@ class KaraokeApp(QWidget):
             pass
     def showEvent(self, event):
         super().showEvent(event)
+        # Restore/return-from-tab must re-read authoritative playback IDs. This
+        # updates presentation only and never selects a row or steals focus.
+        QTimer.singleShot(0, lambda: self._reapply_rotation_presentation(scroll_current=False))
         # Run startup auto-placement only once; do not re-place on restore/maximize.
         if not getattr(self, "_initial_video_window_placement_done", False):
             self._initial_video_window_placement_done = True
@@ -18752,6 +19119,15 @@ class KaraokeApp(QWidget):
         # Defer first paint of BG mini-card until after final startup geometry sync.
         QTimer.singleShot(0, self._finalize_bg_main_card_layout)
         QTimer.singleShot(80, self._finalize_bg_main_card_layout)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        try:
+            if event.type() in (QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange):
+                if self.isActiveWindow() or not self.isMinimized():
+                    QTimer.singleShot(0, lambda: self._reapply_rotation_presentation(scroll_current=False))
+        except Exception:
+            pass
 
     def _place_video_window_bottom_right(self):
         try:
@@ -25551,6 +25927,7 @@ class KaraokeApp(QWidget):
             return False
         old_artist = str(req.get("artist") or "").strip()
         old_title = str(req.get("title") or "").strip()
+        undo = KaraokeApp._begin_undoable_action(self, "Replace Song")
         artist = str(track.get("artist") or old_artist).strip()
         title = str(track.get("title") or old_title).strip()
         replacement = dict(track)
@@ -25582,6 +25959,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._show_processing_notification("Waitlist replacement selected.", level="success")
+        KaraokeApp._commit_undoable_action(self, undo, "Waitlist song replaced")
         return True
 
     def _waiting_for_add_song_data_from_track(self, req: dict, track: dict):
@@ -26077,6 +26455,7 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
+        undo = KaraokeApp._begin_undoable_action(self, "Remove Pending Request")
         try:
             self._waiting_for_add_handled_ids.add(rid)
         except Exception:
@@ -26100,6 +26479,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._schedule_waiting_for_add_view_refresh(reason="clear")
+        KaraokeApp._commit_undoable_action(self, undo, "Pending request removed")
 
     def _clear_all_waiting_for_add(self):
         reqs = self._waiting_for_add_clearable_requests()
@@ -26118,6 +26498,7 @@ class KaraokeApp(QWidget):
                 return
         except Exception:
             pass
+        undo = KaraokeApp._begin_undoable_action(self, "Clear Waitlist")
         handled = getattr(self, "_waiting_for_add_handled_ids", None)
         if not isinstance(handled, set):
             handled = set()
@@ -26155,6 +26536,7 @@ class KaraokeApp(QWidget):
                 f"Cleared {removed} waitlisted song{'s' if removed != 1 else ''}.",
                 level="success",
             )
+            KaraokeApp._commit_undoable_action(self, undo, "Waitlist cleared")
 
     def _waiting_for_add_failed_add(self, req: dict | None) -> bool:
         """True when this waitlist entry is here because the desktop add failed
@@ -29151,12 +29533,13 @@ class KaraokeApp(QWidget):
             """Network settings with server connection check and accepting toggle button."""
             from PyQt6.QtWidgets import (
                 QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QDialogButtonBox,
-                QMessageBox, QPushButton, QProgressDialog, QCheckBox
+                QMessageBox, QPushButton, QProgressDialog, QCheckBox, QScrollArea, QWidget
             )
     
             dlg = QDialog(self)
             dlg.setWindowTitle("Network Settings")
-            dlg.resize(520, 320)
+            dlg.resize(560, 640)
+            dlg.setMinimumSize(480, 420)
 
             def _network_label_css() -> str:
                 return section_meta_css()
@@ -29189,9 +29572,20 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-            v = QVBoxLayout(dlg)
-            v.setContentsMargins(18, 18, 18, 18)
+            outer = QVBoxLayout(dlg)
+            outer.setContentsMargins(12, 12, 12, 12)
+            outer.setSpacing(10)
+
+            scroll = QScrollArea(dlg)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            settings_page = QWidget(scroll)
+            v = QVBoxLayout(settings_page)
+            v.setContentsMargins(6, 6, 10, 10)
             v.setSpacing(10)
+            scroll.setWidget(settings_page)
+            outer.addWidget(scroll, 1)
     
             # Base URL row
             connection_title = QLabel("Connection")
@@ -29421,6 +29815,67 @@ class KaraokeApp(QWidget):
             host_hint.setStyleSheet(_network_label_css())
             host_hint.setWordWrap(True)
             v.addWidget(host_hint)
+
+            v.addSpacing(12)
+            karafun_title = QLabel("KaraFun Integration")
+            karafun_title.setStyleSheet(section_title_css())
+            v.addWidget(karafun_title)
+
+            karafun_enable_cb = QCheckBox("Enable automatic KaraFun queueing on this Mac")
+            karafun_enable_cb.setChecked(bool(self.settings.get("karafun_auto_queue_enabled", False)))
+            v.addWidget(karafun_enable_cb)
+
+            karafun_search_cb = QCheckBox("Include online KaraFun catalog results in SingWS search")
+            karafun_search_cb.setChecked(bool(self.settings.get("karafun_include_online_search", False)))
+            karafun_search_cb.setToolTip("Shows CSV catalog-only tracks with a KaraFun Online badge. Local matches remain preferred.")
+            v.addWidget(karafun_search_cb)
+
+            karafun_url_row = QHBoxLayout()
+            karafun_url_row.addWidget(QLabel("Host request link:"))
+            karafun_url_edit = QLineEdit(str(self.settings.get("karafun_request_url", "") or ""))
+            karafun_url_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            karafun_url_edit.setPlaceholderText("https://www.karafun.com/your-session-code")
+            karafun_url_edit.setToolTip("Stored only in this Mac's local SingWS settings. It is never uploaded to the public request server.")
+            karafun_url_row.addWidget(karafun_url_edit, 1)
+            karafun_show_btn = QPushButton("Show")
+            karafun_show_btn.setCheckable(True)
+            karafun_open_btn = QPushButton("Open Page")
+            karafun_url_row.addWidget(karafun_show_btn)
+            karafun_url_row.addWidget(karafun_open_btn)
+            v.addLayout(karafun_url_row)
+
+            karafun_server_cb = QCheckBox("Automatically submit server-requested KaraFun tracks")
+            karafun_server_cb.setChecked(bool(self.settings.get("karafun_auto_submit_server", True)))
+            v.addWidget(karafun_server_cb)
+            karafun_host_cb = QCheckBox("Automatically submit host-added KaraFun tracks")
+            karafun_host_cb.setChecked(bool(self.settings.get("karafun_auto_submit_host", True)))
+            v.addWidget(karafun_host_cb)
+            karafun_approval_cb = QCheckBox("Require host approval before KaraFun submission")
+            karafun_approval_cb.setChecked(bool(self.settings.get("karafun_require_host_approval", False)))
+            v.addWidget(karafun_approval_cb)
+
+            karafun_status = QLabel("The private link and automation settings stay on this Mac.")
+            karafun_status.setStyleSheet(_network_label_css())
+            karafun_status.setWordWrap(True)
+            v.addWidget(karafun_status)
+
+            def toggle_karafun_url_visible(visible: bool):
+                karafun_url_edit.setEchoMode(QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password)
+                karafun_show_btn.setText("Hide" if visible else "Show")
+
+            def open_karafun_request_page():
+                value = karafun_url_edit.text().strip()
+                parsed = urllib.parse.urlsplit(value)
+                if parsed.scheme != "https" or parsed.hostname not in {"karafun.com", "www.karafun.com"}:
+                    karafun_status.setText("Enter a valid HTTPS karafun.com host request link.")
+                    karafun_status.setStyleSheet(_network_state_label_css(_v("danger")))
+                    return
+                QDesktopServices.openUrl(QUrl(value))
+                karafun_status.setText("Opened the configured KaraFun host request page.")
+                karafun_status.setStyleSheet(_network_state_label_css(_v("success")))
+
+            karafun_show_btn.toggled.connect(toggle_karafun_url_visible)
+            karafun_open_btn.clicked.connect(open_karafun_request_page)
 
             # Track current accepting state
             accepting_state = [self._is_requests_accepting_cached()]  # Host-authoritative state
@@ -29741,7 +30196,7 @@ class KaraokeApp(QWidget):
     
             # OK / Cancel
             btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-            v.addWidget(btns)
+            outer.addWidget(btns)
     
             def accept():
                 # Save new values
@@ -29756,6 +30211,12 @@ class KaraokeApp(QWidget):
                 self.settings["api_key"] = (key_edit.text().strip() or "")
                 self.settings["header_qr_url"] = qr_edit.text().strip()
                 self.settings["host_controls_pin"] = host_pin_edit.text().strip()
+                self.settings["karafun_auto_queue_enabled"] = bool(karafun_enable_cb.isChecked())
+                self.settings["karafun_include_online_search"] = bool(karafun_search_cb.isChecked())
+                self.settings["karafun_request_url"] = karafun_url_edit.text().strip()
+                self.settings["karafun_auto_submit_server"] = bool(karafun_server_cb.isChecked())
+                self.settings["karafun_auto_submit_host"] = bool(karafun_host_cb.isChecked())
+                self.settings["karafun_require_host_approval"] = bool(karafun_approval_cb.isChecked())
                 self.settings["session_location_auto_detect"] = bool(auto_loc_checkbox.isChecked())
                 self.settings["session_location_latitude"] = lat_edit.text().strip()
                 self.settings["session_location_longitude"] = lng_edit.text().strip()
@@ -29919,7 +30380,20 @@ class KaraokeApp(QWidget):
                     return None, self._friendly_location_detection_error("Location permission denied for SingWS.")
             except Exception:
                 pass
-            if hasattr(manager, "requestWhenInUseAuthorization"):
+            try:
+                status = int(manager.authorizationStatus())
+            except Exception:
+                status = 0
+            if (
+                status == 0
+                and hasattr(manager, "requestWhenInUseAuthorization")
+                and not bool(self.settings.get("session_location_permission_requested", False))
+            ):
+                self.settings["session_location_permission_requested"] = True
+                try:
+                    self.save_settings()
+                except Exception:
+                    pass
                 manager.requestWhenInUseAuthorization()
             manager.startUpdatingLocation()
 
@@ -29968,7 +30442,7 @@ class KaraokeApp(QWidget):
 
         if auto_detect and allow_auto_detect:
             should_refresh = (
-                lat_raw == "" or lng_raw == "" or source == "auto_detected" or
+                lat_raw == "" or lng_raw == "" or
                 (detected_at > 0 and (time.time() - detected_at) >= 300) or detected_at == 0
             )
             if should_refresh:
@@ -30303,6 +30777,8 @@ class KaraokeApp(QWidget):
             self._now_singing_parts = None
             self._current_karaoke_singer_name = ""
             self._current_karaoke_singer_display = ""
+            self._current_karaoke_singer_id = ""
+            self._current_karaoke_request_id = ""
             try:
                 self._update_last_sung_card()
             except Exception:
@@ -32124,6 +32600,16 @@ class KaraokeApp(QWidget):
             # Never leave the freshly inserted server row (or a stale
             # index-shifted row) highlighted as if it were the next singer.
             self._queue_select_top_after_server_update = False
+            if bool(getattr(self, "karaoke_playing", False)):
+                # A server mutation must never create a competing highlighted
+                # row during playback. Current/next remain model presentation
+                # roles; ordinary editing selection is cleared.
+                self.queue_display.setCurrentRow(-1)
+                try:
+                    _diag("[QUEUE-SELECT] server update during playback -> cleared editing selection")
+                except Exception:
+                    pass
+                return
             top_row = self._queue_top_actionable_row()
             self.queue_display.setCurrentRow(top_row)  # -1 clears selection
             if not self._host_is_interacting_elsewhere():
@@ -32281,6 +32767,174 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         _save_json_atomic(DEFERRED_REMOTE_ADDS_PATH, snapshot)
+
+    def _save_host_request_sync_ops(self) -> None:
+        """Durably persist host-created request upserts before network delivery."""
+        try:
+            rows = list(object.__getattribute__(self, "__dict__").get("_host_request_sync_ops", []) or [])
+        except Exception:
+            rows = []
+        _save_json_atomic(HOST_REQUEST_SYNC_PATH, rows)
+
+    def _host_request_sync_payload(self, singer: dict, entry: dict, song_idx: int) -> dict:
+        singer_id = self._ensure_singer_id(singer)
+        request_uid = self._ensure_queue_entry_id(entry)
+        key = str(entry.get("host_request_key") or f"host:{singer_id}:{request_uid}")
+        entry["host_request_key"] = key
+        entry["request_source"] = "host_manual"
+        entry["host_singer_id"] = singer_id
+        display = str(entry.get("display_name") or "").strip()
+        artist = str(entry.get("artist") or "").strip()
+        title = str(entry.get("title") or "").strip()
+        if not title and " - " in display:
+            left, right = display.split(" - ", 1)
+            artist = artist or left.strip()
+            title = right.strip()
+        title = title or display or "Unknown"
+        song_info = entry.get("song_info")
+        media_reference = str(
+            entry.get("provider_track_id")
+            or entry.get("local_reference_path")
+            or self._song_info_primary_path(song_info)
+            or entry.get("disc_id")
+            or ""
+        ).strip()
+        try:
+            duration = float(entry.get("duration") or 0)
+        except Exception:
+            duration = 0.0
+        return {
+            "idempotency_key": key,
+            "host_singer_id": singer_id,
+            "singer_session_id": int(singer.get("server_singer_session_id") or entry.get("singer_session_id") or 0),
+            "singer": str(singer.get("name") or "").strip(),
+            "duet_display": str(entry.get("duet_display") or "").strip(),
+            "artist": artist,
+            "title": title,
+            "selected_version": str(entry.get("selected_version") or entry.get("selected_brand") or entry.get("disc_id") or "").strip(),
+            "selected_brand": str(entry.get("selected_brand") or "").strip(),
+            "selected_disc_id": str(entry.get("selected_disc_id") or entry.get("disc_id") or "").strip(),
+            "provider": str(entry.get("provider") or "local").strip(),
+            "provider_track_id": str(entry.get("provider_track_id") or "").strip(),
+            "media_reference": media_reference,
+            "duration": duration,
+            "key_change": entry.get("key") if entry.get("key") is not None else 0,
+            "tempo_percent": entry.get("tempo_percent") if entry.get("tempo_percent") is not None else 100,
+            "sort_order": int(song_idx) + 1,
+            "request_status": "accepted",
+            "request_source": "host_manual",
+            "order_revision": int(singer.get("order_revision") or 0),
+            "host_order_updated_at": int(singer.get("host_order_updated_at") or 0),
+        }
+
+    def _queue_host_request_sync(self, singer_idx: int, song_idx: int) -> None:
+        """Queue an idempotent, non-blocking server upsert for a manual add."""
+        try:
+            singer = self.queue[int(singer_idx)]
+            entry = singer.get("songs", [])[int(song_idx)]
+            payload = self._host_request_sync_payload(singer, entry, int(song_idx))
+        except Exception as exc:
+            _diag(f"[HOST-REQUEST-SYNC] unable to create operation error={exc}")
+            return
+        key = payload["idempotency_key"]
+        entry["host_sync_status"] = "pending"
+        operation = {"key": key, "payload": payload, "attempts": 0, "queued_at": time.time()}
+        pending = [op for op in list(getattr(self, "_host_request_sync_ops", []) or []) if op.get("key") != key]
+        pending.append(operation)
+        self._host_request_sync_ops = pending
+        self._save_host_request_sync_ops()
+        self._schedule_save_data(0)
+        _diag(
+            f"[HOST-REQUEST-SYNC] queued singer_id={payload['host_singer_id']} "
+            f"request_key={key} source=host_manual status=pending"
+        )
+        self._flush_host_request_sync_ops()
+
+    def _flush_host_request_sync_ops(self) -> None:
+        pending = list(getattr(self, "_host_request_sync_ops", []) or [])
+        if not pending or not self.is_network_configured():
+            return
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        for operation in pending:
+            key = str(operation.get("key") or "")
+            if not key or key in self._host_request_sync_inflight:
+                continue
+            attempts = int(operation.get("attempts") or 0)
+            last_attempt = float(operation.get("last_attempt_at") or 0.0)
+            retry_delay = min(60.0, float(2 ** min(attempts, 6))) if attempts else 0.0
+            if last_attempt and time.time() - last_attempt < retry_delay:
+                continue
+            self._host_request_sync_inflight.add(key)
+
+            def send(op=dict(operation), op_key=key):
+                ok = False
+                request_id = 0
+                singer_session_id = 0
+                error = ""
+                try:
+                    resp = requests.post(
+                        f"{base_url}/api/v1/upsert_host_request.php",
+                        params={"user": tenant},
+                        data={"user": tenant, **dict(op.get("payload") or {})},
+                        headers={"X-API-Key": api_key},
+                        timeout=7,
+                    )
+                    body = resp.json() if resp.content else {}
+                    ok = 200 <= resp.status_code < 300 and bool(body.get("ok"))
+                    request_id = int(body.get("request_id") or 0)
+                    singer_session_id = int(body.get("singer_session_id") or 0)
+                    if not ok:
+                        error = str(body.get("error") or f"HTTP {resp.status_code}")
+                except Exception as exc:
+                    error = str(exc)
+                self._run_on_ui_thread(
+                    lambda: self._finish_host_request_sync(op_key, ok, request_id, singer_session_id, error)
+                )
+
+            threading.Thread(target=send, daemon=True, name="singws-host-request-sync").start()
+
+    def _finish_host_request_sync(self, key: str, ok: bool, request_id: int, singer_session_id: int, error: str) -> None:
+        self._host_request_sync_inflight.discard(key)
+        matched_singer_idx = -1
+        if ok and request_id > 0:
+            for singer_idx, singer in enumerate(self.queue or []):
+                for entry in (singer or {}).get("songs", []) or []:
+                    if str((entry or {}).get("host_request_key") or "") != key:
+                        continue
+                    entry["remote_request_id"] = int(request_id)
+                    entry["request_order"] = float(((singer or {}).get("songs") or []).index(entry) + 1)
+                    entry["host_sync_status"] = "synced"
+                    if singer_session_id > 0:
+                        singer["server_singer_session_id"] = int(singer_session_id)
+                        entry["singer_session_id"] = int(singer_session_id)
+                    matched_singer_idx = singer_idx
+                    break
+                if matched_singer_idx >= 0:
+                    break
+            self._host_request_sync_ops = [op for op in self._host_request_sync_ops if op.get("key") != key]
+            self._save_host_request_sync_ops()
+            self._schedule_save_data(0)
+            _diag(
+                f"[HOST-REQUEST-SYNC] request_key={key} request_id={request_id} "
+                f"singer_session_id={singer_session_id or ''} source=host_manual result=synced"
+            )
+            if matched_singer_idx >= 0:
+                self._sync_remote_singer_order(matched_singer_idx, reason="host_manual_upsert")
+            return
+
+        for operation in self._host_request_sync_ops:
+            if operation.get("key") == key:
+                operation["attempts"] = int(operation.get("attempts") or 0) + 1
+                operation["last_error"] = str(error or "sync_failed")[:240]
+                operation["last_attempt_at"] = time.time()
+        self._save_host_request_sync_ops()
+        _diag(f"[HOST-REQUEST-SYNC] request_key={key} source=host_manual result=pending_retry error={error!r}")
+        try:
+            self._show_processing_notification("Song was added locally; server sync is pending and will retry.", level="warning")
+        except Exception:
+            pass
 
     def _start_deferred_remote_save_worker(self, snapshot: list) -> bool:
         try:
@@ -32721,6 +33375,12 @@ class KaraokeApp(QWidget):
             ):
                 if remote_meta.get(_request_meta_key) not in (None, ""):
                     entry[_request_meta_key] = remote_meta.get(_request_meta_key)
+            try:
+                session_id = int(remote_meta.get("singer_session_id") or 0)
+            except Exception:
+                session_id = 0
+            if session_id > 0:
+                entry["singer_session_id"] = session_id
         else:
             remote_request_id = 0
         insert_source = self._queue_insert_source_label(remote_meta)
@@ -32797,6 +33457,10 @@ class KaraokeApp(QWidget):
         singer_idx = self._queue_singer_match_index(primary)
         if singer_idx >= 0:
             singer = self.queue[singer_idx]
+            self._ensure_singer_id(singer)
+            if is_remote and int(entry.get("singer_session_id") or 0) > 0:
+                singer["server_singer_session_id"] = int(entry["singer_session_id"])
+            self._ensure_queue_entry_id(entry)
             songs = singer.setdefault("songs", [])
             before_order = self._queue_order_snapshot_for_log(singer)
             active_count = len(songs)
@@ -32805,6 +33469,8 @@ class KaraokeApp(QWidget):
             singer.setdefault("rotation_marker", False)
             insertion_index = len(songs)
             songs.append(entry)
+            if not is_remote:
+                self._queue_host_request_sync(singer_idx, insertion_index)
             self._clear_temporary_empty_rotation_slot(singer, reason="replacement_added")
             try:
                 if self._is_rotation_mode() and bool(singer.get("has_sung", False)):
@@ -32848,7 +33514,11 @@ class KaraokeApp(QWidget):
                 self.key_selector.setCurrentIndex(self.key_selector.findText("Key: 0"))
             return True
 
+        self._ensure_queue_entry_id(entry)
         new_singer = {"name": primary, "songs": [entry], "skipped": False, "has_sung": False, "round_sung": False, "rotation_marker": False, "created_at": time.time()}
+        self._ensure_singer_id(new_singer)
+        if is_remote and int(entry.get("singer_session_id") or 0) > 0:
+            new_singer["server_singer_session_id"] = int(entry["singer_session_id"])
         if self._is_rotation_mode():
             self._rotation_recompute_round_state(force_reset=False)
             if self._is_rotation_locked():
@@ -32872,6 +33542,8 @@ class KaraokeApp(QWidget):
         else:
             self.queue.append(new_singer)
             ins = len(self.queue) - 1
+        if not is_remote:
+            self._queue_host_request_sync(ins, 0)
         self._mark_inserted_singer_order_authoritative(
             ins,
             is_remote=is_remote,
@@ -33569,11 +34241,7 @@ class KaraokeApp(QWidget):
             self.update_queue_display()
         except Exception:
             pass
-        if message:
-            try:
-                self._set_processing_text(message)
-            except Exception:
-                pass
+        # The edited key/tempo is already visible in the queue row.
 
     def open_song_key_dialog(self, singer_idx: int, song_idx: int):
         """Set a per-song key change (semitones). Applies only to this entry and
@@ -34277,6 +34945,7 @@ class KaraokeApp(QWidget):
         new_name = str(new_name or "").strip()
         if not old_name or not new_name or new_name == old_name:
             return False
+        undo = KaraokeApp._begin_undoable_action(self, "Rename Singer")
 
         if merge_prefs_history:
             try:
@@ -34335,6 +35004,7 @@ class KaraokeApp(QWidget):
             self.post_rotation()
         except Exception:
             pass
+        KaraokeApp._commit_undoable_action(self, undo, "Singer renamed")
         return True
 
     def _merge_duplicate_rotation_singers(self, *, reason: str = "") -> int:
@@ -34384,9 +35054,15 @@ class KaraokeApp(QWidget):
 
             best_i = min(range(len(group)), key=lambda i: (_created(group[i]), i))
             survivor = group[best_i]
+            survivor_id = self._ensure_singer_id(survivor)
             for i, dup in enumerate(group):
                 if i == best_i:
                     continue
+                try:
+                    if str(getattr(self, "_current_karaoke_singer_id", "") or "") == str(dup.get("singer_id") or ""):
+                        self._current_karaoke_singer_id = survivor_id
+                except Exception:
+                    pass
                 self._absorb_duplicate_singer(survivor, dup)
                 merged_count += 1
             new_queue.append(survivor)
@@ -35727,9 +36403,11 @@ class KaraokeApp(QWidget):
     def toggle_singer_skip(self, singer_idx):
         """Toggle skip status for a singer"""
         if 0 <= singer_idx < len(self.queue):
+            undo = KaraokeApp._begin_undoable_action(self, "Skip Singer")
             self.queue[singer_idx]["skipped"] = not self.queue[singer_idx].get("skipped", False)
             self.update_queue_display()
             self.save_data()
+            KaraokeApp._commit_undoable_action(self, undo, "Singer status changed")
 
     def toggle_song_skip(self, singer_idx, song_idx):
         """Toggle skip status for a song"""
@@ -35894,6 +36572,7 @@ class KaraokeApp(QWidget):
             "local_reference_path": row.get("local_reference_path") or "",
             "authorization_requirement": row.get("authorization_requirement") or "",
             "availability_status": row.get("availability_status") or "",
+            "karafun_catalog_only": bool(row.get("karafun_catalog_only", False)),
         }
 
     def _build_queue_entry_from_track_choice(self, old_entry, track: dict):
@@ -35971,6 +36650,7 @@ class KaraokeApp(QWidget):
         songs = self.queue[singer_idx].get("songs", [])
         if song_idx < 0 or song_idx >= len(songs):
             return False
+        undo = KaraokeApp._begin_undoable_action(self, "Replace Song")
 
         singer_name = str(self.queue[singer_idx].get("name", "") or "").strip()
         old_entry = songs[song_idx]
@@ -36011,6 +36691,7 @@ class KaraokeApp(QWidget):
             old_title=old_title,
             source=source,
         )
+        KaraokeApp._commit_undoable_action(self, undo, "Song replaced")
         return True
 
     def _push_remote_request_replacement(self, entry, *, singer_name: str = "", old_artist: str = "", old_title: str = "", source: str = "replace_track"):
@@ -36723,6 +37404,7 @@ class KaraokeApp(QWidget):
         for singer in self.queue:
             if not isinstance(singer, dict):
                 continue
+            self._ensure_singer_id(singer)
             if "skipped" not in singer:
                 singer["skipped"] = False
             # NEW: Add has_sung field - default to True for existing singers
@@ -36740,6 +37422,7 @@ class KaraokeApp(QWidget):
                     if "skipped" not in entry:
                         entry["skipped"] = False
                     new_songs.append(entry)
+                    self._ensure_queue_entry_id(entry)
                 else:
                     if isinstance(entry, (tuple, list)):
                         song_dict = {
@@ -37030,6 +37713,16 @@ class KaraokeApp(QWidget):
         row.addStretch(1)
         mode_box.addLayout(row)
 
+        scan_hint = QLabel(
+            "Update checks saved folders for added, changed, or removed files.\n"
+            "Full Scan rereads the entire selected library and rebuilds all metadata and durations."
+        )
+        scan_hint.setWordWrap(True)
+        scan_hint.setStyleSheet(section_meta_css())
+        mode_box.addWidget(scan_hint)
+        btn_update.setToolTip("Incremental: process only filesystem changes in saved library folders.")
+        btn_full.setToolTip("Complete rebuild: reread every supported file and duration in the selected folder.")
+
         mode_choice = {"value": None}
         btn_update.clicked.connect(lambda: (mode_choice.__setitem__("value", "update"), mode_dlg.accept()))
         btn_full.clicked.connect(lambda: (mode_choice.__setitem__("value", "full"), mode_dlg.accept()))
@@ -37146,7 +37839,7 @@ class KaraokeApp(QWidget):
                 "artist": artist,
                 "title": title,
                 "disc_id": disc_id,
-                "duration": old_duration_by_path.get(full_path),
+                "duration": old_duration_by_path.get(full_path) if quick_mode else None,
             }
             if scan_mtime is not None:
                 track["scan_mtime"] = scan_mtime
@@ -38179,6 +38872,11 @@ class KaraokeApp(QWidget):
             query,
             limit=500,
             fuzzy=True,
+            karafun_search_url=(
+                _network_normalize_base_url(self.settings.get("base_url", "")) + "/karafun_search.php"
+                if bool(self.settings.get("karafun_include_online_search", False)) else ""
+            ),
+            karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
         )
         self._search_thread.results_ready.connect(self._apply_db_search_results)
         self._search_thread.start()
@@ -38253,6 +38951,23 @@ class KaraokeApp(QWidget):
                     return
             except Exception:
                 pass
+
+    def _clear_routine_processing_text_for_playback(self):
+        """Clear routine action text at playback start, preserving actual work/errors."""
+        try:
+            label = getattr(self, "processing_label", None)
+            if label is None:
+                return
+            text = str(label.text() or "").strip()
+            protected = (
+                "scanning", "building search", "getting durations", "extracting zip",
+                "analyzing", "packaging", "failed", "error",
+            )
+            if text and not any(part in text.lower() for part in protected):
+                label.setText("")
+                self._processing_notification_text = ""
+        except Exception:
+            pass
 
     def _show_processing_notification(self, msg: str, *, level: str = "info", persistent: bool = False):
         """Show a short-lived app notification below search.
@@ -38464,7 +39179,14 @@ class KaraokeApp(QWidget):
         self._pending_search_query = None
         self._pending_search_job_id = None
         try:
-            self._search_thread = SongSearchThread(int(pending_job_id), pending_query, limit=500)
+            self._search_thread = SongSearchThread(
+                int(pending_job_id), pending_query, limit=500,
+                karafun_search_url=(
+                    _network_normalize_base_url(self.settings.get("base_url", "")) + "/karafun_search.php"
+                    if bool(self.settings.get("karafun_include_online_search", False)) else ""
+                ),
+                karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
+            )
             self._search_thread.results_ready.connect(self._apply_db_search_results)
             self._search_thread.start()
         except Exception:
@@ -38633,17 +39355,10 @@ class KaraokeApp(QWidget):
         artist_edit.setPlaceholderText("Artist")
         title_edit = QLineEdit()
         title_edit.setPlaceholderText("Song title")
-        url_edit = QLineEdit()
-        url_edit.setPlaceholderText("KaraFun URL or app/file reference (optional)")
-        track_id_edit = QLineEdit()
-        track_id_edit.setPlaceholderText("KaraFun track ID or search term (optional)")
-
         for row, (label_text, widget) in enumerate((
             ("Singer", singer_edit),
             ("Artist", artist_edit),
             ("Title", title_edit),
-            ("URL / File", url_edit),
-            ("Track ID", track_id_edit),
         )):
             label = QLabel(label_text)
             label.setStyleSheet(section_meta_css())
@@ -38673,18 +39388,32 @@ class KaraokeApp(QWidget):
         singer = str(singer_edit.text() or "").strip()
         artist = str(artist_edit.text() or "").strip()
         title = str(title_edit.text() or "").strip()
-        provider_url = str(url_edit.text() or "").strip()
-        provider_track_id = str(track_id_edit.text() or "").strip()
-        if not provider_track_id:
-            provider_track_id = " - ".join([p for p in (artist, title) if p]) or title
-        reference_id = provider_track_id or provider_url or title
-        song_path = f"karafun_streaming:{reference_id}"
-        display = " - ".join([p for p in (artist, title, "KaraFun") if p])
-        track = {
+        track = self._build_karafun_streaming_track(
+            artist=artist,
+            title=title,
+        )
+        song_path = track["path"]
+        song_data = (song_path, 0, None)
+        if self._add_song_to_queue(singer, song_data, track=track):
+            try:
+                self._show_processing_notification(f"Added KaraFun: {title}", level="success")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _build_karafun_streaming_track(*, artist: str, title: str,
+                                       provider_track_id: str = "", provider_url: str = "") -> dict:
+        """Build the single external-track shape used by manual and server adds."""
+        artist = str(artist or "").strip()
+        title = str(title or "").strip()
+        provider_track_id = str(provider_track_id or "").strip()
+        provider_url = str(provider_url or "").strip()
+        reference_id = provider_track_id or provider_url or f"manual:{uuid.uuid4().hex}"
+        return {
             "artist": artist,
             "title": title,
-            "display": display,
-            "path": song_path,
+            "display": " - ".join([p for p in (artist, title, "KaraFun") if p]),
+            "path": f"karafun_streaming:{reference_id}",
             "type": "external",
             "provider": "karafun_streaming",
             "provider_track_id": provider_track_id,
@@ -38692,12 +39421,6 @@ class KaraokeApp(QWidget):
             "authorization_requirement": "official_karafun_app",
             "availability_status": "externally_controlled",
         }
-        song_data = (song_path, 0, None)
-        if self._add_song_to_queue(singer, song_data, track=track):
-            try:
-                self._show_processing_notification(f"Added KaraFun: {title}", level="success")
-            except Exception:
-                pass
 
     def _on_search_result_double_clicked(self, item):
         """Double-click in song results → same add-to-queue flow as before."""
@@ -39196,19 +39919,8 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         karaoke_active = bool(getattr(self, "karaoke_playing", False))
-        current_singer_name = str(getattr(self, "_current_karaoke_singer_name", "") or "").strip().lower()
         current_song_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip().lower()
-        next_active_singer_idx = -1
-        if karaoke_active:
-            try:
-                for i, s in enumerate(self.queue):
-                    if s.get("skipped", False):
-                        continue
-                    if any((not song.get("skipped", False)) if isinstance(song, dict) else True for song in s.get("songs", [])):
-                        next_active_singer_idx = i
-                        break
-            except Exception:
-                next_active_singer_idx = -1
+        current_singer_idx, next_active_singer_idx, current_mapping_warning = self._authoritative_rotation_indices()
 
         boundary_idx = -1
         try:
@@ -39244,7 +39956,8 @@ class KaraokeApp(QWidget):
         for singer_idx, singer in enumerate(self.queue):
             is_singer_skipped = singer.get("skipped", False)
             has_sung = singer.get("has_sung", False)  # New singers haven't sung yet
-            is_current_singer = karaoke_active and singer.get("name", "").strip().lower() == current_singer_name
+            self._ensure_singer_id(singer)
+            is_current_singer = karaoke_active and singer_idx == current_singer_idx
             has_songs = singer.get("songs") and any(
                 not song.get("skipped", False) if isinstance(song, dict) else True 
                 for song in singer.get("songs", [])
@@ -39294,7 +40007,10 @@ class KaraokeApp(QWidget):
             if self._is_rotation_mode() and singer_idx == boundary_idx and not is_singer_skipped:
                 item.setForeground(QColor(_v("warning")))
             if is_current_singer:
-                item.setBackground(QColor(109, 40, 255, 118))
+                singer_right = "CURRENTLY SINGING"
+                self._set_aligned_row_meta(item, singer_left, singer_right)
+                item.setData(getattr(self, "_queue_presentation_role", int(Qt.ItemDataRole.UserRole) + 33), "current")
+                item.setBackground(QColor(17, 94, 58, 220))
                 item.setForeground(QColor("#FFFFFF"))
                 try:
                     f = item.font()
@@ -39311,7 +40027,10 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
             elif karaoke_active and singer_idx == next_active_singer_idx and not is_singer_skipped:
-                item.setBackground(QColor(70, 54, 16, 92))
+                singer_right = "NEXT UP"
+                self._set_aligned_row_meta(item, singer_left, singer_right)
+                item.setData(getattr(self, "_queue_presentation_role", int(Qt.ItemDataRole.UserRole) + 33), "next")
+                item.setBackground(QColor(70, 54, 16, 130))
                 item.setForeground(QColor("#FFE49A"))
             
             model_rows.append(self._queue_model_row_from_item(item))
@@ -39385,6 +40104,19 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 row_song_path = str(self._song_info_primary_path(song_info) or "").strip().lower()
+                if isinstance(entry, dict) and self._is_external_karafun_entry(entry):
+                    status = str(entry.get("karafun_status") or "").strip().lower()
+                    status_label = {
+                        "searching": "SEARCHING KARAFUN",
+                        "ready": "KARAFUN READY",
+                        "manual": "MANUAL KARAFUN",
+                        "launching": "LAUNCHING KARAFUN",
+                        "playing": "PLAYING KARAFUN",
+                        "permission": "KARAFUN PERMISSION",
+                        "failed": "KARAFUN FAILED",
+                        "completed": "KARAFUN DONE",
+                    }.get(status, "KARAFUN")
+                    right = f"{status_label}  {right}" if right else status_label
                 if is_song_skipped:
                     right = "SKIP  " + right if right else "SKIP"
                     item.setForeground(QColor(_v("danger")))
@@ -39553,6 +40285,7 @@ class KaraokeApp(QWidget):
         shift_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
         current_item = self.queue_display.item(index)
         current_kind = self._queue_item_kind(current_item) if current_item is not None else ""
+        undo = KaraokeApp._begin_undoable_action(self, "Reorder")
 
         # Move singer up
         if current_kind == "singer":
@@ -39591,6 +40324,7 @@ class KaraokeApp(QWidget):
                     self._sync_remote_singer_order(singer_idx)
                 # Debounced ticker
                 self.schedule_ticker_update()
+        KaraokeApp._commit_undoable_action(self, undo, "Queue reordered")
 
     def move_down(self):
         index = self.get_selected_index()
@@ -39600,6 +40334,7 @@ class KaraokeApp(QWidget):
         shift_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
         current_item = self.queue_display.item(index)
         current_kind = self._queue_item_kind(current_item) if current_item is not None else ""
+        undo = KaraokeApp._begin_undoable_action(self, "Reorder")
 
         # Move singer down
         if current_kind == "singer":
@@ -39638,6 +40373,7 @@ class KaraokeApp(QWidget):
                     self._sync_remote_singer_order(singer_idx)
                 # Debounced ticker
                 self.schedule_ticker_update()
+        KaraokeApp._commit_undoable_action(self, undo, "Queue reordered")
 
     def clear_queue_with_confirmation(self):
         if not self.queue:
@@ -39656,6 +40392,7 @@ class KaraokeApp(QWidget):
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        undo = KaraokeApp._begin_undoable_action(self, "Clear Rotation")
         if self.is_network_configured():
             try:
                 self.stop_request_polling()
@@ -39701,6 +40438,7 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print(f"[REMOTE-CLEAR] local queue cleared; remote clear scheduling failed: {e}")
         print("[REMOTE-CLEAR] local queue cleared")
+        KaraokeApp._commit_undoable_action(self, undo, "Rotation cleared")
 
     def remove_selected(self):
         shift_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -39714,6 +40452,8 @@ class KaraokeApp(QWidget):
 
         item = self.queue_display.item(index)
         item_kind = self._queue_item_kind(item) if item is not None else ""
+        undo_name = "Remove Singer" if item_kind == "singer" else "Remove Song"
+        undo = KaraokeApp._begin_undoable_action(self, undo_name)
 
         # Remove singer if it's a singer line
         if item_kind == "singer":
@@ -39766,6 +40506,10 @@ class KaraokeApp(QWidget):
             self._schedule_save_data(1000 if bool(getattr(self, "karaoke_playing", False)) else 0)
         except Exception:
             pass
+        KaraokeApp._commit_undoable_action(
+            self, undo,
+            "Singer removed" if item_kind == "singer" else "Song removed",
+        )
 
     def _resolve_karaoke_audio_path(self, song_info) -> str:
         """Return the best audio path for a queued karaoke entry (empty if not scannable)."""
@@ -40246,6 +40990,464 @@ class KaraokeApp(QWidget):
             _diag(f"[KARAFUN] open failed: {e}")
         return False
 
+    @staticmethod
+    def _karafun_script_source(lines) -> str:
+        return "\n".join(str(line) for line in (lines or []))
+
+    @staticmethod
+    def _karafun_applescript_literal(value: str) -> str:
+        text = str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
+        return f'"{text}"'
+
+    def _run_karafun_applescript_sync(self, lines, *, timeout: float | None = None) -> tuple[bool, str, str]:
+        """Run AppleScript inside SingWS so Accessibility permission belongs to SingWS, not /usr/bin/osascript."""
+        source = self._karafun_script_source(lines)
+        if not source.strip():
+            return False, "", "empty_script"
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSAppleScript
+                script = NSAppleScript.alloc().initWithSource_(source)
+                result, error = script.executeAndReturnError_(None)
+                if error:
+                    return False, "", str(error)
+                try:
+                    return True, str(result.stringValue() if result is not None else "").strip(), ""
+                except Exception:
+                    return True, "", ""
+            except Exception as e:
+                _diag(f"[KARAFUN] NSAppleScript fallback to osascript: {e}")
+        try:
+            args = ["osascript"]
+            for line in lines:
+                args.extend(["-e", str(line)])
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if completed.returncode != 0:
+                return False, str(completed.stdout or "").strip(), str(completed.stderr or "").strip()
+            return True, str(completed.stdout or "").strip(), str(completed.stderr or "").strip()
+        except Exception as e:
+            return False, "", str(e)
+
+    @staticmethod
+    def _is_karafun_accessibility_error(message: str) -> bool:
+        text = str(message or "").lower()
+        return (
+            "not allowed assistive access" in text
+            or "accessibility" in text and "not allowed" in text
+            or "-25211" in text
+        )
+
+    def _show_karafun_accessibility_setup(self, *, notify: bool = True):
+        message = (
+            "KaraFun automation needs macOS Accessibility permission for SingWS. "
+            "Open System Settings > Privacy & Security > Accessibility, enable SingWS, "
+            "then quit and reopen SingWS."
+        )
+        try:
+            _diag("[KARAFUN] accessibility permission required for automation")
+        except Exception:
+            pass
+        if notify:
+            try:
+                self._show_processing_notification(message, level="warning", persistent=True)
+            except Exception:
+                pass
+            try:
+                QMessageBox.warning(self, "KaraFun Automation Permission Needed", message)
+            except Exception:
+                pass
+        try:
+            if sys.platform == "darwin":
+                QDesktopServices.openUrl(QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"))
+        except Exception:
+            pass
+        return message
+
+    def _karafun_run_window_script(self, lines, on_complete=None) -> bool:
+        """Run non-blocking macOS Accessibility automation for KaraFun."""
+        if sys.platform != "darwin":
+            return False
+        try:
+            if callable(on_complete):
+                def _wait_then_complete():
+                    ok, stdout, stderr = self._run_karafun_applescript_sync(lines, timeout=18)
+                    try:
+                        result = str(stdout or "").strip()
+                        if not ok:
+                            _diag(f"[KARAFUN] window script failed error={str(stderr or '').strip()[:240]!r}")
+                        try:
+                            on_complete(result)
+                        except TypeError:
+                            on_complete()
+                    except Exception as e:
+                        _diag(f"[KARAFUN] window automation completion failed: {e}")
+                threading.Thread(target=_wait_then_complete, daemon=True).start()
+            else:
+                def _fire_and_forget():
+                    ok, _stdout, stderr = self._run_karafun_applescript_sync(lines, timeout=18)
+                    if not ok:
+                        _diag(f"[KARAFUN] window script failed error={str(stderr or '').strip()[:240]!r}")
+                threading.Thread(target=_fire_and_forget, daemon=True).start()
+            return True
+        except Exception as e:
+            _diag(f"[KARAFUN] window automation failed: {e}")
+            return False
+
+    @staticmethod
+    def _macos_native_mouse_click(x: int, y: int, *, clicks: int = 1) -> bool:
+        """Post one or more genuine mouse clicks at a macOS screen point."""
+        if sys.platform != "darwin":
+            return False
+        try:
+            class CGPoint(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+            cg = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+            cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+            cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+            cg.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, CGPoint, ctypes.c_uint32]
+            cg.CGEventSetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64]
+            cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+            cf.CFRelease.argtypes = [ctypes.c_void_p]
+            point = CGPoint(float(x), float(y))
+            for click_count in range(1, max(1, int(clicks or 1)) + 1):
+                down = cg.CGEventCreateMouseEvent(None, 1, point, 0)  # leftMouseDown
+                up = cg.CGEventCreateMouseEvent(None, 2, point, 0)    # leftMouseUp
+                if not down or not up:
+                    return False
+                cg.CGEventSetIntegerValueField(down, 1, click_count)  # mouseEventClickState
+                cg.CGEventSetIntegerValueField(up, 1, click_count)
+                cg.CGEventPost(0, down)  # cghidEventTap
+                cg.CGEventPost(0, up)
+                cf.CFRelease(down)
+                cf.CFRelease(up)
+                time.sleep(0.08)
+            return True
+        except Exception as e:
+            _diag(f"[KARAFUN] native mouse click failed: {e}")
+            return False
+
+    @staticmethod
+    def _macos_native_double_click(x: int, y: int) -> bool:
+        """Post a genuine two-click mouse sequence at a macOS screen point."""
+        return KaraokeApp._macos_native_mouse_click(x, y, clicks=2)
+
+    def _handoff_show_screen_to_karafun(self):
+        """Minimize SingWS output and fullscreen KaraFun on the same display."""
+        if sys.platform != "darwin" or not bool(self.settings.get("karafun_manage_show_screen", True)):
+            return
+        vw = getattr(self, "video_window", None)
+        if vw is None:
+            return
+        try:
+            frame = vw.frameGeometry()
+            screen = QApplication.screenAt(frame.center()) or vw.screen() or QApplication.primaryScreen()
+            rect = screen.geometry() if screen is not None else frame
+            self._karafun_show_screen_restore = {
+                "geometry": vw.geometry(),
+                "fullscreen": bool(vw.isFullScreen()),
+                "maximized": bool(vw.isMaximized()),
+                "visible": bool(vw.isVisible()),
+                "screen_geometry": rect,
+            }
+            vw.showMinimized()
+            x, y, width, height = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+        except Exception as e:
+            _diag(f"[KARAFUN] show-screen snapshot failed: {e}")
+            return
+
+        fast_lines = [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "MISS|no_app"',
+            'set kf to item 1 of matches',
+            'set frontmost of kf to true',
+            'tell kf',
+            'set outputWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is "Dual Renderer" then',
+            'set outputWindow to candidateWindow',
+            'exit repeat',
+            'end if',
+            'end try',
+            'end repeat',
+            'if outputWindow is missing value then return "MISS|no_dual_renderer"',
+            'set wp to position of outputWindow',
+            'set ws to size of outputWindow',
+            f'set targetX to {x}',
+            f'set targetY to {y}',
+            f'set targetW to {width}',
+            f'set targetH to {height}',
+            'set dx to (item 1 of wp) - targetX',
+            'if dx < 0 then set dx to -dx',
+            'set dy to (item 2 of wp) - targetY',
+            'if dy < 0 then set dy to -dy',
+            'set dw to (item 1 of ws) - targetW',
+            'if dw < 0 then set dw to -dw',
+            'set dh to (item 2 of ws) - targetH',
+            'if dh < 0 then set dh to -dh',
+            'if dx < 40 and dy < 80 and dw < 80 and dh < 120 then',
+            'try',
+            'set value of attribute "AXMinimized" of outputWindow to false',
+            'end try',
+            'try',
+            f'set position of outputWindow to {{{x}, {y}}}',
+            f'set size of outputWindow to {{{width}, {height}}}',
+            'end try',
+            'perform action "AXRaise" of outputWindow',
+            'delay 0.1',
+            'try',
+            'set value of attribute "AXFullScreen" of outputWindow to true',
+            'end try',
+            'perform action "AXRaise" of outputWindow',
+            'return "FAST_READY"',
+            'end if',
+            'return "MISS|geometry"',
+            'end tell',
+            'end tell',
+        ]
+        def _finish_fast(result=""):
+            if str(result or "").strip() == "FAST_READY":
+                _diag(f"[KARAFUN] show-screen fast handoff ready fullscreen forced bounds={x},{y},{width},{height}")
+                return
+            QTimer.singleShot(0, _fullscreen_karafun)
+
+        def _fullscreen_karafun(attempt=0):
+            lines = [
+                'tell application "System Events"',
+                'set kf to missing value',
+                'repeat 12 times',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) > 0 then',
+                'set kf to item 1 of matches',
+                'exit repeat',
+                'end if',
+                'delay 0.05',
+                'end repeat',
+                'if kf is not missing value then',
+                'set frontmost of kf to true',
+                'tell kf',
+                '-- KaraFun lyrics use a separate Dual-Screen Display window.',
+                'if (count of windows) < 2 then',
+                'try',
+                'set elems to entire contents of window 1',
+                'set wp to position of window 1',
+                'set ws to size of window 1',
+                'set bestButton to missing value',
+                'set bestButtonX to 0',
+                'set bestButtonY to 0',
+                'repeat with elem in elems',
+                'try',
+                'if role of elem is "AXButton" then',
+                'set labelText to ""',
+                'try',
+                'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text)',
+                'end try',
+                'set ep to position of elem',
+                'set es to size of elem',
+                'set centerX to (item 1 of ep) + ((item 1 of es) div 2)',
+                'set centerY to (item 2 of ep) + ((item 2 of es) div 2)',
+                'ignoring case',
+                'if labelText contains "dual" or labelText contains "screen" or labelText contains "display" or labelText contains "renderer" then',
+                'set bestButton to elem',
+                'set bestButtonX to centerX',
+                'set bestButtonY to centerY',
+                'exit repeat',
+                'end if',
+                'end ignoring',
+                '-- Fallback for KaraFun builds whose Dual-Screen button has no useful AX label.',
+                'if centerX > ((item 1 of wp) + ((item 1 of ws) * 0.66)) and centerY < ((item 2 of wp) + 115) then',
+                'if bestButton is missing value or centerX > bestButtonX then',
+                'set bestButton to elem',
+                'set bestButtonX to centerX',
+                'set bestButtonY to centerY',
+                'end if',
+                'end if',
+                'end if',
+                'end try',
+                'end repeat',
+                'if bestButton is not missing value then',
+                '-- KaraFun exposes AXPress/click inconsistently across builds; try both plus a coordinate click.',
+                'try',
+                'perform action "AXPress" of bestButton',
+                'end try',
+                'delay 0.15',
+                'click bestButton',
+                'delay 0.15',
+                'try',
+                'click at {bestButtonX, bestButtonY}',
+                'end try',
+                'end if',
+                'end try',
+                'end if',
+                'repeat 16 times',
+                'if (count of windows) > 1 then exit repeat',
+                'delay 0.1',
+                'end repeat',
+                'if (count of windows) > 1 then',
+                'set outputWindow to missing value',
+                'repeat with candidateWindow in windows',
+                'try',
+                'if name of candidateWindow is "Dual Renderer" then',
+                'set outputWindow to candidateWindow',
+                'exit repeat',
+                'end if',
+                'end try',
+                'end repeat',
+                'if outputWindow is missing value then set outputWindow to first window',
+                'try',
+                'set value of attribute "AXFullScreen" of outputWindow to false',
+                'end try',
+                f'set position of outputWindow to {{{x}, {y}}}',
+                f'set size of outputWindow to {{{width}, {height}}}',
+                'perform action "AXRaise" of outputWindow',
+                'delay 0.2',
+                'try',
+                'set value of attribute "AXFullScreen" of outputWindow to true',
+                'end try',
+                '-- KaraFun Dual Renderer is a custom window and may report',
+                '-- AXFullScreen=false even while filling the output display.',
+                'perform action "AXRaise" of outputWindow',
+                'return "READY"',
+                'else',
+                '-- Never fullscreen KaraFun window 1 here; that is the host/control window.',
+                '-- If the Dual Renderer is unavailable, leave the host window usable.',
+                'return "NO_DUAL_RENDERER"',
+                'end if',
+                'end tell',
+                'else',
+                'return "NOT_READY"',
+                'end if',
+                'end tell',
+            ]
+            center_x = x + (width // 2)
+            center_y = y + (height // 2)
+            def _finish_handoff(result=""):
+                outcome = str(result or "").strip()
+                if outcome == "READY":
+                    if self._macos_native_double_click(center_x, center_y):
+                        _diag(f"[KARAFUN] Dual Renderer fullscreen confirmed attempt={attempt + 1}")
+                    return
+                if outcome == "NO_DUAL_RENDERER":
+                    _diag(f"[KARAFUN] Dual Renderer unavailable; leaving KaraFun control window unchanged attempt={attempt + 1}")
+                    return
+                if attempt < 1:
+                    self._run_on_ui_thread(
+                        lambda: QTimer.singleShot(350, lambda: _fullscreen_karafun(attempt + 1))
+                    )
+                else:
+                    _diag("[KARAFUN] Dual Renderer unavailable after 3 attempts")
+            if self._karafun_run_window_script(
+                lines,
+                on_complete=_finish_handoff,
+            ):
+                _diag(f"[KARAFUN] show-screen handoff attempt={attempt + 1} bounds={x},{y},{width},{height}")
+
+        if self._karafun_run_window_script(fast_lines, on_complete=_finish_fast):
+            _diag(f"[KARAFUN] show-screen fast handoff check bounds={x},{y},{width},{height}")
+        else:
+            QTimer.singleShot(0, _fullscreen_karafun)
+
+    def _restore_show_screen_from_karafun(self):
+        """Minimize KaraFun's Dual Renderer and restore the SingWS audience output window."""
+        state = getattr(self, "_karafun_show_screen_restore", None)
+        if not isinstance(state, dict):
+            vw = getattr(self, "video_window", None)
+            if vw is None:
+                return
+            try:
+                frame = vw.frameGeometry()
+                screen = QApplication.screenAt(frame.center()) or vw.screen() or QApplication.primaryScreen()
+                state = {"screen_geometry": screen.geometry() if screen is not None else frame}
+                _diag("[KARAFUN] restore snapshot missing; using current show-screen display")
+            except Exception:
+                state = {"screen_geometry": None}
+        self._karafun_show_screen_restore = None
+        restore_token = uuid.uuid4().hex
+        self._karafun_restore_token = restore_token
+
+        def _minimize_karafun_after_fullscreen_exit():
+            if getattr(self, "_karafun_restore_token", None) != restore_token:
+                _diag("[KARAFUN] skipped stale KaraFun Dual Renderer minimize")
+                return
+            if isinstance(getattr(self, "_active_external_karafun", None), dict):
+                _diag("[KARAFUN] skipped KaraFun Dual Renderer minimize during active playback")
+                return
+            self._karafun_run_window_script([
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) > 0 then',
+            'tell item 1 of matches',
+            'set outputWindow to missing value',
+            'repeat with w in windows',
+            'try',
+            'if name of w is "Dual Renderer" then set outputWindow to w',
+            'end try',
+            'end repeat',
+            'if outputWindow is not missing value then',
+            'try',
+            'set value of attribute "AXFullScreen" of outputWindow to false',
+            'end try',
+            'delay 0.6',
+            'try',
+            'set value of attribute "AXMinimized" of outputWindow to true',
+            'end try',
+            'end if',
+            'end tell',
+            'end if',
+            'end tell',
+            ])
+
+        QTimer.singleShot(650, _minimize_karafun_after_fullscreen_exit)
+
+        def _restore_singws():
+            if getattr(self, "_karafun_restore_token", None) != restore_token:
+                _diag("[KARAFUN] skipped stale SingWS show-screen restore")
+                return
+            if isinstance(getattr(self, "_active_external_karafun", None), dict):
+                _diag("[KARAFUN] skipped SingWS show-screen restore during active KaraFun playback")
+                return
+            vw = getattr(self, "video_window", None)
+            if vw is None:
+                return
+            try:
+                screen_rect = state.get("screen_geometry")
+                # Clear the combined Minimized|FullScreen state first. On macOS,
+                # calling showFullScreen() directly on that state is a no-op.
+                vw.setWindowState(Qt.WindowState.WindowNoState)
+                vw.showNormal()
+                if screen_rect is not None:
+                    vw.setGeometry(screen_rect)
+                vw.show()
+                vw.raise_()
+
+                def _enter_singws_fullscreen(attempt=0):
+                    try:
+                        if screen_rect is not None and not vw.isFullScreen():
+                            vw.setGeometry(screen_rect)
+                        vw.showFullScreen()
+                        vw.raise_()
+                        if not vw.isFullScreen() and attempt < 2:
+                            QTimer.singleShot(650, lambda: _enter_singws_fullscreen(attempt + 1))
+                        else:
+                            _diag(f"[KARAFUN] restored SingWS show screen fullscreen={int(vw.isFullScreen())}")
+                    except Exception as e:
+                        _diag(f"[KARAFUN] fullscreen retry failed: {e}")
+
+                # Allow KaraFun's native fullscreen Space to finish closing.
+                QTimer.singleShot(300, _enter_singws_fullscreen)
+            except Exception as e:
+                _diag(f"[KARAFUN] show-screen restore failed: {e}")
+
+        # Restoration does not depend on KaraFun automation succeeding.
+        QTimer.singleShot(1400, _restore_singws)
+
     def _copy_karafun_lookup_text(self, entry: dict) -> bool:
         text = self._karafun_lookup_text(entry)
         if not text:
@@ -40257,6 +41459,754 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[KARAFUN] copy failed: {e}")
             return False
+
+    def _find_queue_entry_by_song_path(self, song_path: str):
+        target = str(song_path or "").strip()
+        if not target:
+            return None
+        try:
+            for singer in reversed(self.queue or []):
+                for entry in reversed(singer.get("songs") or []):
+                    if isinstance(entry, dict) and str(self._song_info_primary_path(entry.get("song_info")) or "").strip() == target:
+                        return entry
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _karafun_clean_search_part(value: str) -> str:
+        text = str(value or "")
+        text = re.sub(r"\([^)]*(karaoke|version|explicit|clean|remaster|live|feat\\.?|ft\\.?)[^)]*\)", " ", text, flags=re.I)
+        text = re.sub(r"\[[^]]*(karaoke|version|explicit|clean|remaster|live|feat\\.?|ft\\.?)[^]]*\]", " ", text, flags=re.I)
+        text = re.sub(r"\b(feat\\.?|ft\\.?|featuring)\b.*$", " ", text, flags=re.I)
+        text = re.sub(r"\b(karaoke|instrumental|official|version|lyrics?|lyric video|hd|remaster(?:ed)?|clean|explicit)\b", " ", text, flags=re.I)
+        text = text.replace("&", " and ")
+        text = re.sub(r"[’'`]", "", text)
+        text = re.sub(r"[^0-9A-Za-zÀ-ÖØ-öø-ÿ]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _karafun_search_query_for_entry(self, entry: dict) -> str:
+        artist, title = self._karafun_entry_artist_title(entry)
+        artist = self._karafun_clean_search_part(artist)
+        title = self._karafun_clean_search_part(title)
+        return " ".join(p for p in (artist, title) if p).strip()
+
+    def _karafun_search_queries_for_entry(self, entry: dict) -> list[str]:
+        artist, title = self._karafun_entry_artist_title(entry)
+        artist = self._karafun_clean_search_part(artist)
+        title = self._karafun_clean_search_part(title)
+        candidates = [
+            " ".join(p for p in (artist, title) if p).strip(),
+            " ".join(p for p in (title, artist) if p).strip(),
+            title,
+            artist,
+        ]
+        out = []
+        seen = set()
+        for query in candidates:
+            key = str(query or "").strip().lower()
+            if key and key not in seen:
+                out.append(str(query).strip())
+                seen.add(key)
+        return out
+
+    def _set_karafun_entry_status(self, entry: dict, status: str, *, message: str = "", notify: bool = False, level: str = "info"):
+        if not isinstance(entry, dict):
+            return
+        status = str(status or "").strip()
+        entry["karafun_status"] = status
+        entry["karafun_status_at"] = int(time.time())
+        if message:
+            entry["karafun_status_message"] = str(message)[:240]
+        try:
+            _diag(f"[KARAFUN] status={status} title={entry.get('title', '')!r} message={str(message or '')[:180]!r}")
+        except Exception:
+            pass
+        try:
+            self._schedule_save_data(0)
+        except Exception:
+            pass
+        try:
+            self._run_on_ui_thread(self.update_queue_display)
+        except Exception:
+            pass
+        if notify and message:
+            try:
+                self._show_processing_notification(message, level=level)
+            except Exception:
+                pass
+
+    def _karafun_search_script(self, *, query: str, safe_title: str = "", require_exact_title: bool = False):
+        query_literal = self._karafun_applescript_literal(query)
+        safe_title_literal = self._karafun_applescript_literal(safe_title)
+        lines = [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
+            'tell item 1 of matches',
+            'set frontmost to true',
+            'set mainWindow to missing value',
+            'set searchField to missing value',
+            'repeat 80 times',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is not "Dual Renderer" then',
+            'try',
+            'set candidateElems to entire contents of candidateWindow',
+            'on error',
+            'set candidateElems to UI elements of candidateWindow',
+            'end try',
+            'set wp to position of candidateWindow',
+            'set ws to size of candidateWindow',
+            'set fallbackField to missing value',
+            'set fallbackX to 999999',
+            'repeat with elem in candidateElems',
+            'try',
+            'if role of elem is "AXTextField" then',
+            'set labelText to ""',
+            'try',
+            'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
+            'end try',
+            'set ep to position of elem',
+            'set es to size of elem',
+            'set centerX to (item 1 of ep) + ((item 1 of es) div 2)',
+            'set centerY to (item 2 of ep) + ((item 2 of es) div 2)',
+            'ignoring case',
+            'if labelText contains "catalog" or labelText contains "search" then',
+            'set mainWindow to candidateWindow',
+            'set searchField to elem',
+            'exit repeat',
+            'end if',
+            'end ignoring',
+            'if centerX < ((item 1 of wp) + ((item 1 of ws) * 0.35)) and centerY < ((item 2 of wp) + 170) then',
+            'if centerX < fallbackX then',
+            'set fallbackField to elem',
+            'set fallbackX to centerX',
+            'end if',
+            'end if',
+            'end if',
+            'end try',
+            'end repeat',
+            'if searchField is missing value and fallbackField is not missing value then',
+            'set mainWindow to candidateWindow',
+            'set searchField to fallbackField',
+            'end if',
+            'end if',
+            'end try',
+            'if searchField is not missing value then exit repeat',
+            'end repeat',
+            'if searchField is not missing value then exit repeat',
+            'delay 0.15',
+            'end repeat',
+            'if searchField is missing value then return "ERROR|KaraFun search field not found"',
+            'perform action "AXRaise" of mainWindow',
+            'set frontmost to true',
+            'set focused of searchField to true',
+            'click searchField',
+            'delay 0.1',
+            'key code 0 using command down',
+            'delay 0.05',
+            f'keystroke {query_literal}',
+            'key code 36',
+            'delay 3',
+        ]
+        if require_exact_title and safe_title:
+            lines.extend([
+                'try',
+                'set elems to entire contents of mainWindow',
+                'on error',
+                'set elems to UI elements of mainWindow',
+                'end try',
+                'set wp to position of mainWindow',
+                'set ws to size of mainWindow',
+                'set cutoff to (item 1 of wp) + ((item 1 of ws) * 0.7)',
+                'set fallbackX to 0',
+                'set fallbackY to 0',
+                'repeat with elem in elems',
+                'try',
+                f'if (role of elem is "AXStaticText") and (name of elem is {safe_title_literal}) then',
+                'set ep to position of elem',
+                'if (item 1 of ep) < cutoff then',
+                'set es to size of elem',
+                'set rowX to ((item 1 of ep) + ((item 1 of es) div 2))',
+                'set rowY to ((item 2 of ep) + ((item 2 of es) div 2))',
+                'set durationText to ""',
+                'repeat with durationElem in elems',
+                'try',
+                'if role of durationElem is "AXStaticText" then',
+                'set dName to name of durationElem as text',
+                'set dp to position of durationElem',
+                'set ds to size of durationElem',
+                'set dX to (item 1 of dp) + ((item 1 of ds) div 2)',
+                'set dY to (item 2 of dp) + ((item 2 of ds) div 2)',
+                'set rowDelta to dY - rowY',
+                'if rowDelta < 0 then set rowDelta to -rowDelta',
+                'if dName contains ":" and (length of dName) < 9 and dX > rowX and rowDelta < 30 then',
+                'set durationText to dName',
+                'exit repeat',
+                'end if',
+                'end if',
+                'end try',
+                'end repeat',
+                'return "FOUND|" & rowX & "|" & rowY & "|" & durationText',
+                'end if',
+                'end if',
+                'end try',
+                'end repeat',
+                '-- Fallback: use the first visible result in the left results area for the already-specific artist+title query.',
+                'repeat with elem in elems',
+                'try',
+                'if role of elem is "AXStaticText" then',
+                'set n to name of elem as text',
+                'set ep to position of elem',
+                'set es to size of elem',
+                'set centerX to (item 1 of ep) + ((item 1 of es) div 2)',
+                'set centerY to (item 2 of ep) + ((item 2 of es) div 2)',
+                'if (n is not "") and (centerX < cutoff) and (centerY > ((item 2 of wp) + 110)) then',
+                'set durationText to ""',
+                'repeat with durationElem in elems',
+                'try',
+                'if role of durationElem is "AXStaticText" then',
+                'set dName to name of durationElem as text',
+                'set dp to position of durationElem',
+                'set ds to size of durationElem',
+                'set dX to (item 1 of dp) + ((item 1 of ds) div 2)',
+                'set dY to (item 2 of dp) + ((item 2 of ds) div 2)',
+                'set rowDelta to dY - centerY',
+                'if rowDelta < 0 then set rowDelta to -rowDelta',
+                'if dName contains ":" and (length of dName) < 9 and dX > centerX and rowDelta < 30 then',
+                'set durationText to dName',
+                'exit repeat',
+                'end if',
+                'end if',
+                'end try',
+                'end repeat',
+                'return "FIRST|" & centerX & "|" & centerY & "|" & durationText',
+                'end if',
+                'end if',
+                'end try',
+                'end repeat',
+                'return "ERROR|No usable KaraFun search result"',
+            ])
+        else:
+            lines.append('return "SEARCHED"')
+        lines.extend([
+            'end tell',
+            'end tell',
+        ])
+        return lines
+
+    def _automate_karafun_search_only(self, entry: dict) -> bool:
+        """Search KaraFun from Add KaraFun without starting playback."""
+        if sys.platform != "darwin" or not bool(self.settings.get("karafun_auto_queue_enabled", False)):
+            self._set_karafun_entry_status(entry, "manual", message="KaraFun automation is disabled; select this track manually.", notify=True, level="warning")
+            return False
+        if not isinstance(entry, dict):
+            return False
+        query = self._karafun_search_query_for_entry(entry)
+        if not query:
+            self._set_karafun_entry_status(entry, "manual", message="Could not build a KaraFun search query. Please select it manually.", notify=True, level="warning")
+            return False
+        self._set_karafun_entry_status(entry, "searching", message=f"Searching KaraFun: {query}")
+        _diag(f"[KARAFUN-SEARCH] query={query!r}")
+
+        def _worker():
+            result = {"ok": False, "message": "KaraFun search did not complete."}
+            try:
+                self._open_karafun_for_entry(entry)
+                ok, out, err = self._run_karafun_applescript_sync(
+                    self._karafun_search_script(query=query, require_exact_title=False),
+                    timeout=18,
+                )
+                if not ok:
+                    raise RuntimeError(err or out or "KaraFun search failed")
+                result = {"ok": True, "message": out or "SEARCHED"}
+            except Exception as e:
+                result = {"ok": False, "message": str(e)}
+
+            def _finish():
+                if result["ok"]:
+                    self._set_karafun_entry_status(entry, "ready", message="KaraFun search complete. Confirm the result before Play if needed.", notify=False)
+                    try:
+                        self._show_processing_notification("KaraFun search complete.", level="success")
+                    except Exception:
+                        pass
+                else:
+                    if self._is_karafun_accessibility_error(result["message"]):
+                        setup_message = self._show_karafun_accessibility_setup(notify=True)
+                        self._set_karafun_entry_status(
+                            entry,
+                            "permission",
+                            message=setup_message,
+                            notify=False,
+                        )
+                    else:
+                        self._set_karafun_entry_status(
+                            entry,
+                            "manual",
+                            message="Could not automatically find this track in KaraFun. Please select it manually.",
+                            notify=True,
+                            level="warning",
+                        )
+                    entry["karafun_submission_error"] = result["message"][:240]
+                    _diag(f"[KARAFUN-SEARCH] failed error={result['message'][:240]!r}")
+
+            self._run_on_ui_thread(_finish)
+
+        threading.Thread(target=_worker, daemon=True, name="karafun-search-only").start()
+        return True
+
+    def _automate_karafun_search_and_play(self, entry: dict, *, key=0, tempo_percent=None):
+        """Search, queue, start, and adjust an exact track in the official KaraFun app."""
+        if sys.platform != "darwin" or not bool(self.settings.get("karafun_auto_queue_enabled", False)):
+            return False
+        if not isinstance(entry, dict):
+            return False
+        state = str(entry.get("karafun_submission_state") or "").strip().lower()
+        pending_at = float(entry.get("karafun_pending_at") or 0)
+        if state in {"karafun_queued", "karafun_completed"} or (
+            state == "karafun_pending" and (time.time() - pending_at) < 30
+        ):
+            _diag(f"[KARAFUN-AUTO] duplicate prevented state={state}")
+            return False
+        artist, title = self._karafun_entry_artist_title(entry)
+        if not title:
+            entry["karafun_submission_state"] = "karafun_manual_action_required"
+            return False
+        try:
+            requested_key = max(-12, min(12, int(key or 0)))
+        except Exception:
+            requested_key = 0
+        try:
+            requested_tempo = max(50, min(200, int(tempo_percent if tempo_percent is not None else 100)))
+        except Exception:
+            requested_tempo = 100
+        adjustment_signature = f"key={requested_key};tempo={requested_tempo}"
+        entry["karafun_submission_state"] = "karafun_pending"
+        entry["karafun_pending_at"] = time.time()
+        self._set_karafun_entry_status(entry, "launching", message="Launching KaraFun playback")
+        request_uid = self._ensure_queue_entry_id(entry)
+
+        safe_title = str(title or "").strip()
+        search_queries = self._karafun_search_queries_for_entry(entry)
+        if not search_queries:
+            search_queries = [" ".join(p for p in (artist, title) if p).strip()]
+        _diag(f"[KARAFUN-AUTO] playback search queries={search_queries!r} title={title!r}")
+
+        def _worker():
+            result = {"ok": False, "message": "KaraFun automation did not complete."}
+            try:
+                found = ""
+                selected_query = ""
+                last_error = ""
+                for attempt, query in enumerate(search_queries, start=1):
+                    if not query:
+                        continue
+                    _diag(f"[KARAFUN-AUTO] search attempt={attempt} query={query!r}")
+                    search_script = self._karafun_search_script(query=query, safe_title=safe_title, require_exact_title=True)
+                    ok, candidate, script_error = self._run_karafun_applescript_sync(search_script, timeout=18)
+                    if not ok:
+                        last_error = script_error or candidate or "KaraFun search automation failed"
+                        _diag(f"[KARAFUN-AUTO] search attempt={attempt} failed error={str(last_error)[:180]!r}")
+                        if self._is_karafun_accessibility_error(last_error):
+                            raise RuntimeError(last_error)
+                        continue
+                    parts = str(candidate or "").split("|")
+                    if len(parts) >= 3 and parts[0] in {"FOUND", "FIRST"}:
+                        found = str(candidate or "")
+                        selected_query = query
+                        _diag(f"[KARAFUN-AUTO] search attempt={attempt} result={found!r}")
+                        break
+                    last_error = parts[-1] if parts else "KaraFun search failed"
+                    _diag(f"[KARAFUN-AUTO] search attempt={attempt} no_match result={str(candidate or '')[:180]!r}")
+                parts = found.split("|")
+                if len(parts) < 3 or parts[0] not in {"FOUND", "FIRST"}:
+                    raise RuntimeError(last_error or "No acceptable KaraFun match")
+                selected_duration = self._karafun_clock_seconds(parts[3] if len(parts) > 3 else "")
+                if selected_duration and selected_duration > 0:
+                    entry["duration"] = int(selected_duration)
+                    _diag(f"[KARAFUN-AUTO] selected duration seconds={int(selected_duration)} raw={parts[3]!r}")
+                if parts[0] == "FIRST":
+                    _diag(f"[KARAFUN-AUTO] selected first visible KaraFun result query={selected_query!r}")
+                else:
+                    _diag(f"[KARAFUN-AUTO] selected exact KaraFun title query={selected_query!r}")
+                _diag(f"[KARAFUN-AUTO] activating KaraFun result mode={parts[0]} x={parts[1]} y={parts[2]}")
+                if not self._macos_native_double_click(int(float(parts[1])), int(float(parts[2]))):
+                    raise RuntimeError("Could not double-click the KaraFun result")
+                result_activated_at = time.monotonic()
+                entry["karafun_result_activated_at"] = result_activated_at
+                time.sleep(0.8)
+
+                playback_probe_script = [
+                    'tell application "System Events"',
+                    'tell application process "KaraFun"',
+                    'set mainWindow to missing value',
+                    'repeat with candidateWindow in windows',
+                    'try',
+                    'if name of candidateWindow is not "Dual Renderer" then',
+                    'set mainWindow to candidateWindow',
+                    'exit repeat',
+                    'end if',
+                    'end try',
+                    'end repeat',
+                    'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+                    'set out to ""',
+                    'set playingHintFound to false',
+                    'set idleTextFound to false',
+                    'try',
+                    'set elems to entire contents of mainWindow',
+                    'on error',
+                    'set elems to UI elements of mainWindow',
+                    'end try',
+                    'repeat with elem in elems',
+                    'try',
+                    'set labelText to ""',
+                    'try',
+                    'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
+                    'end try',
+                    'ignoring case',
+                    'if labelText contains "pause" or labelText contains "stop" then set playingHintFound to true',
+                    'if labelText contains "no item is being played" or labelText contains "your queue is empty" then set idleTextFound to true',
+                    'end ignoring',
+                    'end try',
+                    'end repeat',
+                    'if playingHintFound then return "PLAYING"',
+                    'if idleTextFound then return "IDLE"',
+                    'return "UNKNOWN"',
+                    'end tell',
+                    'end tell',
+                ]
+                ok, initial_probe, initial_probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
+                initial_probe_state = str(initial_probe or initial_probe_error or "").strip()
+                _diag(f"[KARAFUN-AUTO] playback pre-click state={initial_probe_state!r}")
+                if not (ok and initial_probe_state == "PLAYING"):
+                    play_script = [
+                        'tell application "System Events"',
+                        'tell application process "KaraFun"',
+                        'set frontmost to true',
+                        'set mainWindow to missing value',
+                        'repeat with candidateWindow in windows',
+                        'try',
+                        'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
+                        'end try',
+                        'end repeat',
+                        'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+                        'set wp to position of mainWindow',
+                        'set ws to size of mainWindow',
+                        '-- Main player Play/Pause button: left transport control in the right-side player panel.',
+                        '-- Avoid AXPress/button scans here; KaraFun can hang while enumerating player controls.',
+                        'set playX to (item 1 of wp) + ((item 1 of ws) * 0.768)',
+                        'set playY to (item 2 of wp) + ((item 2 of ws) * 0.222)',
+                        'return "PLAY|" & playX & "|" & playY',
+                        'end tell',
+                        'end tell',
+                    ]
+                    ok, played, script_error = self._run_karafun_applescript_sync(play_script, timeout=10)
+                    if not ok:
+                        raise RuntimeError(script_error or "KaraFun play automation failed")
+                    play_parts = str(played or "").split("|")
+                    if len(play_parts) != 3 or play_parts[0] not in {"PLAY_NEXT", "PLAY"}:
+                        raise RuntimeError(str(played or "").split("|", 1)[-1] or "KaraFun did not expose a play control")
+                    _diag(f"[KARAFUN-AUTO] pressing KaraFun control mode={play_parts[0]} x={play_parts[1]} y={play_parts[2]}")
+                    if not self._macos_native_mouse_click(int(float(play_parts[1])), int(float(play_parts[2])), clicks=1):
+                        raise RuntimeError("Could not click the KaraFun play control")
+                    entry["karafun_playback_clock_started_at"] = time.monotonic()
+                else:
+                    entry["karafun_playback_clock_started_at"] = result_activated_at
+                    _diag("[KARAFUN-AUTO] play click skipped already playing")
+                verified_playing = False
+                last_playback_probe = ""
+                for probe_attempt in range(12):
+                    time.sleep(1.0)
+                    ok, probe_result, probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
+                    last_playback_probe = str(probe_result or probe_error or "").strip()
+                    _diag(f"[KARAFUN-AUTO] playback verify attempt={probe_attempt + 1} state={last_playback_probe!r}")
+                    if ok and last_playback_probe == "PLAYING":
+                        verified_playing = True
+                        break
+                if not verified_playing:
+                    raise RuntimeError(f"KaraFun did not report active playback after Play ({last_playback_probe or 'unknown state'})")
+                if not entry.get("karafun_playback_clock_started_at"):
+                    entry["karafun_playback_clock_started_at"] = time.monotonic()
+                entry["karafun_play_started_at"] = time.time()
+                _diag(f"[KARAFUN-AUTO] playback start event title={title!r} query={selected_query!r}")
+
+                self._start_karafun_completion_monitor(entry)
+
+                # Discover named controls at runtime. Never set an unidentified slider.
+                adjusted = "ADJUSTED|false|false"
+                needs_adjustment = requested_key != 0 or requested_tempo != 100
+                adjustment_already_applied = str(entry.get("karafun_adjustment_applied") or "") == adjustment_signature
+                if needs_adjustment and not adjustment_already_applied:
+                    time.sleep(1.5)
+                    adjust_script = [
+                        'tell application "System Events"',
+                        'tell application process "KaraFun"',
+                        'set mainWindow to missing value',
+                        'repeat with candidateWindow in windows',
+                        'try',
+                        'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
+                        'end try',
+                        'end repeat',
+                        'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+                        'try',
+                        'set elems to entire contents of mainWindow',
+                        'on error',
+                        'set elems to UI elements of mainWindow',
+                        'end try',
+                        'repeat with elem in elems',
+                        'try',
+                        'if (role of elem is "AXButton") and (help of elem is "Audio Settings") then click elem',
+                        'end try',
+                        'end repeat',
+                        'delay 0.5',
+                        'try',
+                        'set elems to entire contents of mainWindow',
+                        'on error',
+                        'set elems to UI elements of mainWindow',
+                        'end try',
+                        'set keySet to false',
+                        'set tempoSet to false',
+                        'repeat with elem in elems',
+                        'try',
+                        'if role of elem is "AXSlider" then',
+                        'set labelText to ""',
+                        'try',
+                        'set labelText to (description of elem as text) & " " & (help of elem as text) & " " & (name of elem as text)',
+                        'end try',
+                        'ignoring case',
+                        f'if labelText contains "key" or labelText contains "pitch" then set value of elem to {requested_key}',
+                        f'if labelText contains "tempo" or labelText contains "speed" then set value of elem to {requested_tempo}',
+                        'if labelText contains "key" or labelText contains "pitch" then set keySet to true',
+                        'if labelText contains "tempo" or labelText contains "speed" then set tempoSet to true',
+                        'end ignoring',
+                        'end if',
+                        'end try',
+                        'end repeat',
+                        'return "ADJUSTED|" & keySet & "|" & tempoSet',
+                        'end tell',
+                        'end tell',
+                    ]
+                    ok, adjusted, script_error = self._run_karafun_applescript_sync(adjust_script, timeout=8)
+                    if not ok:
+                        _diag(f"[KARAFUN-AUTO] adjustment skipped error={str(script_error or '')[:180]!r}")
+                        adjusted = ""
+                    else:
+                        lowered_adjusted = str(adjusted or "").lower()
+                        key_ok = requested_key == 0 or "|true|" in lowered_adjusted
+                        tempo_ok = requested_tempo == 100 or lowered_adjusted.endswith("|true")
+                        if key_ok and tempo_ok:
+                            entry["karafun_adjustment_applied"] = adjustment_signature
+                            _diag(f"[KARAFUN-AUTO] adjustment applied {adjustment_signature}")
+                else:
+                    if adjustment_already_applied:
+                        _diag(f"[KARAFUN-AUTO] adjustment skipped already applied {adjustment_signature}")
+                    else:
+                        _diag("[KARAFUN-AUTO] adjustment skipped default key/tempo")
+                result = {"ok": True, "message": adjusted or "ADJUSTED|false|false"}
+            except Exception as e:
+                result = {"ok": False, "message": str(e)}
+
+            def _finish():
+                if result["ok"]:
+                    entry["karafun_submission_state"] = "karafun_queued"
+                    entry["karafun_submitted_at"] = int(time.time())
+                    entry["karafun_idempotency_key"] = request_uid
+                    entry.pop("karafun_pending_at", None)
+                    self._set_karafun_entry_status(entry, "playing", message="Playing in KaraFun")
+                    _diag(f"[KARAFUN-AUTO] search, queue, and play succeeded title={title!r}")
+                    try:
+                        self._handoff_show_screen_to_karafun()
+                    except Exception as e:
+                        _diag(f"[KARAFUN] post-play show-screen handoff failed: {e}")
+                    adjustment = result["message"].lower()
+                    if (requested_key != 0 and "|true|" not in adjustment) or (requested_tempo != 100 and not adjustment.endswith("|true")):
+                        self._show_processing_notification("KaraFun started, but key/tempo controls need manual adjustment.", level="warning")
+                    else:
+                        self._show_processing_notification(f"KaraFun queued and started: {title}", level="success")
+                else:
+                    entry["karafun_submission_state"] = "karafun_failed"
+                    entry.pop("karafun_pending_at", None)
+                    entry["karafun_submission_error"] = result["message"][:240]
+                    if self._is_karafun_accessibility_error(result["message"]):
+                        setup_message = self._show_karafun_accessibility_setup(notify=True)
+                        self._set_karafun_entry_status(entry, "permission", message=setup_message, notify=False)
+                    else:
+                        self._set_karafun_entry_status(entry, "failed", message=f"KaraFun automation failed: {result['message']}", notify=False)
+                    _diag(f"[KARAFUN-AUTO] failed title={title!r} error={result['message'][:240]!r}")
+                    if not self._is_karafun_accessibility_error(result["message"]):
+                        self._show_processing_notification(f"KaraFun automation failed: {result['message']}", level="error")
+                self._schedule_save_data(0)
+                self.update_queue_display()
+
+            self._run_on_ui_thread(_finish)
+
+        threading.Thread(target=_worker, daemon=True, name="karafun-search-play").start()
+        return True
+
+    @staticmethod
+    def _karafun_clock_seconds(value: str):
+        text = str(value or "").strip()
+        parts = text.split(":")
+        if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
+            return None
+        total = 0
+        for part in parts:
+            total = (total * 60) + int(part)
+        return total
+
+    def _start_karafun_completion_monitor(self, entry: dict):
+        """Complete the active external track once KaraFun reports end/idle state."""
+        if not isinstance(entry, dict):
+            return
+        monitor_token = uuid.uuid4().hex
+        entry["karafun_completion_monitor"] = monitor_token
+        now_mono = time.monotonic()
+        try:
+            started = float(entry.get("karafun_playback_clock_started_at") or entry.get("karafun_result_activated_at") or now_mono)
+        except Exception:
+            started = now_mono
+        if started <= 0 or started > now_mono + 5.0:
+            started = now_mono
+        seen_playback = False
+        last_state = ""
+        last_clock_candidates = {}
+        idle_stop_count = 0
+        try:
+            fallback_duration = max(0, int(entry.get("duration") or 0))
+        except Exception:
+            fallback_duration = 0
+        try:
+            _diag(
+                f"[KARAFUN] completion monitor started title={entry.get('title', '')!r} "
+                f"fallback_duration={fallback_duration} clock_age={max(0.0, now_mono - started):.1f}s"
+            )
+        except Exception:
+            pass
+
+        def _monitor():
+            nonlocal seen_playback, last_state, last_clock_candidates, idle_stop_count
+            while True:
+                active = getattr(self, "_active_external_karafun", None)
+                if not isinstance(active, dict) or active.get("entry") is not entry:
+                    return
+                if entry.get("karafun_completion_monitor") != monitor_token:
+                    return
+                remaining = None
+                idle_reported = False
+                playing_reported = False
+                clocks = []
+                try:
+                    script = [
+                        'tell application "System Events"',
+                        'set matches to every application process whose name contains "KaraFun"',
+                        'if (count of matches) is 0 then return ""',
+                        'tell item 1 of matches',
+                        'if (count of windows) is 0 then return ""',
+                        'set mainWindow to missing value',
+                        'repeat with candidateWindow in windows',
+                        'try',
+                        'if name of candidateWindow is not "Dual Renderer" then',
+                        'set mainWindow to candidateWindow',
+                        'exit repeat',
+                        'end if',
+                        'end try',
+                        'end repeat',
+                        'if mainWindow is missing value then return ""',
+                        'set out to ""',
+                        'set idleTextFound to false',
+                        'set playingHintFound to false',
+                        'try',
+                        'set elems to entire contents of mainWindow',
+                        'on error',
+                        'set elems to UI elements of mainWindow',
+                        'end try',
+                        'repeat with elem in elems',
+                        'try',
+                        'set labelText to ""',
+                        'try',
+                        'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
+                        'end try',
+                        'ignoring case',
+                        'if labelText contains "no item is being played" or labelText contains "your queue is empty" then set idleTextFound to true',
+                        'if labelText contains "pause" or labelText contains "stop" then set playingHintFound to true',
+                        'end ignoring',
+                        'if role of elem is "AXStaticText" then',
+                        'set n to name of elem as text',
+                        'if n contains ":" and (length of n) is less than 9 then set out to out & n & linefeed',
+                        'end if',
+                        'end try',
+                        'end repeat',
+                        'if idleTextFound then set out to out & "STATE|IDLE" & linefeed',
+                        'if playingHintFound then set out to out & "STATE|PLAYING" & linefeed',
+                        'return out',
+                        'end tell',
+                        'end tell',
+                    ]
+                    ok, raw, _script_error = self._run_karafun_applescript_sync(script, timeout=4)
+                    if not ok:
+                        raw = ""
+                    lines = [str(v or "").strip() for v in raw.splitlines() if str(v or "").strip()]
+                    idle_reported = any(v == "STATE|IDLE" for v in lines)
+                    playing_reported = any(v == "STATE|PLAYING" for v in lines)
+                    clocks = [self._karafun_clock_seconds(v) for v in lines if not v.startswith("STATE|")]
+                    clocks = [v for v in clocks if v is not None]
+                    # KaraFun may expose search durations or display counters
+                    # after the actual player clock. Static duration labels can
+                    # look like current == total, so only trust a clock pair
+                    # once its current value progresses between polls.
+                    next_clock_candidates = {}
+                    for i in range(0, max(0, len(clocks) - 1)):
+                        current, total = clocks[i], clocks[i + 1]
+                        if total > 0 and 0 <= current < total:
+                            previous = last_clock_candidates.get(total)
+                            next_clock_candidates[total] = max(current, int(next_clock_candidates.get(total, -1)))
+                            if previous is None or current <= previous:
+                                continue
+                            remaining = total - current
+                            if current > 2:
+                                seen_playback = True
+                    last_clock_candidates = next_clock_candidates
+                    if playing_reported:
+                        seen_playback = True
+                        idle_stop_count = 0
+                    elif idle_reported and seen_playback:
+                        idle_stop_count += 1
+                    else:
+                        idle_stop_count = 0
+                    state_label = f"idle={int(idle_reported)} playing={int(playing_reported)} remaining={remaining}"
+                    if state_label != last_state:
+                        _diag(f"[KARAFUN] monitor state {state_label} idle_stop_count={idle_stop_count}")
+                        last_state = state_label
+                except Exception:
+                    remaining = None
+
+                fallback_remaining = None
+                remaining_from_fallback = False
+                if fallback_duration > 0:
+                    fallback_remaining = fallback_duration - int(time.monotonic() - started)
+                if remaining is None and fallback_remaining is not None:
+                    remaining = fallback_remaining
+                    remaining_from_fallback = True
+                age = time.monotonic() - started
+                if remaining is not None and remaining > 5:
+                    seen_playback = True
+                should_complete = (
+                    (remaining is not None and remaining <= 5 and age > 8.0)
+                    or (idle_reported and not playing_reported and seen_playback and idle_stop_count >= 2 and age > 8.0)
+                )
+                if should_complete:
+                    def _complete_near_end():
+                        current_active = getattr(self, "_active_external_karafun", None)
+                        if isinstance(current_active, dict) and current_active.get("entry") is entry:
+                            reason = "duration_fallback" if remaining_from_fallback else "karaFun_idle"
+                            _diag(f"[KARAFUN] completion event received reason={reason} remaining={remaining} idle={int(idle_reported)}")
+                            self._finish_external_karafun_playback("complete")
+                    self._run_on_ui_thread(_complete_near_end)
+                    return
+                time.sleep(1.0)
+
+        threading.Thread(target=_monitor, daemon=True, name="karafun-completion-monitor").start()
 
     def _fade_bg_for_external_karafun(self):
         try:
@@ -40278,6 +42228,7 @@ class KaraokeApp(QWidget):
     def _start_external_karafun_playback(self, *, singer: dict, entry: dict, song_info, key=0, tempo_percent=None, duet_display=None, marker_was_top: bool = False):
         artist, title = self._karafun_entry_artist_title(entry)
         singer_display = duet_display or str((singer or {}).get("name", "") or "").strip()
+        self._karafun_restore_token = None
         self._active_external_karafun = {
             "singer": singer,
             "entry": entry,
@@ -40292,7 +42243,11 @@ class KaraokeApp(QWidget):
         self._eta_hold_current_secs = max(0, int((entry or {}).get("duration") or 0))
         self._current_karaoke_singer_name = str((singer or {}).get("name", "") or "")
         self._current_karaoke_singer_display = str(singer_display or "")
+        self._current_karaoke_singer_id = self._ensure_singer_id(singer)
+        self._current_karaoke_request_id = self._ensure_queue_entry_id(entry)
         self._current_karaoke_song_path = str(self._song_info_primary_path(song_info) or "")
+        _diag(f"[KARAFUN] song started singer={singer_display!r} artist={artist!r} title={title!r}")
+        QTimer.singleShot(0, lambda: self._reapply_rotation_presentation(scroll_current=True))
         try:
             self._clear_next_up_overlay_pending("external_karafun_start")
         except Exception:
@@ -40319,6 +42274,8 @@ class KaraokeApp(QWidget):
             _diag(f"[KARAFUN] companion active singer={singer_display!r} artist={artist!r} title={title!r}")
         except Exception:
             pass
+        if bool(self.settings.get("karafun_open_automatically", True)):
+            self._automate_karafun_search_and_play(entry, key=key, tempo_percent=tempo_percent)
         self._show_external_karafun_dialog()
         self.queue = self.queue.copy()
         QTimer.singleShot(0, self.update_queue_display)
@@ -40350,7 +42307,7 @@ class KaraokeApp(QWidget):
         song_label.setWordWrap(True)
         song_label.setStyleSheet(f"color:{_v('text')}; font-size:14px; font-weight:700;")
         layout.addWidget(song_label)
-        note = QLabel("KaraFun is externally controlled. SingWS will not advance the rotation until you confirm completion.")
+        note = QLabel("SingWS is controlling KaraFun and will advance automatically when playback ends.")
         note.setWordWrap(True)
         note.setStyleSheet(section_meta_css())
         layout.addWidget(note)
@@ -40404,11 +42361,18 @@ class KaraokeApp(QWidget):
             pass
         self._active_external_karafun_dialog = None
         self._active_external_karafun = None
+        try:
+            entry.pop("karafun_completion_monitor", None)
+            entry.pop("karafun_play_started_at", None)
+        except Exception:
+            pass
         self.karaoke_playing = False
         self._eta_hold_current_secs = 0
+        self._restore_show_screen_from_karafun()
 
         if action == "return_to_queue":
             try:
+                self._set_karafun_entry_status(entry, "ready", message="Returned to queue")
                 singer.setdefault("songs", []).insert(0, entry)
                 self.queue.insert(0, singer)
                 self.queue = self.queue.copy()
@@ -40432,6 +42396,11 @@ class KaraokeApp(QWidget):
             rid = self._queue_entry_remote_request_id(entry)
             if rid is not None:
                 self._complete_remote_request(rid, entry=entry, singer_name=singer_name, reason="external_karafun_completed")
+        except Exception:
+            pass
+        try:
+            self._set_karafun_entry_status(entry, "completed", message="Completed in KaraFun")
+            entry["karafun_submission_state"] = "karafun_completed"
         except Exception:
             pass
         try:
@@ -40477,7 +42446,8 @@ class KaraokeApp(QWidget):
             self.post_rotation()
         except Exception:
             pass
-        _diag(f"[KARAFUN] completed singer={singer_name!r}")
+        _diag(f"[KARAFUN] song ended singer={singer_name!r} action={action!r}")
+        _diag(f"[KARAFUN] rotation advanced after completion singer={singer_name!r} queue_len={len(self.queue) if isinstance(self.queue, list) else -1}")
 
     def play_next_file(self, skip_confirmation=False):
         # Intro Loop release: if the next song is held in a looping intro, a
@@ -40775,6 +42745,7 @@ class KaraokeApp(QWidget):
             _diag(f"[PLAYNEXT] started singer={singer.get('name', 'Unknown')} song={song_path_display}")
         except Exception:
             pass
+        self._clear_routine_processing_text_for_playback()
 
         # Prefer queue entry metadata first so scan/DB timing can't force filename fallback.
         entry_artist = ""
@@ -40815,6 +42786,8 @@ class KaraokeApp(QWidget):
         # Render 3-line Now Singing with stable eliding + padding-aware width
         self._current_karaoke_singer_name = str(singer.get("name", "") or "")
         self._current_karaoke_singer_display = str(singer_display or "")
+        self._current_karaoke_singer_id = self._ensure_singer_id(singer)
+        self._current_karaoke_request_id = self._ensure_queue_entry_id(entry)
         self._current_karaoke_song_path = str(song_path_display or "")
         try:
             self._update_last_sung_card()
@@ -40861,7 +42834,7 @@ class KaraokeApp(QWidget):
             pass
 
         # Defer queue display update with small delay to avoid freezing ticker
-        QTimer.singleShot(50, self.update_queue_display)
+        QTimer.singleShot(50, lambda: self._reapply_rotation_presentation(scroll_current=True))
 
     def stop_playback(self, skip_confirmation=False):
         if isinstance(getattr(self, "_active_external_karafun", None), dict):
@@ -42377,6 +44350,12 @@ class KaraokeApp(QWidget):
 
     def _reconcile_remote_requests(self, reqs):
         _perf_t0 = time.perf_counter()
+        # A successful poll is also our reconnect signal. Retry durable host
+        # additions without blocking the UI; idempotency prevents duplicates.
+        try:
+            self._flush_host_request_sync_ops()
+        except Exception:
+            pass
         try:
             self._prune_expired_empty_rotation_slots()
         except Exception:
@@ -42638,6 +44617,9 @@ class KaraokeApp(QWidget):
                 "selected_version": req.get("selected_version") or "",
                 "selected_brand": req.get("selected_brand") or "",
                 "selected_disc_id": req.get("selected_disc_id") or "",
+                "selected_source": req.get("selected_source") or "",
+                "provider": req.get("provider") or "",
+                "provider_track_id": req.get("provider_track_id") or req.get("selected_disc_id") or "",
                 "received_at_server": req.get("received_at_server") or "",
                 "pending_reason": req.get("pending_reason") or "",
                 "pending_status": req.get("pending_status") or "",
@@ -43107,9 +45089,42 @@ class KaraokeApp(QWidget):
         tempo_offset = max(-30, min(30, tempo_offset))
         tempo_percent = 100 + tempo_offset
 
+        selected_source = str(req.get("selected_source") or req.get("provider") or "").strip().lower()
+        provider_track_id = str(req.get("provider_track_id") or req.get("selected_disc_id") or "").strip()
+        is_karafun = (
+            selected_source in {"karafun", "karafun_streaming", "external_karafun"}
+            or provider_track_id.lower().startswith("kf_")
+        )
+        def _external_karafun_payload():
+            track = self._build_karafun_streaming_track(
+                artist=artist,
+                title=title,
+                provider_track_id=provider_track_id,
+            )
+            try:
+                request_id = int(req.get("request_id", req.get("id", 0)) or 0)
+            except Exception:
+                request_id = 0
+            try:
+                request_time = float(req.get("created_at") or req.get("requested_at") or req.get("request_time") or time.time())
+            except Exception:
+                request_time = time.time()
+            return {
+                "_ok": True,
+                "request_id": request_id,
+                "request_time": request_time,
+                "singer": singer,
+                "artist": artist,
+                "title": title,
+                "song_data": (track["path"], key, tempo_percent),
+                "track": track,
+                "remote_meta": req,
+                "brand_info": {"effective": ["KARAFUN"], "source": "server_catalog"},
+            }
+
         _sig = (singer.lower(), artist.lower(), title.lower())
         _failed_sigs = getattr(self, "_unmatched_request_sigs", None)
-        if isinstance(_failed_sigs, set) and _sig in _failed_sigs:
+        if not is_karafun and isinstance(_failed_sigs, set) and _sig in _failed_sigs:
             return self._remote_request_failure_payload(req, "previous_auto_match_failure", match_result="previous_failure")
 
         _match_t0 = time.perf_counter()
@@ -43123,6 +45138,28 @@ class KaraokeApp(QWidget):
                 and t.get("title", "").lower() == title.lower()
             ]
         _perf_log_if_slow("remote_request_match_lookup", (time.perf_counter() - _match_t0) * 1000.0)
+        if is_karafun:
+            # A KaraFun catalog badge describes where the singer found the
+            # title, not how it must be played. Only physical, supported local
+            # media counts as an alternative; stored external references do not.
+            local_matches = []
+            for candidate in matches:
+                candidate_path = str(candidate.get("path") or "").strip()
+                _base, candidate_ext = os.path.splitext(candidate_path)
+                if candidate_ext.lower() in {".mp4", ".mp3", ".cdg", ".zip"} and os.path.isfile(candidate_path):
+                    local_matches.append(candidate)
+            if not local_matches and artist and title:
+                return _external_karafun_payload()
+            matches = local_matches
+            # Prefer the host's local video when several physical versions
+            # exist, while still using any other playable local version before
+            # falling back to the KaraFun app.
+            local_mp4_matches = [
+                candidate for candidate in matches
+                if str(candidate.get("path") or "").lower().endswith(".mp4")
+            ]
+            if local_mp4_matches:
+                matches = local_mp4_matches
         if not matches:
             return self._remote_request_failure_payload(req, "no_local_library_match", match_result="no_match")
 
