@@ -32774,7 +32774,10 @@ class KaraokeApp(QWidget):
             rows = list(object.__getattribute__(self, "__dict__").get("_host_request_sync_ops", []) or [])
         except Exception:
             rows = []
-        _save_json_atomic(HOST_REQUEST_SYNC_PATH, rows)
+        try:
+            _save_json_atomic(HOST_REQUEST_SYNC_PATH, rows)
+        except Exception as exc:
+            _diag(f"[HOST-REQUEST-SYNC] persist deferred unavailable error={exc}")
 
     def _host_request_sync_payload(self, singer: dict, entry: dict, song_idx: int) -> dict:
         singer_id = self._ensure_singer_id(singer)
@@ -32839,11 +32842,15 @@ class KaraokeApp(QWidget):
         key = payload["idempotency_key"]
         entry["host_sync_status"] = "pending"
         operation = {"key": key, "payload": payload, "attempts": 0, "queued_at": time.time()}
-        pending = [op for op in list(getattr(self, "_host_request_sync_ops", []) or []) if op.get("key") != key]
+        state = object.__getattribute__(self, "__dict__")
+        pending = [op for op in list(state.get("_host_request_sync_ops", []) or []) if op.get("key") != key]
         pending.append(operation)
         self._host_request_sync_ops = pending
         self._save_host_request_sync_ops()
-        self._schedule_save_data(0)
+        try:
+            self._schedule_save_data(0)
+        except Exception:
+            pass
         _diag(
             f"[HOST-REQUEST-SYNC] queued singer_id={payload['host_singer_id']} "
             f"request_key={key} source=host_manual status=pending"
@@ -32851,22 +32858,27 @@ class KaraokeApp(QWidget):
         self._flush_host_request_sync_ops()
 
     def _flush_host_request_sync_ops(self) -> None:
-        pending = list(getattr(self, "_host_request_sync_ops", []) or [])
+        state = object.__getattribute__(self, "__dict__")
+        pending = list(state.get("_host_request_sync_ops", []) or [])
         if not pending or not self.is_network_configured():
             return
+        inflight = state.get("_host_request_sync_inflight")
+        if not isinstance(inflight, set):
+            inflight = set()
+            self._host_request_sync_inflight = inflight
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
         for operation in pending:
             key = str(operation.get("key") or "")
-            if not key or key in self._host_request_sync_inflight:
+            if not key or key in inflight:
                 continue
             attempts = int(operation.get("attempts") or 0)
             last_attempt = float(operation.get("last_attempt_at") or 0.0)
             retry_delay = min(60.0, float(2 ** min(attempts, 6))) if attempts else 0.0
             if last_attempt and time.time() - last_attempt < retry_delay:
                 continue
-            self._host_request_sync_inflight.add(key)
+            inflight.add(key)
 
             def send(op=dict(operation), op_key=key):
                 ok = False
@@ -32896,7 +32908,10 @@ class KaraokeApp(QWidget):
             threading.Thread(target=send, daemon=True, name="singws-host-request-sync").start()
 
     def _finish_host_request_sync(self, key: str, ok: bool, request_id: int, singer_session_id: int, error: str) -> None:
-        self._host_request_sync_inflight.discard(key)
+        state = object.__getattribute__(self, "__dict__")
+        inflight = state.get("_host_request_sync_inflight")
+        if isinstance(inflight, set):
+            inflight.discard(key)
         matched_singer_idx = -1
         if ok and request_id > 0:
             for singer_idx, singer in enumerate(self.queue or []):
