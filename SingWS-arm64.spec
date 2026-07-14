@@ -1,9 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import os
 import platform
 
 project_root = Path("/Users/daniel/Documents/SingWS")
+build_gst_registry = project_root / "build" / "gst-registry.bin"
+build_gst_registry.parent.mkdir(parents=True, exist_ok=True)
+os.environ["GST_REGISTRY"] = str(build_gst_registry)
 machine = platform.machine().lower()
 brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("/usr/local")
 gst_scanner = brew_root / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"

@@ -90,6 +90,18 @@ class UpdateManifestDefaultsTests(unittest.TestCase):
 
 
 class PackagingSpecTests(unittest.TestCase):
+    def test_gstreamer_registry_never_targets_signed_app_bundle(self):
+        runtime = Path("singws_pyinstaller_runtime.py").read_text(encoding="utf-8")
+        entry = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn('"Caches" / "SingWS" / "gstreamer-registry.bin"', runtime)
+        self.assertIn('os.environ["GST_REGISTRY"] = str(registry_cache)', runtime)
+        self.assertNotIn('resources / "gst-registry.bin"', entry)
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+            with self.subTest(spec=spec):
+                source = Path(spec).read_text(encoding="utf-8")
+                self.assertIn('project_root / "build" / "gst-registry.bin"', source)
+                self.assertIn('os.environ["GST_REGISTRY"] = str(build_gst_registry)', source)
+
     def test_release_specs_exclude_gst_python_plugin(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
             with self.subTest(spec=spec):

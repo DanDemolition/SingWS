@@ -1,9 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import os
 import platform
 
 project_root = Path("/Users/daniel/Documents/SingWS")
+build_gst_registry = project_root / "build" / "gst-registry.bin"
+build_gst_registry.parent.mkdir(parents=True, exist_ok=True)
+os.environ["GST_REGISTRY"] = str(build_gst_registry)
 # Universal-build mode: prefer the universal GStreamer.framework (x86_64 +
 # arm64) installed at /Library/Frameworks over the single-arch Homebrew
 # install at /opt/homebrew.  Homebrew remains the fallback so the spec

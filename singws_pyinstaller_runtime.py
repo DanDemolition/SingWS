@@ -33,6 +33,13 @@ def _configure_frozen_gstreamer_paths() -> None:
     resources_dir = contents_dir / "Resources"
     frameworks_dir = contents_dir / "Frameworks"
 
+    # GStreamer rewrites its registry as plugins change. A cache inside the
+    # signed .app invalidates the macOS bundle seal, so establish the writable
+    # per-user location before any GI/GStreamer runtime hook can initialize.
+    registry_cache = Path.home() / "Library" / "Caches" / "SingWS" / "gstreamer-registry.bin"
+    registry_cache.parent.mkdir(parents=True, exist_ok=True)
+    os.environ["GST_REGISTRY"] = str(registry_cache)
+
     _prepend_env_path("GI_TYPELIB_PATH", resources_dir / "gi_typelibs")
     _prepend_env_path("XDG_DATA_DIRS", resources_dir / "share")
 

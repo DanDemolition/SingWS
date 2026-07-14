@@ -33,6 +33,7 @@ openkj.sqlite
 *.bak*
 *.icns.bak*
 *.iconset.bak*/
+tmp_live_test_backup/
 
 # Current PyInstaller specs are source for the active release builders.
 # Stable (version-agnostic) names so the version lives only in APP_VERSION.

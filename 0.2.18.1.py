@@ -1,7 +1,9 @@
 import math
+import os
 import sys
 import logging
 import logging.handlers
+from pathlib import Path
 
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.1.3"
@@ -123,6 +125,8 @@ def _setup_gstreamer_runtime_paths():
     elif sys.platform == "darwin":
         try:
             host_paths = _darwin_prefix_paths()
+            registry_cache = Path.home() / "Library" / "Caches" / "SingWS" / "gstreamer-registry.bin"
+            registry_cache.parent.mkdir(parents=True, exist_ok=True)
             # In a frozen .app: sys.executable -> .../SingWS.app/Contents/MacOS/SingWS
             exe_path = Path(sys.executable).resolve()
             contents = exe_path.parents[1]  # Contents/
@@ -169,8 +173,10 @@ def _setup_gstreamer_runtime_paths():
                     fallback_parts.append(existing)
                 os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = os.pathsep.join(fallback_parts)
 
-                # Keep registry local to avoid user-global caching weirdness
-                os.environ["GST_REGISTRY"] = str(resources / "gst-registry.bin")
+                # The signed app bundle is read-only. Keep the mutable plugin
+                # registry in the per-user cache so startup never invalidates
+                # the bundle seal.
+                os.environ["GST_REGISTRY"] = str(registry_cache)
                 os.environ["GST_REGISTRY_REUSE_PLUGIN_SCANNER"] = "0"
                 try:
                     _GST_RUNTIME_DEBUG.update({
@@ -224,7 +230,7 @@ def _setup_gstreamer_runtime_paths():
                 if fallback_parts:
                     os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = os.pathsep.join(fallback_parts)
 
-                os.environ["GST_REGISTRY"] = str(resources / "gst-registry.bin")
+                os.environ["GST_REGISTRY"] = str(registry_cache)
                 os.environ["GST_REGISTRY_REUSE_PLUGIN_SCANNER"] = "0"
                 try:
                     _GST_RUNTIME_DEBUG.update({
@@ -2904,6 +2910,7 @@ DEFAULTS = {
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "karafun_open_automatically": True, # Focus/open KaraFun when an external KaraFun queue item becomes active
     "karafun_manage_show_screen": True, # macOS: hand the show display to KaraFun, then restore SingWS on completion
+    "karafun_transparent_handoff": True, # Reveal an already-positioned KaraFun renderer through the SingWS show window
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
     "karafun_request_url": "",       # Private KaraFun host/session link; never included in public/server payloads
     "karafun_auto_submit_server": True,
@@ -29825,6 +29832,15 @@ class KaraokeApp(QWidget):
             karafun_enable_cb.setChecked(bool(self.settings.get("karafun_auto_queue_enabled", False)))
             v.addWidget(karafun_enable_cb)
 
+            karafun_transparent_cb = QCheckBox("Reveal KaraFun through the SingWS show screen (faster)")
+            karafun_transparent_cb.setChecked(bool(self.settings.get("karafun_transparent_handoff", True)))
+            karafun_transparent_cb.setToolTip(
+                "Uses a macOS fullscreen-auxiliary SingWS audience window over KaraFun's true fullscreen renderer, "
+                "then switches SingWS transparent during playback. Turn this off to use the older automatic "
+                "renderer recreation/fullscreen handoff."
+            )
+            v.addWidget(karafun_transparent_cb)
+
             karafun_search_cb = QCheckBox("Include online KaraFun catalog results in SingWS search")
             karafun_search_cb.setChecked(bool(self.settings.get("karafun_include_online_search", False)))
             karafun_search_cb.setToolTip("Shows CSV catalog-only tracks with a KaraFun Online badge. Local matches remain preferred.")
@@ -30212,6 +30228,7 @@ class KaraokeApp(QWidget):
                 self.settings["header_qr_url"] = qr_edit.text().strip()
                 self.settings["host_controls_pin"] = host_pin_edit.text().strip()
                 self.settings["karafun_auto_queue_enabled"] = bool(karafun_enable_cb.isChecked())
+                self.settings["karafun_transparent_handoff"] = bool(karafun_transparent_cb.isChecked())
                 self.settings["karafun_include_online_search"] = bool(karafun_search_cb.isChecked())
                 self.settings["karafun_request_url"] = karafun_url_edit.text().strip()
                 self.settings["karafun_auto_submit_server"] = bool(karafun_server_cb.isChecked())
@@ -41083,28 +41100,35 @@ class KaraokeApp(QWidget):
             pass
         return message
 
-    def _karafun_run_window_script(self, lines, on_complete=None) -> bool:
+    def _karafun_run_window_script(self, lines, on_complete=None, *, timeout: float = 18) -> bool:
         """Run non-blocking macOS Accessibility automation for KaraFun."""
         if sys.platform != "darwin":
             return False
         try:
             if callable(on_complete):
                 def _wait_then_complete():
-                    ok, stdout, stderr = self._run_karafun_applescript_sync(lines, timeout=18)
-                    try:
-                        result = str(stdout or "").strip()
-                        if not ok:
-                            _diag(f"[KARAFUN] window script failed error={str(stderr or '').strip()[:240]!r}")
+                    ok, stdout, stderr = self._run_karafun_applescript_sync(lines, timeout=timeout)
+                    result = str(stdout or "").strip()
+                    if not ok:
+                        _diag(f"[KARAFUN] window script failed error={str(stderr or '').strip()[:240]!r}")
+
+                    def _deliver_completion():
                         try:
                             on_complete(result)
                         except TypeError:
                             on_complete()
-                    except Exception as e:
-                        _diag(f"[KARAFUN] window automation completion failed: {e}")
+                        except Exception as e:
+                            _diag(f"[KARAFUN] window automation completion failed: {e}")
+
+                    # Completion handlers schedule Qt timers and inspect Qt
+                    # windows. Always deliver them on the UI thread; a
+                    # QTimer.singleShot created from this worker thread can be
+                    # silently lost because the worker has no Qt event loop.
+                    self._run_on_ui_thread(_deliver_completion)
                 threading.Thread(target=_wait_then_complete, daemon=True).start()
             else:
                 def _fire_and_forget():
-                    ok, _stdout, stderr = self._run_karafun_applescript_sync(lines, timeout=18)
+                    ok, _stdout, stderr = self._run_karafun_applescript_sync(lines, timeout=timeout)
                     if not ok:
                         _diag(f"[KARAFUN] window script failed error={str(stderr or '').strip()[:240]!r}")
                 threading.Thread(target=_fire_and_forget, daemon=True).start()
@@ -41153,12 +41177,199 @@ class KaraokeApp(QWidget):
         return KaraokeApp._macos_native_mouse_click(x, y, clicks=2)
 
     def _handoff_show_screen_to_karafun(self):
-        """Minimize SingWS output and fullscreen KaraFun on the same display."""
+        """Reveal KaraFun on the show display, preferring an instant transparent overlay."""
         if sys.platform != "darwin" or not bool(self.settings.get("karafun_manage_show_screen", True)):
+            return
+        if bool(getattr(self, "_karafun_handoff_in_progress", False)):
+            _diag("[KARAFUN] show-screen handoff already in progress; duplicate ignored")
+            return
+        if bool(getattr(self, "_karafun_handoff_complete", False)):
+            _diag("[KARAFUN] show-screen handoff already complete; duplicate ignored")
             return
         vw = getattr(self, "video_window", None)
         if vw is None:
             return
+        handoff_token = uuid.uuid4().hex
+        self._karafun_handoff_token = handoff_token
+        self._karafun_handoff_in_progress = True
+        self._karafun_handoff_complete = False
+
+        def _handoff_is_current() -> bool:
+            return (
+                getattr(self, "_karafun_handoff_token", None) == handoff_token
+                and isinstance(getattr(self, "_active_external_karafun", None), dict)
+            )
+
+        def _finish_handoff_state(*, complete: bool):
+            if getattr(self, "_karafun_handoff_token", None) != handoff_token:
+                return
+            self._karafun_handoff_in_progress = False
+            self._karafun_handoff_complete = bool(complete)
+
+        if (
+            bool(self.settings.get("karafun_transparent_handoff", True))
+            and bool(getattr(self, "_karafun_transparent_renderer_ready", False))
+        ):
+            try:
+                frame = vw.frameGeometry()
+                screen = QApplication.screenAt(frame.center()) or vw.screen() or QApplication.primaryScreen()
+                screen_rect = screen.geometry() if screen is not None else frame
+                self._karafun_show_screen_restore = {
+                    "mode": "transparent",
+                    "geometry": vw.geometry(),
+                    "fullscreen": bool(vw.isFullScreen()),
+                    "maximized": bool(vw.isMaximized()),
+                    "visible": bool(vw.isVisible()),
+                    "window_opacity": float(vw.windowOpacity()),
+                    "screen_geometry": screen_rect,
+                }
+                state = self._karafun_show_screen_restore
+                x, y = int(screen_rect.x()), int(screen_rect.y())
+                width, height = int(screen_rect.width()), int(screen_rect.height())
+            except Exception as e:
+                _finish_handoff_state(complete=False)
+                _diag(f"[KARAFUN] transparent show-screen handoff failed: {e}")
+                return
+
+            fullscreen_check = [
+                'tell application "System Events"',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) is 0 then return "NO_APP"',
+                'tell item 1 of matches',
+                'repeat with candidateWindow in windows',
+                'try',
+                'if name of candidateWindow is "Dual Renderer" then',
+                'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
+                'return "WINDOWED"',
+                'end if',
+                'end try',
+                'end repeat',
+                'return "NO_DUAL_RENDERER"',
+                'end tell',
+                'end tell',
+            ]
+            fullscreen_verify = [
+                'tell application "System Events"',
+                'repeat 40 times',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) > 0 then',
+                'tell item 1 of matches',
+                'repeat with candidateWindow in windows',
+                'try',
+                'if name of candidateWindow is "Dual Renderer" then',
+                'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
+                'end if',
+                'end try',
+                'end repeat',
+                'end tell',
+                'end if',
+                'delay 0.1',
+                'end repeat',
+                'return "WINDOWED"',
+                'end tell',
+            ]
+
+            def _reveal_true_fullscreen(result=""):
+                if not _handoff_is_current():
+                    _diag("[KARAFUN] skipped stale true-fullscreen reveal")
+                    return
+                verified = str(result or "").strip() == "FULLSCREEN"
+                try:
+                    vw.setWindowOpacity(0.0)
+                    _finish_handoff_state(complete=True)
+                    _diag(
+                        f"[KARAFUN] SingWS show screen opacity=0; "
+                        f"revealed KaraFun true_fullscreen={int(verified)}"
+                    )
+                except Exception as e:
+                    _finish_handoff_state(complete=False)
+                    _diag(f"[KARAFUN] true-fullscreen reveal failed: {e}")
+
+            def _enter_karafun_true_fullscreen(initial_state=""):
+                if not _handoff_is_current():
+                    return
+                if str(initial_state or "").strip() == "FULLSCREEN":
+                    _reveal_true_fullscreen("FULLSCREEN")
+                    return
+                center_x = x + (width // 2)
+                center_y = y + (height // 2)
+                if not self._macos_native_double_click(center_x, center_y):
+                    _reveal_true_fullscreen("CLICK_FAILED")
+                    return
+                if not self._karafun_run_window_script(
+                    fullscreen_verify,
+                    on_complete=_reveal_true_fullscreen,
+                    timeout=6,
+                ):
+                    _reveal_true_fullscreen("VERIFY_START_FAILED")
+
+            def _check_or_enter_true_fullscreen():
+                if not _handoff_is_current():
+                    return
+                if not self._karafun_run_window_script(
+                    fullscreen_check,
+                    on_complete=_enter_karafun_true_fullscreen,
+                    timeout=5,
+                ):
+                    _enter_karafun_true_fullscreen("CHECK_START_FAILED")
+
+            def _configure_auxiliary_window():
+                if not _handoff_is_current():
+                    return
+                try:
+                    import objc
+                    from AppKit import (
+                        NSFloatingWindowLevel,
+                        NSWindowCollectionBehaviorCanJoinAllSpaces,
+                        NSWindowCollectionBehaviorFullScreenAuxiliary,
+                        NSWindowCollectionBehaviorFullScreenPrimary,
+                        NSWindowStyleMaskBorderless,
+                    )
+
+                    vw.setWindowState(Qt.WindowState.WindowNoState)
+                    vw.setGeometry(screen_rect)
+                    vw.show()
+                    QApplication.processEvents()
+                    native_view = objc.objc_object(c_void_p=int(QWidget.winId(vw)))
+                    native_window = native_view.window()
+                    if native_window is None:
+                        raise RuntimeError("SingWS native audience window unavailable")
+                    if "native_style_mask" not in state:
+                        state["native_style_mask"] = int(native_window.styleMask())
+                        state["native_collection_behavior"] = int(native_window.collectionBehavior())
+                        state["native_level"] = int(native_window.level())
+                        state["native_ignores_mouse"] = bool(native_window.ignoresMouseEvents())
+                    behavior = int(native_window.collectionBehavior())
+                    behavior &= ~int(NSWindowCollectionBehaviorFullScreenPrimary)
+                    behavior |= int(NSWindowCollectionBehaviorCanJoinAllSpaces)
+                    behavior |= int(NSWindowCollectionBehaviorFullScreenAuxiliary)
+                    native_window.setStyleMask_(NSWindowStyleMaskBorderless)
+                    native_window.setCollectionBehavior_(behavior)
+                    native_window.setLevel_(NSFloatingWindowLevel)
+                    native_window.setIgnoresMouseEvents_(True)
+                    vw.setGeometry(screen_rect)
+                    native_window.orderFrontRegardless()
+                    state["native_window"] = native_window
+                    self._karafun_auxiliary_show_screen = True
+                    _diag(
+                        f"[KARAFUN] SingWS show screen configured fullscreen auxiliary "
+                        f"bounds={x},{y},{width},{height}"
+                    )
+                    QTimer.singleShot(250, _check_or_enter_true_fullscreen)
+                except Exception as e:
+                    _diag(f"[KARAFUN] fullscreen auxiliary setup failed: {e}; using windowed reveal")
+                    _reveal_true_fullscreen("AUXILIARY_SETUP_FAILED")
+
+            # A Qt native-fullscreen window is a primary Space and cannot join
+            # KaraFun's fullscreen Space in place. Leave that Space first, then
+            # convert the same native audience window to a borderless auxiliary.
+            if bool(getattr(self, "_karafun_auxiliary_show_screen", False)):
+                QTimer.singleShot(0, _configure_auxiliary_window)
+            else:
+                vw.showNormal()
+                QTimer.singleShot(700, _configure_auxiliary_window)
+            return
+
         try:
             frame = vw.frameGeometry()
             screen = QApplication.screenAt(frame.center()) or vw.screen() or QApplication.primaryScreen()
@@ -41170,70 +41381,26 @@ class KaraokeApp(QWidget):
                 "visible": bool(vw.isVisible()),
                 "screen_geometry": rect,
             }
-            vw.showMinimized()
+            # A minimized Qt fullscreen window can leave its macOS fullscreen
+            # Space active.  KaraFun then becomes the frontmost application,
+            # but its Dual Renderer remains in another Space until the host
+            # switches to it manually.  Leave the SingWS fullscreen Space and
+            # hide the audience window before raising KaraFun so the handoff is
+            # visible immediately.  The snapshot above is used to restore the
+            # original fullscreen state after KaraFun completes.
+            vw.setWindowState(Qt.WindowState.WindowNoState)
+            vw.showNormal()
+            vw.hide()
             x, y, width, height = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
         except Exception as e:
+            _finish_handoff_state(complete=False)
             _diag(f"[KARAFUN] show-screen snapshot failed: {e}")
             return
 
-        fast_lines = [
-            'tell application "System Events"',
-            'set matches to every application process whose name contains "KaraFun"',
-            'if (count of matches) is 0 then return "MISS|no_app"',
-            'set kf to item 1 of matches',
-            'set frontmost of kf to true',
-            'tell kf',
-            'set outputWindow to missing value',
-            'repeat with candidateWindow in windows',
-            'try',
-            'if name of candidateWindow is "Dual Renderer" then',
-            'set outputWindow to candidateWindow',
-            'exit repeat',
-            'end if',
-            'end try',
-            'end repeat',
-            'if outputWindow is missing value then return "MISS|no_dual_renderer"',
-            'set wp to position of outputWindow',
-            'set ws to size of outputWindow',
-            f'set targetX to {x}',
-            f'set targetY to {y}',
-            f'set targetW to {width}',
-            f'set targetH to {height}',
-            'set dx to (item 1 of wp) - targetX',
-            'if dx < 0 then set dx to -dx',
-            'set dy to (item 2 of wp) - targetY',
-            'if dy < 0 then set dy to -dy',
-            'set dw to (item 1 of ws) - targetW',
-            'if dw < 0 then set dw to -dw',
-            'set dh to (item 2 of ws) - targetH',
-            'if dh < 0 then set dh to -dh',
-            'if dx < 40 and dy < 80 and dw < 80 and dh < 120 then',
-            'try',
-            'set value of attribute "AXMinimized" of outputWindow to false',
-            'end try',
-            'try',
-            f'set position of outputWindow to {{{x}, {y}}}',
-            f'set size of outputWindow to {{{width}, {height}}}',
-            'end try',
-            'perform action "AXRaise" of outputWindow',
-            'delay 0.1',
-            'try',
-            'set value of attribute "AXFullScreen" of outputWindow to true',
-            'end try',
-            'perform action "AXRaise" of outputWindow',
-            'return "FAST_READY"',
-            'end if',
-            'return "MISS|geometry"',
-            'end tell',
-            'end tell',
-        ]
-        def _finish_fast(result=""):
-            if str(result or "").strip() == "FAST_READY":
-                _diag(f"[KARAFUN] show-screen fast handoff ready fullscreen forced bounds={x},{y},{width},{height}")
-                return
-            QTimer.singleShot(0, _fullscreen_karafun)
-
         def _fullscreen_karafun(attempt=0):
+            if not _handoff_is_current():
+                _diag("[KARAFUN] skipped stale show-screen handoff attempt")
+                return
             lines = [
                 'tell application "System Events"',
                 'set kf to missing value',
@@ -41249,11 +41416,24 @@ class KaraokeApp(QWidget):
                 'set frontmost of kf to true',
                 'tell kf',
                 '-- KaraFun lyrics use a separate Dual-Screen Display window.',
-                'if (count of windows) < 2 then',
+                '-- Recreate that window on every handoff. Reusing its previous',
+                '-- fullscreen Space is what can move KaraFun to the wrong display.',
+                'set mainWindow to missing value',
+                'set outputWindow to missing value',
+                'repeat with candidateWindow in windows',
                 'try',
-                'set elems to entire contents of window 1',
-                'set wp to position of window 1',
-                'set ws to size of window 1',
+                'if name of candidateWindow is "Dual Renderer" then',
+                'set outputWindow to candidateWindow',
+                'else if mainWindow is missing value then',
+                'set mainWindow to candidateWindow',
+                'end if',
+                'end try',
+                'end repeat',
+                'if mainWindow is missing value then return "NOT_READY"',
+                'try',
+                'set elems to entire contents of mainWindow',
+                'set wp to position of mainWindow',
+                'set ws to size of mainWindow',
                 'set bestButton to missing value',
                 'set bestButtonX to 0',
                 'set bestButtonY to 0',
@@ -41287,25 +41467,34 @@ class KaraokeApp(QWidget):
                 'end if',
                 'end try',
                 'end repeat',
-                'if bestButton is not missing value then',
-                '-- KaraFun exposes AXPress/click inconsistently across builds; try both plus a coordinate click.',
-                'try',
-                'perform action "AXPress" of bestButton',
-                'end try',
-                'delay 0.15',
-                'click bestButton',
-                'delay 0.15',
+                'if bestButton is missing value then return "NO_DUAL_BUTTON"',
+                '-- The Dual Renderer control is a toggle. If its named window',
+                '-- already exists, click exactly once and wait for it to close.',
+                'if outputWindow is not missing value then',
                 'try',
                 'click at {bestButtonX, bestButtonY}',
                 'end try',
-                'end if',
+                'repeat 20 times',
+                'set dualStillOpen to false',
+                'repeat with candidateWindow in windows',
+                'try',
+                'if name of candidateWindow is "Dual Renderer" then set dualStillOpen to true',
                 'end try',
-                'end if',
-                'repeat 16 times',
-                'if (count of windows) > 1 then exit repeat',
+                'end repeat',
+                'if dualStillOpen is false then exit repeat',
                 'delay 0.1',
                 'end repeat',
-                'if (count of windows) > 1 then',
+                'if dualStillOpen then return "DUAL_DID_NOT_CLOSE"',
+                '-- KaraFun debounces this toggle after removing the renderer.',
+                '-- Reopening immediately can be ignored even though the window is gone.',
+                'delay 0.8',
+                'end if',
+                '-- Click the same toggle exactly once to create a fresh renderer.',
+                'try',
+                'click at {bestButtonX, bestButtonY}',
+                'end try',
+                'end try',
+                'repeat 20 times',
                 'set outputWindow to missing value',
                 'repeat with candidateWindow in windows',
                 'try',
@@ -41315,7 +41504,10 @@ class KaraokeApp(QWidget):
                 'end if',
                 'end try',
                 'end repeat',
-                'if outputWindow is missing value then set outputWindow to first window',
+                'if outputWindow is not missing value then exit repeat',
+                'delay 0.1',
+                'end repeat',
+                'if outputWindow is not missing value then',
                 'try',
                 'set value of attribute "AXFullScreen" of outputWindow to false',
                 'end try',
@@ -41323,11 +41515,6 @@ class KaraokeApp(QWidget):
                 f'set size of outputWindow to {{{width}, {height}}}',
                 'perform action "AXRaise" of outputWindow',
                 'delay 0.2',
-                'try',
-                'set value of attribute "AXFullScreen" of outputWindow to true',
-                'end try',
-                '-- KaraFun Dual Renderer is a custom window and may report',
-                '-- AXFullScreen=false even while filling the output display.',
                 'perform action "AXRaise" of outputWindow',
                 'return "READY"',
                 'else',
@@ -41344,34 +41531,221 @@ class KaraokeApp(QWidget):
             center_x = x + (width // 2)
             center_y = y + (height // 2)
             def _finish_handoff(result=""):
+                if not _handoff_is_current():
+                    _diag("[KARAFUN] skipped stale show-screen handoff result")
+                    return
                 outcome = str(result or "").strip()
                 if outcome == "READY":
-                    if self._macos_native_double_click(center_x, center_y):
-                        _diag(f"[KARAFUN] Dual Renderer fullscreen confirmed attempt={attempt + 1}")
+                    fullscreen_check = [
+                        'tell application "System Events"',
+                        '-- The renderer can temporarily disappear from AX while',
+                        '-- macOS moves it into or out of a fullscreen Space.',
+                        'set lastState to "NO_DUAL_RENDERER"',
+                        'repeat 30 times',
+                        'set matches to every application process whose name contains "KaraFun"',
+                        'if (count of matches) > 0 then',
+                        'tell item 1 of matches',
+                        'repeat with candidateWindow in windows',
+                        'try',
+                        'if name of candidateWindow is "Dual Renderer" then',
+                        'set lastState to "WINDOWED"',
+                        'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
+                        'end if',
+                        'end try',
+                        'end repeat',
+                        'end tell',
+                        'end if',
+                        'delay 0.1',
+                        'end repeat',
+                        'return lastState',
+                        'end tell',
+                    ]
+
+                    def _double_click_and_verify(click_attempt=0):
+                        if not _handoff_is_current():
+                            _diag("[KARAFUN] skipped stale Dual Renderer fullscreen click")
+                            return
+                        if not self._macos_native_double_click(center_x, center_y):
+                            _finish_handoff_state(complete=False)
+                            _diag(f"[KARAFUN] Dual Renderer fullscreen click failed attempt={click_attempt + 1}")
+                            return
+
+                        def _after_fullscreen_check(check_result=""):
+                            if not _handoff_is_current():
+                                _diag("[KARAFUN] skipped stale Dual Renderer fullscreen verification")
+                                return
+                            check_outcome = str(check_result or "").strip()
+                            if check_outcome == "FULLSCREEN":
+                                _finish_handoff_state(complete=True)
+                                _diag(f"[KARAFUN] Dual Renderer fullscreen verified attempt={click_attempt + 1}")
+                                return
+                            if click_attempt < 1:
+                                _diag(f"[KARAFUN] Dual Renderer still windowed; retrying double-click state={check_outcome!r}")
+                                QTimer.singleShot(650, lambda: _double_click_and_verify(click_attempt + 1))
+                                return
+                            _finish_handoff_state(complete=False)
+                            _diag(f"[KARAFUN] Dual Renderer fullscreen verification failed state={check_outcome!r}")
+
+                        if not self._karafun_run_window_script(
+                            fullscreen_check,
+                            on_complete=_after_fullscreen_check,
+                            timeout=6,
+                        ):
+                            _after_fullscreen_check("CHECK_START_FAILED")
+
+                    # Verification now polls through the renderer's temporary
+                    # AX disappearance, so the first click can happen sooner.
+                    QTimer.singleShot(400, _double_click_and_verify)
                     return
                 if outcome == "NO_DUAL_RENDERER":
-                    _diag(f"[KARAFUN] Dual Renderer unavailable; leaving KaraFun control window unchanged attempt={attempt + 1}")
+                    if attempt < 1:
+                        _diag(f"[KARAFUN] Dual Renderer unavailable; retrying recreation attempt={attempt + 1}")
+                        QTimer.singleShot(250, lambda: _fullscreen_karafun(attempt + 1))
+                    else:
+                        _finish_handoff_state(complete=False)
+                        _diag(f"[KARAFUN] Dual Renderer unavailable; leaving KaraFun control window unchanged attempt={attempt + 1}")
                     return
                 if attempt < 1:
-                    self._run_on_ui_thread(
-                        lambda: QTimer.singleShot(350, lambda: _fullscreen_karafun(attempt + 1))
-                    )
+                    QTimer.singleShot(350, lambda: _fullscreen_karafun(attempt + 1))
                 else:
-                    _diag("[KARAFUN] Dual Renderer unavailable after 3 attempts")
+                    _finish_handoff_state(complete=False)
+                    _diag("[KARAFUN] Dual Renderer unavailable after 2 attempts")
             if self._karafun_run_window_script(
                 lines,
                 on_complete=_finish_handoff,
             ):
                 _diag(f"[KARAFUN] show-screen handoff attempt={attempt + 1} bounds={x},{y},{width},{height}")
 
-        if self._karafun_run_window_script(fast_lines, on_complete=_finish_fast):
-            _diag(f"[KARAFUN] show-screen fast handoff check bounds={x},{y},{width},{height}")
-        else:
-            QTimer.singleShot(0, _fullscreen_karafun)
+        QTimer.singleShot(0, _fullscreen_karafun)
 
     def _restore_show_screen_from_karafun(self):
-        """Minimize KaraFun's Dual Renderer and restore the SingWS audience output window."""
+        """Restore the SingWS audience output after external KaraFun playback."""
         state = getattr(self, "_karafun_show_screen_restore", None)
+        transparent_handoff = isinstance(state, dict) and state.get("mode") == "transparent"
+        if transparent_handoff:
+            self._karafun_show_screen_restore = None
+            self._karafun_handoff_token = None
+            self._karafun_handoff_in_progress = False
+            self._karafun_handoff_complete = False
+            restore_token = uuid.uuid4().hex
+            self._karafun_restore_token = restore_token
+            vw = getattr(self, "video_window", None)
+            if vw is None:
+                return
+
+            restore_started = False
+
+            def _restore_transparent_singws(reason=""):
+                nonlocal restore_started
+                if getattr(self, "_karafun_restore_token", None) != restore_token:
+                    _diag("[KARAFUN] skipped stale transparent show-screen restore")
+                    return
+                if isinstance(getattr(self, "_active_external_karafun", None), dict):
+                    _diag("[KARAFUN] skipped transparent show-screen restore during active KaraFun playback")
+                    return
+                if restore_started:
+                    return
+                restore_started = True
+                try:
+                    opacity = float(state.get("window_opacity", 1.0))
+                    opacity = max(0.0, min(1.0, opacity))
+                    native_window = state.get("native_window")
+                    if native_window is not None:
+                        native_window.setIgnoresMouseEvents_(False)
+                        if "native_style_mask" in state:
+                            native_window.setStyleMask_(int(state["native_style_mask"]))
+                        if "native_collection_behavior" in state:
+                            native_window.setCollectionBehavior_(int(state["native_collection_behavior"]))
+                        if "native_level" in state:
+                            native_window.setLevel_(int(state["native_level"]))
+                    was_visible = bool(state.get("visible", True))
+                    if not was_visible:
+                        vw.hide()
+                    else:
+                        screen_rect = state.get("screen_geometry")
+                        saved_geometry = state.get("geometry")
+                        was_fullscreen = bool(state.get("fullscreen", False))
+                        was_maximized = bool(state.get("maximized", False))
+                        vw.hide()
+                        vw.setWindowState(Qt.WindowState.WindowNoState)
+                        if screen_rect is not None:
+                            vw.setGeometry(screen_rect)
+                        elif saved_geometry is not None:
+                            vw.setGeometry(saved_geometry)
+                        vw.setWindowOpacity(opacity)
+                        if was_fullscreen or was_maximized:
+                            vw.showFullScreen()
+                        else:
+                            vw.showNormal()
+                        vw.raise_()
+                        vw.activateWindow()
+                        try:
+                            from AppKit import NSApplication
+                            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                        except Exception:
+                            pass
+                        if native_window is not None:
+                            native_window.orderFrontRegardless()
+                    _diag(
+                        f"[KARAFUN] restored SingWS show screen opacity={opacity:.2f} "
+                        f"fullscreen={int(vw.isFullScreen())} reason={reason}"
+                    )
+                except Exception as e:
+                    _diag(f"[KARAFUN] transparent show-screen restore failed: {e}")
+
+            def _after_transparent_karafun_hidden(result=""):
+                if getattr(self, "_karafun_restore_token", None) != restore_token:
+                    _diag("[KARAFUN] skipped stale transparent KaraFun hide completion")
+                    return
+                _diag(f"[KARAFUN] transparent KaraFun hide result={str(result or '').strip() or 'OK'}")
+                # AXMinimized is verified by the script. A short delay lets the
+                # final Space animation settle before recreating SingWS native
+                # fullscreen on the same physical display.
+                QTimer.singleShot(250, lambda: _restore_transparent_singws("karafun_hidden"))
+
+            hide_script = [
+                'tell application "System Events"',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) is 0 then return "NO_APP"',
+                'tell item 1 of matches',
+                'set outputWindow to missing value',
+                'repeat with w in windows',
+                'try',
+                'if name of w is "Dual Renderer" then set outputWindow to w',
+                'end try',
+                'end repeat',
+                'if outputWindow is missing value then return "NO_DUAL_RENDERER"',
+                'try',
+                'set value of attribute "AXFullScreen" of outputWindow to false',
+                'end try',
+                'repeat 20 times',
+                'try',
+                'if not (value of attribute "AXFullScreen" of outputWindow) then exit repeat',
+                'end try',
+                'delay 0.1',
+                'end repeat',
+                'try',
+                'set value of attribute "AXMinimized" of outputWindow to true',
+                'end try',
+                'repeat 20 times',
+                'try',
+                'if value of attribute "AXMinimized" of outputWindow then return "MINIMIZED"',
+                'end try',
+                'delay 0.1',
+                'end repeat',
+                'return "MINIMIZE_FAILED"',
+                'end tell',
+                'end tell',
+            ]
+            started = self._karafun_run_window_script(
+                hide_script,
+                on_complete=_after_transparent_karafun_hidden,
+                timeout=6,
+            )
+            if not started:
+                QTimer.singleShot(350, lambda: _restore_transparent_singws("script_start_failed"))
+            QTimer.singleShot(6500, lambda: _restore_transparent_singws("fallback_timeout"))
+            return
         if not isinstance(state, dict):
             vw = getattr(self, "video_window", None)
             if vw is None:
@@ -41379,22 +41753,105 @@ class KaraokeApp(QWidget):
             try:
                 frame = vw.frameGeometry()
                 screen = QApplication.screenAt(frame.center()) or vw.screen() or QApplication.primaryScreen()
-                state = {"screen_geometry": screen.geometry() if screen is not None else frame}
+                state = {
+                    "geometry": vw.geometry(),
+                    "fullscreen": bool(vw.isFullScreen()),
+                    "maximized": bool(vw.isMaximized()),
+                    "visible": bool(vw.isVisible()),
+                    "screen_geometry": screen.geometry() if screen is not None else frame,
+                }
                 _diag("[KARAFUN] restore snapshot missing; using current show-screen display")
             except Exception:
                 state = {"screen_geometry": None}
         self._karafun_show_screen_restore = None
+        # Invalidate every pending open/fullscreen callback before beginning the
+        # reverse transition. A late handoff result must never reopen or toggle
+        # KaraFun after playback has ended.
+        self._karafun_handoff_token = None
+        self._karafun_handoff_in_progress = False
+        self._karafun_handoff_complete = False
         restore_token = uuid.uuid4().hex
         self._karafun_restore_token = restore_token
 
-        def _minimize_karafun_after_fullscreen_exit():
+        restore_started = False
+
+        def _restore_singws(reason=""):
+            nonlocal restore_started
             if getattr(self, "_karafun_restore_token", None) != restore_token:
-                _diag("[KARAFUN] skipped stale KaraFun Dual Renderer minimize")
+                _diag("[KARAFUN] skipped stale SingWS show-screen restore")
                 return
             if isinstance(getattr(self, "_active_external_karafun", None), dict):
-                _diag("[KARAFUN] skipped KaraFun Dual Renderer minimize during active playback")
+                _diag("[KARAFUN] skipped SingWS show-screen restore during active KaraFun playback")
                 return
-            self._karafun_run_window_script([
+            if restore_started:
+                _diag(f"[KARAFUN] skipped duplicate SingWS show-screen restore reason={reason}")
+                return
+            restore_started = True
+            vw = getattr(self, "video_window", None)
+            if vw is None:
+                return
+            try:
+                screen_rect = state.get("screen_geometry")
+                saved_geometry = state.get("geometry")
+                was_fullscreen = bool(state.get("fullscreen", False))
+                was_maximized = bool(state.get("maximized", False))
+                was_visible = bool(state.get("visible", True))
+                restore_fullscreen = was_fullscreen or was_maximized
+
+                vw.setWindowState(Qt.WindowState.WindowNoState)
+                if restore_fullscreen and screen_rect is not None:
+                    vw.setGeometry(screen_rect)
+                elif saved_geometry is not None:
+                    vw.setGeometry(saved_geometry)
+
+                if not was_visible:
+                    vw.hide()
+                    _diag("[KARAFUN] restored SingWS show screen hidden")
+                    return
+                if not restore_fullscreen:
+                    vw.showNormal()
+                    vw.raise_()
+                    _diag("[KARAFUN] restored SingWS show screen fullscreen=0")
+                    return
+
+                def _enter_singws_fullscreen(attempt=0):
+                    if getattr(self, "_karafun_restore_token", None) != restore_token:
+                        _diag("[KARAFUN] skipped stale SingWS fullscreen request")
+                        return
+                    if isinstance(getattr(self, "_active_external_karafun", None), dict):
+                        _diag("[KARAFUN] skipped SingWS fullscreen request during active KaraFun playback")
+                        return
+                    try:
+                        if vw.isFullScreen():
+                            _diag("[KARAFUN] restored SingWS show screen fullscreen=1")
+                            return
+                        if screen_rect is not None:
+                            vw.setGeometry(screen_rect)
+                        vw.showFullScreen()
+                        vw.raise_()
+                        if not vw.isFullScreen() and attempt < 1:
+                            QTimer.singleShot(700, lambda: _enter_singws_fullscreen(attempt + 1))
+                        else:
+                            _diag(f"[KARAFUN] restored SingWS show screen fullscreen={int(vw.isFullScreen())}")
+                    except Exception as e:
+                        _diag(f"[KARAFUN] fullscreen retry failed: {e}")
+
+                _enter_singws_fullscreen()
+            except Exception as e:
+                _diag(f"[KARAFUN] show-screen restore failed: {e}")
+
+        def _after_karafun_hidden(_result=""):
+            if getattr(self, "_karafun_restore_token", None) != restore_token:
+                _diag("[KARAFUN] skipped stale KaraFun Dual Renderer minimize completion")
+                return
+            if isinstance(getattr(self, "_active_external_karafun", None), dict):
+                _diag("[KARAFUN] skipped KaraFun Dual Renderer minimize completion during active playback")
+                return
+            # Let the native fullscreen Space finish closing before SingWS
+            # claims the same physical display.
+            QTimer.singleShot(250, lambda: _restore_singws("karafun_hidden"))
+
+        restore_script = [
             'tell application "System Events"',
             'set matches to every application process whose name contains "KaraFun"',
             'if (count of matches) > 0 then',
@@ -41417,51 +41874,18 @@ class KaraokeApp(QWidget):
             'end tell',
             'end if',
             'end tell',
-            ])
-
-        QTimer.singleShot(650, _minimize_karafun_after_fullscreen_exit)
-
-        def _restore_singws():
-            if getattr(self, "_karafun_restore_token", None) != restore_token:
-                _diag("[KARAFUN] skipped stale SingWS show-screen restore")
-                return
-            if isinstance(getattr(self, "_active_external_karafun", None), dict):
-                _diag("[KARAFUN] skipped SingWS show-screen restore during active KaraFun playback")
-                return
-            vw = getattr(self, "video_window", None)
-            if vw is None:
-                return
-            try:
-                screen_rect = state.get("screen_geometry")
-                # Clear the combined Minimized|FullScreen state first. On macOS,
-                # calling showFullScreen() directly on that state is a no-op.
-                vw.setWindowState(Qt.WindowState.WindowNoState)
-                vw.showNormal()
-                if screen_rect is not None:
-                    vw.setGeometry(screen_rect)
-                vw.show()
-                vw.raise_()
-
-                def _enter_singws_fullscreen(attempt=0):
-                    try:
-                        if screen_rect is not None and not vw.isFullScreen():
-                            vw.setGeometry(screen_rect)
-                        vw.showFullScreen()
-                        vw.raise_()
-                        if not vw.isFullScreen() and attempt < 2:
-                            QTimer.singleShot(650, lambda: _enter_singws_fullscreen(attempt + 1))
-                        else:
-                            _diag(f"[KARAFUN] restored SingWS show screen fullscreen={int(vw.isFullScreen())}")
-                    except Exception as e:
-                        _diag(f"[KARAFUN] fullscreen retry failed: {e}")
-
-                # Allow KaraFun's native fullscreen Space to finish closing.
-                QTimer.singleShot(300, _enter_singws_fullscreen)
-            except Exception as e:
-                _diag(f"[KARAFUN] show-screen restore failed: {e}")
-
-        # Restoration does not depend on KaraFun automation succeeding.
-        QTimer.singleShot(1400, _restore_singws)
+        ]
+        started = self._karafun_run_window_script(
+            restore_script,
+            on_complete=_after_karafun_hidden,
+            timeout=3,
+        )
+        if not started:
+            QTimer.singleShot(250, lambda: _restore_singws("script_start_failed"))
+        # Bounded fallback: restoration still happens if Accessibility is
+        # denied or KaraFun stops responding. The local guard makes this a
+        # no-op if the normal completion path has already restored the window.
+        QTimer.singleShot(3500, lambda: _restore_singws("fallback_timeout"))
 
     def _copy_karafun_lookup_text(self, entry: dict) -> bool:
         text = self._karafun_lookup_text(entry)
@@ -41639,7 +42063,9 @@ class KaraokeApp(QWidget):
                 'set fallbackY to 0',
                 'repeat with elem in elems',
                 'try',
-                f'if (role of elem is "AXStaticText") and (name of elem is {safe_title_literal}) then',
+                # KaraFun appends a small attachment/icon character to some
+                # result titles, so equality rejects the correct visible row.
+                f'if (role of elem is "AXStaticText") and ((name of elem as text) contains {safe_title_literal}) then',
                 'set ep to position of elem',
                 'if (item 1 of ep) < cutoff then',
                 'set es to size of elem',
@@ -41696,7 +42122,10 @@ class KaraokeApp(QWidget):
                 'end if',
                 'end try',
                 'end repeat',
-                'return "FIRST|" & centerX & "|" & centerY & "|" & durationText',
+                '-- A real result row exposes an aligned duration. Requiring it',
+                '-- prevents labels such as Discover, Display, and My Playlists',
+                '-- from becoming the fallback double-click target.',
+                'if durationText is not "" then return "FIRST|" & centerX & "|" & centerY & "|" & durationText',
                 'end if',
                 'end if',
                 'end try',
@@ -41808,9 +42237,131 @@ class KaraokeApp(QWidget):
             search_queries = [" ".join(p for p in (artist, title) if p).strip()]
         _diag(f"[KARAFUN-AUTO] playback search queries={search_queries!r} title={title!r}")
 
+        transparent_renderer_bounds = None
+        if bool(self.settings.get("karafun_transparent_handoff", True)):
+            try:
+                vw = getattr(self, "video_window", None)
+                if vw is not None:
+                    frame = vw.frameGeometry()
+                    screen = QApplication.screenAt(frame.center()) or vw.screen() or QApplication.primaryScreen()
+                    rect = screen.availableGeometry() if screen is not None else frame
+                    transparent_renderer_bounds = (
+                        int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                    )
+            except Exception as e:
+                _diag(f"[KARAFUN] transparent renderer target unavailable: {e}")
+
         def _worker():
             result = {"ok": False, "message": "KaraFun automation did not complete."}
+            handoff_scheduled = False
+            bgm_fade_scheduled = False
+
+            def _schedule_bgm_fade(reason: str):
+                nonlocal bgm_fade_scheduled
+                if bgm_fade_scheduled:
+                    return
+                bgm_fade_scheduled = True
+                _diag(f"[KARAFUN] delayed BGM fade scheduled reason={reason}")
+                self._run_on_ui_thread(self._fade_bg_for_external_karafun)
+
+            def _schedule_early_handoff(reason: str):
+                nonlocal handoff_scheduled
+                if handoff_scheduled:
+                    return
+                handoff_scheduled = True
+                _diag(f"[KARAFUN] early show-screen handoff scheduled reason={reason}")
+                self._run_on_ui_thread(self._handoff_show_screen_to_karafun)
+
             try:
+                self._karafun_transparent_renderer_ready = False
+                if transparent_renderer_bounds is not None:
+                    rx, ry, rw, rh = transparent_renderer_bounds
+                    prepare_renderer_script = [
+                        'tell application "System Events"',
+                        'set matches to every application process whose name contains "KaraFun"',
+                        'if (count of matches) is 0 then return "NOT_READY|no_app"',
+                        'tell item 1 of matches',
+                        'set mainWindow to missing value',
+                        'set outputWindow to missing value',
+                        'repeat with candidateWindow in windows',
+                        'try',
+                        'if name of candidateWindow is "Dual Renderer" then',
+                        'set outputWindow to candidateWindow',
+                        'else if mainWindow is missing value then',
+                        'set mainWindow to candidateWindow',
+                        'end if',
+                        'end try',
+                        'end repeat',
+                        'if outputWindow is not missing value then',
+                        'try',
+                        '-- Preserve true fullscreen across songs. Reposition only',
+                        '-- a normal renderer; fullscreen owns its display Space.',
+                        'if value of attribute "AXFullScreen" of outputWindow then return "READY"',
+                        'end try',
+                        'try',
+                        'set value of attribute "AXMinimized" of outputWindow to false',
+                        'end try',
+                        f'set position of outputWindow to {{{rx}, {ry}}}',
+                        f'set size of outputWindow to {{{rw}, {rh}}}',
+                        'return "READY"',
+                        'end if',
+                        'if mainWindow is missing value then return "NOT_READY|no_main_window"',
+                        'set elems to entire contents of mainWindow',
+                        'repeat with elem in elems',
+                        'try',
+                        'if role of elem is "AXButton" then',
+                        'set descriptionText to ""',
+                        'set helpText to ""',
+                        'try',
+                        'set descriptionText to description of elem as text',
+                        'end try',
+                        'try',
+                        'set helpText to help of elem as text',
+                        'end try',
+                        'ignoring case',
+                        'if descriptionText contains "Dual Renderer" or helpText contains "Dual-Screen Display" then',
+                        'set ep to position of elem',
+                        'set es to size of elem',
+                        'set centerX to (item 1 of ep) + ((item 1 of es) div 2)',
+                        'set centerY to (item 2 of ep) + ((item 2 of es) div 2)',
+                        'return "OPEN|" & centerX & "|" & centerY',
+                        'end if',
+                        'end ignoring',
+                        'end if',
+                        'end try',
+                        'end repeat',
+                        'return "NOT_READY|no_renderer_button"',
+                        'end tell',
+                        'end tell',
+                    ]
+                    renderer_result = ""
+                    for renderer_attempt in range(3):
+                        ok, renderer_result, renderer_error = self._run_karafun_applescript_sync(
+                            prepare_renderer_script, timeout=8
+                        )
+                        renderer_result = str(renderer_result or renderer_error or "").strip()
+                        if ok and renderer_result == "READY":
+                            self._karafun_transparent_renderer_ready = True
+                            _diag(
+                                f"[KARAFUN] transparent renderer ready bounds={rx},{ry},{rw},{rh} "
+                                f"attempt={renderer_attempt + 1}"
+                            )
+                            break
+                        renderer_parts = renderer_result.split("|")
+                        if ok and len(renderer_parts) == 3 and renderer_parts[0] == "OPEN":
+                            _diag(f"[KARAFUN] opening missing Dual Renderer attempt={renderer_attempt + 1}")
+                            self._macos_native_mouse_click(
+                                int(float(renderer_parts[1])), int(float(renderer_parts[2])), clicks=1
+                            )
+                            time.sleep(0.8)
+                            continue
+                        break
+                    if not self._karafun_transparent_renderer_ready:
+                        _diag(
+                            f"[KARAFUN] transparent renderer preflight unavailable result={renderer_result!r}; "
+                            "using legacy show-screen handoff"
+                        )
+
                 found = ""
                 selected_query = ""
                 last_error = ""
@@ -41845,6 +42396,23 @@ class KaraokeApp(QWidget):
                     _diag(f"[KARAFUN-AUTO] selected first visible KaraFun result query={selected_query!r}")
                 else:
                     _diag(f"[KARAFUN-AUTO] selected exact KaraFun title query={selected_query!r}")
+
+                # Finish the audience-display transition before activating the
+                # result. Direct result activation can begin playback at once;
+                # handing off afterward exposes several seconds of the song in
+                # KaraFun's normal window before its fullscreen Space is ready.
+                _schedule_bgm_fade("before_fullscreen_handoff")
+                if self._karafun_transparent_renderer_ready:
+                    _schedule_early_handoff("before_result_activation")
+                    handoff_deadline = time.monotonic() + 12.0
+                    while time.monotonic() < handoff_deadline:
+                        if bool(getattr(self, "_karafun_handoff_complete", False)):
+                            break
+                        time.sleep(0.1)
+                    if bool(getattr(self, "_karafun_handoff_complete", False)):
+                        _diag("[KARAFUN-AUTO] fullscreen audience handoff ready before play")
+                    else:
+                        _diag("[KARAFUN-AUTO] fullscreen audience handoff timed out before play")
                 _diag(f"[KARAFUN-AUTO] activating KaraFun result mode={parts[0]} x={parts[1]} y={parts[2]}")
                 if not self._macos_native_double_click(int(float(parts[1])), int(float(parts[2]))):
                     raise RuntimeError("Could not double-click the KaraFun result")
@@ -41876,16 +42444,24 @@ class KaraokeApp(QWidget):
                     'repeat with elem in elems',
                     'try',
                     'set labelText to ""',
+                    'set controlDescription to ""',
                     'try',
                     'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
                     'end try',
+                    'try',
+                    'set controlDescription to description of elem as text',
+                    'end try',
                     'ignoring case',
-                    'if labelText contains "pause" or labelText contains "stop" then set playingHintFound to true',
+                    '-- The idle button help is always "Play/Pause". Its actual',
+                    '-- description changes from play to pause during playback.',
+                    'if controlDescription is "pause" or controlDescription is "stop" then set playingHintFound to true',
                     'if labelText contains "no item is being played" or labelText contains "your queue is empty" then set idleTextFound to true',
                     'end ignoring',
                     'end try',
                     'end repeat',
                     'if playingHintFound then return "PLAYING"',
+                    '-- Direct result playback does not populate the queue, so',
+                    '-- "Your queue is empty" remains visible while playing.',
                     'if idleTextFound then return "IDLE"',
                     'return "UNKNOWN"',
                     'end tell',
@@ -41894,6 +42470,8 @@ class KaraokeApp(QWidget):
                 ok, initial_probe, initial_probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
                 initial_probe_state = str(initial_probe or initial_probe_error or "").strip()
                 _diag(f"[KARAFUN-AUTO] playback pre-click state={initial_probe_state!r}")
+                if ok and initial_probe_state == "PLAYING":
+                    _schedule_early_handoff("pre_click_playing")
                 if not (ok and initial_probe_state == "PLAYING"):
                     play_script = [
                         'tell application "System Events"',
@@ -41929,16 +42507,21 @@ class KaraokeApp(QWidget):
                 else:
                     entry["karafun_playback_clock_started_at"] = result_activated_at
                     _diag("[KARAFUN-AUTO] play click skipped already playing")
-                verified_playing = False
+                # The pre-click probe is already a positive playback
+                # verification. Do not immediately run the same expensive AX
+                # scan again while the fullscreen handoff is starting.
+                verified_playing = bool(ok and initial_probe_state == "PLAYING")
                 last_playback_probe = ""
-                for probe_attempt in range(12):
-                    time.sleep(1.0)
-                    ok, probe_result, probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
-                    last_playback_probe = str(probe_result or probe_error or "").strip()
-                    _diag(f"[KARAFUN-AUTO] playback verify attempt={probe_attempt + 1} state={last_playback_probe!r}")
-                    if ok and last_playback_probe == "PLAYING":
-                        verified_playing = True
-                        break
+                if not verified_playing:
+                    for probe_attempt in range(12):
+                        time.sleep(1.0)
+                        ok, probe_result, probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
+                        last_playback_probe = str(probe_result or probe_error or "").strip()
+                        _diag(f"[KARAFUN-AUTO] playback verify attempt={probe_attempt + 1} state={last_playback_probe!r}")
+                        if ok and last_playback_probe == "PLAYING":
+                            _schedule_early_handoff("playback_verified")
+                            verified_playing = True
+                            break
                 if not verified_playing:
                     raise RuntimeError(f"KaraFun did not report active playback after Play ({last_playback_probe or 'unknown state'})")
                 if not entry.get("karafun_playback_clock_started_at"):
@@ -41953,6 +42536,9 @@ class KaraokeApp(QWidget):
                 needs_adjustment = requested_key != 0 or requested_tempo != 100
                 adjustment_already_applied = str(entry.get("karafun_adjustment_applied") or "") == adjustment_signature
                 if needs_adjustment and not adjustment_already_applied:
+                    handoff_wait_deadline = time.monotonic() + 15.0
+                    while bool(getattr(self, "_karafun_handoff_in_progress", False)) and time.monotonic() < handoff_wait_deadline:
+                        time.sleep(0.25)
                     time.sleep(1.5)
                     adjust_script = [
                         'tell application "System Events"',
@@ -42099,6 +42685,28 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+        # Accessibility inspection can block inside KaraFun while its renderer
+        # is changing Spaces. Keep the duration fallback independent from that
+        # polling thread so a stuck query cannot delay song completion.
+        if fallback_duration > 0:
+            fallback_delay = max(1.0, float(fallback_duration) - max(0.0, now_mono - started) + 2.0)
+
+            def _duration_watchdog_fired():
+                def _complete_from_duration_watchdog():
+                    active = getattr(self, "_active_external_karafun", None)
+                    if not isinstance(active, dict) or active.get("entry") is not entry:
+                        return
+                    if entry.get("karafun_completion_monitor") != monitor_token:
+                        return
+                    _diag("[KARAFUN] completion event received reason=duration_watchdog")
+                    self._finish_external_karafun_playback("complete")
+
+                self._run_on_ui_thread(_complete_from_duration_watchdog)
+
+            duration_watchdog = threading.Timer(fallback_delay, _duration_watchdog_fired)
+            duration_watchdog.daemon = True
+            duration_watchdog.start()
+
         def _monitor():
             nonlocal seen_playback, last_state, last_clock_candidates, idle_stop_count
             while True:
@@ -42107,6 +42715,13 @@ class KaraokeApp(QWidget):
                     return
                 if entry.get("karafun_completion_monitor") != monitor_token:
                     return
+                # NSAppleScript calls into KaraFun are not safely concurrent.
+                # Let the latency-sensitive fullscreen handoff finish before
+                # starting the recurring completion-state scrape. The duration
+                # watchdog above remains active throughout this pause.
+                if bool(getattr(self, "_karafun_handoff_in_progress", False)):
+                    time.sleep(0.25)
+                    continue
                 remaining = None
                 idle_reported = False
                 playing_reported = False
@@ -42139,12 +42754,16 @@ class KaraokeApp(QWidget):
                         'repeat with elem in elems',
                         'try',
                         'set labelText to ""',
+                        'set controlDescription to ""',
                         'try',
                         'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
                         'end try',
+                        'try',
+                        'set controlDescription to description of elem as text',
+                        'end try',
                         'ignoring case',
                         'if labelText contains "no item is being played" or labelText contains "your queue is empty" then set idleTextFound to true',
-                        'if labelText contains "pause" or labelText contains "stop" then set playingHintFound to true',
+                        'if controlDescription is "pause" or controlDescription is "stop" then set playingHintFound to true',
                         'end ignoring',
                         'if role of elem is "AXStaticText" then',
                         'set n to name of elem as text',
@@ -42152,7 +42771,7 @@ class KaraokeApp(QWidget):
                         'end if',
                         'end try',
                         'end repeat',
-                        'if idleTextFound then set out to out & "STATE|IDLE" & linefeed',
+                        'if idleTextFound and not playingHintFound then set out to out & "STATE|IDLE" & linefeed',
                         'if playingHintFound then set out to out & "STATE|PLAYING" & linefeed',
                         'return out',
                         'end tell',
@@ -42244,6 +42863,10 @@ class KaraokeApp(QWidget):
         artist, title = self._karafun_entry_artist_title(entry)
         singer_display = duet_display or str((singer or {}).get("name", "") or "").strip()
         self._karafun_restore_token = None
+        self._karafun_handoff_token = None
+        self._karafun_handoff_in_progress = False
+        self._karafun_handoff_complete = False
+        self._karafun_transparent_renderer_ready = False
         self._active_external_karafun = {
             "singer": singer,
             "entry": entry,
@@ -42272,7 +42895,11 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         try:
-            self._fade_bg_for_external_karafun()
+            automatic_playback = bool(self.settings.get("karafun_open_automatically", True)) and bool(
+                self.settings.get("karafun_auto_queue_enabled", False)
+            )
+            if not automatic_playback:
+                self._fade_bg_for_external_karafun()
         except Exception:
             pass
         try:
