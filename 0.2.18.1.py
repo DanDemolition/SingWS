@@ -6,7 +6,7 @@ import logging.handlers
 from pathlib import Path
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.1.4"
+APP_VERSION = "0.4.1.5"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 
 # Try to import psutil for system info (optional but recommended)
