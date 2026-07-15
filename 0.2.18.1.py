@@ -2871,6 +2871,8 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
 
 # Settings defaults
+TICKER_COLOR_DEFAULT = "#39FF88"  # lively green; operator can override in Ticker Settings
+
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
     "bg_autoplay_on_idle": True,     # start BG when karaoke stops
@@ -2880,6 +2882,7 @@ DEFAULTS = {
     "ticker_size_index": 2,          # 2 smaller, default, 2 larger
     "ticker_bold": False,            # ticker uses same OS/Qt font family; toggles weight only
     "ticker_speed_px_per_sec": 78.0, # persisted ticker scroll speed; do not overwrite saved values
+    "ticker_color": TICKER_COLOR_DEFAULT, # scrolling queue + duration text; remains user-pickable
     "ticker_vfx_enabled": True,      # decorative render-thread ticker lighting; core marquee remains when off
     "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
     "performance_debug_default_migrated": False,
@@ -18044,8 +18047,8 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print("Video window bottom-right placement failed:", e)
 
-        # Apply saved ticker color (default to existing gold if none)
-        ticker_hex = self.settings.get("ticker_color", "#FFFFFF")
+        # Apply the saved picker color; green is only the clean-look default.
+        ticker_hex = self.settings.get("ticker_color", TICKER_COLOR_DEFAULT)
         try:
             self.video_window.ticker.set_color(ticker_hex)
         except Exception:
@@ -22921,7 +22924,7 @@ class KaraokeApp(QWidget):
         vbox.addWidget(vars_label)
 
         # Remember current color
-        current_hex = self.settings.get("ticker_color", "#FFFFFF")
+        current_hex = self.settings.get("ticker_color", TICKER_COLOR_DEFAULT)
         current_qcolor = QColor(current_hex)
 
         def pick_color():
@@ -49194,7 +49197,7 @@ Rectangle {
     property real timerPad: 8
     property int namesPx: 40
     property int timerPx: 40
-    property color tickerColor: "#FBD000"
+    property color tickerColor: "#39FF88"
     property bool tickerBold: false
     property bool running: true
     property bool effectsEnabled: true
@@ -49243,10 +49246,9 @@ Rectangle {
         visible: root.effectsEnabled
         gradient: Gradient {
             orientation: Gradient.Horizontal
-            GradientStop { position: 0.0; color: "#300b1022" }
-            GradientStop { position: 0.38; color: "#511b123d" }
-            GradientStop { position: 0.72; color: "#3812192c" }
-            GradientStop { position: 1.0; color: "#28080614" }
+            GradientStop { position: 0.0; color: "#14050320" }
+            GradientStop { position: 0.45; color: "#38220a52" }
+            GradientStop { position: 1.0; color: "#10050312" }
         }
     }
 
@@ -49262,7 +49264,7 @@ Rectangle {
             orientation: Gradient.Horizontal
             GradientStop { position: 0.0; color: "#00ffffff" }
             GradientStop { position: 0.42; color: "#70a895ff" }
-            GradientStop { position: 0.58; color: "#8ff6c945" }
+            GradientStop { position: 0.58; color: "#8fc4b5fd" }
             GradientStop { position: 1.0; color: "#00ffffff" }
         }
         XAnimator on x {
@@ -49282,7 +49284,7 @@ Rectangle {
         width: root.scrollAreaW
         height: 6
         clip: true
-        visible: root.effectsEnabled
+        visible: false
         opacity: 0.34
         Repeater {
             model: 4
@@ -49296,7 +49298,7 @@ Rectangle {
                 y: index % 2 === 0 ? 1 : 3
                 color: index % 3 === 0 ? "#f6c945" : (index % 3 === 1 ? "#a895ff" : "#ffffff")
                 XAnimator on x {
-                    running: root.running && root.effectsEnabled && !root.churnHold
+                    running: tickerSparkLane.visible && root.running && root.effectsEnabled && !root.churnHold
                     from: -20 - stageSpark.index * 90
                     to: tickerSparkLane.width + 20
                     duration: 6500 + stageSpark.index * 850
@@ -49316,8 +49318,8 @@ Rectangle {
         opacity: 0
         gradient: Gradient {
             orientation: Gradient.Horizontal
-            GradientStop { position: 0.0; color: "#55f6c945" }
-            GradientStop { position: 0.25; color: "#38a895ff" }
+            GradientStop { position: 0.0; color: "#556d28d9" }
+            GradientStop { position: 0.25; color: "#38c4b5fd" }
             GradientStop { position: 1.0; color: "#00121319" }
         }
     }
@@ -49350,9 +49352,9 @@ Rectangle {
         width: root.timerWidth
         height: Math.max(28, root.timerPx * 1.18)
         radius: Math.min(13, height / 2)
-        color: "#3b2b0d"
+        color: "#6d28d9"
         border.width: 1
-        border.color: "#8ff6c945"
+        border.color: "#c4b5fd"
         transformOrigin: Item.Center
     }
 
@@ -49449,10 +49451,10 @@ Rectangle {
         visible: root.effectsEnabled
         gradient: Gradient {
             orientation: Gradient.Horizontal
-            GradientStop { position: 0.0; color: "#00a895ff" }
-            GradientStop { position: 0.35; color: "#88a895ff" }
-            GradientStop { position: 0.70; color: "#a0f6c945" }
-            GradientStop { position: 1.0; color: "#00f6c945" }
+            GradientStop { position: 0.0; color: "#006d28d9" }
+            GradientStop { position: 0.35; color: "#886d28d9" }
+            GradientStop { position: 0.70; color: "#a0c4b5fd" }
+            GradientStop { position: 1.0; color: "#00c4b5fd" }
         }
         opacity: 0.48
     }
@@ -49648,7 +49650,7 @@ class RenderThreadTicker(QFrame):
 
     def set_color(self, hex_color: str):
         try:
-            self._root.setProperty("tickerColor", str(hex_color or "#FBD000"))
+            self._root.setProperty("tickerColor", str(hex_color or TICKER_COLOR_DEFAULT))
         except Exception:
             pass
 
@@ -49775,7 +49777,7 @@ class Ticker(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAutoFillBackground(False)
 
-        self._color = QColor("#FBD000")
+        self._color = QColor(TICKER_COLOR_DEFAULT)
         self._right_margin = 32
         self._gap = 16
         self._timer_pad_px = 8
@@ -49998,7 +50000,7 @@ class Ticker(QFrame):
         self.set_size_preset(self._size_idx)
 
     def set_color(self, hex_color: str):
-        self._color = QColor(hex_color or "#FBD000")
+        self._color = QColor(hex_color or TICKER_COLOR_DEFAULT)
         self._rebuild_active_strip()
         self.update()
 

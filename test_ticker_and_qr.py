@@ -132,6 +132,8 @@ class RenderThreadTickerTests(unittest.TestCase):
 
     def test_bold_and_color(self):
         t = self._make(["A"])
+        self.assertEqual(mod.DEFAULTS["ticker_color"], "#39FF88")
+        self.assertEqual(t._root.property("tickerColor").name().lower(), "#39ff88")
         t.set_bold(True)
         self.assertTrue(t._root.property("tickerBold"))
         t.set_color("#00FF00")
@@ -142,8 +144,12 @@ class RenderThreadTickerTests(unittest.TestCase):
         self.assertIn("id: tickerAtmosphere", source)
         self.assertIn("id: tickerLightRibbon", source)
         self.assertIn("id: tickerSparkLane", source)
+        spark_lane = source[source.index("id: tickerSparkLane"):source.index("id: queueChangeFlash")]
+        self.assertIn("visible: false", spark_lane)
         self.assertIn("id: queueChangeFlash", source)
         self.assertIn("id: timerPill", source)
+        self.assertIn('color: "#6d28d9"', source)
+        self.assertIn('border.color: "#c4b5fd"', source)
         self.assertIn("id: tickerLivePulse", source)
         self.assertIn("id: tickerEdgeGlow", source)
         self.assertIn("property real timerSeparation", source)
