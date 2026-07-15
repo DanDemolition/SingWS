@@ -511,6 +511,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         recreate = function_source("recreate_video_surface")
         self.assertIn("new_area.karaoke_frame = QImage(old.karaoke_frame)", recreate)
         self.assertIn("new_area._ensure_karaoke_scaled_pixmap()", recreate)
+        self.assertIn("duplicate recreate skipped", recreate)
+        self.assertIn("(now - last_completed) < 1.25", recreate)
+        self.assertIn("old_overlay.setParent(new_area)", recreate)
+        self.assertIn("new_area.set_show_vfx_overlay(old_overlay)", recreate)
 
     def test_removed_slow_computer_settings_are_migrated(self):
         source = MAIN_SOURCE

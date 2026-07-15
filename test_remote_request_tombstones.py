@@ -1794,6 +1794,50 @@ class HostRemovalAuthorityTests(unittest.TestCase):
             ])
             self.assertEqual([r["request_id"] for r in app.processed_requests], [500])
 
+    def test_stale_terminal_id_collision_cannot_complete_fresh_host_add(self):
+        """Regression: server history reused 1096 and completed a new host song."""
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            fresh = self._entry("Welcome To My Nightmare", rid=1096, artist="Alice Cooper")
+            fresh["host_request_key"] = "host:new-singer:local:new-request"
+            fresh["request_source"] = "host_manual"
+            app.queue = [self._singer("D", [fresh])]
+
+            app._reconcile_remote_requests([{
+                "request_id": 1096,
+                "singer": "Jennifer",
+                "artist": "Everybody Loves An Outlaw",
+                "title": "I See Red",
+                "state": "completed",
+                "completed_at": 1000,
+                "request_source": "phone",
+            }])
+
+            self.assertEqual(len(app.queue), 1)
+            self.assertEqual(app.queue[0]["songs"], [fresh])
+            self.assertEqual(fresh["remote_request_id"], 1096)
+
+    def test_matching_terminal_row_still_completes_live_host_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            entry = self._entry("Welcome To My Nightmare", rid=1096, artist="Alice Cooper")
+            entry["host_request_key"] = "host:singer:local:request"
+            entry["request_source"] = "host_manual"
+            app.queue = [self._singer("D", [entry])]
+
+            app._reconcile_remote_requests([{
+                "request_id": 1096,
+                "singer": "D",
+                "artist": "Alice Cooper",
+                "title": "Welcome To My Nightmare",
+                "state": "completed",
+                "completed_at": 1000,
+                "request_source": "host_manual",
+                "idempotency_key": "host:singer:local:request",
+            }])
+
+            self.assertEqual(app.queue[0]["songs"], [])
+
     # -- duplicate cleanup -------------------------------------------------------
 
     def test_duplicate_cleanup_preserves_oldest_and_migrates_id(self):

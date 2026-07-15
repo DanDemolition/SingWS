@@ -2880,6 +2880,7 @@ DEFAULTS = {
     "ticker_size_index": 2,          # 2 smaller, default, 2 larger
     "ticker_bold": False,            # ticker uses same OS/Qt font family; toggles weight only
     "ticker_speed_px_per_sec": 78.0, # persisted ticker scroll speed; do not overwrite saved values
+    "ticker_vfx_enabled": True,      # decorative render-thread ticker lighting; core marquee remains when off
     "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
@@ -2904,8 +2905,10 @@ DEFAULTS = {
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
-    "next_up_overlay_enabled": True, # Show temporary audience-facing Next Up transition panel
-    "next_up_overlay_duration_sec": 10, # seconds the Next Up transition panel stays visible
+    "next_up_overlay_enabled": False, # legacy Next Up panel retired; QR remains visible between singers
+    "next_up_overlay_duration_sec": 10, # retained only for backward-compatible settings loading
+    "show_screen_vfx_enabled": True, # audience spotlights/countdown/explosion; lightweight overlay remains when off
+    "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "karafun_open_automatically": True, # Focus/open KaraFun when an external KaraFun queue item becomes active
@@ -6560,6 +6563,730 @@ class LyricsBackgroundVideoPlayer(QObject):
         return dict(self._last_stats)
 
 
+QML_SHOW_SCREEN_VFX_SOURCE = r"""
+import QtQuick
+
+Rectangle {
+    id: root
+    color: "transparent"
+    clip: true
+    property bool effectsEnabled: true
+    property bool active: false
+    property string singerText: ""
+    property string songText: ""
+    property string artistText: ""
+    property string onDeckText: ""
+    property int countdownValue: 0
+    property int startCountdownValue: 0
+    property bool startCountdownActive: false
+    property int burstSerial: 0
+    signal nextUpCountdownFinished()
+
+    function showNextUp(singer, song, artist, onDeck, durationSeconds) {
+        singerCountdownTimer.stop()
+        startCountdownActive = false
+        singerText = singer || ""
+        songText = song || ""
+        artistText = artist || ""
+        onDeckText = onDeck || ""
+        countdownValue = Math.max(1, Math.ceil(durationSeconds || 10))
+        active = true
+        nowPanel.opacity = 0
+        nextPanel.opacity = 0
+        nextPanel.scale = 0.66
+        nextPanel.y = (root.height - nextPanel.height) / 2
+        backdrop.opacity = 0
+        countdownTimer.restart()
+        nextUpEntrance.restart()
+    }
+
+    function showSingerStart(singer, song, artist) {
+        singerText = singer || ""
+        songText = song || ""
+        artistText = artist || ""
+        countdownTimer.stop()
+        singerCountdownTimer.stop()
+        active = true
+        nextPanel.opacity = 0
+        nowPanel.opacity = 0
+        nowPanel.scale = 0.40
+        backdrop.opacity = 0
+        startCountdownValue = 3
+        startCountdownActive = true
+        startCountdownStage.opacity = 0
+        countdownNumber.scale = 0.25
+        countdownRing.opacity = 0
+        startCountdownEntrance.restart()
+        countdownNumberHit.restart()
+        singerCountdownTimer.restart()
+    }
+
+    function showSongOutro(singer, song, artist) {
+        singerText = singer || ""
+        songText = song || ""
+        artistText = artist || ""
+        countdownTimer.stop()
+        singerCountdownTimer.stop()
+        startCountdownActive = false
+        active = true
+        nextPanel.opacity = 0
+        nowPanel.opacity = 0
+        outroPanel.opacity = 0
+        outroPanel.scale = 0.36
+        backdrop.opacity = 0
+        flash.opacity = 0
+        shockwave.opacity = 0
+        burstSerial += 1
+        songOutroSequence.restart()
+    }
+
+    function hideTransition() {
+        countdownTimer.stop()
+        singerCountdownTimer.stop()
+        startCountdownActive = false
+        if (active) overlayExit.restart()
+    }
+
+    Timer {
+        id: countdownTimer
+        interval: 1000
+        repeat: true
+        onTriggered: {
+            if (root.countdownValue > 1) {
+                root.countdownValue -= 1
+                countdownHit.restart()
+            } else {
+                stop()
+                root.countdownValue = 0
+                overlayExit.restart()
+                root.active = false
+                root.nextUpCountdownFinished()
+            }
+        }
+    }
+
+    Timer {
+        id: singerCountdownTimer
+        interval: 1000
+        repeat: true
+        onTriggered: {
+            if (root.startCountdownValue > 1) {
+                root.startCountdownValue -= 1
+                countdownNumberHit.restart()
+            } else {
+                stop()
+                root.startCountdownValue = 0
+                root.startCountdownActive = false
+                root.burstSerial += 1
+                singerStartSequence.restart()
+            }
+        }
+    }
+
+    Rectangle {
+        id: backdrop
+        anchors.fill: parent
+        opacity: 0
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#e8060610" }
+            GradientStop { position: 0.36; color: "#e8221742" }
+            GradientStop { position: 0.68; color: "#e8141028" }
+            GradientStop { position: 1.0; color: "#e8060610" }
+        }
+    }
+
+    Item {
+        id: spotlights
+        anchors.fill: parent
+        visible: root.active && root.effectsEnabled
+        opacity: 0.42
+        clip: true
+        Repeater {
+            model: 3
+            Rectangle {
+                id: beam
+                required property int index
+                width: Math.max(130, root.width * 0.18)
+                height: root.height * 1.35
+                x: root.width * (0.16 + index * 0.34) - width / 2
+                y: -root.height * 0.10
+                rotation: index === 0 ? -15 : (index === 1 ? 0 : 15)
+                transformOrigin: Item.Top
+                opacity: index === 1 ? 0.25 : 0.20
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "#00ffffff" }
+                    GradientStop { position: 0.38; color: index === 1 ? "#30f6c945" : "#28a895ff" }
+                    GradientStop { position: 0.5; color: index === 1 ? "#a8f6c945" : "#98b9adff" }
+                    GradientStop { position: 0.62; color: index === 1 ? "#30f6c945" : "#28a895ff" }
+                    GradientStop { position: 1.0; color: "#00ffffff" }
+                }
+                SequentialAnimation {
+                    running: root.active && root.effectsEnabled
+                    loops: Animation.Infinite
+                    RotationAnimator {
+                        target: beam
+                        from: beam.index === 0 ? -19 : (beam.index === 1 ? -8 : 11)
+                        to: beam.index === 0 ? -7 : (beam.index === 1 ? 8 : 19)
+                        duration: 4600 + beam.index * 650
+                        easing.type: Easing.InOutSine
+                    }
+                    RotationAnimator {
+                        target: beam
+                        from: beam.index === 0 ? -7 : (beam.index === 1 ? 8 : 19)
+                        to: beam.index === 0 ? -19 : (beam.index === 1 ? -8 : 11)
+                        duration: 4600 + beam.index * 650
+                        easing.type: Easing.InOutSine
+                    }
+                }
+            }
+        }
+
+        Row {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Math.max(18, root.height * 0.04)
+            spacing: Math.max(50, root.width * 0.13)
+            Repeater {
+                model: 3
+                Rectangle {
+                    id: floorPool
+                    required property int index
+                    width: Math.max(90, root.width * 0.13)
+                    height: Math.max(14, root.height * 0.026)
+                    radius: height / 2
+                    color: index === 1 ? "#45f6c945" : "#36a895ff"
+                    opacity: 0.30
+                    SequentialAnimation {
+                        running: root.active && root.effectsEnabled
+                        loops: Animation.Infinite
+                        OpacityAnimator { target: floorPool; from: 0.18; to: 0.38; duration: 1800 + index * 280; easing.type: Easing.InOutSine }
+                        OpacityAnimator { target: floorPool; from: 0.38; to: 0.18; duration: 1800 + index * 280; easing.type: Easing.InOutSine }
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        id: flash
+        anchors.fill: parent
+        z: 20
+        opacity: 0
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#00f6c945" }
+            GradientStop { position: 0.42; color: "#d8ffffff" }
+            GradientStop { position: 0.62; color: "#c8b9a8ff" }
+            GradientStop { position: 1.0; color: "#00ff65c8" }
+        }
+    }
+
+    Item {
+        id: shockwave
+        anchors.centerIn: parent
+        width: 120
+        height: 120
+        z: 18
+        opacity: 0
+        Repeater {
+            model: 4
+            Rectangle {
+                required property int index
+                anchors.centerIn: parent
+                width: 112
+                height: 112
+                radius: 56
+                color: "transparent"
+                border.width: index === 1 ? 4 : 2
+                border.color: index % 2 ? "#f6c945" : "#b9a8ff"
+                scale: 1.0 + index * 0.13
+                opacity: 0.92 - index * 0.14
+            }
+        }
+    }
+
+    Item {
+        id: confettiBurst
+        anchors.fill: parent
+        z: 19
+        visible: root.effectsEnabled
+        Repeater {
+            model: 42
+            Item {
+                id: particle
+                required property int index
+                readonly property real angle: (index / 42.0) * Math.PI * 2 + (index % 4) * 0.07
+                readonly property real originX: root.width / 2
+                readonly property real originY: root.height * 0.48
+                readonly property real distanceX: root.width * (0.34 + (index % 5) * 0.045)
+                readonly property real distanceY: root.height * (0.38 + (index % 6) * 0.055)
+                x: originX
+                y: originY
+                width: 7 + (index % 4) * 3
+                height: index % 3 === 0 ? width * 2.8 : width
+                opacity: 0
+                Rectangle {
+                    anchors.fill: parent
+                    radius: index % 3 === 0 ? 2 : width / 2
+                    color: index % 5 === 0 ? "#ffffff" : (index % 5 === 1 ? "#f6c945" : (index % 5 === 2 ? "#a895ff" : (index % 5 === 3 ? "#ff65c8" : "#65e6ff")))
+                }
+                Connections {
+                    target: root
+                    function onBurstSerialChanged() { particleFlight.restart() }
+                }
+                ParallelAnimation {
+                    id: particleFlight
+                    XAnimator { target: particle; from: particle.originX; to: particle.originX + Math.cos(particle.angle) * particle.distanceX; duration: 760 + particle.index * 9; easing.type: Easing.OutCubic }
+                    YAnimator { target: particle; from: particle.originY; to: particle.originY + Math.sin(particle.angle) * particle.distanceY + 70; duration: 820 + particle.index * 8; easing.type: Easing.OutCubic }
+                    RotationAnimator { target: particle; from: 0; to: 320 + particle.index * 29; duration: 980; easing.type: Easing.OutQuad }
+                    ScaleAnimator { target: particle; from: 0.25; to: 1.45; duration: 460; easing.type: Easing.OutBack }
+                    SequentialAnimation {
+                        OpacityAnimator { target: particle; from: 0.0; to: 1.0; duration: 70 }
+                        PauseAnimation { duration: 330 + (particle.index % 6) * 28 }
+                        OpacityAnimator { target: particle; from: 1.0; to: 0.0; duration: 360; easing.type: Easing.InQuad }
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        id: nextPanel
+        z: 10
+        width: Math.min(root.width * 0.82, 1120)
+        height: Math.min(root.height * 0.56, 500)
+        x: (root.width - width) / 2
+        y: (root.height - height) / 2
+        radius: Math.max(22, height * 0.07)
+        color: "#f018132c"
+        border.width: 2
+        border.color: "#a895ff"
+        opacity: 0
+        transformOrigin: Item.Center
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 7
+            radius: parent.radius - 5
+            color: "transparent"
+            border.width: 1
+            border.color: "#55f6c945"
+        }
+        Rectangle {
+            id: panelSheen
+            width: 150
+            height: parent.height * 1.8
+            y: -parent.height * 0.4
+            rotation: 18
+            opacity: 0.13
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "#00ffffff" }
+                GradientStop { position: 0.5; color: "#e0ffffff" }
+                GradientStop { position: 1.0; color: "#00ffffff" }
+            }
+            XAnimator on x { running: root.active; from: -220; to: nextPanel.width + 220; duration: 2100; loops: Animation.Infinite; easing.type: Easing.InOutSine }
+        }
+        Column {
+            anchors.centerIn: parent
+            width: parent.width - 80
+            spacing: Math.max(8, parent.height * 0.018)
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "NEXT UP  •  GET READY"
+                color: "#f6c945"
+                font.pixelSize: Math.max(16, nextPanel.height * 0.052)
+                font.bold: true
+                font.letterSpacing: 2.2
+            }
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: root.singerText
+                color: "#ffffff"
+                font.pixelSize: Math.max(48, nextPanel.height * 0.19)
+                font.bold: true
+                fontSizeMode: Text.Fit
+                minimumPixelSize: 30
+            }
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: root.songText
+                color: "#e9e5f5"
+                font.pixelSize: Math.max(24, nextPanel.height * 0.088)
+                font.bold: true
+                fontSizeMode: Text.Fit
+                minimumPixelSize: 18
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.artistText
+                color: "#bfb7d8"
+                font.pixelSize: Math.max(17, nextPanel.height * 0.058)
+                visible: text !== ""
+            }
+            Rectangle {
+                id: countdownPill
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: countdownText.implicitWidth + 34
+                height: Math.max(46, nextPanel.height * 0.13)
+                radius: height / 2
+                color: "#4b3510"
+                border.width: 2
+                border.color: "#f6c945"
+                Text {
+                    id: countdownText
+                    anchors.centerIn: parent
+                    text: root.countdownValue > 0 ? root.countdownValue : "GO!"
+                    color: "#ffffff"
+                    font.pixelSize: Math.max(24, parent.height * 0.58)
+                    font.bold: true
+                }
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.onDeckText !== "" ? "ON DECK  •  " + root.onDeckText : ""
+                color: "#a99fc4"
+                font.pixelSize: Math.max(14, nextPanel.height * 0.045)
+                font.bold: true
+                visible: text !== ""
+            }
+        }
+    }
+
+    Item {
+        id: startCountdownStage
+        anchors.fill: parent
+        z: 24
+        opacity: 0
+        visible: root.startCountdownActive
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#f2070612"
+        }
+
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: Math.max(42, root.height * 0.10)
+            text: "GET READY  •  " + root.singerText.toUpperCase()
+            color: "#f6c945"
+            font.pixelSize: Math.max(22, root.height * 0.046)
+            font.bold: true
+            font.letterSpacing: 3.2
+        }
+
+        Rectangle {
+            id: countdownRing
+            anchors.centerIn: parent
+            width: Math.min(root.width, root.height) * 0.48
+            height: width
+            radius: width / 2
+            color: "#101b1433"
+            border.width: Math.max(4, width * 0.018)
+            border.color: root.startCountdownValue === 1 ? "#ff65c8" : (root.startCountdownValue === 2 ? "#65e6ff" : "#a895ff")
+            opacity: 0
+        }
+
+        Text {
+            id: countdownNumber
+            anchors.centerIn: parent
+            text: root.startCountdownValue > 0 ? root.startCountdownValue : ""
+            color: "#ffffff"
+            font.pixelSize: Math.min(root.width, root.height) * 0.42
+            font.bold: true
+            fontSizeMode: Text.Fit
+            style: Text.Outline
+            styleColor: root.startCountdownValue === 1 ? "#ff257e" : (root.startCountdownValue === 2 ? "#128cb8" : "#6245bd")
+            transformOrigin: Item.Center
+        }
+
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Math.max(38, root.height * 0.09)
+            width: root.width * 0.82
+            horizontalAlignment: Text.AlignHCenter
+            text: root.songText + (root.artistText !== "" ? "  •  " + root.artistText : "")
+            color: "#d8d1ed"
+            font.pixelSize: Math.max(19, root.height * 0.042)
+            font.bold: true
+            fontSizeMode: Text.Fit
+            minimumPixelSize: 16
+        }
+    }
+
+    Column {
+        id: outroPanel
+        z: 25
+        anchors.centerIn: parent
+        width: root.width * 0.88
+        spacing: Math.max(8, root.height * 0.016)
+        opacity: 0
+        transformOrigin: Item.Center
+
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: "MAKE SOME NOISE FOR"
+            color: "#f6c945"
+            font.pixelSize: Math.max(24, root.height * 0.055)
+            font.bold: true
+            font.letterSpacing: 4.0
+        }
+        Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: root.singerText
+            color: "#ffffff"
+            font.pixelSize: Math.max(76, root.height * 0.18)
+            font.bold: true
+            fontSizeMode: Text.Fit
+            minimumPixelSize: 42
+            style: Text.Outline
+            styleColor: "#713fd0"
+        }
+        Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: root.songText + (root.artistText !== "" ? "  •  " + root.artistText : "")
+            color: "#ddd6f4"
+            font.pixelSize: Math.max(20, root.height * 0.045)
+            font.bold: true
+            fontSizeMode: Text.Fit
+            minimumPixelSize: 16
+            visible: text !== ""
+        }
+    }
+
+    Column {
+        id: nowPanel
+        z: 21
+        anchors.centerIn: parent
+        width: root.width * 0.86
+        spacing: 8
+        opacity: 0
+        transformOrigin: Item.Center
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: "NOW SINGING  •  LIVE"
+            color: "#f6c945"
+            font.pixelSize: Math.max(20, root.height * 0.045)
+            font.bold: true
+            font.letterSpacing: 2.4
+        }
+        Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: root.singerText
+            color: "#ffffff"
+            font.pixelSize: Math.max(62, root.height * 0.13)
+            font.bold: true
+            fontSizeMode: Text.Fit
+            minimumPixelSize: 36
+        }
+        Text {
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            text: root.songText + (root.artistText !== "" ? "  •  " + root.artistText : "")
+            color: "#ddd6f4"
+            font.pixelSize: Math.max(22, root.height * 0.052)
+            font.bold: true
+            fontSizeMode: Text.Fit
+            minimumPixelSize: 16
+        }
+    }
+
+    SequentialAnimation {
+        id: startCountdownEntrance
+        ParallelAnimation {
+            OpacityAnimator { target: backdrop; from: 0.0; to: 0.96; duration: 180; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: startCountdownStage; from: 0.0; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
+        }
+    }
+
+    SequentialAnimation {
+        id: countdownNumberHit
+        ParallelAnimation {
+            ScaleAnimator { target: countdownNumber; from: 0.25; to: 1.16; duration: 260; easing.type: Easing.OutBack }
+            OpacityAnimator { target: countdownNumber; from: 0.0; to: 1.0; duration: 90 }
+            ScaleAnimator { target: countdownRing; from: 0.42; to: 1.08; duration: 430; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: countdownRing; from: 0.0; to: 0.82; duration: 110 }
+        }
+        ParallelAnimation {
+            ScaleAnimator { target: countdownNumber; from: 1.16; to: 1.0; duration: 170; easing.type: Easing.OutBounce }
+            OpacityAnimator { target: countdownRing; from: 0.82; to: 0.16; duration: 320; easing.type: Easing.InQuad }
+        }
+    }
+
+    SequentialAnimation {
+        id: nextUpEntrance
+        ParallelAnimation {
+            OpacityAnimator { target: backdrop; from: 0.0; to: 0.90; duration: 360; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: nextPanel; from: 0.0; to: 1.0; duration: 320; easing.type: Easing.OutCubic }
+            ScaleAnimator { target: nextPanel; from: 0.66; to: 1.05; duration: 470; easing.type: Easing.OutBack }
+        }
+        ScaleAnimator { target: nextPanel; from: 1.05; to: 1.0; duration: 170; easing.type: Easing.OutBounce }
+    }
+
+    SequentialAnimation {
+        id: countdownHit
+        ParallelAnimation {
+            ScaleAnimator { target: countdownPill; from: 1.0; to: 1.26; duration: 105; easing.type: Easing.OutQuad }
+            RotationAnimator { target: countdownPill; from: -3; to: 3; duration: 105; easing.type: Easing.OutQuad }
+        }
+        ParallelAnimation {
+            ScaleAnimator { target: countdownPill; from: 1.26; to: 1.0; duration: 220; easing.type: Easing.OutBack }
+            RotationAnimator { target: countdownPill; from: 3; to: 0; duration: 220; easing.type: Easing.OutBack }
+        }
+    }
+
+    SequentialAnimation {
+        id: singerStartSequence
+        ParallelAnimation {
+            OpacityAnimator { target: backdrop; from: 0.96; to: 0.82; duration: 130 }
+            OpacityAnimator { target: flash; from: 0.0; to: 0.95; duration: 75 }
+            OpacityAnimator { target: shockwave; from: 0.0; to: 1.0; duration: 70 }
+            ScaleAnimator { target: shockwave; from: 0.15; to: 4.8; duration: 680; easing.type: Easing.OutCubic }
+        }
+        ParallelAnimation {
+            OpacityAnimator { target: flash; from: 0.95; to: 0.0; duration: 300; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: shockwave; from: 1.0; to: 0.0; duration: 360; easing.type: Easing.OutQuad }
+            OpacityAnimator { target: nowPanel; from: 0.0; to: 1.0; duration: 280; easing.type: Easing.OutCubic }
+            ScaleAnimator { target: nowPanel; from: 0.40; to: 1.12; duration: 480; easing.type: Easing.OutBack }
+            RotationAnimator { target: nowPanel; from: -5; to: 0; duration: 480; easing.type: Easing.OutBack }
+        }
+        ScaleAnimator { target: nowPanel; from: 1.12; to: 1.0; duration: 180; easing.type: Easing.OutBounce }
+        PauseAnimation { duration: 1200 }
+        ParallelAnimation {
+            OpacityAnimator { target: nowPanel; from: 1.0; to: 0.0; duration: 420; easing.type: Easing.InCubic }
+            ScaleAnimator { target: nowPanel; from: 1.0; to: 1.16; duration: 420; easing.type: Easing.InCubic }
+            OpacityAnimator { target: backdrop; from: 0.82; to: 0.0; duration: 480; easing.type: Easing.InCubic }
+        }
+        ScriptAction { script: root.active = false }
+    }
+
+    SequentialAnimation {
+        id: songOutroSequence
+        ParallelAnimation {
+            OpacityAnimator { target: backdrop; from: 0.0; to: 0.92; duration: 150; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: flash; from: 0.0; to: 1.0; duration: 70 }
+            OpacityAnimator { target: shockwave; from: 0.0; to: 1.0; duration: 60 }
+            ScaleAnimator { target: shockwave; from: 0.10; to: 5.6; duration: 620; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: outroPanel; from: 0.0; to: 1.0; duration: 210; easing.type: Easing.OutCubic }
+            ScaleAnimator { target: outroPanel; from: 0.36; to: 1.14; duration: 480; easing.type: Easing.OutBack }
+        }
+        ParallelAnimation {
+            OpacityAnimator { target: flash; from: 1.0; to: 0.0; duration: 240; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: shockwave; from: 1.0; to: 0.0; duration: 320; easing.type: Easing.OutQuad }
+            ScaleAnimator { target: outroPanel; from: 1.14; to: 1.0; duration: 170; easing.type: Easing.OutBounce }
+        }
+        ScriptAction { script: root.burstSerial += 1 }
+        ParallelAnimation {
+            OpacityAnimator { target: flash; from: 0.0; to: 0.52; duration: 65 }
+            ScaleAnimator { target: outroPanel; from: 1.0; to: 1.07; duration: 120; easing.type: Easing.OutQuad }
+        }
+        ParallelAnimation {
+            OpacityAnimator { target: flash; from: 0.52; to: 0.0; duration: 180; easing.type: Easing.OutCubic }
+            ScaleAnimator { target: outroPanel; from: 1.07; to: 1.0; duration: 170; easing.type: Easing.OutBack }
+        }
+        PauseAnimation { duration: 520 }
+        ParallelAnimation {
+            OpacityAnimator { target: outroPanel; from: 1.0; to: 0.0; duration: 280; easing.type: Easing.InCubic }
+            ScaleAnimator { target: outroPanel; from: 1.0; to: 1.20; duration: 280; easing.type: Easing.InCubic }
+            OpacityAnimator { target: backdrop; from: 0.92; to: 0.0; duration: 340; easing.type: Easing.InCubic }
+        }
+        ScriptAction { script: root.active = false }
+    }
+
+    SequentialAnimation {
+        id: overlayExit
+        ParallelAnimation {
+            OpacityAnimator { target: nextPanel; from: nextPanel.opacity; to: 0.0; duration: 200; easing.type: Easing.InCubic }
+            ScaleAnimator { target: nextPanel; from: nextPanel.scale; to: 1.06; duration: 200; easing.type: Easing.InCubic }
+            OpacityAnimator { target: nowPanel; from: nowPanel.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
+            OpacityAnimator { target: backdrop; from: backdrop.opacity; to: 0.0; duration: 240; easing.type: Easing.InCubic }
+        }
+        ScriptAction { script: root.active = false }
+    }
+}
+"""
+
+
+class RenderThreadShowScreenVfx(QFrame):
+    """Transparent Qt Quick transition layer for the audience show screen."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PyQt6.QtQuick import QQuickView
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background: transparent;")
+        self._view = QQuickView()
+        self._view.setColor(QColor(0, 0, 0, 0))
+        self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
+
+        fd, qml_path = tempfile.mkstemp(prefix="singws_show_vfx_", suffix=".qml")
+        self._qml_temp_path = qml_path
+        with os.fdopen(fd, "w", encoding="utf-8") as qml_file:
+            qml_file.write(QML_SHOW_SCREEN_VFX_SOURCE)
+        self._view.setSource(QUrl.fromLocalFile(qml_path))
+        if self._view.status() == QQuickView.Status.Error:
+            errors = [err.toString() for err in self._view.errors()]
+            raise RuntimeError("QML show-screen VFX load error: " + (" | ".join(errors) or "unknown"))
+
+        self._root = self._view.rootObject()
+        if self._root is None:
+            raise RuntimeError("QML show-screen VFX has no root object")
+        try:
+            self._root.nextUpCountdownFinished.connect(self._on_next_up_countdown_finished)
+        except Exception:
+            pass
+        self._container = QWidget.createWindowContainer(self._view, self)
+        self._container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._container)
+
+    def _on_next_up_countdown_finished(self):
+        area = self.parentWidget()
+        if area is not None and hasattr(area, "finish_next_up_countdown"):
+            area.finish_next_up_countdown()
+
+    def show_next_up(self, payload: dict, duration_sec: float = 10.0):
+        payload = payload if isinstance(payload, dict) else {}
+        self._root.showNextUp(
+            str(payload.get("singer", "") or ""),
+            str(payload.get("title", "") or ""),
+            str(payload.get("artist", "") or ""),
+            str(payload.get("on_deck", "") or ""),
+            float(duration_sec or 10.0),
+        )
+        self.raise_()
+
+    def show_singer_start(self, singer: str, title: str = "", artist: str = ""):
+        self._root.showSingerStart(str(singer or ""), str(title or ""), str(artist or ""))
+        self.raise_()
+
+    def show_song_outro(self, singer: str, title: str = "", artist: str = ""):
+        self._root.showSongOutro(str(singer or ""), str(title or ""), str(artist or ""))
+        self.raise_()
+
+    def hide_transition(self):
+        self._root.hideTransition()
+
+    def set_enabled(self, enabled):
+        enabled = bool(enabled)
+        self._root.setProperty("effectsEnabled", enabled)
+        if not enabled:
+            self._root.setProperty("active", False)
+
+
 class VideoAreaWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -6602,10 +7329,70 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_hide_timer = QTimer(self)
         self._next_up_overlay_hide_timer.setSingleShot(True)
         self._next_up_overlay_hide_timer.timeout.connect(lambda: self.hide_next_up_overlay(reason="timer"))
+        self._show_vfx_overlay = None
+        self._show_vfx_enabled = True
         # Request QR shown on the show screen, bottom-right, right-aligned with
         # the ticker countdown timer. Host pushes the pixmap; None hides it.
         self._request_qr_pixmap = QPixmap()
         self._request_qr_margin = 24
+
+    def set_show_vfx_overlay(self, overlay):
+        self._show_vfx_overlay = overlay
+        if overlay is not None:
+            overlay.setGeometry(self.rect())
+            overlay.show()
+            overlay.raise_()
+
+    def set_show_vfx_enabled(self, enabled):
+        self._show_vfx_enabled = bool(enabled)
+        overlay = getattr(self, "_show_vfx_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.set_enabled(self._show_vfx_enabled)
+            except Exception:
+                pass
+        self.update()
+
+    def finish_next_up_countdown(self):
+        """Clear Next Up state as soon as its visible countdown completes.
+
+        The QML layer performs its short exit animation; clearing the backing
+        payload here prevents a stale overlay timer or surface recreation from
+        putting the panel back over the request QR.
+        """
+        self._next_up_overlay_hide_timer.stop()
+        self._next_up_overlay_tick_timer.stop()
+        self._next_up_overlay_hide_started = False
+        self._next_up_overlay_payload = {}
+        self._next_up_overlay_phase = ""
+        self._next_up_overlay_log("hidden reason=countdown_complete; QR restored")
+        self.update()
+
+    def show_singer_start_vfx(self, singer: str, title: str = "", artist: str = ""):
+        if not bool(getattr(self, "_show_vfx_enabled", True)):
+            return False
+        overlay = getattr(self, "_show_vfx_overlay", None)
+        if overlay is None:
+            return False
+        try:
+            overlay.show_singer_start(singer, title, artist)
+            return True
+        except Exception as exc:
+            _diag(f"[SHOW-VFX] singer-start failed: {exc}")
+            return False
+
+    def show_song_outro_vfx(self, singer: str, title: str = "", artist: str = ""):
+        if not bool(getattr(self, "_show_vfx_enabled", True)):
+            return False
+        overlay = getattr(self, "_show_vfx_overlay", None)
+        if overlay is None:
+            return False
+        try:
+            overlay.show_song_outro(singer, title, artist)
+            return True
+        except Exception as exc:
+            _diag(f"[SHOW-VFX] song-outro failed: {exc}")
+            return False
 
     def set_request_qr(self, pixmap):
         """Set (or clear with None) the request QR painted on the show screen.
@@ -6827,6 +7614,13 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_hide_timer.stop()
         if not self._next_up_overlay_tick_timer.isActive():
             self._next_up_overlay_tick_timer.start(33)
+        overlay = getattr(self, "_show_vfx_overlay", None)
+        if overlay is not None and bool(getattr(self, "_show_vfx_enabled", True)):
+            try:
+                overlay.show_next_up(self._next_up_overlay_payload, duration_sec)
+            except Exception as exc:
+                _diag(f"[SHOW-VFX] next-up failed; using painter fallback: {exc}")
+                self._show_vfx_overlay = None
         self._next_up_overlay_log(f"show requested reason={reason} duration_ms={duration_ms} payload={self._next_up_overlay_payload!r}")
         self.update()
 
@@ -6837,6 +7631,12 @@ class VideoAreaWidget(QWidget):
             pass
         self._next_up_overlay_hide_started = False
         self._next_up_overlay_log(f"hide requested reason={reason} immediate={int(bool(immediate))}")
+        overlay = getattr(self, "_show_vfx_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.hide_transition()
+            except Exception:
+                pass
         if immediate or not self._next_up_overlay_payload:
             self._next_up_overlay_payload = {}
             self._next_up_overlay_phase = ""
@@ -6903,6 +7703,10 @@ class VideoAreaWidget(QWidget):
         self._karaoke_scaled_key = None
         if not self.karaoke_frame.isNull():
             self._ensure_karaoke_scaled_pixmap()
+        overlay = getattr(self, "_show_vfx_overlay", None)
+        if overlay is not None:
+            overlay.setGeometry(self.rect())
+            overlay.raise_()
 
     def _cdg_near_black_settings(self) -> tuple[bool, int]:
         try:
@@ -7180,6 +7984,9 @@ class VideoAreaWidget(QWidget):
         painter.restore()
 
     def _draw_next_up_overlay(self, painter: QPainter):
+        if (getattr(self, "_show_vfx_overlay", None) is not None
+                and bool(getattr(self, "_show_vfx_enabled", True))):
+            return
         payload = self._next_up_overlay_payload if isinstance(self._next_up_overlay_payload, dict) else {}
         if not payload:
             return
@@ -11482,6 +12289,8 @@ class VideoWindow(QWidget):
         self.video_area = VideoAreaWidget(self)
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
+        self.show_vfx = None
+        self._attach_show_vfx(self.video_area)
 
         # Bottom ticker. Preferred backend is the Qt Quick render-thread ticker
         # (RenderThreadTicker): the scroll animation runs on the scene-graph
@@ -11511,6 +12320,13 @@ class VideoWindow(QWidget):
         layout.setStretch(0, 1)
         layout.setStretch(1, 0)
 
+        # The visible output is made from child/native surfaces (the painted
+        # video widget plus Qt Quick containers for the VFX and ticker). Mouse
+        # events delivered to those surfaces do not bubble to VideoWindow, so
+        # explicitly route their double-clicks to the window-level fullscreen
+        # toggle.
+        self._install_fullscreen_mouse_targets()
+
         _diag(
             f"[TICKER] init title={title} winId={int(self.video_area.winId())} "
             f"backend={self.ticker_backend}"
@@ -11524,6 +12340,64 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer = QTimer(self)
         self._idle_overlay_timer.timeout.connect(self._tick_idle_overlay)
         self._idle_overlay_timer.start(50)
+
+    def _attach_show_vfx(self, area):
+        try:
+            overlay = RenderThreadShowScreenVfx(area)
+            area.set_show_vfx_overlay(overlay)
+            owner = getattr(self, "_external_owner", None)
+            settings = getattr(owner, "settings", {}) if owner is not None else {}
+            vfx_enabled = bool(settings.get("show_screen_vfx_enabled", True))
+            area.set_show_vfx_enabled(vfx_enabled)
+            self.show_vfx = overlay
+            self._install_fullscreen_mouse_target(overlay)
+            self._install_fullscreen_mouse_target(getattr(overlay, "_container", None))
+            self._install_fullscreen_mouse_target(getattr(overlay, "_view", None))
+            payload = getattr(area, "_next_up_overlay_payload", {}) or {}
+            if vfx_enabled and isinstance(payload, dict) and payload:
+                overlay.show_next_up(payload, area.next_up_overlay_remaining_sec())
+            _diag("[SHOW-VFX] Qt Quick audience transition layer ready")
+            return True
+        except Exception as exc:
+            self.show_vfx = None
+            try:
+                area.set_show_vfx_overlay(None)
+            except Exception:
+                pass
+            _diag(f"[SHOW-VFX] unavailable; using painter transition: {exc}")
+            return False
+
+    def _install_fullscreen_mouse_target(self, target):
+        if target is None:
+            return
+        try:
+            target.installEventFilter(self)
+        except Exception:
+            pass
+
+    def _install_fullscreen_mouse_targets(self):
+        self._install_fullscreen_mouse_target(getattr(self, "video_area", None))
+        ticker = getattr(self, "ticker", None)
+        self._install_fullscreen_mouse_target(ticker)
+        self._install_fullscreen_mouse_target(getattr(ticker, "_container", None))
+        self._install_fullscreen_mouse_target(getattr(ticker, "_view", None))
+        overlay = getattr(self, "show_vfx", None)
+        self._install_fullscreen_mouse_target(overlay)
+        self._install_fullscreen_mouse_target(getattr(overlay, "_container", None))
+        self._install_fullscreen_mouse_target(getattr(overlay, "_view", None))
+
+    def _toggle_output_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            self._toggle_output_fullscreen()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
     def _tick_idle_overlay(self):
         """Periodic repaint so idle BG overlay updates without requiring window focus."""
@@ -11589,17 +12463,22 @@ class VideoWindow(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         """Toggle fullscreen on double-click"""
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
-        super().mouseDoubleClickEvent(event)
+        self._toggle_output_fullscreen()
+        event.accept()
 
     def winId(self):
         return self.video_area.winId()
 
     def recreate_video_surface(self, reason: str = ""):
         """Recreate native video surface widget so stale overlays cannot persist."""
+        now = time.monotonic()
+        last_completed = float(getattr(self, "_video_surface_recreated_at", 0.0) or 0.0)
+        if last_completed > 0.0 and (now - last_completed) < 1.25:
+            _diag(
+                f"[VIDSURFACE] duplicate recreate skipped reason={reason} "
+                f"age_ms={(now - last_completed) * 1000.0:.1f}"
+            )
+            return
         try:
             old = getattr(self, "video_area", None)
             if old is None:
@@ -11607,6 +12486,7 @@ class VideoWindow(QWidget):
             old_id = int(old.winId())
             old_size = old.size()
             old_policy = old.sizePolicy()
+            old_overlay = getattr(old, "_show_vfx_overlay", None)
 
             new_area = VideoAreaWidget(self)
             new_area.setSizePolicy(old_policy)
@@ -11643,14 +12523,32 @@ class VideoWindow(QWidget):
 
             # Replace in-place to avoid transient layout collapse/jumps.
             self._main_layout.replaceWidget(old, new_area)
+            # The Qt Quick VFX layer owns a native render window. Preserve and
+            # reparent it across video-surface resets instead of tearing down
+            # and recreating that render window during every song transition.
+            # Rapid native QQuickView churn is both unnecessary and fragile on
+            # macOS, especially when stop and media-end cleanup arrive together.
+            if old_overlay is not None:
+                old._show_vfx_overlay = None
+                old_overlay.setParent(new_area)
+                new_area.set_show_vfx_overlay(old_overlay)
+                self.show_vfx = old_overlay
             old.setParent(None)
             old.deleteLater()
             self.video_area = new_area
+            if old_overlay is None:
+                self._attach_show_vfx(new_area)
+            self._install_fullscreen_mouse_target(new_area)
             if old_size.width() > 0 and old_size.height() > 0:
                 new_area.resize(old_size)
 
+            self._video_surface_recreated_at = time.monotonic()
+
             try:
-                _diag(f"[VIDSURFACE] recreated reason={reason} old={old_id} new={int(new_area.winId())}")
+                _diag(
+                    f"[VIDSURFACE] recreated reason={reason} old={old_id} "
+                    f"new={int(new_area.winId())} vfx_reused={int(old_overlay is not None)}"
+                )
             except Exception:
                 pass
         except Exception:
@@ -14650,6 +15548,1034 @@ def attach_smart_vscroll(view, width_px=10):
     _apply()
     return sb
 
+QML_NOW_SINGING_SOURCE = r"""
+import QtQuick
+
+Rectangle {
+    id: root
+    color: "#211a3b"
+    radius: 22
+    clip: true
+    property string singerText: "Singer Rotation"
+    property string pendingSingerText: ""
+    property string nextSingerText: ""
+    property string countdownText: ""
+    property bool effectsEnabled: true
+    property int singerBurstSerial: 0
+
+    function updateState(singer, nextSinger, countdown) {
+        singer = singer || "Singer Rotation"
+        nextSingerText = nextSinger || ""
+        countdownText = countdown || ""
+        if (singer !== singerText) {
+            if (effectsEnabled) {
+                pendingSingerText = singer
+                singerTransition.restart()
+            } else {
+                pendingSingerText = ""
+                singerText = singer
+            }
+        }
+    }
+
+    function updateCountdown(countdown) {
+        countdownText = countdown || ""
+        if (effectsEnabled && shouldPulseCountdown()) countdownPulse.restart()
+    }
+
+    function shouldPulseCountdown() {
+        var parts = countdownText.split(":")
+        if (parts.length < 2) return false
+        var minutes = parseInt(parts[parts.length - 2])
+        var seconds = parseInt(parts[parts.length - 1])
+        if (isNaN(minutes) || isNaN(seconds)) return false
+        return seconds === 0 || (minutes === 0 && seconds <= 10)
+    }
+
+    gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0.0; color: "#332560" }
+        GradientStop { position: 0.52; color: "#211a3b" }
+        GradientStop { position: 1.0; color: "#181429" }
+    }
+
+    Rectangle {
+        id: stageGlow
+        visible: root.effectsEnabled
+        width: Math.max(260, root.width * 0.52)
+        height: width
+        radius: width / 2
+        y: -height * 0.58
+        color: "transparent"
+        opacity: 0.28
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#00a98fff" }
+            GradientStop { position: 0.5; color: "#aaa98fff" }
+            GradientStop { position: 1.0; color: "#00a98fff" }
+        }
+        SequentialAnimation {
+            running: root.effectsEnabled
+            loops: Animation.Infinite
+            XAnimator { target: stageGlow; from: -stageGlow.width * 0.25; to: root.width - stageGlow.width * 0.72; duration: 8200; easing.type: Easing.InOutSine }
+            XAnimator { target: stageGlow; from: root.width - stageGlow.width * 0.72; to: -stageGlow.width * 0.25; duration: 8200; easing.type: Easing.InOutSine }
+        }
+    }
+
+    Rectangle {
+        id: headerSheen
+        visible: root.effectsEnabled
+        width: 110
+        height: root.height * 2.2
+        y: -root.height * 0.6
+        rotation: 16
+        opacity: 0.055
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#00ffffff" }
+            GradientStop { position: 0.5; color: "#e8ffffff" }
+            GradientStop { position: 1.0; color: "#00ffffff" }
+        }
+        XAnimator on x {
+            running: root.effectsEnabled
+            from: -180
+            to: root.width + 180
+            duration: 7200
+            loops: Animation.Infinite
+            easing.type: Easing.InOutSine
+        }
+    }
+
+    Row {
+        id: liveRow
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        anchors.topMargin: 17
+        spacing: 8
+
+        Item {
+            width: 12; height: 12
+            Rectangle {
+                id: pulseRing
+                anchors.centerIn: parent
+                width: 9; height: 9; radius: 4.5
+                color: "transparent"
+                border.width: 2
+                border.color: "#f6c945"
+                opacity: 0.8
+                SequentialAnimation {
+                    running: root.effectsEnabled
+                    loops: Animation.Infinite
+                    ScaleAnimator { target: pulseRing; from: 0.88; to: 1.18; duration: 1400; easing.type: Easing.InOutSine }
+                    ScaleAnimator { target: pulseRing; from: 1.18; to: 0.88; duration: 1400; easing.type: Easing.InOutSine }
+                }
+                SequentialAnimation {
+                    running: root.effectsEnabled
+                    loops: Animation.Infinite
+                    OpacityAnimator { target: pulseRing; from: 0.68; to: 0.24; duration: 1400 }
+                    OpacityAnimator { target: pulseRing; from: 0.24; to: 0.68; duration: 1400 }
+                }
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: 6; height: 6; radius: 3
+                color: "#f6c945"
+            }
+        }
+
+        Text {
+            text: "NOW SINGING  •  LIVE"
+            color: "#f6c945"
+            font.pixelSize: 11
+            font.bold: true
+            font.letterSpacing: 1.1
+            anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Row {
+            height: 17
+            spacing: 3
+            anchors.verticalCenter: parent.verticalCenter
+            Repeater {
+                model: 3
+                Rectangle {
+                    id: eqBar
+                    required property int index
+                    width: 3
+                    height: 16
+                    radius: 2
+                    color: index % 2 ? "#a995ff" : "#f6c945"
+                    transformOrigin: Item.Bottom
+                    SequentialAnimation {
+                        running: root.effectsEnabled
+                        loops: Animation.Infinite
+                        PauseAnimation { duration: eqBar.index * 85 }
+                        ScaleAnimator { target: eqBar; from: 0.24; to: 1.0; duration: 280 + eqBar.index * 35; easing.type: Easing.OutQuad }
+                        ScaleAnimator { target: eqBar; from: 1.0; to: 0.32; duration: 340 + (4 - eqBar.index) * 28; easing.type: Easing.InOutSine }
+                    }
+                }
+            }
+        }
+    }
+
+    Item {
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: liveRow.bottom
+        anchors.topMargin: 7
+        height: 57
+        clip: true
+        Text {
+            id: singerNameText
+            x: 0
+            width: parent.width
+            height: parent.height
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            text: root.singerText
+            color: "#ffffff"
+            font.pixelSize: 44
+            font.bold: true
+            fontSizeMode: Text.Fit
+            minimumPixelSize: 24
+            elide: Text.ElideRight
+        }
+    }
+
+    Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 10
+        spacing: 8
+        visible: root.nextSingerText !== ""
+        Text {
+            text: "NEXT UP"
+            color: "#8f84af"
+            font.pixelSize: 10
+            font.bold: true
+            font.letterSpacing: 0.8
+            anchors.verticalCenter: parent.verticalCenter
+        }
+        Text {
+            text: root.nextSingerText
+            color: "#ffffff"
+            font.pixelSize: 12
+            font.bold: true
+            anchors.verticalCenter: parent.verticalCenter
+        }
+        Rectangle {
+            id: countdownPill
+            visible: root.countdownText !== ""
+            width: countdownLabel.implicitWidth + 18
+            height: 25
+            radius: 9
+            color: "#3b2e12"
+            border.width: 1
+            border.color: "#9f7720"
+            transformOrigin: Item.Center
+            Text {
+                id: countdownLabel
+                anchors.centerIn: parent
+                text: root.countdownText
+                color: "#f6c945"
+                font.pixelSize: 11
+                font.bold: true
+            }
+        }
+    }
+
+    Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 14
+        visible: root.nextSingerText === ""
+        text: "LIVE ON THE KARAOKE STAGE"
+        color: "#bdb4db"
+        font.pixelSize: 11
+        font.bold: true
+        font.letterSpacing: 0.8
+    }
+
+    SequentialAnimation {
+        id: countdownPulse
+        running: false
+        ScaleAnimator { target: countdownPill; from: 1.0; to: 1.045; duration: 95; easing.type: Easing.OutQuad }
+        ScaleAnimator { target: countdownPill; from: 1.045; to: 1.0; duration: 190; easing.type: Easing.OutBack }
+    }
+
+    SequentialAnimation {
+        id: singerTransition
+        ParallelAnimation {
+            OpacityAnimator { target: singerNameText; from: 1.0; to: 0.0; duration: 190; easing.type: Easing.InQuad }
+            XAnimator { target: singerNameText; from: 0; to: -root.width * 0.12; duration: 190; easing.type: Easing.InCubic }
+            ScaleAnimator { target: singerNameText; from: 1.0; to: 0.92; duration: 190; easing.type: Easing.InQuad }
+        }
+        ScriptAction {
+            script: {
+                root.singerText = root.pendingSingerText
+                singerNameText.x = root.width * 0.12
+                singerNameText.scale = 1.06
+                singerNameText.opacity = 0
+                root.singerBurstSerial += 1
+                stageFlashAnimation.restart()
+                shockwaveAnimation.restart()
+            }
+        }
+        ParallelAnimation {
+            OpacityAnimator { target: singerNameText; from: 0.0; to: 1.0; duration: 360; easing.type: Easing.OutCubic }
+            XAnimator { target: singerNameText; from: root.width * 0.12; to: 0; duration: 330; easing.type: Easing.OutCubic }
+            ScaleAnimator { target: singerNameText; from: 1.06; to: 1.0; duration: 330; easing.type: Easing.OutCubic }
+        }
+    }
+
+    // Singer handoffs get a short stage-show explosion: a flash, expanding
+    // shockwaves, and scene-graph confetti fired radially from the new name.
+    Rectangle {
+        id: singerChangeFlash
+        anchors.fill: parent
+        z: 11
+        opacity: 0
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#00f6c945" }
+            GradientStop { position: 0.35; color: "#b8ffffff" }
+            GradientStop { position: 0.55; color: "#d8c2b2ff" }
+            GradientStop { position: 1.0; color: "#00a895ff" }
+        }
+    }
+    SequentialAnimation {
+        id: stageFlashAnimation
+        ParallelAnimation {
+            OpacityAnimator { target: singerChangeFlash; from: 0.0; to: 0.32; duration: 85; easing.type: Easing.OutQuad }
+            ScaleAnimator { target: singerChangeFlash; from: 0.72; to: 1.0; duration: 110; easing.type: Easing.OutCubic }
+        }
+        OpacityAnimator { target: singerChangeFlash; from: 0.32; to: 0.0; duration: 340; easing.type: Easing.OutCubic }
+    }
+
+    Item {
+        id: singerShockwaves
+        anchors.centerIn: parent
+        width: 78
+        height: 78
+        z: 12
+        opacity: 0
+        Repeater {
+            model: 1
+            Rectangle {
+                required property int index
+                anchors.centerIn: parent
+                width: 74
+                height: 74
+                radius: 37
+                color: "transparent"
+                border.width: 2
+                border.color: "#f6c945"
+                opacity: 0.72
+            }
+        }
+    }
+    SequentialAnimation {
+        id: shockwaveAnimation
+        ParallelAnimation {
+            OpacityAnimator { target: singerShockwaves; from: 0.0; to: 1.0; duration: 55 }
+            ScaleAnimator { target: singerShockwaves; from: 0.35; to: 2.25; duration: 520; easing.type: Easing.OutCubic }
+        }
+        ParallelAnimation {
+            OpacityAnimator { target: singerShockwaves; from: 1.0; to: 0.0; duration: 260; easing.type: Easing.OutQuad }
+            ScaleAnimator { target: singerShockwaves; from: 2.25; to: 3.0; duration: 260; easing.type: Easing.OutQuad }
+        }
+    }
+
+    Item {
+        id: singerBurst
+        anchors.fill: parent
+        z: 14
+        clip: true
+        visible: root.effectsEnabled
+
+        Repeater {
+            model: 12
+            Item {
+                id: burstParticle
+                required property int index
+                readonly property real burstAngle: (index / 12.0) * Math.PI * 2 + (index % 3) * 0.09
+                readonly property real burstDistanceX: root.width * (0.15 + (index % 4) * 0.025)
+                readonly property real burstDistanceY: root.height * (0.24 + (index % 3) * 0.06)
+                readonly property real originX: root.width / 2
+                readonly property real originY: root.height * 0.50
+                x: originX
+                y: originY
+                width: 4 + (index % 3)
+                height: index % 3 === 0 ? width * 1.8 : width
+                opacity: 0
+                transformOrigin: Item.Center
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: index % 3 === 0 ? 2 : width / 2
+                    color: index % 4 === 0 ? "#ffffff" : (index % 4 === 1 ? "#f6c945" : (index % 4 === 2 ? "#a895ff" : "#ff62c6"))
+                    border.width: index % 5 === 0 ? 1 : 0
+                    border.color: "#ffffff"
+                }
+
+                Connections {
+                    target: root
+                    function onSingerBurstSerialChanged() { burstFlight.restart() }
+                }
+                ParallelAnimation {
+                    id: burstFlight
+                    XAnimator {
+                        target: burstParticle
+                        from: burstParticle.originX
+                        to: burstParticle.originX + Math.cos(burstParticle.burstAngle) * burstParticle.burstDistanceX
+                        duration: 620 + burstParticle.index * 11
+                        easing.type: Easing.OutCubic
+                    }
+                    YAnimator {
+                        target: burstParticle
+                        from: burstParticle.originY
+                        to: burstParticle.originY + Math.sin(burstParticle.burstAngle) * burstParticle.burstDistanceY + 34
+                        duration: 680 + burstParticle.index * 10
+                        easing.type: Easing.OutCubic
+                    }
+                    RotationAnimator { target: burstParticle; from: 0; to: 220 + burstParticle.index * 31; duration: 760; easing.type: Easing.OutQuad }
+                    ScaleAnimator { target: burstParticle; from: 0.35; to: 1.35; duration: 430; easing.type: Easing.OutBack }
+                    SequentialAnimation {
+                        OpacityAnimator { target: burstParticle; from: 0.0; to: 1.0; duration: 80 }
+                        PauseAnimation { duration: 260 + (burstParticle.index % 5) * 25 }
+                        OpacityAnimator { target: burstParticle; from: 1.0; to: 0.0; duration: 300; easing.type: Easing.InQuad }
+                    }
+                }
+            }
+        }
+    }
+
+    Repeater {
+        model: 3
+        Rectangle {
+            required property int index
+            width: 2 + (index % 2)
+            height: width
+            radius: width / 2
+            x: ((index * 97 + 53) % 101) / 101 * root.width
+            y: root.height + index * 9
+            color: index % 3 === 0 ? "#f6c945" : "#b5a6ff"
+            opacity: 0.12 + (index % 3) * 0.05
+            YAnimator on y {
+                running: root.effectsEnabled
+                from: root.height + index * 9
+                to: -12
+                duration: 4800 + index * 420
+                loops: Animation.Infinite
+            }
+        }
+    }
+
+    Rectangle {
+        id: singerPopup
+        anchors.centerIn: parent
+        width: Math.min(root.width - 40, singerPopupText.implicitWidth + 58)
+        height: 62
+        radius: 20
+        color: "#ff21183d"
+        border.width: 2
+        border.color: "#f6c945"
+        opacity: 0
+        z: 20
+        transformOrigin: Item.Center
+        Column {
+            anchors.centerIn: parent
+            spacing: 2
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "UP NOW"
+                color: "#f6c945"
+                font.pixelSize: 10
+                font.bold: true
+                font.letterSpacing: 1.4
+            }
+            Text {
+                id: singerPopupText
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.singerText
+                color: "#ffffff"
+                font.pixelSize: 22
+                font.bold: true
+            }
+        }
+    }
+    SequentialAnimation {
+        id: singerPopupAnimation
+        ParallelAnimation {
+            OpacityAnimator { target: singerPopup; from: 0.0; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
+            ScaleAnimator { target: singerPopup; from: 0.42; to: 1.16; duration: 300; easing.type: Easing.OutBack }
+            RotationAnimator { target: singerPopup; from: -5; to: 0; duration: 320; easing.type: Easing.OutBack }
+            OpacityAnimator { target: singerNameText; from: 1.0; to: 0.08; duration: 180; easing.type: Easing.OutQuad }
+        }
+        ScaleAnimator { target: singerPopup; from: 1.16; to: 1.0; duration: 150; easing.type: Easing.OutBounce }
+        PauseAnimation { duration: 900 }
+        ParallelAnimation {
+            OpacityAnimator { target: singerPopup; from: 1.0; to: 0.0; duration: 300; easing.type: Easing.InQuad }
+            ScaleAnimator { target: singerPopup; from: 1.0; to: 1.18; duration: 300; easing.type: Easing.InQuad }
+            OpacityAnimator { target: singerNameText; from: 0.08; to: 1.0; duration: 300; easing.type: Easing.OutCubic }
+        }
+    }
+
+    Rectangle {
+        id: liveBorder
+        anchors.fill: parent
+        radius: parent.radius
+        color: "transparent"
+        border.width: 1
+        border.color: "#a58bff"
+        opacity: 0.45
+    }
+}
+"""
+
+
+class RenderThreadNowSingingCard(QFrame):
+    """Animated show-card for the current singer, rendered by Qt Quick."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PyQt6.QtQuick import QQuickView
+
+        self._last_countdown = ""
+        self.setMinimumHeight(142)
+        self.setMaximumHeight(166)
+        self._view = QQuickView()
+        self._view.setColor(QColor("transparent"))
+        self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
+
+        fd, qml_path = tempfile.mkstemp(prefix="singws_now_singing_rt_", suffix=".qml")
+        self._qml_temp_path = qml_path
+        with os.fdopen(fd, "w", encoding="utf-8") as qml_file:
+            qml_file.write(QML_NOW_SINGING_SOURCE)
+        self._view.setSource(QUrl.fromLocalFile(qml_path))
+        if self._view.status() == QQuickView.Status.Error:
+            errors = [err.toString() for err in self._view.errors()]
+            raise RuntimeError("QML now-singing card load error: " + (" | ".join(errors) or "unknown"))
+
+        self._root = self._view.rootObject()
+        if self._root is None:
+            raise RuntimeError("QML now-singing card has no root object")
+        self._container = QWidget.createWindowContainer(self._view, self)
+        self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._container)
+
+    def set_state(self, singer, next_singer="", countdown=""):
+        singer_value = str(singer or "Singer Rotation")
+        next_value = str(next_singer or "")
+        countdown_value = str(countdown or "")
+        self._last_countdown = countdown_value
+        if not self.isVisible():
+            self._root.setProperty("singerText", singer_value)
+            self._root.setProperty("nextSingerText", next_value)
+            self._root.setProperty("countdownText", countdown_value)
+            return
+        self._root.updateState(
+            singer_value,
+            next_value,
+            countdown_value,
+        )
+
+    def set_singer(self, text):
+        self.set_state(text)
+
+    def set_countdown(self, text):
+        value = str(text or "")
+        if value == self._last_countdown:
+            return
+        self._last_countdown = value
+        if self.isVisible():
+            self._root.updateCountdown(value)
+        else:
+            self._root.setProperty("countdownText", value)
+
+    def set_effects_enabled(self, enabled):
+        self._root.setProperty("effectsEnabled", bool(enabled))
+
+
+QML_ROTATION_RAIL_SOURCE = r"""
+import QtQuick
+
+Rectangle {
+    id: root
+    color: "transparent"
+    clip: true
+
+    property string itemsJson: "[]"
+    property string pendingJson: ""
+    property string transitionJson: ""
+    property string updatePopupText: ""
+    property real speedPxPerSec: 34
+    property real cardHeight: Math.max(94, Math.min(122, height * 0.27))
+    property real cardGap: 12
+    property bool running: true
+    property bool effectsEnabled: true
+    readonly property real cycleHeight: firstPass.height + cardGap
+    readonly property bool overflow: rotationModel.count > 1 && cycleHeight > height
+
+    ListModel { id: rotationModel }
+
+    // Slow ambient stage lighting. These are scene-graph objects rather than
+    // Python-painted effects, so they remain fluid while the host is busy.
+    Item {
+        id: ambientLight
+        anchors.fill: parent
+        visible: root.effectsEnabled
+        opacity: 0.12
+
+        Rectangle {
+            id: violetOrb
+            width: Math.max(220, root.width * 0.62)
+            height: width
+            radius: width / 2
+            x: -width * 0.45
+            y: -height * 0.28
+            color: "transparent"
+            opacity: 0.30
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "#001c1450" }
+                GradientStop { position: 0.5; color: "#8f4b35b5" }
+                GradientStop { position: 1.0; color: "#001c1450" }
+            }
+            SequentialAnimation {
+                running: root.effectsEnabled
+                loops: Animation.Infinite
+                XAnimator { target: violetOrb; from: -violetOrb.width * 0.45; to: root.width * 0.16; duration: 10500; easing.type: Easing.InOutSine }
+                XAnimator { target: violetOrb; from: root.width * 0.16; to: -violetOrb.width * 0.45; duration: 10500; easing.type: Easing.InOutSine }
+            }
+        }
+
+        Rectangle {
+            id: goldOrb
+            width: Math.max(160, root.width * 0.34)
+            height: width
+            radius: width / 2
+            x: root.width - width * 0.55
+            y: root.height * 0.58
+            color: "transparent"
+            opacity: 0.16
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "#0049340e" }
+                GradientStop { position: 0.5; color: "#88a66f16" }
+                GradientStop { position: 1.0; color: "#0049340e" }
+            }
+            SequentialAnimation {
+                running: root.effectsEnabled
+                loops: Animation.Infinite
+                YAnimator { target: goldOrb; from: root.height * 0.58; to: root.height * 0.25; duration: 9200; easing.type: Easing.InOutSine }
+                YAnimator { target: goldOrb; from: root.height * 0.25; to: root.height * 0.58; duration: 9200; easing.type: Easing.InOutSine }
+            }
+        }
+    }
+
+    function loadItems(payload) {
+        var parsed = []
+        try { parsed = JSON.parse(payload || "[]") } catch (err) { parsed = [] }
+        rotationModel.clear()
+        for (var i = 0; i < parsed.length; ++i) rotationModel.append(parsed[i])
+        itemsJson = payload || "[]"
+        pendingJson = ""
+        Qt.callLater(restartScroll)
+    }
+
+    function submitItems(payload, forceNow) {
+        payload = payload || "[]"
+        if (forceNow || itemsJson === "[]") {
+            loadItems(payload)
+        } else if (payload !== itemsJson) {
+            var oldCount = rotationModel.count
+            var newCount = 0
+            try { newCount = JSON.parse(payload).length } catch (err) { newCount = 0 }
+            var delta = newCount - oldCount
+            if (delta > 0) updatePopupText = "+" + delta + " SINGER" + (delta === 1 ? "" : "S") + " JOINED"
+            else if (delta < 0) updatePopupText = "ROTATION UPDATED"
+            else updatePopupText = "LINEUP UPDATED"
+            transitionJson = payload
+            queueTransition.restart()
+        }
+    }
+
+    function restartScroll() {
+        scrollAnim.stop()
+        strip.y = 0
+        if (!running || !overflow || cycleHeight <= 0) return
+        scrollAnim.from = 0
+        scrollAnim.to = -cycleHeight
+        scrollAnim.duration = Math.max(1200, Math.round((cycleHeight / Math.max(1, speedPxPerSec)) * 1000))
+        scrollAnim.start()
+    }
+
+    Component {
+        id: cardComponent
+        Rectangle {
+            id: rotationCard
+            width: firstPass.width
+            height: root.cardHeight
+            radius: 18
+            clip: true
+            opacity: 0
+            x: 24
+            scale: 0.98
+            color: index === 0 ? "#241d3d" : "#181921"
+            border.width: 1
+            border.color: index === 0 ? "#8f73ff" : "#2b2d38"
+
+            Component.onCompleted: cardEntrance.start()
+            SequentialAnimation {
+                id: cardEntrance
+                PauseAnimation { duration: Math.max(0, Math.min(index, 8)) * 55 }
+                ParallelAnimation {
+                    OpacityAnimator { target: rotationCard; from: 0.0; to: 1.0; duration: 280; easing.type: Easing.OutCubic }
+                    XAnimator { target: rotationCard; from: 24; to: 0; duration: 340; easing.type: Easing.OutCubic }
+                    ScaleAnimator { target: rotationCard; from: 0.98; to: 1.0; duration: 340; easing.type: Easing.OutCubic }
+                }
+            }
+
+            Rectangle {
+                id: sheen
+                visible: index === 0 && root.effectsEnabled
+                width: 90
+                height: parent.height * 2.2
+                y: -parent.height * 0.6
+                rotation: 16
+                opacity: 0.07
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "#00ffffff" }
+                    GradientStop { position: 0.5; color: "#d8ffffff" }
+                    GradientStop { position: 1.0; color: "#00ffffff" }
+                }
+                XAnimator on x {
+                    running: sheen.visible
+                    from: -160
+                    to: root.width + 160
+                    duration: 6500
+                    loops: Animation.Infinite
+                    easing.type: Easing.InOutSine
+                }
+            }
+
+            Rectangle {
+                width: 5
+                height: parent.height - 28
+                radius: 3
+                anchors.left: parent.left
+                anchors.leftMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                color: index === 0 ? "#f6c945" : "#6954d9"
+            }
+
+            Rectangle {
+                id: numberBadge
+                width: 48
+                height: 48
+                radius: 15
+                anchors.left: parent.left
+                anchors.leftMargin: 28
+                anchors.verticalCenter: parent.verticalCenter
+                color: index === 0 ? "#f6c945" : "#272936"
+
+                Text {
+                    anchors.centerIn: parent
+                    text: model.number
+                    color: index === 0 ? "#17130a" : "#c9cbd3"
+                    font.pixelSize: 19
+                    font.bold: true
+                }
+            }
+
+            Column {
+                anchors.left: numberBadge.right
+                anchors.leftMargin: 18
+                anchors.right: parent.right
+                anchors.rightMargin: 24
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 6
+
+                Text {
+                    width: parent.width
+                    text: model.singer
+                    color: "#ffffff"
+                    font.pixelSize: Math.max(22, Math.min(31, root.cardHeight * 0.27))
+                    font.bold: true
+                    elide: Text.ElideRight
+                }
+                Text {
+                    width: parent.width
+                    text: model.song
+                    color: index === 0 ? "#d8cef9" : "#a6a9b4"
+                    font.pixelSize: Math.max(14, Math.min(18, root.cardHeight * 0.16))
+                    elide: Text.ElideRight
+                }
+            }
+
+            Rectangle {
+                id: leadGlow
+                visible: index === 0 && root.effectsEnabled
+                anchors.fill: parent
+                radius: parent.radius
+                color: "transparent"
+                border.width: 2
+                border.color: "#c2b2ff"
+                opacity: 0.34
+            }
+
+        }
+    }
+
+    // Keep the card rail on one motion axis. The render-thread YAnimator below
+    // provides the smooth conveyor movement without a competing sideways sway.
+    Item {
+        id: driftLayer
+        anchors.fill: parent
+
+        Item {
+            id: strip
+            width: root.width
+            height: firstPass.height + (root.overflow ? root.cardGap + secondPass.height : 0)
+
+            Column {
+                id: firstPass
+                width: root.width
+                spacing: root.cardGap
+                Repeater { model: rotationModel; delegate: cardComponent }
+            }
+            Column {
+                id: secondPass
+                visible: root.overflow
+                width: root.width
+                spacing: root.cardGap
+                anchors.top: firstPass.bottom
+                anchors.topMargin: root.cardGap
+                Repeater { model: rotationModel; delegate: cardComponent }
+            }
+        }
+    }
+
+    YAnimator {
+        id: scrollAnim
+        target: strip
+        easing.type: Easing.Linear
+        loops: 1
+        onFinished: {
+            root.restartScroll()
+        }
+    }
+
+    SequentialAnimation {
+        id: queueTransition
+        OpacityAnimator { target: strip; from: 1.0; to: 0.0; duration: 150; easing.type: Easing.InQuad }
+        ScriptAction {
+            script: {
+                root.loadItems(root.transitionJson)
+                strip.opacity = 0
+            }
+        }
+        OpacityAnimator { target: strip; from: 0.0; to: 1.0; duration: 240; easing.type: Easing.OutCubic }
+        ScriptAction { script: queuePopupAnimation.restart() }
+    }
+
+    Rectangle {
+        id: queuePopup
+        z: 12
+        anchors.right: parent.right
+        anchors.rightMargin: 12
+        anchors.top: parent.top
+        anchors.topMargin: 10
+        width: Math.min(root.width - 24, popupText.implicitWidth + 30)
+        height: 32
+        radius: 11
+        color: "#f0251f43"
+        border.width: 1
+        border.color: "#f6c945"
+        opacity: 0
+        transformOrigin: Item.Center
+        Text {
+            id: popupText
+            anchors.centerIn: parent
+            text: root.updatePopupText
+            color: "#ffffff"
+            font.pixelSize: 11
+            font.bold: true
+            font.letterSpacing: 0.8
+        }
+    }
+    SequentialAnimation {
+        id: queuePopupAnimation
+        OpacityAnimator { target: queuePopup; from: 0.0; to: 0.92; duration: 150; easing.type: Easing.OutCubic }
+        PauseAnimation { duration: 700 }
+        OpacityAnimator { target: queuePopup; from: 0.92; to: 0.0; duration: 260; easing.type: Easing.InQuad }
+    }
+
+    // One faint light ribbon reinforces the vertical direction without
+    // layering several moving lines over the singer cards.
+    Item {
+        id: scrollLightRibbons
+        anchors.fill: parent
+        z: 2
+        visible: root.effectsEnabled && root.overflow
+        opacity: 0.12
+        clip: true
+
+        Repeater {
+            model: 1
+            Rectangle {
+                required property int index
+                width: Math.max(80, root.width * (0.18 + index * 0.035))
+                height: 2
+                radius: 1
+                x: root.width * (0.08 + index * 0.33)
+                y: root.height + index * 75
+                rotation: -5
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "#00a895ff" }
+                    GradientStop { position: 0.5; color: index === 1 ? "#b8f6c945" : "#8fa895ff" }
+                    GradientStop { position: 1.0; color: "#00a895ff" }
+                }
+                YAnimator on y {
+                    from: root.height + index * 75
+                    to: -60
+                    duration: 4200
+                    loops: Animation.Infinite
+                    easing.type: Easing.Linear
+                }
+            }
+        }
+    }
+
+    // Tiny rising light motes add depth without competing with singer names.
+    Item {
+        anchors.fill: parent
+        z: 3
+        visible: root.effectsEnabled
+        Repeater {
+            model: 4
+            Rectangle {
+                required property int index
+                width: 2 + (index % 3)
+                height: width
+                radius: width / 2
+                x: ((index * 83 + 41) % 97) / 100 * root.width
+                y: root.height + (index * 37 % 120)
+                color: index % 3 === 0 ? "#f6c945" : "#a895ff"
+                opacity: 0.12 + (index % 3) * 0.05
+                YAnimator on y {
+                    from: root.height + (index * 37 % 120)
+                    to: -18
+                    duration: 7200 + (index % 4) * 1300
+                    loops: Animation.Infinite
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        id: topScrollFeather
+        z: 8
+        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+        height: Math.max(30, root.cardHeight * 0.34)
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#ff121319" }
+            GradientStop { position: 0.42; color: "#a8121319" }
+            GradientStop { position: 1.0; color: "#00121319" }
+        }
+    }
+    Rectangle {
+        id: bottomScrollFeather
+        z: 8
+        anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+        height: Math.max(42, root.cardHeight * 0.46)
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#00121319" }
+            GradientStop { position: 0.58; color: "#a8121319" }
+            GradientStop { position: 1.0; color: "#ff121319" }
+        }
+    }
+
+    Rectangle {
+        id: scrollEdgeGlint
+        z: 9
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: bottomScrollFeather.height - 2
+        height: 1
+        opacity: root.effectsEnabled && root.overflow ? 0.28 : 0
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#006954d9" }
+            GradientStop { position: 0.5; color: "#b0a895ff" }
+            GradientStop { position: 1.0; color: "#00f6c945" }
+        }
+    }
+
+    onWidthChanged: Qt.callLater(restartScroll)
+    onHeightChanged: Qt.callLater(restartScroll)
+    onRunningChanged: Qt.callLater(restartScroll)
+    onSpeedPxPerSecChanged: Qt.callLater(restartScroll)
+}
+"""
+
+
+class RenderThreadRotationRail(QFrame):
+    """Vertical rotation rail animated by Qt Quick's render-thread YAnimator."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PyQt6.QtQuick import QQuickView
+
+        self._active_json = "[]"
+        self._view = QQuickView()
+        self._view.setColor(QColor("transparent"))
+        self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
+
+        fd, qml_path = tempfile.mkstemp(prefix="singws_rotation_rt_", suffix=".qml")
+        self._qml_temp_path = qml_path
+        with os.fdopen(fd, "w", encoding="utf-8") as qml_file:
+            qml_file.write(QML_ROTATION_RAIL_SOURCE)
+        self._view.setSource(QUrl.fromLocalFile(qml_path))
+        if self._view.status() == QQuickView.Status.Error:
+            errors = [err.toString() for err in self._view.errors()]
+            raise RuntimeError("QML rotation rail load error: " + (" | ".join(errors) or "unknown"))
+
+        self._root = self._view.rootObject()
+        if self._root is None:
+            raise RuntimeError("QML rotation rail has no root object")
+
+        self._container = QWidget.createWindowContainer(self._view, self)
+        self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._container)
+
+    def set_items(self, items, force=False):
+        payload = json.dumps(items or [], ensure_ascii=False, separators=(",", ":"))
+        if not force and payload == self._active_json:
+            return
+        self._active_json = payload
+        self._root.submitItems(payload, bool(force))
+
+    def set_scroll_speed(self, pixels_per_second):
+        try:
+            speed = max(12.0, min(160.0, float(pixels_per_second)))
+        except Exception:
+            speed = 34.0
+        self._root.setProperty("speedPxPerSec", speed)
+
+    def set_effects_enabled(self, enabled):
+        self._root.setProperty("effectsEnabled", bool(enabled))
+
+
 class RotationView(QMainWindow):
     class SingerItemDelegate(QStyledItemDelegate):
         def paint(self, painter, option, index):
@@ -14698,7 +16624,10 @@ class RotationView(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        # Keep the native QQuick surfaces alive when the operator dismisses the
+        # rotation window. Repeatedly destroying and recreating both surfaces is
+        # unstable in Qt's macOS scene-graph backend, especially between songs.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window)
         self.setWindowTitle("Singer Rotation")
         self.setGeometry(300, 200, 540, 520)
@@ -14727,22 +16656,41 @@ class RotationView(QMainWindow):
                 border-radius: 26px;
             }
             QFrame#rotationNowCard {
-                background: rgba(255,255,255,0.018);
-                border: 1px solid rgba(255,255,255,0.035);
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                    stop:0 rgba(104,75,205,0.34),
+                    stop:1 rgba(44,34,83,0.48));
+                border: 1px solid rgba(160,135,255,0.50);
                 border-radius: 22px;
             }
             QLabel#rotationHeader {
-                color: #B4B4B8;
-                font-size: 13px;
-                font-weight: 700;
-                letter-spacing: 0px;
-                text-transform: uppercase;
+                color: #F6C945;
+                font-size: 12px;
+                font-weight: 800;
             }
             QLabel#rotationNow {
                 color: #FFFFFF;
-                font-size: 38px;
+                font-size: 40px;
                 font-weight: 800;
-                padding: 8px 0px 2px 0px;
+                padding: 4px 0px 1px 0px;
+            }
+            QLabel#rotationSubtitle {
+                color: #BDB4DB;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QLabel#rotationQueueTitle {
+                color: #EDECF3;
+                font-size: 15px;
+                font-weight: 750;
+            }
+            QLabel#rotationQueueCount {
+                color: #AAA5B8;
+                font-size: 12px;
+                font-weight: 700;
+                padding: 4px 9px;
+                background: rgba(255,255,255,0.055);
+                border: 1px solid rgba(255,255,255,0.07);
+                border-radius: 9px;
             }
             QListWidget {
                 background: rgba(255,255,255,0.012);
@@ -14765,21 +16713,52 @@ class RotationView(QMainWindow):
         self.now_singing_label.setFont(font)
         self.now_singing_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.rotation_header_label = QLabel("Singer Rotation", self)
+        self.rotation_header_label = QLabel("●  NOW SINGING", self)
         self.rotation_header_label.setObjectName("rotationHeader")
         self.rotation_header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.now_singing_subtitle = QLabel("Live on the karaoke stage", self)
+        self.now_singing_subtitle.setObjectName("rotationSubtitle")
+        self.now_singing_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.now_singing_card = QFrame(self)
         self.now_singing_card.setObjectName("rotationNowCard")
         now_layout = QVBoxLayout(self.now_singing_card)
-        now_layout.setContentsMargins(26, 18, 26, 22)
-        now_layout.setSpacing(4)
+        now_layout.setContentsMargins(26, 18, 26, 20)
+        now_layout.setSpacing(3)
         now_layout.addWidget(self.rotation_header_label)
         now_layout.addWidget(self.now_singing_label)
+        now_layout.addWidget(self.now_singing_subtitle)
+
+        self.now_singing_surface = None
+        try:
+            self.now_singing_surface = RenderThreadNowSingingCard(self)
+            self.now_singing_card.hide()
+        except Exception as exc:
+            _diag(f"[ROTATION] animated now-singing card unavailable; using Qt fallback: {exc}")
+            self.now_singing_surface = None
 
         self.list_widget = AutoResizingListWidget(self)
         self.list_widget.setItemDelegate(self.SingerItemDelegate(self.list_widget))
         self.list_widget.setSpacing(6)
+        self.rotation_rail = None
+        try:
+            self.rotation_rail = RenderThreadRotationRail(self)
+            self.rotation_rail.set_scroll_speed(34)
+            self.list_widget.hide()
+        except Exception as exc:
+            _diag(f"[ROTATION] render-thread rail unavailable; using list fallback: {exc}")
+            self.rotation_rail = None
+
+        self.queue_title_label = QLabel("SINGER ROTATION", self)
+        self.queue_title_label.setObjectName("rotationQueueTitle")
+        self.queue_count_label = QLabel("0 SINGERS", self)
+        self.queue_count_label.setObjectName("rotationQueueCount")
+        queue_heading = QHBoxLayout()
+        queue_heading.setContentsMargins(4, 0, 4, 0)
+        queue_heading.addWidget(self.queue_title_label)
+        queue_heading.addStretch(1)
+        queue_heading.addWidget(self.queue_count_label)
         # ---- Safe area container ----
         safe_area = QWidget(self)
         safe_area.setObjectName("rotationSafe")
@@ -14794,8 +16773,15 @@ class RotationView(QMainWindow):
         shell_layout.setContentsMargins(24, 24, 24, 24)
         shell_layout.setSpacing(18)
 
-        shell_layout.addWidget(self.now_singing_card)
-        shell_layout.addWidget(self.list_widget)
+        if self.now_singing_surface is not None:
+            shell_layout.addWidget(self.now_singing_surface)
+        else:
+            shell_layout.addWidget(self.now_singing_card)
+        shell_layout.addLayout(queue_heading)
+        if self.rotation_rail is not None:
+            shell_layout.addWidget(self.rotation_rail, 1)
+        else:
+            shell_layout.addWidget(self.list_widget, 1)
 
         safe_layout.addWidget(shell)
 
@@ -14813,10 +16799,19 @@ class RotationView(QMainWindow):
         self.scroll_speed = 30  # ms per scroll step
         self.duplicate_count = 0
         self.last_scroll_percent = 0.0
+        settings = getattr(parent, "settings", {}) if parent is not None else {}
+        self.set_effects_enabled(bool(settings.get("rotation_vfx_enabled", True)))
+
+    def set_effects_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.now_singing_surface is not None:
+            self.now_singing_surface.set_effects_enabled(enabled)
+        if self.rotation_rail is not None:
+            self.rotation_rail.set_effects_enabled(enabled)
 
     def closeEvent(self, event):
+        owner = self.parent()
         try:
-            owner = self.parent()
             if owner is not None:
                 try:
                     rg = self.geometry()
@@ -14833,10 +16828,18 @@ class RotationView(QMainWindow):
                     pass
                 if hasattr(owner, "_rotation_view_user_opened"):
                     owner._rotation_view_user_opened = False
-                if hasattr(owner, "rotation_view"):
-                    owner.rotation_view = None
         except Exception:
             pass
+
+        # A normal window close is an operator hide, not destruction. Retaining
+        # the two native QQuickViews avoids scene-graph teardown/recreation
+        # crashes when Rotation is checked again between singers. The parent
+        # still owns and destroys this window during the real app shutdown.
+        if owner is not None and not bool(getattr(owner, "_app_closing", False)):
+            _diag("[ROTATION] hidden; native render surfaces retained")
+            event.ignore()
+            self.hide()
+            return
         super().closeEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -14847,9 +16850,11 @@ class RotationView(QMainWindow):
             self.showFullScreen()
         super().mouseDoubleClickEvent(event)
 
-    def update_rotation(self, queue, tracks, now_singing_text):
+    def update_rotation(self, queue, tracks, now_singing_text, countdown_text=""):
         self.queue_items = []
-        self.list_widget.clear()
+        display_items = []
+        if self.rotation_rail is None:
+            self.list_widget.clear()
         num = 1
         for singer in queue:
             # Skip if singer is skipped or has no active songs
@@ -14889,20 +16894,63 @@ class RotationView(QMainWindow):
                     duet_display = None
 
             path = song_info[0] if isinstance(song_info, (tuple, list)) else song_info
-            name = self.lookup_display_name(path, tracks, artist_title_only=True)
+            name = self.display_name_for_queue_entry(first_active_song, path, tracks)
 
             singer_display = duet_display if duet_display else singer.get("name", "")
             text = f"{num}. {singer_display}  •  {name}"
 
             self.queue_items.append(text)
-            item = QListWidgetItem(text)
-            self.list_widget.addItem(item)
+            display_items.append({"number": str(num), "singer": str(singer_display), "song": str(name)})
+            if self.rotation_rail is None:
+                item = QListWidgetItem(text)
+                self.list_widget.addItem(item)
             num += 1
 
         self.now_singing_label.setText(now_singing_text)
-        self.list_widget.refresh_size_hints()
-        self.check_autoscroll()
-        QTimer.singleShot(0, self.restore_scroll_position)
+        count = len(display_items)
+        self.queue_count_label.setText(f"{count} SINGER{'S' if count != 1 else ''}")
+        next_singer = ""
+        now_key = str(now_singing_text or "").strip().casefold()
+        for card in display_items:
+            candidate = str(card.get("singer") or "").strip()
+            if candidate and candidate.casefold() != now_key:
+                next_singer = candidate
+                break
+        if self.now_singing_surface is not None:
+            self.now_singing_surface.set_state(now_singing_text, next_singer, countdown_text)
+        if self.rotation_rail is not None:
+            self.rotation_rail.set_items(display_items)
+        else:
+            self.list_widget.refresh_size_hints()
+            self.check_autoscroll()
+            QTimer.singleShot(0, self.restore_scroll_position)
+
+    def update_countdown(self, countdown_text):
+        if self.now_singing_surface is not None:
+            self.now_singing_surface.set_countdown(countdown_text)
+
+    def display_name_for_queue_entry(self, entry, song_path, tracks):
+        """Prefer queue metadata, especially for synthetic streaming paths."""
+        if isinstance(entry, dict):
+            artist = str(entry.get("artist") or "").strip()
+            title = str(entry.get("title") or "").strip()
+            if artist and title:
+                return f"{artist} • {title}"
+            if title:
+                return title
+
+            display = str(entry.get("display_name") or "").strip()
+            if display and display.lower() != "unknown":
+                parts = [part.strip() for part in display.split(" - ") if part.strip()]
+                if parts and parts[-1].lower() == "karafun":
+                    parts.pop()
+                if len(parts) >= 2:
+                    return f"{parts[0]} • {parts[1]}"
+                if parts:
+                    return parts[0]
+
+        return self.lookup_display_name(song_path, tracks, artist_title_only=True)
+
     def restore_scroll_position(self):
         sb = self.list_widget.verticalScrollBar()
         main_count = self.list_widget.count() - self.duplicate_count if self.duplicate_count else self.list_widget.count()
@@ -14912,8 +16960,9 @@ class RotationView(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.list_widget.refresh_size_hints()
-        self.check_autoscroll()
+        if self.rotation_rail is None:
+            self.list_widget.refresh_size_hints()
+            self.check_autoscroll()
 
     def check_autoscroll(self):
         total_items = self.list_widget.count()
@@ -15932,6 +17981,12 @@ class KaraokeApp(QWidget):
         )
         # Owner link so VideoAreaWidget can render audience-facing BG now-playing overlay.
         self.video_window._external_owner = self
+        try:
+            self.video_window.video_area.set_show_vfx_enabled(
+                bool(self.settings.get("show_screen_vfx_enabled", True))
+            )
+        except Exception:
+            pass
         # Explicit owner link so ticker can always read persisted settings.
         try:
             self.video_window.ticker._external_settings_owner = self
@@ -15942,6 +17997,10 @@ class KaraokeApp(QWidget):
             self.video_window.ticker.set_scroll_speed(
                 self.settings.get("ticker_speed_px_per_sec", TICKER_SPEED_DEFAULT)
             )
+            if hasattr(self.video_window.ticker, "set_effects_enabled"):
+                self.video_window.ticker.set_effects_enabled(
+                    bool(self.settings.get("ticker_vfx_enabled", True))
+                )
         except Exception:
             pass
         self._apply_idle_background(force=True)
@@ -20835,6 +22894,11 @@ class KaraokeApp(QWidget):
         ticker_bold_cb.setChecked(bool(self.settings.get("ticker_bold", False)))
         vbox.addWidget(ticker_bold_cb)
 
+        ticker_vfx_cb = QCheckBox("Animated ticker lighting and accents (more GPU)")
+        ticker_vfx_cb.setToolTip("Turn off for the plain render-thread ticker; scrolling remains equally smooth.")
+        ticker_vfx_cb.setChecked(bool(self.settings.get("ticker_vfx_enabled", True)))
+        vbox.addWidget(ticker_vfx_cb)
+
         # --- Custom message (optional) ---
         msg_cb = QCheckBox("Include custom message in ticker")
         msg_cb.setChecked(bool(self.settings.get("ticker_custom_enabled", False)))
@@ -20901,6 +22965,7 @@ class KaraokeApp(QWidget):
             self.settings["ticker_size_index"] = int(size_slider.value())
             self.settings["ticker_bold"] = bool(ticker_bold_cb.isChecked())
             self.settings["ticker_speed_px_per_sec"] = float(speed_slider.value())
+            self.settings["ticker_vfx_enabled"] = bool(ticker_vfx_cb.isChecked())
 
             # Persist and apply immediately
             self.save_settings()
@@ -20923,6 +22988,11 @@ class KaraokeApp(QWidget):
                 pass
             try:
                 self.video_window.ticker.set_scroll_speed(float(speed_slider.value()))
+            except Exception:
+                pass
+            try:
+                if hasattr(self.video_window.ticker, "set_effects_enabled"):
+                    self.video_window.ticker.set_effects_enabled(bool(ticker_vfx_cb.isChecked()))
             except Exception:
                 pass
 
@@ -21197,6 +23267,7 @@ class KaraokeApp(QWidget):
     def _finish_media_end_cleanup(self, end_silence_triggered: bool, schedule_bg_resume: bool):
         """Finalize karaoke end: teardown/UI reset and optional delayed BG resume."""
         try:
+            song_outro_payload = self._song_outro_payload_from_current()
             try:
                 # Stop/tear down players (doesn't prompt the user)
                 self.stop_playback(skip_confirmation=True)
@@ -21208,6 +23279,7 @@ class KaraokeApp(QWidget):
                 _diag(f"[REMOTE-DEFER] media-end flush failed: {e}")
             try:
                 if bool(getattr(self, "_media_end_overlay_eligible", False)):
+                    self._pending_song_outro_payload = song_outro_payload
                     self._mark_next_up_overlay_pending_after_completion(reason="media_end")
                 else:
                     self._clear_next_up_overlay_pending("media_end_not_eligible")
@@ -22195,21 +24267,29 @@ class KaraokeApp(QWidget):
         bg_video_folder_btn.clicked.connect(on_choose_bg_video_folder)
 
         v = _section_card(tab_display, "Show Screen Transition")
-        next_up_overlay_cb = QCheckBox('Show "Next Up" Transition Overlay')
-        next_up_overlay_cb.setChecked(bool(self.settings.get("next_up_overlay_enabled", True)))
-        v.addWidget(next_up_overlay_cb)
+        show_screen_vfx_cb = QCheckBox("Use animated Show Screen VFX (more GPU)")
+        show_screen_vfx_cb.setToolTip(
+            "Full-screen 3-2-1 after Play, spotlights, shockwaves, and singer-start confetti. "
+            "Turn off to skip the animated countdown on slower laptops."
+        )
+        show_screen_vfx_cb.setChecked(bool(self.settings.get("show_screen_vfx_enabled", True)))
+        v.addWidget(show_screen_vfx_cb)
 
-        next_up_duration_row = QHBoxLayout()
-        next_up_duration_row.addWidget(QLabel("Overlay duration (seconds):"))
-        next_up_duration_spin = QSpinBox(dlg)
-        next_up_duration_spin.setRange(1, 60)
-        try:
-            next_up_duration_spin.setValue(max(1, min(60, int(float(self.settings.get("next_up_overlay_duration_sec", 10) or 10)))))
-        except Exception:
-            next_up_duration_spin.setValue(10)
-        next_up_duration_row.addWidget(next_up_duration_spin)
-        next_up_duration_row.addStretch(1)
-        v.addLayout(next_up_duration_row)
+        rotation_vfx_cb = QCheckBox("Use animated Singer Rotation VFX (more GPU)")
+        rotation_vfx_cb.setToolTip(
+            "Particles, glow loops, parallax, flashes, and singer-change explosions. "
+            "The smooth vertical rotation scroll stays enabled when this is off."
+        )
+        rotation_vfx_cb.setChecked(bool(self.settings.get("rotation_vfx_enabled", True)))
+        v.addWidget(rotation_vfx_cb)
+
+        ticker_vfx_cb = QCheckBox("Use animated Ticker VFX (more GPU)")
+        ticker_vfx_cb.setToolTip(
+            "Ambient lighting, queue-change accents, countdown pulse, and edge glow. "
+            "The smooth ticker scroll stays enabled when this is off."
+        )
+        ticker_vfx_cb.setChecked(bool(self.settings.get("ticker_vfx_enabled", True)))
+        v.addWidget(ticker_vfx_cb)
 
         # --- CDG lyric timing offset (visual-only calibration backup) ---
         v = _section_card(tab_display, "CDG Lyric Timing Offset",
@@ -22925,23 +25005,34 @@ class KaraokeApp(QWidget):
                 self.settings["end_silence_trim_threshold_sec"] = 6.0
             self.save_settings()
 
-        def on_next_up_overlay_toggled(checked: bool):
-            self.settings["next_up_overlay_enabled"] = bool(checked)
+        def on_show_screen_vfx_toggled(checked: bool):
+            self.settings["show_screen_vfx_enabled"] = bool(checked)
             self.save_settings()
-            if not checked:
-                try:
-                    area = getattr(getattr(self, "video_window", None), "video_area", None)
-                    if area is not None and hasattr(area, "hide_next_up_overlay"):
-                        area.hide_next_up_overlay(immediate=True)
-                except Exception:
-                    pass
-
-        def on_next_up_duration_changed(value: int):
             try:
-                self.settings["next_up_overlay_duration_sec"] = max(1, min(60, int(value)))
+                area = getattr(getattr(self, "video_window", None), "video_area", None)
+                if area is not None and hasattr(area, "set_show_vfx_enabled"):
+                    area.set_show_vfx_enabled(bool(checked))
             except Exception:
-                self.settings["next_up_overlay_duration_sec"] = 10
+                pass
+
+        def on_rotation_vfx_toggled(checked: bool):
+            self.settings["rotation_vfx_enabled"] = bool(checked)
             self.save_settings()
+            try:
+                if self.rotation_view is not None:
+                    self.rotation_view.set_effects_enabled(bool(checked))
+            except Exception:
+                pass
+
+        def on_ticker_vfx_toggled(checked: bool):
+            self.settings["ticker_vfx_enabled"] = bool(checked)
+            self.save_settings()
+            try:
+                ticker = getattr(getattr(self, "video_window", None), "ticker", None)
+                if ticker is not None and hasattr(ticker, "set_effects_enabled"):
+                    ticker.set_effects_enabled(bool(checked))
+            except Exception:
+                pass
 
         def on_auto_advance_toggled(checked: bool):
             self.settings["karaoke_auto_advance"] = bool(checked)
@@ -23064,8 +25155,9 @@ class KaraokeApp(QWidget):
             cdg_black_threshold_spin.setValue(10)
             lyric_bg_opacity_spin.setValue(0)
             bg_video_quality_combo.setCurrentIndex(bg_video_quality_combo.findData("auto"))
-            next_up_overlay_cb.setChecked(True)
-            next_up_duration_spin.setValue(10)
+            show_screen_vfx_cb.setChecked(True)
+            rotation_vfx_cb.setChecked(True)
+            ticker_vfx_cb.setChecked(True)
             show_tooltips_cb.setChecked(False)
             disc_priority_edit.setText("")
             defer_remote_adds_cb.setChecked(False)
@@ -23109,8 +25201,9 @@ class KaraokeApp(QWidget):
         cdg_black_cleanup_cb.toggled.connect(on_cdg_black_cleanup_changed)
         cdg_black_threshold_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
         lyric_bg_opacity_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
-        next_up_overlay_cb.toggled.connect(on_next_up_overlay_toggled)
-        next_up_duration_spin.valueChanged.connect(on_next_up_duration_changed)
+        show_screen_vfx_cb.toggled.connect(on_show_screen_vfx_toggled)
+        rotation_vfx_cb.toggled.connect(on_rotation_vfx_toggled)
+        ticker_vfx_cb.toggled.connect(on_ticker_vfx_toggled)
         perf_debug_cb.toggled.connect(on_perf_debug_toggled)
         auto_update_cb.toggled.connect(on_auto_update_toggled)
         auto_update_download_cb.toggled.connect(on_auto_update_download_toggled)
@@ -31665,11 +33758,17 @@ class KaraokeApp(QWidget):
             self._last_pos_ns = None
             self._stalled_pos_ticks = 0
             self._eos_guard = 0
+        try:
+            if self.rotation_view is not None:
+                self.rotation_view.update_countdown(self._get_time_left_text())
+        except Exception:
+            pass
         _perf_log_if_slow("ui_update_time_left", (time.perf_counter() - _perf_t0) * 1000.0)
 
     def open_rotation_view(self):
         try:
             if self.rotation_view is None:
+                _diag("[ROTATION] creating persistent window")
                 self.rotation_view = RotationView(self)
                 try:
                     saved = (self.settings or {}).get("rotation_window_geometry")
@@ -31688,10 +33787,14 @@ class KaraokeApp(QWidget):
                             self.rotation_view.setGeometry(rect)
                 except Exception:
                     pass
+            else:
+                _diag("[ROTATION] reusing persistent window")
             now_singing_text = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
             if not now_singing_text:
                 now_singing_text = "Singer Rotation"
-            self.rotation_view.update_rotation(self.queue, self.tracks, now_singing_text)
+            self.rotation_view.update_rotation(
+                self.queue, self.tracks, now_singing_text, self._get_time_left_text()
+            )
             self.rotation_view.show()
             self.rotation_view.raise_()
             self.rotation_view.activateWindow()
@@ -31715,7 +33818,9 @@ class KaraokeApp(QWidget):
             now_singing_text = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
             if not now_singing_text:
                 now_singing_text = "Singer Rotation"
-            self.rotation_view.update_rotation(self.queue, self.tracks, now_singing_text)
+            self.rotation_view.update_rotation(
+                self.queue, self.tracks, now_singing_text, self._get_time_left_text()
+            )
         except Exception:
             pass
         finally:
@@ -31844,6 +33949,34 @@ class KaraokeApp(QWidget):
                 pass
         except Exception:
             pass
+
+    def _trigger_show_screen_singer_start_vfx(self, singer_display: str, artist: str, title: str):
+        try:
+            area = getattr(getattr(self, "video_window", None), "video_area", None)
+            if area is not None and hasattr(area, "show_singer_start_vfx"):
+                area.show_singer_start_vfx(singer_display, title, artist)
+        except Exception as exc:
+            _diag(f"[SHOW-VFX] app singer-start trigger failed: {exc}")
+
+    def _song_outro_payload_from_current(self) -> dict:
+        singer = str(
+            getattr(self, "_current_karaoke_singer_display", "")
+            or getattr(self, "_current_karaoke_singer_name", "")
+            or ""
+        ).strip()
+        song_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip()
+        artist = ""
+        title = ""
+        if song_path:
+            try:
+                display = str(self.lookup_display_name(song_path, artist_title_only=True) or "").strip()
+            except Exception:
+                display = ""
+            if " • " in display:
+                artist, title = (part.strip() for part in display.split(" • ", 1))
+            elif display:
+                title = display
+        return {"singer": singer, "artist": artist, "title": title}
 
     def _current_play_item_key(self):
         """Identity of the song currently playing/cued (singer + file path).
@@ -32047,52 +34180,29 @@ class KaraokeApp(QWidget):
                 pass
 
     def _mark_next_up_overlay_pending_after_completion(self, *, reason: str = "media_end") -> bool:
-        payload = self._next_up_transition_payload_from_queue()
+        """Legacy entry point: show a brief outro, never a Next Up countdown."""
+        payload = self.__dict__.pop("_pending_song_outro_payload", None)
         if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
-            self._clear_next_up_overlay_pending("no_next_singer")
-            return False
-        transition_key = (
-            str(getattr(self, "_current_karaoke_singer_display", "") or getattr(self, "_current_karaoke_singer_name", "") or "").strip(),
-            str(getattr(self, "_current_karaoke_song_path", "") or "").strip(),
-            str(payload.get("singer", "") or "").strip(),
-            str(payload.get("title", "") or "").strip(),
-            str(payload.get("artist", "") or "").strip(),
-        )
-        try:
-            last_transition_key = self.__dict__.get("_next_up_overlay_last_completion_key", ())
-        except Exception:
-            last_transition_key = ()
-        if transition_key and transition_key == last_transition_key:
-            self._clear_next_up_overlay_pending("duplicate_completion_transition")
-            try:
-                _diag(f"[NEXT-UP-OVERLAY] duplicate completion ignored reason={reason} key={transition_key!r}")
-            except Exception:
-                pass
+            payload = self._song_outro_payload_from_current()
+        self._clear_next_up_overlay_pending(f"retired:{reason}")
+        singer = str(payload.get("singer", "") or "").strip()
+        if not singer:
+            _diag(f"[SONG-OUTRO] skipped reason={reason}; singer unavailable")
             return False
         try:
-            token = int(getattr(self, "_next_up_overlay_completion_token", 0) or 0) + 1
-        except Exception:
-            token = 1
-        self._next_up_overlay_completion_token = token
-        self._next_up_overlay_pending_payload = dict(payload)
-        self._next_up_overlay_pending_reason = str(reason or "media_end")
-        self._next_up_overlay_last_completion_key = transition_key
-        try:
-            _diag(
-                f"[NEXT-UP-OVERLAY] armed token={token} reason={reason} "
-                f"singer={payload.get('singer', '')!r} title={payload.get('title', '')!r} "
-                f"artist={payload.get('artist', '')!r} on_deck={payload.get('on_deck', '')!r}"
-            )
-        except Exception:
-            pass
-        shown = self._show_next_up_transition_overlay(payload, reason=f"{reason}:completed_song_end")
-        self._next_up_overlay_consumed_token = token
-        self._clear_next_up_overlay_pending(f"shown_at_completion:{reason}")
-        try:
-            _diag(f"[NEXT-UP-OVERLAY] completion token={token} shown={shown} reason={reason}")
-        except Exception:
-            pass
-        return bool(shown)
+            area = getattr(getattr(self, "video_window", None), "video_area", None)
+            if area is None or not hasattr(area, "show_song_outro_vfx"):
+                return False
+            shown = bool(area.show_song_outro_vfx(
+                singer,
+                str(payload.get("title", "") or ""),
+                str(payload.get("artist", "") or ""),
+            ))
+            _diag(f"[SONG-OUTRO] shown={int(shown)} reason={reason} singer={singer!r}; QR follows")
+            return shown
+        except Exception as exc:
+            _diag(f"[SONG-OUTRO] failed reason={reason}: {exc}")
+            return False
 
     def _consume_next_up_overlay_for_transition(
         self,
@@ -42892,6 +45002,7 @@ class KaraokeApp(QWidget):
             pass
         try:
             self._set_now_singing_3line(singer_display, artist, title)
+            self._trigger_show_screen_singer_start_vfx(singer_display, artist, title)
         except Exception:
             pass
         try:
@@ -43448,6 +45559,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._set_now_singing_3line(singer_display, artist, title)
+        self._trigger_show_screen_singer_start_vfx(singer_display, artist, title)
         # Mark singer as has_sung (they've now completed at least one song)
         singer["has_sung"] = True
         singer["last_sung_at"] = time.time()
@@ -44602,6 +46714,59 @@ class KaraokeApp(QWidget):
                     pass
         return sorted(set(ids))
 
+    def _server_terminal_conflicts_with_live_host_request(self, request_id: int, req: dict) -> bool:
+        """Return True when a terminal history row reused a live host request id.
+
+        Some server resets can recycle numeric request ids while older terminal
+        rows are still present in the history payload. A newly synced host add
+        has a permanent host_request_key, so an unrelated historical row must
+        never complete/remove it merely because the numeric ids collide.
+        """
+        try:
+            request_id = int(request_id or 0)
+        except Exception:
+            return False
+        if request_id <= 0 or not isinstance(req, dict):
+            return False
+
+        def norm(value) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+        server_key = str(req.get("idempotency_key") or req.get("host_request_key") or "").strip()
+        server_source = str(req.get("request_source") or req.get("source") or "").strip().lower()
+        for singer in getattr(self, "queue", []) or []:
+            if not isinstance(singer, dict):
+                continue
+            for entry in singer.get("songs", []) or []:
+                try:
+                    local_id = int(self._queue_entry_remote_request_id(entry) or 0)
+                except Exception:
+                    local_id = 0
+                if local_id != request_id or not isinstance(entry, dict):
+                    continue
+
+                local_key = str(entry.get("host_request_key") or "").strip()
+                if not local_key:
+                    return False
+                if server_key:
+                    return server_key != local_key
+                if server_source and server_source != "host_manual":
+                    return True
+
+                _artist, local_title = self._queue_entry_artist_title_for_tombstone(entry)
+                server_title = str(req.get("title") or "").strip()
+                if local_title and server_title and self._tombstone_signature_conflicts(
+                    {"title": local_title}, {"title": server_title}
+                ):
+                    return True
+
+                local_singer = str(entry.get("duet_display") or singer.get("name") or "").strip()
+                server_singer = str(req.get("singer") or "").strip()
+                if local_singer and server_singer and norm(local_singer) != norm(server_singer):
+                    return True
+                return False
+        return False
+
     def _remove_local_remote_request_by_id(self, request_id: int, reason: str = "server_removed") -> int:
         try:
             request_id = int(request_id or 0)
@@ -45091,6 +47256,18 @@ class KaraokeApp(QWidget):
                 completed_at = 0
             server_terminal = state in {"removed", "completed", "sung"} or removed_at > 0 or completed_at > 0
             if server_terminal:
+                if self._server_terminal_conflicts_with_live_host_request(request_id, req):
+                    # A stale terminal history row collided with the numeric id
+                    # just assigned to a different live host/manual request.
+                    # The host queue is authoritative; do not auto-complete it.
+                    if request_id not in logged_historical:
+                        logged_historical.add(request_id)
+                        _diag(
+                            "[REMOTE-SYNC] stale terminal id collision ignored "
+                            f"request_id={request_id} singer={req.get('singer', '')!r} "
+                            f"title={req.get('title', '')!r}"
+                        )
+                    continue
                 # The server already knows this request is done. Handle it
                 # before the local-tombstone branch: re-pushing removals for
                 # rows the server itself reports as terminal churned the
@@ -47020,6 +49197,7 @@ Rectangle {
     property color tickerColor: "#FBD000"
     property bool tickerBold: false
     property bool running: true
+    property bool effectsEnabled: true
     // Freeze-in-place during native window churn (sink detach/surface swap):
     // pausing the animator idles the render thread without hiding anything,
     // and the scroll resumes mid-pass when released.
@@ -47027,7 +49205,8 @@ Rectangle {
     property int passCount: 0   // diagnostics: counts animation (re)starts
 
     readonly property real timerWidth: Math.max(1, timerText.contentWidth + (timerPad * 2))
-    readonly property real scrollAreaW: Math.max(0, width - timerWidth - rightMargin - gap)
+    readonly property real timerSeparation: effectsEnabled ? Math.max(gap, 30) : gap
+    readonly property real scrollAreaW: Math.max(0, width - timerWidth - rightMargin - timerSeparation)
 
     function restartPass() {
         // Frozen for a native window transition (e.g. fullscreen toggle): do
@@ -47049,6 +49228,99 @@ Rectangle {
         root.passCount += 1
     }
     function scheduleRestart() { Qt.callLater(restartPass) }
+    function shouldPulseTimer() {
+        var parts = root.rightText.split(":")
+        if (parts.length < 2) return false
+        var minutes = parseInt(parts[parts.length - 2])
+        var seconds = parseInt(parts[parts.length - 1])
+        if (isNaN(minutes) || isNaN(seconds)) return false
+        return seconds === 0 || (minutes === 0 && seconds <= 10)
+    }
+
+    Rectangle {
+        id: tickerAtmosphere
+        anchors.fill: parent
+        visible: root.effectsEnabled
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#300b1022" }
+            GradientStop { position: 0.38; color: "#511b123d" }
+            GradientStop { position: 0.72; color: "#3812192c" }
+            GradientStop { position: 1.0; color: "#28080614" }
+        }
+    }
+
+    Rectangle {
+        id: tickerLightRibbon
+        visible: root.effectsEnabled
+        width: Math.max(100, root.width * 0.18)
+        height: root.height * 2.2
+        y: -root.height * 0.62
+        rotation: 17
+        opacity: 0.11
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#00ffffff" }
+            GradientStop { position: 0.42; color: "#70a895ff" }
+            GradientStop { position: 0.58; color: "#8ff6c945" }
+            GradientStop { position: 1.0; color: "#00ffffff" }
+        }
+        XAnimator on x {
+            running: root.running && root.effectsEnabled && !root.churnHold
+            from: -tickerLightRibbon.width * 1.5
+            to: root.scrollAreaW + tickerLightRibbon.width
+            duration: 6500
+            loops: Animation.Infinite
+            easing.type: Easing.InOutSine
+        }
+    }
+
+    Item {
+        id: tickerSparkLane
+        x: 0
+        y: Math.max(0, root.height - 8)
+        width: root.scrollAreaW
+        height: 6
+        clip: true
+        visible: root.effectsEnabled
+        opacity: 0.34
+        Repeater {
+            model: 4
+            Rectangle {
+                id: stageSpark
+                required property int index
+                width: 2 + (index % 3)
+                height: width
+                radius: width / 2
+                x: -20 - index * 90
+                y: index % 2 === 0 ? 1 : 3
+                color: index % 3 === 0 ? "#f6c945" : (index % 3 === 1 ? "#a895ff" : "#ffffff")
+                XAnimator on x {
+                    running: root.running && root.effectsEnabled && !root.churnHold
+                    from: -20 - stageSpark.index * 90
+                    to: tickerSparkLane.width + 20
+                    duration: 6500 + stageSpark.index * 850
+                    loops: Animation.Infinite
+                    easing.type: Easing.Linear
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        id: queueChangeFlash
+        x: 0
+        y: 1
+        width: root.scrollAreaW
+        height: root.height - 2
+        opacity: 0
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#55f6c945" }
+            GradientStop { position: 0.25; color: "#38a895ff" }
+            GradientStop { position: 1.0; color: "#00121319" }
+        }
+    }
 
     Item {
         id: leftClip
@@ -47070,8 +49342,57 @@ Rectangle {
         }
     }
 
+    Rectangle {
+        id: timerPill
+        visible: root.effectsEnabled
+        x: Math.max(0, root.width - root.timerWidth - root.rightMargin)
+        y: Math.max(3, (root.height - height) / 2)
+        width: root.timerWidth
+        height: Math.max(28, root.timerPx * 1.18)
+        radius: Math.min(13, height / 2)
+        color: "#3b2b0d"
+        border.width: 1
+        border.color: "#8ff6c945"
+        transformOrigin: Item.Center
+    }
+
+    Item {
+        id: tickerLivePulse
+        visible: root.effectsEnabled
+        x: Math.max(2, timerPill.x - 21)
+        y: (root.height - height) / 2
+        width: 6
+        height: 6
+        Rectangle {
+            id: tickerLiveRing
+            anchors.centerIn: parent
+            width: 6; height: 6; radius: 3
+            color: "transparent"
+            border.width: 1
+            border.color: root.tickerColor
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: 3; height: 3; radius: 1.5
+            color: root.tickerColor
+        }
+        SequentialAnimation {
+            running: root.running && root.effectsEnabled && !root.churnHold
+            loops: Animation.Infinite
+            ParallelAnimation {
+                ScaleAnimator { target: tickerLiveRing; from: 0.85; to: 1.20; duration: 1350; easing.type: Easing.InOutSine }
+                OpacityAnimator { target: tickerLiveRing; from: 0.72; to: 0.24; duration: 1350 }
+            }
+            ParallelAnimation {
+                ScaleAnimator { target: tickerLiveRing; from: 1.20; to: 0.85; duration: 1350; easing.type: Easing.InOutSine }
+                OpacityAnimator { target: tickerLiveRing; from: 0.24; to: 0.72; duration: 1350 }
+            }
+        }
+    }
+
     Text {
         id: timerText
+        z: 3
         text: root.rightText
         color: root.tickerColor
         font.pixelSize: root.timerPx
@@ -47101,7 +49422,48 @@ Rectangle {
         }
     }
 
-    onDisplayTextChanged: scheduleRestart()
+    SequentialAnimation {
+        id: queueAccent
+        OpacityAnimator { target: queueChangeFlash; from: 0.0; to: 0.22; duration: 100; easing.type: Easing.OutQuad }
+        OpacityAnimator { target: queueChangeFlash; from: 0.22; to: 0.0; duration: 420; easing.type: Easing.OutCubic }
+    }
+
+    SequentialAnimation {
+        id: timerPulse
+        ParallelAnimation {
+            ScaleAnimator { target: timerPill; from: 1.0; to: 1.045; duration: 95; easing.type: Easing.OutQuad }
+            OpacityAnimator { target: timerPill; from: 0.78; to: 0.94; duration: 95 }
+        }
+        ParallelAnimation {
+            ScaleAnimator { target: timerPill; from: 1.045; to: 1.0; duration: 190; easing.type: Easing.OutBack }
+            OpacityAnimator { target: timerPill; from: 0.94; to: 0.78; duration: 190 }
+        }
+    }
+
+    Rectangle {
+        id: tickerEdgeGlow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: 2
+        visible: root.effectsEnabled
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0.0; color: "#00a895ff" }
+            GradientStop { position: 0.35; color: "#88a895ff" }
+            GradientStop { position: 0.70; color: "#a0f6c945" }
+            GradientStop { position: 1.0; color: "#00f6c945" }
+        }
+        opacity: 0.48
+    }
+
+    onDisplayTextChanged: {
+        scheduleRestart()
+        if (effectsEnabled && displayText !== "") queueAccent.restart()
+    }
+    onRightTextChanged: {
+        if (effectsEnabled && shouldPulseTimer()) timerPulse.restart()
+    }
     onWidthChanged: scheduleRestart()
     onHeightChanged: scheduleRestart()
     onRunningChanged: scheduleRestart()
@@ -47294,6 +49656,12 @@ class RenderThreadTicker(QFrame):
         self._bold = bool(enabled)
         try:
             self._root.setProperty("tickerBold", self._bold)
+        except Exception:
+            pass
+
+    def set_effects_enabled(self, enabled: bool):
+        try:
+            self._root.setProperty("effectsEnabled", bool(enabled))
         except Exception:
             pass
 

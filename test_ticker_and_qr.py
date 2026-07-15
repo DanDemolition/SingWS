@@ -24,7 +24,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtGui import QPixmap, QColor, QImage, QPainter
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QEvent
 
 _APP = None
 
@@ -42,6 +42,38 @@ def load_main_module():
 
 
 mod = load_main_module()
+
+
+class VideoWindowFullscreenInputTests(unittest.TestCase):
+    def test_child_output_surfaces_route_double_click_to_fullscreen_toggle(self):
+        # Build only the QWidget shell here. Constructing VideoWindow's two
+        # native Qt Quick windows under the offscreen test backend can crash
+        # inside Qt during teardown; the behavior under test is the event
+        # filter shared by every real output surface.
+        class _EventFilterOnlyVideoWindow(mod.VideoWindow):
+            def __init__(self):
+                QWidget.__init__(self)
+
+        window = _EventFilterOnlyVideoWindow()
+        video_surface = QWidget(window)
+        ticker_surface = QWidget(window)
+        window._install_fullscreen_mouse_target(video_surface)
+        window._install_fullscreen_mouse_target(ticker_surface)
+        toggles = []
+        window._toggle_output_fullscreen = lambda: toggles.append(True)
+        try:
+            self.assertTrue(window.eventFilter(
+                video_surface,
+                QEvent(QEvent.Type.MouseButtonDblClick),
+            ))
+            self.assertTrue(window.eventFilter(
+                ticker_surface,
+                QEvent(QEvent.Type.MouseButtonDblClick),
+            ))
+            self.assertEqual(len(toggles), 2)
+        finally:
+            window.close()
+            window.deleteLater()
 
 
 def _qtquick_available() -> bool:
@@ -104,6 +136,30 @@ class RenderThreadTickerTests(unittest.TestCase):
         self.assertTrue(t._root.property("tickerBold"))
         t.set_color("#00FF00")
         self.assertEqual(t._root.property("tickerColor").name().lower(), "#00ff00")
+
+    def test_optional_vfx_do_not_disable_or_retune_scroll(self):
+        source = mod.QML_TICKER_RT_SOURCE
+        self.assertIn("id: tickerAtmosphere", source)
+        self.assertIn("id: tickerLightRibbon", source)
+        self.assertIn("id: tickerSparkLane", source)
+        self.assertIn("id: queueChangeFlash", source)
+        self.assertIn("id: timerPill", source)
+        self.assertIn("id: tickerLivePulse", source)
+        self.assertIn("id: tickerEdgeGlow", source)
+        self.assertIn("property real timerSeparation", source)
+        self.assertIn("function shouldPulseTimer()", source)
+        self.assertIn("model: 4", source)
+        self.assertIn("effectsEnabled && shouldPulseTimer()", source)
+        queue_accent = source[source.index("id: queueAccent"):source.index("id: timerPulse")]
+        self.assertNotIn("target: nameText", queue_accent)
+
+        t = self._make(["Alice", "Bob"])
+        t.set_scroll_speed(95.0)
+        t.set_effects_enabled(False)
+        self.assertFalse(t._root.property("effectsEnabled"))
+        self.assertTrue(t._root.property("running"))
+        self.assertAlmostEqual(t._root.property("speedPxPerSec"), 95.0, places=3)
+        self.assertTrue(mod.DEFAULTS["ticker_vfx_enabled"])
 
     def test_right_text_updates(self):
         t = self._make(["A"], time_text="2:47")

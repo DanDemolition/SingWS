@@ -71,7 +71,7 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("ticker_speed_px_per_sec", self.singws.DEFAULTS)
         self.assertGreater(float(self.singws.DEFAULTS["ticker_speed_px_per_sec"]), 0)
         self.assertEqual(int(self.singws.DEFAULTS["video_timing_offset_ms"]), 0)
-        self.assertTrue(self.singws.DEFAULTS["next_up_overlay_enabled"])
+        self.assertFalse(self.singws.DEFAULTS["next_up_overlay_enabled"])
         self.assertEqual(int(self.singws.DEFAULTS["next_up_overlay_duration_sec"]), 10)
         self.assertIn("lyrics_background_video_opacity", self.singws.DEFAULTS)
         self.assertIn("crash_log_email_to", self.singws.DEFAULTS)
@@ -257,13 +257,17 @@ class RecentRegressionTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
-    def test_next_up_overlay_song_end_shows_once(self):
+    def test_song_end_uses_short_outro_not_next_up_countdown(self):
         app = make_app(self.singws)
         calls = []
 
         class FakeArea:
             def show_next_up_overlay(self, payload, duration):
-                calls.append((payload, duration))
+                calls.append(("next", payload, duration))
+
+            def show_song_outro_vfx(self, singer, title, artist):
+                calls.append(("outro", singer, title, artist))
+                return True
 
         app.video_window = SimpleNamespace(video_area=FakeArea())
         app.settings["next_up_overlay_enabled"] = True
@@ -289,23 +293,24 @@ class RecentRegressionTests(unittest.TestCase):
         ]
 
         self.assertTrue(app._mark_next_up_overlay_pending_after_completion(reason="test_end"))
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0]["singer"], "Ada")
-        self.assertEqual(calls[0][0]["title"], "Next")
-        self.assertEqual(calls[0][0]["artist"], "Artist")
-        self.assertEqual(calls[0][0]["on_deck"], "Bo")
-        self.assertEqual(calls[0][1], 10.0)
+        self.assertEqual(calls[0][0:2], ("outro", "Ada"))
+        self.assertEqual(app._next_up_overlay_pending_payload, {})
 
-        self.assertFalse(app._mark_next_up_overlay_pending_after_completion(reason="test_end_duplicate"))
-        self.assertEqual(len(calls), 1)
+        self.assertTrue(app._mark_next_up_overlay_pending_after_completion(reason="test_end_duplicate"))
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("next", [call[0] for call in calls])
 
-    def test_next_up_overlay_no_next_singer_does_not_show(self):
+    def test_song_outro_does_not_require_a_next_singer(self):
         app = make_app(self.singws)
         calls = []
 
         class FakeArea:
             def show_next_up_overlay(self, payload, duration):
-                calls.append((payload, duration))
+                calls.append(("next", payload, duration))
+
+            def show_song_outro_vfx(self, singer, title, artist):
+                calls.append(("outro", singer, title, artist))
+                return True
 
         app.video_window = SimpleNamespace(video_area=FakeArea())
         app.settings["next_up_overlay_enabled"] = True
@@ -321,8 +326,8 @@ class RecentRegressionTests(unittest.TestCase):
             },
         ]
 
-        self.assertFalse(app._mark_next_up_overlay_pending_after_completion(reason="test_end_no_next"))
-        self.assertEqual(calls, [])
+        self.assertTrue(app._mark_next_up_overlay_pending_after_completion(reason="test_end_no_next"))
+        self.assertEqual(calls[0][0:2], ("outro", "Ada"))
 
     def test_settings_save_scheduler_debounces_ui_thread_writes(self):
         app = make_app(self.singws)
