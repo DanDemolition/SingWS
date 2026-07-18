@@ -23,12 +23,20 @@ RUNTIME_NATIVE_MODULES = (
 
 def _macho_arches(path: Path) -> set[str] | None:
     file_result = subprocess.run(
-        ["file", "-b", str(path)], capture_output=True, text=True, check=False
+        ["file", "-b", str(path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
     )
     if "Mach-O" not in file_result.stdout:
         return None
     lipo_result = subprocess.run(
-        ["lipo", "-archs", str(path)], capture_output=True, text=True, check=False
+        ["lipo", "-archs", str(path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
     )
     if lipo_result.returncode != 0:
         raise RuntimeError(lipo_result.stderr.strip() or f"lipo failed for {path}")
