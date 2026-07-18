@@ -88,6 +88,32 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(int(overlay._root.property("startCountdownValue") or 0), 0)
         self.assertEqual(int(overlay._root.property("burstSerial") or 0), before + 1)
 
+    def test_consecutive_singer_countdown_replaces_stale_outro_exit(self):
+        overlay = mod.RenderThreadShowScreenVfx()
+        self.addCleanup(overlay.close)
+        overlay.resize(960, 540)
+        overlay.show()
+        overlay.show_song_outro("Alice", "First Song", "Artist A")
+        QTest.qWait(80)
+
+        # This is the production ordering: dismiss the old transition first,
+        # then start the next singer's countdown.
+        overlay.hide_transition()
+        before = int(overlay._root.property("burstSerial") or 0)
+        overlay.show_singer_start("Bob", "Second Song", "Artist B")
+        QTest.qWait(1500)
+
+        self.assertTrue(overlay._root.property("active"))
+        self.assertTrue(overlay._root.property("startCountdownActive"))
+        self.assertEqual(int(overlay._root.property("startCountdownValue") or 0), 1)
+        self.assertEqual(overlay._root.property("singerText"), "Bob")
+        self.assertEqual(int(overlay._root.property("burstSerial") or 0), before)
+
+        QTest.qWait(750)
+        self.assertFalse(overlay._root.property("startCountdownActive"))
+        self.assertEqual(int(overlay._root.property("startCountdownValue") or 0), 0)
+        self.assertEqual(int(overlay._root.property("burstSerial") or 0), before + 1)
+
     def test_song_outro_fires_double_burst_and_clears_quickly(self):
         overlay = mod.RenderThreadShowScreenVfx()
         self.addCleanup(overlay.close)

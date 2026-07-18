@@ -194,7 +194,7 @@ exe = EXE(
     # GStreamer) to also be universal2.
     target_arch='x86_64',
     codesign_identity=None,
-    entitlements_file=None,
+    entitlements_file=str(project_root / 'SingWS.entitlements'),
 )
 coll = COLLECT(
     exe,
@@ -218,6 +218,9 @@ app = BUNDLE(
         'CFBundleShortVersionString': '0.4.1.7',
         'CFBundleVersion': '0.4.1.7',
         'NSHighResolutionCapable': True,
+        'NSAppleEventsUsageDescription': (
+            "SingWS uses System Events to find, queue, and control songs in the KaraFun application."
+        ),
         'NSLocationWhenInUseUsageDescription': (
             "SingWS uses this Mac's location to set venue coordinates for request signups."
         ),

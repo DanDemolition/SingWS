@@ -215,7 +215,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("singws-save-deferred-remote", worker)
 
     def test_scan_folder_starts_background_worker_before_inline_fallback(self):
-        marker = '    def scan_folder(self):\n        """Scan chooser: Quick Update (incremental) or Full Scan."""'
+        marker = '    def _legacy_scan_folder(self):\n        """Scan chooser: Quick Update (incremental) or Full Scan."""'
         self.assertIn(marker, MAIN_SOURCE)
         source = MAIN_SOURCE[MAIN_SOURCE.index(marker):]
         source = source[:source.index("\n    def _fmt_mmss")]

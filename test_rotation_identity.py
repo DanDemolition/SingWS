@@ -347,6 +347,69 @@ class RotationIdentityTests(unittest.TestCase):
         self.assertEqual([s["name"] for s in app.queue], ["Ada", "Grace"])
         self.assertEqual(app.queue[0]["songs"], [])
 
+    def test_multi_singer_remove_complete_and_readd_stays_name_scoped(self):
+        app = make_app(self.singws)
+        refreshes = []
+        app._request_queue_display_refresh = lambda *args, **kwargs: refreshes.append("refresh")
+        app.queue = [
+            {
+                "name": "Alice",
+                "songs": [{"remote_request_id": 101, "artist": "Artist", "title": "A1", "song_info": "/tmp/a1.mp3", "skipped": False}],
+                "skipped": False,
+            },
+            {
+                "name": "Bob",
+                "songs": [{"remote_request_id": 102, "artist": "Artist", "title": "B1", "song_info": "/tmp/b1.mp3", "skipped": False}],
+                "skipped": False,
+            },
+            {
+                "name": "Cara",
+                "server_singer_session_id": 700,
+                "songs": [{"remote_request_id": 103, "artist": "Artist", "title": "C1", "song_info": "/tmp/c1.mp3", "skipped": False}],
+                "skipped": False,
+            },
+        ]
+
+        # Bob's row remains internal for identity/order, but is not active.
+        self.assertEqual(app._remove_local_remote_request_by_id(102, reason="server_removed"), 1)
+        self.assertEqual([row["name"] for row in app.get_rotation_data()["rotation"]], ["Alice", "Cara"])
+
+        # A stale/reused session points at Cara. The submitted name must win,
+        # attaching the replacement to Bob's preserved slot instead.
+        self.assertTrue(app._add_song_to_queue(
+            "Bob",
+            ("/tmp/b2.mp3", 0, 100),
+            track=track("B2", "/tmp/b2.mp3"),
+            remote_meta={"request_id": 104, "singer": "Bob", "singer_session_id": 700, "source": "phone"},
+        ))
+        self.assertEqual([song["remote_request_id"] for song in app.queue[1]["songs"]], [104])
+        self.assertEqual([song["remote_request_id"] for song in app.queue[2]["songs"]], [103])
+        self.assertEqual([row["name"] for row in app.get_rotation_data()["rotation"]], ["Alice", "Bob", "Cara"])
+
+        # Removing Bob and completing Alice leaves only Cara active.
+        self.assertEqual(app._remove_local_remote_request_by_id(104, reason="server_removed"), 1)
+        self.assertEqual(app._remove_local_remote_request_by_id(101, reason="server_completed"), 1)
+        self.assertEqual([row["name"] for row in app.get_rotation_data()["rotation"]], ["Cara"])
+
+        # Alice can re-add without moving Cara or inheriting Cara's song.
+        self.assertTrue(app._add_song_to_queue(
+            "Alice",
+            ("/tmp/a2.mp3", 0, 100),
+            track=track("A2", "/tmp/a2.mp3"),
+            remote_meta={"request_id": 105, "singer": "Alice", "singer_session_id": 700, "source": "phone"},
+        ))
+        rotation = app.get_rotation_data()["rotation"]
+        self.assertEqual([row["name"] for row in rotation], ["Alice", "Cara"])
+        self.assertEqual([row["rotation_position"] for row in rotation], [1, 2])
+        all_ids = [
+            song["remote_request_id"]
+            for singer in app.queue
+            for song in singer.get("songs", [])
+        ]
+        self.assertEqual(all_ids, [105, 103])
+        self.assertEqual(len(all_ids), len(set(all_ids)))
+        self.assertGreaterEqual(len(refreshes), 5)
+
 
 if __name__ == "__main__":
     unittest.main()

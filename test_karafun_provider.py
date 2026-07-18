@@ -287,6 +287,8 @@ class KaraFunProviderTests(unittest.TestCase):
         start = start[:start.index("def _show_external_karafun_dialog")]
         self.assertNotIn("self._handoff_show_screen_to_karafun()", start)
         self.assertIn('if not automatic_playback:', start)
+        self.assertIn('if open_automatically and not automatic_playback:', start)
+        self.assertIn('if automatic_playback:', start)
         self.assertIn("self._automate_karafun_search_and_play(entry, key=key, tempo_percent=tempo_percent)", start)
 
     def test_karafun_monitor_completes_once_with_five_seconds_remaining(self):
@@ -439,10 +441,11 @@ class KaraFunProviderTests(unittest.TestCase):
         scan = source[source.index("def _build_library_scan_result"):]
         scan = scan[:scan.index("class LibraryScanWorker")]
         self.assertIn('"duration": old_duration_by_path.get(full_path) if quick_mode else None', scan)
-        chooser = source[source.index("def scan_folder(self):"):]
+        chooser = source[source.index("def _legacy_scan_folder(self):"):]
         chooser = chooser[:chooser.index("def search_tracks(self):")]
         self.assertIn("Update checks saved folders", chooser)
         self.assertIn("Full Scan rereads the entire selected library", chooser)
+        self.assertIn("def scan_folder(self):\n        self.open_library_locations_dialog()", source)
         commit = source[source.index("def _commit_undoable_action"):]
         commit = commit[:commit.index("def _update_undo_action")]
         self.assertNotIn("_show_processing_notification", commit)

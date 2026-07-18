@@ -3000,6 +3000,8 @@ DEFAULTS = {
     "session_location_session_id": "",    # per-session sync id for website location checks
     "session_location_ttl_minutes": 720,    # session location heartbeat TTL
     "audio_output_id": "default",          # default | discovered GST device id
+    "karaoke_library_locations": [],        # configured libraries, including temporarily offline volumes
+    "karaoke_library_locations_migrated": False, # prevents retired single-path keys from restoring removed roots
     "karaoke_scan_roots": [],              # remembered karaoke library roots for incremental scan
     "karaoke_scan_dir_sigs": {},           # directory signatures so Update can skip unchanged folders
     "header_qr_url": "",                   # optional request URL rendered as clickable QR in header
@@ -6604,6 +6606,15 @@ Rectangle {
     }
 
     function showSingerStart(singer, song, artist) {
+        // A previous outro/Next Up exit may still be finishing when the next
+        // singer is started. Cancel those writers before resetting the shared
+        // overlay state, or their final ScriptAction can hide this countdown.
+        overlayExit.stop()
+        songOutroSequence.stop()
+        nextUpEntrance.stop()
+        singerStartSequence.stop()
+        startCountdownEntrance.stop()
+        countdownNumberHit.stop()
         singerText = singer || ""
         songText = song || ""
         artistText = artist || ""
@@ -11122,9 +11133,8 @@ class SimplePollWorker(QObject):
         self.base_url = _network_normalize_base_url(base_url)
         self.user_id = (user_id or "").strip() or "default"
         self.api_key = (api_key or "").strip()
-        # Keep this enabled even when the WebSocket relay is active. The relay
-        # gives fast push delivery; the non-mutating sync poll is the safety net
-        # if a relay notification is missed during a live show.
+        # Disabled by start_request_polling() when the WebSocket relay is the
+        # request source. The worker still runs for host-control polling.
         self.poll_requests = bool(poll_requests)
         self.normal_interval = interval_sec
         self.interval = interval_sec
@@ -11795,6 +11805,131 @@ class DurationProbeWorker(QObject):
         self.finished.emit()
 
 
+def _normalize_library_location_path(path: str) -> str:
+    """Return the stable filesystem identity used for library roots and songs."""
+    value = os.path.expanduser(str(path or "").strip())
+    if not value:
+        return ""
+    return os.path.normpath(os.path.realpath(os.path.abspath(value)))
+
+
+def _library_location_key(path: str) -> str:
+    return os.path.normcase(_normalize_library_location_path(path))
+
+
+def _library_location_id(path: str) -> str:
+    key = _library_location_key(path)
+    return f"library-{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}" if key else ""
+
+
+def _migrate_library_locations(settings: dict) -> tuple[list[dict], bool]:
+    """Migrate every historic library setting into the multi-location model."""
+    settings = settings if isinstance(settings, dict) else {}
+    candidates = []
+    existing = settings.get("karaoke_library_locations", []) or []
+    if not isinstance(existing, list):
+        existing = [existing]
+    candidates.extend(existing)
+
+    old_roots = settings.get("karaoke_scan_roots", []) or []
+    if not isinstance(old_roots, list):
+        old_roots = [old_roots]
+    candidates.extend(old_roots)
+    if not bool(settings.get("karaoke_library_locations_migrated", False)):
+        for key in ("karaoke_folder", "karaoke_library_folder", "library_folder", "library_path"):
+            value = settings.get(key)
+            if value:
+                candidates.append(value)
+
+    locations = []
+    seen = set()
+    for candidate in candidates:
+        source = candidate if isinstance(candidate, dict) else {"path": candidate}
+        path = _normalize_library_location_path(source.get("path", ""))
+        identity = _library_location_key(path)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        location = dict(source)
+        location.update({"id": _library_location_id(path), "path": path})
+        location.setdefault("added_at", time.time())
+        location.setdefault("last_scan_at", 0)
+        location.setdefault("last_scan_status", "not scanned")
+        location.setdefault("last_track_count", 0)
+        locations.append(location)
+
+    roots = [location["path"] for location in locations]
+    changed = (
+        settings.get("karaoke_library_locations") != locations
+        or settings.get("karaoke_scan_roots") != roots
+        or not bool(settings.get("karaoke_library_locations_migrated", False))
+    )
+    settings["karaoke_library_locations"] = locations
+    settings["karaoke_library_locations_migrated"] = True
+    # Retain this compatibility mirror for older builds and third-party tools.
+    settings["karaoke_scan_roots"] = roots
+    return locations, changed
+
+
+def _path_is_within_library(path: str, root: str) -> bool:
+    path_key = _library_location_key(path)
+    root_key = _library_location_key(root)
+    return bool(path_key and root_key and (path_key == root_key or path_key.startswith(root_key + os.sep)))
+
+
+def _library_location_for_path(path: str, locations) -> dict | None:
+    matches = [
+        location for location in (locations or [])
+        if isinstance(location, dict) and _path_is_within_library(path, location.get("path", ""))
+    ]
+    return max(matches, key=lambda item: len(str(item.get("path") or "")), default=None)
+
+
+def _dedupe_library_tracks(tracks) -> list[dict]:
+    """Collapse the same physical file only; metadata matches remain distinct versions."""
+    result = []
+    seen_paths = set()
+    seen_files = set()
+    for track in tracks or []:
+        if not isinstance(track, dict) or not track.get("path"):
+            continue
+        item = dict(track)
+        item["path"] = _normalize_library_location_path(item["path"])
+        path_key = _library_location_key(item["path"])
+        physical_key = None
+        try:
+            st = os.stat(item["path"])
+            physical_key = (int(st.st_dev), int(st.st_ino))
+            item["scan_device"] = physical_key[0]
+            item["scan_inode"] = physical_key[1]
+        except Exception:
+            # Never compare a stale inode from an offline volume with a live
+            # file: filesystems may reuse inode numbers after reconnects.
+            physical_key = None
+        if path_key in seen_paths or (physical_key is not None and physical_key in seen_files):
+            continue
+        seen_paths.add(path_key)
+        if physical_key is not None:
+            seen_files.add(physical_key)
+        result.append(item)
+    return result
+
+
+def _tracks_after_library_location_removed(tracks, removed_path: str, remaining_locations) -> list[dict]:
+    remaining_roots = [
+        location.get("path", "") for location in (remaining_locations or []) if isinstance(location, dict)
+    ]
+    result = []
+    for track in tracks or []:
+        path = str(track.get("path") or "") if isinstance(track, dict) else ""
+        if _path_is_within_library(path, removed_path) and not any(
+            _path_is_within_library(path, root) for root in remaining_roots
+        ):
+            continue
+        result.append(track)
+    return result
+
+
 def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_snapshot, progress_cb=None) -> dict:
     """Build a scanned karaoke library without touching Qt widgets.
 
@@ -11803,12 +11938,18 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
     and duration probing after this result comes back.
     """
     start_time = time.time()
-    roots = [str(r) for r in (roots or []) if r]
+    requested_roots = [_normalize_library_location_path(r) for r in (roots or []) if r]
+    roots = [r for r in requested_roots if os.path.isdir(r)]
     old_tracks = list(old_tracks or [])
     settings_snapshot = dict(settings_snapshot or {})
-    old_by_path = {str(t.get("path") or ""): t for t in old_tracks if isinstance(t, dict) and t.get("path")}
+    locations, _ = _migrate_library_locations(settings_snapshot)
+    preserve_outside = bool(settings_snapshot.get("_scan_preserve_outside_roots", False)) or len(roots) != len(requested_roots)
+    old_by_path = {
+        _normalize_library_location_path(t.get("path")): t
+        for t in old_tracks if isinstance(t, dict) and t.get("path")
+    }
     old_duration_by_path = {
-        t.get("path"): t.get("duration")
+        _normalize_library_location_path(t.get("path")): t.get("duration")
         for t in old_tracks
         if isinstance(t, dict) and t.get("path") and t.get("duration")
     }
@@ -11860,6 +12001,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
 
     def _make_scanned_track(full_path: str, song_type: str, old_track: dict | None = None):
         name = os.path.basename(full_path)
+        full_path = _normalize_library_location_path(full_path)
         scan_mtime, scan_size = _scan_file_sig(full_path)
         if quick_mode and _old_track_unchanged(old_track, scan_mtime, scan_size):
             track = dict(old_track)
@@ -11879,6 +12021,9 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                 if not track.get("disc_id"):
                     track["disc_id"] = disc_id
                 track["display"] = _display_for_track(track)
+            location = _library_location_for_path(full_path, locations)
+            if location:
+                track["library_location_id"] = location.get("id")
             return track, True, False
 
         base = os.path.splitext(name)[0]
@@ -11897,16 +12042,25 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
             track["scan_mtime"] = scan_mtime
         if scan_size is not None:
             track["scan_size"] = scan_size
+        try:
+            st = os.stat(full_path)
+            track["scan_device"] = int(st.st_dev)
+            track["scan_inode"] = int(st.st_ino)
+        except Exception:
+            pass
+        location = _library_location_for_path(full_path, locations)
+        if location:
+            track["library_location_id"] = location.get("id")
         track["display"] = _display_for_track(track)
         changed_existing = bool(quick_mode and old_track is not None)
         return track, False, changed_existing
 
     def _is_under_any_root_factory(root_paths):
-        root_norms = [os.path.normcase(os.path.abspath(r)) for r in root_paths]
+        root_norms = [_library_location_key(r) for r in root_paths]
 
         def _is_under_any_root(path: str) -> bool:
             try:
-                p = os.path.normcase(os.path.abspath(path))
+                p = _library_location_key(path)
                 for rn in root_norms:
                     if p == rn or p.startswith(rn + os.sep):
                         return True
@@ -11917,7 +12071,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
         return _is_under_any_root
 
     keep_outside_roots = []
-    if quick_mode and roots:
+    if (quick_mode or preserve_outside) and roots:
         _is_under_any_root = _is_under_any_root_factory(roots)
         keep_outside_roots = [
             t for t in old_tracks
@@ -11926,36 +12080,42 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
             and (not _is_under_any_root(str(t.get("path") or "")))
         ]
 
-    new_tracks = [] if not quick_mode else list(keep_outside_roots)
+    new_tracks = [] if not (quick_mode or preserve_outside) else (list(keep_outside_roots) if roots else list(old_tracks))
     seen = set(str(t.get("path") or "") for t in new_tracks if isinstance(t, dict) and t.get("path"))
     files_seen = 0
     tracks_added, zip_count, mp4_count, cdg_count = 0, 0, 0, 0
     tracks_reused, tracks_changed = 0, 0
     last_ui = time.time()
-    dir_sigs = {}
+    stored_dir_sigs = settings_snapshot.get("karaoke_scan_dir_sigs", {}) or {}
+    if not isinstance(stored_dir_sigs, dict):
+        stored_dir_sigs = {}
+    dir_sigs = {
+        path: sig for path, sig in stored_dir_sigs.items()
+        if not any(_path_is_within_library(path, root) for root in roots)
+    }
 
     if quick_mode:
         _is_under_any_root = _is_under_any_root_factory(roots)
-        stored_dir_sigs = settings_snapshot.get("karaoke_scan_dir_sigs", {}) or {}
-        if not isinstance(stored_dir_sigs, dict):
-            stored_dir_sigs = {}
         no_dir_cache = not bool(stored_dir_sigs)
         try:
             baseline_ns = int(TRACKS_PATH.stat().st_mtime_ns)
         except Exception:
             baseline_ns = 0
 
-        tracks_by_path = {str(t.get("path") or ""): dict(t) for t in old_tracks if isinstance(t, dict) and t.get("path")}
+        tracks_by_path = {
+            _normalize_library_location_path(t.get("path")): dict(t)
+            for t in old_tracks if isinstance(t, dict) and t.get("path")
+        }
         under_root_paths = {p for p in tracks_by_path if _is_under_any_root(p)}
-        known_dirs = set(os.path.abspath(r) for r in roots)
+        known_dirs = set(_normalize_library_location_path(r) for r in roots)
         for path in under_root_paths:
             try:
-                known_dirs.add(os.path.abspath(os.path.dirname(path)))
+                known_dirs.add(_normalize_library_location_path(os.path.dirname(path)))
             except Exception:
                 pass
         for path in stored_dir_sigs.keys():
             if _is_under_any_root(path):
-                known_dirs.add(os.path.abspath(path))
+                known_dirs.add(_normalize_library_location_path(path))
 
         changed_dirs = set()
         removed_dirs = set()
@@ -11978,10 +12138,10 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                 changed_dirs.add(directory)
 
         def _remove_tracks_under(directory: str):
-            dn = os.path.normcase(os.path.abspath(directory))
+            dn = _library_location_key(directory)
             for path in list(tracks_by_path.keys()):
                 try:
-                    pn = os.path.normcase(os.path.abspath(path))
+                    pn = _library_location_key(path)
                     if pn.startswith(dn + os.sep):
                         tracks_by_path.pop(path, None)
                 except Exception:
@@ -11994,7 +12154,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
 
         def _scan_directory_files(directory: str, recursive: bool = False):
             nonlocal files_seen, tracks_added, zip_count, mp4_count, cdg_count, tracks_reused, tracks_changed, last_ui
-            directory = os.path.abspath(directory)
+            directory = _normalize_library_location_path(directory)
             if directory in scanned_dirs:
                 return
             scanned_dirs.add(directory)
@@ -12016,7 +12176,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                     continue
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        child_dir = os.path.abspath(entry.path)
+                        child_dir = _normalize_library_location_path(entry.path)
                         child_sig = _scan_dir_sig(child_dir)
                         if child_sig is not None:
                             dir_sigs[child_dir] = child_sig
@@ -12029,7 +12189,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                 song_type = _song_type_for_name(name)
                 if song_type is None:
                     continue
-                full_path = entry.path
+                full_path = _normalize_library_location_path(entry.path)
                 current_files.add(full_path)
                 files_seen += 1
                 if song_type == "mp4":
@@ -12053,7 +12213,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
 
             for path in list(under_root_paths):
                 try:
-                    if os.path.abspath(os.path.dirname(path)) == directory and path not in current_files:
+                    if _normalize_library_location_path(os.path.dirname(path)) == directory and path not in current_files:
                         tracks_by_path.pop(path, None)
                 except Exception:
                     pass
@@ -12088,7 +12248,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                 for name in files:
                     files_seen += 1
                     lower = name.lower()
-                    full_path = os.path.join(root, name)
+                    full_path = _normalize_library_location_path(os.path.join(root, name))
                     if name.startswith("._") or lower.endswith(".ds_store"):
                         continue
                     if full_path in seen:
@@ -12117,17 +12277,19 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                     if changed_existing:
                         tracks_changed += 1
 
+    new_tracks = _dedupe_library_tracks(new_tracks)
     new_by_path = {str(t.get("path") or ""): t for t in new_tracks if isinstance(t, dict) and t.get("path")}
     old_paths = set(old_by_path.keys())
     new_paths = set(new_by_path.keys())
     added_count = len(new_paths - old_paths)
     removed_count = len(old_paths - new_paths)
-    reindex_needed = (not quick_mode) or added_count > 0 or removed_count > 0 or tracks_changed > 0
+    reindex_needed = ((not quick_mode) and bool(roots)) or added_count > 0 or removed_count > 0 or tracks_changed > 0
     scan_time = time.time() - start_time
     return {
         "ok": True,
         "quick_mode": bool(quick_mode),
         "roots": roots,
+        "requested_roots": requested_roots,
         "tracks": new_tracks,
         "dir_sigs": dir_sigs,
         "tracks_added": tracks_added,
@@ -17798,6 +17960,9 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
+        _, library_settings_changed = _migrate_library_locations(self.settings)
+        if library_settings_changed:
+            self.save_settings()
         self._remote_request_tombstones = self._load_remote_request_tombstones()
         self._deferred_remote_adds = self._load_deferred_remote_adds()
         self._host_request_sync_ops = _load_json_file(
@@ -18355,7 +18520,7 @@ class KaraokeApp(QWidget):
         left_panel.setSpacing(12)
 
         # Create Scan button (do NOT add to left_panel; we'll add it to the bottom row on the right panel)
-        self.scan_button = QPushButton("📂 Scan Folder")
+        self.scan_button = QPushButton("📚 Library Locations")
         self.scan_button.clicked.connect(self.scan_folder)
         # Enhanced search box (native clear button)
         self.search_input = QLineEdit()
@@ -21704,6 +21869,14 @@ class KaraokeApp(QWidget):
         try:
             countdown_payload = getattr(self, "_pending_playback_countdown_payload", None)
             self._pending_playback_countdown_payload = None
+            # Clear the previous outro/Next Up transition before starting the
+            # singer countdown. Doing this after show_singer_start_vfx() stops
+            # singerCountdownTimer in the same event-loop turn and makes the
+            # countdown disappear.
+            try:
+                self._hide_next_up_transition_overlay(reason="before_singer_countdown")
+            except Exception:
+                pass
             if isinstance(countdown_payload, (tuple, list)) and len(countdown_payload) >= 3:
                 self._trigger_show_screen_singer_start_vfx(
                     str(countdown_payload[0] or ""),
@@ -21716,10 +21889,6 @@ class KaraokeApp(QWidget):
                     transport.set_loop(float(loop_seconds[0]), float(loop_seconds[1]))
                 except Exception as e:
                     _diag(f"[INTRO-LOOP] set_loop failed: {e}")
-            try:
-                self._hide_next_up_transition_overlay(reason="playback_started")
-            except Exception:
-                pass
         except Exception as e:
             self.karaoke_transport = None
             try:
@@ -22605,9 +22774,11 @@ class KaraokeApp(QWidget):
 
     def _connect_poll_worker_requests_received(self, use_relay: bool):
         if use_relay:
-            self.poll_worker.requests_received.connect(self._handle_relay_requests)
-        else:
-            self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
+            # The relay performs a full v2 recovery fetch when it connects.
+            # Connecting the legacy sync poll as a second request source made
+            # the startup backlog arrive twice (once from each endpoint).
+            return
+        self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
 
     def start_request_polling(self):
         base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
@@ -22644,7 +22815,10 @@ class KaraokeApp(QWidget):
             api_key,
             interval_sec=_poll_iv,
             host_interval_sec=self._effective_host_poll_interval_sec(),
-            poll_requests=True,
+            # Keep the worker alive for host-control polling, but make the
+            # relay the sole request source. Its connect-time recovery fetch
+            # supplies the existing queue exactly once.
+            poll_requests=not use_relay,
         )
         self.poll_worker.moveToThread(self.poll_thread)
 
@@ -22656,7 +22830,7 @@ class KaraokeApp(QWidget):
 
         self.poll_thread.start()
         if use_relay:
-            print(f"✅ Host-controls polling started ({base_url}/api/v1/host_commands.php); requests via relay + sync fallback")
+            print(f"✅ Host-controls polling started ({base_url}/api/v1/host_commands.php); requests via relay")
         else:
             print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
 
@@ -24729,7 +24903,7 @@ class KaraokeApp(QWidget):
         v.addLayout(audio_row)
 
         # Quick action buttons, grouped into their relevant tabs.
-        scan_folder_btn = QPushButton("Scan Folder")
+        scan_folder_btn = QPushButton("Library Locations")
         export_csv_btn = QPushButton("Export CSV")
         ticker_settings_btn = QPushButton("Ticker Settings")
         set_background_btn = QPushButton("Set Background")
@@ -35387,11 +35561,12 @@ class KaraokeApp(QWidget):
         """Find a singer by immutable identity first, legacy name second."""
         meta = remote_meta if isinstance(remote_meta, dict) else {}
         singer_id = str(meta.get("singer_id") or meta.get("singer_uid") or "").strip()
+        target = self._queue_limit_name_key(singer_name)
         try:
             session_id = int(meta.get("singer_session_id") or 0)
         except Exception:
             session_id = 0
-        if singer_id or session_id > 0:
+        if singer_id:
             for idx, singer in enumerate(self.queue or []):
                 if not isinstance(singer, dict):
                     continue
@@ -35400,18 +35575,32 @@ class KaraokeApp(QWidget):
                     str(singer.get("server_singer_id") or "").strip(),
                 }:
                     return idx
+        if session_id > 0 and target:
+            # Session IDs can be stale or reused. Never let one attach a
+            # request to a differently named singer.
+            for idx, singer in enumerate(self.queue or []):
+                if not isinstance(singer, dict):
+                    continue
+                if self._queue_limit_name_key(singer.get("name", "")) != target:
+                    continue
                 try:
-                    if session_id > 0 and int(singer.get("server_singer_session_id") or 0) == session_id:
+                    if int(singer.get("server_singer_session_id") or 0) == session_id:
                         return idx
                 except Exception:
                     pass
-        target = self._queue_limit_name_key(singer_name)
         if not target:
             return -1
         try:
             for idx, singer in enumerate(self.queue or []):
-                if self._queue_limit_name_key((singer or {}).get("name", "")) == target:
-                    return idx
+                if self._queue_limit_name_key((singer or {}).get("name", "")) != target:
+                    continue
+                # A different permanent server identity is a different person
+                # who happens to share this display name. Identity-less legacy
+                # rows may safely adopt the incoming permanent identity.
+                existing_server_id = str((singer or {}).get("server_singer_id") or "").strip()
+                if singer_id and existing_server_id and existing_server_id != singer_id:
+                    continue
+                return idx
         except Exception:
             pass
         return -1
@@ -39858,7 +40047,205 @@ class KaraokeApp(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"Could not write CSV:\n{e}")
 
-    def _start_library_scan_worker(self, roots, quick_mode: bool) -> bool:
+    def _library_locations(self) -> list[dict]:
+        locations, changed = _migrate_library_locations(self.settings)
+        if changed:
+            self.save_settings()
+        return locations
+
+    def _add_library_location(self, path: str, start_scan: bool = True) -> tuple[bool, str]:
+        normalized = _normalize_library_location_path(path)
+        if not normalized:
+            return False, "Choose a library folder."
+        locations = self._library_locations()
+        if any(_library_location_key(item.get("path", "")) == _library_location_key(normalized) for item in locations):
+            return False, "That library location is already configured."
+        location = {
+            "id": _library_location_id(normalized),
+            "path": normalized,
+            "added_at": time.time(),
+            "last_scan_at": 0,
+            "last_scan_status": "not scanned",
+            "last_track_count": 0,
+        }
+        locations.append(location)
+        self.settings["karaoke_library_locations"] = locations
+        self.settings["karaoke_scan_roots"] = [item["path"] for item in locations]
+        self.save_settings()
+        if start_scan and os.path.isdir(normalized):
+            self._scan_library_locations([location["id"]], full=True)
+        return True, ""
+
+    def _remove_library_location(self, location_id: str) -> bool:
+        locations = self._library_locations()
+        removed = next((item for item in locations if item.get("id") == location_id), None)
+        if removed is None:
+            return False
+        remaining = [item for item in locations if item.get("id") != location_id]
+        self.tracks = _tracks_after_library_location_removed(
+            list(getattr(self, "tracks", []) or []), removed.get("path", ""), remaining
+        )
+        self.settings["karaoke_library_locations"] = remaining
+        self.settings["karaoke_scan_roots"] = [item["path"] for item in remaining]
+        signatures = self.settings.get("karaoke_scan_dir_sigs", {}) or {}
+        self.settings["karaoke_scan_dir_sigs"] = {
+            path: sig for path, sig in signatures.items()
+            if not _path_is_within_library(path, removed.get("path", ""))
+            or any(_path_is_within_library(path, item.get("path", "")) for item in remaining)
+        }
+        self.save_settings()
+        _save_json_atomic(TRACKS_PATH, self.tracks)
+        try:
+            self._display_name_cache = {}
+            self._rebind_queue_entries_to_tracks()
+            self.search_tracks()
+            self.update_queue_display()
+            self.ensure_song_index_async(force=True)
+        except Exception as e:
+            print(f"Post-removal library refresh failed: {e}")
+        return True
+
+    def _scan_library_locations(self, location_ids=None, full: bool = False) -> bool:
+        try:
+            thread = getattr(self, "_library_scan_thread", None)
+            if thread is not None and thread.isRunning():
+                self._show_processing_notification("Library scan already running.", level="info")
+                return False
+        except Exception:
+            pass
+        locations = self._library_locations()
+        selected_ids = set(location_ids or [item.get("id") for item in locations])
+        selected = [item for item in locations if item.get("id") in selected_ids]
+        available = [item for item in selected if os.path.isdir(item.get("path", ""))]
+        offline = [item for item in selected if item not in available]
+        for item in offline:
+            item["last_scan_status"] = "offline"
+        if not available:
+            self.settings["karaoke_library_locations"] = locations
+            self.save_settings()
+            QMessageBox.information(
+                self, "Library Location Offline",
+                "None of the selected library locations are currently available.\n"
+                "They remain configured and their song records have been preserved."
+            )
+            return False
+        self.settings["karaoke_library_locations"] = locations
+        for item in available:
+            item["last_scan_status"] = "scanning"
+        self.save_settings()
+        self._pending_library_scan_ids = [item.get("id") for item in available]
+        return self._start_library_scan_worker(
+            [item.get("path") for item in available],
+            quick_mode=not bool(full),
+            preserve_outside=True,
+        )
+
+    def open_library_locations_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Karaoke Library Locations")
+        dialog.setMinimumSize(720, 390)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "Songs from every available location are searched as one library. "
+            "Offline drives stay configured and reconnect automatically when mounted again."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        location_list = QListWidget(dialog)
+        layout.addWidget(location_list, 1)
+
+        def refresh():
+            current_id = None
+            if location_list.currentItem() is not None:
+                current_id = location_list.currentItem().data(Qt.ItemDataRole.UserRole)
+            location_list.clear()
+            tracks = list(getattr(self, "tracks", []) or [])
+            for location in self._library_locations():
+                path = location.get("path", "")
+                online = os.path.isdir(path)
+                count = sum(
+                    1 for track in tracks
+                    if isinstance(track, dict) and _path_is_within_library(track.get("path", ""), path)
+                )
+                status = "Available" if online else "Offline"
+                scan_status = str(location.get("last_scan_status") or "not scanned")
+                if online and scan_status == "offline":
+                    scan_status = "available again; ready to update"
+                row = QListWidgetItem(f"{status}  •  {count:,} songs  •  {scan_status}\n{path}")
+                row.setData(Qt.ItemDataRole.UserRole, location.get("id"))
+                if not online:
+                    row.setToolTip("The location is unavailable. Its settings and song records are preserved.")
+                location_list.addItem(row)
+                if location.get("id") == current_id:
+                    location_list.setCurrentItem(row)
+            try:
+                thread = getattr(self, "_library_scan_thread", None)
+                scanning = bool(thread is not None and thread.isRunning())
+            except Exception:
+                scanning = False
+            rescan_button.setEnabled(not scanning)
+            rescan_all_button.setEnabled(not scanning)
+            remove_button.setEnabled(not scanning)
+
+        buttons = QHBoxLayout()
+        add_button = QPushButton("Add Library Location…")
+        rescan_button = QPushButton("Rescan Selected")
+        rescan_all_button = QPushButton("Update All Available")
+        remove_button = QPushButton("Remove Selected")
+        close_button = QPushButton("Close")
+        for button in (add_button, rescan_button, rescan_all_button, remove_button):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        def selected_id():
+            item = location_list.currentItem()
+            return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+        def add_location():
+            folder = QFileDialog.getExistingDirectory(self, "Add Library Location")
+            if not folder:
+                return
+            added, message = self._add_library_location(folder, start_scan=True)
+            if not added:
+                QMessageBox.information(dialog, "Library Location", message)
+            refresh()
+
+        def rescan_selected():
+            location_id = selected_id()
+            if not location_id:
+                return
+            self._scan_library_locations([location_id], full=True)
+            refresh()
+
+        def remove_selected():
+            location_id = selected_id()
+            location = next((x for x in self._library_locations() if x.get("id") == location_id), None)
+            if not location:
+                return
+            answer = QMessageBox.question(
+                dialog, "Remove Library Location",
+                f"Remove this location from the combined library?\n\n{location.get('path', '')}\n\n"
+                "Files on disk will not be deleted.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._remove_library_location(location_id)
+                refresh()
+
+        add_button.clicked.connect(add_location)
+        rescan_button.clicked.connect(rescan_selected)
+        rescan_all_button.clicked.connect(lambda: (self._scan_library_locations(full=False), refresh()))
+        remove_button.clicked.connect(remove_selected)
+        close_button.clicked.connect(dialog.accept)
+        self._library_locations_refresh = refresh
+        refresh()
+        dialog.exec()
+        self._library_locations_refresh = None
+
+    def _start_library_scan_worker(self, roots, quick_mode: bool, preserve_outside: bool = False) -> bool:
         try:
             thr = getattr(self, "_library_scan_thread", None)
             if thr is not None and thr.isRunning():
@@ -39875,11 +40262,13 @@ class KaraokeApp(QWidget):
                 self.scan_progress.show()
 
             self._library_scan_thread = QThread(self)
+            scan_settings = dict(getattr(self, "settings", {}) or {})
+            scan_settings["_scan_preserve_outside_roots"] = bool(preserve_outside)
             self._library_scan_worker = LibraryScanWorker(
                 roots,
                 quick_mode,
                 list(getattr(self, "tracks", []) or []),
-                dict(getattr(self, "settings", {}) or {}),
+                scan_settings,
             )
             self._library_scan_worker.moveToThread(self._library_scan_thread)
             self._library_scan_thread.started.connect(self._library_scan_worker.run)
@@ -39916,6 +40305,13 @@ class KaraokeApp(QWidget):
             pass
         if not result.get("ok", False):
             msg = str(result.get("error") or "Library scan failed")
+            pending_ids = set(getattr(self, "_pending_library_scan_ids", []) or [])
+            if pending_ids:
+                for location in self._library_locations():
+                    if location.get("id") in pending_ids:
+                        location["last_scan_status"] = f"scan failed: {msg[:80]}"
+                self.save_settings()
+            self._pending_library_scan_ids = []
             print(f"⚠️ Library scan failed: {msg}")
             self._show_processing_notification(f"Scan failed: {msg[:120]}", level="error")
             return
@@ -39925,6 +40321,20 @@ class KaraokeApp(QWidget):
         try:
             self.settings["karaoke_scan_dir_sigs"] = result.get("dir_sigs", {}) or {}
             self.settings["karaoke_scan_last_update"] = time.time()
+            pending_ids = set(getattr(self, "_pending_library_scan_ids", []) or [])
+            if pending_ids:
+                now = time.time()
+                for location in self._library_locations():
+                    if location.get("id") not in pending_ids:
+                        continue
+                    location["last_scan_at"] = now
+                    location["last_scan_status"] = "scan complete"
+                    location["last_track_count"] = sum(
+                        1 for track in self.tracks
+                        if isinstance(track, dict)
+                        and _path_is_within_library(track.get("path", ""), location.get("path", ""))
+                    )
+            self._pending_library_scan_ids = []
             self.save_settings()
         except Exception:
             pass
@@ -39978,6 +40388,13 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print(f"⚠️ Failed to save tracks: {e}")
 
+        try:
+            refresh = getattr(self, "_library_locations_refresh", None)
+            if callable(refresh):
+                refresh()
+        except Exception:
+            pass
+
         missing = sum(1 for t in self.tracks if self._track_needs_duration(t))
         if missing > 0:
             print(f"🔍 Phase 2: Starting background duration scanning ({missing} missing).")
@@ -39991,6 +40408,9 @@ class KaraokeApp(QWidget):
                 print(f"⚠️ Failed to rebuild search index: {e}")
 
     def scan_folder(self):
+        self.open_library_locations_dialog()
+
+    def _legacy_scan_folder(self):
         """Scan chooser: Quick Update (incremental) or Full Scan."""
         import time, os
         self._last_scan_summary_text = ""
@@ -42290,6 +42710,10 @@ class KaraokeApp(QWidget):
 
         number = 1
         for singer_idx, singer in enumerate(self.queue):
+            # Empty rows are retained internally for identity and stable re-add
+            # ordering, but they are not active rotation entries.
+            if not singer.get("songs"):
+                continue
             is_singer_skipped = singer.get("skipped", False)
             has_sung = singer.get("has_sung", False)  # New singers haven't sung yet
             self._ensure_singer_id(singer)
@@ -42606,8 +43030,17 @@ class KaraokeApp(QWidget):
         """Return queue_display row for a singer header by singer index."""
         if singer_idx < 0 or singer_idx >= len(self.queue):
             return -1
+        try:
+            model = getattr(self, "queue_display_model", None)
+            if isinstance(model, QueueListModel):
+                idx = model.indexForSinger(int(singer_idx))
+                return int(idx.row()) if idx.isValid() else -1
+        except Exception:
+            pass
         row = 0
         for i, singer in enumerate(self.queue):
+            if not singer.get("songs"):
+                continue
             if i == singer_idx:
                 return row
             row += 1 + len(singer.get("songs", []))
@@ -43310,21 +43743,76 @@ class KaraokeApp(QWidget):
         provider_url = str((entry or {}).get("provider_url") or "").strip()
         local_ref = str((entry or {}).get("local_reference_path") or "").strip()
         target = provider_url or local_ref
+        self._last_karafun_launch_error = ""
         try:
-            if target:
-                if "://" in target:
-                    ok = QDesktopServices.openUrl(QUrl(target))
-                else:
-                    ok = QDesktopServices.openUrl(QUrl.fromLocalFile(target))
-                _diag(f"[KARAFUN] open target={target!r} ok={int(bool(ok))}")
-                return bool(ok)
             if sys.platform == "darwin":
-                subprocess.Popen(["open", "-a", "KaraFun"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                _diag("[KARAFUN] focused KaraFun app")
+                app_path = self._karafun_application_path()
+                if not app_path:
+                    raise FileNotFoundError(
+                        "KaraFun.app was not found in /Applications or ~/Applications. "
+                        "Install KaraFun, open it once, then retry."
+                    )
+                args = ["/usr/bin/open", str(app_path)]
+                # Local KaraFun documents should be handed directly to KaraFun.
+                # Catalog URLs are deliberately not opened in the default
+                # browser while automatic queueing is enabled; the Accessibility
+                # workflow searches the native app for the exact song instead.
+                if local_ref:
+                    args = ["/usr/bin/open", "-a", str(app_path), local_ref]
+                completed = subprocess.run(args, capture_output=True, text=True, timeout=10)
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        str(completed.stderr or completed.stdout or "macOS could not launch KaraFun").strip()
+                    )
+                if target and not local_ref and not bool(self.settings.get("karafun_auto_queue_enabled", False)):
+                    QDesktopServices.openUrl(QUrl(target))
+                _diag(
+                    f"[KARAFUN] launched app={str(app_path)!r} arch={platform.machine()} "
+                    f"automatic={int(bool(self.settings.get('karafun_auto_queue_enabled', False)))}"
+                )
                 return True
         except Exception as e:
+            self._last_karafun_launch_error = str(e)
             _diag(f"[KARAFUN] open failed: {e}")
         return False
+
+    @staticmethod
+    def _karafun_application_candidates() -> list[Path]:
+        candidates = []
+        for folder in (Path("/Applications"), Path.home() / "Applications"):
+            candidates.append(folder / "KaraFun.app")
+            try:
+                candidates.extend(sorted(folder.glob("KaraFun*.app")))
+            except Exception:
+                pass
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            key = os.path.normcase(os.path.realpath(str(candidate)))
+            if key not in seen:
+                unique.append(candidate)
+                seen.add(key)
+        return unique
+
+    @classmethod
+    def _karafun_application_path(cls) -> Path | None:
+        if sys.platform != "darwin":
+            return None
+        # LaunchServices is preferable when KaraFun has already been opened,
+        # but clean Intel installations may not have registered it yet.
+        try:
+            from AppKit import NSWorkspace
+            url = NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_("com.recisio.kfiphone")
+            if url is not None:
+                path = Path(str(url.path()))
+                if path.is_dir():
+                    return path
+        except Exception as e:
+            _diag(f"[KARAFUN] LaunchServices lookup unavailable: {e}")
+        for candidate in cls._karafun_application_candidates():
+            if candidate.is_dir() and (candidate / "Contents" / "MacOS" / "KaraFun").exists():
+                return candidate
+        return None
 
     @staticmethod
     def _karafun_script_source(lines) -> str:
@@ -43346,7 +43834,12 @@ class KaraokeApp(QWidget):
                 script = NSAppleScript.alloc().initWithSource_(source)
                 result, error = script.executeAndReturnError_(None)
                 if error:
-                    return False, "", str(error)
+                    error_text = str(error)
+                    _diag(
+                        f"[KARAFUN-SCRIPT] failed arch={platform.machine()} frozen={int(bool(getattr(sys, 'frozen', False)))} "
+                        f"executable={str(sys.executable)!r} error={error_text!r}"
+                    )
+                    return False, "", error_text
                 try:
                     return True, str(result.stringValue() if result is not None else "").strip(), ""
                 except Exception:
@@ -43364,7 +43857,12 @@ class KaraokeApp(QWidget):
                 timeout=timeout,
             )
             if completed.returncode != 0:
-                return False, str(completed.stdout or "").strip(), str(completed.stderr or "").strip()
+                stderr = str(completed.stderr or "").strip()
+                _diag(
+                    f"[KARAFUN-SCRIPT] osascript failed arch={platform.machine()} "
+                    f"returncode={completed.returncode} error={stderr!r}"
+                )
+                return False, str(completed.stdout or "").strip(), stderr
             return True, str(completed.stdout or "").strip(), str(completed.stderr or "").strip()
         except Exception as e:
             return False, "", str(e)
@@ -43377,6 +43875,52 @@ class KaraokeApp(QWidget):
             or "accessibility" in text and "not allowed" in text
             or "-25211" in text
         )
+
+    @staticmethod
+    def _is_karafun_apple_events_error(message: str) -> bool:
+        text = str(message or "").lower()
+        return (
+            "-1743" in text
+            or "not authorized to send apple events" in text
+            or ("apple events" in text and "not permitted" in text)
+        )
+
+    def _show_karafun_apple_events_setup(self, *, notify: bool = True):
+        message = (
+            "macOS blocked SingWS from controlling System Events (Apple Event error -1743). "
+            "Open System Settings > Privacy & Security > Automation, enable System Events under SingWS, "
+            "then quit and reopen both SingWS and KaraFun. If SingWS is not listed, retry one KaraFun song "
+            "with this updated build so macOS can show the authorization prompt."
+        )
+        _diag(f"[KARAFUN] Apple Events authorization required arch={platform.machine()}")
+        if notify:
+            try:
+                self._show_processing_notification(message, level="warning", persistent=True)
+            except Exception:
+                pass
+            try:
+                QMessageBox.warning(self, "KaraFun Automation Permission Needed", message)
+            except Exception:
+                pass
+        try:
+            if sys.platform == "darwin":
+                QDesktopServices.openUrl(QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"))
+        except Exception:
+            pass
+        return message
+
+    def _karafun_apple_events_preflight(self) -> tuple[bool, str]:
+        ok, stdout, stderr = self._run_karafun_applescript_sync(
+            [
+                'tell application "System Events"',
+                'return "AUTHORIZED"',
+                'end tell',
+            ],
+            timeout=8,
+        )
+        if ok:
+            return True, str(stdout or "AUTHORIZED")
+        return False, str(stderr or stdout or "Apple Events authorization failed")
 
     def _show_karafun_accessibility_setup(self, *, notify: bool = True):
         message = (
@@ -44461,7 +45005,13 @@ class KaraokeApp(QWidget):
         def _worker():
             result = {"ok": False, "message": "KaraFun search did not complete."}
             try:
-                self._open_karafun_for_entry(entry)
+                if not self._open_karafun_for_entry(entry):
+                    raise RuntimeError(
+                        str(getattr(self, "_last_karafun_launch_error", "") or "KaraFun could not be opened")
+                    )
+                permission_ok, permission_error = self._karafun_apple_events_preflight()
+                if not permission_ok:
+                    raise RuntimeError(permission_error)
                 ok, out, err = self._run_karafun_applescript_sync(
                     self._karafun_search_script(query=query, require_exact_title=False),
                     timeout=18,
@@ -44480,7 +45030,15 @@ class KaraokeApp(QWidget):
                     except Exception:
                         pass
                 else:
-                    if self._is_karafun_accessibility_error(result["message"]):
+                    if self._is_karafun_apple_events_error(result["message"]):
+                        setup_message = self._show_karafun_apple_events_setup(notify=True)
+                        self._set_karafun_entry_status(
+                            entry,
+                            "permission",
+                            message=setup_message,
+                            notify=False,
+                        )
+                    elif self._is_karafun_accessibility_error(result["message"]):
                         setup_message = self._show_karafun_accessibility_setup(notify=True)
                         self._set_karafun_entry_status(
                             entry,
@@ -44577,6 +45135,13 @@ class KaraokeApp(QWidget):
                 self._run_on_ui_thread(self._handoff_show_screen_to_karafun)
 
             try:
+                if not self._open_karafun_for_entry(entry):
+                    raise RuntimeError(
+                        str(getattr(self, "_last_karafun_launch_error", "") or "KaraFun could not be opened")
+                    )
+                permission_ok, permission_error = self._karafun_apple_events_preflight()
+                if not permission_ok:
+                    raise RuntimeError(permission_error)
                 self._karafun_transparent_renderer_ready = False
                 if transparent_renderer_bounds is not None:
                     rx, ry, rw, rh = transparent_renderer_bounds
@@ -44678,7 +45243,10 @@ class KaraokeApp(QWidget):
                     if not ok:
                         last_error = script_error or candidate or "KaraFun search automation failed"
                         _diag(f"[KARAFUN-AUTO] search attempt={attempt} failed error={str(last_error)[:180]!r}")
-                        if self._is_karafun_accessibility_error(last_error):
+                        if (
+                            self._is_karafun_apple_events_error(last_error)
+                            or self._is_karafun_accessibility_error(last_error)
+                        ):
                             raise RuntimeError(last_error)
                         continue
                     parts = str(candidate or "").split("|")
@@ -44933,13 +45501,19 @@ class KaraokeApp(QWidget):
                     entry["karafun_submission_state"] = "karafun_failed"
                     entry.pop("karafun_pending_at", None)
                     entry["karafun_submission_error"] = result["message"][:240]
-                    if self._is_karafun_accessibility_error(result["message"]):
+                    if self._is_karafun_apple_events_error(result["message"]):
+                        setup_message = self._show_karafun_apple_events_setup(notify=True)
+                        self._set_karafun_entry_status(entry, "permission", message=setup_message, notify=False)
+                    elif self._is_karafun_accessibility_error(result["message"]):
                         setup_message = self._show_karafun_accessibility_setup(notify=True)
                         self._set_karafun_entry_status(entry, "permission", message=setup_message, notify=False)
                     else:
                         self._set_karafun_entry_status(entry, "failed", message=f"KaraFun automation failed: {result['message']}", notify=False)
                     _diag(f"[KARAFUN-AUTO] failed title={title!r} error={result['message'][:240]!r}")
-                    if not self._is_karafun_accessibility_error(result["message"]):
+                    if not (
+                        self._is_karafun_apple_events_error(result["message"])
+                        or self._is_karafun_accessibility_error(result["message"])
+                    ):
                         self._show_processing_notification(f"KaraFun automation failed: {result['message']}", level="error")
                 self._schedule_save_data(0)
                 self.update_queue_display()
@@ -45199,10 +45773,11 @@ class KaraokeApp(QWidget):
             self._trigger_show_screen_singer_start_vfx(singer_display, artist, title)
         except Exception:
             pass
+        open_automatically = bool(self.settings.get("karafun_open_automatically", True))
+        automatic_playback = open_automatically and bool(
+            self.settings.get("karafun_auto_queue_enabled", False)
+        )
         try:
-            automatic_playback = bool(self.settings.get("karafun_open_automatically", True)) and bool(
-                self.settings.get("karafun_auto_queue_enabled", False)
-            )
             if not automatic_playback:
                 self._fade_bg_for_external_karafun()
         except Exception:
@@ -45211,17 +45786,20 @@ class KaraokeApp(QWidget):
             self._show_idle_background_after_karaoke(reason="external_karafun_active", advance_slideshow=False)
         except Exception:
             pass
-        if bool(self.settings.get("karafun_open_automatically", True)):
+        # The automation worker performs the launch and authorization preflight
+        # itself so it can recover after KaraFun is restarted. Only the manual
+        # companion path needs to launch KaraFun here.
+        if open_automatically and not automatic_playback:
             opened = self._open_karafun_for_entry(entry)
             if not opened:
                 self._copy_karafun_lookup_text(entry)
-        else:
+        elif not open_automatically:
             self._copy_karafun_lookup_text(entry)
         try:
             _diag(f"[KARAFUN] companion active singer={singer_display!r} artist={artist!r} title={title!r}")
         except Exception:
             pass
-        if bool(self.settings.get("karafun_open_automatically", True)):
+        if automatic_playback:
             self._automate_karafun_search_and_play(entry, key=key, tempo_percent=tempo_percent)
         self._show_external_karafun_dialog()
         self.queue = self.queue.copy()
@@ -46166,19 +46744,18 @@ class KaraokeApp(QWidget):
     def get_singer_index_by_row(self, row):
         counter = 0
         for i, singer in enumerate(self.queue):
-            if singer["songs"]:
-                if counter == row:
-                    return i
-                counter += 1 + len(singer["songs"])
-            else:
-                if counter == row:
-                    return i
-                counter += 1
+            if not singer.get("songs"):
+                continue
+            if counter == row:
+                return i
+            counter += 1 + len(singer["songs"])
         return -1
 
     def get_song_index_by_row(self, row):
         counter = 0
         for i, singer in enumerate(self.queue):
+            if not singer.get("songs"):
+                continue
             if counter == row:
                 return i, -1
             counter += 1
@@ -47109,6 +47686,10 @@ class KaraokeApp(QWidget):
                 self._queue_revision = int(getattr(self, "_queue_revision", 0)) + 1
             except Exception:
                 self._queue_revision = 1
+            try:
+                self._request_queue_display_refresh()
+            except Exception:
+                pass
         return removed
 
     def _log_remote_request_diag(self, req: dict | None, *, status: str, match_result: str = "",
@@ -48590,7 +49171,7 @@ class KaraokeApp(QWidget):
     def get_rotation_data(self):
         rotation = []
         number = 1
-        for rotation_position, singer in enumerate(self.queue, start=1):
+        for singer in self.queue:
             if not isinstance(singer, dict) or bool(singer.get("skipped", False)):
                 continue
 
@@ -48620,22 +49201,13 @@ class KaraokeApp(QWidget):
                 display_name = self._queue_singer_display_for_entry(singer, self._first_active_entry_for_singer(singer))
                 rotation.append({
                     "number": number,
-                    "rotation_position": rotation_position,
+                    "rotation_position": number,
                     "name": display_name or singer.get("name", ""),
                     "songs": songs,
                     "active": True,
                     "status": "active",
                 })
                 number += 1
-            else:
-                rotation.append({
-                    "number": None,
-                    "rotation_position": rotation_position,
-                    "name": singer.get("name", ""),
-                    "songs": [],
-                    "active": False,
-                    "status": "no_active_song",
-                })
         return {"rotation": rotation}
 
     def clear_all_selections(self):

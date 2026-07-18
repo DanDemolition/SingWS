@@ -329,7 +329,7 @@ class ModelBackedViewQATests(unittest.TestCase):
         self.assertEqual(app._queue_item_song_indices(app.queue_display.item(1), 1), (0, 0))
         self.assertEqual(app._queue_item_song_indices(app.queue_display.item(2), 2), (0, 1))
 
-    def test_queue_numbering_skips_singers_without_active_songs(self):
+    def test_queue_omits_singers_without_active_songs_and_keeps_numbering_contiguous(self):
         app = self.make_app()
         self.setup_queue_shell(app)
         app._first_active_entry_for_singer = lambda singer: next((song for song in singer.get("songs", []) if not song.get("skipped", False)), None)
@@ -354,8 +354,8 @@ class ModelBackedViewQATests(unittest.TestCase):
         singer_rows = [row for row in app.queue_display_model._rows if row.get("kind") == "singer"]
         left_role = app._row_left_role
         right_role = app._row_right_role
-        self.assertEqual([row.get("roles", {}).get(left_role) for row in singer_rows], ["1. Dan", "— Steve", "2. Bill"])
-        self.assertEqual(singer_rows[1].get("roles", {}).get(right_role), "")
+        self.assertEqual([row.get("roles", {}).get(left_role) for row in singer_rows], ["1. Dan", "2. Bill"])
+        self.assertEqual([row.get("roles", {}).get(right_role) for row in singer_rows], ["", ""])
 
 
 if __name__ == "__main__":

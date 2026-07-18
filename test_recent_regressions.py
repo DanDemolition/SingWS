@@ -104,7 +104,7 @@ class RecentRegressionTests(unittest.TestCase):
             finally:
                 self.singws.LOGS_DIR = old_logs_dir
 
-    def test_rotation_data_preserves_empty_singer_without_active_number(self):
+    def test_rotation_data_omits_empty_singer_and_keeps_active_numbers_contiguous(self):
         app = make_app(self.singws)
         app._first_active_entry_for_singer = lambda singer: next((s for s in singer.get("songs", []) if not s.get("skipped", False)), None)
         app._queue_singer_display_for_entry = lambda singer, entry: singer.get("name", "")
@@ -115,10 +115,10 @@ class RecentRegressionTests(unittest.TestCase):
         ]
 
         rotation = self.singws.KaraokeApp.get_rotation_data(app)["rotation"]
-        self.assertEqual([row["name"] for row in rotation], ["Dan", "Steve", "Bill"])
-        self.assertEqual([row["number"] for row in rotation], [1, None, 2])
-        self.assertEqual(rotation[1]["status"], "no_active_song")
-        self.assertFalse(rotation[1]["active"])
+        self.assertEqual([row["name"] for row in rotation], ["Dan", "Bill"])
+        self.assertEqual([row["number"] for row in rotation], [1, 2])
+        self.assertEqual([row["rotation_position"] for row in rotation], [1, 2])
+        self.assertTrue(all(row["active"] for row in rotation))
 
     def test_host_rotation_state_empty_defaults(self):
         app = make_app(self.singws)

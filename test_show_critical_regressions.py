@@ -165,10 +165,18 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         self.assertIn("playback preroll/countdown not committed", source)
 
         prepared_start = inspect.getsource(self.singws.KaraokeApp._start_python_karaoke_transport)
+        clear_previous = prepared_start.index("before_singer_countdown")
+        show_countdown = prepared_start.index("_trigger_show_screen_singer_start_vfx")
+        transport_start = prepared_start.index("transport.start(start_seconds)")
         self.assertLess(
-            prepared_start.index("_trigger_show_screen_singer_start_vfx"),
-            prepared_start.index("transport.start(start_seconds)"),
+            clear_previous,
+            show_countdown,
         )
+        self.assertLess(show_countdown, transport_start)
+        self.assertNotIn('reason="playback_started"', prepared_start[transport_start:])
+        self.assertEqual(prepared_start.count("_trigger_show_screen_singer_start_vfx"), 1)
+        self.assertEqual(prepared_start.count("transport.start(start_seconds)"), 1)
+        self.assertEqual(source.count("self._playback_start_countdown_ms = 2100"), 1)
 
     def test_countdown_restarts_one_timer_and_runs_at_show_speed(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")

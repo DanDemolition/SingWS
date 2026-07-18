@@ -2,6 +2,7 @@ import importlib.util
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -173,7 +174,7 @@ class FetchOverlapTests(unittest.TestCase):
 
 
 class RelayFallbackPollingTests(unittest.TestCase):
-    def test_relay_mode_routes_poll_fallback_through_relay_handler(self):
+    def test_relay_mode_does_not_connect_legacy_request_poll(self):
         app = make_app()
         connected = []
 
@@ -190,7 +191,78 @@ class RelayFallbackPollingTests(unittest.TestCase):
 
         MAIN.KaraokeApp._connect_poll_worker_requests_received(app, True)
 
-        self.assertEqual(connected, [app._handle_relay_requests])
+        self.assertEqual(connected, [])
+
+    def test_relay_startup_backlog_queues_each_person_once(self):
+        app = make_app()
+        relay_starts = []
+        created_workers = []
+        queued = [{"request_id": 99, "singer": "Existing", "title": "Saved Song"}]
+
+        class FakeSignal:
+            def __init__(self):
+                self.handlers = []
+
+            def connect(self, fn):
+                self.handlers.append(fn)
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                self.started = FakeSignal()
+
+            def start(self):
+                pass
+
+        class FakePollWorker:
+            def __init__(self, *args, **kwargs):
+                self.poll_requests = kwargs["poll_requests"]
+                self.requests_received = FakeSignal()
+                self.host_commands_received = FakeSignal()
+                self.host_state_sync_requested = FakeSignal()
+                self.connection_status_changed = FakeSignal()
+                created_workers.append(self)
+
+            def moveToThread(self, thread):
+                pass
+
+            def run(self):
+                pass
+
+        app.stop_request_polling = lambda: None
+        app._should_use_request_relay = lambda *args: True
+        app._start_request_relay = lambda *args: relay_starts.append(args)
+        app._should_use_host_control_relay = lambda *args: False
+        app._effective_request_poll_interval_sec = lambda: 2
+        app._effective_host_poll_interval_sec = lambda: 2
+        app.handle_host_commands_from_thread = lambda rows: None
+        app._schedule_host_control_state_sync = lambda: None
+        app._set_server_connection_status = lambda *args: None
+        app._sync_remote_removal_tombstones_async = lambda reason: None
+        app.handle_requests_from_thread = lambda rows: queued.extend(rows)
+        app._handle_relay_requests = lambda rows: queued.extend(rows)
+
+        backlog = [
+            {"request_id": 101, "singer": "Alice", "title": "Song A"},
+            {"request_id": 102, "singer": "Bob", "title": "Song B"},
+        ]
+
+        with mock.patch.object(MAIN, "QThread", FakeThread), \
+             mock.patch.object(MAIN, "SimplePollWorker", FakePollWorker), \
+             mock.patch.object(MAIN.QTimer, "singleShot", lambda *args: None):
+            MAIN.KaraokeApp.start_request_polling(app)
+
+        self.assertEqual(len(relay_starts), 1)
+        self.assertEqual(len(created_workers), 1)
+        self.assertFalse(created_workers[0].poll_requests)
+        self.assertEqual(created_workers[0].requests_received.handlers, [])
+
+        # The relay's connect-time recovery fetch is now the only startup
+        # request source; the legacy worker cannot replay the same backlog.
+        app._handle_relay_requests(backlog)
+        self.assertEqual([row["singer"] for row in queued], ["Existing", "Alice", "Bob"])
+        self.assertEqual([row["request_id"] for row in queued], [99, 101, 102])
+        self.assertEqual(sum(row["request_id"] == 101 for row in queued), 1)
+        self.assertEqual(sum(row["request_id"] == 102 for row in queued), 1)
 
     def test_polling_mode_keeps_legacy_request_handler(self):
         app = make_app()
