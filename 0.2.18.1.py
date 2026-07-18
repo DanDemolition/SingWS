@@ -6670,7 +6670,9 @@ Rectangle {
 
     Timer {
         id: singerCountdownTimer
-        interval: 1000
+        // A brisk 3-2-1 keeps the singer-facing cue useful without adding
+        // three seconds of dead air. The transport uses the same 2100ms gate.
+        interval: 700
         repeat: true
         onTriggered: {
             if (root.startCountdownValue > 1) {
@@ -7286,8 +7288,6 @@ class RenderThreadShowScreenVfx(QFrame):
     def set_enabled(self, enabled):
         enabled = bool(enabled)
         self._root.setProperty("effectsEnabled", enabled)
-        if not enabled:
-            self._root.setProperty("active", False)
 
 
 class VideoAreaWidget(QWidget):
@@ -7372,8 +7372,6 @@ class VideoAreaWidget(QWidget):
         self.update()
 
     def show_singer_start_vfx(self, singer: str, title: str = "", artist: str = ""):
-        if not bool(getattr(self, "_show_vfx_enabled", True)):
-            return False
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is None:
             return False
@@ -7613,8 +7611,15 @@ class VideoAreaWidget(QWidget):
         except Exception:
             duration_ms = 10000
         self._next_up_overlay_duration_ms = duration_ms
-        self._next_up_overlay_hide_started = False
+        # Arm a widget-side deadline immediately.  The QML completion signal is
+        # still the preferred finish path, but it can be delayed when the render
+        # thread is saturated (notably during show startup on slower Macs).
+        # Keeping this independent watchdog also prevents stale/stacked overlays.
+        self._next_up_overlay_hide_started = True
         self._next_up_overlay_hide_timer.stop()
+        self._next_up_overlay_hide_timer.start(
+            duration_ms + max(1, int(getattr(self, "_next_up_overlay_fade_ms", 250) or 250))
+        )
         if not self._next_up_overlay_tick_timer.isActive():
             self._next_up_overlay_tick_timer.start(33)
         overlay = getattr(self, "_show_vfx_overlay", None)
@@ -21497,6 +21502,15 @@ class KaraokeApp(QWidget):
         background music comes back instead of leaving dead air."""
         if getattr(self, "karaoke_transport", None) is None:
             return
+        pending_rollback = getattr(self, "_pending_play_start_rollback", None)
+        if callable(pending_rollback):
+            try:
+                if pending_rollback("async_preroll_failed"):
+                    self.karaoke_transport = None
+                    self._recover_idle_output("async_preroll_failed", ensure_bg=True)
+                    return
+            except Exception:
+                pass
         _diag("[PY-KARAOKE] playback hung — recovering via media-end path")
         QTimer.singleShot(0, self._handle_media_end_safe)
 
@@ -21538,7 +21552,7 @@ class KaraokeApp(QWidget):
                 self._apply_idle_background(force=True, advance_slideshow=True)
             except Exception:
                 pass
-            return
+            return False
         self._gst_teardown_async()
         duration = 0.0
         try:
@@ -21582,6 +21596,10 @@ class KaraokeApp(QWidget):
             transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             transport.max_video_height = 720
+        try:
+            transport.start_delay_ms = max(0, int(getattr(self, "_playback_start_countdown_ms", 0) or 0))
+        except Exception:
+            pass
         try:
             transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
         except Exception:
@@ -21684,6 +21702,14 @@ class KaraokeApp(QWidget):
         self.karaoke_transport = transport
         self.karaoke_volume = None
         try:
+            countdown_payload = getattr(self, "_pending_playback_countdown_payload", None)
+            self._pending_playback_countdown_payload = None
+            if isinstance(countdown_payload, (tuple, list)) and len(countdown_payload) >= 3:
+                self._trigger_show_screen_singer_start_vfx(
+                    str(countdown_payload[0] or ""),
+                    str(countdown_payload[1] or ""),
+                    str(countdown_payload[2] or ""),
+                )
             transport.start(start_seconds)
             if loop_seconds and len(loop_seconds) == 2:
                 try:
@@ -21717,13 +21743,14 @@ class KaraokeApp(QWidget):
                 self._apply_idle_background(force=True, advance_slideshow=True)
             except Exception:
                 pass
-            return
+            return False
         self._setup_end_silence_state(mode, None)
         self._update_karaoke_key_ui()
         _diag(
             f"[PY-KARAOKE] started mode={mode} start={float(start_seconds):.3f}s "
             f"tempo={float(self._karaoke_tempo_percent):.0f}% key={int(semitones)}"
         )
+        return True
 
     def _prepare_python_karaoke_start(self, media_path: str):
         self.karaoke_playing = True
@@ -21761,7 +21788,7 @@ class KaraokeApp(QWidget):
             )
         except Exception:
             pass
-        self._start_python_karaoke_transport(
+        return self._start_python_karaoke_transport(
             audio_path=song_path,
             video_path=song_path,
             mode="mp4",
@@ -21782,7 +21809,7 @@ class KaraokeApp(QWidget):
             SingWSLogger.log_playback_start("CDG", cdg_path, semitones, current_singer, duration)
         except Exception:
             pass
-        self._start_python_karaoke_transport(
+        started = self._start_python_karaoke_transport(
             audio_path=mp3_path,
             video_path=cdg_path,
             mode="cdg",
@@ -21793,17 +21820,22 @@ class KaraokeApp(QWidget):
         # Optional shuffled MP4 background behind the CDG lyrics. Runs on its
         # own muted video-only pipeline so audio timing/key/tempo are
         # untouched; falls back to the normal background when disabled/empty.
-        try:
-            self._start_lyrics_background_video()
-        except Exception as e:
-            _diag(f"[BG-VIDEO] start hook failed: {e}")
+        if started:
+            try:
+                # Decorative video startup is deliberately delayed until the
+                # real karaoke transport has accepted its start. This keeps it
+                # out of the Play-button critical section on slower Macs.
+                QTimer.singleShot(self._playback_safe_ui_delay_ms(180), self._start_lyrics_background_video)
+            except Exception as e:
+                _diag(f"[BG-VIDEO] start hook failed: {e}")
+        return bool(started)
 
     def _play_python_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
         self._prepare_python_karaoke_start(song_path)
         self._current_karaoke_mode = "mp3"
         self._current_karaoke_semitones = int(semitones or 0)
-        self._start_python_karaoke_transport(
+        return self._start_python_karaoke_transport(
             audio_path=song_path,
             video_path=None,
             mode="audio",
@@ -25494,7 +25526,7 @@ class KaraokeApp(QWidget):
             try:
                 if getattr(self, "_zip_extract_thread", None) is not None and self._zip_extract_thread.isRunning():
                     self._set_processing_text("ZIP extraction already running…")
-                    return
+                    return False
             except Exception:
                 pass
             self._set_processing_text(
@@ -25513,11 +25545,11 @@ class KaraokeApp(QWidget):
             self._zip_extract_worker.finished.connect(self._zip_extract_worker.deleteLater)
             self._zip_extract_thread.finished.connect(self._zip_extract_thread.deleteLater)
             self._zip_extract_thread.start()
-            return
+            return True
 
         if not cdg_path or not mp3_path:
             print(f"❌ Failed to locate MP3/CDG inside {zip_path}")
-            return
+            return False
 
         # Mark karaoke as active and refresh BG controls only once playback can start.
         self.karaoke_playing = True
@@ -25531,7 +25563,7 @@ class KaraokeApp(QWidget):
         # Run playback (with any phrase-start offset + loop carried across extraction)
         self._mp3g_pending_start.pop(str(zip_path), None)
         self._mp3g_pending_loop.pop(str(zip_path), None)
-        self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones, start_seconds=effective_start, loop_seconds=effective_loop)
+        return bool(self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones, start_seconds=effective_start, loop_seconds=effective_loop))
 
     def _on_zip_extract_finished(self, zip_path: str, cdg_path: str, mp3_path: str, semitones: int, ok: bool, message: str):
         try:
@@ -25540,10 +25572,23 @@ class KaraokeApp(QWidget):
             pass
         if not ok or not cdg_path or not mp3_path:
             print(f"❌ zip_cache could not extract ZIP for playback: {zip_path} ({message})")
+            if str(getattr(self, "_mp3g_prepare_then_play_next", "") or "") == str(zip_path):
+                self._mp3g_prepare_then_play_next = ""
+                self._next_in_progress = False
+                _diag(f"[QUEUE-AUDIT] action=zip_prepare_failed queue_preserved=1 file={zip_path!r}")
             try:
                 self._set_processing_text("ZIP extraction failed")
             except Exception:
                 pass
+            return
+        # Queue-driven playback prepares uncached ZIP media first. The queue
+        # entry was restored before extraction, so only re-enter Play after the
+        # CDG/MP3 pair is available. This gives every ZIP the same deterministic
+        # prepare -> countdown -> transport-start sequence as cached media.
+        if str(getattr(self, "_mp3g_prepare_then_play_next", "") or "") == str(zip_path):
+            self._mp3g_prepare_then_play_next = ""
+            self._next_in_progress = False
+            QTimer.singleShot(0, lambda: self.play_next_file(skip_confirmation=True))
             return
         self.play_mp3g_zip(zip_path, semitones)
 
@@ -28453,6 +28498,13 @@ class KaraokeApp(QWidget):
                 query,
                 limit=250,
                 fuzzy=True,
+                karafun_search_url=(
+                    _network_normalize_base_url(self.settings.get("base_url", "")) + "/karafun_search.php"
+                    if bool(self.settings.get("karafun_provider_enabled", True))
+                    and bool(self.settings.get("karafun_include_online_search", False))
+                    else ""
+                ),
+                karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
             )
             thread.results_ready.connect(on_results)
             try:
@@ -31190,7 +31242,7 @@ class KaraokeApp(QWidget):
     def _set_waitlist_enabled_from_host(self, enabled: bool, *, reason: str = "host_toggle") -> bool:
         base_url, tenant, api_key = self._waitlist_sync_config()
         if not base_url or not tenant or not api_key:
-            self._set_waitlist_enabled_local(bool(enabled), reason=f"{reason}_local_only", persist=False)
+            self._set_waitlist_enabled_local(bool(enabled), reason=f"{reason}_local_only", persist=True)
             return False
         previous = self._is_waitlist_enabled_cached()
         desired = bool(enabled)
@@ -31205,9 +31257,25 @@ class KaraokeApp(QWidget):
 
             def finish():
                 if ok:
-                    self._set_waitlist_enabled_local(desired, reason=reason, persist=False)
+                    self._set_waitlist_enabled_local(desired, reason=reason, persist=True)
+                    self._last_waitlist_state_pull_ts = 0.0
+                    try:
+                        self._show_processing_notification(
+                            "Waitlist enabled: new signups will wait for host approval."
+                            if desired else
+                            "Waitlist disabled: new signups will enter the active rotation.",
+                            level="success",
+                        )
+                    except Exception:
+                        pass
+                    # Pull immediately so stale/reconnected browser sessions
+                    # are reconciled without a page refresh or device restart.
+                    try:
+                        self.fetch_remote_requests_once("waitlist_mode_changed")
+                    except Exception:
+                        pass
                 else:
-                    self._set_waitlist_enabled_local(previous, reason=f"{reason}_failed_revert", persist=False)
+                    self._set_waitlist_enabled_local(previous, reason=f"{reason}_failed_revert", persist=True)
                     try:
                         QMessageBox.warning(
                             self,
@@ -35315,7 +35383,28 @@ class KaraokeApp(QWidget):
         s = str(name or "")
         return _re.sub(r"\S+", lambda m: m.group(0)[0].upper() + m.group(0)[1:], s)
 
-    def _queue_singer_match_index(self, singer_name: str) -> int:
+    def _queue_singer_match_index(self, singer_name: str, remote_meta: dict | None = None) -> int:
+        """Find a singer by immutable identity first, legacy name second."""
+        meta = remote_meta if isinstance(remote_meta, dict) else {}
+        singer_id = str(meta.get("singer_id") or meta.get("singer_uid") or "").strip()
+        try:
+            session_id = int(meta.get("singer_session_id") or 0)
+        except Exception:
+            session_id = 0
+        if singer_id or session_id > 0:
+            for idx, singer in enumerate(self.queue or []):
+                if not isinstance(singer, dict):
+                    continue
+                if singer_id and singer_id in {
+                    str(singer.get("singer_id") or "").strip(),
+                    str(singer.get("server_singer_id") or "").strip(),
+                }:
+                    return idx
+                try:
+                    if session_id > 0 and int(singer.get("server_singer_session_id") or 0) == session_id:
+                        return idx
+                except Exception:
+                    pass
         target = self._queue_limit_name_key(singer_name)
         if not target:
             return -1
@@ -35517,6 +35606,8 @@ class KaraokeApp(QWidget):
                 "selected_brand",
                 "selected_disc_id",
                 "request_source",
+                "singer_id",
+                "singer_uid",
             ):
                 if remote_meta.get(_request_meta_key) not in (None, ""):
                     entry[_request_meta_key] = remote_meta.get(_request_meta_key)
@@ -35599,12 +35690,15 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-        singer_idx = self._queue_singer_match_index(primary)
+        singer_idx = self._queue_singer_match_index(primary, remote_meta)
         if singer_idx >= 0:
             singer = self.queue[singer_idx]
             self._ensure_singer_id(singer)
             if is_remote and int(entry.get("singer_session_id") or 0) > 0:
                 singer["server_singer_session_id"] = int(entry["singer_session_id"])
+            remote_singer_id = str(entry.get("singer_id") or entry.get("singer_uid") or "").strip()
+            if remote_singer_id:
+                singer["server_singer_id"] = remote_singer_id
             self._ensure_queue_entry_id(entry)
             songs = singer.setdefault("songs", [])
             before_order = self._queue_order_snapshot_for_log(singer)
@@ -35662,6 +35756,9 @@ class KaraokeApp(QWidget):
         self._ensure_queue_entry_id(entry)
         new_singer = {"name": primary, "songs": [entry], "skipped": False, "has_sung": False, "round_sung": False, "rotation_marker": False, "created_at": time.time()}
         self._ensure_singer_id(new_singer)
+        remote_singer_id = str(entry.get("singer_id") or entry.get("singer_uid") or "").strip()
+        if remote_singer_id:
+            new_singer["server_singer_id"] = remote_singer_id
         if is_remote and int(entry.get("singer_session_id") or 0) > 0:
             new_singer["server_singer_session_id"] = int(entry["singer_session_id"])
         if self._is_rotation_mode():
@@ -35726,6 +35823,35 @@ class KaraokeApp(QWidget):
                 self.queue_display.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
         except Exception:
             pass
+
+    def _select_next_rotation_after_start(self, started_singer_id: str = "") -> int:
+        """Select/center the next actionable singer after an accepted Play.
+
+        A singer moves to the end after one song, even when they have more
+        songs, so every singer gets one turn per pass. At the end this wraps to
+        the first actionable row. If the started singer is the only actionable
+        singer and has another song, their row is selected again.
+        """
+        started_singer_id = str(started_singer_id or "").strip()
+        fallback_same = -1
+        for idx, candidate in enumerate(self.queue or []):
+            if not isinstance(candidate, dict) or candidate.get("skipped", False):
+                continue
+            if self._first_active_entry_for_singer(candidate) is None:
+                continue
+            candidate_id = self._ensure_singer_id(candidate)
+            if started_singer_id and candidate_id == started_singer_id:
+                fallback_same = idx
+                continue
+            self._select_queue_singer_for_host(idx)
+            _diag(f"[ROTATION-ADVANCE] selected next singer_id={candidate_id} index={idx}")
+            return idx
+        if fallback_same >= 0:
+            self._select_queue_singer_for_host(fallback_same)
+            _diag(f"[ROTATION-ADVANCE] wrapped to same singer_id={started_singer_id} index={fallback_same}")
+            return fallback_same
+        _diag("[ROTATION-ADVANCE] no actionable singer remains; selection unchanged")
+        return -1
 
     def _song_info_primary_path(self, song_info):
         """Best-effort primary file path for a queued song_info payload."""
@@ -37086,6 +37212,17 @@ class KaraokeApp(QWidget):
         if singer_idx < 0 or singer_idx >= len(self.queue):
             return False
         singer = self.queue[singer_idx]
+        # Snapshot immutable server ownership before any display-name merge.
+        # The server can use these fields to retain the existing signup
+        # session, while older servers safely fall back to old_name/new_name.
+        try:
+            singer_session_id = int(singer.get("server_singer_session_id") or 0)
+        except Exception:
+            singer_session_id = 0
+        singer_identity = {
+            "singer_id": str(singer.get("server_singer_id") or singer.get("singer_id") or "").strip(),
+            "singer_session_id": singer_session_id,
+        }
         old_name = str(singer.get("name", "") or "").strip()
         new_name = str(new_name or "").strip()
         if not old_name or not new_name or new_name == old_name:
@@ -37123,7 +37260,7 @@ class KaraokeApp(QWidget):
         self._record_singer_rename_alias(old_name, canonical)
         self._apply_singer_rename_to_requests(old_name, canonical)
         self._update_current_singer_refs_for_rename(old_name, canonical)
-        self._push_singer_rename_to_server(old_name, canonical)
+        self._push_singer_rename_to_server(old_name, canonical, singer_identity=singer_identity)
         try:
             _diag(
                 f"[SINGER-MERGE] rename source={source} old={old_name!r} "
@@ -37367,7 +37504,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _push_singer_rename_to_server(self, old_name: str, new_name: str) -> None:
+    def _push_singer_rename_to_server(self, old_name: str, new_name: str, *, singer_identity: dict | None = None) -> None:
         """Host-wins: rewrite the server's request rows for the old singer so
         the next sync/reconnect can't reintroduce the duplicate. The endpoint
         is a single atomic UPDATE, so two clients racing the same rename
@@ -37386,11 +37523,22 @@ class KaraokeApp(QWidget):
 
         import threading, requests
 
+        identity = singer_identity if isinstance(singer_identity, dict) else {}
+        payload = {
+            "user": tenant,
+            "old_singer": old_name,
+            "new_singer": new_name,
+            # New servers update by immutable identity. Old servers ignore
+            # these extra fields and retain the legacy name-based fallback.
+            "singer_id": str(identity.get("singer_id") or ""),
+            "singer_session_id": int(identity.get("singer_session_id") or 0),
+        }
+
         def send():
             try:
                 resp = requests.post(
                     f"{base_url}/api/v1/rename_request_singer.php",
-                    data={"user": tenant, "old_singer": old_name, "new_singer": new_name},
+                    data=payload,
                     headers={
                         "X-API-Key": api_key,
                         "Accept": "application/json",
@@ -39071,6 +39219,13 @@ class KaraokeApp(QWidget):
                 query,
                 limit=250,
                 fuzzy=True,
+                karafun_search_url=(
+                    _network_normalize_base_url(self.settings.get("base_url", "")) + "/karafun_search.php"
+                    if bool(self.settings.get("karafun_provider_enabled", True))
+                    and bool(self.settings.get("karafun_include_online_search", False))
+                    else ""
+                ),
+                karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
             )
             thread.results_ready.connect(on_results)
             try:
@@ -39085,6 +39240,12 @@ class KaraokeApp(QWidget):
             if not isinstance(track, dict):
                 return
             try:
+                provider = str(track.get("provider") or "local").strip().lower()
+                if "karafun" in provider:
+                    track_id = str(track.get("provider_track_id") or track.get("songid") or "").strip()
+                    availability = str(track.get("availability_status") or "").strip().lower()
+                    if not track_id or availability in {"unavailable", "invalid", "removed"}:
+                        raise ValueError("This KaraFun result is unavailable or no longer has a valid track ID.")
                 if self._replace_queue_song_with_track(singer_idx, song_idx, track, source="replace_track_dialog"):
                     dlg.accept()
             except Exception as e:
@@ -40707,6 +40868,10 @@ class KaraokeApp(QWidget):
     def _apply_runtime_media_settings(self):
         """Apply runtime media settings without overwriting user choices."""
         try:
+            intel_mac = sys.platform == "darwin" and platform.machine().lower() in {"x86_64", "amd64"}
+        except Exception:
+            intel_mac = False
+        try:
             ticker = getattr(getattr(self, "video_window", None), "ticker", None)
             if ticker is not None and hasattr(ticker, "set_scroll_speed"):
                 ticker.set_scroll_speed(self._effective_ticker_speed_px_per_sec())
@@ -40731,6 +40896,32 @@ class KaraokeApp(QWidget):
             self._apply_bgm_master_processing()
         except Exception:
             pass
+        if intel_mac:
+            # Keep the functional 3-2-1 singer cue, but disable particle,
+            # ticker-glow, and rotation animation work that competes with
+            # decoder/device preroll on older Intel Macs. These are runtime
+            # overrides only; the user's saved preferences are untouched.
+            try:
+                area = getattr(getattr(self, "video_window", None), "video_area", None)
+                if area is not None and hasattr(area, "set_show_vfx_enabled"):
+                    area.set_show_vfx_enabled(False)
+            except Exception:
+                pass
+            try:
+                rotation_view = getattr(self, "rotation_view", None)
+                if rotation_view is not None and hasattr(rotation_view, "set_effects_enabled"):
+                    rotation_view.set_effects_enabled(False)
+            except Exception:
+                pass
+            try:
+                ticker = getattr(getattr(self, "video_window", None), "ticker", None)
+                if ticker is not None and hasattr(ticker, "set_effects_enabled"):
+                    ticker.set_effects_enabled(False)
+            except Exception:
+                pass
+            if not bool(getattr(self, "_intel_show_effects_backoff_logged", False)):
+                self._intel_show_effects_backoff_logged = True
+                _diag("[PERF] Intel Mac show-effects backoff active; countdown retained")
 
     def _track_trim_db(self, path: str) -> float:
         """Host-set per-track playback trim in dB (plain gain, no DSP). 0 if unset."""
@@ -45262,8 +45453,14 @@ class KaraokeApp(QWidget):
         if getattr(self, "_next_in_progress", False):
             _diag("[PLAYNEXT] ignored: action already in progress")
             return
+        if getattr(self, "_pending_play_start_token", None) is not None:
+            _diag("[PLAYNEXT] ignored: playback preroll/countdown not committed")
+            return
         self._next_in_progress = True
-        QTimer.singleShot(450, lambda: setattr(self, "_next_in_progress", False))
+        # Covers countdown + asynchronous GStreamer preroll. A 450ms gate let
+        # a normal double-click consume the following singer before audio had
+        # started on slower Macs.
+        QTimer.singleShot(3500, lambda: setattr(self, "_next_in_progress", False))
 
         # Optional confirmation if currently playing
         is_playing = False
@@ -45278,6 +45475,30 @@ class KaraokeApp(QWidget):
         if not self.queue:
             _diag("[PLAYNEXT] ignored: queue empty")
             return
+
+        # Playback selection is transactional. Several legacy return paths
+        # popped a singer/song before validating or starting media, which is
+        # how a failed Play could make later rotation positions disappear.
+        queue_snapshot = list(self.queue)
+        singer_snapshots = [(s, dict(s)) for s in queue_snapshot if isinstance(s, dict)]
+
+        def _restore_play_transaction(reason: str, *, clear_gate: bool = True):
+            for snapshot_singer, snapshot_state in singer_snapshots:
+                snapshot_singer.clear()
+                snapshot_singer.update(snapshot_state)
+                snapshot_singer["songs"] = list(snapshot_state.get("songs", []) or [])
+            self.queue = list(queue_snapshot)
+            self.karaoke_playing = False
+            self._playback_start_countdown_ms = 0
+            self._pending_playback_countdown_payload = None
+            if clear_gate:
+                self._next_in_progress = False
+            _diag(f"[QUEUE-AUDIT] action=play_start_rollback reason={reason} singers={len(self.queue)}")
+            try:
+                self._request_queue_display_refresh()
+                self._schedule_save_data(0)
+            except Exception:
+                pass
 
         marker_was_top = False
         if self._is_rotation_mode():
@@ -45395,22 +45616,13 @@ class KaraokeApp(QWidget):
                 )
                 return
             if primary_path and (not os.path.exists(primary_path)):
+                _diag(f"[PLAYNEXT] start rejected: missing file kept in queue: {primary_path}")
+                _restore_play_transaction("missing_file")
                 try:
-                    _diag(f"[PLAYNEXT] dropped stale queue entry (missing file): {primary_path}")
+                    QMessageBox.warning(self, "Playback Failed", f"The selected track file is missing:\n\n{primary_path}")
                 except Exception:
                     pass
-                # Keep looking for next valid song for this singer.
-                continue
-            try:
-                if remote_request_id is not None:
-                    self._complete_remote_request(
-                        remote_request_id,
-                        entry=entry,
-                        singer_name=str(singer.get("name", "") or ""),
-                        reason="song_completed",
-                    )
-            except Exception:
-                pass
+                return
             break
 
         # Keep this song in ETA while it is actively playing.
@@ -45447,55 +45659,152 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        # Uncached MP3+G ZIPs are preparation, not a successful playback
+        # start. Restore the queue before starting the worker, keep Play gated,
+        # and re-enter this method from the extraction callback. This prevents
+        # extraction errors or repeated clicks from consuming a request.
+        if isinstance(song_info, str) and song_info.lower().endswith(".zip"):
+            cached_cdg, cached_mp3 = self.zip_cache.cached_paths_if_ready(song_info)
+            if not cached_cdg or not cached_mp3:
+                _restore_play_transaction("zip_prepare_pending", clear_gate=False)
+                self._mp3g_prepare_then_play_next = str(song_info)
+                if not self.play_mp3g_zip(
+                    song_info,
+                    semitones=key,
+                    start_seconds=phrase_start,
+                    loop_seconds=intro_loop_seconds,
+                ):
+                    self._mp3g_prepare_then_play_next = ""
+                    self._next_in_progress = False
+                return
+
+        # Show the singer cue before media is allowed to leave PAUSED. The
+        # GStreamer transport prerolls asynchronously behind this 2100ms gate,
+        # so immediate CDG lyrics cannot paint or advance over the countdown.
+        countdown_artist = str(entry.get("artist") or "").strip() if isinstance(entry, dict) else ""
+        countdown_title = str(entry.get("title") or "").strip() if isinstance(entry, dict) else ""
+        singer_display = duet_display if duet_display else singer.get("name", "")
+        self._playback_start_countdown_ms = 2100
+        self._pending_playback_countdown_payload = (
+            singer_display,
+            countdown_artist,
+            countdown_title,
+        )
+
         # Normalize shapes we might see in the queue
+        start_ok = False
         if isinstance(song_info, (tuple, list)):
             # Could be ((cdg, mp3), key) OR (orig_mp4, processed_mp4) from older entries
             if isinstance(song_info[0], str) and song_info[0].endswith(".cdg"):
                 cdg_path, mp3_path = song_info
                 song_path_display = cdg_path
-                self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                start_ok = bool(self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
             elif isinstance(song_info[0], str) and song_info[0].endswith(".mp4"):
                 # Old tuple (original, processed) — play original with realtime key change
                 orig_mp4 = song_info[0]
                 song_path_display = orig_mp4
-                self.play_mp4(orig_mp4, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                start_ok = bool(self.play_mp4(orig_mp4, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
             else:
                 # Fallback to first element
                 song_path_display = str(song_info[0])
                 if song_path_display.endswith(".mp4"):
-                    self.play_mp4(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                    start_ok = bool(self.play_mp4(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
                 elif song_path_display.endswith(".mp3"):
-                    self.play_mp3(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                    start_ok = bool(self.play_mp3(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
                 else:
                     print("Unsupported tuple format:", song_info)
+                    _restore_play_transaction("unsupported_tuple")
                     return
         else:
             # Plain string path
             song_path_display = song_info
             if song_info.endswith(".mp4"):
-                self.play_mp4(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                start_ok = bool(self.play_mp4(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
             elif song_info.endswith(".mp3"):
-                self.play_mp3(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                start_ok = bool(self.play_mp3(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
             elif song_info.endswith(".zip"):
                 # NEW: Handle MP3G zip files
                 if self.is_mp3g_zip(song_info):
-                    self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                    start_ok = bool(self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
                 else:
                     print("Invalid zip format:", song_info)
+                    _restore_play_transaction("invalid_zip")
                     return
             elif song_info.endswith(".cdg"):
                 base, _ = os.path.splitext(song_info)
                 mp3_path = base + ".mp3"
                 if os.path.exists(mp3_path):
-                    self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds)
+                    start_ok = bool(self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
                 else:
                     _diag(f"[PLAYNEXT] failed: missing MP3 pair for CDG {song_info}")
                     print("Missing MP3 for CDG:", song_info)
+                    _restore_play_transaction("missing_cdg_audio_pair")
                     return
             else:
                 _diag(f"[PLAYNEXT] failed: unsupported format {song_info}")
                 print("Unsupported format:", song_info)
+                _restore_play_transaction("unsupported_format")
                 return
+
+        # The transport copied this value before returning acceptance. Do not
+        # leak the queue countdown into previews, restarts, or later direct
+        # playback calls.
+        self._playback_start_countdown_ms = 0
+        if not start_ok:
+            _restore_play_transaction("transport_rejected_start")
+            return
+
+        # start_ok means asynchronous preroll was accepted, not that sound has
+        # started. Commit ownership/history/selection only from the transport's
+        # real started signal. A preroll failure or Stop during the countdown
+        # restores the complete queue and singer snapshot.
+        transport_for_start = getattr(self, "karaoke_transport", None)
+        play_start_token = object()
+        self._pending_play_start_token = play_start_token
+
+        def _rollback_pending_start(reason: str):
+            if getattr(self, "_pending_play_start_token", None) is not play_start_token:
+                return False
+            self._pending_play_start_token = None
+            self._pending_play_start_rollback = None
+            _restore_play_transaction(reason)
+            return True
+
+        def _commit_pending_start():
+            if getattr(self, "_pending_play_start_token", None) is not play_start_token:
+                return
+            self._pending_play_start_token = None
+            self._pending_play_start_rollback = None
+            try:
+                if remote_request_id is not None:
+                    self._complete_remote_request(
+                        remote_request_id,
+                        entry=entry,
+                        singer_name=str(singer.get("name", "") or ""),
+                        reason="song_started",
+                    )
+            except Exception:
+                pass
+            try:
+                self._record_singer_history_play(
+                    singer.get("name", "") or singer_display,
+                    entry,
+                    song_path_display,
+                    key=key,
+                    tempo_percent=tempo_percent,
+                )
+                self._schedule_save_data(1000)
+                self._sync_singer_history_async("play_next")
+            except Exception:
+                pass
+            started_singer_id = str(getattr(self, "_current_karaoke_singer_id", "") or "")
+            QTimer.singleShot(0, lambda sid=started_singer_id: self._select_next_rotation_after_start(sid))
+
+        self._pending_play_start_rollback = _rollback_pending_start
+        if transport_for_start is not None and hasattr(transport_for_start, "started"):
+            transport_for_start.started.connect(_commit_pending_start)
+        else:
+            QTimer.singleShot(0, _commit_pending_start)
 
         try:
             _diag(f"[PLAYNEXT] started singer={singer.get('name', 'Unknown')} song={song_path_display}")
@@ -45549,20 +45858,7 @@ class KaraokeApp(QWidget):
             self._update_last_sung_card()
         except Exception:
             pass
-        try:
-            self._record_singer_history_play(
-                singer.get("name", "") or singer_display,
-                entry,
-                song_path_display,
-                key=key,
-                tempo_percent=tempo_percent,
-            )
-            self._schedule_save_data(1000 if bool(getattr(self, "karaoke_playing", False)) else 0)
-            self._sync_singer_history_async("play_next")
-        except Exception:
-            pass
         self._set_now_singing_3line(singer_display, artist, title)
-        self._trigger_show_screen_singer_start_vfx(singer_display, artist, title)
         # Mark singer as has_sung (they've now completed at least one song)
         singer["has_sung"] = True
         singer["last_sung_at"] = time.time()
@@ -45591,9 +45887,15 @@ class KaraokeApp(QWidget):
             pass
 
         # Defer queue display update with small delay to avoid freezing ticker
-        QTimer.singleShot(50, lambda: self._reapply_rotation_presentation(scroll_current=True))
+        QTimer.singleShot(50, lambda: self._reapply_rotation_presentation(scroll_current=False))
 
     def stop_playback(self, skip_confirmation=False):
+        pending_rollback = getattr(self, "_pending_play_start_rollback", None)
+        if callable(pending_rollback):
+            try:
+                pending_rollback("stopped_before_audible_start")
+            except Exception:
+                pass
         if isinstance(getattr(self, "_active_external_karafun", None), dict):
             self._finish_external_karafun_playback("return_to_queue")
             return
@@ -45846,11 +46148,11 @@ class KaraokeApp(QWidget):
             _diag(f"[BG] Manual-stop recovery failed: {e}")
     
     def play_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
-        self._play_python_mp4(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
+        return self._play_python_mp4(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
     def play_cdg_mp3_dual(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, fast_restart=False, loop_seconds=None):
-        self._play_python_cdg(cdg_path, mp3_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
+        return self._play_python_cdg(cdg_path, mp3_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
     def on_media_ended(self, event=None):
@@ -45858,7 +46160,7 @@ class KaraokeApp(QWidget):
             QTimer.singleShot(0, self._handle_media_end_safe)
                 
     def play_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
-        self._play_python_mp3(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
+        return self._play_python_mp3(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
     def get_singer_index_by_row(self, row):
@@ -46293,13 +46595,12 @@ class KaraokeApp(QWidget):
         return (norm(artist), norm(title), norm(version))
 
     def _cleanup_duplicate_singer_songs(self, *, reason: str = "") -> int:
-        """Collapse accidental duplicate active songs within each singer.
+        """Collapse only entries that share the same immutable request ID.
 
-        Duplicates share the same singer record and normalized artist/title/
-        version. The host's current queue order is authoritative: the earliest
-        active copy in the singer's queue survives, later copies are removed.
-        If the removed copy has its own remote request id, record a tombstone so
-        server reconciliation cannot recreate it."""
+        Artist/title/version are never identities: a singer may intentionally
+        request the same song/version more than once. Legacy entries without a
+        permanent ID are preserved rather than guessed away.
+        """
         removed = 0
         for singer in self.queue or []:
             if not isinstance(singer, dict):
@@ -46307,41 +46608,26 @@ class KaraokeApp(QWidget):
             songs = singer.get("songs") or []
             if len(songs) < 2:
                 continue
-            survivors_by_sig = {}
+            survivors_by_identity = {}
             drop_indices = []
             for idx, entry in enumerate(songs):
                 if not isinstance(entry, dict) or entry.get("skipped", False):
                     continue
-                sig = self._queue_entry_dup_signature(entry)
-                if sig is None:
+                identity = self._queue_entry_identity_key(entry)
+                if identity is None:
                     continue
-                survivor = survivors_by_sig.get(sig)
+                survivor = survivors_by_identity.get(identity)
                 if survivor is None:
-                    survivors_by_sig[sig] = entry
+                    survivors_by_identity[identity] = entry
                     continue
                 rid_survivor = self._queue_entry_remote_request_id(survivor)
                 rid_dup = self._queue_entry_remote_request_id(entry)
-                if rid_survivor is None and rid_dup is None:
-                    continue  # two local host adds: deliberate, not a sync artifact
-                if rid_survivor is None and rid_dup is not None:
-                    survivor["remote_request_id"] = int(rid_dup)
-                elif rid_survivor is not None and rid_dup is not None and int(rid_survivor) != int(rid_dup):
-                    try:
-                        self._record_remote_request_tombstone(
-                            int(rid_dup),
-                            entry=entry,
-                            singer_name=str(singer.get("name", "") or ""),
-                            reason=f"duplicate_self_heal:{reason or 'cleanup'}",
-                            status="removed",
-                        )
-                    except Exception:
-                        pass
                 drop_indices.append(idx)
                 removed += 1
                 _diag(
-                    "[QUEUE-DEDUP] removed accidental duplicate "
+                    "[QUEUE-AUDIT] action=dedup_same_request_id "
                     f"singer={singer.get('name', '')!r} title={entry.get('title', '')!r} "
-                    f"request_id={rid_dup} kept_request_id={self._queue_entry_remote_request_id(survivor)} "
+                    f"identity={identity!r} request_id={rid_dup} kept_request_id={rid_survivor} "
                     f"reason={reason}"
                 )
             for idx in reversed(drop_indices):
@@ -46357,22 +46643,31 @@ class KaraokeApp(QWidget):
                 pass
         return removed
 
+    def _queue_entry_identity_key(self, entry) -> tuple | None:
+        """Permanent queue-entry identity; never derived from display metadata."""
+        if not isinstance(entry, dict):
+            return None
+        remote_id = self._queue_entry_remote_request_id(entry)
+        if remote_id is not None:
+            return ("remote", int(remote_id))
+        request_uid = str(entry.get("request_uid") or "").strip()
+        if request_uid:
+            return ("local", request_uid)
+        return None
+
     def _find_existing_duplicate_song_entry(self, singer_name: str, entry: dict) -> tuple[int, int, dict] | None:
         if not isinstance(entry, dict):
             return None
-        sig = self._queue_entry_dup_signature(entry)
-        if sig is None:
+        identity = self._queue_entry_identity_key(entry)
+        if identity is None:
             return None
-        target_name = self._queue_limit_name_key(singer_name)
         for singer_idx, singer in enumerate(self.queue or []):
             if not isinstance(singer, dict):
-                continue
-            if self._queue_limit_name_key(singer.get("name", "")) != target_name:
                 continue
             for song_idx, existing in enumerate(singer.get("songs", []) or []):
                 if not isinstance(existing, dict) or bool(existing.get("skipped", False)):
                     continue
-                if self._queue_entry_dup_signature(existing) == sig:
+                if self._queue_entry_identity_key(existing) == identity:
                     return singer_idx, song_idx, existing
         return None
 
@@ -47211,11 +47506,13 @@ class KaraokeApp(QWidget):
             self._ensure_server_accepting_matches_host_intent_async(reason="remote_reconcile")
         except Exception as e:
             _diag(f"[SERVER-STATE] accepting watchdog schedule failed reason=remote_reconcile: {e}")
-        if self._is_waitlist_enabled_cached():
-            try:
-                self._sync_waitlist_state_from_server_async(reason="remote_reconcile")
-            except Exception as e:
-                _diag(f"[WAITLIST-STATE] pull schedule failed reason=remote_reconcile: {e}")
+        try:
+            # Pull in both modes. The old enabled-only gate meant a stale
+            # client/server toggle could never self-heal once local mode was
+            # off, which is why iPads appeared stuck until restart.
+            self._sync_waitlist_state_from_server_async(reason="remote_reconcile")
+        except Exception as e:
+            _diag(f"[WAITLIST-STATE] pull schedule failed reason=remote_reconcile: {e}")
 
         # Session-scoped dedupe for per-request reconcile logging: the server
         # resends the night's full request history on every sync pass, and

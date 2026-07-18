@@ -272,6 +272,7 @@ class GstKaraokeTransport(QObject):
 
     frame_ready = pyqtSignal(QImage)
     ended = pyqtSignal()
+    started = pyqtSignal()
     playback_hung = pyqtSignal()
 
     def __init__(
@@ -301,6 +302,10 @@ class GstKaraokeTransport(QObject):
         self.semitones = 0.0
         self.video_offset_seconds = 0.0
         self.visual_timer_interval_ms = 15
+        self.start_delay_ms = 0
+        self._start_preroll_deadline = 0.0
+        self._start_not_before = 0.0
+        self._start_finish_pending = False
 
         self._normalize_gain_db = 0.0
         self._master = None
@@ -550,18 +555,59 @@ class GstKaraokeTransport(QObject):
         self._reset_stream_eof_state("start")
         self._started_monotonic = time.monotonic()
 
-        self.pipeline.set_state(Gst.State.PAUSED)
-        # Block for preroll (bounded): a song start is allowed a moment of
-        # setup; everything after runs on the pipeline clock.
-        self.pipeline.get_state(4 * Gst.SECOND)
+        state_result = self.pipeline.set_state(Gst.State.PAUSED)
+        if state_result == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("GStreamer failed to begin karaoke preroll")
+        # Never wait for preroll on Qt's main thread. get_state(4s) was the
+        # actual Play-button freeze on slower Intel Macs. Poll with a zero
+        # timeout instead; the pipeline does its decoder/device setup on its
+        # own streaming threads while Qt remains responsive. start_delay_ms
+        # lets SingWS display its deterministic countdown over this preroll.
+        now = time.monotonic()
+        self._start_preroll_deadline = now + 4.0
+        self._start_not_before = now + max(0, int(self.start_delay_ms or 0)) / 1000.0
+        self._start_finish_pending = True
+        QTimer.singleShot(0, self._finish_start_after_preroll)
+        return True
+
+    def _finish_start_after_preroll(self):
+        if self._stopped or not self._start_finish_pending:
+            return
+        Gst = self.Gst
+        now = time.monotonic()
+        try:
+            result, state, _pending = self.pipeline.get_state(0)
+        except Exception as exc:
+            self._start_finish_pending = False
+            _diag(f"[GST-KARAOKE] nonblocking preroll status failed: {exc}")
+            return
+        if result == Gst.StateChangeReturn.FAILURE:
+            self._start_finish_pending = False
+            _diag(f"[GST-KARAOKE] preroll failed file={self.audio_path!r}")
+            self.stop()
+            self.playback_hung.emit()
+            return
+        preroll_ready = state == Gst.State.PAUSED or result == Gst.StateChangeReturn.NO_PREROLL
+        if (not preroll_ready and now < self._start_preroll_deadline) or now < self._start_not_before:
+            QTimer.singleShot(20, self._finish_start_after_preroll)
+            return
+        if not preroll_ready:
+            _diag(f"[GST-KARAOKE] preroll timeout; attempting PLAYING file={self.audio_path!r}")
+        self._start_finish_pending = False
         if self._pending_start_seconds > 0.0:
             self._do_seek(self._pending_start_seconds)
         if self.cdg is not None:
             self.cdg.seek_seconds(self._pending_start_seconds)
         self._apply_normalize_gain()
         self._apply_modifiers_initial()
-        self.pipeline.set_state(Gst.State.PLAYING)
+        state_result = self.pipeline.set_state(Gst.State.PLAYING)
+        if state_result == Gst.StateChangeReturn.FAILURE:
+            _diag(f"[GST-KARAOKE] PLAYING transition failed file={self.audio_path!r}")
+            self.stop()
+            self.playback_hung.emit()
+            return
         self.timer.start()
+        self.started.emit()
         _diag(
             f"[GST-KARAOKE] started mode={self.mode} start={self._pending_start_seconds:.3f}s "
             f"pitch_element={int(self.pitch is not None)} cdg_sidefill={int(self.cdg_sidefill)} "
@@ -573,6 +619,7 @@ class GstKaraokeTransport(QObject):
 
     def stop(self):
         self._stopped = True
+        self._start_finish_pending = False
         _diag(
             f"[GST-KARAOKE] shutdown requested mode={self.mode} file={self.audio_path!r} "
             f"renderer=qt_qimage_appsink video_eof={int(self._video_eof_received)} "

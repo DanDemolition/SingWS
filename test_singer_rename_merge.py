@@ -115,6 +115,23 @@ class RenameMergeTests(unittest.TestCase):
         self.assertEqual(app.queue[0]["name"], "Dan")
         self.assertEqual(titles_of(app.queue[0]), ["Song A", "Song B", "Song C"])
 
+    def test_rename_pushes_immutable_server_identity(self):
+        app = self._app()
+        app.queue = [singer(
+            "Daniel",
+            ["Song A"],
+            singer_id="local-singer-id",
+            server_singer_id="server-singer-id",
+            server_singer_session_id=741,
+        )]
+        pushed = []
+        app._push_singer_rename_to_server = lambda old, new, **kwargs: pushed.append((old, new, kwargs))
+
+        self.assertTrue(app._rename_rotation_singer(0, "Dan"))
+        identity = pushed[0][2]["singer_identity"]
+        self.assertEqual(identity["singer_id"], "server-singer-id")
+        self.assertEqual(identity["singer_session_id"], 741)
+
     def test_relative_song_order_preserved(self):
         app = self._app()
         app.queue = [

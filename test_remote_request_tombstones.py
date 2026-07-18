@@ -1840,18 +1840,18 @@ class HostRemovalAuthorityTests(unittest.TestCase):
 
     # -- duplicate cleanup -------------------------------------------------------
 
-    def test_duplicate_cleanup_preserves_oldest_and_migrates_id(self):
+    def test_legacy_local_and_remote_same_metadata_are_both_preserved(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             older = self._entry("Song A")             # host-added local copy (older)
             newer = self._entry("Song A", rid=123)    # server re-add (newer)
             app.queue = [self._singer("Dan", [older, newer])]
             removed = app._cleanup_duplicate_singer_songs(reason="test")
-            self.assertEqual(removed, 1)
+            self.assertEqual(removed, 0)
             songs = app.queue[0]["songs"]
-            self.assertEqual(len(songs), 1)
-            self.assertIs(songs[0], older)                      # oldest preserved
-            self.assertEqual(songs[0]["remote_request_id"], 123)  # id migrated, not recreated
+            self.assertEqual(len(songs), 2)
+            self.assertIs(songs[0], older)
+            self.assertIs(songs[1], newer)
 
     def test_duplicate_cleanup_same_id_twice(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1883,20 +1883,18 @@ class HostRemovalAuthorityTests(unittest.TestCase):
             self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
             self.assertEqual(len(app.queue[0]["songs"]), 2)
 
-    def test_live_duplicate_with_two_request_ids_self_heals(self):
-        """Two live ids for the same singer/song are treated as a replay/race
-        duplicate. The host queue copy wins and the extra id is tombstoned so
-        sync cannot recreate it."""
+    def test_same_metadata_with_two_request_ids_preserves_both_requests(self):
+        """Metadata is not identity: two permanent request IDs are two songs."""
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json")
             app.queue = [self._singer("Dan", [
                 self._entry("Song A", rid=1),
                 self._entry("Song A", rid=2),
             ])]
-            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 1)
-            self.assertEqual(len(app.queue[0]["songs"]), 1)
+            self.assertEqual(app._cleanup_duplicate_singer_songs(reason="test"), 0)
+            self.assertEqual(len(app.queue[0]["songs"]), 2)
             tombstones = app._ensure_remote_request_tombstones().get("requests", {})
-            self.assertIn("2", tombstones)
+            self.assertNotIn("2", tombstones)
 
     def test_intentional_repeat_after_completion_not_blocked(self):
         """After request 1 completes (tombstone status=completed), the singer

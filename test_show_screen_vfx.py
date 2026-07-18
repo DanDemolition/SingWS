@@ -151,7 +151,7 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(calls[2], ("outro", "Maya", "Halo", "Beyoncé"))
         self.assertEqual(calls[3], ("hide",))
 
-    def test_disabled_show_vfx_suppresses_gpu_overlay_events(self):
+    def test_disabled_show_vfx_retains_basic_countdown_but_suppresses_other_events(self):
         calls = []
 
         class FakeOverlay:
@@ -169,9 +169,9 @@ class ShowScreenVfxTests(unittest.TestCase):
         area.set_show_vfx_overlay(FakeOverlay())
         area.set_show_vfx_enabled(False)
         area.show_next_up_overlay({"singer": "Maya", "title": "Halo"}, 7)
-        self.assertFalse(area.show_singer_start_vfx("Maya", "Halo", "Beyoncé"))
+        self.assertTrue(area.show_singer_start_vfx("Maya", "Halo", "Beyoncé"))
         self.assertFalse(area.show_song_outro_vfx("Maya", "Halo", "Beyoncé"))
-        self.assertEqual(calls, [("enabled", False)])
+        self.assertEqual(calls, [("enabled", False), ("start",)])
         self.assertFalse(area._show_vfx_enabled)
 
     def test_vfx_defaults_are_enabled_but_optional(self):

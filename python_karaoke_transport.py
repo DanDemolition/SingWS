@@ -825,6 +825,7 @@ class _PcmFeeder(QIODevice):
 class PythonKaraokeTransport(QObject):
     frame_ready = pyqtSignal(object)
     ended = pyqtSignal()
+    started = pyqtSignal()
 
     def __init__(
         self,
@@ -936,6 +937,11 @@ class PythonKaraokeTransport(QObject):
         self._sync_last_log_ns = 0
         self._sync_dropped_visual_packets = 0
         self.visual_timer_interval_ms = 15
+        # Owner-provided countdown gate. Decoding/lyric timing must not start
+        # until this expires, matching the GStreamer transport contract.
+        self.start_delay_ms = 0
+        self._start_pending = False
+        self._stopped = True
         self.timer = QTimer(self)
         self.timer.setInterval(self.visual_timer_interval_ms)
         self.timer.timeout.connect(self._tick)
@@ -950,13 +956,30 @@ class PythonKaraokeTransport(QObject):
         self.timer.setInterval(interval)
 
     def start(self, start_seconds: float = 0.0):
+        self._stopped = False
+        delay_ms = max(0, int(self.start_delay_ms or 0))
+        if delay_ms:
+            self._start_pending = True
+            QTimer.singleShot(delay_ms, lambda: self._finish_delayed_start(start_seconds))
+            return True
+        self._finish_delayed_start(start_seconds)
+        return True
+
+    def _finish_delayed_start(self, start_seconds: float = 0.0):
+        if self._stopped:
+            self._start_pending = False
+            return
+        self._start_pending = False
         self.seek(start_seconds)
         # Begin decoding the whole track to memory in the background so seeks
         # become instant once it's ready (within a couple seconds of playback).
         self._start_full_decode()
         self.timer.start()
+        self.started.emit()
 
     def stop(self):
+        self._stopped = True
+        self._start_pending = False
         self.timer.stop()
         self._stop_media()
 

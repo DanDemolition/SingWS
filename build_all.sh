@@ -1,10 +1,18 @@
 #!/bin/bash
 # Sequential build: arm64 (dev) + x86_64 (Intel test machine), each into its own DMG.
-set -e
+set -euo pipefail
 cd /Users/daniel/Documents/SingWS
 # Version is the single source of truth in APP_VERSION (entry script).
 VER="$(grep -E '^APP_VERSION' 0.2.18.1.py | sed -E 's/.*"([^"]+)".*/\1/')"
 GST="/Library/Frameworks/GStreamer.framework/Versions/1.0"
+UNIVERSAL_PY=".venv-universal/bin/python"
+
+# Intel is cross-built by native PyInstaller from a genuinely universal Python
+# runtime. Running PyInstaller itself under Rosetta breaks the ARM-only
+# pkg-config helper; using the regular ARM-only .venv cannot collect Intel
+# Python extensions. Refuse either mistake before changing build artifacts.
+"${UNIVERSAL_PY}" tools/verify_macos_arch.py \
+  --runtime --require arm64 --require x86_64
 
 echo "========================================"
 echo " BUILD START $(date)"
@@ -18,6 +26,8 @@ echo "========================================"
 echo ">>> [1/4] arm64 PyInstaller"
 rm -rf build dist
 .venv/bin/pyinstaller --noconfirm "SingWS-arm64.spec"
+.venv/bin/python tools/verify_macos_arch.py \
+  --bundle dist/SingWS.app --require arm64
 echo ">>> arm64 app arch:"; file dist/SingWS.app/Contents/MacOS/SingWS | sed 's/^/    /'
 echo ">>> [2/4] arm64 dmgbuild"
 rm -f "SingWS-${VER}-arm64-installer.dmg"
@@ -31,7 +41,9 @@ export GI_TYPELIB_PATH="${GST}/lib/girepository-1.0"
 export XDG_DATA_DIRS="${GST}/share:${XDG_DATA_DIRS:-}"
 export DYLD_FALLBACK_LIBRARY_PATH="${GST}/lib"
 export PKG_CONFIG_PATH="${GST}/lib/pkgconfig"
-.venv-universal/bin/pyinstaller --noconfirm "SingWS-x86_64.spec"
+"${UNIVERSAL_PY}" -m PyInstaller --noconfirm "SingWS-x86_64.spec"
+"${UNIVERSAL_PY}" tools/verify_macos_arch.py \
+  --bundle dist/SingWS.app --require x86_64
 echo ">>> x86_64 app arch:"; file dist/SingWS.app/Contents/MacOS/SingWS | sed 's/^/    /'
 echo ">>> [4/4] x86_64 dmgbuild"
 rm -f "SingWS-${VER}-x86_64-installer.dmg"

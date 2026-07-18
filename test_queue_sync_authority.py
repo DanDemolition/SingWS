@@ -352,9 +352,9 @@ class QueueSyncAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(reported, [])
 
-    def test_remote_duplicate_insert_self_heals_before_song_limit(self):
+    def test_same_metadata_remote_insert_with_new_id_is_not_deduplicated(self):
         self.app.settings["use_waiting_for_add"] = False
-        self.app.settings["limit_pending_max"] = 1
+        self.app.settings["limit_pending_max"] = 2
         self._seed_grace([remote_song(801, "Artist", "Same Song")])
 
         ok = self.app._add_song_to_queue(
@@ -365,13 +365,13 @@ class QueueSyncAuthorityTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
-        self.assertEqual(self._titles(), ["Same Song"])
-        self.assertEqual(self._ids(), [801])
+        self.assertEqual(self._titles(), ["Same Song", "Same Song"])
+        self.assertEqual(self._ids(), [801, 802])
         self.assertEqual(self.app._waiting_for_add_requests, {})
         tombstones = self.app._ensure_remote_request_tombstones().get("requests", {})
-        self.assertIn("802", tombstones)
+        self.assertNotIn("802", tombstones)
 
-    def test_reconcile_collapses_existing_duplicate_remote_rows(self):
+    def test_reconcile_preserves_existing_rows_with_distinct_request_ids(self):
         self.app.settings["use_waiting_for_add"] = False
         self._seed_grace([
             remote_song(901, "Artist", "Same Song"),
@@ -380,11 +380,11 @@ class QueueSyncAuthorityTests(unittest.TestCase):
 
         removed = self.app._cleanup_duplicate_singer_songs(reason="test")
 
-        self.assertEqual(removed, 1)
-        self.assertEqual(self._titles(), ["Same Song"])
-        self.assertEqual(self._ids(), [901])
+        self.assertEqual(removed, 0)
+        self.assertEqual(self._titles(), ["Same Song", "Same Song"])
+        self.assertEqual(self._ids(), [901, 902])
         tombstones = self.app._ensure_remote_request_tombstones().get("requests", {})
-        self.assertIn("902", tombstones)
+        self.assertNotIn("902", tombstones)
 
 
 if __name__ == "__main__":

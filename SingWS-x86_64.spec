@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import platform
+import subprocess
 
 project_root = Path("/Users/daniel/Documents/SingWS")
 build_gst_registry = project_root / "build" / "gst-registry.bin"
@@ -93,10 +94,10 @@ if gst_framework_plugins.exists():
         binaries.append((str(core_dylib), "."))
 
 # Bundle ffmpeg and ffprobe so the app works without a Homebrew install.
-# ``bin/ffmpeg`` is a universal binary (lipo'd arm64 + x86_64), so we
-# prefer it over Homebrew's single-arch copy.  ffprobe is currently only
-# available from Homebrew (single-arch arm64); if a universal ffprobe is
-# ever placed in ``bin/`` it'll be picked up first.
+# The copies in bin/ are universal launchers. Their arm64 slices use Homebrew
+# codec dylibs, while their x86_64 slices do not. PyInstaller analyzes the
+# native arm64 slice during this cross-build, so its dependency scan can add
+# ARM-only Homebrew codec libraries that the Intel slices never reference.
 for ff_binary in ("ffmpeg", "ffprobe"):
     candidates = (
         project_root / "bin" / ff_binary,
@@ -154,6 +155,23 @@ a.binaries = [
         and Path(str(item[0])).name in excluded_optional_gst_plugins
     )
 ]
+
+
+def _keep_intel_binary(item):
+    """Exclude ARM-only Homebrew dependencies discovered from universal tools."""
+    source = Path(str(item[1]))
+    if not str(source).startswith("/opt/homebrew/") or not source.exists():
+        return True
+    result = subprocess.run(
+        ["lipo", "-archs", str(source)], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0 or "x86_64" in result.stdout.split():
+        return True
+    print(f"[intel-build] excluding unreachable ARM-only dependency: {source}")
+    return False
+
+
+a.binaries = [item for item in a.binaries if _keep_intel_binary(item)]
 
 pyz = PYZ(a.pure)
 
