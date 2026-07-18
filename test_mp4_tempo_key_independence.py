@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from pathlib import Path
 
 os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
@@ -213,7 +214,19 @@ class TempoKeyIndependencePipelineTests(unittest.TestCase):
         import gi
         gi.require_version("Gst", "1.0")
         gi.require_version("GstApp", "1.0")
-        from gi.repository import Gst, GstApp  # noqa: F401
+        # PyGObject 3.56 re-reads its deprecated GLib compatibility alias while
+        # loading GStreamer's dependencies. SingWS never accesses that alias;
+        # keep this upstream import warning from obscuring test-suite results.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    r"GLib\.unix_signal_add_full is deprecated; "
+                    r"use GLibUnix\.signal_add_full instead"
+                ),
+                category=gi.PyGIDeprecationWarning,
+            )
+            from gi.repository import Gst, GstApp  # noqa: F401
         if not Gst.is_initialized():
             Gst.init(None)
         cls.Gst = Gst
