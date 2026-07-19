@@ -958,11 +958,11 @@ class PythonKaraokeTransport(QObject):
     def start(self, start_seconds: float = 0.0):
         self._stopped = False
         delay_ms = max(0, int(self.start_delay_ms or 0))
-        if delay_ms:
-            self._start_pending = True
-            QTimer.singleShot(delay_ms, lambda: self._finish_delayed_start(start_seconds))
-            return True
-        self._finish_delayed_start(start_seconds)
+        # Always finish on the next Qt turn, even with no delay. Owners must
+        # have a chance to connect the token-validated started callback before
+        # this transport publishes its successful start.
+        self._start_pending = True
+        QTimer.singleShot(delay_ms, lambda: self._finish_delayed_start(start_seconds))
         return True
 
     def _finish_delayed_start(self, start_seconds: float = 0.0):

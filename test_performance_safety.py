@@ -4,6 +4,7 @@ import unittest
 import importlib.util
 
 from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtWidgets import QApplication
 
 
 MAIN_SOURCE = pathlib.Path("0.2.18.1.py").read_text(encoding="utf-8")
@@ -229,6 +230,20 @@ class PerformanceSafetyTests(unittest.TestCase):
         install = function_source("_install_live_state_polish")
         self.assertIn("self._live_state_interval_ms()", install)
 
+    def test_rotation_level_meter_runs_only_during_active_playback(self):
+        app = QApplication.instance() or QApplication([])
+        meter = self.singws.BarLevelMeter()
+        self.assertFalse(meter._timer.isActive())
+
+        meter.set_active(True)
+        self.assertTrue(meter._timer.isActive())
+
+        meter.set_active(False)
+        self.assertFalse(meter._timer.isActive())
+        self.assertEqual(meter._heights, [0.0] * meter._n_bars)
+        meter.deleteLater()
+        app.processEvents()
+
     def test_waitlist_uses_model_backed_view(self):
         self.assertIn("class WaitlistRequestListModel(QAbstractListModel)", MAIN_SOURCE)
         page = function_source("_build_waiting_for_add_page")
@@ -347,6 +362,18 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_record_daw_preview_server_failure", uploader)
         self.assertIn("_record_daw_preview_server_success", uploader)
 
+    def test_daw_preview_frame_callbacks_honor_viewer_and_server_backoff(self):
+        frame_sender = function_source("_maybe_send_daw_snapshot_from_frame")
+        self.assertIn("_daw_snapshot_viewer_recent()", frame_sender)
+        self.assertIn("_daw_preview_server_backoff_active", frame_sender)
+        uploader = function_source("_post_daw_singer_screen_snapshot")
+        self.assertIn("_daw_preview_server_backoff_active", uploader)
+
+    def test_daw_preview_does_not_capture_without_recent_viewer(self):
+        scheduler = function_source("_schedule_daw_singer_screen_snapshot")
+        self.assertIn("should_capture = enabled and viewer_recent", scheduler)
+        self.assertNotIn("viewer_recent or playing or bool(force)", scheduler)
+
     def test_daw_preview_timer_is_adaptive(self):
         init_source = MAIN_SOURCE[MAIN_SOURCE.index("self._daw_snapshot_timer = QTimer(self)"):]
         init_source = init_source[:init_source.index("self.rotation_view = None")]
@@ -357,9 +384,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("return 5000", target)
         self.assertLess(
             target.index("_daw_preview_server_backoff_until"),
-            target.index("karaoke_playing"),
+            target.index("_daw_snapshot_viewer_recent()"),
         )
         self.assertIn("_daw_snapshot_viewer_recent()", target)
+        self.assertNotIn("karaoke_playing", target)
         tuner = function_source("_retune_daw_snapshot_timer")
         self.assertIn("timer.stop()", tuner)
         self.assertIn("timer.start(target_ms)", tuner)

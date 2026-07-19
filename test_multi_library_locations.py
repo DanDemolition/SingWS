@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 
 def load_main_module():
@@ -57,6 +59,21 @@ class MultiLibraryLocationTests(unittest.TestCase):
             settings["karaoke_scan_roots"] = []
             locations, _ = self.singws._migrate_library_locations(settings)
             self.assertEqual(locations, [], "a retired single-path key must not restore a removed location")
+
+    def test_already_migrated_locations_restore_without_touching_volume(self):
+        path = "/Volumes/Temporarily Offline/Karaoke"
+        location_id = "library-existing"
+        settings = {
+            "karaoke_library_locations_migrated": True,
+            "karaoke_library_locations": [{"id": location_id, "path": path}],
+            "karaoke_scan_roots": [path],
+        }
+
+        with mock.patch.object(self.singws.os.path, "realpath", side_effect=AssertionError("volume touched")):
+            locations, _changed = self.singws._migrate_library_locations(settings)
+
+        self.assertEqual(locations[0]["id"], location_id)
+        self.assertEqual(locations[0]["path"], path)
 
     def test_targeted_full_scan_preserves_other_location_and_signatures(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,6 +159,8 @@ class MultiLibraryLocationTests(unittest.TestCase):
 
             physical = [track for track in result["tracks"] if track["title"] == "Shared"]
             self.assertEqual(len(physical), 1)
+            self.assertEqual(result["files_seen"], 2, "overlapping roots must be walked only once")
+            self.assertEqual(result["overlapping_roots_skipped"], 2)
 
     def test_same_metadata_in_different_files_remains_two_versions(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,9 +201,96 @@ class MultiLibraryLocationTests(unittest.TestCase):
     def test_ui_exposes_add_status_rescan_and_remove_actions(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('QPushButton("Add Library Location…")', source)
-        self.assertIn('QPushButton("Rescan Selected")', source)
+        self.assertIn('QPushButton("Update Selected")', source)
+        self.assertIn('QPushButton("Full Rescan Selected…")', source)
         self.assertIn('QPushButton("Remove Selected")', source)
-        self.assertIn('status = "Available" if online else "Offline"', source)
+        self.assertIn('QPushButton("Cancel Scan")', source)
+        self.assertIn('status = "Configured" if online else "Offline"', source)
+        scan_method = source[source.index("    def _scan_library_locations("):]
+        scan_method = scan_method[:scan_method.index("\n    def open_library_locations_dialog")]
+        self.assertNotIn("os.path.isdir", scan_method)
+
+    def test_incremental_update_detects_added_modified_moved_and_deleted_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "library"
+            root.mkdir()
+            first_path = root / "Artist - First - D001.zip"
+            second_path = root / "Artist - Second - D002.zip"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            locations = [self._location(root)]
+            settings = self._settings(locations)
+            initial = self.singws._build_library_scan_result([str(root)], False, [], settings)
+
+            added_path = root / "Artist - Added - D003.zip"
+            added_path.write_bytes(b"added")
+            added = self.singws._build_library_scan_result(
+                [str(root)], True, initial["tracks"], self._settings(locations, initial["dir_sigs"])
+            )
+            self.assertEqual(added["added_count"], 1)
+
+            normalized = self.singws._normalize_library_location_path
+            previous = next(track for track in added["tracks"] if track["path"] == normalized(first_path))
+            first_path.write_bytes(b"first-modified")
+            now_ns = time.time_ns() + 5_000_000
+            os.utime(first_path, ns=(now_ns, now_ns))
+            modified = self.singws._build_library_scan_result(
+                [str(root)], True, added["tracks"], self._settings(locations, added["dir_sigs"])
+            )
+            current = next(track for track in modified["tracks"] if track["path"] == normalized(first_path))
+            self.assertNotEqual(previous.get("scan_mtime_ns"), current.get("scan_mtime_ns"))
+            self.assertGreaterEqual(modified["tracks_changed"], 1)
+
+            moved_path = root / "Artist - Moved - D002.zip"
+            second_path.rename(moved_path)
+            moved = self.singws._build_library_scan_result(
+                [str(root)], True, modified["tracks"], self._settings(locations, modified["dir_sigs"])
+            )
+            self.assertNotIn(normalized(second_path), {track["path"] for track in moved["tracks"]})
+            self.assertIn(normalized(moved_path), {track["path"] for track in moved["tracks"]})
+
+            added_path.unlink()
+            deleted = self.singws._build_library_scan_result(
+                [str(root)], True, moved["tracks"], self._settings(locations, moved["dir_sigs"])
+            )
+            self.assertNotIn(normalized(added_path), {track["path"] for track in deleted["tracks"]})
+            self.assertEqual(deleted["removed_count"], 1)
+
+            full = self.singws._build_library_scan_result([str(root)], False, [], settings)
+            fields = lambda rows: sorted(
+                (item["path"], item["artist"], item["title"], item["disc_id"], item["type"])
+                for item in rows
+            )
+            self.assertEqual(fields(deleted["tracks"]), fields(full["tracks"]))
+
+    def test_no_change_update_avoids_repeated_realpath_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "library"
+            root.mkdir()
+            for index in range(500):
+                (root / f"Artist - Song {index} - D{index:04d}.zip").touch()
+            locations = [self._location(root)]
+            initial = self.singws._build_library_scan_result(
+                [str(root)], False, [], self._settings(locations)
+            )
+            original_realpath = self.singws.os.path.realpath
+            realpath_calls = []
+
+            def counted_realpath(path, *args, **kwargs):
+                realpath_calls.append(str(path))
+                return original_realpath(path, *args, **kwargs)
+
+            with mock.patch.object(self.singws.os.path, "realpath", side_effect=counted_realpath):
+                updated = self.singws._build_library_scan_result(
+                    [str(root)],
+                    True,
+                    initial["tracks"],
+                    self._settings(locations, initial["dir_sigs"]),
+                )
+
+            self.assertEqual(updated["files_seen"], 0)
+            self.assertEqual(updated["tracks_reused"], 500)
+            self.assertLess(len(realpath_calls), 40)
 
 
 if __name__ == "__main__":

@@ -177,7 +177,10 @@ def _get_duration_secs(track: Dict[str, Any]) -> Optional[int]:
     return None
 
 def _get_mtime(track: Dict[str, Any]) -> Optional[int]:
-    for k in ("mtime","modified","last_modified"):
+    # Library scans already captured this signature. Re-statting every song
+    # while rebuilding the index is especially expensive across multiple or
+    # external libraries and adds no newer information than the completed scan.
+    for k in ("scan_mtime", "mtime", "modified", "last_modified"):
         v = track.get(k)
         if v is None: 
             continue
@@ -192,7 +195,7 @@ def _get_mtime(track: Dict[str, Any]) -> Optional[int]:
         return None
 
 def _get_size(track: Dict[str, Any]) -> Optional[int]:
-    for k in ("size","bytes"):
+    for k in ("scan_size", "size", "bytes"):
         v = track.get(k)
         if v is None:
             continue
@@ -407,6 +410,93 @@ def rebuild_from_tracks_json(
         progress_callback(f"Search index ready ({rows:,} songs)", rows, total_tracks)
 
     return rows, elapsed
+
+
+def update_from_tracks_json(
+    tracks_path: Optional[Path] = None,
+    dbfile: Optional[Path] = None,
+    *,
+    changed_paths: Sequence[str] = (),
+    removed_paths: Sequence[str] = (),
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
+) -> Tuple[int, int, float]:
+    """Apply a scan delta without deleting and rebuilding the whole index."""
+    tracks_path = tracks_path or tracks_json_path()
+    dbfile = dbfile or db_path()
+    if not dbfile.exists():
+        rows, elapsed = rebuild_from_tracks_json(
+            tracks_path, dbfile, verbose=False, progress_callback=progress_callback
+        )
+        return rows, 0, elapsed
+
+    changed = {str(path) for path in changed_paths or () if path}
+    removed = {str(path) for path in removed_paths or () if path}
+    if not changed and not removed:
+        return 0, 0, 0.0
+
+    started = time.time()
+    tracks = json.loads(tracks_path.read_text(encoding="utf-8", errors="ignore") or "[]") or []
+    selected = [
+        track for track in tracks
+        if isinstance(track, dict) and _get_track_path(track) in changed
+    ]
+    total = len(selected) + len(removed)
+    if progress_callback:
+        progress_callback(f"Updating search index... 0/{total:,}", 0, total)
+
+    con = _connect(dbfile, read_only=False)
+    init_schema(con)
+    con.execute("BEGIN;")
+    if removed:
+        con.executemany("DELETE FROM songs WHERE path = ?", [(path,) for path in sorted(removed)])
+
+    rows = []
+    for track in selected:
+        path = _get_track_path(track)
+        artist = track.get("artist") or track.get("Artist")
+        title = track.get("title") or track.get("Title")
+        discid = track.get("discid") or track.get("disc_id") or track.get("DiscID") or track.get("Vendor")
+        display = track.get("display")
+        song_type = track.get("type") or track.get("song_type")
+        provider = _get_provider(track)
+        rows.append((
+            path, artist, title, discid, _get_duration_secs(track), _get_mtime(track), _get_size(track),
+            song_type, display, provider, _get_provider_track_id(track), _get_provider_url(track),
+            _get_local_reference_path(track), _get_authorization_requirement(track),
+            _get_availability_status(track), build_search_string(track),
+            fuzzy_match_key(str(artist or "")), fuzzy_match_key(str(title or "")),
+        ))
+
+    if rows:
+        con.executemany("""
+            INSERT INTO songs
+            (path, artist, title, discid, duration_secs, mtime, size_bytes, song_type, display,
+             provider, provider_track_id, provider_url, local_reference_path, authorization_requirement,
+             availability_status, searchstring, artist_norm, title_norm)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                artist=excluded.artist, title=excluded.title, discid=excluded.discid,
+                duration_secs=excluded.duration_secs, mtime=excluded.mtime, size_bytes=excluded.size_bytes,
+                song_type=excluded.song_type, display=excluded.display, provider=excluded.provider,
+                provider_track_id=excluded.provider_track_id, provider_url=excluded.provider_url,
+                local_reference_path=excluded.local_reference_path,
+                authorization_requirement=excluded.authorization_requirement,
+                availability_status=excluded.availability_status, searchstring=excluded.searchstring,
+                artist_norm=excluded.artist_norm, title_norm=excluded.title_norm
+        """, rows)
+    con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('last_incremental_epoch', ?);", (str(int(time.time())),))
+    con.execute("COMMIT;")
+    con.commit()
+    con.close()
+    _clear_read_caches()
+    elapsed = time.time() - started
+    if progress_callback:
+        progress_callback(
+            f"Search index updated ({len(rows):,} changed, {len(removed):,} removed)",
+            total,
+            total,
+        )
+    return len(rows), len(removed), elapsed
 
 # Run the tolerant fuzzy fallback only when the strict substring search returns
 # fewer than this many rows (a typo usually returns 0).  Keeps exact, high-yield

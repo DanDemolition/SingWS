@@ -89,32 +89,36 @@ class DuetSongLimitTests(unittest.TestCase):
         self.assertTrue(add(app, " singer   a ", "two"))
         self.assertFalse(add(app, "SINGER A", "three"))
 
-    def test_waitlisted_song_counts_toward_remote_limit(self):
+    def test_waitlisted_song_does_not_count_toward_remote_limit(self):
         app = make_app(self.singws)
         app._waiting_for_add_requests = {
             7001: {"request_id": 7001, "singer": "Singer A", "artist": "Artist", "title": "Pending"}
         }
 
         self.assertTrue(add(app, "Singer A", "second"))
-        self.assertFalse(add(app, "Singer A", "third"))
+        self.assertTrue(add(app, "Singer A", "third"))
+        self.assertFalse(add(app, "Singer A", "fourth"))
 
-    def test_active_and_waitlisted_song_at_limit_blocks_remote(self):
+    def test_active_and_waitlisted_song_blocks_only_at_active_limit(self):
         app = make_app(self.singws)
         self.assertTrue(add(app, "Singer A", "active"))
         app._waiting_for_add_requests = {
             7002: {"request_id": 7002, "singer": "Singer A", "artist": "Artist", "title": "Pending"}
         }
 
-        self.assertFalse(add(app, "Singer A", "third"))
+        self.assertTrue(add(app, "Singer A", "third"))
+        self.assertFalse(add(app, "Singer A", "fourth"))
 
-    def test_two_waitlisted_songs_block_remote(self):
+    def test_two_waitlisted_songs_do_not_inflate_remote_limit(self):
         app = make_app(self.singws)
         app._waiting_for_add_requests = {
             7003: {"request_id": 7003, "singer": "Singer A", "artist": "Artist", "title": "Pending 1"},
             7004: {"request_id": 7004, "singer": "Singer A", "artist": "Artist", "title": "Pending 2"},
         }
 
-        self.assertFalse(add(app, "Singer A", "third"))
+        self.assertTrue(add(app, "Singer A", "third"))
+        self.assertTrue(add(app, "Singer A", "fourth"))
+        self.assertFalse(add(app, "Singer A", "fifth"))
 
 
 class HostBypassSongLimitTests(unittest.TestCase):
@@ -172,8 +176,10 @@ class HostBypassSongLimitTests(unittest.TestCase):
             7102: {"request_id": 7102, "singer": "Singer A", "artist": "Artist", "title": "Pending 2"},
         }
 
-        self.assertFalse(add(app, "Singer A", "remote-third"))
-        self.assertTrue(add_host(app, "Singer A", "host-third"))
+        self.assertTrue(add(app, "Singer A", "remote-third"))
+        self.assertTrue(add(app, "Singer A", "remote-fourth"))
+        self.assertFalse(add(app, "Singer A", "remote-fifth"))
+        self.assertTrue(add_host(app, "Singer A", "host-fifth"))
 
 
 if __name__ == "__main__":

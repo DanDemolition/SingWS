@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import sys
 import logging
 import logging.handlers
@@ -8,6 +9,54 @@ from pathlib import Path
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.1.8"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
+KARAFUN_ESTIMATED_DURATION_SECONDS = 3 * 60 + 30
+
+
+def normalize_karafun_duration_seconds(value):
+    """Normalize known KaraFun duration shapes to positive whole seconds.
+
+    KaraFun's public CSV currently has no duration column. Its desktop UI does
+    expose result/playback clocks as m:ss or h:mm:ss, while server integrations
+    may already carry numeric seconds. Keep this parser strict so malformed
+    clocks never become authoritative queue timing.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            seconds = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(seconds) or seconds <= 0 or seconds > 86400:
+            return None
+        return int(round(seconds))
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        try:
+            seconds = float(text)
+        except Exception:
+            return None
+        if not math.isfinite(seconds) or seconds <= 0 or seconds > 86400:
+            return None
+        return int(round(seconds))
+
+    parts = text.split(":")
+    if len(parts) not in (2, 3) or not all(part.isdigit() for part in parts):
+        return None
+    values = [int(part) for part in parts]
+    if values[-1] >= 60:
+        return None
+    if len(values) == 3 and values[-2] >= 60:
+        return None
+    total = 0
+    for part in values:
+        total = total * 60 + part
+    if total <= 0 or total > 86400:
+        return None
+    return total
 
 # Try to import psutil for system info (optional but recommended)
 try:
@@ -263,7 +312,6 @@ except Exception:
 from datetime import datetime, timedelta
 import requests
 import platform
-import re
 import threading
 import time
 import uuid
@@ -1117,6 +1165,13 @@ class SongSearchThread(QThread):
             track_id = str(row.get("song_id") or "").strip()
             if not artist or not title or not track_id or (artist.lower(), title.lower()) in local_keys:
                 continue
+            raw_duration = next(
+                (row.get(key) for key in ("duration", "duration_secs", "duration_seconds", "length_secs", "length")
+                 if row.get(key) not in (None, "")),
+                None,
+            )
+            duration = normalize_karafun_duration_seconds(raw_duration)
+            duration_estimated = duration is None
             rows.append({
                 "artist": artist,
                 "title": title,
@@ -1128,6 +1183,9 @@ class SongSearchThread(QThread):
                 "availability_status": "externally_controlled",
                 "authorization_requirement": "official_karafun_app",
                 "karafun_catalog_only": True,
+                "duration": duration or KARAFUN_ESTIMATED_DURATION_SECONDS,
+                "duration_estimated": duration_estimated,
+                "duration_source": "karafun_default_estimate" if duration_estimated else "karafun_catalog",
             })
         return rows
 
@@ -1167,9 +1225,11 @@ class IndexBuildThread(QThread):
     done = pyqtSignal(bool, str)
     progress = pyqtSignal(str, int, int)  # message, current, total
 
-    def __init__(self, force: bool = False):
+    def __init__(self, force: bool = False, changed_paths=None, removed_paths=None):
         super().__init__()
         self.force = force
+        self.changed_paths = list(changed_paths or [])
+        self.removed_paths = list(removed_paths or [])
 
     def run(self):
         try:
@@ -1177,6 +1237,19 @@ class IndexBuildThread(QThread):
             dbf = song_index.db_path()
             if not tp.exists():
                 self.done.emit(False, "No library found - Please scan a folder first")
+                return
+            if dbf.exists() and (self.changed_paths or self.removed_paths):
+                def progress_cb(msg: str, current: int, total: int):
+                    self.progress.emit(msg, current, total)
+
+                song_index.update_from_tracks_json(
+                    tp,
+                    dbf,
+                    changed_paths=self.changed_paths,
+                    removed_paths=self.removed_paths,
+                    progress_callback=progress_cb,
+                )
+                self.done.emit(True, "Import Complete")
                 return
             if (not self.force) and dbf.exists():
                 self.done.emit(True, "Import Complete")
@@ -2719,7 +2792,14 @@ def _save_json_atomic(path: Path, value) -> None:
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(value, f, indent=2)
+            if path == TRACKS_PATH:
+                # tracks.json grows to hundreds of thousands of rows when
+                # several libraries are combined. Pretty-printing doubled its
+                # size and made both UI-thread startup reads and post-scan
+                # writes needlessly expensive.
+                json.dump(value, f, separators=(",", ":"))
+            else:
+                json.dump(value, f, indent=2)
             f.write("\n")
         os.replace(tmp_name, path)
         _perf_record(f"json_write:{path.name}", (time.perf_counter() - _perf_t0) * 1000.0)
@@ -8332,10 +8412,23 @@ class BarLevelMeter(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(45)  # ~22 fps
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
 
     def set_active(self, active: bool):
-        self._active = bool(active)
+        active = bool(active)
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            self._timer.start()
+            return
+
+        # This meter sits inside a card with a drop-shadow effect. Repainting
+        # it while idle makes Qt re-render the whole effected card every 45 ms,
+        # consuming a substantial fraction of a CPU core for a static screen.
+        # Stop the animation completely and draw the silent baseline once.
+        self._timer.stop()
+        self._heights = [0.0] * self._n_bars
+        self.update()
 
     def _sample_level(self) -> float:
         if not self._level_provider:
@@ -11193,10 +11286,12 @@ class SimplePollWorker(QObject):
                             if self.interval != self.normal_interval:
                                 self.interval = self.normal_interval
                                 print(f"[POLL] Connection restored, back to {self.normal_interval}s interval")
-                                # Notify UI that connection is back
-                                if self.last_status != "connected":
-                                    self.connection_status_changed.emit(True, "Connected")
-                                    self.last_status = "connected"
+                        # Report the initial healthy connection as well as a
+                        # recovery.  Previously a worker that succeeded on its
+                        # first poll never published connected state.
+                        if self.last_status != "connected":
+                            self.connection_status_changed.emit(True, "Connected")
+                            self.last_status = "connected"
 
                         try:
                             body = resp.text or ""
@@ -11612,6 +11707,7 @@ class DurationProbeWorker(QObject):
         # How many durations this run actually resolved. Used to decide whether a
         # post-probe index rebuild is warranted (no new durations → no reindex).
         self.resolved_count = 0
+        self.resolved_paths = []
 
     def run(self):
         """Background thread: probe missing durations for tracks (parallel processing)."""
@@ -11723,6 +11819,7 @@ class DurationProbeWorker(QObject):
                 t.pop("dur_unavailable", None)
                 with stats_lock:
                     stats['resolved'] += 1
+                    self.resolved_paths.append(str(p))
             elif p and os.path.exists(p):
                 # File is present but its duration can't be determined on this
                 # build (e.g. an mp4 when mutagen isn't bundled). Flag it so it
@@ -11813,6 +11910,26 @@ def _normalize_library_location_path(path: str) -> str:
     return os.path.normpath(os.path.realpath(os.path.abspath(value)))
 
 
+def _normalize_scanned_library_path(path: str) -> str:
+    """Normalize an already-canonical scan path without resolving it again.
+
+    Configured roots cross the realpath boundary once in
+    ``_normalize_library_location_path``. Paths produced beneath those roots
+    by scandir/os.walk, and paths restored from tracks.json, are already
+    canonical. Calling realpath for them repeatedly walks every path component
+    with lstat, which made no-change scans scale very poorly on large and
+    external libraries.
+    """
+    value = os.path.expanduser(str(path or "").strip())
+    if not value:
+        return ""
+    return os.path.normpath(os.path.abspath(value))
+
+
+def _scanned_library_path_key(path: str) -> str:
+    return os.path.normcase(_normalize_scanned_library_path(path))
+
+
 def _library_location_key(path: str) -> str:
     return os.path.normcase(_normalize_library_location_path(path))
 
@@ -11825,6 +11942,7 @@ def _library_location_id(path: str) -> str:
 def _migrate_library_locations(settings: dict) -> tuple[list[dict], bool]:
     """Migrate every historic library setting into the multi-location model."""
     settings = settings if isinstance(settings, dict) else {}
+    already_migrated = bool(settings.get("karaoke_library_locations_migrated", False))
     candidates = []
     existing = settings.get("karaoke_library_locations", []) or []
     if not isinstance(existing, list):
@@ -11845,13 +11963,23 @@ def _migrate_library_locations(settings: dict) -> tuple[list[dict], bool]:
     seen = set()
     for candidate in candidates:
         source = candidate if isinstance(candidate, dict) else {"path": candidate}
-        path = _normalize_library_location_path(source.get("path", ""))
-        identity = _library_location_key(path)
+        # Once stored, roots are already canonical. Avoid touching every
+        # configured disk during startup merely to restore settings; an
+        # offline/network volume can otherwise stall the UI before first paint.
+        path = (
+            _normalize_scanned_library_path(source.get("path", ""))
+            if already_migrated
+            else _normalize_library_location_path(source.get("path", ""))
+        )
+        identity = _scanned_library_path_key(path) if already_migrated else _library_location_key(path)
         if not identity or identity in seen:
             continue
         seen.add(identity)
         location = dict(source)
-        location.update({"id": _library_location_id(path), "path": path})
+        location.update({
+            "id": str(source.get("id") or f"library-{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:16]}"),
+            "path": path,
+        })
         location.setdefault("added_at", time.time())
         location.setdefault("last_scan_at", 0)
         location.setdefault("last_scan_status", "not scanned")
@@ -11878,39 +12006,86 @@ def _path_is_within_library(path: str, root: str) -> bool:
 
 
 def _library_location_for_path(path: str, locations) -> dict | None:
-    matches = [
-        location for location in (locations or [])
-        if isinstance(location, dict) and _path_is_within_library(path, location.get("path", ""))
-    ]
+    path_key = _scanned_library_path_key(path)
+    matches = []
+    for location in locations or []:
+        if not isinstance(location, dict):
+            continue
+        root_key = _scanned_library_path_key(location.get("path", ""))
+        if path_key and root_key and (path_key == root_key or path_key.startswith(root_key + os.sep)):
+            matches.append(location)
     return max(matches, key=lambda item: len(str(item.get("path") or "")), default=None)
 
 
-def _dedupe_library_tracks(tracks) -> list[dict]:
+def _collapse_overlapping_library_roots(roots) -> list[str]:
+    """Return the minimum roots needed to visit every configured location."""
+    unique = []
+    seen = set()
+    for root in roots or []:
+        normalized = _normalize_library_location_path(root)
+        key = _scanned_library_path_key(normalized)
+        if normalized and key not in seen:
+            seen.add(key)
+            unique.append(normalized)
+    kept = []
+    kept_keys = []
+    for root in sorted(unique, key=lambda value: (len(_scanned_library_path_key(value)), value)):
+        key = _scanned_library_path_key(root)
+        if any(key == parent or key.startswith(parent + os.sep) for parent in kept_keys):
+            continue
+        kept.append(root)
+        kept_keys.append(key)
+    return kept
+
+
+def _dedupe_library_tracks(
+    tracks,
+    *,
+    trust_cached_identity: bool = False,
+    location_priority=None,
+) -> list[dict]:
     """Collapse the same physical file only; metadata matches remain distinct versions."""
     result = []
     seen_paths = set()
-    seen_files = set()
+    seen_files = {}
+    location_priority = dict(location_priority or {})
     for track in tracks or []:
         if not isinstance(track, dict) or not track.get("path"):
             continue
         item = dict(track)
-        item["path"] = _normalize_library_location_path(item["path"])
-        path_key = _library_location_key(item["path"])
+        item["path"] = _normalize_scanned_library_path(item["path"])
+        path_key = _scanned_library_path_key(item["path"])
         physical_key = None
-        try:
-            st = os.stat(item["path"])
-            physical_key = (int(st.st_dev), int(st.st_ino))
-            item["scan_device"] = physical_key[0]
-            item["scan_inode"] = physical_key[1]
-        except Exception:
-            # Never compare a stale inode from an offline volume with a live
-            # file: filesystems may reuse inode numbers after reconnects.
-            physical_key = None
-        if path_key in seen_paths or (physical_key is not None and physical_key in seen_files):
+        if trust_cached_identity and item.get("scan_device") is not None and item.get("scan_inode") is not None:
+            try:
+                physical_key = (int(item["scan_device"]), int(item["scan_inode"]))
+            except Exception:
+                physical_key = None
+        else:
+            try:
+                st = os.stat(item["path"])
+                physical_key = (int(st.st_dev), int(st.st_ino))
+                item["scan_device"] = physical_key[0]
+                item["scan_inode"] = physical_key[1]
+            except Exception:
+                # Never compare a stale inode from an offline volume with a
+                # live file: filesystems may reuse inode numbers after reconnects.
+                physical_key = None
+        if path_key in seen_paths:
+            continue
+        if physical_key is not None and physical_key in seen_files:
+            existing_index = seen_files[physical_key]
+            existing = result[existing_index]
+            existing_priority = int(location_priority.get(existing.get("library_location_id"), 0) or 0)
+            item_priority = int(location_priority.get(item.get("library_location_id"), 0) or 0)
+            if item_priority > existing_priority:
+                seen_paths.discard(_scanned_library_path_key(existing.get("path", "")))
+                result[existing_index] = item
+                seen_paths.add(path_key)
             continue
         seen_paths.add(path_key)
         if physical_key is not None:
-            seen_files.add(physical_key)
+            seen_files[physical_key] = len(result)
         result.append(item)
     return result
 
@@ -11930,7 +12105,18 @@ def _tracks_after_library_location_removed(tracks, removed_path: str, remaining_
     return result
 
 
-def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_snapshot, progress_cb=None) -> dict:
+class _LibraryScanCancelled(RuntimeError):
+    pass
+
+
+def _build_library_scan_result(
+    roots,
+    quick_mode: bool,
+    old_tracks,
+    settings_snapshot,
+    progress_cb=None,
+    cancel_cb=None,
+) -> dict:
     """Build a scanned karaoke library without touching Qt widgets.
 
     This is deliberately pure-ish so it can run in a worker thread. The GUI
@@ -11939,17 +12125,31 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
     """
     start_time = time.time()
     requested_roots = [_normalize_library_location_path(r) for r in (roots or []) if r]
-    roots = [r for r in requested_roots if os.path.isdir(r)]
+
+    def check_cancelled():
+        if cancel_cb is not None and bool(cancel_cb()):
+            raise _LibraryScanCancelled("Library scan cancelled")
+
+    available_roots = []
+    unavailable_roots = []
+    for requested_root in requested_roots:
+        check_cancelled()
+        try:
+            available = os.path.isdir(requested_root)
+        except Exception:
+            available = False
+        (available_roots if available else unavailable_roots).append(requested_root)
+    roots = _collapse_overlapping_library_roots(available_roots)
     old_tracks = list(old_tracks or [])
     settings_snapshot = dict(settings_snapshot or {})
     locations, _ = _migrate_library_locations(settings_snapshot)
     preserve_outside = bool(settings_snapshot.get("_scan_preserve_outside_roots", False)) or len(roots) != len(requested_roots)
     old_by_path = {
-        _normalize_library_location_path(t.get("path")): t
+        _normalize_scanned_library_path(t.get("path")): t
         for t in old_tracks if isinstance(t, dict) and t.get("path")
     }
     old_duration_by_path = {
-        _normalize_library_location_path(t.get("path")): t.get("duration")
+        _normalize_scanned_library_path(t.get("path")): t.get("duration")
         for t in old_tracks
         if isinstance(t, dict) and t.get("path") and t.get("duration")
     }
@@ -11963,12 +12163,11 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
         except Exception:
             pass
 
-    def _scan_file_sig(path: str):
+    def _scan_file_stat(path: str):
         try:
-            st = os.stat(path)
-            return int(st.st_mtime), int(st.st_size)
+            return os.stat(path)
         except Exception:
-            return None, None
+            return None
 
     def _scan_dir_sig(path: str):
         try:
@@ -11977,15 +12176,21 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
         except Exception:
             return None
 
-    def _old_track_unchanged(old_track: dict, mtime, size) -> bool:
+    def _old_track_unchanged(old_track: dict, mtime, mtime_ns, size) -> bool:
         if not isinstance(old_track, dict):
             return False
         old_mtime = old_track.get("scan_mtime")
+        old_mtime_ns = old_track.get("scan_mtime_ns")
         old_size = old_track.get("scan_size")
         if old_mtime is None or old_size is None:
-            return True
+            return False
         try:
-            return int(old_mtime) == int(mtime) and int(old_size) == int(size)
+            mtime_matches = (
+                int(old_mtime_ns) == int(mtime_ns)
+                if old_mtime_ns is not None and mtime_ns is not None
+                else int(old_mtime) == int(mtime)
+            )
+            return mtime_matches and int(old_size) == int(size)
         except Exception:
             return False
 
@@ -12001,14 +12206,19 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
 
     def _make_scanned_track(full_path: str, song_type: str, old_track: dict | None = None):
         name = os.path.basename(full_path)
-        full_path = _normalize_library_location_path(full_path)
-        scan_mtime, scan_size = _scan_file_sig(full_path)
-        if quick_mode and _old_track_unchanged(old_track, scan_mtime, scan_size):
+        full_path = _normalize_scanned_library_path(full_path)
+        stat_result = _scan_file_stat(full_path)
+        scan_mtime = int(stat_result.st_mtime) if stat_result is not None else None
+        scan_mtime_ns = int(stat_result.st_mtime_ns) if stat_result is not None else None
+        scan_size = int(stat_result.st_size) if stat_result is not None else None
+        if quick_mode and _old_track_unchanged(old_track, scan_mtime, scan_mtime_ns, scan_size):
             track = dict(old_track)
             track["path"] = full_path
             track["type"] = song_type
             if scan_mtime is not None:
                 track["scan_mtime"] = scan_mtime
+            if scan_mtime_ns is not None:
+                track["scan_mtime_ns"] = scan_mtime_ns
             if scan_size is not None:
                 track["scan_size"] = scan_size
             if not track.get("artist") or not track.get("title") or not track.get("display"):
@@ -12040,14 +12250,13 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
         }
         if scan_mtime is not None:
             track["scan_mtime"] = scan_mtime
+        if scan_mtime_ns is not None:
+            track["scan_mtime_ns"] = scan_mtime_ns
         if scan_size is not None:
             track["scan_size"] = scan_size
-        try:
-            st = os.stat(full_path)
-            track["scan_device"] = int(st.st_dev)
-            track["scan_inode"] = int(st.st_ino)
-        except Exception:
-            pass
+        if stat_result is not None:
+            track["scan_device"] = int(stat_result.st_dev)
+            track["scan_inode"] = int(stat_result.st_ino)
         location = _library_location_for_path(full_path, locations)
         if location:
             track["library_location_id"] = location.get("id")
@@ -12056,11 +12265,11 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
         return track, False, changed_existing
 
     def _is_under_any_root_factory(root_paths):
-        root_norms = [_library_location_key(r) for r in root_paths]
+        root_norms = [_scanned_library_path_key(r) for r in root_paths]
 
         def _is_under_any_root(path: str) -> bool:
             try:
-                p = _library_location_key(path)
+                p = _scanned_library_path_key(path)
                 for rn in root_norms:
                     if p == rn or p.startswith(rn + os.sep):
                         return True
@@ -12085,6 +12294,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
     files_seen = 0
     tracks_added, zip_count, mp4_count, cdg_count = 0, 0, 0, 0
     tracks_reused, tracks_changed = 0, 0
+    changed_paths = set()
     last_ui = time.time()
     stored_dir_sigs = settings_snapshot.get("karaoke_scan_dir_sigs", {}) or {}
     if not isinstance(stored_dir_sigs, dict):
@@ -12103,23 +12313,24 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
             baseline_ns = 0
 
         tracks_by_path = {
-            _normalize_library_location_path(t.get("path")): dict(t)
+            _normalize_scanned_library_path(t.get("path")): dict(t)
             for t in old_tracks if isinstance(t, dict) and t.get("path")
         }
         under_root_paths = {p for p in tracks_by_path if _is_under_any_root(p)}
-        known_dirs = set(_normalize_library_location_path(r) for r in roots)
+        known_dirs = set(_normalize_scanned_library_path(r) for r in roots)
         for path in under_root_paths:
             try:
-                known_dirs.add(_normalize_library_location_path(os.path.dirname(path)))
+                known_dirs.add(_normalize_scanned_library_path(os.path.dirname(path)))
             except Exception:
                 pass
         for path in stored_dir_sigs.keys():
             if _is_under_any_root(path):
-                known_dirs.add(_normalize_library_location_path(path))
+                known_dirs.add(_normalize_scanned_library_path(path))
 
         changed_dirs = set()
         removed_dirs = set()
         for directory in sorted(known_dirs):
+            check_cancelled()
             sig = _scan_dir_sig(directory)
             if sig is None:
                 removed_dirs.add(directory)
@@ -12137,11 +12348,39 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
             except Exception:
                 changed_dirs.add(directory)
 
+        # Directory mtimes detect additions, moves, and removals, but normal
+        # filesystems do not change a directory mtime when an existing file's
+        # contents are replaced. Verify each cached file with one stat so a
+        # same-path media update cannot be missed. This is intentionally the
+        # only per-file syscall on a no-change update; metadata and duration
+        # parsing remain fully cached.
+        verified_files = 0
+        for path in sorted(under_root_paths):
+            check_cancelled()
+            old_track = tracks_by_path.get(path) or old_by_path.get(path)
+            stat_result = _scan_file_stat(path)
+            parent = _normalize_scanned_library_path(os.path.dirname(path))
+            if stat_result is None:
+                changed_dirs.add(parent)
+            else:
+                current_mtime = int(stat_result.st_mtime)
+                current_mtime_ns = int(stat_result.st_mtime_ns)
+                current_size = int(stat_result.st_size)
+                if not _old_track_unchanged(old_track, current_mtime, current_mtime_ns, current_size):
+                    changed_dirs.add(parent)
+            verified_files += 1
+            if (verified_files % 2000) == 0:
+                elapsed = time.time() - start_time
+                emit_progress(
+                    f"Quick Update • verified {verified_files:,}/{len(under_root_paths):,} "
+                    f"• {elapsed:.1f}s"
+                )
+
         def _remove_tracks_under(directory: str):
-            dn = _library_location_key(directory)
+            dn = _scanned_library_path_key(directory)
             for path in list(tracks_by_path.keys()):
                 try:
-                    pn = _library_location_key(path)
+                    pn = _scanned_library_path_key(path)
                     if pn.startswith(dn + os.sep):
                         tracks_by_path.pop(path, None)
                 except Exception:
@@ -12154,7 +12393,8 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
 
         def _scan_directory_files(directory: str, recursive: bool = False):
             nonlocal files_seen, tracks_added, zip_count, mp4_count, cdg_count, tracks_reused, tracks_changed, last_ui
-            directory = _normalize_library_location_path(directory)
+            check_cancelled()
+            directory = _normalize_scanned_library_path(directory)
             if directory in scanned_dirs:
                 return
             scanned_dirs.add(directory)
@@ -12176,7 +12416,7 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                     continue
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        child_dir = _normalize_library_location_path(entry.path)
+                        child_dir = _normalize_scanned_library_path(entry.path)
                         child_sig = _scan_dir_sig(child_dir)
                         if child_sig is not None:
                             dir_sigs[child_dir] = child_sig
@@ -12189,9 +12429,11 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                 song_type = _song_type_for_name(name)
                 if song_type is None:
                     continue
-                full_path = _normalize_library_location_path(entry.path)
+                full_path = _normalize_scanned_library_path(entry.path)
                 current_files.add(full_path)
                 files_seen += 1
+                if (files_seen & 127) == 0:
+                    check_cancelled()
                 if song_type == "mp4":
                     mp4_count += 1
                 elif song_type == "cdg":
@@ -12206,14 +12448,21 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                     tracks_reused += 1
                 if changed_existing:
                     tracks_changed += 1
+                    changed_paths.add(full_path)
                 now = time.time()
                 if (now - last_ui) >= 0.2:
-                    emit_progress(f"Scanning changed folders... {files_seen:,}")
+                    elapsed = time.time() - start_time
+                    location = _library_location_for_path(directory, locations)
+                    library_name = os.path.basename(str((location or {}).get("path") or directory).rstrip(os.sep)) or directory
+                    emit_progress(
+                        f"Quick Update • {library_name} • folders {len(scanned_dirs):,}/{len(changed_dirs):,} "
+                        f"• files {files_seen:,} • {elapsed:.1f}s"
+                    )
                     last_ui = now
 
             for path in list(under_root_paths):
                 try:
-                    if _normalize_library_location_path(os.path.dirname(path)) == directory and path not in current_files:
+                    if _normalize_scanned_library_path(os.path.dirname(path)) == directory and path not in current_files:
                         tracks_by_path.pop(path, None)
                 except Exception:
                     pass
@@ -12233,29 +12482,44 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                 new_tracks.append(tracks_by_path[path])
                 emitted.add(path)
         tracks_added = len([t for t in new_tracks if isinstance(t, dict) and _is_under_any_root(str(t.get("path") or ""))])
+        if not changed_dirs and not removed_dirs:
+            tracks_reused = tracks_added
     else:
-        for scan_root in roots:
+        for root_index, scan_root in enumerate(roots, 1):
+            check_cancelled()
+            library_name = os.path.basename(scan_root.rstrip(os.sep)) or scan_root
             for root, _, files in os.walk(scan_root):
-                root_abs = os.path.abspath(root)
+                check_cancelled()
+                root_abs = _normalize_scanned_library_path(root)
                 sig = _scan_dir_sig(root_abs)
                 if sig is not None:
                     dir_sigs[root_abs] = sig
                 now = time.time()
                 if (now - last_ui) >= 0.2:
-                    emit_progress(f"Scanning... {files_seen:,}")
+                    elapsed = time.time() - start_time
+                    emit_progress(
+                        f"Library {root_index}/{len(roots)}: {library_name} "
+                        f"• files {files_seen:,} • {elapsed:.1f}s"
+                    )
                     last_ui = now
 
                 for name in files:
                     files_seen += 1
+                    if (files_seen & 127) == 0:
+                        check_cancelled()
                     lower = name.lower()
-                    full_path = _normalize_library_location_path(os.path.join(root, name))
+                    full_path = _normalize_scanned_library_path(os.path.join(root, name))
                     if name.startswith("._") or lower.endswith(".ds_store"):
                         continue
                     if full_path in seen:
                         continue
 
                     if (files_seen % 200) == 0:
-                        emit_progress(f"Scanning... {files_seen:,}")
+                        elapsed = time.time() - start_time
+                        emit_progress(
+                            f"Library {root_index}/{len(roots)}: {library_name} "
+                            f"• files {files_seen:,} • {elapsed:.1f}s"
+                        )
 
                     song_type = _song_type_for_name(name)
                     if song_type is None:
@@ -12276,13 +12540,23 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
                         tracks_reused += 1
                     if changed_existing:
                         tracks_changed += 1
+                        changed_paths.add(full_path)
 
-    new_tracks = _dedupe_library_tracks(new_tracks)
+    new_tracks = _dedupe_library_tracks(
+        new_tracks,
+        trust_cached_identity=bool(quick_mode),
+        location_priority={
+            location.get("id"): len(_scanned_library_path_key(location.get("path", "")))
+            for location in locations if isinstance(location, dict)
+        },
+    )
     new_by_path = {str(t.get("path") or ""): t for t in new_tracks if isinstance(t, dict) and t.get("path")}
     old_paths = set(old_by_path.keys())
     new_paths = set(new_by_path.keys())
-    added_count = len(new_paths - old_paths)
-    removed_count = len(old_paths - new_paths)
+    added_paths = new_paths - old_paths
+    removed_paths = old_paths - new_paths
+    added_count = len(added_paths)
+    removed_count = len(removed_paths)
     reindex_needed = ((not quick_mode) and bool(roots)) or added_count > 0 or removed_count > 0 or tracks_changed > 0
     scan_time = time.time() - start_time
     return {
@@ -12290,6 +12564,8 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
         "quick_mode": bool(quick_mode),
         "roots": roots,
         "requested_roots": requested_roots,
+        "unavailable_roots": unavailable_roots,
+        "overlapping_roots_skipped": max(0, len(available_roots) - len(roots)),
         "tracks": new_tracks,
         "dir_sigs": dir_sigs,
         "tracks_added": tracks_added,
@@ -12298,8 +12574,11 @@ def _build_library_scan_result(roots, quick_mode: bool, old_tracks, settings_sna
         "cdg_count": cdg_count,
         "tracks_reused": tracks_reused,
         "tracks_changed": tracks_changed,
+        "files_seen": files_seen,
         "added_count": added_count,
         "removed_count": removed_count,
+        "index_changed_paths": sorted(added_paths | changed_paths),
+        "index_removed_paths": sorted(removed_paths),
         "reindex_needed": bool(reindex_needed),
         "summary_text": f"Added: {added_count:,} • Removed: {removed_count:,} • Total: {len(new_tracks):,}",
         "scan_time": scan_time,
@@ -12316,6 +12595,10 @@ class LibraryScanWorker(QObject):
         self.quick_mode = bool(quick_mode)
         self.old_tracks = list(old_tracks or [])
         self.settings_snapshot = dict(settings_snapshot or {})
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
 
     def run(self):
         try:
@@ -12325,8 +12608,26 @@ class LibraryScanWorker(QObject):
                 self.old_tracks,
                 self.settings_snapshot,
                 progress_cb=self.progress.emit,
+                cancel_cb=self._cancel_event.is_set,
             )
+            if not self._cancel_event.is_set():
+                try:
+                    _save_json_atomic(TRACKS_PATH, result.get("tracks", []))
+                    result["tracks_persisted"] = True
+                except Exception as persist_error:
+                    result["tracks_persisted"] = False
+                    result["tracks_persist_error"] = str(persist_error)
             _perf_log_if_slow("library_scan_worker", float(result.get("scan_time", 0.0) or 0.0) * 1000.0)
+        except _LibraryScanCancelled:
+            result = {
+                "ok": False,
+                "cancelled": True,
+                "error": "Library scan cancelled",
+                "quick_mode": self.quick_mode,
+                "roots": self.roots,
+                "tracks": self.old_tracks,
+                "scan_time": 0.0,
+            }
         except Exception as e:
             result = {
                 "ok": False,
@@ -17026,8 +17327,12 @@ class RotationView(QMainWindow):
         if self.rotation_rail is None:
             self.list_widget.clear()
         num = 1
+        rotation_start_name = ""
+        ready_singer_names = []
         for singer in queue:
-            # Skip if singer is skipped or has no active songs
+            # Explicitly skipped singers remain non-actionable and stay off the
+            # audience rail. Empty singers, however, are real rotation slots
+            # and must remain visible while waiting for a selection.
             if singer.get("skipped", False):
                 continue
             
@@ -17043,34 +17348,43 @@ class RotationView(QMainWindow):
                     first_active_song = song
                     break
             
-            if not first_active_song:
-                continue
-            
-            # Extract song info and duet display
-            if isinstance(first_active_song, dict):
-                song_info = first_active_song.get("song_info")
-                duet_display = first_active_song.get("duet_display")
+            # Extract song info and duet display. Empty/all-skipped singers get
+            # a waiting label, never a fabricated playable entry.
+            duet_display = None
+            if first_active_song is not None:
+                if isinstance(first_active_song, dict):
+                    song_info = first_active_song.get("song_info")
+                    duet_display = first_active_song.get("duet_display")
+                else:
+                    try:
+                        song_info = first_active_song[0]
+                    except Exception:
+                        song_info = first_active_song
+                    try:
+                        if isinstance(first_active_song, (tuple, list)) and len(first_active_song) >= 3:
+                            duet_display = first_active_song[2]
+                    except Exception:
+                        duet_display = None
+                path = song_info[0] if isinstance(song_info, (tuple, list)) else song_info
+                name = self.display_name_for_queue_entry(first_active_song, path, tracks)
             else:
-                # Old format
-                try:
-                    song_info = first_active_song[0]
-                except Exception:
-                    song_info = first_active_song
-                duet_display = None
-                try:
-                    if isinstance(first_active_song, (tuple, list)) and len(first_active_song) >= 3:
-                        duet_display = first_active_song[2]
-                except Exception:
-                    duet_display = None
-
-            path = song_info[0] if isinstance(song_info, (tuple, list)) else song_info
-            name = self.display_name_for_queue_entry(first_active_song, path, tracks)
+                name = "Waiting for song"
 
             singer_display = duet_display if duet_display else singer.get("name", "")
+            is_rotation_start = bool(singer.get("rotation_marker", False))
+            if is_rotation_start:
+                rotation_start_name = str(singer_display or singer.get("name", "") or "").strip()
+                name = f"{name}  •  Rotation start"
             text = f"{num}. {singer_display}  •  {name}"
 
             self.queue_items.append(text)
-            display_items.append({"number": str(num), "singer": str(singer_display), "song": str(name)})
+            display_items.append({
+                "number": str(num),
+                "singer": str(singer_display),
+                "song": str(name),
+            })
+            if first_active_song is not None:
+                ready_singer_names.append(str(singer_display))
             if self.rotation_rail is None:
                 item = QListWidgetItem(text)
                 self.list_widget.addItem(item)
@@ -17079,10 +17393,14 @@ class RotationView(QMainWindow):
         self.now_singing_label.setText(now_singing_text)
         count = len(display_items)
         self.queue_count_label.setText(f"{count} SINGER{'S' if count != 1 else ''}")
+        self.queue_title_label.setText(
+            f"SINGER ROTATION  •  START: {rotation_start_name}"
+            if rotation_start_name else "SINGER ROTATION"
+        )
         next_singer = ""
         now_key = str(now_singing_text or "").strip().casefold()
-        for card in display_items:
-            candidate = str(card.get("singer") or "").strip()
+        for singer_name in ready_singer_names:
+            candidate = str(singer_name or "").strip()
             if candidate and candidate.casefold() != now_key:
                 next_singer = candidate
                 break
@@ -17954,6 +18272,9 @@ class KaraokeApp(QWidget):
         self._bgm_session_started = False   # stays False until user manually presses play
         self._manual_stop_in_progress = False
         self._playnext_pending = False
+        self._play_confirmation_open = False
+        self._play_control_starting = False
+        self._pending_play_start_context = None
         self._teardown_detach_sinks = []
         self._stop_started_ts = 0.0
         self._teardown_active = False
@@ -18315,7 +18636,10 @@ class KaraokeApp(QWidget):
         self.add_file_icon_button.setToolTip("Add File to Queue")
         self.audio_output_button.setToolTip("Audio Output")
 
-        self.play_next.clicked.connect(self.play_next_file)
+        # The UI button has one command boundary. Internal auto/resume paths
+        # call play_next_file directly and therefore cannot masquerade as a
+        # second mouse/touch press.
+        self.play_next.clicked.connect(self._on_play_control_clicked)
         self.karaoke_pause_button.clicked.connect(self.toggle_karaoke_pause)
         self.restart_button.clicked.connect(self.restart_track)
         self.stop_button.clicked.connect(self.stop_and_clear_now_singing)
@@ -18706,6 +19030,11 @@ class KaraokeApp(QWidget):
         self._current_karaoke_singer_id = ""
         self._current_karaoke_request_id = ""
         self._current_karaoke_song_path = ""
+        # A playback presentation is published only after the matching
+        # transport emits started.  The generation prevents a late signal
+        # from an older skip/play attempt from replacing the current singer.
+        self._singer_start_generation = 0
+        self._confirmed_singer_start_generation = 0
         self._current_karaoke_mode = ""
         self._current_karaoke_cdg_path = ""
         self._current_karaoke_mp3_path = ""
@@ -18952,12 +19281,6 @@ class KaraokeApp(QWidget):
         self.library_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         library_header_row.addWidget(self.library_title_label)
         library_header_row.addStretch(1)
-        self.add_karafun_button = QPushButton("Add KaraFun")
-        self.add_karafun_button.setToolTip("Add an externally controlled KaraFun song reference to the SingWS rotation.")
-        self.add_karafun_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.add_karafun_button.setStyleSheet(subtle_button_css(padding="6px 9px", radius=8).replace("font-size: 13px;", "font-size: 12px;"))
-        self.add_karafun_button.clicked.connect(self.add_karafun_reference_to_queue)
-        library_header_row.addWidget(self.add_karafun_button)
         library_card_layout.addLayout(library_header_row)
         library_card_layout.addLayout(search_row)
         self.library_hint_label.hide()
@@ -19887,22 +20210,12 @@ class KaraokeApp(QWidget):
         self.auto_save_timer.timeout.connect(self.save_data)
         self.auto_save_timer.start(60000)
 
-        # Only start polling if network is properly configured.
-        if self.is_network_configured():
-            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
-            user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
-            api_key = self.settings.get("api_key", "")
-            
-            # Quick connection test
-            success, msg = self.test_server_connection_quick(base_url, user_id, api_key)
-            
-            if success:
-                self.start_request_polling()
-                print(f"✅ Auto-started polling - {msg}")
-            else:
-                print(f"⚠️ Network configured but not connecting: {msg}")
-                print(f"   Will retry when you save network settings")
-        else:
+        # Start the recovery-capable transport whenever network settings are
+        # complete.  A one-shot launch probe used to gate this call; if that
+        # probe happened during a brief outage, no worker existed to notice
+        # recovery and requests stayed pending until Network settings restarted
+        # the transport.
+        if not self._start_configured_network_transport():
             print("ℹ️ Network not configured - polling disabled")
             print("   Configure network settings (Settings > Network) to enable request polling")
 
@@ -20779,12 +21092,16 @@ class KaraokeApp(QWidget):
         kind_role = int(getattr(self, "_queue_row_kind_role", int(Qt.ItemDataRole.UserRole) + 30))
         singer_role = int(getattr(self, "_queue_singer_index_role", int(Qt.ItemDataRole.UserRole) + 31))
         song_role = int(getattr(self, "_queue_song_index_role", int(Qt.ItemDataRole.UserRole) + 32))
+        singer_idx_value = roles.get(singer_role, -1)
+        song_idx_value = roles.get(song_role, -1)
         row = {
             "text": item.text(),
             "tooltip": item.toolTip(),
             "kind": str(roles.get(kind_role) or roles.get(int(Qt.ItemDataRole.UserRole)) or ""),
-            "singer_idx": int(roles.get(singer_role, -1) or -1),
-            "song_idx": int(roles.get(song_role, -1) or -1),
+            # Zero is a valid index. Truthiness fallbacks used to turn the
+            # first singer/song into -1, breaking selection after reorders.
+            "singer_idx": int(singer_idx_value if singer_idx_value is not None else -1),
+            "song_idx": int(song_idx_value if song_idx_value is not None else -1),
             "entry": roles.get(int(Qt.ItemDataRole.UserRole) + 1),
             "roles": roles,
         }
@@ -20927,6 +21244,34 @@ class KaraokeApp(QWidget):
         except Exception:
             return ""
 
+    @staticmethod
+    def _queue_singer_status_label(
+        singer: dict,
+        *,
+        is_rotation_start: bool = False,
+        is_current: bool = False,
+        is_next: bool = False,
+    ) -> str:
+        """Presentation-only singer state; it never changes play readiness."""
+        singer = singer if isinstance(singer, dict) else {}
+        if bool(singer.get("skipped", False)):
+            return "SKIPPED"
+        songs = list(singer.get("songs", []) or [])
+        has_active_song = any(
+            (not song.get("skipped", False)) if isinstance(song, dict) else True
+            for song in songs
+        )
+        labels = []
+        if is_rotation_start:
+            labels.append("ROTATION START")
+        if is_current:
+            labels.append("CURRENTLY SINGING")
+        elif is_next and has_active_song:
+            labels.append("NEXT UP")
+        elif not has_active_song:
+            labels.append("WAITING FOR SONG" if not songs else "NO READY SONG")
+        return " • ".join(labels)
+
     def _queue_entry_duration_for_display(self, entry) -> int:
         """Best-effort duration for queue presentation only."""
         try:
@@ -21066,6 +21411,9 @@ class KaraokeApp(QWidget):
         duet_display = (entry.get("duet_display") or "").strip()
         dur = entry.get("duration")
         dur_txt = self._fmt_right_time(dur) if dur else ""
+        duration_estimated = bool(entry.get("duration_estimated", False))
+        if dur_txt and duration_estimated:
+            dur_txt = "~" + self._fmt_m_ss(normalize_karafun_duration_seconds(dur))
 
         key = 0
         try:
@@ -21104,7 +21452,9 @@ class KaraokeApp(QWidget):
         if disc_id:
             detail_parts.append(f"Disc: {disc_id}")
         if dur_txt:
-            detail_parts.append(f"Duration: {dur_txt}")
+            detail_parts.append(
+                f"Estimated duration: {dur_txt}" if duration_estimated else f"Duration: {dur_txt}"
+            )
         if key != 0:
             detail_parts.append(f"Key: {key:+d}")
         if tempo_percent is not None and tempo_percent != 100:
@@ -21867,22 +22217,6 @@ class KaraokeApp(QWidget):
         self.karaoke_transport = transport
         self.karaoke_volume = None
         try:
-            countdown_payload = getattr(self, "_pending_playback_countdown_payload", None)
-            self._pending_playback_countdown_payload = None
-            # Clear the previous outro/Next Up transition before starting the
-            # singer countdown. Doing this after show_singer_start_vfx() stops
-            # singerCountdownTimer in the same event-loop turn and makes the
-            # countdown disappear.
-            try:
-                self._hide_next_up_transition_overlay(reason="before_singer_countdown")
-            except Exception:
-                pass
-            if isinstance(countdown_payload, (tuple, list)) and len(countdown_payload) >= 3:
-                self._trigger_show_screen_singer_start_vfx(
-                    str(countdown_payload[0] or ""),
-                    str(countdown_payload[1] or ""),
-                    str(countdown_payload[2] or ""),
-                )
             transport.start(start_seconds)
             if loop_seconds and len(loop_seconds) == 2:
                 try:
@@ -22394,6 +22728,19 @@ class KaraokeApp(QWidget):
         # Must have both URL and user ID, and URL must start with http
         return bool(base_url and user_id and base_url.startswith("http"))
 
+    def _start_configured_network_transport(self) -> bool:
+        """Start an auto-recovering transport without gating on a point-in-time probe."""
+        if not self.is_network_configured():
+            return False
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
+        self.start_request_polling()
+        _diag(
+            "[NETWORK-RECOVERY] transport auto-started "
+            f"base_url={base_url} tenant={user_id} launch_probe_gate=disabled"
+        )
+        return True
+
     def test_server_connection_quick(self, base_url: str, user_id: str = "", api_key: str = ""):
         """Quick connection test with short timeout. Returns (success, message)"""
         status = probe_network_sync_status(base_url, user_id, api_key, timeout_sec=3.0)
@@ -22430,6 +22777,8 @@ class KaraokeApp(QWidget):
     # > (0,3,0,0), i.e. >= (0,3,0,1).
     DAW_RELAY_MIN_APP_VERSION = (0, 3, 0, 1)
     RELAY_HOSTS = {"wskar.com", "www.wskar.com"}
+    NETWORK_RECOVERY_TICK_MS = 2000
+    RELAY_RECOVERY_FETCH_SEC = 10.0
 
     @staticmethod
     def _version_tuple(version: str) -> tuple:
@@ -22475,6 +22824,8 @@ class KaraokeApp(QWidget):
         self._stop_request_relay()
         self._relay_fetch_in_flight = False
         self._relay_fetch_queued = False
+        self._relay_last_successful_fetch_at = 0.0
+        self._relay_recovery_last_attempt_at = 0.0
         worker = RelayRequestWorker(base_url, tenant, api_key, APP_VERSION, parent=self)
         worker.requests_available.connect(self.fetch_remote_requests_once)
         worker.history_available.connect(lambda reason: self._sync_singer_history_async(f"relay_{reason}"))
@@ -22685,14 +23036,106 @@ class KaraokeApp(QWidget):
         self._relay_fetch_in_flight = False
         try:
             if rows is not None:
+                self._relay_last_successful_fetch_at = time.monotonic()
+                _diag(
+                    "[NETWORK-RECOVERY] request refresh succeeded "
+                    f"rows={len(rows or [])}"
+                )
                 self._handle_relay_requests(rows)
+            else:
+                _diag("[NETWORK-RECOVERY] request refresh failed; pending requests preserved")
         finally:
             if bool(getattr(self, "_relay_fetch_queued", False)):
                 self._relay_fetch_queued = False
                 self.fetch_remote_requests_once("queued notification")
 
+    def _start_network_recovery_timer(self) -> bool:
+        """Run request recovery and durable-add retries without any screen open."""
+        try:
+            timer = getattr(self, "_network_recovery_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.timeout.connect(self._network_recovery_tick)
+                self._network_recovery_timer = timer
+            timer.start(int(self.NETWORK_RECOVERY_TICK_MS))
+            _diag(
+                "[NETWORK-RECOVERY] watchdog started "
+                f"tick_ms={int(self.NETWORK_RECOVERY_TICK_MS)} "
+                f"relay_fetch_sec={float(self.RELAY_RECOVERY_FETCH_SEC):.1f}"
+            )
+            return True
+        except Exception as exc:
+            # Unit tests construct a Python-only KaraokeApp without initializing
+            # QObject; production instances always take the successful path.
+            _diag(f"[NETWORK-RECOVERY] watchdog unavailable error={exc}")
+            return False
+
+    def _stop_network_recovery_timer(self) -> None:
+        try:
+            timer = getattr(self, "_network_recovery_timer", None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+
+    def _network_recovery_tick(self) -> None:
+        """Retry pending sends and periodically recover missed relay notices."""
+        state = object.__getattribute__(self, "__dict__")
+        if bool(state.get("_app_closing", False)) or not self.is_network_configured():
+            return
+
+        try:
+            pending_count = len(list(state.get("_host_request_sync_ops", []) or []))
+        except Exception:
+            pending_count = 0
+        if pending_count:
+            scheduled = self._flush_host_request_sync_ops()
+            if scheduled:
+                _diag(
+                    "[NETWORK-RECOVERY] durable host retry scheduled "
+                    f"pending={pending_count} sends={scheduled}"
+                )
+
+        try:
+            tombstones = state.get("_remote_request_tombstones", {})
+            terminal_pending = sum(
+                1 for item in ((tombstones or {}).get("requests", {}) or {}).values()
+                if isinstance(item, dict) and item.get("request_id") and not item.get("server_synced_at")
+            )
+        except Exception:
+            terminal_pending = 0
+        if terminal_pending:
+            _diag(
+                "[REQUEST-LIFECYCLE] terminal retry watchdog "
+                f"pending={terminal_pending} reason=network_watchdog"
+            )
+            self._sync_remote_removal_tombstones_async("network_watchdog")
+
+        # WebSocket notifications remain the immediate path.  This bounded
+        # recovery fetch covers a missed notification or a relay that appears
+        # connected but stopped delivering events.  Request IDs plus the
+        # intake/in-flight sets keep repeated snapshots idempotent.
+        if state.get("relay_worker") is None:
+            return
+        now = time.monotonic()
+        last_success = float(state.get("_relay_last_successful_fetch_at", 0.0) or 0.0)
+        last_attempt = float(state.get("_relay_recovery_last_attempt_at", 0.0) or 0.0)
+        if now - max(last_success, last_attempt) < float(self.RELAY_RECOVERY_FETCH_SEC):
+            return
+        self._relay_recovery_last_attempt_at = now
+        _diag(
+            "[NETWORK-RECOVERY] scheduled request refresh "
+            f"reason=relay_watchdog age_sec={(now - last_success) if last_success else -1:.1f}"
+        )
+        self.fetch_remote_requests_once("relay watchdog")
+
     def _handle_relay_requests(self, rows):
-        """Reconcile v2 request rows on the UI thread, then ack queued successes."""
+        """Reconcile v2 rotation rows on the UI thread, then ack queued successes.
+
+        The v2 feed is backed by ``okjweb.db`` and is not authoritative for
+        waitlisted phone requests, which live in ``incoming_requests.db``.
+        Legacy sync polling remains the wait-list snapshot source.
+        """
         processed = getattr(self, "_relay_processed_request_ids", None)
         if not isinstance(processed, set):
             processed = set()
@@ -22708,7 +23151,7 @@ class KaraokeApp(QWidget):
                     req["request_id"] = rid
 
         try:
-            self._reconcile_remote_requests(rows or [])
+            self._reconcile_remote_requests(rows or [], update_waitlist=False)
         except Exception as e:
             logging.error(f"Relay request reconciliation failed: {e}")
             print(f"❌ Error reconciling relay requests: {e}")
@@ -22773,11 +23216,10 @@ class KaraokeApp(QWidget):
         threading.Thread(target=worker, daemon=True, name="relay-request-ack").start()
 
     def _connect_poll_worker_requests_received(self, use_relay: bool):
-        if use_relay:
-            # The relay performs a full v2 recovery fetch when it connects.
-            # Connecting the legacy sync poll as a second request source made
-            # the startup backlog arrive twice (once from each endpoint).
-            return
+        # Keep incoming_requests.db polling connected even with the relay. The
+        # relay's v2 recovery feed reads okjweb.db, which intentionally omits
+        # phone requests that are still on the wait-list. Request IDs plus the
+        # intake/in-flight sets make duplicate active snapshots idempotent.
         self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
 
     def start_request_polling(self):
@@ -22794,7 +23236,7 @@ class KaraokeApp(QWidget):
         use_relay = self._should_use_request_relay(base_url, tenant, api_key)
         if use_relay:
             self._start_request_relay(base_url, tenant, api_key)
-            print(f"✅ Request relay started (WebSocket) tenant={tenant}; request polling disabled")
+            print(f"✅ Request relay started (WebSocket) tenant={tenant}; waitlist recovery polling retained")
 
         # v2 DAW host-control over WebSocket (app > 3.0.0.0). Runs alongside the
         # v1 host_commands.php polling below, which stays active for older browsers
@@ -22815,10 +23257,9 @@ class KaraokeApp(QWidget):
             api_key,
             interval_sec=_poll_iv,
             host_interval_sec=self._effective_host_poll_interval_sec(),
-            # Keep the worker alive for host-control polling, but make the
-            # relay the sole request source. Its connect-time recovery fetch
-            # supplies the existing queue exactly once.
-            poll_requests=not use_relay,
+            # The legacy sync feed remains required for wait-listed requests;
+            # the relay/v2 feed supplies immediate active-rotation updates.
+            poll_requests=True,
         )
         self.poll_worker.moveToThread(self.poll_thread)
 
@@ -22830,7 +23271,7 @@ class KaraokeApp(QWidget):
 
         self.poll_thread.start()
         if use_relay:
-            print(f"✅ Host-controls polling started ({base_url}/api/v1/host_commands.php); requests via relay")
+            print(f"✅ Request relay + waitlist recovery polling started ({_poll_iv}s, tenant={tenant})")
         else:
             print(f"✅ Polling started ({_poll_iv}s) URL: {base_url}/get_requests.php (tenant={tenant})")
 
@@ -22838,10 +23279,12 @@ class KaraokeApp(QWidget):
             QTimer.singleShot(250, lambda: self._sync_remote_removal_tombstones_async("poll_start"))
         except Exception:
             pass
+        self._start_network_recovery_timer()
 
     def stop_request_polling(self):
         # Relay and polling are managed together: stopping the request
         # transport always tears down both, so they can never run at once.
+        self._stop_network_recovery_timer()
         self._stop_request_relay()
         self._stop_host_control_relay()
 
@@ -22879,6 +23322,10 @@ class KaraokeApp(QWidget):
                 _QT_APP_SHUTTING_DOWN = True
             except Exception:
                 pass
+        try:
+            self._stop_network_recovery_timer()
+        except Exception:
+            pass
         try:
             timer = getattr(self, "_host_control_state_timer", None)
             if timer is not None:
@@ -23454,7 +23901,32 @@ class KaraokeApp(QWidget):
         self._finish_media_end_cleanup(end_silence_triggered, schedule_bg_resume=(not early_auto_advance))
         if early_auto_advance:
             _diag(f"[END] scheduling next queued karaoke after early end ({early_end_reason})")
-            QTimer.singleShot(450, self.play_next_file)
+            ended_generation = int(getattr(self, "_confirmed_singer_start_generation", 0) or 0)
+            QTimer.singleShot(
+                450,
+                lambda generation=ended_generation, reason=early_end_reason: self._auto_play_next_if_generation(
+                    generation,
+                    reason=reason or "early_media_end",
+                ),
+            )
+
+    def _auto_play_next_if_generation(self, ended_generation: int, *, reason: str) -> bool:
+        """Run an end timer only if no newer manual playback command won."""
+        current_generation = int(getattr(self, "_confirmed_singer_start_generation", 0) or 0)
+        if current_generation != int(ended_generation):
+            _diag(
+                f"[PLAY-COMMAND] stale auto-advance ignored reason={reason} "
+                f"ended_generation={int(ended_generation)} current_generation={current_generation}"
+            )
+            return False
+        if (
+            getattr(self, "_pending_play_start_token", None) is not None
+            or bool(getattr(self, "_next_in_progress", False))
+        ):
+            _diag(f"[PLAY-COMMAND] auto-advance yielded to active command reason={reason}")
+            return False
+        self.play_next_file(skip_confirmation=True, command_source=f"automatic:{reason}")
+        return True
 
     def _karaoke_bgm_crossfade_enabled(self) -> bool:
         """True only when the host explicitly allows BGM to overlap karaoke endings."""
@@ -25749,6 +26221,7 @@ class KaraokeApp(QWidget):
             if str(getattr(self, "_mp3g_prepare_then_play_next", "") or "") == str(zip_path):
                 self._mp3g_prepare_then_play_next = ""
                 self._next_in_progress = False
+                self._set_play_control_starting(False)
                 _diag(f"[QUEUE-AUDIT] action=zip_prepare_failed queue_preserved=1 file={zip_path!r}")
             try:
                 self._set_processing_text("ZIP extraction failed")
@@ -25762,7 +26235,10 @@ class KaraokeApp(QWidget):
         if str(getattr(self, "_mp3g_prepare_then_play_next", "") or "") == str(zip_path):
             self._mp3g_prepare_then_play_next = ""
             self._next_in_progress = False
-            QTimer.singleShot(0, lambda: self.play_next_file(skip_confirmation=True))
+            QTimer.singleShot(
+                0,
+                lambda: self.play_next_file(skip_confirmation=True, command_source="zip_resume"),
+            )
             return
         self.play_mp3g_zip(zip_path, semitones)
 
@@ -25890,18 +26366,11 @@ class KaraokeApp(QWidget):
                 return 5000
         except Exception:
             pass
-        try:
-            if bool(getattr(self, "karaoke_playing", False)):
-                return 1000
-        except Exception:
-            pass
-        try:
-            if bool(getattr(self, "_daw_snapshot_first_frame_pending", False)):
-                return 1000
-        except Exception:
-            pass
         if self._daw_snapshot_viewer_recent():
             return 1000
+        # With no recent DAW viewer, only poll for a newly opened page. Video
+        # frame callbacks must not turn playback into an unconditional upload
+        # stream, especially while the server or venue network is struggling.
         return 5000
 
     def _retune_daw_snapshot_timer(self, reason: str = "") -> None:
@@ -26028,7 +26497,7 @@ class KaraokeApp(QWidget):
         self._daw_preview_log_transition("producer_state", f"preview producer started reason={reason} playing={int(playing)}")
 
         def check_viewer():
-            should_capture = playing or bool(force)
+            should_capture = False
             try:
                 resp = requests.get(
                     f"{base_url}/api/show-screen/snapshot.php",
@@ -26046,7 +26515,7 @@ class KaraokeApp(QWidget):
                         self._daw_snapshot_viewer_recent_until = time.monotonic() + 16.0 if viewer_recent else 0.0
                     except Exception:
                         pass
-                    should_capture = enabled and (viewer_recent or playing or bool(force))
+                    should_capture = enabled and viewer_recent
                     self._daw_preview_log_transition(
                         "viewer_check",
                         "viewer check "
@@ -26165,6 +26634,10 @@ class KaraokeApp(QWidget):
                 return
             if not self._daw_singer_screen_preview_enabled():
                 return
+            if not self._daw_snapshot_viewer_recent():
+                return
+            if self._daw_preview_server_backoff_active(reason=reason):
+                return
             now = time.monotonic()
             last_capture = float(getattr(self, "_daw_snapshot_last_capture_ts", 0.0) or 0.0)
             first = bool(getattr(self, "_daw_snapshot_first_frame_pending", False))
@@ -26206,6 +26679,15 @@ class KaraokeApp(QWidget):
         reason: str = "",
         generation: int | None = None,
     ):
+        # Frame-triggered and queued captures can arrive without going through
+        # the timer scheduler. Enforce backoff here as the final network gate
+        # and discard queued frames so a failed POST cannot immediately trigger
+        # another upload from ``finally``.
+        if self._daw_preview_server_backoff_active(reason=f"upload:{reason}"):
+            self._daw_snapshot_inflight = False
+            self._daw_snapshot_pending_image = None
+            self._daw_snapshot_pending_reason = ""
+            return
         base_url, tenant, api_key = self._daw_snapshot_config()
         if not base_url or not tenant or not api_key:
             self._daw_snapshot_inflight = False
@@ -27292,10 +27774,18 @@ class KaraokeApp(QWidget):
         return bool(str(req.get("pending_reason") or req.get("last_error") or req.get("attention_reason") or "").strip())
 
     def _remote_request_is_non_actionable(self, req: dict | None) -> bool:
-        """Rows already accepted/delivered by the server must not re-enter waitlist intake."""
+        """Return whether a server row has left host-actionable intake.
+
+        ``sent``/``delivered`` are transport acknowledgement fields on older
+        servers.  An explicit lifecycle state is authoritative: a waiting or
+        failed row remains actionable even if one of those transport flags is
+        stale.
+        """
         if not isinstance(req, dict):
             return False
         state = str(req.get("state") or req.get("status") or "").strip().lower()
+        if state in {"waiting", "failed", "failed_needs_review"}:
+            return False
         if state in {"accepted", "active", "delivered", "completed", "sung", "removed", "skipped"}:
             return True
         try:
@@ -27831,6 +28321,12 @@ class KaraokeApp(QWidget):
                     f"state={state_name!r} sent={int(bool(req.get('sent') or req.get('delivered')))}"
                 )
                 continue
+            if state_name in {"waiting", "failed", "failed_needs_review"} and bool(req.get("sent") or req.get("delivered")):
+                _diag(
+                    "[WAITING-FOR-ADD] lifecycle/transport conflict retained "
+                    f"request_id={rid} state={state_name!r} sent={int(bool(req.get('sent')))} "
+                    f"delivered={int(bool(req.get('delivered')))} action=keep_waitlisted"
+                )
             if not self._is_waiting_for_add_request(req):
                 continue
             if rid in local_ids:
@@ -27866,10 +28362,6 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         items = {}
-        counts = self._active_song_counts_by_singer()
-        deferred_counts = self._pending_request_counts_by_singer(include_waiting=False, include_deferred=True)
-        for key, value in deferred_counts.items():
-            counts[key] = counts.get(key, 0) + int(value or 0)
 
         def candidate_order(pair):
             rid, req = pair
@@ -27877,15 +28369,12 @@ class KaraokeApp(QWidget):
             return self._waiting_for_add_order_key(row)
 
         for rid, req in sorted(candidates.items(), key=candidate_order):
-            ok, limit_message = self._check_remote_request_song_limit(req, counts=counts)
-            if not ok:
-                try:
-                    self._record_remote_limit_blocked_request(req, limit_message, report=False)
-                except Exception:
-                    pass
-                continue
             items[rid] = dict(req)
-            self._add_participants_to_song_counts(counts, self._remote_request_participants(req))
+            if str(req.get("pending_reason") or "").strip().lower() == "singer_limit_waitlist":
+                _diag(
+                    "[WAITING-FOR-ADD] retained singer-limit waitlist entry "
+                    f"request_id={rid} singer={str(req.get('singer') or '')!r} action=await_host"
+                )
         self._waiting_for_add_requests = items
         self._waiting_for_add_recent_terminal_requests = terminal_items
         _diag(
@@ -31160,6 +31649,21 @@ class KaraokeApp(QWidget):
             f"accepting_requests={int(self._is_requests_accepting_cached())}"
         )
         self._refresh_header_status()
+        if connected:
+            try:
+                pending_count = len(list(getattr(self, "_host_request_sync_ops", []) or []))
+                if pending_count:
+                    _diag(
+                        "[NETWORK-RECOVERY] connection restored; flushing durable host additions "
+                        f"pending={pending_count}"
+                    )
+                    self._flush_host_request_sync_ops()
+            except Exception as exc:
+                _diag(f"[NETWORK-RECOVERY] reconnect flush failed error={exc}")
+            try:
+                self._sync_remote_removal_tombstones_async("connection_restored", force=True)
+            except Exception as exc:
+                _diag(f"[REQUEST-LIFECYCLE] reconnect terminal flush failed error={exc}")
 
     def _hero_badge_text(self, singer_name: str, artist: str = "", title: str = "") -> str:
         singer_name = str(singer_name or "").strip()
@@ -34195,13 +34699,30 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _trigger_show_screen_singer_start_vfx(self, singer_display: str, artist: str, title: str):
+    def _trigger_show_screen_singer_start_vfx(
+        self,
+        singer_display: str,
+        artist: str,
+        title: str,
+        *,
+        generation=None,
+    ):
+        if generation is not None:
+            current = int(getattr(self, "_confirmed_singer_start_generation", 0) or 0)
+            if int(generation) != current:
+                _diag(
+                    f"[SHOW-VFX] ignored stale singer-start generation={int(generation)} "
+                    f"current={current} singer={str(singer_display or '')!r}"
+                )
+                return False
         try:
             area = getattr(getattr(self, "video_window", None), "video_area", None)
             if area is not None and hasattr(area, "show_singer_start_vfx"):
                 area.show_singer_start_vfx(singer_display, title, artist)
+                return True
         except Exception as exc:
             _diag(f"[SHOW-VFX] app singer-start trigger failed: {exc}")
+        return False
 
     def _song_outro_payload_from_current(self) -> dict:
         singer = str(
@@ -34817,7 +35338,14 @@ class KaraokeApp(QWidget):
 
     def _live_song_counts_by_singer(self, *, exclude_request_id: int | None = None) -> dict[str, int]:
         counts = dict(self._active_song_counts_by_singer())
-        pending = self._pending_request_counts_by_singer(exclude_request_id=exclude_request_id)
+        # Waitlisted requests are not active requests and must not consume a
+        # singer's active-song allowance. Deferred accepted additions still
+        # count so concurrent/retried intake cannot oversubscribe the limit.
+        pending = self._pending_request_counts_by_singer(
+            exclude_request_id=exclude_request_id,
+            include_waiting=False,
+            include_deferred=True,
+        )
         for key, value in pending.items():
             counts[key] = counts.get(key, 0) + int(value or 0)
         return counts
@@ -35229,11 +35757,11 @@ class KaraokeApp(QWidget):
         )
         self._flush_host_request_sync_ops()
 
-    def _flush_host_request_sync_ops(self) -> None:
+    def _flush_host_request_sync_ops(self) -> int:
         state = object.__getattribute__(self, "__dict__")
         pending = list(state.get("_host_request_sync_ops", []) or [])
         if not pending or not self.is_network_configured():
-            return
+            return 0
         inflight = state.get("_host_request_sync_inflight")
         if not isinstance(inflight, set):
             inflight = set()
@@ -35241,6 +35769,7 @@ class KaraokeApp(QWidget):
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
+        scheduled = 0
         for operation in pending:
             key = str(operation.get("key") or "")
             if not key or key in inflight:
@@ -35251,6 +35780,11 @@ class KaraokeApp(QWidget):
             if last_attempt and time.time() - last_attempt < retry_delay:
                 continue
             inflight.add(key)
+            scheduled += 1
+            _diag(
+                "[HOST-REQUEST-SYNC] send scheduled "
+                f"request_key={key} attempt={attempts + 1} pending_total={len(pending)}"
+            )
 
             def send(op=dict(operation), op_key=key):
                 ok = False
@@ -35278,6 +35812,7 @@ class KaraokeApp(QWidget):
                 )
 
             threading.Thread(target=send, daemon=True, name="singws-host-request-sync").start()
+        return scheduled
 
     def _finish_host_request_sync(self, key: str, ok: bool, request_id: int, singer_session_id: int, error: str) -> None:
         state = object.__getattribute__(self, "__dict__")
@@ -35772,6 +36307,8 @@ class KaraokeApp(QWidget):
                 "local_reference_path",
                 "authorization_requirement",
                 "availability_status",
+                "duration_estimated",
+                "duration_source",
             ):
                 if track.get(_provider_key) not in (None, ""):
                     entry[_provider_key] = track.get(_provider_key)
@@ -36107,8 +36644,9 @@ class KaraokeApp(QWidget):
             entry["title"] = (track.get("title") or "")
             entry["disc_id"] = (track.get("discid") or track.get("disc_id") or "")
             entry["display_name"] = (track.get("display") or entry.get("display_name") or os.path.basename(path))
-            if track.get("duration"):
-                entry["duration"] = track.get("duration")
+            track_duration = track.get("duration_secs") or track.get("duration")
+            if track_duration:
+                self._apply_verified_duration(entry, track_duration, source="library_metadata")
         except Exception:
             pass
         return entry
@@ -38882,9 +39420,38 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _cancel_pending_singer_start_for_queue_change(self, reason: str) -> bool:
+        """Invalidate an unconfirmed singer presentation after a queue edit."""
+        cancelled = False
+        pending_rollback = getattr(self, "_pending_play_start_rollback", None)
+        if callable(pending_rollback):
+            try:
+                cancelled = bool(pending_rollback(str(reason or "queue_changed")))
+            except Exception as exc:
+                _diag(f"[PLAYNEXT] pending presentation rollback failed reason={reason}: {exc}")
+        self._pending_playback_countdown_payload = None
+        self._singer_start_generation = int(getattr(self, "_singer_start_generation", 0) or 0) + 1
+        if cancelled:
+            transport = getattr(self, "karaoke_transport", None)
+            try:
+                if transport is not None:
+                    transport.stop()
+            except Exception:
+                pass
+            if getattr(self, "karaoke_transport", None) is transport:
+                self.karaoke_transport = None
+            _diag(f"[PLAYNEXT] pending singer start cancelled reason={reason}")
+        return cancelled
+
     def toggle_singer_skip(self, singer_idx):
         """Toggle skip status for a singer"""
         if 0 <= singer_idx < len(self.queue):
+            target_singer = self.queue[singer_idx]
+            self._cancel_pending_singer_start_for_queue_change("singer_skip_changed")
+            try:
+                singer_idx = next(i for i, queued in enumerate(self.queue) if queued is target_singer)
+            except StopIteration:
+                return
             undo = KaraokeApp._begin_undoable_action(self, "Skip Singer")
             self.queue[singer_idx]["skipped"] = not self.queue[singer_idx].get("skipped", False)
             self.update_queue_display()
@@ -38894,8 +39461,17 @@ class KaraokeApp(QWidget):
     def toggle_song_skip(self, singer_idx, song_idx):
         """Toggle skip status for a song"""
         if 0 <= singer_idx < len(self.queue):
-            songs = self.queue[singer_idx].get("songs", [])
+            target_singer = self.queue[singer_idx]
+            songs = target_singer.get("songs", [])
             if 0 <= song_idx < len(songs):
+                target_song = songs[song_idx]
+                self._cancel_pending_singer_start_for_queue_change("song_skip_changed")
+                try:
+                    singer_idx = next(i for i, queued in enumerate(self.queue) if queued is target_singer)
+                    songs = self.queue[singer_idx].get("songs", [])
+                    song_idx = next(i for i, queued_song in enumerate(songs) if queued_song is target_song)
+                except StopIteration:
+                    return
                 # Convert to dict format if needed
                 if not isinstance(songs[song_idx], dict):
                     entry = songs[song_idx]
@@ -39044,6 +39620,8 @@ class KaraokeApp(QWidget):
             "discid": disc,
             "disc_id": disc,
             "duration": row.get("duration_secs") or row.get("duration") or "",
+            "duration_estimated": bool(row.get("duration_estimated", False)),
+            "duration_source": row.get("duration_source") or "",
             "path": row.get("path") or "",
             "type": row.get("song_type") or row.get("type") or "",
             "display": row.get("display") or "",
@@ -39826,6 +40404,15 @@ class KaraokeApp(QWidget):
 
         # PROCESSED_DIR cleanup removed - no longer needed
 
+        # Ask a filesystem scan to stop before tearing down its QThread. The
+        # worker checks this flag between directories and file batches, so the
+        # app can close without leaving a scan running against an external
+        # volume.
+        try:
+            self._cancel_library_scan()
+        except Exception:
+            pass
+
         # Cancel any background ZIP extraction before temp cleanup.
         try:
             worker = getattr(self, "_zip_extract_worker", None)
@@ -39870,7 +40457,11 @@ class KaraokeApp(QWidget):
                 pass
 
     def load_data(self):
+        library_load_started = time.perf_counter()
         self.tracks = _load_json_file(TRACKS_PATH, [], expected_type=list, label="Tracks")
+        library_load_ms = (time.perf_counter() - library_load_started) * 1000.0
+        _perf_log_if_slow("library_startup_load", library_load_ms)
+        _diag(f"[LIBRARY-LOAD] tracks={len(self.tracks):,} elapsed_ms={library_load_ms:.1f}")
         # Old in-memory index removed - now using DB lookups
         self.singer_history = {"singers": {}}
         try:
@@ -39916,6 +40507,8 @@ class KaraokeApp(QWidget):
                 if isinstance(entry, dict) and "song_info" in entry:
                     if "skipped" not in entry:
                         entry["skipped"] = False
+                    if self._is_external_karafun_entry(entry):
+                        self._ensure_karafun_duration_estimate(entry)
                     new_songs.append(entry)
                     self._ensure_queue_entry_id(entry)
                 else:
@@ -40116,26 +40709,15 @@ class KaraokeApp(QWidget):
         locations = self._library_locations()
         selected_ids = set(location_ids or [item.get("id") for item in locations])
         selected = [item for item in locations if item.get("id") in selected_ids]
-        available = [item for item in selected if os.path.isdir(item.get("path", ""))]
-        offline = [item for item in selected if item not in available]
-        for item in offline:
-            item["last_scan_status"] = "offline"
-        if not available:
-            self.settings["karaoke_library_locations"] = locations
-            self.save_settings()
-            QMessageBox.information(
-                self, "Library Location Offline",
-                "None of the selected library locations are currently available.\n"
-                "They remain configured and their song records have been preserved."
-            )
+        if not selected:
             return False
         self.settings["karaoke_library_locations"] = locations
-        for item in available:
+        for item in selected:
             item["last_scan_status"] = "scanning"
         self.save_settings()
-        self._pending_library_scan_ids = [item.get("id") for item in available]
+        self._pending_library_scan_ids = [item.get("id") for item in selected]
         return self._start_library_scan_worker(
-            [item.get("path") for item in available],
+            [item.get("path") for item in selected],
             quick_mode=not bool(full),
             preserve_outside=True,
         )
@@ -40160,17 +40742,20 @@ class KaraokeApp(QWidget):
                 current_id = location_list.currentItem().data(Qt.ItemDataRole.UserRole)
             location_list.clear()
             tracks = list(getattr(self, "tracks", []) or [])
+            track_path_keys = [
+                _scanned_library_path_key(track.get("path", ""))
+                for track in tracks if isinstance(track, dict) and track.get("path")
+            ]
             for location in self._library_locations():
                 path = location.get("path", "")
-                online = os.path.isdir(path)
-                count = sum(
-                    1 for track in tracks
-                    if isinstance(track, dict) and _path_is_within_library(track.get("path", ""), path)
-                )
-                status = "Available" if online else "Offline"
                 scan_status = str(location.get("last_scan_status") or "not scanned")
-                if online and scan_status == "offline":
-                    scan_status = "available again; ready to update"
+                online = scan_status != "offline"
+                root_key = _scanned_library_path_key(path)
+                count = sum(
+                    1 for path_key in track_path_keys
+                    if path_key == root_key or path_key.startswith(root_key + os.sep)
+                )
+                status = "Configured" if online else "Offline"
                 row = QListWidgetItem(f"{status}  •  {count:,} songs  •  {scan_status}\n{path}")
                 row.setData(Qt.ItemDataRole.UserRole, location.get("id"))
                 if not online:
@@ -40185,16 +40770,21 @@ class KaraokeApp(QWidget):
                 scanning = False
             rescan_button.setEnabled(not scanning)
             rescan_all_button.setEnabled(not scanning)
+            full_rescan_button.setEnabled(not scanning)
             remove_button.setEnabled(not scanning)
+            cancel_scan_button.setEnabled(scanning)
 
         buttons = QHBoxLayout()
         add_button = QPushButton("Add Library Location…")
-        rescan_button = QPushButton("Rescan Selected")
+        rescan_button = QPushButton("Update Selected")
         rescan_all_button = QPushButton("Update All Available")
+        full_rescan_button = QPushButton("Full Rescan Selected…")
         remove_button = QPushButton("Remove Selected")
+        cancel_scan_button = QPushButton("Cancel Scan")
         close_button = QPushButton("Close")
-        for button in (add_button, rescan_button, rescan_all_button, remove_button):
+        for button in (add_button, rescan_button, rescan_all_button, full_rescan_button, remove_button):
             buttons.addWidget(button)
+        buttons.addWidget(cancel_scan_button)
         buttons.addStretch(1)
         buttons.addWidget(close_button)
         layout.addLayout(buttons)
@@ -40215,6 +40805,24 @@ class KaraokeApp(QWidget):
         def rescan_selected():
             location_id = selected_id()
             if not location_id:
+                return
+            self._scan_library_locations([location_id], full=False)
+            refresh()
+
+        def full_rescan_selected():
+            location_id = selected_id()
+            if not location_id:
+                return
+            answer = QMessageBox.question(
+                dialog,
+                "Full Library Rescan",
+                "Re-read every file in the selected library?\n\n"
+                "Use this only to repair metadata. A normal Update is much faster "
+                "and already detects added, changed, moved, and removed files.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
                 return
             self._scan_library_locations([location_id], full=True)
             refresh()
@@ -40238,12 +40846,27 @@ class KaraokeApp(QWidget):
         add_button.clicked.connect(add_location)
         rescan_button.clicked.connect(rescan_selected)
         rescan_all_button.clicked.connect(lambda: (self._scan_library_locations(full=False), refresh()))
+        full_rescan_button.clicked.connect(full_rescan_selected)
         remove_button.clicked.connect(remove_selected)
+        cancel_scan_button.clicked.connect(lambda: (self._cancel_library_scan(), refresh()))
         close_button.clicked.connect(dialog.accept)
         self._library_locations_refresh = refresh
         refresh()
         dialog.exec()
         self._library_locations_refresh = None
+
+    def _cancel_library_scan(self) -> bool:
+        worker = getattr(self, "_library_scan_worker", None)
+        thread = getattr(self, "_library_scan_thread", None)
+        try:
+            if worker is None or thread is None or not thread.isRunning():
+                return False
+            worker.cancel()
+            self._set_processing_text("Cancelling library scan…", auto_dismiss_ms=None)
+            return True
+        except Exception as e:
+            print(f"⚠️ Could not cancel library scan: {e}")
+            return False
 
     def _start_library_scan_worker(self, roots, quick_mode: bool, preserve_outside: bool = False) -> bool:
         try:
@@ -40303,6 +40926,15 @@ class KaraokeApp(QWidget):
                 self.scan_progress.setRange(0, 1)
         except Exception:
             pass
+        if bool(result.get("cancelled", False)):
+            pending_ids = set(getattr(self, "_pending_library_scan_ids", []) or [])
+            for location in self._library_locations():
+                if location.get("id") in pending_ids:
+                    location["last_scan_status"] = "scan cancelled"
+            self._pending_library_scan_ids = []
+            self.save_settings()
+            self._show_processing_notification("Library scan cancelled; existing library preserved.", level="info")
+            return
         if not result.get("ok", False):
             msg = str(result.get("error") or "Library scan failed")
             pending_ids = set(getattr(self, "_pending_library_scan_ids", []) or [])
@@ -40322,17 +40954,27 @@ class KaraokeApp(QWidget):
             self.settings["karaoke_scan_dir_sigs"] = result.get("dir_sigs", {}) or {}
             self.settings["karaoke_scan_last_update"] = time.time()
             pending_ids = set(getattr(self, "_pending_library_scan_ids", []) or [])
+            unavailable_keys = {
+                _scanned_library_path_key(path) for path in (result.get("unavailable_roots") or [])
+            }
             if pending_ids:
                 now = time.time()
+                track_path_keys = [
+                    _scanned_library_path_key(track.get("path", ""))
+                    for track in self.tracks if isinstance(track, dict) and track.get("path")
+                ]
                 for location in self._library_locations():
                     if location.get("id") not in pending_ids:
                         continue
+                    if _scanned_library_path_key(location.get("path", "")) in unavailable_keys:
+                        location["last_scan_status"] = "offline"
+                        continue
                     location["last_scan_at"] = now
                     location["last_scan_status"] = "scan complete"
+                    root_key = _scanned_library_path_key(location.get("path", ""))
                     location["last_track_count"] = sum(
-                        1 for track in self.tracks
-                        if isinstance(track, dict)
-                        and _path_is_within_library(track.get("path", ""), location.get("path", ""))
+                        1 for path_key in track_path_keys
+                        if path_key == root_key or path_key.startswith(root_key + os.sep)
                     )
             self._pending_library_scan_ids = []
             self.save_settings()
@@ -40350,6 +40992,9 @@ class KaraokeApp(QWidget):
         quick_mode = bool(result.get("quick_mode", False))
         reindex_needed = bool(result.get("reindex_needed", not quick_mode))
         self._pending_scan_reindex_needed = bool(reindex_needed)
+        self._pending_scan_index_incremental = bool(quick_mode)
+        self._pending_scan_index_changed_paths = list(result.get("index_changed_paths") or [])
+        self._pending_scan_index_removed_paths = list(result.get("index_removed_paths") or [])
         self._last_scan_summary_text = str(result.get("summary_text") or "")
 
         scan_time = float(result.get("scan_time") or 0.0)
@@ -40359,8 +41004,17 @@ class KaraokeApp(QWidget):
         cdg_count = int(result.get("cdg_count") or 0)
         tracks_reused = int(result.get("tracks_reused") or 0)
         tracks_changed = int(result.get("tracks_changed") or 0)
+        unavailable_count = len(result.get("unavailable_roots") or [])
+        overlap_count = int(result.get("overlapping_roots_skipped") or 0)
         print(f"✅ Phase 1 completed in {scan_time:.2f} seconds")
         print(f"📁 Found {tracks_added} tracks ({zip_count} zip files, {mp4_count} mp4, ~{cdg_count} cdg entries)")
+        _diag(
+            f"[LIBRARY-SCAN] mode={'quick' if quick_mode else 'full'} "
+            f"requested={len(result.get('requested_roots') or [])} scanned={len(result.get('roots') or [])} "
+            f"offline={unavailable_count} overlapping_skipped={overlap_count} "
+            f"files_seen={int(result.get('files_seen') or 0):,} reused={tracks_reused:,} "
+            f"changed={tracks_changed:,} elapsed_ms={scan_time * 1000.0:.1f}"
+        )
         if quick_mode:
             print(f"⚡ Quick Update reused {tracks_reused:,} unchanged track(s); changed existing: {tracks_changed:,}")
         try:
@@ -40383,10 +41037,11 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print("Post-scan refresh failed:", e)
 
-        try:
-            _save_json_atomic(TRACKS_PATH, self.tracks)
-        except Exception as e:
-            print(f"⚠️ Failed to save tracks: {e}")
+        if not bool(result.get("tracks_persisted", False)):
+            try:
+                _save_json_atomic(TRACKS_PATH, self.tracks)
+            except Exception as e:
+                print(f"⚠️ Failed to save tracks: {e}")
 
         try:
             refresh = getattr(self, "_library_locations_refresh", None)
@@ -40403,7 +41058,14 @@ class KaraokeApp(QWidget):
         else:
             print("✅ All durations present — checking search index...")
             try:
-                self.ensure_song_index_async(force=bool(reindex_needed))
+                self.ensure_song_index_async(
+                    force=bool(reindex_needed),
+                    changed_paths=(result.get("index_changed_paths") or []) if quick_mode else None,
+                    removed_paths=(result.get("index_removed_paths") or []) if quick_mode else None,
+                )
+                self._pending_scan_index_changed_paths = []
+                self._pending_scan_index_removed_paths = []
+                self._pending_scan_index_incremental = False
             except Exception as e:
                 print(f"⚠️ Failed to rebuild search index: {e}")
 
@@ -41504,7 +42166,21 @@ class KaraokeApp(QWidget):
         try:
             pending_scan_reindex = bool(getattr(self, "_pending_scan_reindex_needed", False))
             self._pending_scan_reindex_needed = False
-            self._persist_tracks_json(trigger_reindex=(resolved > 0 or pending_scan_reindex))
+            incremental = bool(getattr(self, "_pending_scan_index_incremental", False))
+            changed_paths = set(getattr(self, "_pending_scan_index_changed_paths", []) or [])
+            removed_paths = set(getattr(self, "_pending_scan_index_removed_paths", []) or [])
+            try:
+                changed_paths.update(getattr(getattr(self, "_dur_worker", None), "resolved_paths", []) or [])
+            except Exception:
+                pass
+            self._pending_scan_index_changed_paths = []
+            self._pending_scan_index_removed_paths = []
+            self._pending_scan_index_incremental = False
+            self._persist_tracks_json(
+                trigger_reindex=(resolved > 0 or pending_scan_reindex),
+                changed_paths=sorted(changed_paths) if incremental or not pending_scan_reindex else None,
+                removed_paths=sorted(removed_paths) if incremental else None,
+            )
         except Exception as e:
             self._duration_scan_state = "error"
             self._duration_scan_error = str(e)
@@ -41513,7 +42189,13 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-    def _persist_tracks_json(self, trigger_reindex: bool = True):
+    def _persist_tracks_json(
+        self,
+        trigger_reindex: bool = True,
+        *,
+        changed_paths=None,
+        removed_paths=None,
+    ):
         # keep the on-disk library up to date as durations are discovered
         try:
             _save_json_atomic(TRACKS_PATH, self.tracks)
@@ -41526,7 +42208,11 @@ class KaraokeApp(QWidget):
             # Rebuild search index so durations appear in search results
             try:
                 print("🔍 Rebuilding search index with durations...")
-                self.ensure_song_index_async(force=True)
+                self.ensure_song_index_async(
+                    force=True,
+                    changed_paths=changed_paths,
+                    removed_paths=removed_paths,
+                )
             except Exception as e:
                 print(f"⚠️ Failed to rebuild search index: {e}")
 
@@ -41776,7 +42462,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-    def ensure_song_index_async(self, force: bool = False):
+    def ensure_song_index_async(self, force: bool = False, *, changed_paths=None, removed_paths=None):
         # Start index build in a QThread, report completion in the same status area as scan text.
         try:
             thr = getattr(self, "_index_thread", None)
@@ -41785,7 +42471,11 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        self._index_thread = IndexBuildThread(force=force)
+        self._index_thread = IndexBuildThread(
+            force=force,
+            changed_paths=changed_paths,
+            removed_paths=removed_paths,
+        )
         self._index_thread.done.connect(self._on_index_done)
         self._index_thread.progress.connect(self._on_index_progress)  # NEW: connect progress
         self._index_thread.start()
@@ -42157,14 +42847,48 @@ class KaraokeApp(QWidget):
                 pass
 
     @staticmethod
+    def _apply_verified_duration(entry: dict, value, *, source: str) -> bool:
+        """Replace only a missing/estimated duration with verified metadata."""
+        if not isinstance(entry, dict):
+            return False
+        seconds = normalize_karafun_duration_seconds(value)
+        if seconds is None:
+            return False
+        current = normalize_karafun_duration_seconds(entry.get("duration"))
+        if current is not None and not bool(entry.get("duration_estimated", False)):
+            return False
+        entry["duration"] = seconds
+        entry["duration_estimated"] = False
+        entry["duration_source"] = str(source or "verified_metadata")
+        return True
+
+    @staticmethod
+    def _ensure_karafun_duration_estimate(entry: dict) -> bool:
+        """Persist one stable estimate for an external KaraFun queue entry."""
+        if not isinstance(entry, dict):
+            return False
+        current = normalize_karafun_duration_seconds(entry.get("duration"))
+        if current is not None and not bool(entry.get("duration_estimated", False)):
+            return False
+        changed = current != KARAFUN_ESTIMATED_DURATION_SECONDS or not bool(entry.get("duration_estimated", False))
+        entry["duration"] = KARAFUN_ESTIMATED_DURATION_SECONDS
+        entry["duration_estimated"] = True
+        entry["duration_source"] = "karafun_default_estimate"
+        return changed
+
+    @staticmethod
     def _build_karafun_streaming_track(*, artist: str, title: str,
-                                       provider_track_id: str = "", provider_url: str = "") -> dict:
+                                       provider_track_id: str = "", provider_url: str = "",
+                                       duration=None, duration_estimated=None,
+                                       duration_source: str = "") -> dict:
         """Build the single external-track shape used by manual and server adds."""
         artist = str(artist or "").strip()
         title = str(title or "").strip()
         provider_track_id = str(provider_track_id or "").strip()
         provider_url = str(provider_url or "").strip()
         reference_id = provider_track_id or provider_url or f"manual:{uuid.uuid4().hex}"
+        normalized_duration = normalize_karafun_duration_seconds(duration)
+        is_estimate = bool(duration_estimated) or normalized_duration is None
         return {
             "artist": artist,
             "title": title,
@@ -42176,6 +42900,12 @@ class KaraokeApp(QWidget):
             "provider_url": provider_url,
             "authorization_requirement": "official_karafun_app",
             "availability_status": "externally_controlled",
+            "duration": normalized_duration or KARAFUN_ESTIMATED_DURATION_SECONDS,
+            "duration_estimated": is_estimate,
+            "duration_source": (
+                "karafun_default_estimate"
+                if is_estimate else str(duration_source or "karafun_metadata")
+            ),
         }
 
     def _on_search_result_double_clicked(self, item):
@@ -42561,7 +43291,14 @@ class KaraokeApp(QWidget):
             self._rotation_recompute_round_state(force_reset=False)
         except Exception:
             pass
-        singer_count, total_secs = self._compute_queue_eta_seconds()
+        _active_singer_count, total_secs = self._compute_queue_eta_seconds()
+        try:
+            singer_count = sum(
+                1 for singer in (self.queue or [])
+                if isinstance(singer, dict) and str(singer.get("name", "") or "").strip()
+            )
+        except Exception:
+            singer_count = int(_active_singer_count or 0)
         eta_mss = self._fmt_m_ss(total_secs) if total_secs > 0 else "0:00"
 
         SHOW_END_TIME = True
@@ -42589,6 +43326,21 @@ class KaraokeApp(QWidget):
                 '<span style="color:#5AC8FA; font-weight:900;">LOOPING</span>'
             )
 
+        start_html = ""
+        if self._is_rotation_mode():
+            try:
+                marker_idx = int(self._rotation_marker_index())
+                marker_name = str(self.queue[marker_idx].get("name", "") or "").strip() if 0 <= marker_idx < len(self.queue) else ""
+            except Exception:
+                marker_name = ""
+            if marker_name:
+                from html import escape as _html_escape
+                start_html = (
+                    '<span style="color:#5C6170;"> • </span>'
+                    '<span style="color:#F3CB00; font-weight:900;">START</span> '
+                    f'<span style="color:#FFF0A6; font-weight:850;">{_html_escape(marker_name)}</span>'
+                )
+
         self.queue_label.setText(
             f'<span style="color:#9CA3B5; font-weight:700;">SINGERS</span> '
             f'<span style="color:#FFFFFF; font-weight:800;">{singer_count}</span>'
@@ -42598,7 +43350,7 @@ class KaraokeApp(QWidget):
             f'{end_html}'
             f'<span style="color:#5C6170;"> • </span>'
             f'<span style="color:#B994FF; font-weight:800;">{mode_label}</span>'
-            f'{locked_html}{loop_html}'
+            f'{start_html}{locked_html}{loop_html}'
         )
 
     def update_queue_display(self):
@@ -42710,10 +43462,6 @@ class KaraokeApp(QWidget):
 
         number = 1
         for singer_idx, singer in enumerate(self.queue):
-            # Empty rows are retained internally for identity and stable re-add
-            # ordering, but they are not active rotation entries.
-            if not singer.get("songs"):
-                continue
             is_singer_skipped = singer.get("skipped", False)
             has_sung = singer.get("has_sung", False)  # New singers haven't sung yet
             self._ensure_singer_id(singer)
@@ -42725,14 +43473,15 @@ class KaraokeApp(QWidget):
             
             if is_singer_skipped:
                 singer_left = f"— {singer['name']}"
-                singer_right = "SKIPPED"
-            elif has_songs:
-                singer_left = f"{number}. {singer['name']}"
-                singer_right = ""
-                number += 1
             else:
-                singer_left = f"— {singer['name']}"
-                singer_right = ""
+                singer_left = f"{number}. {singer['name']}"
+                number += 1
+            singer_right = self._queue_singer_status_label(
+                singer,
+                is_rotation_start=bool(self._is_rotation_mode() and singer_idx == boundary_idx),
+                is_current=bool(is_current_singer),
+                is_next=bool(karaoke_active and singer_idx == next_active_singer_idx),
+            )
 
             if not is_singer_skipped:
                 item = QListWidgetItem(singer_left)
@@ -42767,7 +43516,6 @@ class KaraokeApp(QWidget):
             if self._is_rotation_mode() and singer_idx == boundary_idx and not is_singer_skipped:
                 item.setForeground(QColor(_v("warning")))
             if is_current_singer:
-                singer_right = "CURRENTLY SINGING"
                 self._set_aligned_row_meta(item, singer_left, singer_right)
                 item.setData(getattr(self, "_queue_presentation_role", int(Qt.ItemDataRole.UserRole) + 33), "current")
                 item.setBackground(QColor(17, 94, 58, 220))
@@ -42787,7 +43535,6 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
             elif karaoke_active and singer_idx == next_active_singer_idx and not is_singer_skipped:
-                singer_right = "NEXT UP"
                 self._set_aligned_row_meta(item, singer_left, singer_right)
                 item.setData(getattr(self, "_queue_presentation_role", int(Qt.ItemDataRole.UserRole) + 33), "next")
                 item.setBackground(QColor(70, 54, 16, 130))
@@ -43039,8 +43786,6 @@ class KaraokeApp(QWidget):
             pass
         row = 0
         for i, singer in enumerate(self.queue):
-            if not singer.get("songs"):
-                continue
             if i == singer_idx:
                 return row
             row += 1 + len(singer.get("songs", []))
@@ -45262,8 +46007,11 @@ class KaraokeApp(QWidget):
                     raise RuntimeError(last_error or "No acceptable KaraFun match")
                 selected_duration = self._karafun_clock_seconds(parts[3] if len(parts) > 3 else "")
                 if selected_duration and selected_duration > 0:
-                    entry["duration"] = int(selected_duration)
-                    _diag(f"[KARAFUN-AUTO] selected duration seconds={int(selected_duration)} raw={parts[3]!r}")
+                    if self._apply_verified_duration(entry, selected_duration, source="karafun_result"):
+                        _diag(
+                            f"[KARAFUN-AUTO] selected duration seconds={int(selected_duration)} "
+                            f"raw={parts[3]!r} replaced_estimate=1"
+                        )
                 if parts[0] == "FIRST":
                     _diag(f"[KARAFUN-AUTO] selected first visible KaraFun result query={selected_query!r}")
                 else:
@@ -45525,14 +46273,7 @@ class KaraokeApp(QWidget):
 
     @staticmethod
     def _karafun_clock_seconds(value: str):
-        text = str(value or "").strip()
-        parts = text.split(":")
-        if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
-            return None
-        total = 0
-        for part in parts:
-            total = (total * 60) + int(part)
-        return total
+        return normalize_karafun_duration_seconds(value)
 
     def _start_karafun_completion_monitor(self, entry: dict):
         """Complete the active external track once KaraFun reports end/idle state."""
@@ -45552,7 +46293,14 @@ class KaraokeApp(QWidget):
         last_clock_candidates = {}
         idle_stop_count = 0
         try:
-            fallback_duration = max(0, int(entry.get("duration") or 0))
+            # Rotation estimates are presentation metadata, not a playback end
+            # signal. Only a verified/manual duration may arm the completion
+            # watchdog; otherwise a song longer than 3:30 could be completed
+            # early merely because its ETA used the catalog fallback.
+            fallback_duration = (
+                0 if bool(entry.get("duration_estimated", False))
+                else max(0, int(entry.get("duration") or 0))
+            )
         except Exception:
             fallback_duration = 0
         try:
@@ -45974,7 +46722,164 @@ class KaraokeApp(QWidget):
         _diag(f"[KARAFUN] song ended singer={singer_name!r} action={action!r}")
         _diag(f"[KARAFUN] rotation advanced after completion singer={singer_name!r} queue_len={len(self.queue) if isinstance(self.queue, list) else -1}")
 
-    def play_next_file(self, skip_confirmation=False):
+    def _set_play_control_starting(self, starting: bool):
+        """Mark Play locked while still allowing a repeat press to ask first."""
+        self._play_control_starting = bool(starting)
+        button = getattr(self, "play_next", None)
+        if button is None:
+            return
+        try:
+            # Keep the widget enabled so a deliberate repeated press can open
+            # the required confirmation. The command/token gate below is the
+            # lock that prevents that signal from mutating the queue directly.
+            button.setEnabled(True)
+            button.setToolTip(
+                "Starting queued song…" if starting else "Play Next Singer"
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _play_confirmation_line(payload: dict, fallback: str) -> str:
+        payload = payload if isinstance(payload, dict) else {}
+        singer = str(payload.get("singer") or fallback or "Unknown singer").strip()
+        artist = str(payload.get("artist") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        song = " — ".join(part for part in (artist, title) if part) or "Unknown song"
+        return f"{singer}: {song}"
+
+    def _repeated_play_payloads(self) -> tuple[dict, dict, str]:
+        pending = getattr(self, "_pending_play_start_context", None)
+        if isinstance(pending, dict):
+            current = dict(pending.get("payload") or {})
+            state = "starting"
+        else:
+            current = self._song_outro_payload_from_current()
+            state = "paused" if self._is_karaoke_paused() else "playing"
+        try:
+            next_payload = self._next_up_transition_payload_from_queue()
+        except Exception:
+            next_payload = {}
+        return current, next_payload, state
+
+    def _confirm_repeated_play_advance(self) -> bool:
+        """Describe the exact interrupt/queue effects before advancing."""
+        if bool(getattr(self, "_play_confirmation_open", False)):
+            _diag("[PLAY-COMMAND] duplicate confirmation request ignored")
+            return False
+        current, next_payload, state = self._repeated_play_payloads()
+        if not next_payload:
+            try:
+                QMessageBox.information(
+                    self,
+                    "No Next Song",
+                    "There is no playable queued song to advance to.\n\n"
+                    "Current audio and every queue entry will remain unchanged.",
+                )
+            except Exception:
+                pass
+            return False
+        current_line = self._play_confirmation_line(current, "Current singer")
+        next_line = self._play_confirmation_line(next_payload, "Next singer")
+        if state == "starting":
+            current_effect = (
+                "The pending start will be canceled. Its song will be retained and its singer "
+                "will move to the end of the rotation."
+            )
+        elif state == "paused":
+            current_effect = "The paused current song will stop and remain in performance history."
+        else:
+            current_effect = "The currently playing song will stop and remain in performance history."
+        message = (
+            f"Current ({state}):\n{current_line}\n\n"
+            f"Next to play:\n{next_line}\n\n"
+            f"{current_effect}\n"
+            "The next song will leave the pending queue only after playback successfully starts.\n"
+            "No other singer or song will be skipped, completed, deleted, or removed.\n\n"
+            "Stop the current action and play the identified next song?"
+        )
+        self._play_confirmation_open = True
+        try:
+            dlg = ConfirmInterruptDialog(
+                self,
+                title="Stop Current and Play Next?",
+                message=message,
+                confirm_text="Stop & Play Next",
+                cancel_text="Keep Current",
+            )
+            accepted = dlg.exec() == QDialog.DialogCode.Accepted
+            _diag(f"[PLAY-COMMAND] repeated play confirmation accepted={int(accepted)} state={state}")
+            return accepted
+        except Exception as exc:
+            # A broken dialog must never turn into an unconfirmed advance.
+            _diag(f"[PLAY-COMMAND] confirmation failed closed: {exc}")
+            return False
+        finally:
+            self._play_confirmation_open = False
+
+    def _advance_from_pending_start_after_confirmation(self) -> bool:
+        context = getattr(self, "_pending_play_start_context", None)
+        if not isinstance(context, dict):
+            return False
+        pending_singer_id = str(context.get("singer_id") or "")
+        if not self._cancel_pending_singer_start_for_queue_change("confirmed_play_advance"):
+            return False
+        # Rollback restored the selected request. Advancing rotates that singer
+        # without setting skip, completing the request, or deleting the song.
+        for idx, candidate in enumerate(list(getattr(self, "queue", []) or [])):
+            if not isinstance(candidate, dict):
+                continue
+            if str(self._ensure_singer_id(candidate) or "") != pending_singer_id:
+                continue
+            retained = self.queue.pop(idx)
+            self.queue.append(retained)
+            self.queue = self.queue.copy()
+            _diag(
+                f"[PLAY-COMMAND] retained pending song and rotated singer "
+                f"singer_id={pending_singer_id} from_index={idx}"
+            )
+            try:
+                self._request_queue_display_refresh()
+                self._schedule_save_data(0)
+            except Exception:
+                pass
+            break
+        self._next_in_progress = False
+        return True
+
+    def _on_play_control_clicked(self, _checked=False):
+        """Single UI entry point for mouse, touch, keyboard, and accessibility."""
+        starting = bool(
+            getattr(self, "_pending_play_start_token", None) is not None
+            or getattr(self, "_next_in_progress", False)
+            or getattr(self, "_play_control_starting", False)
+            or getattr(self, "_mp3g_prepare_then_play_next", "")
+        )
+        active = bool(
+            starting
+            or getattr(self, "karaoke_transport", None) is not None
+            or getattr(self, "karaoke_playing", False)
+        )
+        if not active:
+            self.play_next_file(skip_confirmation=True, command_source="manual_idle")
+            return
+        if not self._confirm_repeated_play_advance():
+            _diag("[PLAY-COMMAND] repeated play canceled; audio and queue unchanged")
+            return
+        # The modal dialog runs a Qt event loop; preroll may legitimately
+        # become playing while it is open. Re-evaluate after confirmation so
+        # the approved action still targets the same current/next transition.
+        pending_now = isinstance(getattr(self, "_pending_play_start_context", None), dict)
+        if pending_now:
+            if not self._advance_from_pending_start_after_confirmation():
+                return
+        elif isinstance(getattr(self, "_active_external_karafun", None), dict):
+            # The confirmation explicitly authorizes ending the active
+            # external performance before the next queue entry is selected.
+            self._finish_external_karafun_playback("complete")
+        self.play_next_file(skip_confirmation=True, command_source="manual_confirmed_advance")
+
+    def play_next_file(self, skip_confirmation=False, *, command_source="internal"):
         # Intro Loop release: if the next song is held in a looping intro, a
         # Play/Next press just lets it continue past the loop — no teardown, no
         # advance. (Not during the media-end auto-advance, which sets _pending.)
@@ -45990,7 +46895,8 @@ class KaraokeApp(QWidget):
             q_len = len(self.queue) if hasattr(self, "queue") and self.queue is not None else -1
             has_pipe = bool(getattr(self, "karaoke_transport", None))
             _diag(
-                f"[PLAYNEXT] clicked queue_len={q_len} next_in_progress={bool(getattr(self, '_next_in_progress', False))} "
+                f"[PLAYNEXT] requested source={command_source} queue_len={q_len} "
+                f"next_in_progress={bool(getattr(self, '_next_in_progress', False))} "
                 f"stop_in_progress={bool(getattr(self, '_stop_in_progress', False))} has_pipeline={has_pipe}"
             )
         except Exception:
@@ -46035,6 +46941,7 @@ class KaraokeApp(QWidget):
             _diag("[PLAYNEXT] ignored: playback preroll/countdown not committed")
             return
         self._next_in_progress = True
+        self._set_play_control_starting(True)
         # Covers countdown + asynchronous GStreamer preroll. A 450ms gate let
         # a normal double-click consume the following singer before audio had
         # started on slower Macs.
@@ -46048,17 +46955,27 @@ class KaraokeApp(QWidget):
             dlg = ConfirmInterruptDialog(self)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 _diag("[PLAYNEXT] cancelled by interrupt dialog")
+                self._next_in_progress = False
+                self._set_play_control_starting(False)
                 return
 
         if not self.queue:
             _diag("[PLAYNEXT] ignored: queue empty")
+            self._next_in_progress = False
+            self._set_play_control_starting(False)
             return
 
         # Playback selection is transactional. Several legacy return paths
         # popped a singer/song before validating or starting media, which is
         # how a failed Play could make later rotation positions disappear.
         queue_snapshot = list(self.queue)
-        singer_snapshots = [(s, dict(s)) for s in queue_snapshot if isinstance(s, dict)]
+        singer_snapshots = []
+        for snapshot_singer in queue_snapshot:
+            if not isinstance(snapshot_singer, dict):
+                continue
+            snapshot_state = dict(snapshot_singer)
+            snapshot_state["songs"] = list(snapshot_singer.get("songs", []) or [])
+            singer_snapshots.append((snapshot_singer, snapshot_state))
 
         def _restore_play_transaction(reason: str, *, clear_gate: bool = True):
             for snapshot_singer, snapshot_state in singer_snapshots:
@@ -46071,6 +46988,7 @@ class KaraokeApp(QWidget):
             self._pending_playback_countdown_payload = None
             if clear_gate:
                 self._next_in_progress = False
+                self._set_play_control_starting(False)
             _diag(f"[QUEUE-AUDIT] action=play_start_rollback reason={reason} singers={len(self.queue)}")
             try:
                 self._request_queue_display_refresh()
@@ -46124,6 +47042,8 @@ class KaraokeApp(QWidget):
             singer = None
         if singer is None:
             QTimer.singleShot(0, self.update_queue_display)
+            self._next_in_progress = False
+            self._set_play_control_starting(False)
             return
 
         # Find first NON-SKIPPED valid song (keep skipped songs in the list!).
@@ -46155,6 +47075,8 @@ class KaraokeApp(QWidget):
                     self._rotation_reweave_locked_tail()
                 self.queue = self.queue.copy()
                 QTimer.singleShot(0, self.update_queue_display)
+                self._next_in_progress = False
+                self._set_play_control_starting(False)
                 return
 
             # Pop the first non-skipped song (might be index 0 or later if skipped songs before it)
@@ -46192,6 +47114,8 @@ class KaraokeApp(QWidget):
                     duet_display=duet_display,
                     marker_was_top=marker_was_top,
                 )
+                self._next_in_progress = False
+                self._set_play_control_starting(False)
                 return
             if primary_path and (not os.path.exists(primary_path)):
                 _diag(f"[PLAYNEXT] start rejected: missing file kept in queue: {primary_path}")
@@ -46254,20 +47178,24 @@ class KaraokeApp(QWidget):
                 ):
                     self._mp3g_prepare_then_play_next = ""
                     self._next_in_progress = False
+                    self._set_play_control_starting(False)
                 return
 
-        # Show the singer cue before media is allowed to leave PAUSED. The
-        # GStreamer transport prerolls asynchronously behind this 2100ms gate,
-        # so immediate CDG lyrics cannot paint or advance over the countdown.
+        # Do not add an unseen start gate: the singer animation itself begins
+        # only after started is confirmed below. Delaying the transport here
+        # would create dead air before that confirmed animation.
         countdown_artist = str(entry.get("artist") or "").strip() if isinstance(entry, dict) else ""
         countdown_title = str(entry.get("title") or "").strip() if isinstance(entry, dict) else ""
         singer_display = duet_display if duet_display else singer.get("name", "")
-        self._playback_start_countdown_ms = 2100
-        self._pending_playback_countdown_payload = (
-            singer_display,
-            countdown_artist,
-            countdown_title,
-        )
+        start_generation = int(getattr(self, "_singer_start_generation", 0) or 0) + 1
+        self._singer_start_generation = start_generation
+        self._playback_start_countdown_ms = 0
+        self._pending_playback_countdown_payload = {
+            "generation": start_generation,
+            "singer": str(singer_display or ""),
+            "artist": countdown_artist,
+            "title": countdown_title,
+        }
 
         # Normalize shapes we might see in the queue
         start_ok = False
@@ -46332,27 +47260,128 @@ class KaraokeApp(QWidget):
             _restore_play_transaction("transport_rejected_start")
             return
 
+        # Resolve the immutable display payload for the selected entry. Never
+        # read the later queue selection when publishing the animation.
+        entry_artist = ""
+        entry_title = ""
+        if isinstance(entry, dict):
+            entry_artist = str(entry.get("artist") or "").strip()
+            entry_title = str(entry.get("title") or "").strip()
+        if entry_artist and entry_title:
+            display_name = f"{entry_artist} • {entry_title}"
+        else:
+            display_name = self.lookup_display_name(song_path_display, artist_title_only=True)
+        artist = ""
+        title = ""
+        if " • " in display_name:
+            artist, title = display_name.split(" • ", 1)
+            artist = artist.strip()
+            title = title.strip()
+        else:
+            artist = (display_name or "").strip()
+        singer_display = duet_display if duet_display else singer.get("name", "")
+        singer_id = self._ensure_singer_id(singer)
+        request_id = self._ensure_queue_entry_id(entry)
+
         # start_ok means asynchronous preroll was accepted, not that sound has
-        # started. Commit ownership/history/selection only from the transport's
-        # real started signal. A preroll failure or Stop during the countdown
-        # restores the complete queue and singer snapshot.
+        # started. Commit every visible/active identity and rotation mutation
+        # only from the transport's real started signal. A preroll failure or
+        # Stop during the gate restores the complete queue snapshot and never
+        # announces this singer.
         transport_for_start = getattr(self, "karaoke_transport", None)
         play_start_token = object()
         self._pending_play_start_token = play_start_token
+        self._pending_play_start_context = {
+            "generation": start_generation,
+            "singer_id": singer_id,
+            "request_id": request_id,
+            "payload": {
+                "singer": str(singer_display or ""),
+                "artist": str(artist or ""),
+                "title": str(title or ""),
+            },
+            "command_source": str(command_source or "internal"),
+        }
 
         def _rollback_pending_start(reason: str):
             if getattr(self, "_pending_play_start_token", None) is not play_start_token:
                 return False
             self._pending_play_start_token = None
             self._pending_play_start_rollback = None
+            self._pending_play_start_context = None
+            if isinstance(getattr(self, "_pending_playback_countdown_payload", None), dict):
+                pending_generation = self._pending_playback_countdown_payload.get("generation")
+                if pending_generation == start_generation:
+                    self._pending_playback_countdown_payload = None
             _restore_play_transaction(reason)
             return True
 
         def _commit_pending_start():
             if getattr(self, "_pending_play_start_token", None) is not play_start_token:
+                _diag(
+                    f"[PLAYNEXT] ignored stale started signal generation={start_generation} "
+                    f"singer={str(singer_display or '')!r}"
+                )
+                return
+            if getattr(self, "karaoke_transport", None) is not transport_for_start:
+                _diag(
+                    f"[PLAYNEXT] ignored replaced transport start generation={start_generation} "
+                    f"singer={str(singer_display or '')!r}"
+                )
                 return
             self._pending_play_start_token = None
             self._pending_play_start_rollback = None
+            self._pending_playback_countdown_payload = None
+            self._pending_play_start_context = None
+            self._confirmed_singer_start_generation = start_generation
+            self._next_in_progress = False
+            self._set_play_control_starting(False)
+
+            # The confirmed item is the single source of truth for all singer
+            # presentation and active-playback identity.
+            self._eta_hold_current_secs = max(0, int(current_song_dur or 0))
+            self._current_karaoke_singer_name = str(singer.get("name", "") or "")
+            self._current_karaoke_singer_display = str(singer_display or "")
+            self._current_karaoke_singer_id = singer_id
+            self._current_karaoke_request_id = request_id
+            self._current_karaoke_song_path = str(song_path_display or "")
+            try:
+                self._update_last_sung_card()
+            except Exception:
+                pass
+            try:
+                self._clear_next_up_overlay_pending("confirmed_playback_start")
+                self._hide_next_up_transition_overlay(reason="confirmed_singer_start")
+            except Exception:
+                pass
+            self._set_now_singing_3line(singer_display, artist, title)
+            self._trigger_show_screen_singer_start_vfx(
+                singer_display,
+                artist,
+                title,
+                generation=start_generation,
+            )
+
+            singer["has_sung"] = True
+            singer["last_sung_at"] = time.time()
+            try:
+                self._schedule_waiting_for_add_view_refresh(reason="singer_started")
+            except Exception:
+                pass
+            if self._is_rotation_mode():
+                singer["round_sung"] = True
+            self.queue.append(singer)
+            if self._is_rotation_locked():
+                self._rotation_reweave_locked_tail()
+            if self._is_rotation_mode():
+                if marker_was_top:
+                    for queued_singer in self.queue:
+                        queued_singer["rotation_marker"] = False
+                    singer["rotation_marker"] = True
+                self._rotation_repair_marker()
+                self._rotation_recompute_round_state(force_reset=False)
+            self.queue = self.queue.copy()
+
             try:
                 if remote_request_id is not None:
                     self._complete_remote_request(
@@ -46375,97 +47404,32 @@ class KaraokeApp(QWidget):
                 self._sync_singer_history_async("play_next")
             except Exception:
                 pass
-            started_singer_id = str(getattr(self, "_current_karaoke_singer_id", "") or "")
-            QTimer.singleShot(0, lambda sid=started_singer_id: self._select_next_rotation_after_start(sid))
+            try:
+                self._send_stage_notifications_for_transition(singer_display or singer.get("name", ""))
+            except Exception:
+                pass
+            try:
+                _diag(
+                    f"[PLAYNEXT] confirmed generation={start_generation} "
+                    f"singer={singer.get('name', 'Unknown')!r} song={song_path_display!r}"
+                )
+            except Exception:
+                pass
+            self._clear_routine_processing_text_for_playback()
+            QTimer.singleShot(0, lambda sid=singer_id: self._select_next_rotation_after_start(sid))
+
+            def _refresh_confirmed_presentation():
+                if int(getattr(self, "_confirmed_singer_start_generation", 0) or 0) != start_generation:
+                    return
+                self._reapply_rotation_presentation(scroll_current=False)
+
+            QTimer.singleShot(50, _refresh_confirmed_presentation)
 
         self._pending_play_start_rollback = _rollback_pending_start
         if transport_for_start is not None and hasattr(transport_for_start, "started"):
             transport_for_start.started.connect(_commit_pending_start)
         else:
             QTimer.singleShot(0, _commit_pending_start)
-
-        try:
-            _diag(f"[PLAYNEXT] started singer={singer.get('name', 'Unknown')} song={song_path_display}")
-        except Exception:
-            pass
-        self._clear_routine_processing_text_for_playback()
-
-        # Prefer queue entry metadata first so scan/DB timing can't force filename fallback.
-        entry_artist = ""
-        entry_title = ""
-        if isinstance(entry, dict):
-            entry_artist = str(entry.get("artist") or "").strip()
-            entry_title = str(entry.get("title") or "").strip()
-        if entry_artist and entry_title:
-            display_name = f"{entry_artist} • {entry_title}"
-        else:
-            display_name = self.lookup_display_name(song_path_display, artist_title_only=True)
-        self._eta_hold_current_secs = max(0, int(current_song_dur or 0))
-
-        # If this song is a duet, show "Primary & Partner" as the singer line (no literal 'Duet')
-        singer_display = duet_display if duet_display else singer.get("name", "")
-
-                # Now Singing (3 lines under transport buttons)
-        # Line 1: Now Singing: <Singer>
-        # Line 2: Artist
-        # Line 3: Title
-
-        # Split "Artist • Title" (already returned by lookup_display_name(..., artist_title_only=True))
-        artist = ''
-        title = ''
-        if " • " in display_name:
-            artist, title = display_name.split(" • ", 1)
-            artist = artist.strip()
-            title = title.strip()
-        else:
-            artist = (display_name or "").strip()
-            title = ""
-
-        try:
-            self._clear_next_up_overlay_pending("play_next_start_no_overlay")
-        except Exception:
-            pass
-
-        # Render 3-line Now Singing with stable eliding + padding-aware width
-        self._current_karaoke_singer_name = str(singer.get("name", "") or "")
-        self._current_karaoke_singer_display = str(singer_display or "")
-        self._current_karaoke_singer_id = self._ensure_singer_id(singer)
-        self._current_karaoke_request_id = self._ensure_queue_entry_id(entry)
-        self._current_karaoke_song_path = str(song_path_display or "")
-        try:
-            self._update_last_sung_card()
-        except Exception:
-            pass
-        self._set_now_singing_3line(singer_display, artist, title)
-        # Mark singer as has_sung (they've now completed at least one song)
-        singer["has_sung"] = True
-        singer["last_sung_at"] = time.time()
-        try:
-            self._schedule_waiting_for_add_view_refresh(reason="singer_completed")
-        except Exception:
-            pass
-        if self._is_rotation_mode():
-            singer["round_sung"] = True
-        self.queue.append(singer)
-        if self._is_rotation_locked():
-            self._rotation_reweave_locked_tail()
-        if self._is_rotation_mode():
-            # Playback rule: marker stays with the singer that just started the new rotation.
-            if marker_was_top:
-                for s in self.queue:
-                    s["rotation_marker"] = False
-                singer["rotation_marker"] = True
-            self._rotation_repair_marker()
-            self._rotation_recompute_round_state(force_reset=False)
-        self.queue = self.queue.copy()
-
-        try:
-            self._send_stage_notifications_for_transition(singer_display or singer.get("name", ""))
-        except Exception:
-            pass
-
-        # Defer queue display update with small delay to avoid freezing ticker
-        QTimer.singleShot(50, lambda: self._reapply_rotation_presentation(scroll_current=False))
 
     def stop_playback(self, skip_confirmation=False):
         pending_rollback = getattr(self, "_pending_play_start_rollback", None)
@@ -46744,8 +47708,6 @@ class KaraokeApp(QWidget):
     def get_singer_index_by_row(self, row):
         counter = 0
         for i, singer in enumerate(self.queue):
-            if not singer.get("songs"):
-                continue
             if counter == row:
                 return i
             counter += 1 + len(singer["songs"])
@@ -46754,8 +47716,6 @@ class KaraokeApp(QWidget):
     def get_song_index_by_row(self, row):
         counter = 0
         for i, singer in enumerate(self.queue):
-            if not singer.get("songs"):
-                continue
             if counter == row:
                 return i, -1
             counter += 1
@@ -46981,7 +47941,9 @@ class KaraokeApp(QWidget):
                 removed_at = float((tombstone or {}).get("removed_at") or 0)
             except Exception:
                 removed_at = 0
-            if removed_at and now - removed_at > ttl:
+            # Never discard an unconfirmed terminal transition. It is the
+            # durable retry record used after a disconnect or app restart.
+            if removed_at and (tombstone or {}).get("server_synced_at") and now - removed_at > ttl:
                 items.pop(key, None)
                 changed = True
         if changed:
@@ -47054,6 +48016,9 @@ class KaraokeApp(QWidget):
             "removal_reason": str(reason or "host_remove"),
             "local_revision": int(getattr(self, "_queue_revision", 0) or 0),
             "server_synced_at": None,
+            "sync_attempts": 0,
+            "last_sync_attempt_at": None,
+            "last_sync_error": "",
             "status": status,
         }
         data.setdefault("requests", {})[str(request_id)] = tombstone
@@ -47070,7 +48035,7 @@ class KaraokeApp(QWidget):
             "[REMOTE-TOMBSTONE] created "
             f"request_id={request_id} singer={singer_name!r} title={title!r} "
             f"artist={artist!r} reason={reason} revision={tombstone['local_revision']} "
-            f"accepting_requests={int(self._is_requests_accepting_cached())}"
+            f"status={status} accepting_requests={int(self._is_requests_accepting_cached())}"
         )
         return tombstone
 
@@ -47267,7 +48232,7 @@ class KaraokeApp(QWidget):
             return "request_not_found" in error or "not found" in error
         return False
 
-    def _sync_remote_removal_tombstones_async(self, reason: str = "manual") -> None:
+    def _sync_remote_removal_tombstones_async(self, reason: str = "manual", *, force: bool = False) -> None:
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
@@ -47282,7 +48247,7 @@ class KaraokeApp(QWidget):
                 state["_remote_tombstone_sync_lock"] = lock
             with lock:
                 now = time.time()
-                if now - float(state.get("_remote_tombstone_sync_last_ts", 0.0) or 0.0) < 2.0:
+                if not force and now - float(state.get("_remote_tombstone_sync_last_ts", 0.0) or 0.0) < 2.0:
                     return
                 if bool(state.get("_remote_tombstone_sync_active", False)):
                     return
@@ -47310,9 +48275,11 @@ class KaraokeApp(QWidget):
         def send():
             headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/removal-sync"}
             synced = []
+            failures = {}
             try:
                 for tombstone in pending:
                     rid = int(tombstone.get("request_id") or 0)
+                    attempt = int(tombstone.get("sync_attempts") or 0) + 1
                     state_name = str(tombstone.get("status") or "removed").strip().lower()
                     if state_name not in {"removed", "completed", "sung"}:
                         state_name = "removed"
@@ -47332,35 +48299,75 @@ class KaraokeApp(QWidget):
                     }
                     _diag(
                         "[REMOTE-TOMBSTONE] push "
-                        f"request_id={rid} reason={reason} accepting_requests={int(self._is_requests_accepting_cached())} "
+                        f"request_id={rid} state={state_name} attempt={attempt} reason={reason} "
+                        f"accepting_requests={int(self._is_requests_accepting_cached())} "
                         f"sync_connected=1 url={base_url}/api/v1/complete_remote_request.php"
                     )
-                    resp = requests.post(
-                        f"{base_url}/api/v1/complete_remote_request.php",
-                        data=payload,
-                        headers=headers,
-                        timeout=6,
+                    try:
+                        resp = requests.post(
+                            f"{base_url}/api/v1/complete_remote_request.php",
+                            data=payload,
+                            headers=headers,
+                            timeout=6,
+                        )
+                    except Exception as exc:
+                        failures[rid] = str(exc)
+                        _diag(
+                            f"[REQUEST-LIFECYCLE] terminal push failed request_id={rid} "
+                            f"state={state_name} attempt={attempt} error={exc!r}"
+                        )
+                        continue
+                    try:
+                        body = resp.json()
+                    except Exception:
+                        body = None
+                    acknowledged = (
+                        200 <= resp.status_code < 300
+                        and isinstance(body, dict)
+                        and bool(body.get("ok"))
+                        and int(body.get("request_id") or 0) == rid
+                        and str(body.get("state") or "").strip().lower() == state_name
                     )
-                    if 200 <= resp.status_code < 300:
+                    if acknowledged:
                         synced.append(rid)
-                        _diag(f"[REMOTE-TOMBSTONE] server acknowledged removal request_id={rid} status={resp.status_code}")
+                        _diag(
+                            f"[REQUEST-LIFECYCLE] server confirmed terminal state "
+                            f"request_id={rid} state={state_name} attempt={attempt} status={resp.status_code}"
+                        )
                     elif self._remote_request_mark_already_absent(resp):
                         synced.append(rid)
                         _diag(f"[REMOTE-TOMBSTONE] server already absent request_id={rid} status={resp.status_code}; marking synced")
                     else:
-                        _diag(f"[REMOTE-TOMBSTONE] push failed request_id={rid} status={resp.status_code} body={(resp.text or '')[:180]!r}")
+                        error = (
+                            str((body or {}).get("error") or (body or {}).get("message") or "")
+                            if isinstance(body, dict) else ""
+                        ) or f"unconfirmed HTTP {resp.status_code}"
+                        failures[rid] = error
+                        _diag(
+                            f"[REQUEST-LIFECYCLE] terminal acknowledgement rejected request_id={rid} "
+                            f"state={state_name} attempt={attempt} status={resp.status_code} "
+                            f"error={error!r} body={(resp.text or '')[:180]!r}"
+                        )
             except Exception as e:
                 _diag(f"[REMOTE-TOMBSTONE] sync failed reason={reason}: {e}")
             finally:
                 try:
-                    if synced:
+                    if synced or failures:
                         latest = self._ensure_remote_request_tombstones()
                         changed = False
-                        for rid in synced:
+                        now_done = time.time()
+                        for rid in set(synced) | set(failures):
                             item = latest.get("requests", {}).get(str(rid))
-                            if isinstance(item, dict) and not item.get("server_synced_at"):
-                                item["server_synced_at"] = time.time()
-                                changed = True
+                            if not isinstance(item, dict):
+                                continue
+                            item["sync_attempts"] = int(item.get("sync_attempts") or 0) + 1
+                            item["last_sync_attempt_at"] = now_done
+                            if rid in synced:
+                                item["server_synced_at"] = now_done
+                                item["last_sync_error"] = ""
+                            else:
+                                item["last_sync_error"] = str(failures.get(rid) or "sync_failed")[:240]
+                            changed = True
                         if changed:
                             self._save_remote_request_tombstones(latest)
                 finally:
@@ -47394,48 +48401,14 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
-        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
-        api_key = str(self.settings.get("api_key", "") or "").strip()
-        if not base_url or not tenant or not api_key:
+        if not self.is_network_configured() or not str(self.settings.get("api_key", "") or "").strip():
             _diag(f"[REMOTE-COMPLETE] queued unsynced request_id={request_id} reason=network_not_configured")
             return
-
-        import threading, requests
-
-        def send():
-            headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/complete-request"}
-            try:
-                mark = requests.post(
-                    f"{base_url}/api/v1/complete_remote_request.php",
-                    data={
-                        "user": tenant,
-                        "request_id": request_id,
-                        "state": "completed",
-                        "status": "completed",
-                        "singer_name": singer_name,
-                        "artist": (tombstone or {}).get("artist", ""),
-                        "title": (tombstone or {}).get("title", ""),
-                        "completed_at": int(float((tombstone or {}).get("removed_at") or time.time())),
-                        "removal_reason": reason,
-                        "local_revision": (tombstone or {}).get("local_revision", ""),
-                    },
-                    headers=headers,
-                    timeout=5,
-                )
-                if 200 <= mark.status_code < 300 or self._remote_request_mark_already_absent(mark):
-                    latest = self._ensure_remote_request_tombstones()
-                    item = latest.get("requests", {}).get(str(request_id))
-                    if isinstance(item, dict):
-                        item["server_synced_at"] = time.time()
-                        self._save_remote_request_tombstones(latest)
-                    _diag(f"[REMOTE-COMPLETE] server acknowledged completion request_id={request_id} status={mark.status_code}")
-                else:
-                    print(f"[REMOTE-COMPLETE] mark completed HTTP {mark.status_code}: {mark.text[:160]}")
-            except Exception as e:
-                print(f"[REMOTE-COMPLETE] Failed to mark request {request_id} completed: {e}")
-
-        threading.Thread(target=send, daemon=True).start()
+        _diag(
+            f"[REQUEST-LIFECYCLE] completion queued request_id={request_id} "
+            f"reason={reason} durable=1"
+        )
+        self._sync_remote_removal_tombstones_async("song_completion", force=True)
 
     def _delete_remote_request(self, request_id: int, *, entry=None, singer_name: str = "", reason: str = "host_remove"):
         try:
@@ -48034,7 +49007,7 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=send, daemon=True).start()
 
-    def _reconcile_remote_requests(self, reqs):
+    def _reconcile_remote_requests(self, reqs, *, update_waitlist: bool = True):
         _perf_t0 = time.perf_counter()
         # A successful poll is also our reconnect signal. Retry durable host
         # additions without blocking the UI; idempotency prevents duplicates.
@@ -48074,10 +49047,16 @@ class KaraokeApp(QWidget):
             self._refresh_header_status()
         except Exception:
             pass
-        try:
-            self._set_waiting_for_add_requests(reqs, local_remote_ids=local_remote_ids)
-        except Exception as e:
-            _diag(f"[WAITING-FOR-ADD] refresh failed: {e}")
+        if update_waitlist:
+            try:
+                self._set_waiting_for_add_requests(reqs, local_remote_ids=local_remote_ids)
+            except Exception as e:
+                _diag(f"[WAITING-FOR-ADD] refresh failed: {e}")
+        else:
+            _diag(
+                "[WAITING-FOR-ADD] preserved legacy waitlist snapshot "
+                f"source=relay_v2 relay_rows={len(reqs or [])}"
+            )
         _diag(
             "[REMOTE-SYNC] reconcile "
             f"count={len(reqs or [])} accepting_requests={int(accepting_requests)} "
@@ -48250,7 +49229,10 @@ class KaraokeApp(QWidget):
                             f"title={req.get('title', '')!r}"
                         )
                     continue
-            delivered = bool(req.get("sent") or req.get("delivered") or state in {"delivered", "completed", "sung", "removed"})
+            # Lifecycle state outranks legacy transport acknowledgement flags.
+            # A waiting/failed row with a stale ``sent`` bit still needs a host
+            # decision and must not be filed as historical.
+            delivered = self._remote_request_is_non_actionable(req)
             if delivered and request_id not in local_remote_ids:
                 ignored_historical += 1
                 if (request_id, state) not in logged_historical:
@@ -48320,6 +49302,13 @@ class KaraokeApp(QWidget):
                 "selected_source": req.get("selected_source") or "",
                 "provider": req.get("provider") or "",
                 "provider_track_id": req.get("provider_track_id") or req.get("selected_disc_id") or "",
+                "duration": next(
+                    (req.get(field) for field in ("duration", "duration_secs", "duration_seconds", "length_secs", "length")
+                     if req.get(field) not in (None, "")),
+                    None,
+                ),
+                "duration_estimated": bool(req.get("duration_estimated", False)),
+                "duration_source": str(req.get("duration_source") or "server_metadata"),
                 "received_at_server": req.get("received_at_server") or "",
                 "pending_reason": req.get("pending_reason") or "",
                 "pending_status": req.get("pending_status") or "",
@@ -48456,6 +49445,8 @@ class KaraokeApp(QWidget):
 
         tempo_by_id = {item["request_id"]: item["tempo"] for item in normalized}
         key_by_id = {item["request_id"]: item["key"] for item in normalized}
+        duration_by_id = {item["request_id"]: item.get("duration") for item in normalized}
+        duration_source_by_id = {item["request_id"]: item.get("duration_source") for item in normalized}
         sort_by_id = {}
         for item in normalized:
             try:
@@ -48564,6 +49555,13 @@ class KaraokeApp(QWidget):
                     entry["key"] = server_key
                     server_tempo = max(-30, min(30, int(server_tempo or 0)))
                     entry["tempo_percent"] = 100 + server_tempo
+                    server_duration = duration_by_id.get(remote_id)
+                    if normalize_karafun_duration_seconds(server_duration) is not None:
+                        self._apply_verified_duration(
+                            entry,
+                            server_duration,
+                            source=str(duration_source_by_id.get(remote_id) or "server_metadata"),
+                        )
                     try:
                         entry["request_order"] = float(sort_by_id.get(remote_id, entry.get("request_order", remote_id)))
                     except Exception:
@@ -48796,10 +49794,18 @@ class KaraokeApp(QWidget):
             or provider_track_id.lower().startswith("kf_")
         )
         def _external_karafun_payload():
+            raw_duration = next(
+                (req.get(field) for field in ("duration", "duration_secs", "duration_seconds", "length_secs", "length")
+                 if req.get(field) not in (None, "")),
+                None,
+            )
             track = self._build_karafun_streaming_track(
                 artist=artist,
                 title=title,
                 provider_track_id=provider_track_id,
+                duration=raw_duration,
+                duration_estimated=req.get("duration_estimated"),
+                duration_source=str(req.get("duration_source") or "server_metadata"),
             )
             try:
                 request_id = int(req.get("request_id", req.get("id", 0)) or 0)

@@ -29,6 +29,16 @@ def make_app(settings=None):
 
 
 class TransportSelectionTests(unittest.TestCase):
+    def test_configured_transport_starts_without_connection_probe_gate(self):
+        app = make_app()
+        starts = []
+        app.start_request_polling = lambda: starts.append("started")
+        app.test_server_connection_quick = mock.Mock(side_effect=AssertionError("probe must not gate startup"))
+
+        self.assertTrue(app._start_configured_network_transport())
+        self.assertEqual(starts, ["started"])
+        app.test_server_connection_quick.assert_not_called()
+
     def test_version_gate(self):
         app = make_app()
         self.assertGreaterEqual(
@@ -84,7 +94,7 @@ class HandleRelayRequestsTests(unittest.TestCase):
         app._queue_ids = set()
         app.acked = []
 
-        def reconcile(rows):
+        def reconcile(rows, **kwargs):
             for req in rows:
                 if not isinstance(req, dict):
                     continue
@@ -119,7 +129,7 @@ class HandleRelayRequestsTests(unittest.TestCase):
     def test_reconcile_exception_not_acked(self):
         app = self.make_handler_app({})
 
-        def boom(rows):
+        def boom(rows, **kwargs):
             raise RuntimeError("nope")
 
         app._reconcile_remote_requests = boom
@@ -135,7 +145,7 @@ class HandleRelayRequestsTests(unittest.TestCase):
         app = make_app()
         app._relay_processed_request_ids = set()
         seen = []
-        app._reconcile_remote_requests = lambda rows: seen.extend(dict(row) for row in rows)
+        app._reconcile_remote_requests = lambda rows, **kwargs: seen.extend(dict(row) for row in rows)
         app._queue_remote_request_ids = lambda: [42]
         app.ack_remote_requests = lambda ids: None
 
@@ -173,8 +183,41 @@ class FetchOverlapTests(unittest.TestCase):
         self.assertFalse(app._relay_fetch_queued)
 
 
+class NetworkRecoveryWatchdogTests(unittest.TestCase):
+    def test_relay_watchdog_fetches_pending_requests_without_network_screen(self):
+        app = make_app()
+        app.relay_worker = object()
+        app._host_request_sync_ops = []
+        app._relay_last_successful_fetch_at = 0.0
+        app._relay_recovery_last_attempt_at = 0.0
+        calls = []
+        app.fetch_remote_requests_once = lambda reason="relay": calls.append(reason)
+
+        with mock.patch.object(MAIN.time, "monotonic", return_value=100.0):
+            app._network_recovery_tick()
+        with mock.patch.object(MAIN.time, "monotonic", return_value=105.0):
+            app._network_recovery_tick()
+        with mock.patch.object(MAIN.time, "monotonic", return_value=110.1):
+            app._network_recovery_tick()
+
+        self.assertEqual(calls, ["relay watchdog", "relay watchdog"])
+
+    def test_successful_refresh_preserves_batch_identity_for_deduplication(self):
+        app = make_app()
+        app._relay_fetch_in_flight = True
+        app._relay_fetch_queued = False
+        seen = []
+        rows = [{"id": rid, "singer": f"Singer {rid}", "title": f"Song {rid}"} for rid in range(1, 6)]
+        app._handle_relay_requests = lambda batch: seen.extend(row["id"] for row in batch)
+
+        app._relay_fetch_finished(rows)
+
+        self.assertEqual(seen, [1, 2, 3, 4, 5])
+        self.assertGreater(app._relay_last_successful_fetch_at, 0.0)
+
+
 class RelayFallbackPollingTests(unittest.TestCase):
-    def test_relay_mode_does_not_connect_legacy_request_poll(self):
+    def test_relay_mode_keeps_legacy_waitlist_poll_connected(self):
         app = make_app()
         connected = []
 
@@ -191,7 +234,7 @@ class RelayFallbackPollingTests(unittest.TestCase):
 
         MAIN.KaraokeApp._connect_poll_worker_requests_received(app, True)
 
-        self.assertEqual(connected, [])
+        self.assertEqual(connected, [app.handle_requests_from_thread])
 
     def test_relay_startup_backlog_queues_each_person_once(self):
         app = make_app()
@@ -253,16 +296,40 @@ class RelayFallbackPollingTests(unittest.TestCase):
 
         self.assertEqual(len(relay_starts), 1)
         self.assertEqual(len(created_workers), 1)
-        self.assertFalse(created_workers[0].poll_requests)
-        self.assertEqual(created_workers[0].requests_received.handlers, [])
+        self.assertTrue(created_workers[0].poll_requests)
+        self.assertEqual(created_workers[0].requests_received.handlers, [app.handle_requests_from_thread])
 
-        # The relay's connect-time recovery fetch is now the only startup
-        # request source; the legacy worker cannot replay the same backlog.
+        # Relay recovery remains immediate. The production reconciliation path
+        # deduplicates the same permanent request IDs if legacy recovery also
+        # includes these rows.
         app._handle_relay_requests(backlog)
         self.assertEqual([row["singer"] for row in queued], ["Existing", "Alice", "Bob"])
         self.assertEqual([row["request_id"] for row in queued], [99, 101, 102])
         self.assertEqual(sum(row["request_id"] == 101 for row in queued), 1)
         self.assertEqual(sum(row["request_id"] == 102 for row in queued), 1)
+
+    def test_relay_snapshot_cannot_clear_legacy_waitlist_snapshot(self):
+        app = make_app()
+        app._waiting_for_add_requests = {
+            501: {
+                "request_id": 501,
+                "singer": "Ada",
+                "artist": "Artist",
+                "title": "Waiting Song",
+                "state": "waiting",
+                "pending_reason": "host_not_accepting",
+            },
+        }
+        app._relay_processed_request_ids = set()
+        reconcile_options = []
+        app._reconcile_remote_requests = lambda rows, **kwargs: reconcile_options.append(kwargs)
+        app._queue_remote_request_ids = lambda: []
+        app.ack_remote_requests = lambda ids: None
+
+        app._handle_relay_requests([])
+
+        self.assertEqual(list(app._waiting_for_add_requests), [501])
+        self.assertEqual(reconcile_options, [{"update_waitlist": False}])
 
     def test_polling_mode_keeps_legacy_request_handler(self):
         app = make_app()

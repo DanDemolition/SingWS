@@ -2,6 +2,7 @@ import importlib.util
 import os
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -329,7 +330,7 @@ class ModelBackedViewQATests(unittest.TestCase):
         self.assertEqual(app._queue_item_song_indices(app.queue_display.item(1), 1), (0, 0))
         self.assertEqual(app._queue_item_song_indices(app.queue_display.item(2), 2), (0, 1))
 
-    def test_queue_omits_singers_without_active_songs_and_keeps_numbering_contiguous(self):
+    def test_queue_keeps_singers_without_songs_visible_and_numbered_in_place(self):
         app = self.make_app()
         self.setup_queue_shell(app)
         app._first_active_entry_for_singer = lambda singer: next((song for song in singer.get("songs", []) if not song.get("skipped", False)), None)
@@ -354,8 +355,126 @@ class ModelBackedViewQATests(unittest.TestCase):
         singer_rows = [row for row in app.queue_display_model._rows if row.get("kind") == "singer"]
         left_role = app._row_left_role
         right_role = app._row_right_role
-        self.assertEqual([row.get("roles", {}).get(left_role) for row in singer_rows], ["1. Dan", "2. Bill"])
-        self.assertEqual([row.get("roles", {}).get(right_role) for row in singer_rows], ["", ""])
+        self.assertEqual(
+            [row.get("roles", {}).get(left_role) for row in singer_rows],
+            ["1. Dan", "2. Steve", "3. Bill"],
+        )
+        self.assertEqual(
+            [row.get("roles", {}).get(right_role) for row in singer_rows],
+            ["", "WAITING FOR SONG", ""],
+        )
+        self.assertEqual(app._row_for_singer_index(1), 2)
+
+    def test_adding_song_updates_existing_waiting_singer_row_in_place(self):
+        app = self.make_app()
+        self.setup_queue_shell(app)
+        app._first_active_entry_for_singer = lambda singer: next(
+            (song for song in singer.get("songs", []) if not song.get("skipped", False)), None
+        )
+        app.queue = [
+            {"singer_id": "a", "name": "Ada", "songs": [], "skipped": False, "has_sung": True},
+            {"singer_id": "b", "name": "Bob", "songs": [], "skipped": False, "has_sung": True},
+        ]
+        app.update_queue_display()
+        self.assertEqual(app._row_for_singer_index(1), 1)
+
+        app.queue[0]["songs"].append({
+            "request_uid": "song-a",
+            "song_info": "/tmp/a.mp3",
+            "display_name": "Artist - Song A",
+            "artist": "Artist",
+            "title": "Song A",
+            "duration": 180,
+            "skipped": False,
+        })
+        app.update_queue_display()
+
+        singer_rows = [row for row in app.queue_display_model._rows if row.get("kind") == "singer"]
+        self.assertEqual([row.get("singer_idx") for row in singer_rows], [0, 1])
+        self.assertEqual([app.queue[i]["singer_id"] for i in range(2)], ["a", "b"])
+        self.assertEqual(
+            [row.get("roles", {}).get(app._row_right_role) for row in singer_rows],
+            ["", "WAITING FOR SONG"],
+        )
+
+    def test_empty_singer_can_be_manually_reordered_without_disappearing(self):
+        app = self.make_app()
+        self.setup_queue_shell(app)
+        app._first_active_entry_for_singer = lambda singer: next(
+            (song for song in singer.get("songs", []) if not song.get("skipped", False)), None
+        )
+        song = lambda title: {
+            "song_info": f"/tmp/{title}.mp3", "display_name": f"Artist - {title}",
+            "artist": "Artist", "title": title, "duration": 180, "skipped": False,
+        }
+        app.queue = [
+            {"name": "Dan", "songs": [song("One")], "skipped": False},
+            {"name": "Steve", "songs": [], "skipped": False},
+            {"name": "Bill", "songs": [song("Two")], "skipped": False},
+        ]
+        app.update_queue_display()
+        app.queue_display.setCurrentRow(app._row_for_singer_index(1))
+        app.move_up()
+
+        self.assertEqual([singer["name"] for singer in app.queue], ["Steve", "Dan", "Bill"])
+        self.assertEqual(app._row_for_singer_index(0), 0)
+        first = app.queue_display_model.rowDict(0)
+        self.assertEqual(first.get("roles", {}).get(app._row_left_role), "1. Steve")
+        self.assertEqual(first.get("roles", {}).get(app._row_right_role), "WAITING FOR SONG")
+
+    def test_rotation_start_is_visible_in_header_and_waiting_row(self):
+        app = self.make_app()
+        self.setup_queue_shell(app)
+        app.queue = [
+            {"name": "Ada", "songs": [], "skipped": False, "rotation_marker": False},
+            {"name": "Bob", "songs": [], "skipped": False, "rotation_marker": True},
+        ]
+        app._is_rotation_mode = lambda: True
+        app._rotation_marker_index = lambda: 1
+        app._first_active_entry_for_singer = lambda singer: next(
+            (song for song in singer.get("songs", []) if not song.get("skipped", False)), None
+        )
+        app._compute_queue_eta_seconds = lambda: (0, 0)
+        app._fmt_m_ss = lambda seconds: "0:00"
+        app._is_rotation_locked = lambda: False
+        app._update_queue_eta_label = self.singws.KaraokeApp._update_queue_eta_label.__get__(app)
+
+        app.update_queue_display()
+
+        self.assertIn("START", app.queue_label.text())
+        self.assertIn("Bob", app.queue_label.text())
+        bob_row = app.queue_display_model.rowDict(app._row_for_singer_index(1))
+        self.assertEqual(
+            bob_row.get("roles", {}).get(app._row_right_role),
+            "ROTATION START • WAITING FOR SONG",
+        )
+
+    def test_rotation_window_shows_waiting_slot_but_does_not_cue_it(self):
+        rendered = []
+        next_states = []
+        fake = SimpleNamespace(
+            queue_items=[],
+            rotation_rail=SimpleNamespace(set_items=lambda items: rendered.extend(items)),
+            list_widget=SimpleNamespace(),
+            now_singing_label=SimpleNamespace(setText=lambda text: None),
+            queue_count_label=SimpleNamespace(setText=lambda text: None),
+            queue_title_label=SimpleNamespace(setText=lambda text: next_states.append(("title", text))),
+            now_singing_surface=SimpleNamespace(
+                set_state=lambda current, next_singer, countdown: next_states.append((current, next_singer))
+            ),
+            display_name_for_queue_entry=lambda entry, path, tracks: entry.get("title", "Song"),
+        )
+        queue = [
+            {"name": "Waiting Singer", "songs": [], "skipped": False, "rotation_marker": True},
+            {"name": "Ready Singer", "songs": [{"song_info": "/tmp/song.mp3", "title": "Ready Song"}], "skipped": False},
+        ]
+
+        self.singws.RotationView.update_rotation(fake, queue, [], "Current Singer")
+
+        self.assertEqual([item["singer"] for item in rendered], ["Waiting Singer", "Ready Singer"])
+        self.assertIn("Waiting for song", rendered[0]["song"])
+        self.assertEqual(next_states[-1], ("Current Singer", "Ready Singer"))
+        self.assertIn("START: Waiting Singer", next_states[0][1])
 
 
 if __name__ == "__main__":
