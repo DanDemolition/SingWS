@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.1.8",
-  "release_date": "2026-07-18",
+  "version": "0.4.1.9",
+  "release_date": "2026-07-19",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.1.8-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.1.8-arm64-installer.dmg",
+      "filename": "SingWS-0.4.1.9-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.1.9-arm64-installer.dmg",
       "size": "204 MB",
-      "sha256": "ea100c213702f9aac65b11c856968ecdb2846a23692ba9d882d5189f83bcfa2e"
+      "sha256": "de677907b630e63e197100ee436b020d558d93354e02c5ef5b171c375cbc80a7"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.1.8-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.1.8-x86_64-installer.dmg",
+      "filename": "SingWS-0.4.1.9-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.1.9-x86_64-installer.dmg",
       "size": "272 MB",
-      "sha256": "8c8384d7a541fb0b27f724b11f582ee50b4d49f743acbd6fcca3adbb0479bcf7"
+      "sha256": "b2738d5f6a4190fd0ad43d5cf4ac932e38180ac2186179b4f351d427d29537a4"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.1.8-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.1.8-universal-installer.dmg",
+      "filename": "SingWS-0.4.1.9-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.1.9-universal-installer.dmg",
       "size": "455 MB",
-      "sha256": "045cc3ea3bee8cd94ddb6062da4441bd6120a4cf776b0bfe230d952195d70b7d"
+      "sha256": "cd9f3f7eb4f0884bfb43485866db1be0b1e5b52edb81ff9b913b50e6f1436628"
     }
   }
 }
