@@ -194,5 +194,102 @@ class LibraryScanWorkerTests(unittest.TestCase):
             self.assertEqual(rows[0]["title"], "Updated")
 
 
+class EmptyRootMassDeletionGuardTests(unittest.TestCase):
+    """2026-07-19 show outage: a configured root that scans empty while songs
+    were previously indexed there (stale /Volumes mount husk) must preserve
+    the old records instead of silently deleting the whole library."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def _old_tracks(self, root: pathlib.Path, count: int = 4):
+        # Recorded libraries store canonical (realpath'd) paths; mirror that,
+        # otherwise macOS /var vs /private/var symlinks skew the fixtures.
+        canonical = pathlib.Path(str(root).replace("/var/", "/private/var/", 1)
+                                 if str(root).startswith("/var/") else str(root))
+        return [
+            {
+                "path": str(canonical / f"Artist{i} - Song{i} - KV{i:03d}.zip"),
+                "type": "zip",
+                "artist": f"Artist{i}",
+                "title": f"Song{i}",
+            }
+            for i in range(count)
+        ]
+
+    def test_empty_root_with_prior_tracks_preserves_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            husk = pathlib.Path(tmp) / "StaleMount"
+            husk.mkdir()  # exists but has no files: hollow mount point
+            old = self._old_tracks(husk)
+
+            result = self.singws._build_library_scan_result(
+                [str(husk)], False, old,
+                {"filename_format": "artist-title-disc",
+                 "_scan_preserve_outside_roots": True},
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["removed_count"], 0)
+            self.assertEqual(len(result["tracks"]), len(old))
+            self.assertEqual(len(result["suspect_empty_roots"]), 1)
+            self.assertIn("looked empty", result["summary_text"])
+
+    def test_quick_mode_empty_root_also_preserves_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            husk = pathlib.Path(tmp) / "StaleMount"
+            husk.mkdir()
+            old = self._old_tracks(husk)
+
+            result = self.singws._build_library_scan_result(
+                [str(husk)], True, old,
+                {"filename_format": "artist-title-disc"},
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["removed_count"], 0)
+            self.assertEqual(len(result["tracks"]), len(old))
+            self.assertEqual(len(result["suspect_empty_roots"]), 1)
+
+    def test_truly_empty_new_root_is_not_suspect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fresh = pathlib.Path(tmp) / "BrandNew"
+            fresh.mkdir()
+            result = self.singws._build_library_scan_result(
+                [str(fresh)], False, [],
+                {"filename_format": "artist-title-disc"},
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["suspect_empty_roots"], [])
+            self.assertEqual(len(result["tracks"]), 0)
+
+    def test_partial_root_content_still_tracks_real_removals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "Library"
+            root.mkdir()
+            (root / "Artist0 - Song0 - KV000.zip").write_bytes(b"zip")
+            old = self._old_tracks(root, count=3)  # two of three no longer exist
+
+            result = self.singws._build_library_scan_result(
+                [str(root)], False, old,
+                {"filename_format": "artist-title-disc"},
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["suspect_empty_roots"], [])
+            self.assertEqual(len(result["tracks"]), 1)
+            self.assertEqual(result["removed_count"], 3 - 1)
+
+    def test_intentional_location_removal_still_drops_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "Removed"
+            old = self._old_tracks(root)
+            remaining = self.singws._tracks_after_library_location_removed(
+                old, str(root), []
+            )
+            self.assertEqual(remaining, [])
+
+
 if __name__ == "__main__":
     unittest.main()

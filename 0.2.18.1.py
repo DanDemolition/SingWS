@@ -12353,6 +12353,45 @@ def _build_library_scan_result(
                         tracks_changed += 1
                         changed_paths.add(full_path)
 
+    # Mass-deletion guard (2026-07-19 show outage): a configured root that
+    # scans as COMPLETELY empty while the previous library had tracks under it
+    # is almost always a stale or hollow mount point (an external drive that
+    # remounted under a new /Volumes name leaves an empty husk directory at
+    # the old path), not a deliberately emptied library. Deleting those
+    # records here silently killed request matching for the whole show.
+    # Keep the old records, flag the root, and let the host decide — removing
+    # the location explicitly is the intentional way to drop its songs.
+    suspect_empty_roots = []
+    if old_tracks:
+        new_keys = {
+            _scanned_library_path_key(t.get("path"))
+            for t in new_tracks if isinstance(t, dict) and t.get("path")
+        }
+
+        def _under(key: str, root_key: str) -> bool:
+            return key == root_key or key.startswith(root_key + os.sep)
+
+        for root in roots:
+            root_key = _scanned_library_path_key(root)
+            if not root_key:
+                continue
+            if any(_under(key, root_key) for key in new_keys):
+                continue
+            old_under_root = [
+                t for t in old_tracks
+                if isinstance(t, dict) and t.get("path")
+                and _under(_scanned_library_path_key(t.get("path")), root_key)
+            ]
+            if not old_under_root:
+                continue
+            suspect_empty_roots.append(root)
+            new_tracks.extend(dict(t) for t in old_under_root)
+            # Restore the previous directory signatures under this root so a
+            # later scan (with the drive properly mounted) sees true deltas.
+            for sig_path, sig in stored_dir_sigs.items():
+                if _path_is_within_library(sig_path, root):
+                    dir_sigs[sig_path] = sig
+
     new_tracks = _dedupe_library_tracks(
         new_tracks,
         trust_cached_identity=bool(quick_mode),
@@ -12391,7 +12430,14 @@ def _build_library_scan_result(
         "index_changed_paths": sorted(added_paths | changed_paths),
         "index_removed_paths": sorted(removed_paths),
         "reindex_needed": bool(reindex_needed),
-        "summary_text": f"Added: {added_count:,} • Removed: {removed_count:,} • Total: {len(new_tracks):,}",
+        "suspect_empty_roots": suspect_empty_roots,
+        "summary_text": (
+            f"Added: {added_count:,} • Removed: {removed_count:,} • Total: {len(new_tracks):,}"
+            + (
+                f" • ⚠ {len(suspect_empty_roots)} location(s) looked empty; songs preserved"
+                if suspect_empty_roots else ""
+            )
+        ),
         "scan_time": scan_time,
     }
 
@@ -40754,6 +40800,9 @@ class KaraokeApp(QWidget):
             unavailable_keys = {
                 _scanned_library_path_key(path) for path in (result.get("unavailable_roots") or [])
             }
+            suspect_keys = {
+                _scanned_library_path_key(path) for path in (result.get("suspect_empty_roots") or [])
+            }
             if pending_ids:
                 now = time.time()
                 track_path_keys = [
@@ -40766,6 +40815,9 @@ class KaraokeApp(QWidget):
                     if _scanned_library_path_key(location.get("path", "")) in unavailable_keys:
                         location["last_scan_status"] = "offline"
                         continue
+                    if _scanned_library_path_key(location.get("path", "")) in suspect_keys:
+                        location["last_scan_status"] = "looked empty — songs preserved (check drive)"
+                        continue
                     location["last_scan_at"] = now
                     location["last_scan_status"] = "scan complete"
                     root_key = _scanned_library_path_key(location.get("path", ""))
@@ -40775,6 +40827,21 @@ class KaraokeApp(QWidget):
                     )
             self._pending_library_scan_ids = []
             self.save_settings()
+        except Exception:
+            pass
+        try:
+            suspect_roots = list(result.get("suspect_empty_roots") or [])
+            if suspect_roots:
+                names = ", ".join(os.path.basename(r.rstrip(os.sep)) or r for r in suspect_roots)
+                _diag(
+                    "[LIBRARY-SCAN] WARNING: configured location(s) scanned empty while songs "
+                    f"were previously indexed there; records preserved. roots={suspect_roots!r}"
+                )
+                self._show_processing_notification(
+                    f"⚠ Library location(s) looked EMPTY: {names}. Songs preserved — "
+                    "check that the drive is mounted at the same path.",
+                    level="warning",
+                )
         except Exception:
             pass
         try:
