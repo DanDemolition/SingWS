@@ -328,7 +328,10 @@ class QueueSyncAuthorityTests(unittest.TestCase):
             self.assertEqual(self._titles(), ["Song B", "Song E"])
         self.assertNotIn("Song A", self._titles())
 
-    def test_disabled_waitlist_does_not_store_attention_or_sync_rows(self):
+    def test_disabled_waitlist_keeps_failures_visible_and_reported(self):
+        # Changed after the 2026-07-19 show outage: auto-accept mode may clear
+        # server-driven waitlist rows, but failed requests must stay visible
+        # and must always be reported to the server.
         self.app.settings["use_waiting_for_add"] = False
         reported = []
         self.app._report_remote_attention_request_async = lambda req, reason: reported.append((req, reason))
@@ -337,20 +340,23 @@ class QueueSyncAuthorityTests(unittest.TestCase):
             {"request_id": 701, "singer": "Grace", "artist": "Artist", "title": "Needs Review"},
             "auto_accept_failed",
         )
-        self.assertEqual(self.app._waiting_for_add_requests, {})
-        self.assertEqual(reported, [])
+        self.assertIn(701, self.app._waiting_for_add_requests)
+        self.assertEqual([r for _req, r in reported], ["auto_accept_failed"])
 
+        # Server-driven waitlist rows are still cleared in auto-accept mode,
+        # but the locally recorded failure survives the rebuild.
         self.app._set_waiting_for_add_requests([
             {"request_id": 702, "singer": "Grace", "artist": "Artist", "title": "Waitlisted", "state": "waiting"}
         ])
-        self.assertEqual(self.app._waiting_for_add_requests, {})
+        self.assertIn(701, self.app._waiting_for_add_requests)
+        self.assertNotIn(702, self.app._waiting_for_add_requests)
 
         self.app._record_remote_limit_blocked_request(
             {"request_id": 703, "singer": "Grace", "artist": "Artist", "title": "Limit Blocked"},
             "Grace already has too many songs.",
             report=True,
         )
-        self.assertEqual(reported, [])
+        self.assertEqual([r for _req, r in reported], ["auto_accept_failed", "singer_song_limit"])
 
     def test_same_metadata_remote_insert_with_new_id_is_not_deduplicated(self):
         self.app.settings["use_waiting_for_add"] = False

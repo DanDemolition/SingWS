@@ -27996,10 +27996,10 @@ class KaraokeApp(QWidget):
             f"Version: {version}    Length: {duration}    Requested: {request_time}    Server: {server_received_time}"
         )
 
-    def _upsert_waiting_for_add_request(self, req: dict | None, reason: str = "") -> None:
+    def _upsert_waiting_for_add_request(self, req: dict | None, reason: str = "", *, force_visible: bool = False) -> None:
         if not isinstance(req, dict):
             return
-        if not self._is_waitlist_enabled_cached():
+        if not self._is_waitlist_enabled_cached() and not force_visible:
             _diag(f"[WAITING-FOR-ADD] ignored upsert because waitlist disabled reason={reason!r}")
             return
         try:
@@ -28065,9 +28065,21 @@ class KaraokeApp(QWidget):
         elif "_waiting_for_add_handled_ids" not in state:
             self._waiting_for_add_handled_ids = handled
         if not self._is_waitlist_enabled_cached():
-            if state.get("_waiting_for_add_requests"):
-                _diag("[WAITING-FOR-ADD] cleared local waitlist because waitlist disabled")
-            self._waiting_for_add_requests = {}
+            # Auto-accept mode: server-driven waitlist entries go away, but
+            # locally recorded failures (attention_reason set) must survive —
+            # they are the host's only trace of requests that could not be
+            # auto-added.
+            existing = state.get("_waiting_for_add_requests") or {}
+            kept = {
+                rid: item for rid, item in existing.items()
+                if isinstance(item, dict) and str(item.get("attention_reason") or "").strip()
+            }
+            if len(kept) != len(existing):
+                _diag(
+                    "[WAITING-FOR-ADD] cleared server waitlist entries because waitlist disabled "
+                    f"(kept {len(kept)} failed-auto-accept entr{'y' if len(kept) == 1 else 'ies'})"
+                )
+            self._waiting_for_add_requests = kept
             self._waiting_for_add_recent_terminal_requests = {}
             self._schedule_waiting_for_add_view_refresh(reason="waitlist_disabled")
             return
@@ -42280,6 +42292,7 @@ class KaraokeApp(QWidget):
                 try:
                     self._unmatched_remote_request_ids = set()
                     self._unmatched_request_sigs = set()
+                    self._empty_library_request_warned = False
                 except Exception:
                     pass
                 # Show success in green
@@ -48522,16 +48535,23 @@ class KaraokeApp(QWidget):
             f"reason={reason!r} pending_count={len(pending)}"
         )
         try:
-            self._upsert_waiting_for_add_request(item, str(reason or "unknown"))
+            # Failed automatic requests must stay host-visible even in
+            # auto-accept mode (waitlist off): a silent drop looks like "no
+            # requests tonight" while singers watch their submissions say
+            # "sent" (2026-07-19 show outage).
+            self._upsert_waiting_for_add_request(item, str(reason or "unknown"), force_visible=True)
         except Exception:
             pass
-        if self._is_waitlist_enabled_cached():
-            self._report_remote_attention_request_async(req, str(reason or "unknown"))
-        else:
-            _diag(
-                "[REQUEST-ATTENTION] report suppressed because waitlist disabled "
-                f"request_id={rid} reason={reason!r}"
+        try:
+            self._set_processing_text(
+                f"⚠ Request NOT added: {str(req.get('singer', '') or '?')} — "
+                f"{str(req.get('artist', '') or '?')} - {str(req.get('title', '') or '?')} ({reason})",
             )
+        except Exception:
+            pass
+        # Always tell the server: the web side must show "needs host review",
+        # never a silent "sent" while the host saw nothing.
+        self._report_remote_attention_request_async(req, str(reason or "unknown"))
 
     def _record_remote_limit_blocked_request(self, req: dict | None, message: str, *, report: bool = True) -> None:
         """Reject a public request at the singer cap without placing it in the host waitlist."""
@@ -48558,13 +48578,10 @@ class KaraokeApp(QWidget):
             f"request_id={self._request_limit_request_id(req)} singer={str(req.get('singer', '') or '')!r} "
             f"reason={reason!r} message={str(message or '')!r}"
         )
-        if report and self._is_waitlist_enabled_cached():
+        if report:
+            # Reported regardless of waitlist mode so the singer-facing page
+            # reflects the block instead of a silent "sent".
             self._report_remote_attention_request_async(req, reason)
-        elif report:
-            _diag(
-                "[REQUEST-LIMIT] server pending-review report suppressed because waitlist disabled "
-                f"request_id={self._request_limit_request_id(req)}"
-            )
 
     def _report_remote_attention_request_async(self, req: dict, reason: str) -> None:
         try:
@@ -49930,6 +49947,32 @@ class KaraokeApp(QWidget):
         # request (the legacy delivery loop has no request_id to dedup on). The
         # set is cleared whenever the library is re-indexed, giving newly-added
         # songs a fresh attempt.
+        # Catastrophic-config tripwire: a remote request arriving while the
+        # library index is EMPTY means no request can ever match (unmounted
+        # drive, failed scan, missing library locations). Shout once, loudly.
+        # (State reads via __dict__: Qt raises RuntimeError, not
+        # AttributeError, for unset attributes on partially built objects.)
+        try:
+            _state = object.__getattribute__(self, "__dict__")
+            if "tracks" in _state and not _state.get("tracks"):
+                if not bool(_state.get("_empty_library_request_warned", False)):
+                    self._empty_library_request_warned = True
+                    _diag(
+                        "[REQUEST-ATTENTION] CRITICAL: remote request received but the karaoke "
+                        "library index is EMPTY — no request can be matched. Check library "
+                        "locations and that every library drive is mounted."
+                    )
+                    try:
+                        self._set_processing_text(
+                            "⚠ LIBRARY EMPTY — remote requests cannot be matched! "
+                            "Check library locations / drives.",
+                            auto_dismiss_ms=None,
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         _sig = (singer.lower(), artist.lower(), title.lower())
         _failed_sigs = getattr(self, "_unmatched_request_sigs", None)
         if not isinstance(_failed_sigs, set):
