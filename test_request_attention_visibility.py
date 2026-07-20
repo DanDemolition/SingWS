@@ -111,5 +111,80 @@ class AttentionVisibilityTests(unittest.TestCase):
         self.assertEqual(len(library_warnings), 1, "warn loudly, but only once")
 
 
+class AcceptedStateActionabilityTests(unittest.TestCase):
+    """The server's submit-time validation marks fresh requests
+    state='accepted' before the desktop ever sees them (server change of
+    2026-07-19). Treating 'accepted' alone as historical filed every new
+    request as already-handled and killed the whole show's intake."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = _visibility_app(self.singws, Path(self._tmp.name))
+
+    def _fresh_accepted_row(self, rid=1465, **extra):
+        row = {
+            "request_id": rid,
+            "singer": "Dan",
+            "artist": "Avenged Sevenfold",
+            "title": "Almost Easy",
+            "sent": False,
+            "delivered": False,
+            "state": "accepted",
+            "accepted_at": "2026-07-20T19:16:13Z",
+            "validation_result": "accepted",
+            "desktop_sync_status": "pending_desktop_sync",
+            "desktop_add_result": "pending",
+        }
+        row.update(extra)
+        return row
+
+    def test_fresh_accepted_row_is_actionable(self):
+        self.assertFalse(
+            self.app._remote_request_is_non_actionable(self._fresh_accepted_row())
+        )
+
+    def test_delivered_accepted_row_is_historical(self):
+        self.assertTrue(
+            self.app._remote_request_is_non_actionable(
+                self._fresh_accepted_row(sent=True, delivered=True)
+            )
+        )
+
+    def test_desktop_synced_accepted_row_is_historical(self):
+        self.assertTrue(
+            self.app._remote_request_is_non_actionable(
+                self._fresh_accepted_row(desktop_sync_status="synced")
+            )
+        )
+
+    def test_submit_time_accepted_at_alone_is_not_delivery_evidence(self):
+        row = self._fresh_accepted_row(state="", accepted_at=1784575000)
+        self.assertFalse(self.app._remote_request_is_non_actionable(row))
+
+    def test_completed_and_removed_rows_stay_historical(self):
+        for state in ("completed", "removed", "sung", "skipped", "active", "delivered"):
+            self.assertTrue(
+                self.app._remote_request_is_non_actionable(
+                    self._fresh_accepted_row(state=state)
+                ),
+                state,
+            )
+
+    def test_reconcile_routes_fresh_accepted_row_to_intake(self):
+        with fake_network(self.singws):
+            self.app._reconcile_remote_requests([
+                self._fresh_accepted_row(),
+                self._fresh_accepted_row(rid=1440, title="Old Song", sent=True, delivered=True),
+            ])
+        intake_ids = [c.get("request_id") for c in self.app._intake_calls]
+        self.assertEqual(intake_ids, [1465],
+                         "fresh accepted row must reach intake; delivered row must not")
+
+
 if __name__ == "__main__":
     unittest.main()

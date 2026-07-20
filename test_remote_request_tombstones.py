@@ -887,11 +887,25 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
                     "state": "accepted",
                     "pending_reason": "rotation_full",
                 },
+                {
+                    "request_id": 1915,
+                    "singer": "Cy",
+                    "artist": "Delivered Artist",
+                    "title": "Delivered Title",
+                    "state": "accepted",
+                    "pending_reason": "rotation_full",
+                    "sent": 1,
+                },
             ])
 
-            self.assertEqual(list(app._waiting_for_add_requests), [1912])
+            # Since the 2026-07-19 server change, fresh submissions arrive as
+            # state='accepted' before any delivery, so an unsent accepted row
+            # (1913) stays host-actionable; only the transport-acked accepted
+            # row (1915) is history.
+            self.assertEqual(sorted(app._waiting_for_add_requests), [1912, 1913])
             self.assertNotIn(1912, app._waiting_for_add_handled_ids)
-            self.assertIn(1913, app._waiting_for_add_handled_ids)
+            self.assertNotIn(1913, app._waiting_for_add_handled_ids)
+            self.assertIn(1915, app._waiting_for_add_handled_ids)
 
     def test_reconcile_holds_waiting_state_when_transport_delivered_flag_is_stale(self):
         with tempfile.TemporaryDirectory() as td:

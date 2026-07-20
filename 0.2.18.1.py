@@ -27617,14 +27617,26 @@ class KaraokeApp(QWidget):
         state = str(req.get("state") or req.get("status") or "").strip().lower()
         if state in {"waiting", "failed", "failed_needs_review"}:
             return False
-        if state in {"accepted", "active", "delivered", "completed", "sung", "removed", "skipped"}:
+        if state == "accepted":
+            # The server's submit-time validation marks fresh requests
+            # "accepted" before the desktop has ever seen them (server change
+            # of 2026-07-19; this filed every new request as historical and
+            # killed the whole show's intake). Accepted alone is not proof of
+            # delivery — require a transport ack or a desktop-side record.
+            if bool(req.get("sent") or req.get("delivered")):
+                return True
+            sync_status = str(req.get("desktop_sync_status") or "").strip().lower()
+            return sync_status not in {"", "pending", "pending_desktop_sync"}
+        if state in {"active", "delivered", "completed", "sung", "removed", "skipped"}:
             return True
         try:
             if bool(req.get("sent") or req.get("delivered")):
                 return True
         except Exception:
             pass
-        for key in ("accepted_at", "added_at", "queued_at", "completed_at", "removed_at"):
+        # "accepted_at" is deliberately NOT delivery evidence: the new server
+        # stamps it at submit-time validation, before the desktop is involved.
+        for key in ("added_at", "queued_at", "completed_at", "removed_at"):
             try:
                 if float(req.get(key) or 0) > 0:
                     return True
