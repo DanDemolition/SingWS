@@ -29659,6 +29659,21 @@ class KaraokeApp(QWidget):
         songs_header.addWidget(self.singer_history_song_meta_label)
         details_layout.addLayout(songs_header)
 
+        self.singer_history_song_search = QLineEdit()
+        self.singer_history_song_search.setPlaceholderText("Search this singer's songs...")
+        self.singer_history_song_search.setClearButtonEnabled(True)
+        self.singer_history_song_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
+        self._singer_history_song_search_timer = QTimer(self)
+        self._singer_history_song_search_timer.setSingleShot(True)
+        self._singer_history_song_search_timer.setInterval(250)
+        self._singer_history_song_search_timer.timeout.connect(
+            lambda: self._update_singer_history_details(self._selected_singer_history_key())
+        )
+        self.singer_history_song_search.textChanged.connect(
+            lambda *_: self._singer_history_song_search_timer.start()
+        )
+        details_layout.addWidget(self.singer_history_song_search)
+
         self.singer_history_songs_model = SingerHistorySongListModel(self)
         self.singer_history_songs_list = QListView()
         self.singer_history_songs_list.setModel(self.singer_history_songs_model)
@@ -29974,6 +29989,48 @@ class KaraokeApp(QWidget):
     def _on_singer_history_selection_changed(self, *_args):
         self._update_singer_history_details(self._selected_singer_history_key())
 
+    def _singer_history_song_query(self) -> str:
+        try:
+            return str(self.singer_history_song_search.text() or "").strip().casefold()
+        except Exception:
+            return ""
+
+    def _filter_singer_history_songs(self, songs):
+        """Filter (song_key, song) items by the song-search box.
+
+        Every whitespace-separated token must appear somewhere in the song's
+        artist/title/disc/duet text (case-insensitive), matching how the main
+        library search feels.
+        """
+        query = self._singer_history_song_query()
+        if not query:
+            return songs
+        tokens = query.split()
+        filtered = []
+        for item in songs or []:
+            try:
+                song_key, song = item
+            except Exception:
+                continue
+            parts = [str(song_key or "")]
+            if isinstance(song, dict):
+                for field in ("artist", "title", "disc_id", "song_type", "duet_display"):
+                    value = song.get(field)
+                    if value:
+                        parts.append(str(value))
+            blob = " ".join(parts).casefold()
+            if all(token in blob for token in tokens):
+                filtered.append(item)
+        return filtered
+
+    def _singer_history_song_meta_text(self, shown_total: int, shown: int | None = None) -> str:
+        total_unfiltered = int(getattr(self, "_singer_history_song_total_unfiltered", shown_total) or 0)
+        filtered = bool(getattr(self, "_singer_history_song_filter_active", False))
+        suffix = "" if shown is None or shown == shown_total else f" ({shown} shown)"
+        if filtered:
+            return f"{shown_total} of {total_unfiltered} entries{suffix}"
+        return f"{shown_total} entries{suffix}"
+
     def _update_singer_history_details(self, singer_key: str):
         if not hasattr(self, "singer_history_name_label"):
             return
@@ -30036,6 +30093,15 @@ class KaraokeApp(QWidget):
             songs = list((record.get("songs", {}) or {}).items())
         except Exception:
             songs = []
+        # Song search: filter at the source (before the render worker and its
+        # row cap) so every history entry is searchable, not just the first
+        # render_limit rows.
+        total_unfiltered = len(songs)
+        songs = self._filter_singer_history_songs(songs)
+        self._singer_history_song_total_unfiltered = total_unfiltered
+        self._singer_history_song_filter_active = len(songs) != total_unfiltered or bool(
+            self._singer_history_song_query()
+        )
         try:
             self._singer_history_songs_job_id = int(getattr(self, "_singer_history_songs_job_id", 0) or 0) + 1
             job_id = int(self._singer_history_songs_job_id)
@@ -30045,13 +30111,15 @@ class KaraokeApp(QWidget):
         self.singer_history_edit_song_button.setEnabled(False)
         self.singer_history_delete_song_button.setEnabled(False)
         try:
-            self.singer_history_song_meta_label.setText(f"{len(songs)} entries (loading)")
+            self.singer_history_song_meta_label.setText(
+                f"{self._singer_history_song_meta_text(len(songs))} (loading)"
+            )
         except Exception:
             pass
         if not songs:
             try:
                 self.singer_history_songs_model.setRows([])
-                self.singer_history_song_meta_label.setText("0 entries")
+                self.singer_history_song_meta_label.setText(self._singer_history_song_meta_text(0))
             except Exception:
                 pass
             return
@@ -30128,8 +30196,9 @@ class KaraokeApp(QWidget):
         total = int((result or {}).get("total") or 0)
         shown = int((result or {}).get("shown") or 0)
         try:
-            suffix = "" if shown == total else f" ({shown} shown)"
-            self.singer_history_song_meta_label.setText(f"{total} entries{suffix}")
+            self.singer_history_song_meta_label.setText(
+                self._singer_history_song_meta_text(total, shown)
+            )
         except Exception:
             pass
         has_rows = any((row or {}).get("selectable") for row in rows)
@@ -48198,13 +48267,29 @@ class KaraokeApp(QWidget):
                         body = resp.json()
                     except Exception:
                         body = None
-                    acknowledged = (
-                        200 <= resp.status_code < 300
-                        and isinstance(body, dict)
-                        and bool(body.get("ok"))
+                    identity_matches = (
+                        isinstance(body, dict)
                         and int(body.get("request_id") or 0) == rid
                         and str(body.get("state") or "").strip().lower() == state_name
                     )
+                    acknowledged = (
+                        200 <= resp.status_code < 300
+                        and identity_matches
+                        and bool(body.get("ok"))
+                    )
+                    # The server may answer idempotent=true for a row that is
+                    # ALREADY in the requested terminal state even when its
+                    # okjweb twin could not be cross-confirmed (pre-alignment
+                    # rows have unlinkable ids). There is nothing left to sync;
+                    # retrying forever just spams the log (370+ attempts seen
+                    # live 2026-07-20).
+                    if not acknowledged and identity_matches and bool(body.get("idempotent")):
+                        acknowledged = True
+                        _diag(
+                            f"[REMOTE-TOMBSTONE] idempotent terminal state accepted "
+                            f"request_id={rid} state={state_name} status={resp.status_code} "
+                            f"okj_confirmed={int(bool(body.get('okj_confirmed')))}"
+                        )
                     if acknowledged:
                         synced.append(rid)
                         _diag(

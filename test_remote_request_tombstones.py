@@ -1666,6 +1666,43 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             tombstone = app._ensure_remote_request_tombstones()["requests"]["707"]
             self.assertIsNotNone(tombstone["server_synced_at"])
 
+    def test_idempotent_terminal_conflict_marks_tombstone_synced(self):
+        """A 409 cross_store_sync_conflict whose body reports idempotent=true
+        (the authoritative row is already terminal; the okjweb twin is
+        unlinkable for pre-id-alignment rows) can never converge by retrying —
+        the 2026-07-20 live loop pushed one tombstone 370+ times. It must be
+        accepted as acknowledged."""
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            app._record_remote_request_tombstone(
+                1466,
+                entry={"artist": "Eminem & Dr Dre", "title": "Forgot About Dre"},
+                singer_name="Dan",
+                reason="host_remove_song",
+            )
+            self.assertIsNone(app._ensure_remote_request_tombstones()["requests"]["1466"]["server_synced_at"])
+
+            conflict = FakeResponse(
+                409,
+                {
+                    "ok": False,
+                    "state": "removed",
+                    "request_id": 1466,
+                    "idempotent": True,
+                    "okj_confirmed": False,
+                    "error": "cross_store_sync_conflict",
+                    "retryable": True,
+                },
+                '{"ok":false,"error":"cross_store_sync_conflict"}',
+            )
+            with fake_network(self.singws, post_response=conflict) as net:
+                app._sync_remote_removal_tombstones_async("retry")
+
+            removal_posts = [p for p in net.posts if "complete_remote_request.php" in p["url"]]
+            self.assertEqual(len(removal_posts), 1)
+            tombstone = app._ensure_remote_request_tombstones()["requests"]["1466"]
+            self.assertIsNotNone(tombstone["server_synced_at"])
+
     def test_singer_history_syncs_while_requests_off(self):
         """Accepting Requests off must not stop singer-history sync; only the
         connection config gates it."""

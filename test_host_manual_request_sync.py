@@ -22,6 +22,12 @@ class HostManualRequestSyncTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.module.HOST_REQUEST_SYNC_PATH = Path(self.tmp.name) / "host-request-sync.json"
+        # Isolate every durable store this flow can touch: connection restore
+        # also pushes remote-request tombstones, and without this redirect the
+        # test reads the REAL ~/SingWS state (a live unsynced tombstone makes
+        # the flush POST twice and the count assertion flake).
+        self.module.REMOTE_REQUEST_TOMBSTONES_PATH = Path(self.tmp.name) / "remote_request_tombstones.json"
+        self.module.DEFERRED_REMOTE_ADDS_PATH = Path(self.tmp.name) / "deferred_remote_adds.json"
         self.app = self.module.KaraokeApp.__new__(self.module.KaraokeApp)
         self.app.settings = {"base_url": "", "user": "venue", "api_key": ""}
         self.app.queue = [{
