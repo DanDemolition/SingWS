@@ -3804,6 +3804,8 @@ class BackgroundMusicPlayer(QObject):
             for output in parent._refresh_audio_output_cache():
                 if output.get("id") == selected:
                     return str(output.get("name") or "").strip() or None
+            # Cache miss: the persisted display name is the durable identity.
+            return str(parent.settings.get("audio_output_name", "") or "").strip() or None
         except Exception:
             pass
         return None
@@ -24110,7 +24112,10 @@ class KaraokeApp(QWidget):
             if not outputs:
                 outputs = self._refresh_audio_output_cache()
             selected_item = next((item for item in outputs if str(item.get("id") or "") == selected), None)
-            selected_name = str((selected_item or {}).get("name") or "").strip()
+            selected_name = (
+                str((selected_item or {}).get("name") or "").strip()
+                or str(self.settings.get("audio_output_name", "") or "").strip()
+            )
             qt_outputs = list(QMediaDevices.audioOutputs() or [])
             device = match_qt_audio_device(qt_outputs, selected_name) if match_qt_audio_device else None
             if device is not None:
@@ -24156,18 +24161,49 @@ class KaraokeApp(QWidget):
             return "🎧"
         return "🔊"
 
+    @staticmethod
+    def _normalized_audio_output_name(name: str) -> str:
+        return "".join(ch for ch in str(name or "").casefold() if ch.isalnum())
+
     def _refresh_audio_output_cache(self):
         outputs = [{
             "id": "default",
             "name": "Default (System)",
             "kind": "speaker",
         }]
+        seen_names = set()
+        # Primary: Qt enumeration. Engine-agnostic (works for the FFmpeg/Qt
+        # karaoke transport and, by name, for the BASS BGM engine) and its ids
+        # are keyed on the display name ALONE, so a selection survives
+        # reboots, driver churn, and AirPlay devices coming and going —
+        # the old GStreamer ids hashed caps/props and silently un-pinned the
+        # host's device whenever those changed (2026-07-20 AirPlay outage).
+        try:
+            from PyQt6.QtMultimedia import QMediaDevices
+
+            import hashlib
+            for dev in QMediaDevices.audioOutputs() or []:
+                name = str(dev.description() or "").strip()
+                key = self._normalized_audio_output_name(name)
+                if not key or key in seen_names:
+                    continue
+                seen_names.add(key)
+                did = "qt_" + hashlib.sha1(key.encode("utf-8", "ignore")).hexdigest()[:16]
+                outputs.append({"id": did, "name": name, "kind": self._classify_audio_output_name(name)})
+        except Exception:
+            pass
+        # Legacy: GStreamer device monitor. Only fills in devices Qt did not
+        # report (and keeps their historic ids resolvable for old settings).
         try:
             for dev in self._iter_audio_sink_devices():
                 did = self._audio_output_id_for_device(dev)
                 if not did:
                     continue
                 name = str(dev.get_display_name() or "Audio Output").strip() or "Audio Output"
+                key = self._normalized_audio_output_name(name)
+                if key in seen_names:
+                    continue
+                seen_names.add(key)
                 kind = self._classify_audio_output_name(name)
                 outputs.append({"id": did, "name": name, "kind": kind})
         except Exception:
@@ -24186,6 +24222,14 @@ class KaraokeApp(QWidget):
     def _get_selected_audio_output_id(self) -> str:
         out_id = str(self.settings.get("audio_output_id", "default") or "default")
         if out_id != "default" and not self._audio_output_exists(out_id):
+            recovered = self._recover_audio_output_selection(out_id)
+            if recovered:
+                return recovered
+            _diag(
+                f"[AUDIO] selected output id={out_id!r} "
+                f"name={str(self.settings.get('audio_output_name', '') or '')!r} not found; "
+                "falling back to system default (device unplugged or renamed)"
+            )
             self.settings["audio_output_id"] = "default"
             try:
                 self.save_settings()
@@ -24193,6 +24237,49 @@ class KaraokeApp(QWidget):
                 pass
             out_id = "default"
         return out_id
+
+    def _recover_audio_output_selection(self, stale_id: str) -> str:
+        """Re-pin a stale device id by name instead of silently unpinning.
+
+        Old GStreamer-era ids hashed device caps/props and churned between
+        sessions; losing the pin dropped the host onto the system default,
+        which AirPlay then hijacked. Recovery order: the persisted device
+        name, then the legacy GStreamer id resolved to its display name.
+        """
+        outputs = list(getattr(self, "_audio_output_cache", []) or []) or self._refresh_audio_output_cache()
+
+        def _adopt(name: str) -> str:
+            key = self._normalized_audio_output_name(name)
+            if not key:
+                return ""
+            for item in outputs:
+                if str(item.get("id") or "") == "default":
+                    continue
+                if self._normalized_audio_output_name(item.get("name")) == key:
+                    new_id = str(item.get("id") or "")
+                    self.settings["audio_output_id"] = new_id
+                    self.settings["audio_output_name"] = str(item.get("name") or "")
+                    try:
+                        self.save_settings()
+                    except Exception:
+                        pass
+                    _diag(
+                        f"[AUDIO] re-pinned output by name {item.get('name')!r} "
+                        f"(stale id {stale_id!r} -> {new_id!r})"
+                    )
+                    return new_id
+            return ""
+
+        recovered = _adopt(str(self.settings.get("audio_output_name", "") or ""))
+        if recovered:
+            return recovered
+        try:
+            for dev in self._iter_audio_sink_devices():
+                if self._audio_output_id_for_device(dev) == stale_id:
+                    return _adopt(str(dev.get_display_name() or ""))
+        except Exception:
+            pass
+        return ""
 
     def _create_audio_sink_for_selected_output(self, sink_name: str, default_factory: str = "autoaudiosink"):
         selected = self._get_selected_audio_output_id()
@@ -24232,10 +24319,23 @@ class KaraokeApp(QWidget):
         if output_id == current:
             return
         self.settings["audio_output_id"] = output_id
+        # Persist the display name as well: it is the durable identity used to
+        # re-pin the device if the id ever goes stale, and it is what the BASS
+        # and Qt engines actually match on.
+        try:
+            outputs = list(getattr(self, "_audio_output_cache", []) or []) or self._refresh_audio_output_cache()
+            item = next((x for x in outputs if str(x.get("id") or "") == output_id), None)
+            self.settings["audio_output_name"] = str((item or {}).get("name") or "") if output_id != "default" else ""
+        except Exception:
+            pass
         try:
             self.save_settings()
         except Exception:
             pass
+        _diag(
+            f"[AUDIO] output pinned id={output_id!r} "
+            f"name={str(self.settings.get('audio_output_name', '') or 'Default (System)')!r}"
+        )
         self._update_audio_output_button()
 
         # Soundboard streams share BASS's output device. Release their handles
@@ -24260,7 +24360,48 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[AUDIO] Soundboard output switch failed: {e}")
 
+    def _ensure_audio_output_watcher(self):
+        """Watch for CoreAudio device-list changes (AirPlay/Bluetooth)."""
+        if getattr(self, "_qt_media_devices_watcher", None) is not None:
+            return
+        try:
+            from PyQt6.QtMultimedia import QMediaDevices
+
+            watcher = QMediaDevices(self)
+            watcher.audioOutputsChanged.connect(self._on_qt_audio_outputs_changed)
+            self._qt_media_devices_watcher = watcher
+        except Exception:
+            self._qt_media_devices_watcher = None
+
+    def _on_qt_audio_outputs_changed(self):
+        # An AirPlay display or Bluetooth device appeared/vanished. macOS flips
+        # the SYSTEM default output to a new AirPlay device; a pinned SingWS
+        # device shields karaoke (QAudioSink on an explicit QAudioDevice) and
+        # BGM (BASS opened on an explicit device index) from that hijack, so
+        # the job here is to refresh the picker and keep the pin intact.
+        try:
+            outputs = self._refresh_audio_output_cache()
+            names = [str(o.get("name") or "") for o in outputs[1:]]
+            selected = str(self.settings.get("audio_output_id", "default") or "default")
+            pinned_name = str(self.settings.get("audio_output_name", "") or "")
+            _diag(f"[AUDIO] output devices changed: {names!r} pinned={(pinned_name or 'default')!r}")
+            if selected != "default" and pinned_name:
+                pinned_key = self._normalized_audio_output_name(pinned_name)
+                present = any(
+                    self._normalized_audio_output_name(o.get("name")) == pinned_key
+                    for o in outputs[1:]
+                )
+                if not present:
+                    _diag(
+                        f"[AUDIO] WARNING: pinned output {pinned_name!r} went offline; "
+                        "audio may follow the system default until it returns"
+                    )
+            self._update_audio_output_button()
+        except Exception:
+            pass
+
     def _update_audio_output_button(self):
+        self._ensure_audio_output_watcher()
         selected = self._get_selected_audio_output_id()
         outputs = self._refresh_audio_output_cache()
         item = next((x for x in outputs if x.get("id") == selected), outputs[0] if outputs else None)
