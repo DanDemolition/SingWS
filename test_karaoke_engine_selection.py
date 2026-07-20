@@ -43,13 +43,20 @@ class EngineSelectionTests(unittest.TestCase):
         app.settings = {"karaoke_engine": pref} if pref is not None else {}
         return app
 
-    def test_default_setting_present_and_auto(self):
-        self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "auto")
+    def test_default_setting_is_ffmpeg(self):
+        self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "ffmpeg")
+
+    def test_missing_setting_defaults_to_ffmpeg(self):
+        self.singws.GstKaraokeTransport = _GstSentinel
+        self.singws.PythonKaraokeTransport = _FfmpegSentinel
+        pref, cls = self._app(None)._select_karaoke_transport_cls()
+        self.assertEqual(pref, "ffmpeg")
+        self.assertIs(cls, _FfmpegSentinel)
 
     def test_auto_prefers_gstreamer_when_available(self):
         self.singws.GstKaraokeTransport = _GstSentinel
         self.singws.PythonKaraokeTransport = _FfmpegSentinel
-        pref, cls = self._app(None)._select_karaoke_transport_cls()
+        pref, cls = self._app("auto")._select_karaoke_transport_cls()
         self.assertEqual(pref, "auto")
         self.assertIs(cls, _GstSentinel)
 

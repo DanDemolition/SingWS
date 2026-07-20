@@ -10,9 +10,11 @@ No production GStreamer code or packaging was removed by this audit.
 
 ## Current engine selection
 
-- Live karaoke: `GstKaraokeTransport` is selected whenever it imports. The
-  FFmpeg/QAudioSink `PythonKaraokeTransport` is used only when construction of
-  the GStreamer transport fails (or tests explicitly disable GStreamer).
+- Live karaoke: since the default flip (milestone 7), the FFmpeg/QAudioSink
+  `PythonKaraokeTransport` is the default engine. `GstKaraokeTransport` is
+  selected when the host pins `karaoke_engine` to `gstreamer` (or `auto`, the
+  old GStreamer-preferred behavior), and remains the escape hatch until
+  removal.
 - Background music: BASS/BASSmix is primary. GStreamer remains the recovery
   backend if BASS initialization fails.
 - CDG rendering: both transports have a native Python/Qt CDG decoder, but the
@@ -157,6 +159,14 @@ without audio hardware, plus host selection tests for the BASS-fails and
 both-fail paths) and a muted real-QAudioSink smoke run that confirmed
 real-time pull, clock advance, and a live meter on the Apple Silicon test
 machine.
+
+The seventh milestone (default flip) is implemented: `karaoke_engine` now
+defaults to `ffmpeg`, so live karaoke runs on the FFmpeg/Qt transport for
+hosts who never touched the setting, while GStreamer stays fully bundled and
+selectable (`gstreamer`, or `auto` for the old GStreamer-preferred behavior)
+as the escape hatch. Removal (step 8) should follow only after real shows on
+both architectures confirm the default. A muted real-library smoke on the
+default engine verified clock advance, duration probing, and a clean decode.
 
 The sixth milestone (host-selectable engine) is implemented: a new
 `karaoke_engine` setting (default `auto`) with a combo in Settings → Audio →

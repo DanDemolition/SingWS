@@ -2994,7 +2994,7 @@ DEFAULTS = {
     "bg_video_quality": "auto",       # auto | 1080 | 720 | 540 | off; decorative layer only
     "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
-    "karaoke_engine": "auto",        # auto (GStreamer preferred) | gstreamer | ffmpeg; live karaoke engine
+    "karaoke_engine": "ffmpeg",      # ffmpeg (default) | gstreamer | auto (GStreamer preferred); GStreamer stays bundled as the escape hatch until removal
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
@@ -21717,15 +21717,15 @@ class KaraokeApp(QWidget):
     def _select_karaoke_transport_cls(self):
         """Resolve the live karaoke engine from the host preference.
 
-        "auto" (default) keeps the proven GStreamer/OpenKJ (native CDG) path
-        preferred with the FFmpeg/Qt transport as fallback; a host can pin
-        either engine explicitly for parity testing and migration. Returns
-        (normalized_pref, transport_cls_or_None).
+        "ffmpeg" (default) runs live karaoke on the FFmpeg/Qt transport;
+        GStreamer stays selectable ("gstreamer", or "auto" for the old
+        GStreamer-preferred behavior) as the escape hatch until it is removed.
+        Returns (normalized_pref, transport_cls_or_None).
         """
         try:
-            pref = str(self.settings.get("karaoke_engine", "auto") or "auto").strip().lower()
+            pref = str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").strip().lower()
         except Exception:
-            pref = "auto"
+            pref = "ffmpeg"
         if pref in ("ffmpeg", "python", "qt") and PythonKaraokeTransport is not None:
             return "ffmpeg", PythonKaraokeTransport
         if pref in ("gstreamer", "gst") and GstKaraokeTransport is not None:
@@ -24890,14 +24890,14 @@ class KaraokeApp(QWidget):
         engine_row = QHBoxLayout()
         engine_row.addWidget(QLabel("Karaoke playback engine:"))
         karaoke_engine_combo = QComboBox(dlg)
-        karaoke_engine_combo.addItem("Auto (recommended)", "auto")
+        karaoke_engine_combo.addItem("FFmpeg / Qt audio (default)", "ffmpeg")
         karaoke_engine_combo.addItem("GStreamer (OpenKJ)", "gstreamer")
-        karaoke_engine_combo.addItem("FFmpeg / Qt audio", "ffmpeg")
+        karaoke_engine_combo.addItem("Auto (GStreamer preferred)", "auto")
         karaoke_engine_combo.setToolTip(
-            "Auto uses the proven GStreamer engine and falls back to the FFmpeg/Qt transport if it fails.\n"
-            "Pin an engine for A/B parity testing. Takes effect from the next song."
+            "FFmpeg/Qt is the default engine. GStreamer remains available as the escape hatch\n"
+            "if playback misbehaves. Takes effect from the next song."
         )
-        engine_idx = karaoke_engine_combo.findData(str(self.settings.get("karaoke_engine", "auto") or "auto").lower())
+        engine_idx = karaoke_engine_combo.findData(str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").lower())
         karaoke_engine_combo.setCurrentIndex(engine_idx if engine_idx >= 0 else 0)
         engine_row.addWidget(karaoke_engine_combo)
         engine_row.addStretch(1)
