@@ -52,6 +52,71 @@ def decode_pcm_mono(path: str, sr: int = 8000, max_seconds: float = 720.0) -> np
     return np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32, copy=False)
 
 
+def detect_lead_silence(
+    path: str,
+    noise_db: float = -50.0,
+    min_silence: float = 0.5,
+    max_scan_seconds: float = 30.0,
+    sr: int = 16000,
+) -> float:
+    """Length of the leading silence (seconds) at the start of `path`.
+
+    FFmpeg/numpy replacement for the old GStreamer ``level``-element scan and
+    a drop-in match for its semantics: the first `max_scan_seconds` are split
+    into 100 ms windows, a window is silent when the louder channel's RMS is
+    at or below `noise_db` dBFS, and the result is the time of the first
+    non-silent window — but only when that leading run lasts at least
+    `min_silence` seconds, clamped to 10 s. Returns 0.0 for shorter lead-ins,
+    fully silent scans, or any decode error.
+    """
+    try:
+        import os
+
+        if not path or not os.path.exists(str(path)):
+            return 0.0
+        noise_db = float(noise_db)
+        min_silence = max(0.0, float(min_silence))
+        sr = max(1000, int(sr))
+        cmd = [
+            _ffmpeg(), "-v", "quiet", "-nostdin",
+            "-t", str(max(0.1, float(max_scan_seconds))),
+            "-i", str(path),
+            "-vn", "-ac", "2", "-ar", str(sr), "-f", "f32le", "-",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                check=False, timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return 0.0
+        if proc.returncode != 0 or not proc.stdout:
+            return 0.0
+        samples = np.frombuffer(proc.stdout, dtype="<f4")
+        frames = samples.size // 2
+        if frames <= 0:
+            return 0.0
+        stereo = samples[: frames * 2].reshape(-1, 2)
+        window = max(1, sr // 10)  # 100 ms windows, like the level element
+        n_windows = frames // window
+        if n_windows <= 0:
+            return 0.0
+        blocks = stereo[: n_windows * window].reshape(n_windows, window, 2)
+        # Per-channel RMS per window; a window counts as loud when its louder
+        # channel clears the threshold (the level scan took max across channels).
+        rms = np.sqrt(np.mean(np.square(blocks.astype(np.float64)), axis=1))
+        rms_db = 20.0 * np.log10(np.maximum(rms.max(axis=1), 1e-9))
+        loud = np.flatnonzero(rms_db > noise_db)
+        if loud.size == 0:
+            return 0.0
+        silence_end = float(loud[0]) * (float(window) / float(sr))
+        if silence_end >= min_silence:
+            return max(0.0, min(10.0, silence_end))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def peaks(pcm: np.ndarray, n_cols: int) -> np.ndarray:
     """min/max envelope per output column for the waveform.
     Returns an (n_cols, 2) array of (min, max) in [-1, 1]."""

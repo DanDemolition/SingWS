@@ -25,6 +25,37 @@ CDG_PACKETS_PER_SECOND = 300
 _PERF_LAST_PRINT = {}
 
 
+def _normalized_audio_device_name(value: str) -> str:
+    """Return a stable comparison key shared by Gst and Qt device labels."""
+    return "".join(ch for ch in str(value or "").casefold() if ch.isalnum())
+
+
+def match_qt_audio_device(devices, wanted_name: str):
+    """Match a GStreamer display name to a Qt ``QAudioDevice``.
+
+    Both APIs normally expose the CoreAudio display name, but punctuation and
+    spacing can differ. Prefer an exact normalized match and only accept a
+    containment match when it identifies one unique device.
+    """
+    wanted = _normalized_audio_device_name(wanted_name)
+    if not wanted:
+        return None
+    candidates = []
+    for device in list(devices or []):
+        try:
+            name = str(device.description() or "")
+        except Exception:
+            continue
+        key = _normalized_audio_device_name(name)
+        if not key:
+            continue
+        if key == wanted:
+            return device
+        if wanted in key or key in wanted:
+            candidates.append(device)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _perf_log_if_slow(name: str, ms: float, threshold_ms: float = 50.0):
     try:
         if float(ms) >= float(threshold_ms):
@@ -285,6 +316,8 @@ class _AudioDecodeWorker(threading.Thread):
                 try:
                     if self.stop_event.is_set():
                         process.kill()
+                    if process.stdout is not None:
+                        process.stdout.close()
                     process.wait(timeout=0.3)
                 except Exception:
                     pass
@@ -472,7 +505,8 @@ class FfmpegVideoReader:
     # for smooth pacing and keeps memory pressure low on constrained machines.
     MAX_BUFFERED_FRAMES = 24
 
-    def __init__(self, path: str, start_seconds: float, max_height: int | None = None):
+    def __init__(self, path: str, start_seconds: float, max_height: int | None = None,
+                 fps: float | None = None):
         self.path = str(path)
         self.start_seconds = max(0.0, float(start_seconds))
         self.lock = threading.Condition()
@@ -486,7 +520,9 @@ class FfmpegVideoReader:
         else:
             self.max_height = int(max_height)
         self.width, self.height = 0, 0
-        self.fps = 30.0
+        # Decode/output frame rate. The default matches the karaoke MP4 path;
+        # decorative background video passes its quality-profile cap instead.
+        self.fps = float(fps) if fps and float(fps) > 0.0 else 30.0
         self.frame_index = 0
         self.latest_image = None
         self.dropped_frames = 0
@@ -835,6 +871,8 @@ class PythonKaraokeTransport(QObject):
         mode: str = "audio",
         duration_seconds: float = 0.0,
         probe_duration_on_init: bool = False,
+        audio_device=None,
+        audio_device_name: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -901,7 +939,8 @@ class PythonKaraokeTransport(QObject):
         self.master = None  # MasterAudioProcessor instance or None
         self._master_config_signature = None
         self.audio_sink = None
-        self.audio_device = None
+        self.audio_device = audio_device
+        self.audio_device_name = str(audio_device_name or "")
         self._feeder = None  # pull-mode QIODevice feeding the sink
         # Visual-only calibration offset (seconds). Nudges the CDG/MP4 FRAME
         # timing without touching the audio clock — audio stays master. Positive
@@ -1232,7 +1271,25 @@ class PythonKaraokeTransport(QObject):
         fmt.setSampleRate(self.sample_rate)
         fmt.setChannelCount(self.channels)
         fmt.setSampleFormat(QAudioFormat.SampleFormat.Float)
-        self.audio_sink = QAudioSink(fmt, self)
+        device = self.audio_device
+        use_selected_device = device is not None
+        if use_selected_device:
+            try:
+                use_selected_device = not bool(device.isNull())
+            except Exception:
+                use_selected_device = True
+        try:
+            self.audio_sink = QAudioSink(device, fmt, self) if use_selected_device else QAudioSink(fmt, self)
+        except Exception as exc:
+            # Device lists can change between menu selection and song start.
+            # Fall back to Qt's current default rather than failing playback.
+            print(
+                f"[PY-KARAOKE] selected Qt audio output unavailable; using default "
+                f"name={self.audio_device_name!r} error={exc}"
+            )
+            self.audio_device = None
+            self.audio_device_name = ""
+            self.audio_sink = QAudioSink(fmt, self)
         # Small buffer: pull mode keeps the device fed from a background thread,
         # so we don't need a big cushion against UI hitches, and a small buffer
         # keeps output latency (and any residual seek artifact) tight.

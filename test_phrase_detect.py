@@ -213,5 +213,63 @@ class BeatAlignedLoopTests(unittest.TestCase):
         self.assertIsNone(pd.beat_aligned_loop(0.0, 120, 0.0, 0))
 
 
+class DetectLeadSilenceTests(unittest.TestCase):
+    """FFmpeg-based lead-silence scan (replaces the GStreamer level scan)."""
+
+    SR = 16000
+
+    def _write_wav(self, *segments):
+        """Write a stereo WAV from (seconds, amplitude) tone segments."""
+        import math
+        import os
+        import struct
+        import tempfile
+        import wave
+
+        handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        self.addCleanup(lambda: os.unlink(handle.name))
+        with wave.open(handle, "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(self.SR)
+            chunk = bytearray()
+            for seconds, amp in segments:
+                for i in range(int(self.SR * seconds)):
+                    v = int(amp * 32767.0 * math.sin(2.0 * math.pi * 440.0 * i / self.SR))
+                    chunk += struct.pack("<hh", v, v)
+            wav.writeframes(bytes(chunk))
+        handle.close()
+        return handle.name
+
+    def test_measures_leading_silence(self):
+        path = self._write_wav((1.2, 0.0), (1.0, 0.5))
+        self.assertAlmostEqual(pd.detect_lead_silence(path), 1.2, delta=0.15)
+
+    def test_short_lead_in_returns_zero(self):
+        path = self._write_wav((0.3, 0.0), (1.0, 0.5))
+        self.assertEqual(pd.detect_lead_silence(path), 0.0)
+
+    def test_tone_from_start_returns_zero(self):
+        path = self._write_wav((1.0, 0.5))
+        self.assertEqual(pd.detect_lead_silence(path), 0.0)
+
+    def test_fully_silent_scan_returns_zero(self):
+        path = self._write_wav((2.0, 0.0))
+        self.assertEqual(pd.detect_lead_silence(path), 0.0)
+
+    def test_long_silence_clamps_to_ten_seconds(self):
+        path = self._write_wav((12.0, 0.0), (1.0, 0.5))
+        self.assertEqual(pd.detect_lead_silence(path), 10.0)
+
+    def test_missing_file_returns_zero(self):
+        self.assertEqual(pd.detect_lead_silence("/nonexistent/file.mp3"), 0.0)
+
+    def test_quiet_noise_floor_counts_as_silence(self):
+        # A -60 dBFS lead-in stays under the -50 dB threshold, so it is
+        # measured as silence before the real content starts.
+        path = self._write_wav((1.0, 0.001), (1.0, 0.5))
+        self.assertAlmostEqual(pd.detect_lead_silence(path), 1.0, delta=0.15)
+
+
 if __name__ == "__main__":
     unittest.main()

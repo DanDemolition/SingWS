@@ -18,8 +18,12 @@ os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
 
 
 def load_main_module():
+    import sys
+
     spec = importlib.util.spec_from_file_location("singws_main_bgvideo", "0.2.18.1.py")
     module = importlib.util.module_from_spec(spec)
+    # Registering the module lets inspect.getsource resolve class sources.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -242,6 +246,80 @@ class StartStopGatingTests(unittest.TestCase):
         self.assertEqual(self.singws.background_video_quality_profile("720p")["max_width"], 1280)
         self.assertEqual(self.singws.background_video_quality_profile("960x540")["key"], "540")
         self.assertEqual(self.singws.background_video_quality_profile("surprise")["key"], "auto")
+
+
+class FfmpegDecodeWorkerTests(unittest.TestCase):
+    """The decorative video worker decodes via FfmpegVideoReader, not GStreamer."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def test_worker_and_player_have_no_gstreamer_references(self):
+        import inspect
+
+        for cls_ in (
+            self.singws._LyricsBackgroundVideoWorker,
+            self.singws.LyricsBackgroundVideoPlayer,
+        ):
+            source = inspect.getsource(cls_)
+            self.assertNotIn("Gst.", source)
+            self.assertNotIn("uridecodebin", source)
+            self.assertNotIn("appsink", source)
+        self.assertIn(
+            "FfmpegVideoReader",
+            inspect.getsource(self.singws._LyricsBackgroundVideoWorker),
+        )
+
+    def test_worker_decodes_generated_mp4_and_loops(self):
+        import shutil
+        import subprocess
+        import time as _time
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg is required for the decode test")
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication(["test"])
+        with tempfile.TemporaryDirectory() as tmp:
+            clip = Path(tmp) / "clip.mp4"
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-f", "lavfi", "-i", "testsrc=duration=0.6:size=64x48:rate=10",
+                    "-pix_fmt", "yuv420p", str(clip),
+                ],
+                check=True, timeout=30,
+            )
+            worker = self.singws._LyricsBackgroundVideoWorker(
+                None, max_width=64, max_height=48, max_fps=10, quality_label="test",
+            )
+            frames = []
+
+            def collect(image):
+                if image is not None:
+                    frames.append(image)
+                    worker.acknowledge_frame()
+
+            worker.frame_ready.connect(collect)
+            stops = []
+            worker.stopped.connect(lambda reason: stops.append(reason))
+            self.assertTrue(worker.start([str(clip)], shuffle=False))
+            # 0.6s clip at 10fps: collecting past 6 frames proves the shuffle
+            # bag advanced through EOF and restarted the (single) clip.
+            deadline = _time.monotonic() + 15.0
+            while len(frames) < 8 and _time.monotonic() < deadline:
+                app.processEvents()
+                _time.sleep(0.005)
+            worker.stop("test_done")
+            app.processEvents()
+        self.assertGreaterEqual(len(frames), 8, "worker did not deliver frames")
+        image = frames[0]
+        self.assertEqual((image.width(), image.height()), (64, 48))
+        diag = worker.diagnostics()
+        self.assertEqual(diag["working_size"], "64x48")
+        self.assertIn("test_done", stops)
 
 
 if __name__ == "__main__":

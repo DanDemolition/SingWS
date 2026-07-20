@@ -1663,11 +1663,18 @@ else:
         _show_gst_error_and_exit(e)
 
 try:
-    from python_karaoke_transport import NS_PER_SECOND, PythonKaraokeTransport
+    from python_karaoke_transport import (
+        NS_PER_SECOND,
+        FfmpegVideoReader,
+        PythonKaraokeTransport,
+        match_qt_audio_device,
+    )
     PYTHON_KARAOKE_IMPORT_ERROR = None
 except Exception as e:
     NS_PER_SECOND = 1_000_000_000
+    FfmpegVideoReader = None
     PythonKaraokeTransport = None
+    match_qt_audio_device = None
     PYTHON_KARAOKE_IMPORT_ERROR = e
 # GStreamer/OpenKJ karaoke transport (native DSP: soundtouch pitch +
 # scaletempo + equalizer-10bands; change-driven clock-synced CDG). Preferred
@@ -1683,6 +1690,8 @@ except Exception as e:
     GST_KARAOKE_IMPORT_ERROR = e
 
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
+from ffmpeg_background_engine import FfmpegBackgroundEngine
+from bass_soundboard_engine import BassSoundboardChannel, BassSoundboardError
 
 # ===== RESOURCE MANAGEMENT FOR PYINSTALLER =====
 
@@ -2985,6 +2994,7 @@ DEFAULTS = {
     "bg_video_quality": "auto",       # auto | 1080 | 720 | 540 | off; decorative layer only
     "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
+    "karaoke_engine": "auto",        # auto (GStreamer preferred) | gstreamer | ffmpeg; live karaoke engine
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
@@ -3547,155 +3557,19 @@ def pick_by_disc_priority(matches, priority_list=None):
             return prefix_matches[0]
     return matches[0]
 
-# Add this new class after your existing classes, before KaraokeApp
-# Lead-silence detection for better BG->karaoke transition timing (GStreamer-only).
+# Lead-silence detection for better BG->karaoke transition timing.
 def detect_lead_silence(path, noise_db=-50.0, min_silence=0.5) -> float:
-    """
-    Scan the first ~30s using GStreamer's level element and return initial
-    silence length (content-start offset). Returns 0.0 on any error/no-match.
+    """Initial-silence length (content-start offset) for the first ~30s.
+
+    Delegates to the FFmpeg/numpy scan in phrase_detect (no GStreamer);
+    returns 0.0 on any error/no-match, matching the old level-element scan.
     """
     try:
-        if not path or not os.path.exists(path):
-            return 0.0
-
-        max_scan_sec = 30.0
-        timeout_sec = 15.0
-        noise_db = float(noise_db)
-        min_silence = max(0.0, float(min_silence))
-
-        pipeline = Gst.Pipeline.new("silence_scan")
-        src = Gst.ElementFactory.make("filesrc", None)
-        dbin = Gst.ElementFactory.make("decodebin", None)
-        q = Gst.ElementFactory.make("queue", None)
-        aconv = Gst.ElementFactory.make("audioconvert", None)
-        ares = Gst.ElementFactory.make("audioresample", None)
-        level = Gst.ElementFactory.make("level", None)
-        sink = Gst.ElementFactory.make("fakesink", None)
-
-        if not all([pipeline, src, dbin, q, aconv, ares, level, sink]):
-            return 0.0
-
-        src.set_property("location", str(path))
-        try:
-            level.set_property("post-messages", True)
-        except Exception:
-            pass
-        try:
-            # 100ms windows
-            level.set_property("interval", int(100 * Gst.MSECOND))
-        except Exception:
-            pass
-        try:
-            sink.set_property("sync", False)
-        except Exception:
-            pass
-
-        for el in (src, dbin, q, aconv, ares, level, sink):
-            pipeline.add(el)
-
-        src.link(dbin)
-        q.link(aconv)
-        aconv.link(ares)
-        ares.link(level)
-        level.link(sink)
-
-        def on_pad_added(_db, pad):
-            try:
-                caps = pad.query_caps(None)
-                s = caps.to_string() if caps else ""
-                if not s.startswith("audio/"):
-                    return
-                sink_pad = q.get_static_pad("sink")
-                if sink_pad and not sink_pad.is_linked():
-                    pad.link(sink_pad)
-            except Exception:
-                pass
-
-        dbin.connect("pad-added", on_pad_added)
-
-        bus = pipeline.get_bus()
-        pipeline.set_state(Gst.State.PLAYING)
-
-        saw_non_silent = False
-        initial_silence_end = 0.0
-        t0 = time.monotonic()
-
-        while True:
-            now = time.monotonic()
-            if (now - t0) > timeout_sec:
-                break
-
-            # Hard cap at 30s of media progression when available
-            try:
-                ok_pos, pos = pipeline.query_position(Gst.Format.TIME)
-                if ok_pos and pos is not None and pos >= int(max_scan_sec * Gst.SECOND):
-                    break
-            except Exception:
-                pass
-
-            msg = bus.timed_pop_filtered(
-                int(200 * Gst.MSECOND),
-                Gst.MessageType.ERROR | Gst.MessageType.EOS | Gst.MessageType.ELEMENT,
-            )
-            if msg is None:
-                continue
-
-            mtype = msg.type
-            if mtype == Gst.MessageType.ERROR:
-                break
-            if mtype == Gst.MessageType.EOS:
-                break
-            if mtype != Gst.MessageType.ELEMENT:
-                continue
-
-            s = msg.get_structure()
-            if s is None or s.get_name() != "level":
-                continue
-
-            ts_sec = now - t0
-            try:
-                if s.has_field("running-time"):
-                    ts = s.get_value("running-time")
-                    if ts is not None:
-                        ts_sec = float(ts) / float(Gst.SECOND)
-            except Exception:
-                pass
-
-            rms_db = -120.0
-            try:
-                vals = s.get_value("rms")
-                if vals is not None:
-                    nums = []
-                    for v in vals:
-                        try:
-                            fv = float(v)
-                            if fv > -1e8:
-                                nums.append(fv)
-                        except Exception:
-                            continue
-                    if nums:
-                        rms_db = max(nums)
-            except Exception:
-                pass
-
-            if rms_db <= noise_db:
-                if not saw_non_silent:
-                    initial_silence_end = max(initial_silence_end, ts_sec)
-            else:
-                saw_non_silent = True
-                if initial_silence_end >= min_silence:
-                    return max(0.0, min(10.0, float(initial_silence_end)))
-                return 0.0
-
-        return 0.0
+        return float(phrase_detect.detect_lead_silence(
+            path, noise_db=noise_db, min_silence=min_silence,
+        ))
     except Exception:
         return 0.0
-    finally:
-        try:
-            if 'pipeline' in locals() and pipeline is not None:
-                pipeline.set_state(Gst.State.NULL)
-        except Exception:
-            pass
 
 # Trailing-silence (dead-air) detection tunables for background music.
 BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
@@ -3793,7 +3667,7 @@ class BackgroundMusicPlayer(QObject):
     def _bg_volume_diag(self, stage: str, path: str | None = None, extra: str = ""):
         try:
             engine = getattr(self, "_bass_engine", None)
-            backend = "BASS" if engine is not None else "GStreamer"
+            backend = getattr(engine, "backend_name", "BASS") if engine is not None else "GStreamer"
             master = ""
             if engine is not None:
                 try:
@@ -3875,9 +3749,17 @@ class BackgroundMusicPlayer(QObject):
                 except Exception:
                     pass
                 self._bass_engine = None
-            
-            self._bass_engine = BassBackgroundEngine(output_name=output_name)
-            _diag(f"[BG-BASS] BASSmix background engine ready platform={self._platform_audio_label()}")
+
+            try:
+                self._bass_engine = BassBackgroundEngine(output_name=output_name)
+            except BassBackgroundError as bass_err:
+                # BASS failure recovery: fall back to the FFmpeg/Qt background
+                # engine (same deck/crossfade API) before ever considering the
+                # legacy GStreamer pipeline.
+                _diag(f"[BG-BASS] unavailable ({bass_err}); trying FFmpeg/Qt background engine")
+                self._bass_engine = FfmpegBackgroundEngine(output_name=output_name)
+            backend = getattr(self._bass_engine, "backend_name", "BASS")
+            _diag(f"[BG-BASS] {backend} background engine ready platform={self._platform_audio_label()}")
             # Attach the BGM 10-band graphic EQ ONLY in advanced mode. Simple
             # Audio Mode (default) leaves the EQ out of the chain entirely.
             try:
@@ -3905,9 +3787,9 @@ class BackgroundMusicPlayer(QObject):
             except Exception:
                 pass
             return True
-        except BassBackgroundError as e:
+        except Exception as e:
             self._bass_engine = None
-            _diag(f"[BG-BASS] unavailable; GStreamer BG fallback remains active ({e})")
+            _diag(f"[BG-BASS] no BASS/FFmpeg engine; GStreamer BG fallback remains active ({e})")
             return False
 
     def _bass_ready(self) -> bool:
@@ -6212,8 +6094,10 @@ class _LyricsBackgroundVideoWorker(QObject):
         self.max_fps = int(max_fps or 0)
         self.quality_label = str(quality_label or "auto")
         self._bag = None
-        self._pipeline = None
-        self._appsink = None
+        self._reader = None
+        self._clip_started_ts = 0.0
+        self._clip_first_frame_pending = False
+        self._reader_delivered_seen = 0
         self._current_path = ""
         self._source_size = ""
         self._source_fps = 0.0
@@ -6226,7 +6110,6 @@ class _LyricsBackgroundVideoWorker(QObject):
         self._last_stats_log = 0.0
         self._last_frame_pts_ns = None
         self._advance_failures = 0
-        self._runtime_errors = 0
         self._frames_inflight = 0
         self._frames_inflight_lock = threading.Lock()
         self._timer = None
@@ -6234,7 +6117,7 @@ class _LyricsBackgroundVideoWorker(QObject):
 
     @pyqtSlot(list, bool)
     def start(self, files: list[str], shuffle: bool = True) -> bool:
-        if Gst is None or not files:
+        if not files:
             self.stopped.emit("unavailable")
             return False
         self._bag = BackgroundVideoShuffleBag(files, shuffle=shuffle)
@@ -6259,7 +6142,7 @@ class _LyricsBackgroundVideoWorker(QObject):
         except Exception:
             pass
         self._running = False
-        self._teardown_pipeline()
+        self._teardown_reader()
         if self._current_path:
             _diag(f"[BG-VIDEO] stopped reason={reason} frames_delivered={self._frames_delivered}")
         self._current_path = ""
@@ -6274,19 +6157,24 @@ class _LyricsBackgroundVideoWorker(QObject):
         except Exception:
             self._frames_inflight = 0
 
-    def _teardown_pipeline(self):
-        pipeline = self._pipeline
-        self._pipeline = None
-        self._appsink = None
-        if pipeline is not None:
-            try:
-                self._maybe_log_stats(force=True)
-                pipeline.set_state(Gst.State.NULL)
-            except Exception:
-                pass
+    def _teardown_reader(self):
+        reader = self._reader
+        if reader is None:
+            return
+        try:
+            # Log while the reader is still attached so the final stats line
+            # carries its decoded/dropped counters.
+            self._maybe_log_stats(force=True)
+        except Exception:
+            pass
+        self._reader = None
+        try:
+            reader.stop()
+        except Exception:
+            pass
 
     def _advance(self, reason: str) -> bool:
-        self._teardown_pipeline()
+        self._teardown_reader()
         if self._bag is None:
             return False
         path = self._bag.next()
@@ -6297,143 +6185,73 @@ class _LyricsBackgroundVideoWorker(QObject):
                 return self._advance("missing_file")
             return False
         try:
-            self._prefer_macos_hardware_decoders()
-            pipeline = Gst.Pipeline.new("singws-bg-video")
-            dec = Gst.ElementFactory.make("uridecodebin", "bgVideoDecoder")
-            vq = Gst.ElementFactory.make("queue", "bgVideoQueue")
-            vrate = Gst.ElementFactory.make("videorate", "bgVideoRate")
-            vconv = Gst.ElementFactory.make("videoconvert", "bgVideoConvert")
-            vscale = Gst.ElementFactory.make("videoscale", "bgVideoScale")
-            vcaps = Gst.ElementFactory.make("capsfilter", "bgVideoCaps")
-            sink = Gst.ElementFactory.make("appsink", "bgVideoSink")
-            if any(el is None for el in (dec, vq, vrate, vconv, vscale, vcaps, sink)):
-                raise RuntimeError("bg video GStreamer elements unavailable")
-            dec.set_property("uri", Gst.filename_to_uri(path))
-            try:
-                vq.set_property("max-size-buffers", 2)
-                vq.set_property("max-size-bytes", 0)
-                vq.set_property("max-size-time", 0)
-                vq.set_property("leaky", 2)  # downstream: drop old decorative frames when the UI is busy
-                if self.max_fps > 0:
-                    vrate.set_property("drop-only", True)
-                    if vrate.find_property("max-rate") is not None:
-                        vrate.set_property("max-rate", int(self.max_fps))
-            except Exception:
-                pass
-            caps = "video/x-raw,format=RGBx"
-            if self.max_width > 0:
-                caps += f",width=[1,{int(self.max_width)}]"
-            if self.max_height > 0:
-                caps += f",height=[1,{int(self.max_height)}]"
-            if self.max_fps > 0:
-                caps += f",framerate=(fraction)[0/1,{int(self.max_fps)}/1]"
-            vcaps.set_property("caps", Gst.Caps.from_string(caps))
-            sink.set_property("sync", True)
-            sink.set_property("max-buffers", 3)
-            sink.set_property("drop", True)
-            sink.set_property("emit-signals", False)
-            for el in (dec, vq, vrate, vconv, vscale, vcaps, sink):
-                pipeline.add(el)
-            for a, b in zip((vq, vrate, vconv, vscale, vcaps), (vrate, vconv, vscale, vcaps, sink)):
-                if not a.link(b):
-                    raise RuntimeError("bg video link failed")
-
-            def on_pad(_dec, pad, q=vq, pl=pipeline):
-                try:
-                    pad_caps = pad.get_current_caps()
-                    s = pad_caps.to_string() if pad_caps else ""
-                    if s.startswith("video/"):
-                        self._capture_source_caps(pad_caps)
-                        target = q.get_static_pad("sink")
-                        if target is not None and not target.is_linked():
-                            pad.link(target)
-                    elif s.startswith("audio/"):
-                        # The clip's soundtrack is discarded into a fakesink:
-                        # no audio device is opened, no clock is provided, so
-                        # it cannot reach the speakers or influence karaoke
-                        # audio timing. (Leaving the pad unlinked would error
-                        # the pipeline instead.)
-                        fs = Gst.ElementFactory.make("fakesink", None)
-                        if fs is not None:
-                            fs.set_property("sync", False)
-                            fs.set_property("async", False)
-                            pl.add(fs)
-                            fs.sync_state_with_parent()
-                            pad.link(fs.get_static_pad("sink"))
-                except Exception:
-                    pass
-
-            dec.connect("pad-added", on_pad)
-            pipeline.set_state(Gst.State.PLAYING)
+            # FfmpegVideoReader probes and decodes on its own daemon thread
+            # (rawvideo rgb24 with the VideoToolbox hwaccel probe); this
+            # worker paces delivery against a wall clock. The clip's
+            # soundtrack is never decoded (-an), so it cannot reach the
+            # speakers or influence karaoke audio timing.
+            if FfmpegVideoReader is None:
+                raise RuntimeError("python_karaoke_transport unavailable")
+            self._reader = FfmpegVideoReader(
+                path,
+                0.0,
+                max_height=self.max_height or 720,
+                fps=float(self.max_fps) if self.max_fps > 0 else None,
+            )
         except Exception as e:
-            _diag(f"[BG-VIDEO] pipeline start failed file={os.path.basename(path)!r}: {e}")
+            _diag(f"[BG-VIDEO] reader start failed file={os.path.basename(path)!r}: {e}")
             self._advance_failures += 1
             if self._advance_failures <= 3:
-                return self._advance("pipeline_error")
+                return self._advance("reader_error")
             return False
-        self._advance_failures = 0
-        self._pipeline = pipeline
-        self._appsink = sink
+        self._clip_started_ts = time.monotonic()
+        # The reader probes (and runs the one-time hwaccel check) before the
+        # first frame lands; keep re-anchoring the clip clock until frames
+        # exist so that startup latency never fast-forwards the clip.
+        self._clip_first_frame_pending = True
+        self._reader_delivered_seen = 0
         self._current_path = path
+        self._source_size = ""
+        self._source_fps = 0.0
+        self._working_size = ""
         self._last_stats_log = time.monotonic()
         _diag(
             f"[BG-VIDEO] playing file={os.path.basename(path)!r} reason={reason} "
             f"quality={self.quality_label} work_cap={self.max_width}x{self.max_height}@{self.max_fps}fps "
-            f"source={self._source_size or 'pending'} source_fps={self._source_fps:.2f} "
-            f"decoder=gstreamer renderer=qt_qimage_widget queue=max3_leaky latest_only=1"
+            f"decoder=ffmpeg_rawvideo renderer=qt_qimage_widget queue=bounded_latest_only"
         )
         return True
 
-    def _prefer_macos_hardware_decoders(self):
+    def _capture_reader_geometry(self):
+        """Source/working size become known once the reader's probe finishes."""
+        reader = self._reader
+        if reader is None:
+            return
         try:
-            if sys.platform != "darwin" or Gst is None:
-                return
-            registry = Gst.Registry.get()
-            for name in ("vtdec_hw", "vtdec"):
-                feature = registry.find_feature(name, Gst.ElementFactory)
-                if feature is not None:
-                    feature.set_rank(max(int(feature.get_rank()), int(Gst.Rank.PRIMARY + 100)))
-        except Exception:
-            pass
-
-    def _capture_source_caps(self, caps):
-        try:
-            s = caps.get_structure(0)
-            width = int(s.get_value("width") or 0)
-            height = int(s.get_value("height") or 0)
-            self._source_size = f"{width}x{height}" if width and height else ""
-            fps_value = s.get_value("framerate")
-            try:
-                self._source_fps = float(fps_value.num) / float(fps_value.denom or 1)
-            except Exception:
-                self._source_fps = 0.0
+            if not self._source_size and reader.src_width and reader.src_height:
+                self._source_size = f"{reader.src_width}x{reader.src_height}"
+                self._source_fps = float(reader.fps or 0.0)
+            if not self._working_size and reader.width and reader.height:
+                self._working_size = f"{reader.width}x{reader.height}"
         except Exception:
             pass
 
     def _queue_depth(self) -> int:
+        reader = self._reader
+        if reader is None:
+            return 0
         try:
-            if self._appsink is not None and self._appsink.find_property("current-level-buffers") is not None:
-                return max(0, int(self._appsink.get_property("current-level-buffers") or 0))
+            return int(reader.queue_size())
         except Exception:
-            pass
-        return 0
+            return 0
 
-    def _refresh_sink_stats(self):
+    def _refresh_reader_stats(self):
+        reader = self._reader
+        if reader is None:
+            return
         try:
-            if self._appsink is None or self._appsink.find_property("stats") is None:
-                return
-            stats = self._appsink.get_property("stats")
-            if stats is None:
-                return
-            for key in ("dropped", "rendered"):
-                try:
-                    value = int(stats.get_value(key) or 0)
-                except Exception:
-                    continue
-                if key == "dropped":
-                    self._frames_dropped = max(self._frames_dropped, value)
-                elif key == "rendered":
-                    self._frames_decoded = max(self._frames_decoded, value)
+            self._frames_decoded = max(self._frames_decoded, int(reader.frames_decoded))
+            self._frames_dropped = max(self._frames_dropped, int(reader.dropped_frames))
         except Exception:
             pass
 
@@ -6442,7 +6260,8 @@ class _LyricsBackgroundVideoWorker(QObject):
         if not force and (now - float(self._last_stats_log or 0.0)) < 15.0:
             return
         self._last_stats_log = now
-        self._refresh_sink_stats()
+        self._capture_reader_geometry()
+        self._refresh_reader_stats()
         decoded = max(1, int(self._frames_decoded))
         delivered = max(1, int(self._frames_delivered))
         _diag(
@@ -6452,78 +6271,69 @@ class _LyricsBackgroundVideoWorker(QObject):
             f"decoded={self._frames_decoded} rendered={self._frames_delivered} dropped={self._frames_dropped} "
             f"queue={self._queue_depth()} avg_decode_copy_ms={self._decode_copy_time_ms / decoded:.3f} "
             f"avg_handoff_ms={self._frame_handoff_time_ms / delivered:.3f} "
-            f"last_pts_ns={self._last_frame_pts_ns} decoder=gstreamer renderer=qt_qimage_widget"
+            f"last_pts_ns={self._last_frame_pts_ns} decoder=ffmpeg_rawvideo renderer=qt_qimage_widget"
         )
         self.stats_ready.emit(self.diagnostics())
 
+    def _reader_finished(self) -> bool:
+        """True once the decode thread has exited and every frame was consumed."""
+        reader = self._reader
+        if reader is None:
+            return True
+        try:
+            return (not reader.thread.is_alive()) and reader.queue_size() <= 0
+        except Exception:
+            return True
+
     def _tick(self):
-        pipeline = self._pipeline
-        sink = self._appsink
-        if pipeline is None or sink is None:
+        reader = self._reader
+        if reader is None:
             return
-        try:
-            bus = pipeline.get_bus()
-            msg = bus.pop_filtered(Gst.MessageType.EOS | Gst.MessageType.ERROR) if bus is not None else None
-            if msg is not None:
-                if msg.type == Gst.MessageType.ERROR:
-                    err, _dbg = msg.parse_error()
-                    _diag(f"[BG-VIDEO] decode error file={os.path.basename(self._current_path)!r}: {err}")
-                    self._runtime_errors += 1
-                    if self._runtime_errors >= 3:
-                        self.stop("repeated_decode_errors")
-                        return
-                # Continuous shuffle: next video on EOS (or on a bad file).
-                if not self._advance("eos" if msg.type == Gst.MessageType.EOS else "error"):
-                    self.stop("no_playable_files")
-                return
-        except Exception:
-            pass
-        try:
-            # Action signal (like the karaoke transport): works without the
-            # GstApp gi overrides being imported.
-            sample = sink.emit("try-pull-sample", 0)
-        except Exception:
-            sample = None
-        if sample is None:
+        if self._reader_finished():
+            self._refresh_reader_stats()
+            failed = int(getattr(reader, "frames_decoded", 0) or 0) <= 0
+            if failed:
+                _diag(f"[BG-VIDEO] decode produced no frames file={os.path.basename(self._current_path)!r}")
+                self._advance_failures += 1
+                if self._advance_failures > 3:
+                    self.stop("repeated_decode_errors")
+                    return
+            # Continuous shuffle: next video on EOS (or on a bad file).
+            if not self._advance("error" if failed else "eos"):
+                self.stop("no_playable_files")
             return
         t0 = time.perf_counter()
+        if self._clip_first_frame_pending and reader.queue_size() <= 0:
+            self._clip_started_ts = time.monotonic()
+            return
+        position = max(0.0, time.monotonic() - float(self._clip_started_ts or 0.0))
         try:
-            buf = sample.get_buffer()
-            caps = sample.get_caps()
-            s = caps.get_structure(0)
-            width = int(s.get_value("width"))
-            height = int(s.get_value("height"))
-            self._working_size = f"{width}x{height}"
-            ok, mapinfo = buf.map(Gst.MapFlags.READ)
-            if not ok:
-                return
-            try:
-                image = QImage(
-                    bytes(mapinfo.data), width, height,
-                    width * 4, QImage.Format.Format_RGBX8888,
-                ).copy()
-            finally:
-                buf.unmap(mapinfo)
-            try:
-                if buf.pts != Gst.CLOCK_TIME_NONE:
-                    self._last_frame_pts_ns = int(buf.pts)
-            except Exception:
-                pass
-            self._frames_decoded += 1
-            self._decode_copy_time_ms += (time.perf_counter() - t0) * 1000.0
-            with self._frames_inflight_lock:
-                if self._frames_inflight >= 2:
-                    self._frames_dropped += 1
-                    return
-                self._frames_inflight += 1
-            self._frames_delivered += 1
-            self._runtime_errors = 0
-            h0 = time.perf_counter()
-            self.frame_ready.emit(image)
-            self._frame_handoff_time_ms += (time.perf_counter() - h0) * 1000.0
-            self._maybe_log_stats()
+            image = reader.image_at(position)
         except Exception:
-            pass
+            image = None
+        if image is None:
+            return
+        # image_at returns the retained newest-due frame; only a fresh
+        # delivery (the reader's per-clip counter moved) is emitted again.
+        delivered_total = int(getattr(reader, "frames_delivered", 0) or 0)
+        if delivered_total <= self._reader_delivered_seen:
+            return
+        self._reader_delivered_seen = delivered_total
+        self._clip_first_frame_pending = False
+        self._capture_reader_geometry()
+        self._advance_failures = 0
+        self._decode_copy_time_ms += (time.perf_counter() - t0) * 1000.0
+        with self._frames_inflight_lock:
+            if self._frames_inflight >= 2:
+                self._frames_dropped += 1
+                return
+            self._frames_inflight += 1
+        self._frames_delivered += 1
+        self._last_frame_pts_ns = int(position * 1_000_000_000)
+        h0 = time.perf_counter()
+        self.frame_ready.emit(image)
+        self._frame_handoff_time_ms += (time.perf_counter() - h0) * 1000.0
+        self._maybe_log_stats()
 
     def diagnostics(self) -> dict:
         return {
@@ -6539,17 +6349,18 @@ class _LyricsBackgroundVideoWorker(QObject):
             "max_width": int(self.max_width or 0),
             "max_height": int(self.max_height or 0),
             "max_fps": int(self.max_fps or 0),
-            "running": bool(self._pipeline is not None),
+            "running": bool(self._reader is not None),
         }
 
 
 class LyricsBackgroundVideoPlayer(QObject):
     """Shuffled, muted MP4 loop rendered behind CDG lyrics.
 
-    The GStreamer pipeline, appsink pulling, buffer mapping, and QImage copy run
-    on a dedicated worker thread. The GUI thread receives the newest immutable
-    QImage, uploads it to a QPixmap, and composites it in paintEvent only. This
-    keeps host UI actions and CDG frame generation from starving video decode."""
+    The FFmpeg rawvideo reader (with VideoToolbox hwaccel probe), frame pacing,
+    and QImage conversion run on a dedicated worker thread. The GUI thread
+    receives the newest immutable QImage, uploads it to a QPixmap, and
+    composites it in paintEvent only. This keeps host UI actions and CDG frame
+    generation from starving video decode."""
 
     _worker_start_requested = pyqtSignal(list, bool)
     _worker_stop_requested = pyqtSignal(str)
@@ -6588,7 +6399,7 @@ class LyricsBackgroundVideoPlayer(QObject):
         self._thread.start()
 
     def start(self, files: list[str], shuffle: bool = True) -> bool:
-        if Gst is None or not files:
+        if FfmpegVideoReader is None or not files:
             return False
         self._last_stats["running"] = True
         self._worker_start_requested.emit(list(files), bool(shuffle))
@@ -17544,17 +17355,14 @@ class SoundboardPad(QPushButton):
         # canonical text so a later wider resize can restore the full word.
         self._canonical_text: str = ""
 
-        # Soundboard playback must follow SingWS's selected audio output.  Do
-        # not use QMediaPlayer/QAudioOutput here: on macOS that opens Qt's
-        # default output device, bypassing the GStreamer output chosen by the
-        # app.  Pads create a tiny GStreamer playbin on demand instead.
-        self._pipeline = None
-        self._bus = None
-        self._bus_handler_id = None
+        # BASS owns the native realtime mixing/output path used by background
+        # music. Each pad gets an independent preloaded stream on that same
+        # device, so clips overlap BGM and karaoke without Python audio work.
+        self._channel = BassSoundboardChannel(self._bass_runtime)
         self._playing = False
-        self._bus_poll_timer = QTimer(self)
-        self._bus_poll_timer.setInterval(80)
-        self._bus_poll_timer.timeout.connect(self._poll_pipeline_bus)
+        self._channel_poll_timer = QTimer(self)
+        self._channel_poll_timer.setInterval(80)
+        self._channel_poll_timer.timeout.connect(self._poll_bass_channel)
 
         self._refresh_face()
 
@@ -17586,15 +17394,20 @@ class SoundboardPad(QPushButton):
     # ---- internals ----
 
     def _set_clip(self, path: str, label: str, volume: float):
+        self._stop_channel(release=True)
         self._clip_path = path
         self._label = label
         self._volume = max(0.0, min(1.0, float(volume)))
-        self._stop_pipeline()
+        try:
+            self._channel.load(path, self._volume)
+        except BassSoundboardError as e:
+            # Keep the assignment; a later click retries after BASS recovers.
+            _diag(f"[SOUNDBOARD] preload failed slot={self.slot_index}: {e}")
         self._refresh_face()
         self.cleared.emit(self.slot_index)
 
     def clear_clip(self, emit: bool = True):
-        self._stop_pipeline()
+        self._stop_channel(release=True)
         self._clip_path = ""
         self._label = ""
         self._refresh_face()
@@ -17623,7 +17436,7 @@ class SoundboardPad(QPushButton):
     def _app_owner(self):
         w = self.parent()
         while w is not None:
-            if hasattr(w, "_create_audio_sink_for_selected_output"):
+            if hasattr(w, "bg_music") and hasattr(w, "_get_selected_audio_output_id"):
                 return w
             try:
                 w = w.parent()
@@ -17631,203 +17444,68 @@ class SoundboardPad(QPushButton):
                 return None
         return None
 
-    def _make_audio_sink(self):
+    def _bass_runtime(self):
         owner = self._app_owner()
-        name = f"soundboard_pad_{self.slot_index}_audiosink"
-        if owner is not None and hasattr(owner, "_create_audio_sink_for_selected_output"):
-            try:
-                return owner._create_audio_sink_for_selected_output(name, default_factory="autoaudiosink")
-            except Exception as e:
-                try:
-                    _diag(f"[SOUNDBOARD] selected output sink failed slot={self.slot_index}: {e}")
-                except Exception:
-                    pass
-        return Gst.ElementFactory.make("autoaudiosink", name) if Gst is not None else None
+        bg_music = getattr(owner, "bg_music", None) if owner is not None else None
+        return getattr(bg_music, "_bass_engine", None)
 
-    def _make_pipeline(self):
-        if Gst is None or not self._clip_path:
-            return None
-        pipe = Gst.ElementFactory.make("playbin", f"soundboard_pad_{self.slot_index}_playbin")
-        if pipe is None:
-            return None
-        try:
-            pipe.set_property("uri", Gst.filename_to_uri(os.path.abspath(self._clip_path)))
-        except Exception:
-            pipe.set_property("uri", "file://" + os.path.abspath(self._clip_path))
-        try:
-            pipe.set_property("audio-sink", self._make_audio_sink())
-        except Exception:
-            pass
-        try:
-            video_sink = Gst.ElementFactory.make("fakesink", f"soundboard_pad_{self.slot_index}_videosink")
-            if video_sink is not None:
-                pipe.set_property("video-sink", video_sink)
-        except Exception:
-            pass
-        try:
-            pipe.set_property("volume", float(self._volume))
-        except Exception:
-            pass
-        return pipe
-
-    def _watch_pipeline_bus(self, pipe):
-        try:
-            bus = pipe.get_bus()
-            bus.add_signal_watch()
-            handler_id = bus.connect("message", self._on_gst_message)
-            self._bus = bus
-            self._bus_handler_id = handler_id
-        except Exception as e:
-            try:
-                _diag(f"[SOUNDBOARD] bus watch failed slot={self.slot_index}: {e}")
-            except Exception:
-                pass
-
-    def _unwatch_pipeline_bus(self):
-        self._stop_bus_polling()
-        bus = getattr(self, "_bus", None)
-        if bus is None:
-            return
-        try:
-            handler_id = getattr(self, "_bus_handler_id", None)
-            if handler_id:
-                bus.disconnect(handler_id)
-        except Exception:
-            pass
-        try:
-            bus.remove_signal_watch()
-        except Exception:
-            pass
-        self._bus = None
-        self._bus_handler_id = None
-
-    def _stop_pipeline(self):
-        pipe = getattr(self, "_pipeline", None)
+    def _stop_channel(self, release: bool = False):
         self._playing = False
-        if pipe is not None:
-            self._unwatch_pipeline_bus()
-            try:
-                pipe.set_state(Gst.State.NULL)
-            except Exception:
-                pass
-        self._pipeline = None
+        self._stop_channel_polling()
+        self._channel.stop(release=release)
         self._refresh_face()
 
     def _play_from_start(self):
-        self._stop_pipeline()
-        pipe = self._make_pipeline()
-        if pipe is None:
-            return
-        self._pipeline = pipe
-        self._watch_pipeline_bus(pipe)
+        self._stop_channel()
         try:
-            pipe.set_state(Gst.State.PLAYING)
+            if self._channel.path != self._clip_path:
+                self._channel.load(self._clip_path, self._volume)
+            self._channel.play()
             self._playing = True
             self._refresh_face()
-            self._start_bus_polling()
+            self._start_channel_polling()
             owner = self._app_owner()
             selected = owner._get_selected_audio_output_id() if owner is not None and hasattr(owner, "_get_selected_audio_output_id") else "default"
-            _diag(f"[SOUNDBOARD] play slot={self.slot_index} output={selected} file={Path(self._clip_path).name}")
-        except Exception as e:
-            try:
-                _diag(f"[SOUNDBOARD] play failed slot={self.slot_index}: {e}")
-            except Exception:
-                pass
-            self._stop_pipeline()
+            _diag(f"[SOUNDBOARD] play backend=BASS slot={self.slot_index} output={selected} file={Path(self._clip_path).name}")
+        except BassSoundboardError as e:
+            _diag(f"[SOUNDBOARD] play failed slot={self.slot_index}: {e}")
+            self._stop_channel()
 
-    def _on_gst_message(self, _bus, msg):
-        self._handle_gst_message(msg)
-
-    def _handle_gst_message(self, msg):
+    def _start_channel_polling(self):
         try:
-            mtype = msg.type
-            if mtype == Gst.MessageType.EOS:
-                self._stop_pipeline()
-            elif mtype == Gst.MessageType.ERROR:
-                try:
-                    err, debug = msg.parse_error()
-                    _diag(f"[SOUNDBOARD] error slot={self.slot_index}: {err} ({debug})")
-                except Exception:
-                    pass
-                self._stop_pipeline()
+            if not self._channel_poll_timer.isActive():
+                self._channel_poll_timer.start()
         except Exception:
             pass
 
-    def _start_bus_polling(self):
+    def _stop_channel_polling(self):
         try:
-            if not self._bus_poll_timer.isActive():
-                self._bus_poll_timer.start()
+            if self._channel_poll_timer.isActive():
+                self._channel_poll_timer.stop()
         except Exception:
             pass
 
-    def _stop_bus_polling(self):
-        try:
-            if self._bus_poll_timer.isActive():
-                self._bus_poll_timer.stop()
-        except Exception:
-            pass
-
-    def _poll_pipeline_bus(self):
+    def _poll_bass_channel(self):
         if not bool(getattr(self, "_playing", False)):
-            self._stop_bus_polling()
+            self._stop_channel_polling()
             return
-        pipe = getattr(self, "_pipeline", None)
-        bus = getattr(self, "_bus", None)
-        if pipe is None:
-            self._stop_pipeline()
-            return
-        try:
-            if bus is not None:
-                for _ in range(12):
-                    msg = bus.pop()
-                    if msg is None:
-                        break
-                    self._handle_gst_message(msg)
-                    if not bool(getattr(self, "_playing", False)):
-                        return
-        except Exception:
-            pass
-        try:
-            ok_pos, pos = pipe.query_position(Gst.Format.TIME)
-            ok_dur, dur = pipe.query_duration(Gst.Format.TIME)
-            if ok_pos and ok_dur and dur > 0 and pos >= max(0, dur - 50_000_000):
-                self._stop_pipeline()
-        except Exception:
-            pass
+        if not self._channel.is_playing():
+            self._stop_channel()
+
+    def prepare_audio_output_change(self):
+        self._channel.prepare_output_change()
+        self._playing = False
+        self._stop_channel_polling()
 
     def apply_audio_output_change(self):
-        """Rebind this pad to the selected SingWS output device."""
-        if not bool(getattr(self, "_playing", False)):
-            return
-        pos = 0
         try:
-            ok, pos = self._pipeline.query_position(Gst.Format.TIME) if self._pipeline is not None else (False, 0)
-            if not ok:
-                pos = 0
-        except Exception:
-            pos = 0
-        pipe = self._make_pipeline()
-        if pipe is None:
-            self._stop_pipeline()
-            return
-        old = getattr(self, "_pipeline", None)
-        self._unwatch_pipeline_bus()
-        if old is not None:
-            try:
-                old.set_state(Gst.State.NULL)
-            except Exception:
-                pass
-        self._pipeline = pipe
-        self._watch_pipeline_bus(pipe)
-        try:
-            pipe.set_state(Gst.State.PAUSED)
-            if pos > 0:
-                pipe.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, int(pos))
-            pipe.set_state(Gst.State.PLAYING)
-            self._playing = True
-            self._start_bus_polling()
-        except Exception:
-            self._stop_pipeline()
+            self._channel.complete_output_change()
+            self._playing = self._channel.is_playing()
+            if self._playing:
+                self._start_channel_polling()
+        except BassSoundboardError as e:
+            _diag(f"[SOUNDBOARD] output rebind failed slot={self.slot_index}: {e}")
+            self._playing = False
         self._refresh_face()
 
     def _apply_playing_style(self, playing: bool):
@@ -17942,7 +17620,7 @@ class SoundboardPad(QPushButton):
             self._browse_for_clip()
             return
         if bool(getattr(self, "_playing", False)):
-            self._stop_pipeline()
+            self._stop_channel()
         else:
             # Always restart from the beginning so quick re-taps re-fire the
             # clip rather than resuming mid-way through.
@@ -18010,10 +17688,9 @@ class SoundboardPad(QPushButton):
                 if chosen is a:
                     self._volume = v
                     try:
-                        if self._pipeline is not None:
-                            self._pipeline.set_property("volume", float(self._volume))
-                    except Exception:
-                        pass
+                        self._channel.set_volume(self._volume)
+                    except BassSoundboardError as e:
+                        _diag(f"[SOUNDBOARD] volume failed slot={self.slot_index}: {e}")
                     self.cleared.emit(self.slot_index)
                     break
 
@@ -18073,10 +17750,17 @@ class SoundboardStrip(QWidget):
             except Exception:
                 pass
 
+    def prepare_audio_output_change(self):
+        for pad in list(getattr(self, "pads", []) or []):
+            try:
+                pad.prepare_audio_output_change()
+            except Exception:
+                pass
+
     def stop_all(self):
         for pad in list(getattr(self, "pads", []) or []):
             try:
-                pad._stop_pipeline()
+                pad._stop_channel(release=True)
             except Exception:
                 pass
 
@@ -21930,8 +21614,8 @@ class KaraokeApp(QWidget):
         if opacity <= 0:
             _diag("[BG-VIDEO] not started reason=opacity_zero (set Background Video Opacity > 0)")
             return
-        if Gst is None:
-            _diag("[BG-VIDEO] not started reason=gstreamer_unavailable")
+        if FfmpegVideoReader is None:
+            _diag("[BG-VIDEO] not started reason=video_reader_unavailable")
             return
         files = scan_background_video_folder(folder)
         if not files:
@@ -22030,6 +21714,27 @@ class KaraokeApp(QWidget):
         QTimer.singleShot(0, self._handle_media_end_safe)
 
 
+    def _select_karaoke_transport_cls(self):
+        """Resolve the live karaoke engine from the host preference.
+
+        "auto" (default) keeps the proven GStreamer/OpenKJ (native CDG) path
+        preferred with the FFmpeg/Qt transport as fallback; a host can pin
+        either engine explicitly for parity testing and migration. Returns
+        (normalized_pref, transport_cls_or_None).
+        """
+        try:
+            pref = str(self.settings.get("karaoke_engine", "auto") or "auto").strip().lower()
+        except Exception:
+            pref = "auto"
+        if pref in ("ffmpeg", "python", "qt") and PythonKaraokeTransport is not None:
+            return "ffmpeg", PythonKaraokeTransport
+        if pref in ("gstreamer", "gst") and GstKaraokeTransport is not None:
+            return "gstreamer", GstKaraokeTransport
+        if pref not in ("", "auto"):
+            _diag(f"[KARAOKE-ENGINE] preference {pref!r} unavailable; using auto selection")
+        cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
+        return "auto", cls
+
     def _start_python_karaoke_transport(
         self,
         *,
@@ -22040,11 +21745,8 @@ class KaraokeApp(QWidget):
         start_seconds: float = 0.0,
         loop_seconds=None,
     ):
-        # Engine selection: live karaoke runs on the proven GStreamer/OpenKJ
-        # (native CDG) path; the legacy ffmpeg transport is the fallback.
-        base_cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
-        transport_cls = base_cls
-        using_gst_engine = transport_cls is GstKaraokeTransport
+        engine_pref, transport_cls = self._select_karaoke_transport_cls()
+        using_gst_engine = transport_cls is GstKaraokeTransport and transport_cls is not None
         if transport_cls is None:
             detail = str(
                 GST_KARAOKE_IMPORT_ERROR
@@ -22085,6 +21787,10 @@ class KaraokeApp(QWidget):
             }
             if str(mode or "").lower() == "cdg" and getattr(cls, "__name__", "") == "GstKaraokeTransport":
                 kwargs["cdg_sidefill"] = self._effective_cdg_display_mode() == "sidefill"
+            if cls is PythonKaraokeTransport:
+                device, device_name = self._qt_audio_device_for_selected_output()
+                kwargs["audio_device"] = device
+                kwargs["audio_device_name"] = device_name
             return cls(audio_path, **kwargs)
 
         try:
@@ -22095,16 +21801,27 @@ class KaraokeApp(QWidget):
                 # fall back to the legacy ffmpeg transport rather than dying.
                 _diag(f"[GST-KARAOKE] construct failed, falling back to legacy transport: {e}")
                 using_gst_engine = False
+                device, device_name = self._qt_audio_device_for_selected_output()
                 transport = PythonKaraokeTransport(
                     audio_path,
                     video_path=video_path,
                     mode=mode,
                     duration_seconds=duration,
                     probe_duration_on_init=False,
+                    audio_device=device,
+                    audio_device_name=device_name,
                     parent=self,
                 )
             else:
                 raise
+        # Record the engine that actually plays this song (the preference can
+        # differ from the outcome when a construction fallback occurred).
+        engine_name = "gstreamer" if using_gst_engine else "ffmpeg"
+        self._last_karaoke_engine = engine_name
+        _diag(
+            f"[KARAOKE-ENGINE] engine={engine_name} pref={engine_pref} mode={mode} "
+            f"file={os.path.basename(audio_path)}"
+        )
         # MP4 decode-resolution cap (downscale only).  Lower values keep
         # playback smooth on weak GPUs (Intel Macs); 0 = native resolution.
         try:
@@ -24328,6 +24045,42 @@ class KaraokeApp(QWidget):
             return []
         return devices
 
+    def _qt_audio_device_for_selected_output(self):
+        """Resolve the existing SingWS/GStreamer selection to QAudioDevice.
+
+        This adapter lets the FFmpeg/Signalsmith transport honor the same host
+        choice without changing persisted device IDs or the production engine.
+        """
+        try:
+            from PyQt6.QtMultimedia import QMediaDevices
+
+            default_device = QMediaDevices.defaultAudioOutput()
+            selected = self._get_selected_audio_output_id()
+            if selected == "default":
+                name = str(default_device.description() or "")
+                return default_device, name
+
+            outputs = list(getattr(self, "_audio_output_cache", []) or [])
+            if not outputs:
+                outputs = self._refresh_audio_output_cache()
+            selected_item = next((item for item in outputs if str(item.get("id") or "") == selected), None)
+            selected_name = str((selected_item or {}).get("name") or "").strip()
+            qt_outputs = list(QMediaDevices.audioOutputs() or [])
+            device = match_qt_audio_device(qt_outputs, selected_name) if match_qt_audio_device else None
+            if device is not None:
+                _diag(f"[PY-KARAOKE] Qt audio output matched selected={selected!r} name={selected_name!r}")
+                return device, selected_name
+
+            default_name = str(default_device.description() or "")
+            _diag(
+                f"[PY-KARAOKE] Qt audio output match unavailable selected={selected!r} "
+                f"gst_name={selected_name!r}; using default={default_name!r}"
+            )
+            return default_device, default_name
+        except Exception as exc:
+            _diag(f"[PY-KARAOKE] Qt audio output resolution failed; using implicit default ({exc})")
+            return None, ""
+
     def _audio_output_id_for_device(self, dev) -> str:
         try:
             import hashlib
@@ -24439,14 +24192,23 @@ class KaraokeApp(QWidget):
             pass
         self._update_audio_output_button()
 
-        # Apply immediately to BG only; karaoke applies on next track.
+        # Soundboard streams share BASS's output device. Release their handles
+        # before the background engine tears down that device, then restore
+        # active pads on the newly initialized output.
+        strip = getattr(self, "soundboard_strip", None)
+        try:
+            if strip is not None and hasattr(strip, "prepare_audio_output_change"):
+                strip.prepare_audio_output_change()
+        except Exception as e:
+            _diag(f"[AUDIO] Soundboard output preparation failed: {e}")
+
+        # Apply immediately to BG; karaoke applies on next track.
         try:
             if hasattr(self, "bg_music") and self.bg_music is not None:
                 self.bg_music.apply_audio_output_change()
         except Exception as e:
             _diag(f"[AUDIO] BG output switch failed: {e}")
         try:
-            strip = getattr(self, "soundboard_strip", None)
             if strip is not None and hasattr(strip, "apply_audio_output_change"):
                 strip.apply_audio_output_change()
         except Exception as e:
@@ -25125,6 +24887,22 @@ class KaraokeApp(QWidget):
         v.addLayout(pad_row)
 
         v = _section_card(tab_audio, "Playback")  # ---- Audio ----
+        engine_row = QHBoxLayout()
+        engine_row.addWidget(QLabel("Karaoke playback engine:"))
+        karaoke_engine_combo = QComboBox(dlg)
+        karaoke_engine_combo.addItem("Auto (recommended)", "auto")
+        karaoke_engine_combo.addItem("GStreamer (OpenKJ)", "gstreamer")
+        karaoke_engine_combo.addItem("FFmpeg / Qt audio", "ffmpeg")
+        karaoke_engine_combo.setToolTip(
+            "Auto uses the proven GStreamer engine and falls back to the FFmpeg/Qt transport if it fails.\n"
+            "Pin an engine for A/B parity testing. Takes effect from the next song."
+        )
+        engine_idx = karaoke_engine_combo.findData(str(self.settings.get("karaoke_engine", "auto") or "auto").lower())
+        karaoke_engine_combo.setCurrentIndex(engine_idx if engine_idx >= 0 else 0)
+        engine_row.addWidget(karaoke_engine_combo)
+        engine_row.addStretch(1)
+        v.addLayout(engine_row)
+
         gap_row = QHBoxLayout()
         gap_row.addWidget(QLabel("BG -> Karaoke Gap (seconds):"))
         bg_gap_spin = QDoubleSpinBox(dlg)
@@ -25661,6 +25439,12 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        def on_karaoke_engine_changed(_index: int):
+            value = str(karaoke_engine_combo.currentData() or "auto")
+            self.settings["karaoke_engine"] = value
+            self.save_settings()
+            _diag(f"[KARAOKE-ENGINE] preference set pref={value} (applies from the next song)")
+
         def on_bg_gap_changed(value: float):
             try:
                 gap = max(-3.0, min(3.0, float(value)))
@@ -25932,6 +25716,7 @@ class KaraokeApp(QWidget):
         filename_fmt_combo.currentIndexChanged.connect(on_filename_fmt_changed)
 
         audio_output_combo.currentIndexChanged.connect(on_audio_output_changed)
+        karaoke_engine_combo.currentIndexChanged.connect(on_karaoke_engine_changed)
         bg_gap_spin.valueChanged.connect(on_bg_gap_changed)
         karaoke_bgm_crossfade_cb.toggled.connect(on_karaoke_bgm_crossfade_toggled)
         end_silence_cb.toggled.connect(on_end_silence_toggled)

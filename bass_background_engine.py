@@ -116,6 +116,8 @@ class BassBackgroundEngine:
     # Reference count of active engine instances using BASS
     _bass_init_refcount: int = 0
 
+    backend_name = "BASS"
+
     def __init__(self, output_name: str | None = None, sample_rate: int = 48000):
         self.output_name = str(output_name or "").strip()
         self.sample_rate = int(sample_rate or 48000)
@@ -188,6 +190,10 @@ class BassBackgroundEngine:
         self.bass.BASS_ChannelSlideAttribute.restype = BOOL
         self.bass.BASS_ChannelGetLength.argtypes = [DWORD, DWORD]
         self.bass.BASS_ChannelGetLength.restype = QWORD
+        self.bass.BASS_ChannelGetPosition.argtypes = [DWORD, DWORD]
+        self.bass.BASS_ChannelGetPosition.restype = QWORD
+        self.bass.BASS_ChannelSetPosition.argtypes = [DWORD, QWORD, DWORD]
+        self.bass.BASS_ChannelSetPosition.restype = BOOL
         self.bass.BASS_ChannelSeconds2Bytes.argtypes = [DWORD, ctypes.c_double]
         self.bass.BASS_ChannelSeconds2Bytes.restype = QWORD
         self.bass.BASS_ChannelBytes2Seconds.argtypes = [DWORD, QWORD]
