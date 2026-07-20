@@ -384,9 +384,13 @@ class BassBackgroundEngine:
                 handle = int(self.bass.BASS_ChannelSetFX(self.mixer, BASS_FX_DX8_PARAMEQ, 0))
                 if not handle:
                     raise RuntimeError("BASS_ChannelSetFX(PARAMEQ) unavailable")
+                # DX8 PARAMEQ bandwidth is in SEMITONES (1-36). The bands sit
+                # an octave apart, so each needs ~an octave (12 semitones) of
+                # width; 1.0 made ten inaudible surgical notches and the BGM
+                # EQ "did nothing" on real music (2026-07-20).
                 params = _BassDx8ParamEq(
                     ctypes.c_float(float(freq)),
-                    ctypes.c_float(1.0),
+                    ctypes.c_float(12.0),
                     ctypes.c_float(max(-12.0, min(12.0, float(gain_db)))),
                 )
                 if not self.bass.BASS_FXSetParameters(handle, ctypes.byref(params)):
