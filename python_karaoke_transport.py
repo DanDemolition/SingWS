@@ -825,28 +825,37 @@ class _PcmFeeder(QIODevice):
         if n <= 0:
             return b""
         t = self._t
-        out = bytearray()
-        real_audio_bytes = 0
+        raw = bytearray()
         with t._pcm_lock:
             if t._pending_output:
                 take = t._pending_output[:n]
-                out += take
-                real_audio_bytes += len(take)
+                raw += take
                 t._pending_output = t._pending_output[len(take):]
-            while len(out) < n and t._pcm_chunks:
+            while len(raw) < n and t._pcm_chunks:
                 chunk = t._pcm_chunks.popleft()
                 t._pcm_bytes -= len(chunk)
-                need = n - len(out)
+                need = n - len(raw)
                 if len(chunk) > need:
-                    out += chunk[:need]
-                    real_audio_bytes += need
+                    raw += chunk[:need]
                     t._pending_output = chunk[need:]
                 else:
-                    out += chunk
-                    real_audio_bytes += len(chunk)
-            if real_audio_bytes > 0:
-                t._audible_output_bytes += int(real_audio_bytes)
+                    raw += chunk
             t._pcm_lock.notify_all()
+        # Apply the EQ/master DSP here, at output time, so live changes are
+        # heard immediately instead of after the multi-second decode buffer
+        # drains. Length-preserving on whole frames; _dsp_ready smooths the
+        # sub-frame carry so the device still gets exactly n bytes.
+        try:
+            processed = t._process_output_dsp(bytes(raw))
+        except Exception:
+            processed = bytes(raw)
+        t._dsp_ready += processed
+        out = bytearray(t._dsp_ready[:n])
+        del t._dsp_ready[:len(out)]
+        real_audio_bytes = len(out)
+        if real_audio_bytes > 0:
+            with t._pcm_lock:
+                t._audible_output_bytes += int(real_audio_bytes)
         if len(out) < n:
             # Underrun: pad with silence so the output device never stalls.
             t._audio_underrun_count += 1
@@ -908,6 +917,11 @@ class PythonKaraokeTransport(QObject):
         self._pcm_bytes = 0
         self._pcm_lock = threading.Condition()
         self._pending_output = b""
+        # Output-stage DSP buffers (audio thread only): sub-frame input carry
+        # to keep the stateful EQ/master filters frame-aligned, and a small
+        # ready buffer of already-processed bytes waiting to reach the device.
+        self._dsp_output_carry = bytearray()
+        self._dsp_ready = bytearray()
         self._decoder = None
         self._decoder_done = False
         self._ended_sent = False
@@ -1037,6 +1051,10 @@ class PythonKaraokeTransport(QObject):
             self._pcm_chunks.clear()
             self._pcm_bytes = 0
             self._pending_output = b""
+            # Drop output-DSP buffers too, or a seek would splice pre-seek
+            # audio (and stale filter carry) in front of the new position.
+            self._dsp_output_carry = bytearray()
+            self._dsp_ready = bytearray()
             self._audible_output_bytes = 0
             self._pcm_lock.notify_all()
         self._decoder_done = False
@@ -1442,39 +1460,62 @@ class PythonKaraokeTransport(QObject):
         # the buffer (and the playback clock) aligned to the new position.
         if worker is not None and worker is not self._decoder:
             return
-        # Run through the EQ before queueing, so seek/teardown and the
-        # output sink see filtered audio without needing extra plumbing.
-        eq = self.eq
-        if eq is not None:
-            try:
-                signature = (id(eq), int(self.sample_rate), int(self.channels))
-                if signature != self._eq_config_signature:
-                    # Audio decode worker hot path: configure only when the
-                    # stream/EQ instance changes, not for every PCM chunk.
-                    eq.configure_stream(self.sample_rate, self.channels)
-                    self._eq_config_signature = signature
-                data = eq.process_f32_bytes(data)
-            except Exception:
-                pass
-        # Master "mix bus" processing runs after the EQ and after the upstream
-        # loudness-normalization gain (already baked in by the decoder), so it
-        # polishes the normalized signal rather than fighting it.
-        master = self.master
-        if master is not None:
-            try:
-                signature = (id(master), int(self.sample_rate), int(self.channels))
-                if signature != self._master_config_signature:
-                    master.configure_stream(self.sample_rate, self.channels)
-                    self._master_config_signature = signature
-                data = master.process_f32_bytes(data)
-            except Exception:
-                pass
+        # NOTE: the EQ and master "mix bus" DSP are intentionally NOT applied
+        # here. The decoder buffers several seconds of audio ahead for gapless
+        # seeks, so processing at queue time meant a live EQ/master change was
+        # not audible until that buffer drained (~4s) — while BGM's BASS DSP
+        # runs at the output and responds instantly. The DSP now runs in the
+        # feeder (_process_output_dsp) as each block is handed to the device,
+        # so karaoke live-adjust matches BGM. Queued audio is the raw
+        # tempo/pitch-processed stream.
         with self._pcm_lock:
             while self._pcm_bytes > self.sample_rate * self.channels * 4 * 4 and self._decoder is not None:
                 self._pcm_lock.wait(timeout=0.05)
             self._pcm_chunks.append(bytes(data))
             self._pcm_bytes += len(data)
             self._pcm_lock.notify_all()
+
+    def _process_output_dsp(self, data: bytes) -> bytes:
+        """Apply EQ then master to output-bound PCM, on the audio thread.
+
+        Runs the SAME GraphicEQ / MasterAudioProcessor the host attaches, but
+        at the moment audio is handed to the device rather than at decode time,
+        so live knob changes take effect immediately (mirrors the BGM BASS DSP,
+        which already processes on its realtime callback). Frame-aligned and
+        stateful: a sub-frame remainder is carried to the next call so the IIR
+        filter state stays continuous. Fail-safe — returns the raw input on any
+        error, never silence.
+        """
+        eq = self.eq
+        master = self.master
+        if eq is None and master is None:
+            if self._dsp_output_carry:
+                data = bytes(self._dsp_output_carry) + data
+                self._dsp_output_carry = bytearray()
+            return data
+        frame_bytes = self.channels * 4
+        buf = bytes(self._dsp_output_carry) + data
+        whole = (len(buf) // frame_bytes) * frame_bytes
+        self._dsp_output_carry = bytearray(buf[whole:])
+        body = buf[:whole]
+        if not body:
+            return b""
+        try:
+            if eq is not None:
+                signature = (id(eq), int(self.sample_rate), int(self.channels))
+                if signature != self._eq_config_signature:
+                    eq.configure_stream(self.sample_rate, self.channels)
+                    self._eq_config_signature = signature
+                body = eq.process_f32_bytes(body)
+            if master is not None:
+                signature = (id(master), int(self.sample_rate), int(self.channels))
+                if signature != self._master_config_signature:
+                    master.configure_stream(self.sample_rate, self.channels)
+                    self._master_config_signature = signature
+                body = master.process_f32_bytes(body)
+        except Exception:
+            pass
+        return body
 
     def _accept_level(self, data: bytes, worker=None):
         if worker is not None and worker is not self._decoder:
