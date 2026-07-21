@@ -14,13 +14,6 @@ def load_main_module():
     return module
 
 
-def load_transport_module():
-    spec = importlib.util.spec_from_file_location("singws_gst_show_critical", "gst_karaoke_transport.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def load_legacy_transport_module():
     spec = importlib.util.spec_from_file_location("singws_legacy_show_critical", "python_karaoke_transport.py")
     module = importlib.util.module_from_spec(spec)
@@ -32,7 +25,6 @@ class ShowCriticalRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.singws = load_main_module()
-        cls.transport = load_transport_module()
         cls.legacy_transport = load_legacy_transport_module()
 
     def bare_app(self):
@@ -162,14 +154,6 @@ class ShowCriticalRegressionTests(unittest.TestCase):
                 "skipped": False,
             }],
         }
-
-    def test_gstreamer_preroll_never_blocks_qt_main_thread(self):
-        start = inspect.getsource(self.transport.GstKaraokeTransport.start)
-        finish = inspect.getsource(self.transport.GstKaraokeTransport._finish_start_after_preroll)
-        self.assertNotIn("get_state(4 * Gst.SECOND)", start)
-        self.assertIn("QTimer.singleShot", start)
-        self.assertIn("get_state(0)", finish)
-        self.assertIn("self.started.emit()", finish)
 
     def test_legacy_transport_obeys_same_countdown_gate(self):
         start = inspect.getsource(self.legacy_transport.PythonKaraokeTransport.start)

@@ -1590,77 +1590,13 @@ class SongbookUploadThread(QThread):
 
 # ----- GStreamer (with runtime guard + macOS guidance) -----
 
-def _show_gst_error_and_exit(exc: Exception):
-    # Build a clear, actionable message, especially for macOS users.
-    try:
-        print("GStreamer initialization failed:", repr(exc), file=sys.stderr, flush=True)
-        for name in (
-            "GI_TYPELIB_PATH",
-            "GST_PLUGIN_SYSTEM_PATH_1_0",
-            "GST_PLUGIN_PATH_1_0",
-            "GST_PLUGIN_PATH",
-            "GST_PLUGIN_SCANNER",
-            "XDG_DATA_DIRS",
-        ):
-            print(f"{name}={os.environ.get(name, '')}", file=sys.stderr, flush=True)
-    except Exception:
-        pass
-
-    mac_instructions = (
-        "On macOS, please install GStreamer 1.26.5:\n"
-        "  • GStreamer 1.26.5 Runtime installer\n"
-        "  • GStreamer 1.26.5 Development installer\n"
-        "Download: https://gstreamer.freedesktop.org/download/#macos\n\n"
-        "Alternatively, bundle GStreamer.framework inside the app at:\n"
-        "  YourApp.app/Contents/Frameworks/GStreamer.framework\n"
-    )
-
-    generic_hint = (
-        "If you already installed GStreamer, your installation may be incomplete or\n"
-        "missing plugins like 'playbin' or 'autoaudiosink'. Please repair it.\n"
-    )
-
-    try:
-        app = QApplication.instance() or QApplication(sys.argv)
-        QMessageBox.critical(
-            None,
-            "GStreamer Error",
-            "❌ GStreamer could not be initialized.\n\n"
-            f"Details:\n{exc}\n\n"
-            f"{mac_instructions}"
-            f"{generic_hint}"
-        )
-    except Exception:
-        # Fallback if Qt cannot start
-        print("GStreamer initialization failed:", exc, file=sys.stderr)
-        print()
-        print(mac_instructions, file=sys.stderr)
-        print(generic_hint, file=sys.stderr)
-    sys.exit(1)
-
-if os.environ.get("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS") == "1":
-    Gst = None
-    GstVideo = None
-else:
-    try:
-        import gi
-        gi.require_version("Gst", "1.0")
-        gi.require_version("GstVideo", "1.0")
-        from gi.repository import Gst, GstVideo
-
-        # Initialize GStreamer
-        # PyGObject 3.50+ disallows None here; pass an empty list which behaves
-        # identically.  3.46 and earlier accepted both.
-        Gst.init([])
-
-        # Sanity-check a couple of core plugins your app needs
-        if not Gst.ElementFactory.find("playbin"):
-            raise RuntimeError("Required GStreamer plugin 'playbin' is missing.")
-        if not Gst.ElementFactory.find("autoaudiosink"):
-            raise RuntimeError("Required GStreamer plugin 'autoaudiosink' is missing.")
-
-    except Exception as e:
-        _show_gst_error_and_exit(e)
+# GStreamer has been removed from SingWS. The FFmpeg/Qt PythonKaraokeTransport
+# is the sole live karaoke engine. Gst/GstVideo/GstKaraokeTransport stay
+# defined as None so any residual guarded reference degrades to "unavailable"
+# instead of raising, and so old settings pinning karaoke_engine=gstreamer
+# fall through to the FFmpeg engine.
+Gst = None
+GstVideo = None
 
 try:
     from python_karaoke_transport import (
@@ -1676,18 +1612,9 @@ except Exception as e:
     PythonKaraokeTransport = None
     match_qt_audio_device = None
     PYTHON_KARAOKE_IMPORT_ERROR = e
-# GStreamer/OpenKJ karaoke transport (native DSP: soundtouch pitch +
-# scaletempo + equalizer-10bands; change-driven clock-synced CDG). Preferred
-# engine; the ffmpeg/QAudioSink transport above stays as the fallback when
-# GStreamer is unavailable.
-try:
-    if os.environ.get("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS"):
-        raise RuntimeError("GStreamer transport skipped for tests")
-    from gst_karaoke_transport import GstKaraokeTransport
-    GST_KARAOKE_IMPORT_ERROR = None
-except Exception as e:
-    GstKaraokeTransport = None
-    GST_KARAOKE_IMPORT_ERROR = e
+
+GstKaraokeTransport = None
+GST_KARAOKE_IMPORT_ERROR = None
 
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
 from ffmpeg_background_engine import FfmpegBackgroundEngine
@@ -10735,14 +10662,7 @@ class SingWSLogger:
             logging.info(f"- PyQt6: {PYQT_VERSION_STR}")
         except:
             pass
-        try:
-            import gi
-            gi.require_version('Gst', '1.0')
-            from gi.repository import Gst
-            gst_version = Gst.version_string()
-            logging.info(f"- GStreamer: {gst_version}")
-        except:
-            pass
+        logging.info("- Karaoke engine: FFmpeg/Qt (GStreamer removed)")
         if PSUTIL_AVAILABLE:
             logging.info(f"- psutil: {psutil.__version__}")
         
@@ -10797,22 +10717,7 @@ class SingWSLogger:
             except Exception:
                 pass
 
-        try:
-            import gi
-            gi.require_version('Gst', '1.0')
-            from gi.repository import Gst
-            reg = Gst.Registry.get()
-            for plugin_name in ("coreelements", "playback", "autodetect", "volume"):
-                try:
-                    plug = reg.find_plugin(plugin_name)
-                    if plug:
-                        logging.info(f"- plugin.{plugin_name}: {plug.get_filename()}")
-                    else:
-                        logging.info(f"- plugin.{plugin_name}: <not found>")
-                except Exception as pe:
-                    logging.info(f"- plugin.{plugin_name}: <error: {pe}>")
-        except Exception as e:
-            logging.warning(f"Could not query loaded GStreamer plugins: {e}")
+        logging.info("- engine: FFmpeg/Qt (GStreamer removed)")
         logging.info("")
     
     @staticmethod
@@ -21763,25 +21668,20 @@ class KaraokeApp(QWidget):
 
 
     def _select_karaoke_transport_cls(self):
-        """Resolve the live karaoke engine from the host preference.
+        """Resolve the live karaoke engine.
 
-        "ffmpeg" (default) runs live karaoke on the FFmpeg/Qt transport;
-        GStreamer stays selectable ("gstreamer", or "auto" for the old
-        GStreamer-preferred behavior) as the escape hatch until it is removed.
-        Returns (normalized_pref, transport_cls_or_None).
+        GStreamer has been removed; the FFmpeg/Qt ``PythonKaraokeTransport`` is
+        the sole engine. A stale ``karaoke_engine`` setting of gstreamer/auto is
+        accepted and simply maps to the FFmpeg engine. Returns
+        (normalized_pref, transport_cls_or_None).
         """
         try:
             pref = str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").strip().lower()
         except Exception:
             pref = "ffmpeg"
-        if pref in ("ffmpeg", "python", "qt") and PythonKaraokeTransport is not None:
-            return "ffmpeg", PythonKaraokeTransport
-        if pref in ("gstreamer", "gst") and GstKaraokeTransport is not None:
-            return "gstreamer", GstKaraokeTransport
-        if pref not in ("", "auto"):
-            _diag(f"[KARAOKE-ENGINE] preference {pref!r} unavailable; using auto selection")
-        cls = GstKaraokeTransport if GstKaraokeTransport is not None else PythonKaraokeTransport
-        return "auto", cls
+        if pref in ("gstreamer", "gst", "auto"):
+            _diag(f"[KARAOKE-ENGINE] preference {pref!r} obsolete (GStreamer removed); using FFmpeg engine")
+        return "ffmpeg", PythonKaraokeTransport
 
     def _start_python_karaoke_transport(
         self,
@@ -21794,11 +21694,9 @@ class KaraokeApp(QWidget):
         loop_seconds=None,
     ):
         engine_pref, transport_cls = self._select_karaoke_transport_cls()
-        using_gst_engine = transport_cls is GstKaraokeTransport and transport_cls is not None
         if transport_cls is None:
             detail = str(
-                GST_KARAOKE_IMPORT_ERROR
-                or PYTHON_KARAOKE_IMPORT_ERROR
+                PYTHON_KARAOKE_IMPORT_ERROR
                 or "Karaoke playback engine is unavailable"
             )
             _diag(f"[PY-KARAOKE] unavailable: {detail}")
@@ -21825,49 +21723,20 @@ class KaraokeApp(QWidget):
         except Exception:
             duration = 0.0
 
-        def _construct(cls):
-            kwargs = {
-                "video_path": video_path,
-                "mode": mode,
-                "duration_seconds": duration,
-                "probe_duration_on_init": False,
-                "parent": self,
-            }
-            if str(mode or "").lower() == "cdg" and getattr(cls, "__name__", "") == "GstKaraokeTransport":
-                kwargs["cdg_sidefill"] = self._effective_cdg_display_mode() == "sidefill"
-            if cls is PythonKaraokeTransport:
-                device, device_name = self._qt_audio_device_for_selected_output()
-                kwargs["audio_device"] = device
-                kwargs["audio_device_name"] = device_name
-            return cls(audio_path, **kwargs)
-
-        try:
-            transport = _construct(transport_cls)
-        except Exception as e:
-            if using_gst_engine and PythonKaraokeTransport is not None:
-                # GStreamer engine failed to construct (missing element/plugin):
-                # fall back to the legacy ffmpeg transport rather than dying.
-                _diag(f"[GST-KARAOKE] construct failed, falling back to legacy transport: {e}")
-                using_gst_engine = False
-                device, device_name = self._qt_audio_device_for_selected_output()
-                transport = PythonKaraokeTransport(
-                    audio_path,
-                    video_path=video_path,
-                    mode=mode,
-                    duration_seconds=duration,
-                    probe_duration_on_init=False,
-                    audio_device=device,
-                    audio_device_name=device_name,
-                    parent=self,
-                )
-            else:
-                raise
-        # Record the engine that actually plays this song (the preference can
-        # differ from the outcome when a construction fallback occurred).
-        engine_name = "gstreamer" if using_gst_engine else "ffmpeg"
-        self._last_karaoke_engine = engine_name
+        device, device_name = self._qt_audio_device_for_selected_output()
+        transport = transport_cls(
+            audio_path,
+            video_path=video_path,
+            mode=mode,
+            duration_seconds=duration,
+            probe_duration_on_init=False,
+            audio_device=device,
+            audio_device_name=device_name,
+            parent=self,
+        )
+        self._last_karaoke_engine = "ffmpeg"
         _diag(
-            f"[KARAOKE-ENGINE] engine={engine_name} pref={engine_pref} mode={mode} "
+            f"[KARAOKE-ENGINE] engine=ffmpeg pref={engine_pref} mode={mode} "
             f"file={os.path.basename(audio_path)}"
         )
         # MP4 decode-resolution cap (downscale only).  Lower values keep
@@ -21962,12 +21831,6 @@ class KaraokeApp(QWidget):
             mode_l = str(mode or "").lower()
             if mode_l == "cdg":
                 off = int(self.settings.get("cdg_timing_offset_ms", self.settings.get("video_timing_offset_ms", 500)) or 0)
-                # 500ms is the legacy engine's built-in latency compensation
-                # (and the old default, so it's persisted in existing
-                # settings). The GStreamer engine is clock-driven end to end
-                # and needs none — treat a stored 500 as unmigrated there.
-                if using_gst_engine and off == 500:
-                    off = 0
             elif mode_l == "mp4":
                 off = int(self.settings.get("mp4_timing_offset_ms", 0) or 0)
             else:

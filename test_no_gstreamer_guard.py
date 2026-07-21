@@ -1,10 +1,9 @@
-"""Regression guards for the supported no-GStreamer test/fallback surface.
+"""Regression guards proving GStreamer has been fully removed from SingWS.
 
-These tests do not claim that the complete application can ship without
-GStreamer yet.  They make the currently independent host import and
-FFmpeg/Signalsmith audio decoder fail clearly if a direct GStreamer dependency
-is accidentally introduced while the remaining GStreamer-only features are
-being migrated.
+GStreamer is gone: the FFmpeg/Qt PythonKaraokeTransport is the sole engine.
+These tests fail clearly if any GStreamer dependency is reintroduced — a
+resurrected module, an ``import gi`` in the app, or a build spec that starts
+bundling gstreamer plugins again.
 """
 
 from __future__ import annotations
@@ -22,6 +21,35 @@ import wave
 
 
 ROOT = Path(__file__).resolve().parent
+
+_REMOVED_MODULES = (
+    "gst_karaoke_transport.py",
+    "gst_bootstrap.py",
+    "okj_audio_backend.py",
+    "cdg_native.py",
+    "native/gst-soundtouch",
+)
+
+
+class GStreamerRemovedGuardTests(unittest.TestCase):
+    def test_deleted_gstreamer_modules_stay_deleted(self):
+        for rel in _REMOVED_MODULES:
+            self.assertFalse((ROOT / rel).exists(), f"{rel} should not exist after GStreamer removal")
+
+    def test_main_source_never_imports_gi_or_gst_engine(self):
+        src = (ROOT / "0.2.18.1.py").read_text(encoding="utf-8", errors="ignore")
+        self.assertNotIn("import gi", src)
+        self.assertNotIn("from gi.repository", src)
+        self.assertNotIn("from gst_karaoke_transport", src)
+        self.assertNotIn("gi.require_version", src)
+
+    def test_specs_exclude_gi_and_bundle_no_gst_plugins(self):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+            text = (ROOT / spec).read_text(encoding="utf-8", errors="ignore")
+            self.assertIn("'gi'", text, f"{spec} must exclude gi")
+            self.assertNotIn("gst_plugins", text.replace("gstreamer plugins", ""),
+                             f"{spec} must not bundle gst_plugins")
+            self.assertNotIn("GStreamer.framework", text, f"{spec} must not reference GStreamer.framework")
 
 
 class NoGStreamerImportGuardTests(unittest.TestCase):

@@ -4,7 +4,6 @@ set -euo pipefail
 cd /Users/daniel/Documents/SingWS
 # Version is the single source of truth in APP_VERSION (entry script).
 VER="$(grep -E '^APP_VERSION' 0.2.18.1.py | sed -E 's/.*"([^"]+)".*/\1/')"
-GST="/Library/Frameworks/GStreamer.framework/Versions/1.0"
 UNIVERSAL_PY=".venv-universal/bin/python"
 
 # Intel is cross-built by native PyInstaller from a genuinely universal Python
@@ -35,12 +34,8 @@ rm -f "SingWS-${VER}-arm64-installer.dmg"
 echo ">>> arm64 DMG done: $(ls -lh SingWS-${VER}-arm64-installer.dmg | awk '{print $5}')"
 
 # ---- x86_64 (Intel) ----
-echo ">>> [3/4] x86_64 PyInstaller (universal venv + GStreamer env)"
+echo ">>> [3/4] x86_64 PyInstaller (universal venv)"
 rm -rf build dist
-export GI_TYPELIB_PATH="${GST}/lib/girepository-1.0"
-export XDG_DATA_DIRS="${GST}/share:${XDG_DATA_DIRS:-}"
-export DYLD_FALLBACK_LIBRARY_PATH="${GST}/lib"
-export PKG_CONFIG_PATH="${GST}/lib/pkgconfig"
 "${UNIVERSAL_PY}" -m PyInstaller --noconfirm "SingWS-x86_64.spec"
 "${UNIVERSAL_PY}" tools/verify_macos_arch.py \
   --bundle dist/SingWS.app --require x86_64

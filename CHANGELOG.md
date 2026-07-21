@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Removed
+- **GStreamer** — fully removed. The FFmpeg/Qt engine (`PythonKaraokeTransport`)
+  is now the sole live karaoke engine for CDG, MP4, and audio-only playback,
+  and BASS (with an FFmpeg/Qt recovery engine) drives background music and the
+  soundboard. Deleted the GStreamer transport, OpenKJ audio backend, native
+  SoundTouch plugin, the appsrc CDG wrapper, and all GStreamer bundling from
+  the PyInstaller specs and build scripts. The arm64 installer drops from
+  ~204 MB to ~113 MB; the frozen app no longer links to or ships any GStreamer
+  framework, plugins, typelibs, or scanner. The `karaoke_engine` setting still
+  exists (default `ffmpeg`); a stale `gstreamer`/`auto` value maps to FFmpeg.
+
 ### Added
 - **WebSocket request relay (v0.3.0.x)** — on wskar.com the app now connects to
   `wss://wskar.com/relay` and fetches new requests the moment the server pushes

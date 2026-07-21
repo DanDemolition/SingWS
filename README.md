@@ -6,7 +6,7 @@
   ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
   ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
   ![PyQt6](https://img.shields.io/badge/PyQt6-UI-41CD52?logo=qt&logoColor=white)
-  ![GStreamer](https://img.shields.io/badge/GStreamer-audio-orange)
+  ![FFmpeg](https://img.shields.io/badge/FFmpeg-audio-green)
   ![License](https://img.shields.io/github/license/DanDemolition/SingWS)
 </div>
 
@@ -26,7 +26,7 @@ SingWS is a Python/PyQt desktop application that handles everything a live karao
 
 ## Features
 
-- **Gapless playback** — MP3+CDG and video karaoke tracks via GStreamer
+- **Gapless playback** — MP3+CDG and video karaoke tracks via the FFmpeg/Qt engine
 - **Realtime key & tempo** — pitch shift and time-stretch without re-encoding, powered by [Signalsmith Stretch](https://signalsmith-audio.co.uk/code/stretch/)
 - **CDG rendering** — hardware-accelerated lyrics display synchronized to audio
 - **Singer rotation** — drag-and-drop queue, per-singer song history, skip/move controls
@@ -42,7 +42,6 @@ SingWS is a Python/PyQt desktop application that handles everything a live karao
 - macOS 12+ (Apple Silicon or Intel) — primary target
 - Windows 10/11 — also supported
 - Python 3.11+
-- GStreamer 1.x (with `gst-plugins-good`, `gst-plugins-bad`, `gst-plugins-ugly`)
 - PyQt6
 - Optional: `psutil` for system info logging
 
@@ -53,8 +52,6 @@ SingWS is a Python/PyQt desktop application that handles everything a live karao
 ### macOS (Homebrew)
 
 ```bash
-# Install GStreamer
-brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly
 
 # Install Python dependencies
 pip install PyQt6 psutil
@@ -74,7 +71,6 @@ Download the latest release from the [Releases](https://github.com/DanDemolition
 ```bash
 pip install PyQt6 psutil
 
-# GStreamer MSI installer from https://gstreamer.freedesktop.org/download/
 # Install both the runtime and development packages to the default path
 
 python 0.2.18.1.py
@@ -92,7 +88,7 @@ python 0.2.18.1.py
 ./build_universal.sh
 ```
 
-The build scripts use PyInstaller under the hood. The resulting `.app` bundles GStreamer plugins and all Python dependencies — no external installs needed for end users.
+The build scripts use PyInstaller under the hood. The resulting `.app` bundles ffmpeg and all Python dependencies — no external installs needed for end users.
 
 ---
 
@@ -101,7 +97,7 @@ The build scripts use PyInstaller under the hood. The resulting `.app` bundles G
 ```
 SingWS/
 ├── 0.2.18.1.py               # Main application entry point & UI bridge
-├── python_karaoke_transport.py  # GStreamer playback engine
+├── python_karaoke_transport.py  # FFmpeg/Qt playback engine (CDG/MP4/audio)
 ├── bass_background_engine.py    # BGM playback (BASS library)
 ├── qml/
 │   └── AppShell.qml          # Main QML UI shell
