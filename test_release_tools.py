@@ -90,31 +90,23 @@ class UpdateManifestDefaultsTests(unittest.TestCase):
 
 
 class PackagingSpecTests(unittest.TestCase):
-    def test_gstreamer_registry_never_targets_signed_app_bundle(self):
+    def test_specs_bundle_no_gstreamer_and_exclude_gi(self):
+        # GStreamer removal: specs must not set up a GST_REGISTRY, bundle the
+        # plugin scanner/typelibs/framework, and must exclude gi so PyInstaller
+        # cannot pull GStreamer back in transitively.
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+            with self.subTest(spec=spec):
+                source = Path(spec).read_text(encoding="utf-8")
+                self.assertIn("excludes=['gi', 'gi.repository']", source)
+                self.assertNotIn("GST_REGISTRY", source)
+                self.assertNotIn("gst-plugin-scanner", source)
+                self.assertNotIn("gi_typelibs", source)
+                self.assertNotIn('binaries.append((str(plug), "gst_plugins"))', source)
+
+    def test_runtime_hook_has_no_gstreamer_setup(self):
         runtime = Path("singws_pyinstaller_runtime.py").read_text(encoding="utf-8")
-        entry = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertIn('"Caches" / "SingWS" / "gstreamer-registry.bin"', runtime)
-        self.assertIn('os.environ["GST_REGISTRY"] = str(registry_cache)', runtime)
-        self.assertNotIn('resources / "gst-registry.bin"', entry)
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
-            with self.subTest(spec=spec):
-                source = Path(spec).read_text(encoding="utf-8")
-                self.assertIn('project_root / "build" / "gst-registry.bin"', source)
-                self.assertIn('os.environ["GST_REGISTRY"] = str(build_gst_registry)', source)
-
-    def test_release_specs_exclude_gst_python_plugin(self):
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
-            with self.subTest(spec=spec):
-                source = Path(spec).read_text(encoding="utf-8")
-                self.assertIn('"libgstpython.dylib"', source)
-                self.assertIn("excluded_optional_gst_plugins", source)
-
-    def test_framework_specs_skip_gst_python_before_analysis(self):
-        for spec in ("SingWS-x86_64.spec", "SingWS-universal.spec"):
-            with self.subTest(spec=spec):
-                source = Path(spec).read_text(encoding="utf-8")
-                self.assertIn("if plug.name in excluded_optional_gst_plugins:", source)
-                self.assertIn("continue\n        binaries.append((str(plug), \"gst_plugins\"))", source)
+        for token in ("GST_REGISTRY", "GI_TYPELIB_PATH", "gst-plugin-scanner", "gst_plugins", "import gi"):
+            self.assertNotIn(token, runtime)
 
     def test_release_specs_include_karafun_apple_events_authorization(self):
         entitlements = Path("SingWS.entitlements").read_text(encoding="utf-8")

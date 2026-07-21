@@ -5,31 +5,15 @@ import os
 import platform
 
 project_root = Path("/Users/daniel/Documents/SingWS")
-build_gst_registry = project_root / "build" / "gst-registry.bin"
-build_gst_registry.parent.mkdir(parents=True, exist_ok=True)
-os.environ["GST_REGISTRY"] = str(build_gst_registry)
 machine = platform.machine().lower()
 brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("/usr/local")
-gst_scanner = brew_root / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"
-gst_framework_root = Path("/Library/Frameworks/GStreamer.framework/Versions/1.0")
-gst_framework_scanner = gst_framework_root / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"
-glibunix_typelib_candidates = (
-    brew_root / "lib" / "girepository-1.0" / "GLibUnix-2.0.typelib",
-    Path("/opt/homebrew/lib/girepository-1.0/GLibUnix-2.0.typelib"),
-    Path("/usr/local/lib/girepository-1.0/GLibUnix-2.0.typelib"),
-)
+
+# GStreamer has been removed from SingWS. Nothing here bundles gstreamer
+# plugins, the plugin scanner, gi typelibs, or a plugin registry — `gi` is in
+# `excludes` below so PyInstaller cannot pull GStreamer back in transitively.
 
 extra_datas = []
 binaries = []
-if gst_scanner.exists():
-    extra_datas.append((str(gst_scanner), "libexec/gstreamer-1.0"))
-elif gst_framework_scanner.exists():
-    extra_datas.append((str(gst_framework_scanner), "libexec/gstreamer-1.0"))
-
-for typelib in glibunix_typelib_candidates:
-    if typelib.exists():
-        extra_datas.append((str(typelib), "gi_typelibs"))
-        break
 
 for helper in (
     "python_karaoke_transport.py",
@@ -89,47 +73,18 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(project_root / 'singws_pyinstaller_runtime.py')],
-    excludes=[],
+    # Keep GStreamer out of the graph entirely: no plugins, scanner, typelibs,
+    # or GLib gir get pulled in, and a stray transitive `import gi` cannot
+    # resurrect ~315 MiB of frameworks.
+    excludes=['gi', 'gi.repository'],
     noarchive=False,
     optimize=0,
 )
 
-excluded_optional_gst_plugins = {
-    "libgstanalyticsoverlay.dylib",
-    "libgstgtk.dylib",
-    "libgstgtk4.dylib",
-    "libgstpango.dylib",
-    # Optional Python plugin loader. It depends on @rpath/Python3 and emits a
-    # startup warning in packaged apps; SingWS does not use Python Gst plugins.
-    "libgstpython.dylib",
-    "libgstrsclosedcaption.dylib",
-    "libgstrsonvif.dylib",
-    "libgstrsvg.dylib",
-    "libgstttmlsubs.dylib",
-}
-a.binaries = [
-    item for item in a.binaries
-    if not (
-        str(item[0]).startswith("gst_plugins/")
-        and Path(str(item[0])).name in excluded_optional_gst_plugins
-    )
-]
-
-# Self-built soundtouch plugin: provides the "pitch" element for realtime key
-# changes (Homebrew's monolithic gstreamer formula ships without it; the
-# GStreamer.framework used by the x86_64/universal builds already has it).
-# Built by native/gst-soundtouch/build_gst_soundtouch.sh.
-soundtouch_plugin = project_root / "native" / "gst-soundtouch" / "libgstsoundtouch.dylib"
-if soundtouch_plugin.exists():
-    a.binaries += [("gst_plugins/libgstsoundtouch.dylib", str(soundtouch_plugin), "BINARY")]
-    soundtouch_lib = Path("/opt/homebrew/opt/sound-touch/lib/libSoundTouch.1.dylib")
-    if soundtouch_lib.exists():
-        a.binaries += [("libSoundTouch.1.dylib", str(soundtouch_lib), "BINARY")]
-else:
-    raise SystemExit(
-        "native/gst-soundtouch/libgstsoundtouch.dylib missing — run "
-        "native/gst-soundtouch/build_gst_soundtouch.sh first (needs: brew install sound-touch)"
-    )
+# Fail loudly if GStreamer ever sneaks back into the frozen graph.
+_gst_binaries = [item for item in a.binaries if 'gst' in str(item[0]).lower() or 'gstreamer' in str(item[0]).lower()]
+if _gst_binaries:
+    raise SystemExit(f"GStreamer artifacts unexpectedly present in build: {_gst_binaries[:5]}")
 
 pyz = PYZ(a.pure)
 

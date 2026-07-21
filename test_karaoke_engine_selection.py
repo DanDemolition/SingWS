@@ -1,4 +1,10 @@
-"""Tests for the host-selectable live karaoke engine (karaoke_engine setting)."""
+"""Tests for karaoke engine selection after GStreamer removal.
+
+GStreamer is gone; the FFmpeg/Qt PythonKaraokeTransport is the sole engine.
+`_select_karaoke_transport_cls` always resolves to the FFmpeg engine, and a
+stale `karaoke_engine` setting of gstreamer/auto is accepted and mapped to it
+rather than erroring.
+"""
 
 import importlib.util
 import os
@@ -16,10 +22,6 @@ def load_main_module():
     return module
 
 
-class _GstSentinel:
-    pass
-
-
 class _FfmpegSentinel:
     pass
 
@@ -30,12 +32,11 @@ class EngineSelectionTests(unittest.TestCase):
         cls.singws = load_main_module()
 
     def setUp(self):
-        self._orig_gst = self.singws.GstKaraokeTransport
         self._orig_python = self.singws.PythonKaraokeTransport
         self.addCleanup(self._restore)
+        self.singws.PythonKaraokeTransport = _FfmpegSentinel
 
     def _restore(self):
-        self.singws.GstKaraokeTransport = self._orig_gst
         self.singws.PythonKaraokeTransport = self._orig_python
 
     def _app(self, pref):
@@ -46,62 +47,29 @@ class EngineSelectionTests(unittest.TestCase):
     def test_default_setting_is_ffmpeg(self):
         self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "ffmpeg")
 
-    def test_missing_setting_defaults_to_ffmpeg(self):
-        self.singws.GstKaraokeTransport = _GstSentinel
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
+    def test_gstreamer_symbol_is_gone(self):
+        # The removal leaves GstKaraokeTransport defined-but-None so stale refs
+        # degrade gracefully; it must never be a real class again.
+        self.assertIsNone(self.singws.GstKaraokeTransport)
+
+    def test_missing_setting_selects_ffmpeg(self):
         pref, cls = self._app(None)._select_karaoke_transport_cls()
         self.assertEqual(pref, "ffmpeg")
         self.assertIs(cls, _FfmpegSentinel)
 
-    def test_auto_prefers_gstreamer_when_available(self):
-        self.singws.GstKaraokeTransport = _GstSentinel
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
-        pref, cls = self._app("auto")._select_karaoke_transport_cls()
-        self.assertEqual(pref, "auto")
-        self.assertIs(cls, _GstSentinel)
+    def test_every_preference_resolves_to_ffmpeg(self):
+        # ffmpeg aliases, obsolete gstreamer/auto, and garbage all map to the
+        # sole engine — no preference can conjure GStreamer back.
+        for pref in ("ffmpeg", "python", "qt", "FFMPEG", " ffmpeg ",
+                     "gstreamer", "gst", "auto", "laserdisc", ""):
+            resolved, cls = self._app(pref)._select_karaoke_transport_cls()
+            self.assertEqual(resolved, "ffmpeg", pref)
+            self.assertIs(cls, _FfmpegSentinel, pref)
 
-    def test_auto_falls_back_to_ffmpeg_without_gstreamer(self):
-        self.singws.GstKaraokeTransport = None
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
-        pref, cls = self._app("auto")._select_karaoke_transport_cls()
-        self.assertEqual(pref, "auto")
-        self.assertIs(cls, _FfmpegSentinel)
-
-    def test_ffmpeg_pin_selects_python_transport(self):
-        self.singws.GstKaraokeTransport = _GstSentinel
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
-        for alias in ("ffmpeg", "python", "qt", "FFMPEG", " ffmpeg "):
-            pref, cls = self._app(alias)._select_karaoke_transport_cls()
-            self.assertEqual(pref, "ffmpeg")
-            self.assertIs(cls, _FfmpegSentinel)
-
-    def test_gstreamer_pin_selects_gst_transport(self):
-        self.singws.GstKaraokeTransport = _GstSentinel
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
-        for alias in ("gstreamer", "gst"):
-            pref, cls = self._app(alias)._select_karaoke_transport_cls()
-            self.assertEqual(pref, "gstreamer")
-            self.assertIs(cls, _GstSentinel)
-
-    def test_unavailable_pin_falls_back_to_auto(self):
-        self.singws.GstKaraokeTransport = None
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
-        pref, cls = self._app("gstreamer")._select_karaoke_transport_cls()
-        self.assertEqual(pref, "auto")
-        self.assertIs(cls, _FfmpegSentinel)
-
-    def test_garbage_pref_falls_back_to_auto(self):
-        self.singws.GstKaraokeTransport = _GstSentinel
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
-        pref, cls = self._app("laserdisc")._select_karaoke_transport_cls()
-        self.assertEqual(pref, "auto")
-        self.assertIs(cls, _GstSentinel)
-
-    def test_both_engines_missing_returns_none_cls(self):
-        self.singws.GstKaraokeTransport = None
+    def test_engine_missing_returns_none_cls(self):
         self.singws.PythonKaraokeTransport = None
-        pref, cls = self._app("auto")._select_karaoke_transport_cls()
-        self.assertEqual(pref, "auto")
+        pref, cls = self._app("ffmpeg")._select_karaoke_transport_cls()
+        self.assertEqual(pref, "ffmpeg")
         self.assertIsNone(cls)
 
 

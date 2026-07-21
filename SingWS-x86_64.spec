@@ -6,48 +6,16 @@ import platform
 import subprocess
 
 project_root = Path("/Users/daniel/Documents/SingWS")
-build_gst_registry = project_root / "build" / "gst-registry.bin"
-build_gst_registry.parent.mkdir(parents=True, exist_ok=True)
-os.environ["GST_REGISTRY"] = str(build_gst_registry)
-# Universal-build mode: prefer the universal GStreamer.framework (x86_64 +
-# arm64) installed at /Library/Frameworks over the single-arch Homebrew
-# install at /opt/homebrew.  Homebrew remains the fallback so the spec
-# still works on dev machines that don't have the framework installed.
-gst_framework_root = Path("/Library/Frameworks/GStreamer.framework/Versions/1.0")
-gst_framework_scanner = gst_framework_root / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"
 machine = platform.machine().lower()
 brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("/usr/local")
-gst_scanner = brew_root / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"
-glibunix_typelib_candidates = (
-    gst_framework_root / "lib" / "girepository-1.0" / "GLibUnix-2.0.typelib",
-    brew_root / "lib" / "girepository-1.0" / "GLibUnix-2.0.typelib",
-    Path("/usr/local/lib/girepository-1.0/GLibUnix-2.0.typelib"),
-)
+
+# GStreamer has been removed from SingWS. This Intel/universal build no longer
+# copies GStreamer (framework plugins, typelibs, scanner, core dylibs) —
+# that framework was the single largest thing in the bundle (~315 MiB). `gi`
+# is in `excludes` below so PyInstaller cannot pull GStreamer back in.
 
 extra_datas = []
 binaries = []
-excluded_optional_gst_plugins = {
-    "libgstanalyticsoverlay.dylib",
-    "libgstgtk.dylib",
-    "libgstgtk4.dylib",
-    "libgstpango.dylib",
-    # Optional Python plugin loader. It depends on @rpath/Python3 and emits a
-    # startup warning in packaged apps; SingWS does not use Python Gst plugins.
-    "libgstpython.dylib",
-    "libgstrsclosedcaption.dylib",
-    "libgstrsonvif.dylib",
-    "libgstrsvg.dylib",
-    "libgstttmlsubs.dylib",
-}
-if gst_framework_scanner.exists():
-    extra_datas.append((str(gst_framework_scanner), "libexec/gstreamer-1.0"))
-elif gst_scanner.exists():
-    extra_datas.append((str(gst_scanner), "libexec/gstreamer-1.0"))
-
-for typelib in glibunix_typelib_candidates:
-    if typelib.exists():
-        extra_datas.append((str(typelib), "gi_typelibs"))
-        break
 
 for helper in (
     "python_karaoke_transport.py",
@@ -67,31 +35,6 @@ for bass_lib in (Path("vendor/bass") / name for name in (
 )):
     if bass_lib.exists():
         binaries.append((str(bass_lib), "vendor/bass"))
-
-# When building against GStreamer.framework, the PyGObject hook can't
-# auto-discover the plugin tree by globbing Homebrew's prefix.  Add
-# every .dylib under the framework's gstreamer-1.0 plugin folder so the
-# universal2 plugins all end up bundled.
-gst_framework_lib = gst_framework_root / "lib"
-gst_framework_plugins = gst_framework_lib / "gstreamer-1.0"
-if gst_framework_plugins.exists():
-    for plug in gst_framework_plugins.glob("*.dylib"):
-        if plug.name in excluded_optional_gst_plugins:
-            continue
-        binaries.append((str(plug), "gst_plugins"))
-    # GLib typelibs needed by gi.repository.Gst at runtime
-    typelib_dir = gst_framework_lib / "girepository-1.0"
-    if typelib_dir.exists():
-        for tl in typelib_dir.glob("*.typelib"):
-            extra_datas.append((str(tl), "gi_typelibs"))
-    # Bundle the framework's core shared libs so gst-plugin-scanner can
-    # load them inside the .app.
-    for core_dylib in gst_framework_lib.glob("lib*.dylib"):
-        # Skip the plugin dir we already enumerated and any per-arch
-        # symlinks.  Real shared libraries are picked up here.
-        if not core_dylib.is_file() or core_dylib.is_symlink():
-            continue
-        binaries.append((str(core_dylib), "."))
 
 # Bundle ffmpeg and ffprobe so the app works without a Homebrew install.
 # The copies in bin/ are universal launchers. Their arm64 slices use Homebrew
@@ -134,27 +77,16 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[str(project_root / 'singws_pyinstaller_runtime.py')],
-    excludes=[
-        # The bundled GStreamer.framework ships an older glib whose typelib set
-        # predates the GLibUnix/GioUnix split (glib 2.80). PyGObject references
-        # them, so PyInstaller's gi hook logs a "Typelib not found" GError while
-        # querying them. The app never had these typelibs and PyGObject degrades
-        # gracefully without them, so exclude them to keep the build log clean.
-        # (The arm64 spec must NOT exclude these — homebrew glib provides them.)
-        'gi.repository.GLibUnix',
-        'gi.repository.GioUnix',
-    ],
+    # Keep GStreamer out of the graph entirely (no plugins/scanner/typelibs).
+    excludes=['gi', 'gi.repository'],
     noarchive=False,
     optimize=0,
 )
 
-a.binaries = [
-    item for item in a.binaries
-    if not (
-        str(item[0]).startswith("gst_plugins/")
-        and Path(str(item[0])).name in excluded_optional_gst_plugins
-    )
-]
+# Fail loudly if GStreamer ever sneaks back into the frozen graph.
+_gst_binaries = [item for item in a.binaries if 'gst' in str(item[0]).lower() or 'gstreamer' in str(item[0]).lower()]
+if _gst_binaries:
+    raise SystemExit(f"GStreamer artifacts unexpectedly present in build: {_gst_binaries[:5]}")
 
 
 def _keep_intel_binary(item):

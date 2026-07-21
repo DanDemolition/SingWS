@@ -1,12 +1,32 @@
-# GStreamer Removal Audit (2026-07-19)
+# GStreamer Removal Audit (2026-07-19 → 2026-07-20)
 
 ## Decision
 
-**Removal is not currently safe.** GStreamer is not merely a fallback in the
-released application. It is the preferred live karaoke transport and is also
-the only implementation for several supported host features.
+**REMOVED (2026-07-20, branch `chore/remove-gstreamer`).** After milestones
+1–7 migrated every GStreamer-only feature and flipped the default engine to
+FFmpeg/Qt (shipped 0.4.1.10 → 0.4.2.3), GStreamer was fully deleted: the
+`GstKaraokeTransport` engine, `okj_audio_backend`, `gst_bootstrap`, the native
+SoundTouch plugin, the `cdg_native` appsrc wrapper, all runtime `gi`/`Gst`
+usage in the host, and every packaging hook (specs, build scripts, runtime
+hook, `gi` now excluded).
 
-No production GStreamer code or packaging was removed by this audit.
+Validation on a clean arm64 build: **no GStreamer files bundled, no Mach-O
+binary links to system/dev-machine GStreamer, zero GStreamer build warnings,
+and the frozen app launches FFmpeg-only.** The arm64 installer dropped from
+~204 MB to ~113 MB. Full suite green (634 tests + subtests) including the
+strengthened `test_no_gstreamer_guard.py`.
+
+**Residual risk (the removal's stated approval bar, step 7):** paired
+show-length validation on real Apple Silicon AND Intel hardware has not yet
+been performed on the FFmpeg-only build — that is the branch's one open item
+before it ships. The original 2026-07-19 findings below are retained for
+history.
+
+### Historical (2026-07-19): why removal was blocked then
+
+At audit time GStreamer was still the preferred live karaoke transport and the
+only implementation for several host features; the sections below documented
+that state and the migration path that has since been completed.
 
 ## Current engine selection
 
