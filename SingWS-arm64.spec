@@ -21,6 +21,7 @@ for helper in (
     "song_index.py",
     "singws_eq.py",
     "singws_master_audio.py",
+    "mac_keep_awake.py",
 ):
     helper_path = project_root / helper
     if helper_path.exists():
@@ -62,6 +63,7 @@ a = Analysis(
         'song_index',
         'singws_eq',
         'singws_master_audio',
+        'mac_keep_awake',
         'numpy',
         'scipy',
         'scipy.signal',

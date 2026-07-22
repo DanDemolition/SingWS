@@ -2964,6 +2964,7 @@ DEFAULTS = {
     "end_silence_trim_enabled": False,     # CDG/ZIP/MP4: optional early trim; off to preserve complete endings
     "end_silence_trim_threshold_sec": 6.0, # sustained low audio before intelligent karaoke early-end
     "karaoke_auto_advance": False,         # auto-play the next queued karaoke when a song ends (off = stop after each song)
+    "keep_mac_awake": True,                # macOS: prevent App Nap + idle system/display sleep while SingWS runs (stops idle "freezes")
     "bg_end_silence_trim_enabled": False,  # Background music: skip trailing silence between BG tracks (opt-in)
     "request_poll_interval_sec": 2,        # how often the app checks the server for new requests (seconds)
     # --- Audio processing master switch ---
@@ -17921,6 +17922,20 @@ class KaraokeApp(QWidget):
         _, library_settings_changed = _migrate_library_locations(self.settings)
         if library_settings_changed:
             self.save_settings()
+        # Keep macOS from napping/idle-sleeping SingWS during a session, so the
+        # idle app no longer "freezes" between songs (tester logs 2026-07-18).
+        try:
+            from mac_keep_awake import KeepAwake
+            self._mac_keep_awake = KeepAwake("SingWS karaoke session active")
+            if bool(self.settings.get("keep_mac_awake", True)):
+                if self._mac_keep_awake.begin():
+                    _diag("[KEEP-AWAKE] macOS App Nap / idle sleep prevention active for this session")
+        except Exception as e:
+            self._mac_keep_awake = None
+            try:
+                _diag(f"[KEEP-AWAKE] unavailable: {e}")
+            except Exception:
+                pass
         self._remote_request_tombstones = self._load_remote_request_tombstones()
         self._deferred_remote_adds = self._load_deferred_remote_adds()
         self._host_request_sync_ops = _load_json_file(
@@ -23054,6 +23069,12 @@ class KaraokeApp(QWidget):
             self.save_settings()
         except Exception:
             pass
+        try:
+            keep_awake = getattr(self, "_mac_keep_awake", None)
+            if keep_awake is not None:
+                keep_awake.end()
+        except Exception:
+            pass
         self._shutdown_network_transports()
 
     def restart_request_polling(self):
@@ -25002,6 +25023,27 @@ class KaraokeApp(QWidget):
         bg_end_silence_cb = QCheckBox("Auto-skip trailing silence between background-music tracks")
         bg_end_silence_cb.setChecked(bool(self.settings.get("bg_end_silence_trim_enabled", False)))
         v.addWidget(bg_end_silence_cb)
+
+        if sys.platform == "darwin":
+            keep_awake_cb = QCheckBox("Keep this Mac awake during a session (recommended for shows)")
+            keep_awake_cb.setToolTip(
+                "Prevents macOS App Nap and idle system/display sleep while SingWS is running, so the app\n"
+                "doesn't stall or 'freeze' when left idle between songs. (Cannot override a closed lid.)"
+            )
+            keep_awake_cb.setChecked(bool(self.settings.get("keep_mac_awake", True)))
+            v.addWidget(keep_awake_cb)
+
+            def on_keep_awake_toggled(checked: bool):
+                self.settings["keep_mac_awake"] = bool(checked)
+                self.save_settings()
+                try:
+                    ka = getattr(self, "_mac_keep_awake", None)
+                    if ka is not None:
+                        ka.set_enabled(bool(checked))
+                        _diag(f"[KEEP-AWAKE] set enabled={int(bool(checked))} from settings")
+                except Exception:
+                    pass
+            keep_awake_cb.toggled.connect(on_keep_awake_toggled)
 
         v = _section_card(tab_audio, "Audio Processing")
         simple_audio_cb = QCheckBox("Simple Audio Mode — clean signal, no EQ or normalization (recommended)")
