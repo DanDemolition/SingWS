@@ -2921,7 +2921,7 @@ DEFAULTS = {
     "bg_video_quality": "auto",       # auto | 1080 | 720 | 540 | off; decorative layer only
     "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
-    "karaoke_engine": "ffmpeg",      # ffmpeg (default) | gstreamer | auto (GStreamer preferred); GStreamer stays bundled as the escape hatch until removal
+    "karaoke_engine": "ffmpeg",      # internal only; GStreamer removed, FFmpeg is the sole engine (chooser removed from Settings). Stale gstreamer/auto values map to ffmpeg.
     "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
@@ -24958,21 +24958,8 @@ class KaraokeApp(QWidget):
         v.addLayout(pad_row)
 
         v = _section_card(tab_audio, "Playback")  # ---- Audio ----
-        engine_row = QHBoxLayout()
-        engine_row.addWidget(QLabel("Karaoke playback engine:"))
-        karaoke_engine_combo = QComboBox(dlg)
-        karaoke_engine_combo.addItem("FFmpeg / Qt audio (default)", "ffmpeg")
-        karaoke_engine_combo.addItem("GStreamer (OpenKJ)", "gstreamer")
-        karaoke_engine_combo.addItem("Auto (GStreamer preferred)", "auto")
-        karaoke_engine_combo.setToolTip(
-            "FFmpeg/Qt is the default engine. GStreamer remains available as the escape hatch\n"
-            "if playback misbehaves. Takes effect from the next song."
-        )
-        engine_idx = karaoke_engine_combo.findData(str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").lower())
-        karaoke_engine_combo.setCurrentIndex(engine_idx if engine_idx >= 0 else 0)
-        engine_row.addWidget(karaoke_engine_combo)
-        engine_row.addStretch(1)
-        v.addLayout(engine_row)
+        # (Karaoke playback engine chooser removed — GStreamer is gone; the
+        # FFmpeg/Qt engine is the only one. See _select_karaoke_transport_cls.)
 
         gap_row = QHBoxLayout()
         gap_row.addWidget(QLabel("BG -> Karaoke Gap (seconds):"))
@@ -25531,12 +25518,6 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-        def on_karaoke_engine_changed(_index: int):
-            value = str(karaoke_engine_combo.currentData() or "auto")
-            self.settings["karaoke_engine"] = value
-            self.save_settings()
-            _diag(f"[KARAOKE-ENGINE] preference set pref={value} (applies from the next song)")
-
         def on_bg_gap_changed(value: float):
             try:
                 gap = max(-3.0, min(3.0, float(value)))
@@ -25808,7 +25789,6 @@ class KaraokeApp(QWidget):
         filename_fmt_combo.currentIndexChanged.connect(on_filename_fmt_changed)
 
         audio_output_combo.currentIndexChanged.connect(on_audio_output_changed)
-        karaoke_engine_combo.currentIndexChanged.connect(on_karaoke_engine_changed)
         bg_gap_spin.valueChanged.connect(on_bg_gap_changed)
         karaoke_bgm_crossfade_cb.toggled.connect(on_karaoke_bgm_crossfade_toggled)
         end_silence_cb.toggled.connect(on_end_silence_toggled)
