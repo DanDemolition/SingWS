@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.2.4",
+  "version": "0.4.2.5",
   "release_date": "2026-07-21",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.2.4-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.4-arm64-installer.dmg",
+      "filename": "SingWS-0.4.2.5-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.5-arm64-installer.dmg",
       "size": "113 MB",
-      "sha256": "d4bc8814dfbc594ad193dcbdae06ceb19438c228c3fb7b1845de926e982297e0"
+      "sha256": "d93ea977ebee366f479a51efe244c6af1c7cf5bc554b1153280127aec50c8948"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.2.4-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.4-x86_64-installer.dmg",
+      "filename": "SingWS-0.4.2.5-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.5-x86_64-installer.dmg",
       "size": "166 MB",
-      "sha256": "ac1631dcd49c057b79cc390b76245c04530c4f2366457624adafc97134cd2724"
+      "sha256": "fc58296385173b4f264fe812c9f08681f14857a712816e9d143c49972936965b"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.2.4-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.4-universal-installer.dmg",
+      "filename": "SingWS-0.4.2.5-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.5-universal-installer.dmg",
       "size": "259 MB",
-      "sha256": "bf706cc2cdfa6ad8c3b7eb8f3d1cb036dc04148119beb6df836e85caca2b3d8b"
+      "sha256": "e37fce512c2985cb7883c1d7e9b33c6501f8d49f229b0a8084667d3410df25d5"
     }
   }
 }
