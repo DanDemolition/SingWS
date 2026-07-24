@@ -229,6 +229,51 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertTrue(delayed_start)
         self.assertNotIn("_start_full_decode", delayed_start)
 
+    def test_mp4_reader_does_not_reemit_duplicate_frames(self):
+        source = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
+        reader_start = source.index("class FfmpegVideoReader")
+        reader_end = source.index("class _PcmFeeder")
+        reader = source[reader_start:reader_end]
+        self.assertIn("return self.latest_image if selected is not None else None", reader)
+        self.assertIn("self.timer.setTimerType(Qt.TimerType.PreciseTimer)", source)
+
+    def test_cdg_file_io_is_warmed_off_the_gui_thread(self):
+        source = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
+        decoder_start = source.index("class CdgDecoder")
+        decoder_end = source.index("class FfmpegVideoReader")
+        decoder = source[decoder_start:decoder_end]
+        init_start = decoder.index("    def __init__")
+        load_start = decoder.index("    def _load_packets")
+        init = decoder[init_start:load_start]
+        self.assertNotIn("open(", init)
+        self.assertIn("singws-cdg-late-preload", init)
+
+        schedule = function_source("_schedule_next_up_prescan")
+        self.assertIn("_preload_next_up_cdg", schedule)
+        preload = function_source("_preload_next_up_cdg")
+        self.assertIn("threading.Thread", preload)
+        self.assertIn("singws-next-cdg-preload", preload)
+        legacy_add = function_source("add_song_to_singer")
+        self.assertIn("_enqueue_cdg_pair_async", legacy_add)
+        self.assertNotIn("os.path.exists(mp3_path)", legacy_add)
+        pair_check = function_source("_enqueue_cdg_pair_async")
+        self.assertIn("threading.Thread", pair_check)
+        self.assertIn("preload_cdg_packets(cdg_path)", pair_check)
+
+    def test_library_path_lookup_uses_an_index(self):
+        lookup = function_source("_get_track_obj")
+        self.assertIn("_find_track_by_path_ci", lookup)
+        indexed = function_source("_find_track_by_path_ci")
+        self.assertIn("_track_path_lookup", indexed)
+        self.assertNotIn("for t in self.tracks", indexed)
+
+    def test_uncached_loudness_lookup_avoids_file_stat(self):
+        for name in ("loudness_info_cached", "loudness_gain_db_cached"):
+            start = MAIN_SOURCE.index(f"def {name}")
+            end = MAIN_SOURCE.index("\ndef ", start + 4)
+            source = MAIN_SOURCE[start:end]
+            self.assertLess(source.index("_loudness_cache.get"), source.index("_loudness_file_sig"))
+
     def test_noop_server_sync_avoids_history_rebuild_and_repeat_request_diagnostics(self):
         history_merge = function_source("_merge_remote_singer_history")
         self.assertIn("if local_song != remote_song:", history_merge)

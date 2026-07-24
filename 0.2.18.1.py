@@ -1603,6 +1603,7 @@ try:
         NS_PER_SECOND,
         FfmpegVideoReader,
         PythonKaraokeTransport,
+        preload_cdg_packets,
         match_qt_audio_device,
     )
     PYTHON_KARAOKE_IMPORT_ERROR = None
@@ -1610,6 +1611,7 @@ except Exception as e:
     NS_PER_SECOND = 1_000_000_000
     FfmpegVideoReader = None
     PythonKaraokeTransport = None
+    preload_cdg_packets = None
     match_qt_audio_device = None
     PYTHON_KARAOKE_IMPORT_ERROR = e
 
@@ -2084,10 +2086,10 @@ def loudness_info_cached(audio_path: str):
     _loudness_load_cache()
     if not audio_path:
         return None
-    sig = _loudness_file_sig(audio_path)
     entry = _loudness_cache.get(audio_path)
     if not isinstance(entry, dict):
         return None
+    sig = _loudness_file_sig(audio_path)
     if sig is not None and (int(entry.get("mtime", 0)) != sig[0] or int(entry.get("size", 0)) != sig[1]):
         return None
     try:
@@ -2115,10 +2117,10 @@ def loudness_gain_db_cached(audio_path: str):
     _loudness_load_cache()
     if not audio_path:
         return None
-    sig = _loudness_file_sig(audio_path)
     entry = _loudness_cache.get(audio_path)
     if not isinstance(entry, dict):
         return None
+    sig = _loudness_file_sig(audio_path)
     if sig is not None and (int(entry.get("mtime", 0)) != sig[0] or int(entry.get("size", 0)) != sig[1]):
         return None
     try:
@@ -17993,6 +17995,8 @@ class KaraokeApp(QWidget):
         self.setWindowTitle("SingWS")
         # Window position is restored after settings load (or defaulted if none)
         self.tracks = []
+        self._track_path_index = {}
+        self._track_path_index_signature = None
         self._pending_track_data = None  # Temp storage for track data from search results
         self._display_name_cache = {}  # Cache for fast lookups
         self.queue = []
@@ -18004,6 +18008,7 @@ class KaraokeApp(QWidget):
         self._next_scan_path = ""
         self._next_scan_token = 0
         self._next_prescan_inflight = set()
+        self._next_cdg_preload_path = ""
         self._silence_cache = {}
         self._transition_gap_sec = 0.0
         self._bg_fade_duration_ms = 3000
@@ -36759,17 +36764,36 @@ class KaraokeApp(QWidget):
 
     def _find_track_by_path_ci(self, path: str):
         """Case-insensitive in-memory track lookup by absolute path."""
-        p = str(path or "").strip().lower()
+        p = str(path or "").strip().casefold()
         if not p:
             return None
-        try:
-            for t in self.tracks:
-                tp = str(t.get("path") or "").strip().lower()
-                if tp and tp == p:
-                    return t
-        except Exception:
-            pass
-        return None
+        return self._track_path_lookup().get(p)
+
+    def _track_path_lookup(self):
+        """Build the 100k+ library path index only when the track list changes."""
+        tracks = getattr(self, "tracks", None)
+        if not isinstance(tracks, list):
+            tracks = []
+        signature = (
+            id(tracks),
+            len(tracks),
+            id(tracks[0]) if tracks else 0,
+            id(tracks[-1]) if tracks else 0,
+        )
+        if getattr(self, "_track_path_index_signature", None) == signature:
+            index = getattr(self, "_track_path_index", None)
+            if isinstance(index, dict):
+                return index
+        index = {}
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            key = str(track.get("path") or "").strip().casefold()
+            if key:
+                index[key] = track
+        self._track_path_index = index
+        self._track_path_index_signature = signature
+        return index
 
     def _refresh_queue_entry_metadata(self, entry: dict):
         """Rebind queue entry display metadata from current track list when possible."""
@@ -41819,11 +41843,7 @@ class KaraokeApp(QWidget):
         return pri
 
     def _get_track_obj(self, song_path: str):
-        sp = str(song_path)
-        for t in self.tracks:
-            if str(t.get("path", "")).lower() == sp.lower():
-                return t
-        return None
+        return self._find_track_by_path_ci(song_path)
 
     def set_video_timing_offset_ms(self, ms: int):
         """Save the visual-only CDG/MP4 timing offset and apply it live to any
@@ -42886,11 +42906,12 @@ class KaraokeApp(QWidget):
 
         elif ext == ".cdg":
             mp3_path = base + ".mp3"
-            if not os.path.exists(mp3_path):
-                QMessageBox.warning(self, "Missing MP3", "Matching .mp3 not found for this .cdg file!")
-                return
-            song_data = ((track_path, mp3_path), key_offset)  # ((cdg, mp3), key)
-            self._add_song_to_queue(singer_name, song_data)
+            self._enqueue_cdg_pair_async(
+                track_path,
+                mp3_path,
+                singer_name,
+                key_offset,
+            )
             return
 
         elif ext == ".mp3":
@@ -42933,14 +42954,65 @@ class KaraokeApp(QWidget):
         # If it's a .cdg, pair it with a matching .mp3 like the rest of the app expects.
         if track_path.lower().endswith(".cdg"):
             mp3_path = track_path[:-4] + ".mp3"
-            if not os.path.exists(mp3_path):
-                QMessageBox.warning(self, "Missing MP3", f"Matching .mp3 not found:\n{mp3_path}")
-                return
-            song_data = ((track_path, mp3_path), key_offset)   # ((cdg, mp3), key)
+            self._enqueue_cdg_pair_async(
+                track_path,
+                mp3_path,
+                singer_name,
+                key_offset,
+            )
+            return
         else:
             song_data = (track_path, key_offset)               # (file, key)
 
         self._add_song_to_queue(singer_name, song_data)
+
+    def _enqueue_cdg_pair_async(
+        self,
+        cdg_path: str,
+        mp3_path: str,
+        singer_name: str,
+        key_offset: int,
+    ):
+        """Validate a CDG pair and warm graphics without blocking the GUI."""
+        try:
+            self._set_processing_text(
+                f"Checking media... {os.path.basename(cdg_path)}",
+                auto_dismiss_ms=None,
+            )
+        except Exception:
+            pass
+
+        def worker():
+            exists = os.path.exists(mp3_path)
+            if exists and callable(preload_cdg_packets):
+                preload_cdg_packets(cdg_path)
+
+            def finish():
+                try:
+                    self._clear_processing_text_if_matches(
+                        f"Checking media... {os.path.basename(cdg_path)}"
+                    )
+                except Exception:
+                    pass
+                if not exists:
+                    QMessageBox.warning(
+                        self,
+                        "Missing MP3",
+                        f"Matching .mp3 not found:\n{mp3_path}",
+                    )
+                    return
+                self._add_song_to_queue(
+                    singer_name,
+                    ((cdg_path, mp3_path), key_offset),
+                )
+
+            self._run_on_ui_thread(finish)
+
+        threading.Thread(
+            target=worker,
+            name="singws-cdg-pair-check",
+            daemon=True,
+        ).start()
 
 
     def _add_track_path_to_queue_with_dialog(self, track_path: str):
@@ -44244,8 +44316,7 @@ class KaraokeApp(QWidget):
                     if len(value) >= 2:
                         return str(value[1])
                     base, _ = os.path.splitext(first)
-                    mp3 = base + ".mp3"
-                    return mp3 if os.path.exists(mp3) else ""
+                    return base + ".mp3"
                 if first.lower().endswith(".zip"):
                     return first
                 return first
@@ -44256,8 +44327,7 @@ class KaraokeApp(QWidget):
             low = path.lower()
             if low.endswith(".cdg"):
                 base, _ = os.path.splitext(path)
-                mp3 = base + ".mp3"
-                return mp3 if os.path.exists(mp3) else ""
+                return base + ".mp3"
             if low.endswith(".zip"):
                 return path
             return path
@@ -44279,6 +44349,44 @@ class KaraokeApp(QWidget):
 
                 return self._resolve_karaoke_audio_path(song_info)
         return ""
+
+    def _get_next_up_cdg_path(self) -> str:
+        """Return an unzipped CDG path for the first playable queue entry."""
+        for singer in self.queue:
+            if singer.get("skipped", False):
+                continue
+            for entry in singer.get("songs", []):
+                if isinstance(entry, dict):
+                    if entry.get("skipped", False):
+                        continue
+                    song_info = entry.get("song_info")
+                else:
+                    song_info = entry[0] if isinstance(entry, (tuple, list)) and entry else entry
+                path = self._song_info_primary_path(song_info)
+                return path if str(path or "").lower().endswith(".cdg") else ""
+        return ""
+
+    def _preload_next_up_cdg(self, path: str):
+        """Warm next-up graphics on a daemon thread before Play is pressed."""
+        path = str(path or "")
+        if not path or not callable(preload_cdg_packets):
+            self._next_cdg_preload_path = ""
+            return
+        if path == str(getattr(self, "_next_cdg_preload_path", "") or ""):
+            return
+        self._next_cdg_preload_path = path
+
+        def worker(expected_path: str):
+            ok = preload_cdg_packets(expected_path)
+            if not ok and str(getattr(self, "_next_cdg_preload_path", "") or "") == expected_path:
+                self._next_cdg_preload_path = ""
+
+        threading.Thread(
+            target=worker,
+            args=(path,),
+            name="singws-next-cdg-preload",
+            daemon=True,
+        ).start()
 
     def _apply_prescan_result(self, scan_key: str, token: int, offset: float, resolved_path: str | None = None):
         """Apply async scan result only if still current (stale-safe)."""
@@ -44354,6 +44462,8 @@ class KaraokeApp(QWidget):
                 if low.endswith('.zip'):
                     # Pre-extract next-up ZIP in background so silence scan can run on MP3.
                     cdg_p, mp3_p = self.zip_cache.get_extracted_paths(scan_path)
+                    if cdg_p and callable(preload_cdg_packets):
+                        preload_cdg_packets(str(cdg_p))
                     if mp3_p:
                         resolved = str(mp3_p)
                         print(f"[SILENCE] zip next-up extracted for prescan: {Path(resolved).name}")
@@ -44394,6 +44504,7 @@ class KaraokeApp(QWidget):
 
     def _schedule_next_up_prescan(self):
         """Re-evaluate next-up and scan only when it changes."""
+        self._preload_next_up_cdg(self._get_next_up_cdg_path())
         if not self._lead_silence_prescan_enabled():
             self._next_scan_token += 1
             self._next_scan_path = ""

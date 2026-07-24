@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from array import array
-from collections import deque
+from collections import OrderedDict, deque
 import json
 import math
 from pathlib import Path
@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from PyQt6.QtCore import QIODevice, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QIODevice, QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QImage
 from PyQt6.QtMultimedia import QAudioFormat, QAudioSink
 
@@ -23,6 +23,52 @@ CDG_HEIGHT = 216
 CDG_PACKET_SIZE = 24
 CDG_PACKETS_PER_SECOND = 300
 _PERF_LAST_PRINT = {}
+_CDG_PACKET_CACHE_MAX = 8
+_CDG_PACKET_CACHE = OrderedDict()
+_CDG_PACKET_CACHE_LOCK = threading.Lock()
+
+
+def _cdg_packet_cache_key(path: str) -> str:
+    return str(Path(path or "")).casefold()
+
+
+def cached_cdg_packets(path: str) -> bytes | None:
+    """Return preloaded CDG bytes without touching the filesystem."""
+    key = _cdg_packet_cache_key(path)
+    if not key:
+        return None
+    with _CDG_PACKET_CACHE_LOCK:
+        packets = _CDG_PACKET_CACHE.get(key)
+        if packets is not None:
+            _CDG_PACKET_CACHE.move_to_end(key)
+        return packets
+
+
+def preload_cdg_packets(path: str) -> bool:
+    """Warm a small bounded CDG cache from a background worker."""
+    key = _cdg_packet_cache_key(path)
+    if not key:
+        return False
+    if cached_cdg_packets(path) is not None:
+        return True
+    started = time.perf_counter()
+    try:
+        with open(path, "rb") as handle:
+            packets = handle.read()
+    except Exception as exc:
+        print(f"[CDG-PRELOAD] failed file={Path(path).name!r} error={exc}")
+        return False
+    with _CDG_PACKET_CACHE_LOCK:
+        _CDG_PACKET_CACHE[key] = packets
+        _CDG_PACKET_CACHE.move_to_end(key)
+        while len(_CDG_PACKET_CACHE) > _CDG_PACKET_CACHE_MAX:
+            _CDG_PACKET_CACHE.popitem(last=False)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    print(
+        f"[CDG-PRELOAD] ready file={Path(path).name!r} "
+        f"bytes={len(packets)} elapsed_ms={elapsed_ms:.0f}"
+    )
+    return True
 
 
 def _normalized_audio_device_name(value: str) -> str:
@@ -328,8 +374,9 @@ class CdgDecoder:
     """Small CD+G packet interpreter with seek-by-replay semantics."""
 
     def __init__(self, path: str):
-        with open(path, "rb") as handle:
-            self.packets = handle.read()
+        packets = cached_cdg_packets(path)
+        self.packets = packets or b""
+        self.path = str(path or "")
         self.duration_seconds = len(self.packets) / float(CDG_PACKET_SIZE * CDG_PACKETS_PER_SECOND)
         self._palette = [(0, 0, 0)] * 16
         self._pixels = bytearray(CDG_WIDTH * CDG_HEIGHT)
@@ -338,6 +385,23 @@ class CdgDecoder:
         self._cached_image = None
         self.generation = 0
         self._reset()
+        if packets is None:
+            threading.Thread(
+                target=self._load_packets,
+                name="singws-cdg-late-preload",
+                daemon=True,
+            ).start()
+
+    def _load_packets(self):
+        if not preload_cdg_packets(self.path):
+            return
+        packets = cached_cdg_packets(self.path)
+        if packets is None:
+            return
+        self.packets = packets
+        self.duration_seconds = len(packets) / float(CDG_PACKET_SIZE * CDG_PACKETS_PER_SECOND)
+        self._dirty = True
+        self.generation += 1
 
     def _reset(self):
         self._palette = [(0, 0, 0)] * 16
@@ -646,7 +710,10 @@ class FfmpegVideoReader:
                 print(f"[PERF] dropped_frame count={self._dropped_since_log} reason=behind_schedule queue={self.queue_size()}")
                 self._dropped_since_log = 0
                 self._last_drop_log_ts = now
-        return self.latest_image
+        # The visual timer runs faster than most source videos. Returning the
+        # previous image here caused the owner to rescale and repaint the same
+        # 720p frame on every timer tick, starving real 30fps delivery.
+        return self.latest_image if selected is not None else None
 
     def queue_size(self) -> int:
         try:
@@ -1000,6 +1067,7 @@ class PythonKaraokeTransport(QObject):
         self._start_pending = False
         self._stopped = True
         self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.setInterval(self.visual_timer_interval_ms)
         self.timer.timeout.connect(self._tick)
 
