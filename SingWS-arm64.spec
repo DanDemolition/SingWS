@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 import platform
 
-project_root = Path("/Users/daniel/Documents/SingWS")
+project_root = Path(SPECPATH)
 machine = platform.machine().lower()
 brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("/usr/local")
 
@@ -34,6 +34,18 @@ for bass_lib in (Path("vendor/bass") / name for name in (
 )):
     if bass_lib.exists():
         binaries.append((str(bass_lib), "vendor/bass"))
+
+for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
+    candidates = (
+        brew_root / "opt" / "openssl@3" / "lib" / openssl_lib,
+        Path("/opt/homebrew/opt/openssl@3/lib") / openssl_lib,
+        Path("/usr/local/opt/openssl@3/lib") / openssl_lib,
+        Path("/usr/local/lib") / openssl_lib,
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            binaries.append((str(candidate), "."))
+            break
 
 # Bundle ffmpeg and ffprobe so the app works without a Homebrew install.
 # Homebrew (arm64) takes priority over bin/ because bin/ffmpeg is x86_64.
@@ -69,6 +81,11 @@ a = Analysis(
         'scipy.signal',
         'scipy.signal._sosfilt',
         'scipy.signal._signaltools',
+        'ssl',
+        '_ssl',
+        '_hashlib',
+        'certifi',
+        'urllib3.util.ssl_',
         # WebSocket request relay (wss://wskar.com/relay)
         'PyQt6.QtWebSockets',
     ],

@@ -117,5 +117,16 @@ class PackagingSpecTests(unittest.TestCase):
                 self.assertIn("NSAppleEventsUsageDescription", source)
                 self.assertIn("entitlements_file=str(project_root / 'SingWS.entitlements')", source)
 
+    def test_release_specs_bundle_requests_tls_support(self):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+            with self.subTest(spec=spec):
+                source = Path(spec).read_text(encoding="utf-8")
+                self.assertIn("project_root = Path(SPECPATH)", source)
+                for module in ("'ssl'", "'_ssl'", "'_hashlib'", "'certifi'", "'urllib3.util.ssl_'"):
+                    self.assertIn(module, source)
+                for dylib in ('"libssl.3.dylib"', '"libcrypto.3.dylib"'):
+                    self.assertIn(dylib, source)
+                self.assertIn('"openssl@3"', source)
+
 if __name__ == "__main__":
     unittest.main()
