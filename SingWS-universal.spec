@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import platform
+import sys
 
 project_root = Path(SPECPATH)
 machine = platform.machine().lower()
@@ -38,6 +39,7 @@ for bass_lib in (Path("vendor/bass") / name for name in (
 
 for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
     candidates = (
+        Path(sys.base_prefix) / "lib" / openssl_lib,
         brew_root / "opt" / "openssl@3" / "lib" / openssl_lib,
         Path("/opt/homebrew/opt/openssl@3/lib") / openssl_lib,
         Path("/usr/local/opt/openssl@3/lib") / openssl_lib,

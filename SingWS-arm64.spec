@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import platform
+import sys
 
 project_root = Path(SPECPATH)
 machine = platform.machine().lower()
@@ -37,6 +38,7 @@ for bass_lib in (Path("vendor/bass") / name for name in (
 
 for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
     candidates = (
+        Path(sys.base_prefix) / "lib" / openssl_lib,
         brew_root / "opt" / "openssl@3" / "lib" / openssl_lib,
         Path("/opt/homebrew/opt/openssl@3/lib") / openssl_lib,
         Path("/usr/local/opt/openssl@3/lib") / openssl_lib,
@@ -48,14 +50,15 @@ for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
             break
 
 # Bundle ffmpeg and ffprobe so the app works without a Homebrew install.
-# Homebrew (arm64) takes priority over bin/ because bin/ffmpeg is x86_64.
+# Prefer the checked universal launchers so cross-builds do not pick up the
+# build host's architecture-specific Homebrew binaries.
 # The runtime hook adds Frameworks/ to PATH so _ffmpeg_path() finds them
 # via shutil.which() in the frozen app.
 for ff_binary in ("ffmpeg", "ffprobe"):
     candidates = (
+        project_root / "bin" / ff_binary,
         brew_root / "bin" / ff_binary,
         Path("/usr/local/bin") / ff_binary,
-        project_root / "bin" / ff_binary,
     )
     for candidate in candidates:
         if candidate.exists():

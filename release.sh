@@ -14,6 +14,12 @@
 # Plain ./build_all.sh and ./build_universal.sh remain non-publishing test builds.
 set -euo pipefail
 cd "$(dirname "$0")"
+if [[ -n "${SINGWS_DYLD_FRAMEWORK_PATH:-}" ]]; then
+  export DYLD_FRAMEWORK_PATH="$SINGWS_DYLD_FRAMEWORK_PATH"
+fi
+if [[ -n "${SINGWS_DYLD_LIBRARY_PATH:-}" ]]; then
+  export DYLD_LIBRARY_PATH="$SINGWS_DYLD_LIBRARY_PATH"
+fi
 
 PY=".venv/bin/python"
 EXPLICIT_VERSION="${1:-}"
