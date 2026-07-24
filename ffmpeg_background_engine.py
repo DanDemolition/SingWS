@@ -18,6 +18,7 @@ exercised without audio hardware.
 from __future__ import annotations
 
 import os
+import math
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -139,6 +140,7 @@ class _Deck:
     gain_current: float = 1.0
     gain_target: float = 1.0
     gain_ramp_frames: int = 0
+    last_take_frames: int = 0
     reader: _DeckReader | None = None
     cond: threading.Condition = field(default_factory=threading.Condition)
 
@@ -162,6 +164,9 @@ class FfmpegBackgroundEngine:
         self.master_volume = 1.0
         self._master_current = 1.0
         self._master_ramp_frames = 0
+        self._master_ramp_start = 1.0
+        self._master_ramp_total_frames = 0
+        self._master_ramp_elapsed_frames = 0
         self._eq = None
         self._eq_configured = False
         self._master_proc = None
@@ -353,15 +358,37 @@ class FfmpegBackgroundEngine:
             self.master_volume = self._gain(volume)
             self._master_current = self.master_volume
             self._master_ramp_frames = 0
+            self._master_ramp_start = self.master_volume
+            self._master_ramp_total_frames = 0
+            self._master_ramp_elapsed_frames = 0
 
     def slide_master_volume(self, volume: float, duration_ms: int):
         with self._lock:
+            self._master_ramp_start = self._master_current
             self.master_volume = self._gain(volume)
-            self._master_ramp_frames = max(
+            total_frames = max(
                 0, int(self.sample_rate * float(duration_ms) / 1000.0)
             )
-            if self._master_ramp_frames == 0:
+            self._master_ramp_frames = total_frames
+            self._master_ramp_total_frames = total_frames
+            self._master_ramp_elapsed_frames = 0
+            if total_frames == 0:
                 self._master_current = self.master_volume
+
+    def fade_settle_delay_ms(self) -> int:
+        """Return enough time for Qt's queued audio to play the fade tail."""
+        sink = self.audio_sink
+        if sink is None:
+            return 0
+        try:
+            buffer_bytes = max(0, int(sink.bufferSize()))
+            buffered_ms = math.ceil(
+                (buffer_bytes * 1000.0)
+                / float(max(1, self.sample_rate * BYTES_PER_FRAME))
+            )
+            return max(40, min(300, buffered_ms + 30))
+        except Exception:
+            return 230
 
     def set_eq(self, eq) -> None:
         with self._lock:
@@ -493,6 +520,7 @@ class FfmpegBackgroundEngine:
             taken = frames - needed
             deck.buffered_frames -= taken
             deck.consumed_frames += taken
+            deck.last_take_frames = taken
             deck.cond.notify_all()
         if not parts:
             return np.zeros((frames, CHANNELS), dtype=np.float32)
@@ -564,21 +592,36 @@ class FfmpegBackgroundEngine:
                         mixed = np.asarray(processed, dtype=np.float32)
                 except Exception:
                     pass
-            # Master-volume ramp (slide_master_volume), then hard clip.
-            if self._master_ramp_frames > 0:
-                take = min(frames, self._master_ramp_frames)
-                end = self._master_current + (
-                    (self.master_volume - self._master_current)
-                    * (take / float(self._master_ramp_frames))
+            # Master-volume ramp (slide_master_volume), then hard clip. Advance
+            # only across decoded frames: otherwise a slow decoder can consume
+            # the entire fade-in while the sink is still receiving silence.
+            active_frames = max(
+                int(getattr(self.primary, "last_take_frames", 0) or 0),
+                int(getattr(self.secondary, "last_take_frames", 0) or 0)
+                if self.secondary is not None else 0,
+            )
+            if self._master_ramp_frames > 0 and active_frames > 0:
+                take = min(active_frames, self._master_ramp_frames)
+                start_index = self._master_ramp_elapsed_frames
+                total = max(1, self._master_ramp_total_frames)
+                progress = (
+                    np.arange(start_index + 1, start_index + take + 1, dtype=np.float32)
+                    / float(total)
                 )
-                env = np.full(frames, self.master_volume, dtype=np.float32)
-                env[:take] = np.linspace(
-                    self._master_current, end, take, dtype=np.float32
+                progress = np.clip(progress, 0.0, 1.0)
+                curve = 0.5 - (0.5 * np.cos(np.pi * progress))
+                ramp = self._master_ramp_start + (
+                    (self.master_volume - self._master_ramp_start) * curve
                 )
-                self._master_current = float(end)
+                env = np.full(frames, self._master_current, dtype=np.float32)
+                env[:take] = ramp
+                self._master_current = float(ramp[-1])
+                self._master_ramp_elapsed_frames += take
                 self._master_ramp_frames -= take
                 if self._master_ramp_frames <= 0:
                     self._master_current = self.master_volume
+                    if active_frames > take:
+                        env[take:active_frames] = self.master_volume
                 mixed = mixed * env[:, None]
             else:
                 mixed = mixed * self._master_current

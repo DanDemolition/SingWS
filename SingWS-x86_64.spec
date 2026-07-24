@@ -66,7 +66,7 @@ for ff_binary in ("ffmpeg", "ffprobe"):
             break
 
 a = Analysis(
-    ['/Users/daniel/Documents/SingWS/0.2.18.1.py'],
+    [str(project_root / '0.2.18.1.py')],
     pathex=[str(project_root)],
     binaries=binaries,
     datas=extra_datas,

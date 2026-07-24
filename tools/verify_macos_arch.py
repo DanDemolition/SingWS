@@ -16,7 +16,6 @@ RUNTIME_NATIVE_MODULES = (
     "PyQt6.QtCore",
     "numpy._core._multiarray_umath",
     "scipy._lib._ccallback_c",
-    "gi._gi",
     "signalsmith_audio_native",
 )
 

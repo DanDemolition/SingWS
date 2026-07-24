@@ -854,6 +854,10 @@ class _PcmFeeder(QIODevice):
         del t._dsp_ready[:len(out)]
         real_audio_bytes = len(out)
         if real_audio_bytes > 0:
+            # Meter the PCM being handed to the device, not decoder output.
+            # FFmpeg can decode several seconds ahead, so decoder-side levels
+            # can report the silent tail while audible music is still buffered.
+            t._accept_level(bytes(out))
             with t._pcm_lock:
                 t._audible_output_bytes += int(real_audio_bytes)
         if len(out) < n:
@@ -1024,9 +1028,9 @@ class PythonKaraokeTransport(QObject):
             return
         self._start_pending = False
         self.seek(start_seconds)
-        # Begin decoding the whole track to memory in the background so seeks
-        # become instant once it's ready (within a couple seconds of playback).
-        self._start_full_decode()
+        # Keep startup and live playback to one audio decoder. Pre-decoding the
+        # whole track here launched a second FFmpeg process for every song,
+        # competing with MP4 video decode and causing stalls on Intel Macs.
         self.timer.start()
         self.started.emit()
 
@@ -1518,7 +1522,9 @@ class PythonKaraokeTransport(QObject):
         return body
 
     def _accept_level(self, data: bytes, worker=None):
-        if worker is not None and worker is not self._decoder:
+        # Decoder workers run ahead of the speakers. Their level samples are
+        # unsuitable for end-silence decisions; only output-feeder PCM is live.
+        if worker is not None:
             return
         level = _pcm_level_db(data)
         if level is not None:

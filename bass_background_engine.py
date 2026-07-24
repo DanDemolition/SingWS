@@ -26,6 +26,7 @@ BASS_STREAM_PRESCAN = 0x20000
 BASS_STREAM_DECODE = 0x200000
 BASS_POS_BYTE = 0
 BASS_ATTRIB_VOL = 2
+BASS_SLIDE_LOG = 0x1000000
 BASS_LEVEL_STEREO = 2
 BASS_LEVEL_RMS = 4
 BASS_LEVEL_VOLPAN = 8
@@ -657,7 +658,7 @@ class BassBackgroundEngine:
             return
         self.bass.BASS_ChannelSlideAttribute(
             deck.handle,
-            BASS_ATTRIB_VOL,
+            BASS_ATTRIB_VOL | BASS_SLIDE_LOG,
             ctypes.c_float(self._deck_output_gain(deck, volume)),
             max(0, int(duration_ms)),
         )
@@ -796,7 +797,7 @@ class BassBackgroundEngine:
         if self.mixer:
             self.bass.BASS_ChannelSlideAttribute(
                 self.mixer,
-                BASS_ATTRIB_VOL,
+                BASS_ATTRIB_VOL | BASS_SLIDE_LOG,
                 ctypes.c_float(self._effective_master()),
                 max(0, int(duration_ms)),
             )

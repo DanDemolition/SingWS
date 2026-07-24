@@ -63,7 +63,7 @@ for ff_binary in ("ffmpeg", "ffprobe"):
             break
 
 a = Analysis(
-    ['/Users/daniel/Documents/SingWS/0.2.18.1.py'],
+    [str(project_root / '0.2.18.1.py')],
     pathex=[str(project_root)],
     binaries=binaries,
     datas=extra_datas,
@@ -120,7 +120,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    target_arch='arm64',
     codesign_identity=None,
     entitlements_file=str(project_root / 'SingWS.entitlements'),
 )

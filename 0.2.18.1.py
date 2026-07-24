@@ -2888,6 +2888,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
 # Settings defaults
 TICKER_COLOR_DEFAULT = "#39FF88"  # lively green; operator can override in Ticker Settings
+FFMPEG_CDG_BASE_OFFSET_MS = 600
 
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
@@ -2922,7 +2923,8 @@ DEFAULTS = {
     "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "karaoke_engine": "ffmpeg",      # internal only; GStreamer removed, FFmpeg is the sole engine (chooser removed from Settings). Stale gstreamer/auto values map to ffmpeg.
-    "cdg_timing_offset_ms": 0,       # CDG lyric timing nudge (engine is clock-synced; 0 = in sync)
+    "cdg_timing_offset_ms": 0,       # Fine tuning added to the FFmpeg CDG +600ms baseline
+    "ffmpeg_cdg_timing_migrated": True,
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "next_up_overlay_enabled": False, # legacy Next Up panel retired; QR remains visible between singers
@@ -5421,10 +5423,19 @@ class BackgroundMusicPlayer(QObject):
             self._bass_engine.cancel_crossfade()
             generation = int(self._bass_fade_generation)
             self._bass_engine.slide_master_volume(0.0, duration_ms)
+            try:
+                settle_ms = max(0, int(self._bass_engine.fade_settle_delay_ms()))
+            except Exception:
+                settle_ms = 0
             QTimer.singleShot(
-                max(1, int(duration_ms)),
+                max(1, int(duration_ms) + settle_ms),
                 lambda g=generation: self._bass_stop_after_fade(g),
             )
+            if settle_ms:
+                _diag(
+                    f"[BG-FADE] output drain added duration_ms={int(duration_ms)} "
+                    f"settle_ms={settle_ms}"
+                )
             return
         if not self.gst_bg_pipeline or not self.is_playing:
             return
@@ -5824,6 +5835,40 @@ def _scaled_karaoke_image(
     if is_cdg:
         return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
     return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
+
+
+def _cdg_side_fill_color(image) -> QColor:
+    """Choose the dominant CDG border color for widescreen side bars."""
+    try:
+        if image is None or image.isNull():
+            return QColor("black")
+        width = max(1, int(image.width()))
+        height = max(1, int(image.height()))
+        samples = []
+        steps = 12
+        for i in range(steps + 1):
+            x = min(width - 1, int(round((width - 1) * i / steps)))
+            y = min(height - 1, int(round((height - 1) * i / steps)))
+            samples.extend(
+                (
+                    image.pixelColor(x, 0),
+                    image.pixelColor(x, height - 1),
+                    image.pixelColor(0, y),
+                    image.pixelColor(width - 1, y),
+                )
+            )
+        counts = {}
+        for color in samples:
+            if color.alpha() <= 0:
+                continue
+            key = (color.red(), color.green(), color.blue())
+            counts[key] = counts.get(key, 0) + 1
+        if counts:
+            red, green, blue = max(counts, key=counts.get)
+            return QColor(red, green, blue)
+    except Exception:
+        pass
+    return QColor("black")
 
 
 BG_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov"}
@@ -7128,6 +7173,8 @@ class VideoAreaWidget(QWidget):
         self.background_pixmap = QPixmap()
         self.karaoke_frame = QImage()
         self.karaoke_stretch_fill = False
+        self.karaoke_side_fill = False
+        self._karaoke_side_fill_color = QColor("black")
         self.karaoke_frame_is_cdg = False
         self._karaoke_scaled_pixmap = QPixmap()
         self._karaoke_scaled_key = None
@@ -7164,6 +7211,8 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_hide_timer = QTimer(self)
         self._next_up_overlay_hide_timer.setSingleShot(True)
         self._next_up_overlay_hide_timer.timeout.connect(lambda: self.hide_next_up_overlay(reason="timer"))
+        self._fallback_transition_payload = {}
+        self._fallback_transition_generation = 0
         self._show_vfx_overlay = None
         self._show_vfx_enabled = True
         # Request QR shown on the show screen, bottom-right, right-aligned with
@@ -7206,7 +7255,8 @@ class VideoAreaWidget(QWidget):
     def show_singer_start_vfx(self, singer: str, title: str = "", artist: str = ""):
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is None:
-            return False
+            self._show_fallback_transition("UP NEXT", singer, title, artist)
+            return True
         try:
             overlay.show_singer_start(singer, title, artist)
             return True
@@ -7219,13 +7269,89 @@ class VideoAreaWidget(QWidget):
             return False
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is None:
-            return False
+            self._show_fallback_transition("THANK YOU", singer, title, artist)
+            return True
         try:
             overlay.show_song_outro(singer, title, artist)
             return True
         except Exception as exc:
             _diag(f"[SHOW-VFX] song-outro failed: {exc}")
             return False
+
+    def _show_fallback_transition(
+        self,
+        heading: str,
+        singer: str,
+        title: str = "",
+        artist: str = "",
+        duration_ms: int = 2400,
+    ):
+        self._fallback_transition_generation += 1
+        generation = int(self._fallback_transition_generation)
+        self._fallback_transition_payload = {
+            "heading": str(heading or ""),
+            "singer": str(singer or ""),
+            "title": str(title or ""),
+            "artist": str(artist or ""),
+        }
+        self.update()
+        QTimer.singleShot(
+            max(500, int(duration_ms)),
+            lambda g=generation: self._clear_fallback_transition(g),
+        )
+
+    def _clear_fallback_transition(self, generation: int):
+        if int(generation) != int(self._fallback_transition_generation):
+            return
+        self._fallback_transition_payload = {}
+        self.update()
+
+    def _draw_fallback_transition(self, painter: QPainter):
+        payload = getattr(self, "_fallback_transition_payload", {}) or {}
+        if not payload:
+            return
+        painter.save()
+        painter.fillRect(self.rect(), QColor(4, 6, 15, 225))
+        width = max(120, int(self.width() * 0.88))
+        left = (self.width() - width) // 2
+        center_y = self.height() // 2
+        heading_font = QFont()
+        heading_font.setBold(True)
+        heading_font.setPixelSize(max(11, int(self.height() * 0.065)))
+        singer_font = QFont()
+        singer_font.setBold(True)
+        singer_font.setPixelSize(max(18, int(self.height() * 0.16)))
+        detail_font = QFont()
+        detail_font.setBold(True)
+        detail_font.setPixelSize(max(10, int(self.height() * 0.055)))
+        painter.setFont(heading_font)
+        painter.setPen(QColor("#F6C945"))
+        painter.drawText(
+            QRect(left, center_y - int(self.height() * 0.25), width, int(self.height() * 0.10)),
+            Qt.AlignmentFlag.AlignCenter,
+            str(payload.get("heading", "") or ""),
+        )
+        painter.setFont(singer_font)
+        painter.setPen(QColor("white"))
+        painter.drawText(
+            QRect(left, center_y - int(self.height() * 0.13), width, int(self.height() * 0.22)),
+            Qt.AlignmentFlag.AlignCenter,
+            str(payload.get("singer", "") or ""),
+        )
+        detail = str(payload.get("title", "") or "")
+        artist = str(payload.get("artist", "") or "")
+        if artist and detail:
+            detail = f"{detail}  •  {artist}"
+        elif artist:
+            detail = artist
+        painter.setFont(detail_font)
+        painter.setPen(QColor("#D8D1ED"))
+        painter.drawText(
+            QRect(left, center_y + int(self.height() * 0.10), width, int(self.height() * 0.12)),
+            Qt.AlignmentFlag.AlignCenter,
+            detail,
+        )
+        painter.restore()
 
     def set_request_qr(self, pixmap):
         """Set (or clear with None) the request QR painted on the show screen.
@@ -7387,13 +7513,24 @@ class VideoAreaWidget(QWidget):
             pass
         return False
 
-    def set_karaoke_frame(self, image, stretch_fill: bool = False, is_cdg: bool = False):
+    def set_karaoke_frame(
+        self,
+        image,
+        stretch_fill: bool = False,
+        is_cdg: bool = False,
+        side_fill: bool = False,
+    ):
         # QImage is implicitly shared; avoid copying here. Scaling is cached per
         # frame/size/display mode so fullscreen paints only blit an already-scaled
         # pixmap instead of redoing CDG image processing every repaint.
         self.karaoke_frame = image if image is not None and not image.isNull() else QImage()
         self.karaoke_stretch_fill = bool(stretch_fill)
         self.karaoke_frame_is_cdg = bool(is_cdg)
+        self.karaoke_side_fill = bool(side_fill and is_cdg and not stretch_fill)
+        self._karaoke_side_fill_color = (
+            _cdg_side_fill_color(self.karaoke_frame)
+            if self.karaoke_side_fill else QColor("black")
+        )
         self._ensure_karaoke_scaled_pixmap()
         self.update()
 
@@ -7952,6 +8089,8 @@ class VideoAreaWidget(QWidget):
         painter.fillRect(self.rect(), QColor("black"))
 
         if not self.karaoke_frame.isNull():
+            if bool(self.karaoke_side_fill and self.karaoke_frame_is_cdg):
+                painter.fillRect(self.rect(), self._karaoke_side_fill_color)
             bg_opacity = self._lyrics_background_opacity() if bool(self.karaoke_frame_is_cdg) else 0.0
             if bg_opacity > 0.0:
                 # Live MP4 background video wins; otherwise the normal
@@ -8003,6 +8142,7 @@ class VideoAreaWidget(QWidget):
             self._draw_idle_bg_overlay(painter, info)
 
         self._draw_next_up_overlay(painter)
+        self._draw_fallback_transition(painter)
 
         # Request QR sits on top of everything, bottom-right by the timer.
         self._draw_request_qr(painter)
@@ -12741,6 +12881,10 @@ class VideoWindow(QWidget):
                 if hasattr(old, "karaoke_frame") and not old.karaoke_frame.isNull():
                     new_area.karaoke_frame = QImage(old.karaoke_frame)
                     new_area.karaoke_stretch_fill = bool(getattr(old, "karaoke_stretch_fill", False))
+                    new_area.karaoke_side_fill = bool(getattr(old, "karaoke_side_fill", False))
+                    new_area._karaoke_side_fill_color = QColor(
+                        getattr(old, "_karaoke_side_fill_color", QColor("black"))
+                    )
                     new_area.karaoke_frame_is_cdg = bool(getattr(old, "karaoke_frame_is_cdg", False))
                     new_area._ensure_karaoke_scaled_pixmap()
             except Exception:
@@ -13750,12 +13894,57 @@ class PreviewWindow(QWidget):
         layout.setSpacing(0)
         self._main_layout = layout
 
-        self.video_area = PreviewVideoAreaWidget(self)
+        self.video_area = VideoAreaWidget(self)
+        self.video_area.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.video_area.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
 
     def winId(self):
         return self.video_area.winId()
+
+    def recreate_video_surface(self, reason: str = ''):
+        """Replace the preview surface while preserving its rendered state."""
+        try:
+            old = getattr(self, 'video_area', None)
+            if old is None:
+                return
+            old_id = int(old.winId())
+            old_size = old.size()
+            old_policy = old.sizePolicy()
+            new_area = VideoAreaWidget(self)
+            new_area.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+            new_area.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+            new_area.setSizePolicy(old_policy)
+            if not old.background_pixmap.isNull():
+                new_area.background_pixmap = QPixmap(old.background_pixmap)
+            if not old.karaoke_frame.isNull():
+                new_area.set_karaoke_frame(
+                    QImage(old.karaoke_frame),
+                    stretch_fill=bool(getattr(old, "karaoke_stretch_fill", False)),
+                    is_cdg=bool(getattr(old, "karaoke_frame_is_cdg", False)),
+                    side_fill=bool(getattr(old, "karaoke_side_fill", False)),
+                )
+            payload = getattr(old, "_next_up_overlay_payload", {}) or {}
+            if isinstance(payload, dict) and payload:
+                new_area.show_next_up_overlay(
+                    payload,
+                    old.next_up_overlay_remaining_sec(),
+                    reason="preview_surface_recreate",
+                )
+            self._main_layout.replaceWidget(old, new_area)
+            old.setParent(None)
+            old.deleteLater()
+            self.video_area = new_area
+            if old_size.width() > 0 and old_size.height() > 0:
+                new_area.resize(old_size)
+            new_area.update()
+            _diag(
+                f"[PREVIEW] surface refresh reason={reason} old={old_id} "
+                f"new={int(new_area.winId())} changed={bool(int(new_area.winId()) != old_id)}"
+            )
+        except Exception:
+            pass
 
 
 class PerformanceWaveformWidget(QWidget):
@@ -13867,34 +14056,6 @@ class PerformanceWaveformWidget(QWidget):
         painter.setPen(QPen(QColor(255, 255, 255, 28), 1))
         painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 8, 8)
         painter.end()
-
-    def recreate_video_surface(self, reason: str = ''):
-        """Replace preview native child surface so stale compositor layers cannot persist."""
-        try:
-            old = getattr(self, 'video_area', None)
-            if old is None:
-                return
-            old_id = int(old.winId())
-            old_size = old.size()
-            old_policy = old.sizePolicy()
-
-            new_area = PreviewVideoAreaWidget(self)
-            new_area.setSizePolicy(old_policy)
-
-            self._main_layout.replaceWidget(old, new_area)
-            old.setParent(None)
-            old.deleteLater()
-            self.video_area = new_area
-            if old_size.width() > 0 and old_size.height() > 0:
-                new_area.resize(old_size)
-
-            new_area.update()
-            _diag(
-                f"[PREVIEW] surface refresh reason={reason} old={old_id} "
-                f"new={int(new_area.winId())} changed={bool(int(new_area.winId()) != old_id)}"
-            )
-        except Exception:
-            pass
 
 # KeyChangeWorker class removed - key changes now done in realtime by GStreamer pitch element
 
@@ -18076,6 +18237,25 @@ class KaraokeApp(QWidget):
                 self.settings["performance_debug_enabled"] = False
             self.settings["performance_debug_default_migrated"] = True
             changed = True
+        if not bool(self.settings.get("ffmpeg_cdg_timing_migrated", False)):
+            # GStreamer used a zero-offset pipeline clock. FFmpeg CDG playback
+            # needs the calibrated +600ms visual lead. Convert the old total
+            # offset into fine tuning so calibrated installs keep their timing.
+            try:
+                old_total = int(
+                    self.settings.get(
+                        "cdg_timing_offset_ms",
+                        self.settings.get("video_timing_offset_ms", 0),
+                    )
+                    or 0
+                )
+            except Exception:
+                old_total = 0
+            self.settings["cdg_timing_offset_ms"] = (
+                old_total - FFMPEG_CDG_BASE_OFFSET_MS if old_total else 0
+            )
+            self.settings["ffmpeg_cdg_timing_migrated"] = True
+            changed = True
         for k, v in DEFAULTS.items():
             if k not in self.settings:
                 self.settings[k] = v
@@ -18202,7 +18382,15 @@ class KaraokeApp(QWidget):
         self.video_window.video_area.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         self.preview_window = PreviewWindow()
+        self.preview_window._external_owner = self
         self.preview_window.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        try:
+            if self._idle_bg_current_path:
+                self.preview_window.video_area.set_background_image(self._idle_bg_current_path)
+            self.preview_window.force_black = False
+            self._refresh_show_screen_qr("preview_window_ready", force=True)
+        except Exception:
+            pass
 
         try:
             QTimer.singleShot(1800, lambda: self._sync_singer_history_async("startup"))
@@ -21640,15 +21828,20 @@ class KaraokeApp(QWidget):
             is_cdg = str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg"
             cdg_display_mode = self._effective_cdg_display_mode() if is_cdg else "fit"
             stretch = bool(is_cdg and cdg_display_mode == "stretch")
+            side_fill = bool(is_cdg and cdg_display_mode == "sidefill")
             try:
                 if self.video_window.isVisible() and not self.video_window.isMinimized():
-                    self.video_window.video_area.set_karaoke_frame(image, stretch_fill=stretch, is_cdg=is_cdg)
+                    self.video_window.video_area.set_karaoke_frame(
+                        image, stretch_fill=stretch, is_cdg=is_cdg, side_fill=side_fill
+                    )
                     self.video_window.force_black = False
             except Exception:
                 pass
             try:
                 if self.preview_window.isVisible() and not self.preview_window.isMinimized():
-                    self.preview_window.video_area.set_karaoke_frame(image, stretch_fill=stretch, is_cdg=is_cdg)
+                    self.preview_window.video_area.set_karaoke_frame(
+                        image, stretch_fill=stretch, is_cdg=is_cdg, side_fill=side_fill
+                    )
                     self.preview_window.force_black = False
             except Exception:
                 pass
@@ -21845,7 +22038,7 @@ class KaraokeApp(QWidget):
         try:
             mode_l = str(mode or "").lower()
             if mode_l == "cdg":
-                off = int(self.settings.get("cdg_timing_offset_ms", self.settings.get("video_timing_offset_ms", 500)) or 0)
+                off = self._effective_cdg_timing_offset_ms()
             elif mode_l == "mp4":
                 off = int(self.settings.get("mp4_timing_offset_ms", 0) or 0)
             else:
@@ -23523,6 +23716,8 @@ class KaraokeApp(QWidget):
         can_overlap = (
             self._karaoke_bgm_crossfade_enabled()
             and (not early_auto_advance)
+            and (not end_silence_triggered)
+            and (not early_end_reason)
             and hasattr(self, "bg_music")
             and bool(getattr(self.bg_music, "playlist", None))
             and not bool(getattr(self.bg_music, "is_playing", False))
@@ -24807,7 +25002,7 @@ class KaraokeApp(QWidget):
 
         # --- CDG lyric timing offset (visual-only calibration backup) ---
         v = _section_card(tab_display, "CDG Lyric Timing Offset",
-                          "Visual-only nudge for CDG lyric latency. "
+                          "Fine tuning around FFmpeg's automatic +600 ms correction. "
                           "Audio and MP4 timing are unaffected. Positive = lyrics earlier.")
         vto_row = QHBoxLayout()
         vto_row.addWidget(QLabel("Offset (ms):"))
@@ -24815,11 +25010,11 @@ class KaraokeApp(QWidget):
         video_offset_spin.setRange(-3000, 3000)
         video_offset_spin.setSingleStep(50)
         try:
-            video_offset_spin.setValue(max(-3000, min(3000, int(self.settings.get("cdg_timing_offset_ms", 500) or 0))))
+            video_offset_spin.setValue(max(-3000, min(3000, int(self.settings.get("cdg_timing_offset_ms", 0) or 0))))
         except Exception:
             video_offset_spin.setValue(0)
         vto_row.addWidget(video_offset_spin)
-        video_offset_reset_btn = QPushButton("Reset to +500")
+        video_offset_reset_btn = QPushButton("Reset to 0")
         vto_row.addWidget(video_offset_reset_btn)
         vto_row.addStretch(1)
         v.addLayout(vto_row)
@@ -24827,7 +25022,7 @@ class KaraokeApp(QWidget):
         def on_video_offset_changed(val: int):
             self.set_cdg_timing_offset_ms(int(val))
         video_offset_spin.valueChanged.connect(on_video_offset_changed)
-        video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(500))
+        video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(0))
 
         v = _section_card(tab_general, "General")  # ---- General ----
         perf_debug_cb = QCheckBox("Runtime diagnostic logging")
@@ -25922,7 +26117,7 @@ class KaraokeApp(QWidget):
                 self._apply_tooltip_visibility()
                 self._transition_gap_sec = max(-3.0, min(3.0, float(self.settings.get("bg_to_karaoke_gap_sec", 0.0))))
                 self._apply_runtime_media_settings()
-                self.set_cdg_timing_offset_ms(int(self.settings.get("cdg_timing_offset_ms", 500) or 0))
+                self.set_cdg_timing_offset_ms(int(self.settings.get("cdg_timing_offset_ms", 0) or 0))
                 if hasattr(self, "bg_music") and self.bg_music is not None:
                     self.bg_music._refresh_bg_normalize()
                     eng = getattr(self.bg_music, "_bass_engine", None)
@@ -27116,13 +27311,21 @@ class KaraokeApp(QWidget):
                 timer.setSingleShot(True)
                 timer.timeout.connect(self._refresh_singer_history_view)
                 self._singer_history_refresh_timer = timer
+            playing = bool(getattr(self, "karaoke_playing", False))
+            if playing:
+                already_deferred = bool(state.get("_singer_history_refresh_deferred", False))
+                self._singer_history_refresh_deferred = True
+                timer.start(1000)
+                if not already_deferred:
+                    _diag(f"[PERF] singer_history_refresh_deferred reason={reason} playback_active=1")
+                return
+            self._singer_history_refresh_deferred = False
             if delay_ms is None:
                 delay_ms = self._playback_safe_ui_delay_ms(160)
             timer.start(max(0, int(delay_ms)))
-            if bool(getattr(self, "karaoke_playing", False)):
-                _diag(f"[PERF] singer_history_refresh_scheduled reason={reason} delay_ms={int(delay_ms)}")
         except Exception:
-            self._refresh_singer_history_view()
+            if not bool(getattr(self, "karaoke_playing", False)):
+                self._refresh_singer_history_view()
 
     def _history_perf_log(self, name: str, ms: float, **meta):
         try:
@@ -29838,6 +30041,10 @@ class KaraokeApp(QWidget):
     def _refresh_singer_history_view(self):
         if not hasattr(self, "singer_history_singer_list"):
             return
+        if bool(getattr(self, "karaoke_playing", False)):
+            self._schedule_singer_history_refresh(1000, reason="playback_active")
+            return
+        self._singer_history_refresh_deferred = False
         open_t0 = time.perf_counter()
         current_key = self._selected_singer_history_key()
         search = ""
@@ -29953,6 +30160,9 @@ class KaraokeApp(QWidget):
                 return
             if isinstance(result, dict) and result.get("cancelled"):
                 return
+            if bool(getattr(self, "karaoke_playing", False)):
+                self._schedule_singer_history_refresh(1000, reason="worker_finished_during_playback")
+                return
             self._apply_singer_history_directory_rows(job_id, result, current_key)
         except Exception as e:
             _diag(f"[PERF] singer_history_directory_apply_failed error={e}")
@@ -30059,6 +30269,9 @@ class KaraokeApp(QWidget):
 
     def _update_singer_history_details(self, singer_key: str):
         if not hasattr(self, "singer_history_name_label"):
+            return
+        if bool(getattr(self, "karaoke_playing", False)):
+            self._schedule_singer_history_refresh(1000, reason="details_requested_during_playback")
             return
         old_worker = getattr(self, "_singer_history_songs_worker", None)
         try:
@@ -30199,6 +30412,9 @@ class KaraokeApp(QWidget):
             if str(singer_key or "") != self._selected_singer_history_key():
                 return
             if isinstance(result, dict) and result.get("cancelled"):
+                return
+            if bool(getattr(self, "karaoke_playing", False)):
+                self._schedule_singer_history_refresh(1000, reason="songs_worker_finished_during_playback")
                 return
             self._apply_singer_history_song_rows(job_id, singer_key, result, current_song_key)
         except Exception as e:
@@ -31508,7 +31724,13 @@ class KaraokeApp(QWidget):
         is the same network request link the header QR uses."""
         vw = getattr(self, "video_window", None)
         area = getattr(vw, "video_area", None) if vw is not None else None
-        if area is None or not hasattr(area, "set_request_qr"):
+        preview = getattr(self, "preview_window", None)
+        preview_area = getattr(preview, "video_area", None) if preview is not None else None
+        areas = [
+            candidate for candidate in (area, preview_area)
+            if candidate is not None and hasattr(candidate, "set_request_qr")
+        ]
+        if not areas:
             return
         show = bool(self.settings.get("show_request_qr", True)) and self._is_requests_accepting_cached()
         url = self._header_qr_url() if show else ""
@@ -31519,7 +31741,8 @@ class KaraokeApp(QWidget):
             return
         self._show_screen_qr_key = key
         if not show:
-            area.set_request_qr(None)
+            for candidate in areas:
+                candidate.set_request_qr(None)
             _diag(f"[QR-SHOW] cleared reason={reason} "
                   f"enabled={int(bool(self.settings.get('show_request_qr', True)))} "
                   f"accepting={int(self._is_requests_accepting_cached())}")
@@ -31527,7 +31750,8 @@ class KaraokeApp(QWidget):
         # Build at a generous resolution so the responsive downscale in
         # VideoAreaWidget stays crisp on a fullscreen output.
         pix = self._build_qr_pixmap(url, size=300)
-        area.set_request_qr(None if pix.isNull() else pix)
+        for candidate in areas:
+            candidate.set_request_qr(None if pix.isNull() else pix)
         _diag(f"[QR-SHOW] shown url={url} reason={reason} built={int(not pix.isNull())}")
 
     def _set_header_qr_url(self, url: str):
@@ -32078,6 +32302,12 @@ class KaraokeApp(QWidget):
             if force or path != self._idle_bg_current_path:
                 self._idle_bg_current_path = path
                 self.video_window.set_background_image(path)
+                try:
+                    preview_area = getattr(getattr(self, "preview_window", None), "video_area", None)
+                    if preview_area is not None and hasattr(preview_area, "set_background_image"):
+                        preview_area.set_background_image(path)
+                except Exception:
+                    pass
                 if force:
                     try:
                         self.video_window.video_area.fade_background_from_black()
@@ -32130,7 +32360,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         try:
-            self.preview_window.force_black = True
+            self.preview_window.force_black = False
             area = getattr(getattr(self, "preview_window", None), "video_area", None)
             if area is not None and hasattr(area, "clear_karaoke_frame"):
                 area.clear_karaoke_frame()
@@ -34282,24 +34512,6 @@ class KaraokeApp(QWidget):
                 f"remain={remain:.2f}s, cdg_done={cdg_done}, cdg_stale={cdg_stale_for:.2f}s, "
                 f"auto_advance={self._end_silence_auto_advance_next})"
             )
-            # If the host explicitly enabled karaoke->BGM crossfade, BG may
-            # rise under this legacy early-trim path. Otherwise the cleanup path
-            # below resumes BG only after karaoke has been stopped.
-            try:
-                if (self._karaoke_bgm_crossfade_enabled()
-                        and not self._end_silence_auto_advance_next
-                        and not getattr(self, "_bg_crossfade_prefired", False)
-                        and hasattr(self, "bg_music")
-                        and bool(getattr(self.bg_music, "playlist", None))
-                        and not bool(getattr(self.bg_music, "is_playing", False))
-                        and bool(self.settings.get("bg_enabled", True))
-                        and bool(self.settings.get("bg_autoplay_on_idle", True))):
-                    self._bg_crossfade_prefired = True
-                    self._bg_resume_reason = "end_silence_overlap"
-                    self.bg_music.fade_in(None, 1500, allow_during_karaoke=True)
-                    _diag("[END-SILENCE] BG overlap fade-in started at trim")
-            except Exception as e:
-                _diag(f"[END-SILENCE] BG overlap start failed: {e}")
             QTimer.singleShot(0, self._handle_media_end_safe)
             return True
         return False
@@ -34322,37 +34534,8 @@ class KaraokeApp(QWidget):
             time_remaining_ns = dur - pos
             crossfade_window_ns = 3_200_000_000  # 3.2s — matches _karaoke_end_overlap_ms
 
-            # Also pre-start BG when the karaoke AUDIO has been silent for a
-            # sustained moment near the end. CDG songs often keep streaming
-            # graphics after the music stops, which blocks the end-silence trim
-            # (sector safeguard) and would otherwise leave several seconds of
-            # dead air before the 3.2s pre-fire window. This watches the live
-            # level directly and is independent of that video-side gate.
-            silent_prefire = False
-            try:
-                remain_s = time_remaining_ns / NS_PER_SECOND
-                near_end_window = float(getattr(self, "_end_silence_near_end_window_s", 20.0))
-                if 1.5 < remain_s <= near_end_window:
-                    db_now = self._read_level_db()
-                    now_ts = time.monotonic()
-                    last_ts = float(getattr(self, "_bg_prefire_silence_last_ts", 0.0) or 0.0)
-                    dt = 0.0 if last_ts <= 0.0 else max(0.0, min(1.0, now_ts - last_ts))
-                    self._bg_prefire_silence_last_ts = now_ts
-                    if db_now is not None and db_now <= -45.0:
-                        self._bg_prefire_silence_accum_s = float(
-                            getattr(self, "_bg_prefire_silence_accum_s", 0.0)) + dt
-                    else:
-                        self._bg_prefire_silence_accum_s = 0.0
-                    if float(getattr(self, "_bg_prefire_silence_accum_s", 0.0)) >= 1.2:
-                        silent_prefire = True
-                else:
-                    self._bg_prefire_silence_accum_s = 0.0
-                    self._bg_prefire_silence_last_ts = 0.0
-            except Exception:
-                silent_prefire = False
-
             if (crossfade_enabled
-                    and (time_remaining_ns <= crossfade_window_ns or silent_prefire)
+                    and time_remaining_ns <= crossfade_window_ns
                     and time_remaining_ns > 150_000_000   # allow late fire near EOS to reduce dead-air
                     and not getattr(self, "_bg_crossfade_prefired", False)
                     and hasattr(self, "bg_music")
@@ -34364,8 +34547,7 @@ class KaraokeApp(QWidget):
                 try:
                     self._bg_resume_reason = "karaoke_end_overlap"
                     self.bg_music.fade_in(None, 3000, allow_during_karaoke=True)
-                    _reason = "trailing-silence" if silent_prefire else "3s remaining"
-                    _diag(f"[CROSSFADE] BG pre-start fired ({_reason})")
+                    _diag("[CROSSFADE] BG pre-start fired (3s remaining)")
                 except Exception as e:
                     _diag(f"[CROSSFADE] BG pre-start failed: {e}")
 
@@ -34666,10 +34848,12 @@ class KaraokeApp(QWidget):
                 )
                 return False
         try:
-            area = getattr(getattr(self, "video_window", None), "video_area", None)
-            if area is not None and hasattr(area, "show_singer_start_vfx"):
-                area.show_singer_start_vfx(singer_display, title, artist)
-                return True
+            shown = False
+            for window_name in ("video_window", "preview_window"):
+                area = getattr(getattr(self, window_name, None), "video_area", None)
+                if area is not None and hasattr(area, "show_singer_start_vfx"):
+                    shown = bool(area.show_singer_start_vfx(singer_display, title, artist)) or shown
+            return shown
         except Exception as exc:
             _diag(f"[SHOW-VFX] app singer-start trigger failed: {exc}")
         return False
@@ -34906,14 +35090,16 @@ class KaraokeApp(QWidget):
             _diag(f"[SONG-OUTRO] skipped reason={reason}; singer unavailable")
             return False
         try:
-            area = getattr(getattr(self, "video_window", None), "video_area", None)
-            if area is None or not hasattr(area, "show_song_outro_vfx"):
-                return False
-            shown = bool(area.show_song_outro_vfx(
-                singer,
-                str(payload.get("title", "") or ""),
-                str(payload.get("artist", "") or ""),
-            ))
+            shown = False
+            for window_name in ("video_window", "preview_window"):
+                area = getattr(getattr(self, window_name, None), "video_area", None)
+                if area is None or not hasattr(area, "show_song_outro_vfx"):
+                    continue
+                shown = bool(area.show_song_outro_vfx(
+                    singer,
+                    str(payload.get("title", "") or ""),
+                    str(payload.get("artist", "") or ""),
+                )) or shown
             _diag(f"[SONG-OUTRO] shown={int(shown)} reason={reason} singer={singer!r}; QR follows")
             return shown
         except Exception as exc:
@@ -34968,6 +35154,12 @@ class KaraokeApp(QWidget):
                 area.show_next_up_overlay(payload, duration, reason=reason)
             except TypeError:
                 area.show_next_up_overlay(payload, duration)
+            try:
+                preview_area = getattr(getattr(self, "preview_window", None), "video_area", None)
+                if preview_area is not None and hasattr(preview_area, "show_next_up_overlay"):
+                    preview_area.show_next_up_overlay(payload, duration, reason=f"preview:{reason}")
+            except Exception:
+                pass
             _diag(
                 f"[NEXT-UP-OVERLAY] show reason={reason} singer={payload.get('singer', '')!r} "
                 f"title={payload.get('title', '')!r} artist={payload.get('artist', '')!r} "
@@ -34980,10 +35172,11 @@ class KaraokeApp(QWidget):
 
     def _hide_next_up_transition_overlay(self, *, reason: str = "unknown", immediate: bool = True) -> None:
         try:
-            area = getattr(getattr(self, "video_window", None), "video_area", None)
-            if area is not None and hasattr(area, "hide_next_up_overlay"):
-                area.hide_next_up_overlay(immediate=bool(immediate), reason=reason)
-                _diag(f"[NEXT-UP-OVERLAY] app hide reason={reason} immediate={int(bool(immediate))}")
+            for window_name in ("video_window", "preview_window"):
+                area = getattr(getattr(self, window_name, None), "video_area", None)
+                if area is not None and hasattr(area, "hide_next_up_overlay"):
+                    area.hide_next_up_overlay(immediate=bool(immediate), reason=reason)
+            _diag(f"[NEXT-UP-OVERLAY] app hide reason={reason} immediate={int(bool(immediate))}")
         except Exception as e:
             _diag(f"[NEXT-UP-OVERLAY] app hide failed reason={reason}: {e}")
 
@@ -38860,22 +39053,34 @@ class KaraokeApp(QWidget):
             local_updated = int(local_record.get("updated_at") or 0)
             remote_updated = int(remote_record.get("updated_at") or 0)
             if remote_updated >= local_updated:
-                local_record["name"] = remote_record.get("name") or local_record.get("name") or singer_key
-                local_record["preferred_disc_priority"] = ", ".join(
+                merged_name = remote_record.get("name") or local_record.get("name") or singer_key
+                merged_priority = ", ".join(
                     normalize_disc_priority(
                         remote_record.get("preferred_disc_priority", "") or local_record.get("preferred_disc_priority", ""),
                         max_items=10,
                     )
                 )
-                local_record["updated_at"] = max(local_updated, remote_updated)
-                local_record["last_seen_at"] = max(
+                merged_updated = max(local_updated, remote_updated)
+                merged_last_seen = max(
                     int(local_record.get("last_seen_at") or 0),
                     int(remote_record.get("last_seen_at") or 0),
                 )
-            local_record["total_performances"] = max(
+                for field, value in (
+                    ("name", merged_name),
+                    ("preferred_disc_priority", merged_priority),
+                    ("updated_at", merged_updated),
+                    ("last_seen_at", merged_last_seen),
+                ):
+                    if local_record.get(field) != value:
+                        local_record[field] = value
+                        changed = True
+            merged_total = max(
                 int(local_record.get("total_performances") or 0),
                 int(remote_record.get("total_performances") or 0),
             )
+            if int(local_record.get("total_performances") or 0) != merged_total:
+                local_record["total_performances"] = merged_total
+                changed = True
             local_songs = local_record.setdefault("songs", {})
             remote_songs = remote_record.get("songs", {})
             if isinstance(remote_songs, dict):
@@ -38888,17 +39093,24 @@ class KaraokeApp(QWidget):
                     local_song_updated = int(local_song.get("updated_at") or 0)
                     remote_song_updated = int(remote_song.get("updated_at") or 0)
                     if remote_song_updated >= local_song_updated:
-                        local_songs[song_key] = remote_song
-                        changed = True
+                        if local_song != remote_song:
+                            local_songs[song_key] = remote_song
+                            changed = True
                     else:
-                        local_song["play_count"] = max(
+                        merged_play_count = max(
                             int(local_song.get("play_count") or 0),
                             int(remote_song.get("play_count") or 0),
                         )
-                        local_song["last_performed_at"] = max(
+                        merged_last_performed = max(
                             int(local_song.get("last_performed_at") or 0),
                             int(remote_song.get("last_performed_at") or 0),
                         )
+                        if int(local_song.get("play_count") or 0) != merged_play_count:
+                            local_song["play_count"] = merged_play_count
+                            changed = True
+                        if int(local_song.get("last_performed_at") or 0) != merged_last_performed:
+                            local_song["last_performed_at"] = merged_last_performed
+                            changed = True
             local_record["unique_song_count"] = len(local_songs)
 
         for norm_key, items in list(local_song_deletions.items()):
@@ -38976,10 +39188,11 @@ class KaraokeApp(QWidget):
                     singer.pop("preferred_disc_priority", None)
         except Exception:
             pass
-        try:
-            self._schedule_singer_history_refresh(reason="remote_merge")
-        except Exception:
-            pass
+        if changed:
+            try:
+                self._schedule_singer_history_refresh(reason="remote_merge")
+            except Exception:
+                pass
         return changed
 
     def _sync_singer_history_async(self, reason: str = "manual"):
@@ -41634,12 +41847,11 @@ class KaraokeApp(QWidget):
             pass
 
     def set_cdg_timing_offset_ms(self, ms: int):
-        """Save the CDG-only lyric timing offset. Positive values advance the
-        CDG renderer against the audio clock; MP4 remains unmodified."""
+        """Save CDG fine tuning on top of FFmpeg's automatic timing correction."""
         try:
             ms = max(-3000, min(3000, int(ms)))
         except Exception:
-            ms = 500
+            ms = 0
         self.settings["cdg_timing_offset_ms"] = ms
         try:
             self.save_settings()
@@ -41649,8 +41861,12 @@ class KaraokeApp(QWidget):
             if str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg":
                 t = getattr(self, "karaoke_transport", None)
                 if t is not None and hasattr(t, "set_video_offset_ms"):
-                    t.set_video_offset_ms(ms)
-                    _diag(f"[VIDEO-OFFSET] live CDG offset set to {ms:+d}ms")
+                    effective_ms = self._effective_cdg_timing_offset_ms()
+                    t.set_video_offset_ms(effective_ms)
+                    _diag(
+                        f"[VIDEO-OFFSET] live CDG offset base={FFMPEG_CDG_BASE_OFFSET_MS:+d}ms "
+                        f"fine={ms:+d}ms total={effective_ms:+d}ms"
+                    )
         except Exception:
             pass
 
@@ -41905,6 +42121,14 @@ class KaraokeApp(QWidget):
             return int(self.settings.get("mp4_max_height", 720) or 0)
         except Exception:
             return 720
+
+    def _effective_cdg_timing_offset_ms(self) -> int:
+        """Return FFmpeg's CDG baseline plus the host's saved fine tuning."""
+        try:
+            fine_ms = int(self.settings.get("cdg_timing_offset_ms", 0) or 0)
+        except Exception:
+            fine_ms = 0
+        return max(-3000, min(3000, FFMPEG_CDG_BASE_OFFSET_MS + fine_ms))
 
     def _effective_visual_timer_interval_ms(self) -> int:
         """Throttle visual polling only. Audio timing remains authoritative."""
@@ -42828,6 +43052,14 @@ class KaraokeApp(QWidget):
             return False
         current = normalize_karafun_duration_seconds(entry.get("duration"))
         if current is not None and not bool(entry.get("duration_estimated", False)):
+            return False
+        if (
+            bool(entry.get("duration_estimated", False))
+            and str(source or "").strip() == "karafun_result"
+            and seconds == KARAFUN_ESTIMATED_DURATION_SECONDS
+        ):
+            # A scraped 3:30 result is indistinguishable from our default.
+            # Keep it estimated so it cannot arm playback completion.
             return False
         entry["duration"] = seconds
         entry["duration_estimated"] = False
@@ -48672,6 +48904,30 @@ class KaraokeApp(QWidget):
             f"#{request_id} {str(req.get('singer', '') or '').strip()} - "
             f"{str(req.get('artist', '') or '').strip()} / {str(req.get('title', '') or '').strip()}"
         ).strip()
+        diag_signature = (
+            str(status or ""),
+            str(match_result or ""),
+            str(queue_insert_result or ""),
+            str(failure_reason or ""),
+            str(req.get("singer") or ""),
+            str(req.get("artist") or ""),
+            str(req.get("title") or ""),
+            str(req.get("selected_version") or req.get("selected_brand") or req.get("selected_disc_id") or ""),
+        )
+        try:
+            cache = getattr(self, "_remote_request_diag_signatures", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._remote_request_diag_signatures = cache
+            if request_id > 0 and cache.get(request_id) == diag_signature:
+                return
+            if request_id > 0:
+                cache[request_id] = diag_signature
+                if len(cache) > 2048:
+                    for stale_id in list(cache)[:len(cache) - 2048]:
+                        cache.pop(stale_id, None)
+        except Exception:
+            pass
         try:
             if status in {"received", "processing", "pending"}:
                 self._last_request_received_summary = summary

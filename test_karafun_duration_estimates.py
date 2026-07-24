@@ -56,6 +56,15 @@ class KaraFunDurationEstimateTests(unittest.TestCase):
         self.assertFalse(estimated.get("duration_estimated", False))
         self.assertEqual(estimated["duration_source"], "karafun_result")
 
+        ambiguous_default = {
+            "duration": 210,
+            "duration_estimated": True,
+            "duration_source": "karafun_default_estimate",
+        }
+        self.assertFalse(app._apply_verified_duration(ambiguous_default, "3:30", source="karafun_result"))
+        self.assertTrue(ambiguous_default["duration_estimated"])
+        self.assertEqual(ambiguous_default["duration_source"], "karafun_default_estimate")
+
         manual = {"duration": 199, "duration_source": "manual_host"}
         self.assertFalse(app._apply_verified_duration(manual, "3:58", source="karafun_result"))
         self.assertEqual(manual["duration"], 199)

@@ -13,7 +13,7 @@
 #
 # Plain ./build_all.sh and ./build_universal.sh remain non-publishing test builds.
 set -euo pipefail
-cd /Users/daniel/Documents/SingWS
+cd "$(dirname "$0")"
 
 PY=".venv/bin/python"
 EXPLICIT_VERSION="${1:-}"

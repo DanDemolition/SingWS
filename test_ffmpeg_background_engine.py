@@ -196,6 +196,42 @@ class FfmpegBackgroundEngineTests(unittest.TestCase):
         audio = self._mix_seconds(engine, 0.05)
         self.assertEqual(float(np.max(np.abs(audio))), 0.0)
 
+    def test_master_fade_uses_smooth_curve(self):
+        engine = self._engine()
+        engine.load(str(self.tone_a), paused=False)
+        self.assertTrue(_wait_for_buffer(engine.primary))
+        engine.set_master_volume(1.0)
+        engine.slide_master_volume(0.0, 1000)
+        self._mix_seconds(engine, 0.25)
+        self.assertGreater(engine._master_current, 0.80)
+        self._mix_seconds(engine, 0.25)
+        self.assertAlmostEqual(engine._master_current, 0.5, delta=0.03)
+        self._mix_seconds(engine, 0.25)
+        self.assertLess(engine._master_current, 0.20)
+
+    def test_master_fade_waits_for_decoded_audio(self):
+        engine = self._engine()
+        engine.load(str(self.tone_a), paused=False)
+        engine.set_master_volume(0.0)
+        engine.slide_master_volume(1.0, 1000)
+        engine.primary.reader.stop()
+        with engine.primary.cond:
+            engine.primary.blocks.clear()
+            engine.primary.buffered_frames = 0
+        engine.mix_block(SAMPLE_RATE // 2)
+        self.assertEqual(engine._master_current, 0.0)
+        self.assertEqual(engine._master_ramp_frames, SAMPLE_RATE)
+
+    def test_fade_settle_delay_covers_qt_audio_buffer(self):
+        engine = self._engine()
+
+        class _Sink:
+            def bufferSize(self):
+                return int(SAMPLE_RATE * CHANNELS * 4 * 0.2)
+
+        engine.audio_sink = _Sink()
+        self.assertGreaterEqual(engine.fade_settle_delay_ms(), 220)
+
     def test_eq_and_master_processor_run_in_chain(self):
         engine = self._engine()
         eq = _DspStub(0.5)

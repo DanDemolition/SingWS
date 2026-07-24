@@ -1,7 +1,7 @@
 #!/bin/bash
 # Sequential build: arm64 (dev) + x86_64 (Intel test machine), each into its own DMG.
 set -euo pipefail
-cd /Users/daniel/Documents/SingWS
+cd "$(dirname "$0")"
 # Version is the single source of truth in APP_VERSION (entry script).
 VER="$(grep -E '^APP_VERSION' 0.2.18.1.py | sed -E 's/.*"([^"]+)".*/\1/')"
 UNIVERSAL_PY=".venv-universal/bin/python"

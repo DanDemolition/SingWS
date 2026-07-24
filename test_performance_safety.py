@@ -1,3 +1,4 @@
+import ast
 import pathlib
 import re
 import unittest
@@ -205,7 +206,58 @@ class PerformanceSafetyTests(unittest.TestCase):
         history_refresh = function_source("_schedule_singer_history_refresh")
         self.assertIn("owner_thread = self.thread()", history_refresh)
         self.assertIn("self._run_on_ui_thread(lambda: self._schedule_singer_history_refresh", history_refresh)
+        self.assertIn("_singer_history_refresh_deferred", history_refresh)
+        self.assertIn("timer.start(1000)", history_refresh)
+        history_build = function_source("_refresh_singer_history_view")
+        self.assertIn('if bool(getattr(self, "karaoke_playing", False)):', history_build)
+        history_apply = function_source("_on_singer_history_directory_built")
+        self.assertIn("worker_finished_during_playback", history_apply)
+        history_details = function_source("_update_singer_history_details")
+        self.assertIn("details_requested_during_playback", history_details)
+        history_songs_apply = function_source("_on_singer_history_songs_built")
+        self.assertIn("songs_worker_finished_during_playback", history_songs_apply)
         self.assertIn('if bool(getattr(self, "_app_closing", False)):', function_source("_dispatch_ui_call"))
+
+    def test_karaoke_start_does_not_predecode_entire_track(self):
+        source = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        delayed_start = ""
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_finish_delayed_start":
+                delayed_start = ast.get_source_segment(source, node) or ""
+                break
+        self.assertTrue(delayed_start)
+        self.assertNotIn("_start_full_decode", delayed_start)
+
+    def test_noop_server_sync_avoids_history_rebuild_and_repeat_request_diagnostics(self):
+        history_merge = function_source("_merge_remote_singer_history")
+        self.assertIn("if local_song != remote_song:", history_merge)
+        self.assertIn("if changed:", history_merge)
+        self.assertIn('self._schedule_singer_history_refresh(reason="remote_merge")', history_merge)
+        request_diag = function_source("_log_remote_request_diag")
+        self.assertIn("_remote_request_diag_signatures", request_diag)
+        self.assertIn("cache.get(request_id) == diag_signature", request_diag)
+        self.assertIn("len(cache) > 2048", request_diag)
+
+    def test_karaoke_level_meter_tracks_output_not_decoder_lookahead(self):
+        transport = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
+        feeder_start = transport.index("class _PcmFeeder")
+        feeder_end = transport.index("class PythonKaraokeTransport")
+        feeder = transport[feeder_start:feeder_end]
+        self.assertIn("t._accept_level(bytes(out))", feeder)
+        accept_start = transport.index("    def _accept_level")
+        accept_end = transport.index("    def _mark_decoder_done", accept_start)
+        accept = transport[accept_start:accept_end]
+        self.assertIn("if worker is not None:", accept)
+        self.assertIn("return", accept)
+
+    def test_ffmpeg_cdg_timing_restores_legacy_baseline(self):
+        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 600", MAIN_SOURCE)
+        effective = function_source("_effective_cdg_timing_offset_ms")
+        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS + fine_ms", effective)
+        start = function_source("_start_python_karaoke_transport")
+        self.assertIn("off = self._effective_cdg_timing_offset_ms()", start)
+        self.assertIn("ffmpeg_cdg_timing_migrated", MAIN_SOURCE)
 
     def test_deferred_remote_adds_save_off_thread_during_playback(self):
         source = function_source("_save_deferred_remote_adds")
@@ -423,6 +475,23 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("painter.setOpacity(fade_alpha)", paint)
         self.assertIn("_draw_background_pixmap(painter, previous)", paint)
 
+    def test_operator_preview_mirrors_audience_rendering_state(self):
+        self.assertIn("def _cdg_side_fill_color(image)", MAIN_SOURCE)
+        frame_handler = function_source("_on_python_karaoke_frame")
+        self.assertIn('cdg_display_mode == "sidefill"', frame_handler)
+        self.assertEqual(frame_handler.count("side_fill=side_fill"), 2)
+        preview_start = MAIN_SOURCE.index("class PreviewWindow(QWidget):")
+        preview_end = MAIN_SOURCE.index("class PerformanceWaveformWidget", preview_start)
+        preview = MAIN_SOURCE[preview_start:preview_end]
+        self.assertIn("self.video_area = VideoAreaWidget(self)", preview)
+        self.assertIn("def recreate_video_surface", preview)
+        idle = function_source("_show_idle_background_after_karaoke")
+        self.assertIn("self.preview_window.force_black = False", idle)
+        qr = function_source("_refresh_show_screen_qr")
+        self.assertIn("preview_area", qr)
+        overlay = function_source("_show_next_up_transition_overlay")
+        self.assertIn("preview_area.show_next_up_overlay", overlay)
+
     def test_volume_analysis_dialog_is_resurfaced_frontmost(self):
         analyze = function_source("analyze_library")
         self.assertIn("WindowStaysOnTopHint", analyze)
@@ -558,9 +627,12 @@ class PerformanceSafetyTests(unittest.TestCase):
         timer_tick = function_source("update_time_left")
         self.assertIn("crossfade_enabled = self._karaoke_bgm_crossfade_enabled()", timer_tick)
         self.assertIn("if (crossfade_enabled", timer_tick)
+        self.assertNotIn("silent_prefire", timer_tick)
         trim = function_source("_maybe_trim_end_silence")
         self.assertIn("self._karaoke_early_silence_trim_enabled()", trim)
-        self.assertIn("self._karaoke_bgm_crossfade_enabled()", trim)
+        self.assertNotIn("self._karaoke_bgm_crossfade_enabled()", trim)
+        self.assertNotIn("BG overlap fade-in started at trim", trim)
+        self.assertIn("and (not end_silence_triggered)", end_handler)
         fade = function_source("_start_bg_with_fade")
         self.assertIn('resume_reason == "karaoke_end_overlap" and self._karaoke_bgm_crossfade_enabled()', fade)
 
