@@ -9,6 +9,10 @@ if [[ -z "${SINGWS_DYLD_FRAMEWORK_PATH:-}" \
       && ! -f /Library/Frameworks/Python.framework/Versions/3.14/Python \
       && -f "$HOME/.singws-python314/Python.framework/Versions/3.14/Python" ]]; then
   SINGWS_DYLD_FRAMEWORK_PATH="$HOME/.singws-python314"
+  # PyInstaller resolves the Python shared library by basename via
+  # DYLD_LIBRARY_PATH, so point it at the directory holding the `Python` dylib
+  # or Analysis fails with "Python shared library was not found".
+  : "${SINGWS_DYLD_LIBRARY_PATH:=$HOME/.singws-python314/Python.framework/Versions/3.14}"
 fi
 if [[ -n "${SINGWS_DYLD_FRAMEWORK_PATH:-}" ]]; then
   export DYLD_FRAMEWORK_PATH="$SINGWS_DYLD_FRAMEWORK_PATH"
