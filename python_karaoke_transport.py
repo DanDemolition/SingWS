@@ -3,6 +3,7 @@ from __future__ import annotations
 from array import array
 from collections import OrderedDict, deque
 import json
+import logging
 import math
 from pathlib import Path
 import shutil
@@ -114,6 +115,28 @@ def _perf_log_if_slow(name: str, ms: float, threshold_ms: float = 50.0):
             print(f"[PERF] {name} took {float(ms):.0f}ms")
     except Exception:
         pass
+
+
+def _log(message: str) -> None:
+    """Print to the terminal *and* the SingWS log file.
+
+    This module otherwise uses bare print(), whose output never reaches
+    ~/SingWS/logs — which is why decode-path decisions were invisible when
+    reviewing a show afterwards. The app configures the root logger with a file
+    handler, so logging.info() lands in the same log as everything else.
+    """
+    print(message)
+    try:
+        logging.info(message)
+    except Exception:
+        pass
+
+
+# Decode-path decisions are per (codec, geometry, target fps), not per file, so
+# cache them for the process. Probing costs real time at song start and a show
+# plays many files that share a profile.
+_DECODE_PATH_CACHE: dict[tuple, tuple[bool, float]] = {}
+_DECODE_PATH_LOCK = threading.Lock()
 
 
 def _read_exact(stream, wanted: int) -> bytes:
@@ -565,6 +588,20 @@ class FfmpegVideoReader:
     # the frames reach Python cuts pipe throughput and per-frame QImage copy
     # cost by 4-9x for oversized sources, with no visible loss on a TV/projector.
     DEFAULT_MAX_HEIGHT = 720
+    # Frames decoded when timing a candidate decode path. One second of output
+    # is enough to separate a comfortable path from a marginal one without
+    # adding noticeable latency to the start of a song.
+    SPEED_PROBE_FRAMES = 30
+    # Real-time headroom a decode path must clear before expensive sources are
+    # left at full rate. Below this, decoding is technically keeping up but
+    # leaves too little CPU for Qt painting, window dragging and audio.
+    #
+    # Measured ratios include ffmpeg process startup inside a one-second probe,
+    # so they understate steady-state throughput (a file that sustains ~14x
+    # probes near ~4x). That bias is deliberate: it is applied equally to both
+    # candidates, and erring toward "downshift" only ever costs resolution on
+    # sources that are already the most expensive in the library.
+    MIN_COMFORTABLE_SPEED = 4.0
     # Frames buffered ahead.  90 frames of 1080p RGB is ~560 MB; 24 is plenty
     # for smooth pacing and keeps memory pressure low on constrained machines.
     MAX_BUFFERED_FRAMES = 24
@@ -604,6 +641,8 @@ class FfmpegVideoReader:
         # the worker thread (the probe spawns ffmpeg and must NOT block the GUI
         # thread that constructs this reader when a song starts).
         self.use_hwaccel = False
+        # Throughput of the chosen decode path, as a multiple of real time.
+        self.decode_speed_ratio = 0.0
         self.thread = threading.Thread(target=self._read_frames, daemon=True)
         self.thread.start()
 
@@ -630,57 +669,110 @@ class FfmpegVideoReader:
             chain.append(f"scale={self.width}:{self.height}:flags=bilinear")
         return ",".join(chain)
 
-    def _hwaccel_supported(self) -> bool:
-        if sys.platform != "darwin":
-            return False
-        # Mirror the real decode pipeline (hwaccel + filters + rgb24) for a
-        # couple of frames.  If that succeeds, full playback will too, so the
-        # reader can use hwaccel without risk of a mid-stream stall.
+    def _measure_decode_speed(self, use_hwaccel: bool) -> float:
+        """Time a short burst of the real decode pipeline.
+
+        Returns throughput as a multiple of real time (2.0 == twice as fast as
+        playback needs), or 0.0 when the path cannot decode at all.
+
+        Checking only that a path *works* is not enough: VideoToolbox can
+        initialize successfully and still be several times slower than software
+        decode, because this reader needs rgb24 frames in CPU memory and the
+        hardware path pays a GPU->CPU roundtrip for every one. The only reliable
+        way to choose is to time both candidates on the actual file.
+        """
         command = [
             _ffmpeg_path("ffmpeg"),
             "-hide_banner",
             "-loglevel",
             "error",
             "-nostdin",
-            "-hwaccel",
-            "videotoolbox",
-            "-i",
-            self.path,
-            "-map",
-            "0:v:0",
-            "-an",
-            "-sn",
-            "-dn",
-            "-vf",
-            self._video_filter(),
-            "-pix_fmt",
-            "rgb24",
-            "-frames:v",
-            "2",
-            "-f",
-            "null",
-            "-",
         ]
+        if use_hwaccel:
+            command.extend(["-hwaccel", "videotoolbox"])
+        else:
+            command.extend(["-threads", "2"])
+        command.extend(
+            [
+                "-i",
+                self.path,
+                "-map",
+                "0:v:0",
+                "-an",
+                "-sn",
+                "-dn",
+                "-vf",
+                self._video_filter(),
+                "-pix_fmt",
+                "rgb24",
+                "-frames:v",
+                str(self.SPEED_PROBE_FRAMES),
+                "-f",
+                "null",
+                "-",
+            ]
+        )
         try:
+            started = time.perf_counter()
             result = subprocess.run(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=8,
+                timeout=20,
             )
-            # FFmpeg can print a VideoToolbox initialization failure, silently
-            # fall back to its native software decoder, and still exit 0. That
-            # previously made expensive HEVC files look hardware accelerated.
-            errors = (result.stderr or b"").decode("utf-8", errors="replace").casefold()
-            fallback_markers = (
-                "hwaccel initialisation returned error",
-                "failed setup for format videotoolbox",
-                "videotoolbox decoder failed",
-            )
-            return result.returncode == 0 and not any(marker in errors for marker in fallback_markers)
+            elapsed = time.perf_counter() - started
         except Exception:
-            return False
+            return 0.0
+        if result.returncode != 0 or elapsed <= 0.0:
+            return 0.0
+        # FFmpeg can print a VideoToolbox initialization failure, silently fall
+        # back to its native software decoder, and still exit 0. Treat that as
+        # "no hardware path" so the comparison below is not measuring software
+        # decode twice.
+        errors = (result.stderr or b"").decode("utf-8", errors="replace").casefold()
+        fallback_markers = (
+            "hwaccel initialisation returned error",
+            "failed setup for format videotoolbox",
+            "videotoolbox decoder failed",
+        )
+        if use_hwaccel and any(marker in errors for marker in fallback_markers):
+            return 0.0
+        media_seconds = float(self.SPEED_PROBE_FRAMES) / max(1.0, float(self.fps))
+        return media_seconds / elapsed
+
+    def _choose_decode_path(self):
+        """Select the faster decode path and remember how much headroom it has."""
+        cache_key = (
+            self.codec_name,
+            self.src_width,
+            self.src_height,
+            round(float(self.source_fps), 1),
+            round(float(self.fps), 3),
+            int(self.max_height),
+        )
+        with _DECODE_PATH_LOCK:
+            cached = _DECODE_PATH_CACHE.get(cache_key)
+        if cached is not None:
+            self.use_hwaccel, self.decode_speed_ratio = cached
+            self._hwaccel_checked = True
+            return
+        software = self._measure_decode_speed(False)
+        hardware = self._measure_decode_speed(True) if sys.platform == "darwin" else 0.0
+        # Prefer software unless hardware is genuinely faster; a tie should not
+        # buy the GPU roundtrip.
+        self.use_hwaccel = hardware > software
+        self.decode_speed_ratio = hardware if self.use_hwaccel else software
+        self._hwaccel_checked = True
+        with _DECODE_PATH_LOCK:
+            _DECODE_PATH_CACHE[cache_key] = (self.use_hwaccel, self.decode_speed_ratio)
+        _log(
+            f"[FFMPEG] decode_path chose={'videotoolbox' if self.use_hwaccel else 'software'} "
+            f"software={software:.1f}x hardware={hardware:.1f}x "
+            f"codec={self.codec_name or 'unknown'} "
+            f"src={self.src_width}x{self.src_height}@{self.source_fps:.0f} "
+            f"path={Path(self.path).name}"
+        )
 
     def stop(self):
         self.stop_event.set()
@@ -740,6 +832,7 @@ class FfmpegVideoReader:
             "decoder": "ffmpeg/rawvideo",
             "hardware_acceleration": "videotoolbox" if self.use_hwaccel else "none",
             "hardware_acceleration_checked": bool(self._hwaccel_checked),
+            "decode_speed_ratio": round(float(self.decode_speed_ratio), 2),
             "source_size": f"{self.src_width}x{self.src_height}" if self.src_width and self.src_height else "",
             "source_codec": self.codec_name,
             "source_fps": float(self.source_fps),
@@ -803,14 +896,19 @@ class FfmpegVideoReader:
         # Decide hwaccel here (on this worker thread) so the probe never blocks
         # the GUI thread that created the reader.
         if not self.stop_event.is_set():
-            self.use_hwaccel = self._hwaccel_supported()
-            self._hwaccel_checked = True
-        # 1080p60 HEVC is disproportionately expensive on Macs where
-        # VideoToolbox cannot initialize. Karaoke lyrics do not benefit from
-        # 60 fps, so keep the software path comfortably real-time and leave CPU
-        # headroom for Qt painting, window dragging, and audio processing.
+            self._choose_decode_path()
+        # 1080p60 HEVC is disproportionately expensive to turn into rgb24.
+        # Karaoke lyrics do not benefit from 60 fps, so when the chosen path
+        # lacks comfortable real-time headroom, downshift to leave CPU for Qt
+        # painting, window dragging, and audio processing.
+        #
+        # This is deliberately keyed on *measured* headroom rather than on
+        # "hardware decode unavailable". VideoToolbox can initialize and still
+        # be far slower than software decode, and gating on availability meant
+        # the most expensive files in the library got the slow path and no
+        # mitigation at the same time.
         if (
-            not self.use_hwaccel
+            self.decode_speed_ratio < self.MIN_COMFORTABLE_SPEED
             and self.codec_name in {"hevc", "h265"}
             and self.source_fps > 45.0
         ):
@@ -859,10 +957,11 @@ class FfmpegVideoReader:
         )
         frame_bytes = self.width * self.height * 3
         try:
-            print(
+            _log(
                 f"[FFMPEG] video_decode start hwaccel={'videotoolbox' if self.use_hwaccel else 'none'} "
                 f"codec={self.codec_name or 'unknown'} source_fps={self.source_fps:.3f} "
                 f"output_fps={self.fps:.3f} size={self.width}x{self.height} "
+                f"speed={self.decode_speed_ratio:.1f}x "
                 f"software_profile={self.software_decode_profile} path={Path(self.path).name}"
             )
             self.process = subprocess.Popen(

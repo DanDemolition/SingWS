@@ -749,9 +749,40 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('"hwaccel initialisation returned error"', TRANSPORT_SOURCE)
         self.assertIn('"failed setup for format videotoolbox"', TRANSPORT_SOURCE)
         self.assertIn(
-            "result.returncode == 0 and not any(marker in errors",
+            "if use_hwaccel and any(marker in errors for marker in fallback_markers)",
             TRANSPORT_SOURCE,
         )
+
+    def test_decode_path_is_chosen_by_measured_throughput(self):
+        # VideoToolbox can initialize and still be several times slower than
+        # software decode, because rgb24 output forces a GPU->CPU roundtrip.
+        # Choosing on availability alone put playback on the slow path.
+        self.assertIn("def _measure_decode_speed", TRANSPORT_SOURCE)
+        self.assertIn("media_seconds / elapsed", TRANSPORT_SOURCE)
+        choose = TRANSPORT_SOURCE[TRANSPORT_SOURCE.index("def _choose_decode_path"):]
+        choose = choose[:choose.index("\n    def ")]
+        self.assertIn("software = self._measure_decode_speed(False)", choose)
+        self.assertIn("self.use_hwaccel = hardware > software", choose)
+        # The decision must be cached; probing twice per song is expensive.
+        self.assertIn("_DECODE_PATH_CACHE", choose)
+
+    def test_expensive_source_downshift_uses_measured_headroom(self):
+        # Previously gated on "not self.use_hwaccel", so a slow-but-working
+        # hardware path skipped the mitigation entirely.
+        self.assertIn(
+            "self.decode_speed_ratio < self.MIN_COMFORTABLE_SPEED",
+            TRANSPORT_SOURCE,
+        )
+        self.assertNotIn(
+            "not self.use_hwaccel\n            and self.codec_name",
+            TRANSPORT_SOURCE,
+        )
+
+    def test_decode_diagnostics_reach_the_log_file(self):
+        # Bare print() never reaches ~/SingWS/logs, which hid the decode path.
+        self.assertIn("def _log(message: str)", TRANSPORT_SOURCE)
+        self.assertIn("logging.info(message)", TRANSPORT_SOURCE)
+        self.assertIn("_log(\n                f\"[FFMPEG] video_decode start", TRANSPORT_SOURCE)
 
     def test_singer_history_edits_use_debounced_save_path(self):
         source = function_source("_commit_singer_history_change")
