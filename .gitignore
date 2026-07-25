@@ -8,7 +8,9 @@ __pycache__/
 # Local environment and secrets
 .env
 venv/
-.venv/
+# No trailing slash: .venv may be a symlink to .venv-universal when the system
+# Python framework is unavailable, and "\.venv/" would not match a symlink.
+.venv
 .venv-test/
 .venv-test-brew/
 .venv-universal/

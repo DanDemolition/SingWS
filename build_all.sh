@@ -2,6 +2,14 @@
 # Sequential build: arm64 (dev) + x86_64 (Intel test machine), each into its own DMG.
 set -euo pipefail
 cd "$(dirname "$0")"
+# The build venvs link against the system Python 3.14 framework. If that install
+# is missing, fall back to the local copy under ~/.singws-python314 so a plain
+# ./build_all.sh still works. An explicit SINGWS_DYLD_FRAMEWORK_PATH always wins.
+if [[ -z "${SINGWS_DYLD_FRAMEWORK_PATH:-}" \
+      && ! -f /Library/Frameworks/Python.framework/Versions/3.14/Python \
+      && -f "$HOME/.singws-python314/Python.framework/Versions/3.14/Python" ]]; then
+  SINGWS_DYLD_FRAMEWORK_PATH="$HOME/.singws-python314"
+fi
 if [[ -n "${SINGWS_DYLD_FRAMEWORK_PATH:-}" ]]; then
   export DYLD_FRAMEWORK_PATH="$SINGWS_DYLD_FRAMEWORK_PATH"
 fi

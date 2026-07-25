@@ -14,6 +14,13 @@
 # Plain ./build_all.sh and ./build_universal.sh remain non-publishing test builds.
 set -euo pipefail
 cd "$(dirname "$0")"
+# See build_all.sh: fall back to ~/.singws-python314 when the system Python 3.14
+# framework is absent. An explicit SINGWS_DYLD_FRAMEWORK_PATH always wins.
+if [[ -z "${SINGWS_DYLD_FRAMEWORK_PATH:-}" \
+      && ! -f /Library/Frameworks/Python.framework/Versions/3.14/Python \
+      && -f "$HOME/.singws-python314/Python.framework/Versions/3.14/Python" ]]; then
+  SINGWS_DYLD_FRAMEWORK_PATH="$HOME/.singws-python314"
+fi
 if [[ -n "${SINGWS_DYLD_FRAMEWORK_PATH:-}" ]]; then
   export DYLD_FRAMEWORK_PATH="$SINGWS_DYLD_FRAMEWORK_PATH"
 fi

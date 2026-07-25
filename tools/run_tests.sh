@@ -20,9 +20,20 @@ if [[ -z "$PYTHON" ]]; then
     exit 1
 fi
 
-# Only fall back to the extracted-payload shim when the chosen interpreter
-# cannot start on its own (i.e. it needs the deleted system framework).
-FRAMEWORK_VERSION_DIR="${SINGWS_PYTHON_FRAMEWORK_VERSION_DIR:-/private/tmp/python314-expanded/Python_Framework.pkg/Payload/Versions/3.14}"
+# Only fall back to a framework shim when the chosen interpreter cannot start on
+# its own (i.e. it needs the deleted system framework). Prefer the durable copy
+# under ~/.singws-python314 over an extracted payload in /tmp, which macOS purges.
+FRAMEWORK_VERSION_DIR="${SINGWS_PYTHON_FRAMEWORK_VERSION_DIR:-}"
+if [[ -z "$FRAMEWORK_VERSION_DIR" ]]; then
+    for candidate in \
+        "$HOME/.singws-python314/Python.framework/Versions/3.14" \
+        "/private/tmp/python314-expanded/Python_Framework.pkg/Payload/Versions/3.14"; do
+        if [[ -f "$candidate/Python" ]]; then
+            FRAMEWORK_VERSION_DIR="$candidate"
+            break
+        fi
+    done
+fi
 if ! "$PYTHON" --version >/dev/null 2>&1; then
     if [[ ! -f "$FRAMEWORK_VERSION_DIR/Python" ]]; then
         echo "Python 3.14 framework is unavailable and $PYTHON cannot start." >&2
