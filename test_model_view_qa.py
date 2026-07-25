@@ -144,6 +144,12 @@ class ModelBackedViewQATests(unittest.TestCase):
         module = self.singws
         app = self.make_app()
         app.singer_history_page = app._build_singer_history_page()
+        # The view only rebuilds while History is the visible workspace page.
+        # Without a stack the refresh hits its own except/return and silently
+        # does nothing, so anything "timed" here would just be the wait below.
+        app.left_workspace_stack = SimpleNamespace(
+            currentWidget=lambda: app.singer_history_page
+        )
         long_name = "Alexandria Cassandra Montgomery-Silverstone With An Extremely Long Stage Name"
         long_title = "A Very Long Karaoke Song Title That Needs To Wrap Cleanly In The History Details Pane"
         app.singer_history = {
@@ -171,13 +177,20 @@ class ModelBackedViewQATests(unittest.TestCase):
             }
         }
 
+        # Rebuilds are deferred while a song plays; that deferral is the fix for
+        # the 650-1160ms stalls seen at every song stop, so assert it holds.
         app.karaoke_playing = True
+        app._refresh_singer_history_view()
+        module.QApplication.processEvents()
+        self.assertEqual(app.singer_history_singer_model.rowCount(), 0)
+
+        app.karaoke_playing = False
         started = time.perf_counter()
         app._refresh_singer_history_view()
         deadline = time.time() + 2.0
         while time.time() < deadline:
             module.QApplication.processEvents()
-            if app.singer_history_singer_model.rowCount() >= 221 and app.singer_history_songs_model.rowCount() > 0:
+            if app.singer_history_singer_model.rowCount() >= 260 and app.singer_history_songs_model.rowCount() > 0:
                 break
             time.sleep(0.01)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -187,7 +200,7 @@ class ModelBackedViewQATests(unittest.TestCase):
         self.assertIsInstance(app.singer_history_songs_list, module.QListView)
         self.assertEqual(app.singer_history_singer_list.horizontalScrollBarPolicy(), module.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.assertEqual(app.singer_history_songs_list.horizontalScrollBarPolicy(), module.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.assertEqual(app.singer_history_singer_model.rowCount(), 221)
+        self.assertEqual(app.singer_history_singer_model.rowCount(), 260)
         self.assertGreater(app.singer_history_songs_model.rowCount(), 0)
         self.assertTrue(app._selected_singer_history_key())
         self.assertTrue(app._selected_singer_history_song_key())

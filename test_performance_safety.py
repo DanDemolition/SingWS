@@ -784,6 +784,11 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("logging.info(message)", TRANSPORT_SOURCE)
         self.assertIn("_log(\n                f\"[FFMPEG] video_decode start", TRANSPORT_SOURCE)
 
+    def test_singer_history_render_is_capped_harder_during_playback(self):
+        refresh = function_source("_refresh_singer_history_view")
+        self.assertIn("render_limit = 220 if playing else 700", refresh)
+        self.assertIn("song_scan_limit = 120 if playing else 500", refresh)
+
     def test_singer_history_edits_use_debounced_save_path(self):
         source = function_source("_commit_singer_history_change")
         self.assertIn("_schedule_save_data", source)
