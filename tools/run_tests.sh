@@ -4,19 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Prefer a self-contained interpreter. .venv-test-brew is built from a real
-# Homebrew python@3.14 install, so Qt can resolve its platform plugins and the
-# GUI suites run. The older environments hang off an extracted framework
-# payload, where Qt finds zero valid platform plugins and every GUI test aborts.
+# Prefer an interpreter backed by a real Python 3.14 install. Qt resolves its
+# platform plugins relative to the interpreter, and a venv hanging off an
+# extracted .pkg payload makes it find zero valid plugins -- every GUI test then
+# aborts, intermittently and with correct-looking library paths.
 PYTHON=""
-for candidate in "$ROOT/.venv-test-brew" "$ROOT/.venv-test" "$ROOT/.venv-universal"; do
+for candidate in "$ROOT/.venv-test" "$ROOT/.venv-test-brew" "$ROOT/.venv-universal"; do
     if [[ -x "$candidate/bin/python" ]]; then
         PYTHON="$candidate/bin/python"
         break
     fi
 done
 if [[ -z "$PYTHON" ]]; then
-    echo "Missing test environment: create .venv-test-brew from python@3.14" >&2
+    echo "Missing test environment: python3.14 -m venv .venv-test" >&2
     exit 1
 fi
 
