@@ -106,6 +106,14 @@ class PerformanceSafetyTests(unittest.TestCase):
         recovery = function_source("_network_recovery_tick")
         self.assertIn("_diag_rate_limited(", recovery)
 
+    def test_queue_state_diagnostics_are_rate_limited(self):
+        # _update_last_sung_card runs on every queue-display refresh, so an
+        # unthrottled [QUEUE-STATE] line floods the log during a show.
+        card = function_source("_update_last_sung_card")
+        self.assertIn("[QUEUE-STATE]", card)
+        self.assertIn("_diag_rate_limited(", card)
+        self.assertNotIn('_diag(f"[QUEUE-STATE]', card)
+
     def test_logging_setup_does_not_duplicate_handlers(self):
         source = MAIN_SOURCE[MAIN_SOURCE.index("def setup_logging"):MAIN_SOURCE.index("# Initialize logging")]
         self.assertIn("_singws_file_handler", source)

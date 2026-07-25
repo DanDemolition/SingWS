@@ -35425,8 +35425,14 @@ class KaraokeApp(QWidget):
                 cur_key = self._current_play_item_key()
                 next_key = self._entry_play_item_key(next_entry, self._first_active_entry_for_singer(next_entry)) if isinstance(next_entry, dict) else ("", "")
                 same_item = (cur_key == next_key and cur_key != ("", ""))
-                _diag(f"[QUEUE-STATE] last={last!r} current={self._current_play_item_key()} "
-                      f"next_singer={nxt!r} next_item={next_key} same_item={same_item}")
+                # This runs on every queue-display refresh, so repeat the same
+                # state at most once a minute; a genuine change keys differently
+                # and still logs immediately.
+                queue_state_msg = (
+                    f"[QUEUE-STATE] last={last!r} current={cur_key} "
+                    f"next_singer={nxt!r} next_item={next_key} same_item={same_item}"
+                )
+                _diag_rate_limited(f"queue_state:{queue_state_msg}", queue_state_msg, 60.0)
             except Exception:
                 pass
             self.last_sung_label.setStyleSheet(getattr(self, "_last_sung_card_css", ""))
