@@ -578,6 +578,9 @@ class FfmpegVideoReader:
         self.stop_event = threading.Event()
         self.process = None
         self.src_width, self.src_height = 0, 0
+        self.codec_name = ""
+        self.source_fps = 0.0
+        self.software_decode_profile = False
         # max_height: None -> default cap; <=0 -> native (no downscale).
         if max_height is None:
             self.max_height = self.DEFAULT_MAX_HEIGHT
@@ -663,10 +666,19 @@ class FfmpegVideoReader:
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 timeout=8,
             )
-            return result.returncode == 0
+            # FFmpeg can print a VideoToolbox initialization failure, silently
+            # fall back to its native software decoder, and still exit 0. That
+            # previously made expensive HEVC files look hardware accelerated.
+            errors = (result.stderr or b"").decode("utf-8", errors="replace").casefold()
+            fallback_markers = (
+                "hwaccel initialisation returned error",
+                "failed setup for format videotoolbox",
+                "videotoolbox decoder failed",
+            )
+            return result.returncode == 0 and not any(marker in errors for marker in fallback_markers)
         except Exception:
             return False
 
@@ -729,8 +741,11 @@ class FfmpegVideoReader:
             "hardware_acceleration": "videotoolbox" if self.use_hwaccel else "none",
             "hardware_acceleration_checked": bool(self._hwaccel_checked),
             "source_size": f"{self.src_width}x{self.src_height}" if self.src_width and self.src_height else "",
+            "source_codec": self.codec_name,
+            "source_fps": float(self.source_fps),
             "output_size": f"{self.width}x{self.height}" if self.width and self.height else "",
             "fps": float(self.fps),
+            "software_decode_profile": bool(self.software_decode_profile),
             "delivered_fps": float(self.frames_delivered) / elapsed,
             "queue_size": self.queue_size(),
             "decoded_frames": int(self.frames_decoded),
@@ -748,7 +763,7 @@ class FfmpegVideoReader:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=width,height,codec_name,avg_frame_rate,r_frame_rate",
             "-of",
             "json",
             self.path,
@@ -760,6 +775,17 @@ class FfmpegVideoReader:
             raise RuntimeError("video stream not found")
         width = int(streams[0].get("width") or 0)
         height = int(streams[0].get("height") or 0)
+        self.codec_name = str(streams[0].get("codec_name") or "").casefold()
+        rate_text = str(
+            streams[0].get("avg_frame_rate")
+            or streams[0].get("r_frame_rate")
+            or "0/1"
+        )
+        try:
+            numerator, denominator = rate_text.split("/", 1)
+            self.source_fps = float(numerator) / max(1.0, float(denominator))
+        except (TypeError, ValueError, ZeroDivisionError):
+            self.source_fps = 0.0
         if width <= 0 or height <= 0:
             raise RuntimeError("video stream dimensions are invalid")
         return width, height
@@ -779,6 +805,23 @@ class FfmpegVideoReader:
         if not self.stop_event.is_set():
             self.use_hwaccel = self._hwaccel_supported()
             self._hwaccel_checked = True
+        # 1080p60 HEVC is disproportionately expensive on Macs where
+        # VideoToolbox cannot initialize. Karaoke lyrics do not benefit from
+        # 60 fps, so keep the software path comfortably real-time and leave CPU
+        # headroom for Qt painting, window dragging, and audio processing.
+        if (
+            not self.use_hwaccel
+            and self.codec_name in {"hevc", "h265"}
+            and self.source_fps > 45.0
+        ):
+            self.software_decode_profile = True
+            self.fps = min(self.fps, 24.0)
+            adaptive_height = 540
+            if self.max_height > 0:
+                adaptive_height = min(adaptive_height, self.max_height)
+            self.width, self.height = self._compute_output_size(
+                self.src_width, self.src_height, adaptive_height
+            )
         command = [
             _ffmpeg_path("ffmpeg"),
             "-hide_banner",
@@ -788,6 +831,10 @@ class FfmpegVideoReader:
         ]
         if self.use_hwaccel:
             command.extend(["-hwaccel", "videotoolbox"])
+        else:
+            # Native HEVC decoding otherwise fans out across every CPU core,
+            # which makes the host UI hitch even though decoding stays ahead.
+            command.extend(["-threads", "2"])
         # -ss before -i (input seek) is fast and accurate enough here; with
         # hwaccel it also seeks on the GPU-decoded stream.
         if self.start_seconds > 0.0:
@@ -814,7 +861,9 @@ class FfmpegVideoReader:
         try:
             print(
                 f"[FFMPEG] video_decode start hwaccel={'videotoolbox' if self.use_hwaccel else 'none'} "
-                f"size={self.width}x{self.height} path={Path(self.path).name}"
+                f"codec={self.codec_name or 'unknown'} source_fps={self.source_fps:.3f} "
+                f"output_fps={self.fps:.3f} size={self.width}x{self.height} "
+                f"software_profile={self.software_decode_profile} path={Path(self.path).name}"
             )
             self.process = subprocess.Popen(
                 command,

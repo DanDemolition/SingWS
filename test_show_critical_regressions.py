@@ -200,6 +200,24 @@ class ShowCriticalRegressionTests(unittest.TestCase):
             0,
         )
 
+    def test_reconnected_same_name_reuses_existing_rotation_row(self):
+        app = self.bare_app()
+        app.queue = [{
+            "name": "Harry",
+            "singer_id": "local-1",
+            "server_singer_id": "old-browser-session",
+            "server_singer_session_id": 812,
+            "songs": [],
+        }]
+
+        self.assertEqual(
+            app._queue_singer_match_index(
+                " Harry ",
+                {"singer_id": "new-browser-session", "singer_session_id": 913},
+            ),
+            0,
+        )
+
     def test_rotation_advance_handles_large_rotation_and_multiple_songs(self):
         app = self.bare_app()
         app.queue = [
@@ -575,6 +593,22 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         self.assertIn("/karafun_search.php", source)
         self.assertIn("karafun_tenant=", source)
         self.assertIn("KaraFun result is unavailable", source)
+
+    def test_legacy_waitlist_karafun_version_is_treated_as_external_link(self):
+        detect = self.singws.KaraokeApp._remote_request_is_karafun
+        self.assertTrue(detect({"selected_version": "KaraFun"}))
+        self.assertTrue(detect({"selected_brand": "KaraFun Online"}))
+        self.assertTrue(detect({"selected_source": "karafun"}))
+        self.assertFalse(detect({"selected_version": "Sound Choice"}))
+
+        prepare = inspect.getsource(self.singws.KaraokeApp._prepare_remote_request_add_payload)
+        self.assertIn("provider_url=provider_url", prepare)
+        self.assertIn("is_karafun = self._remote_request_is_karafun(req)", prepare)
+        process = inspect.getsource(self.singws.KaraokeApp.process_external_request)
+        self.assertIn(
+            "if _sig in _failed_sigs and not self._remote_request_is_karafun(req):",
+            process,
+        )
 
     def test_waitlist_state_is_reconciled_even_when_locally_disabled(self):
         source = inspect.getsource(self.singws.KaraokeApp._reconcile_remote_requests)

@@ -346,6 +346,17 @@ class ShowScreenQrGatingTests(unittest.TestCase):
         app._refresh_show_screen_qr("third", force=True)
         self.assertEqual(len(area.calls), 2)
 
+    def test_host_preview_is_cleared_and_never_receives_qr(self):
+        app, area = self.make_app(enabled=True, accepting=True)
+        preview_area = self._StubArea()
+        app.preview_window = self._StubVideoWindow(preview_area)
+
+        app._refresh_show_screen_qr("test")
+
+        self.assertEqual(len(area.calls), 1)
+        self.assertIsNotNone(area.calls[-1])
+        self.assertEqual(preview_area.calls, [None])
+
 
 if __name__ == "__main__":
     unittest.main()

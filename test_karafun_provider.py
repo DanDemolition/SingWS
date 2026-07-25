@@ -404,8 +404,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("def _build_karafun_streaming_track", source)
         prepare = source[source.index("def _prepare_remote_request_add_payload"):]
         prepare = prepare[:prepare.index("def _apply_resolved_remote_add")]
-        self.assertIn('selected_source in {"karafun", "karafun_streaming", "external_karafun"}', prepare)
-        self.assertIn('provider_track_id.lower().startswith("kf_")', prepare)
+        self.assertIn("is_karafun = self._remote_request_is_karafun(req)", prepare)
         self.assertIn("self._build_karafun_streaming_track(", prepare)
         self.assertIn('"song_data": (track["path"], key, tempo_percent)', prepare)
         self.assertIn("local_mp4_matches", prepare)

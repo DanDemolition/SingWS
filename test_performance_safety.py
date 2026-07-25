@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication
 
 
 MAIN_SOURCE = pathlib.Path("0.2.18.1.py").read_text(encoding="utf-8")
+TRANSPORT_SOURCE = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
 
 
 def function_source(name: str) -> str:
@@ -534,6 +535,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("self.preview_window.force_black = False", idle)
         qr = function_source("_refresh_show_screen_qr")
         self.assertIn("preview_area", qr)
+        self.assertIn("preview_area.set_request_qr(None)", qr)
+        self.assertIn("for candidate in (area,)", qr)
         overlay = function_source("_show_next_up_transition_overlay")
         self.assertIn("preview_area.show_next_up_overlay", overlay)
 
@@ -658,6 +661,19 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("old_overlay.setParent(new_area)", recreate)
         self.assertIn("new_area.set_show_vfx_overlay(old_overlay)", recreate)
 
+    def test_fallback_transition_timeout_is_owned_by_video_area(self):
+        start = MAIN_SOURCE.index("class VideoAreaWidget")
+        end = MAIN_SOURCE.index("class MusicDatabaseWidget", start)
+        video_area = MAIN_SOURCE[start:end]
+        self.assertIn("self._fallback_transition_timer = QTimer(self)", video_area)
+        self.assertIn(
+            "self._fallback_transition_timer.timeout.connect(self._clear_fallback_transition)",
+            video_area,
+        )
+        fallback = function_source("_show_fallback_transition")
+        self.assertIn("self._fallback_transition_timer.start(", fallback)
+        self.assertNotIn("QTimer.singleShot", fallback)
+
     def test_removed_slow_computer_settings_are_migrated(self):
         source = MAIN_SOURCE
         self.assertNotIn('"performance_mode": False', source)
@@ -681,10 +697,68 @@ class PerformanceSafetyTests(unittest.TestCase):
         fade = function_source("_start_bg_with_fade")
         self.assertIn('resume_reason == "karaoke_end_overlap" and self._karaoke_bgm_crossfade_enabled()', fade)
 
+    def test_trailing_silence_uses_shorter_safe_handoff_threshold(self):
+        self.assertIn('"end_silence_trim_threshold_sec": 2.5', MAIN_SOURCE)
+        self.assertIn("self._end_silence_min_s = 2.5", MAIN_SOURCE)
+        self.assertIn("old_threshold in (5.0, 6.0)", MAIN_SOURCE)
+        self.assertIn('self.settings["end_silence_trim_threshold_sec"] = 2.5', MAIN_SOURCE)
+        trim = function_source("_maybe_trim_end_silence")
+        self.assertIn("cdg_lyrics_finished", trim)
+        self.assertIn("near_end", trim)
+
+    def test_high_frame_rate_hevc_uses_bounded_software_decode_profile(self):
+        self.assertIn('self.codec_name in {"hevc", "h265"}', TRANSPORT_SOURCE)
+        self.assertIn("self.source_fps > 45.0", TRANSPORT_SOURCE)
+        self.assertIn("self.fps = min(self.fps, 24.0)", TRANSPORT_SOURCE)
+        self.assertIn("adaptive_height = 540", TRANSPORT_SOURCE)
+        self.assertIn('command.extend(["-threads", "2"])', TRANSPORT_SOURCE)
+
+    def test_videotoolbox_probe_rejects_silent_software_fallback(self):
+        self.assertIn('"hwaccel initialisation returned error"', TRANSPORT_SOURCE)
+        self.assertIn('"failed setup for format videotoolbox"', TRANSPORT_SOURCE)
+        self.assertIn(
+            "result.returncode == 0 and not any(marker in errors",
+            TRANSPORT_SOURCE,
+        )
+
     def test_singer_history_edits_use_debounced_save_path(self):
         source = function_source("_commit_singer_history_change")
         self.assertIn("_schedule_save_data", source)
         self.assertNotIn("self.save_data()", source)
+
+    def test_hidden_singer_history_does_not_rebuild_models(self):
+        schedule = function_source("_schedule_singer_history_refresh")
+        self.assertIn("stack.currentWidget() is history_page", schedule)
+        self.assertIn("_singer_history_refresh_hidden_deferred = True", schedule)
+        self.assertIn("timer.stop()", schedule)
+        refresh = function_source("_refresh_singer_history_view")
+        self.assertIn(
+            "self.left_workspace_stack.currentWidget() is not self.singer_history_page",
+            refresh,
+        )
+        switch = function_source("_set_left_workspace_view")
+        self.assertLess(
+            switch.index("self.left_workspace_stack.setCurrentWidget(self.singer_history_page)"),
+            switch.index('self._schedule_singer_history_refresh(reason="tab_switch")'),
+        )
+
+    def test_remote_reconcile_collapses_duplicate_singer_rows(self):
+        reconcile = function_source("_reconcile_remote_requests")
+        self.assertIn(
+            '_merge_duplicate_rotation_singers(reason="remote_reconcile_start")',
+            reconcile,
+        )
+        self.assertIn(
+            '_merge_duplicate_rotation_singers(reason="remote_reconcile_finish")',
+            reconcile,
+        )
+
+    def test_queue_insert_reuses_same_display_name_across_server_sessions(self):
+        match = function_source("_queue_singer_match_index")
+        self.assertIn("display-name identity collision reused existing row", match)
+        self.assertNotIn("existing_server_id != singer_id:\n                    continue", match)
+        add = function_source("_add_song_to_queue")
+        self.assertIn("preserved existing row identity while attaching request", add)
 
     def test_queue_uses_model_backed_view_with_identity_roles(self):
         self.assertIn("class QueueListModel(QAbstractListModel)", MAIN_SOURCE)

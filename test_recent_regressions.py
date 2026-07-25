@@ -120,6 +120,27 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual([row["rotation_position"] for row in rotation], [1, 2])
         self.assertTrue(all(row["active"] for row in rotation))
 
+    def test_server_rotation_uses_karafun_song_title_not_provider_id(self):
+        app = make_app(self.singws)
+        entry = {
+            "song_info": "karafun_streaming:kf_7271",
+            "path": "karafun_streaming:kf_7271",
+            "provider": "karafun_streaming",
+            "provider_track_id": "kf_7271",
+            "artist": "Bruno Mars",
+            "title": "Risk It All",
+            "display_name": "Bruno Mars - Risk It All - KaraFun",
+            "skipped": False,
+        }
+        app.queue = [{"name": "Daniel", "songs": [entry]}]
+        app._first_active_entry_for_singer = lambda singer: singer["songs"][0]
+        app._queue_singer_display_for_entry = lambda singer, _entry: singer["name"]
+
+        rotation = app.get_rotation_data()["rotation"]
+
+        self.assertEqual(rotation[0]["songs"], ["Bruno Mars • Risk It All"])
+        self.assertNotIn("kf_7271", rotation[0]["songs"][0])
+
     def test_host_rotation_state_empty_defaults(self):
         app = make_app(self.singws)
         state = app._host_control_state()
@@ -299,6 +320,21 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertTrue(app._mark_next_up_overlay_pending_after_completion(reason="test_end_duplicate"))
         self.assertEqual(len(calls), 2)
         self.assertNotIn("next", [call[0] for call in calls])
+
+    def test_karafun_outro_uses_active_metadata_not_synthetic_path(self):
+        app = make_app(self.singws)
+        app._current_karaoke_singer_display = "Daniel"
+        app._current_karaoke_song_path = "karafun_streaming:kf_7271"
+        app._current_karaoke_artist = "Bruno Mars"
+        app._current_karaoke_title = "Risk It All"
+
+        payload = app._song_outro_payload_from_current()
+
+        self.assertEqual(payload, {
+            "singer": "Daniel",
+            "artist": "Bruno Mars",
+            "title": "Risk It All",
+        })
 
     def test_song_outro_does_not_require_a_next_singer(self):
         app = make_app(self.singws)

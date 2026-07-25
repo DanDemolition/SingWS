@@ -300,6 +300,23 @@ class RenameMergeTests(unittest.TestCase):
         self.assertEqual(titles_of(app.queue[0]), ["A", "B", "C"])
         self.assertEqual(app._merge_duplicate_rotation_singers(reason="again"), 0)
 
+    def test_live_duplicate_singer_with_same_request_keeps_one_song(self):
+        """A reconnect must not render one immutable request under two equal
+        singer rows; deleting either visible copy would otherwise remove both."""
+        app = self._app()
+        first = singer("Harry", [])
+        duplicate = singer(" Harry ", [])
+        first["songs"] = [song("Scarborough Fair", rid=1572)]
+        duplicate["songs"] = [song("Scarborough Fair", rid=1572)]
+        app.queue = [first, singer("Grace", ["Other"]), duplicate]
+
+        merged = app._merge_duplicate_rotation_singers(reason="remote_reconcile")
+
+        self.assertEqual(merged, 1)
+        self.assertEqual([s["name"] for s in app.queue], ["Harry", "Grace"])
+        self.assertEqual(titles_of(app.queue[0]), ["Scarborough Fair"])
+        self.assertEqual(app.queue[0]["songs"][0]["remote_request_id"], 1572)
+
     def test_concurrent_rename_race_converges(self):
         """Two 'clients' rename the same singer: the second rename applies on
         top of the merged state without creating any duplicate."""
