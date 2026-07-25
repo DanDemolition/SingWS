@@ -81,6 +81,30 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("[PLAYBACK-WORKERS]", diag)
         self.assertIn("loudness_inflight", diag)
         self.assertIn("lead_silence_prescan", diag)
+        self.assertIn("now - last < 60.0", diag)
+        self.assertIn("_active_worker_log_last_signature", diag)
+
+    def test_memory_telemetry_is_periodic_and_growth_sensitive(self):
+        start = function_source("_start_memory_telemetry")
+        self.assertIn("timer.start(5 * 60 * 1000)", start)
+        self.assertIn("timer.timeout.connect(self._log_memory_telemetry)", start)
+        telemetry = function_source("_log_memory_telemetry")
+        self.assertIn("psutil.Process(os.getpid()).memory_info().rss", telemetry)
+        self.assertIn("growth_mb >= 128.0", telemetry)
+        self.assertIn("30 * 60", telemetry)
+        self.assertIn("[MEMORY]", telemetry)
+        self.assertIn("queue_songs=", telemetry)
+
+    def test_high_frequency_diagnostics_are_rate_limited(self):
+        helper_start = MAIN_SOURCE.index("def _diag_rate_limited")
+        helper_end = MAIN_SOURCE.index("\ndef ", helper_start + 4)
+        helper = MAIN_SOURCE[helper_start:helper_end]
+        self.assertIn("_DIAG_RATE_LIMIT_LAST", helper)
+        self.assertIn("now - last < max(0.0, float(interval_sec))", helper)
+        relay = function_source("_relay_fetch_finished")
+        self.assertIn("_diag_rate_limited(", relay)
+        recovery = function_source("_network_recovery_tick")
+        self.assertIn("_diag_rate_limited(", recovery)
 
     def test_logging_setup_does_not_duplicate_handlers(self):
         source = MAIN_SOURCE[MAIN_SOURCE.index("def setup_logging"):MAIN_SOURCE.index("# Initialize logging")]

@@ -9,6 +9,7 @@ __pycache__/
 .env
 venv/
 .venv/
+.venv-test/
 .venv-universal/
 
 # Build outputs and packaged artifacts

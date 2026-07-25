@@ -2480,6 +2480,7 @@ def setup_logging():
 logger = setup_logging()
 
 _MAC_LOCATION_DELEGATE_CLASS = None
+_DIAG_RATE_LIMIT_LAST = {}
 
 def _diag(msg: str):
     """Write diagnostic messages to both terminal and SingWS log."""
@@ -2491,6 +2492,26 @@ def _diag(msg: str):
         logging.info(msg)
     except Exception:
         pass
+
+def _diag_rate_limited(key: str, msg: str, interval_sec: float = 60.0):
+    """Log routine diagnostics at most once per key/interval."""
+    try:
+        now = time.monotonic()
+        key = str(key or msg)
+        last = float(_DIAG_RATE_LIMIT_LAST.get(key, 0.0) or 0.0)
+        if now - last < max(0.0, float(interval_sec)):
+            return False
+        _DIAG_RATE_LIMIT_LAST[key] = now
+        if len(_DIAG_RATE_LIMIT_LAST) > 4096:
+            cutoff = now - 3600.0
+            for stale_key, stale_at in list(_DIAG_RATE_LIMIT_LAST.items()):
+                if float(stale_at or 0.0) < cutoff:
+                    _DIAG_RATE_LIMIT_LAST.pop(stale_key, None)
+        _diag(msg)
+        return True
+    except Exception:
+        _diag(msg)
+        return True
 
 def _network_log(msg: str):
     _diag(f"[NETWORK-SYNC] {msg}")
@@ -11237,6 +11258,7 @@ class RelayRequestWorker(QObject):
         self.app_version = str(app_version or "").strip()
         self._socket = None
         self._closing = False
+        self._connected = False
         self._reconnect_timer = QTimer(self)
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.setInterval(self.RECONNECT_DELAY_MS)
@@ -11270,8 +11292,12 @@ class RelayRequestWorker(QObject):
         self._closing = False
         self._open_socket()
 
+    def is_connected(self) -> bool:
+        return bool(self._connected)
+
     def stop(self, *, delete_later: bool = True):
         self._closing = True
+        self._connected = False
         try:
             self._reconnect_timer.stop()
         except Exception:
@@ -11340,12 +11366,14 @@ class RelayRequestWorker(QObject):
         sock.open(self.relay_url())
 
     def _on_connected(self):
+        self._connected = True
         print("[RELAY] Connected")
         self.connection_status_changed.emit(True, "Relay connected")
         # Recover anything submitted while we were disconnected.
         self.requests_available.emit("connect")
 
     def _on_disconnected(self):
+        self._connected = False
         if self._closing:
             return
         print("[RELAY] Disconnected; reconnecting soon")
@@ -11353,6 +11381,7 @@ class RelayRequestWorker(QObject):
         self._schedule_reconnect()
 
     def _on_error(self, _error):
+        self._connected = False
         if self._closing:
             return
         sock = self._socket
@@ -20065,6 +20094,7 @@ class KaraokeApp(QWidget):
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self.save_data)
         self.auto_save_timer.start(60000)
+        self._start_memory_telemetry()
 
         # Start the recovery-capable transport whenever network settings are
         # complete.  A one-shot launch probe used to gate this call; if that
@@ -22503,6 +22533,63 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print(f"[PERF-SUMMARY] failed: {e}")
 
+    def _start_memory_telemetry(self):
+        """Sample bounded cache/process growth without adding UI work."""
+        if not PSUTIL_AVAILABLE:
+            return
+        try:
+            timer = getattr(self, "_memory_telemetry_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.timeout.connect(self._log_memory_telemetry)
+                self._memory_telemetry_timer = timer
+            timer.start(5 * 60 * 1000)
+            QTimer.singleShot(60 * 1000, self._log_memory_telemetry)
+        except Exception:
+            pass
+
+    def _log_memory_telemetry(self, *, force: bool = False):
+        """Log first sample, material RSS growth, and a 30-minute heartbeat."""
+        if not PSUTIL_AVAILABLE:
+            return
+        try:
+            now = time.monotonic()
+            rss_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+            last_rss = float(getattr(self, "_memory_telemetry_logged_rss_mb", 0.0) or 0.0)
+            last_log = float(getattr(self, "_memory_telemetry_last_log_ts", 0.0) or 0.0)
+            growth_mb = rss_mb - last_rss if last_rss > 0 else 0.0
+            should_log = bool(
+                force
+                or last_rss <= 0
+                or growth_mb >= 128.0
+                or now - last_log >= 30 * 60
+            )
+            if not should_log:
+                return
+            self._memory_telemetry_logged_rss_mb = rss_mb
+            self._memory_telemetry_last_log_ts = now
+            display_cache = len(getattr(self, "_display_name_cache", {}) or {})
+            search_cache = len(getattr(song_index, "_SEARCH_CACHE", {}) or {})
+            lookup_cache = len(getattr(song_index, "_LOOKUP_CACHE", {}) or {})
+            queue_rows = sum(
+                len((singer or {}).get("songs", []) or [])
+                for singer in (getattr(self, "queue", []) or [])
+                if isinstance(singer, dict)
+            )
+            _diag(
+                "[MEMORY] "
+                f"rss_mb={rss_mb:.0f} growth_mb={growth_mb:+.0f} "
+                f"tracks={len(getattr(self, 'tracks', []) or [])} queue_songs={queue_rows} "
+                f"display_cache={display_cache} search_cache={search_cache} "
+                f"lookup_cache={lookup_cache} threads={threading.active_count()}"
+            )
+        except Exception as exc:
+            _diag_rate_limited(
+                "memory_telemetry_failure",
+                f"[MEMORY] telemetry unavailable error={exc}",
+                1800.0,
+            )
+
     def _perf_process_snapshot(self) -> tuple[str, str]:
         cpu = "n/a"
         mem = "n/a"
@@ -22631,6 +22718,7 @@ class KaraokeApp(QWidget):
     RELAY_HOSTS = {"wskar.com", "www.wskar.com"}
     NETWORK_RECOVERY_TICK_MS = 2000
     RELAY_RECOVERY_FETCH_SEC = 10.0
+    RELAY_HEALTHY_RECOVERY_FETCH_SEC = 60.0
 
     @staticmethod
     def _version_tuple(version: str) -> tuple:
@@ -22678,6 +22766,8 @@ class KaraokeApp(QWidget):
         self._relay_fetch_queued = False
         self._relay_last_successful_fetch_at = 0.0
         self._relay_recovery_last_attempt_at = 0.0
+        self._relay_last_snapshot_signature = ""
+        self._relay_last_snapshot_queue_revision = -1
         worker = RelayRequestWorker(base_url, tenant, api_key, APP_VERSION, parent=self)
         worker.requests_available.connect(self.fetch_remote_requests_once)
         worker.history_available.connect(lambda reason: self._sync_singer_history_async(f"relay_{reason}"))
@@ -22889,9 +22979,11 @@ class KaraokeApp(QWidget):
         try:
             if rows is not None:
                 self._relay_last_successful_fetch_at = time.monotonic()
-                _diag(
+                _diag_rate_limited(
+                    "network_recovery_success",
                     "[NETWORK-RECOVERY] request refresh succeeded "
-                    f"rows={len(rows or [])}"
+                    f"rows={len(rows or [])}",
+                    60.0,
                 )
                 self._handle_relay_requests(rows)
             else:
@@ -22972,14 +23064,42 @@ class KaraokeApp(QWidget):
         now = time.monotonic()
         last_success = float(state.get("_relay_last_successful_fetch_at", 0.0) or 0.0)
         last_attempt = float(state.get("_relay_recovery_last_attempt_at", 0.0) or 0.0)
-        if now - max(last_success, last_attempt) < float(self.RELAY_RECOVERY_FETCH_SEC):
+        worker = state.get("relay_worker")
+        try:
+            relay_healthy = bool(worker.is_connected())
+        except Exception:
+            relay_healthy = False
+        recovery_interval = (
+            float(self.RELAY_HEALTHY_RECOVERY_FETCH_SEC)
+            if relay_healthy
+            else float(self.RELAY_RECOVERY_FETCH_SEC)
+        )
+        if now - max(last_success, last_attempt) < recovery_interval:
             return
         self._relay_recovery_last_attempt_at = now
-        _diag(
+        _diag_rate_limited(
+            "network_recovery_scheduled",
             "[NETWORK-RECOVERY] scheduled request refresh "
-            f"reason=relay_watchdog age_sec={(now - last_success) if last_success else -1:.1f}"
+            f"reason=relay_watchdog healthy={int(relay_healthy)} "
+            f"interval_sec={recovery_interval:.1f} "
+            f"age_sec={(now - last_success) if last_success else -1:.1f}",
+            60.0,
         )
         self.fetch_remote_requests_once("relay watchdog")
+
+    @staticmethod
+    def _relay_request_snapshot_signature(rows) -> str:
+        try:
+            payload = json.dumps(
+                rows or [],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=str,
+            )
+        except Exception:
+            payload = repr(rows or [])
+        return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
 
     def _handle_relay_requests(self, rows):
         """Reconcile v2 rotation rows on the UI thread, then ack queued successes.
@@ -23003,11 +23123,33 @@ class KaraokeApp(QWidget):
                     req["request_id"] = rid
 
         try:
-            self._reconcile_remote_requests(rows or [], update_waitlist=False)
-        except Exception as e:
-            logging.error(f"Relay request reconciliation failed: {e}")
-            print(f"❌ Error reconciling relay requests: {e}")
-            return
+            app_state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            app_state = {}
+        snapshot_signature = self._relay_request_snapshot_signature(rows)
+        queue_revision = int(app_state.get("_queue_revision", 0) or 0)
+        unchanged_snapshot = bool(
+            snapshot_signature
+            and snapshot_signature == str(app_state.get("_relay_last_snapshot_signature", "") or "")
+            and queue_revision == int(app_state.get("_relay_last_snapshot_queue_revision", -1) or 0)
+        )
+        if unchanged_snapshot:
+            _diag_rate_limited(
+                "relay_snapshot_unchanged",
+                f"[REMOTE-SYNC] unchanged relay snapshot skipped rows={len(rows or [])}",
+                300.0,
+            )
+        else:
+            try:
+                self._reconcile_remote_requests(rows or [], update_waitlist=False)
+            except Exception as e:
+                logging.error(f"Relay request reconciliation failed: {e}")
+                print(f"❌ Error reconciling relay requests: {e}")
+                return
+            app_state["_relay_last_snapshot_signature"] = snapshot_signature
+            app_state["_relay_last_snapshot_queue_revision"] = int(
+                app_state.get("_queue_revision", queue_revision) or 0
+            )
 
         try:
             queue_ids = set(int(v) for v in self._queue_remote_request_ids())
@@ -34482,7 +34624,7 @@ class KaraokeApp(QWidget):
             if rem_sectors is not None:
                 cdg_done = rem_sectors <= float(getattr(self, "_end_silence_cdg_sector_threshold", 120))
 
-        if (now - float(getattr(self, "_end_silence_debug_ts", 0.0) or 0.0)) >= 2.0:
+        if (now - float(getattr(self, "_end_silence_debug_ts", 0.0) or 0.0)) >= 30.0:
             self._end_silence_debug_ts = now
             _diag(
                 f"[END-SILENCE] db={db:.1f} remain={remain:.2f}s "
@@ -34895,9 +35037,13 @@ class KaraokeApp(QWidget):
                 )
                 return False
         try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
+        try:
             shown = False
             for window_name in ("video_window", "preview_window"):
-                area = getattr(getattr(self, window_name, None), "video_area", None)
+                area = getattr(state.get(window_name), "video_area", None)
                 if area is not None and hasattr(area, "show_singer_start_vfx"):
                     shown = bool(area.show_singer_start_vfx(singer_display, title, artist)) or shown
             return shown
@@ -34906,14 +35052,18 @@ class KaraokeApp(QWidget):
         return False
 
     def _song_outro_payload_from_current(self) -> dict:
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
         singer = str(
-            getattr(self, "_current_karaoke_singer_display", "")
-            or getattr(self, "_current_karaoke_singer_name", "")
+            state.get("_current_karaoke_singer_display", "")
+            or state.get("_current_karaoke_singer_name", "")
             or ""
         ).strip()
-        song_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip()
-        artist = str(getattr(self, "_current_karaoke_artist", "") or "").strip()
-        title = str(getattr(self, "_current_karaoke_title", "") or "").strip()
+        song_path = str(state.get("_current_karaoke_song_path", "") or "").strip()
+        artist = str(state.get("_current_karaoke_artist", "") or "").strip()
+        title = str(state.get("_current_karaoke_title", "") or "").strip()
         if song_path and not (artist and title):
             try:
                 display = str(self.lookup_display_name(song_path, artist_title_only=True) or "").strip()
@@ -35132,7 +35282,11 @@ class KaraokeApp(QWidget):
 
     def _mark_next_up_overlay_pending_after_completion(self, *, reason: str = "media_end") -> bool:
         """Legacy entry point: show a brief outro, never a Next Up countdown."""
-        payload = self.__dict__.pop("_pending_song_outro_payload", None)
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
+        payload = state.pop("_pending_song_outro_payload", None)
         if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
             payload = self._song_outro_payload_from_current()
         self._clear_next_up_overlay_pending(f"retired:{reason}")
@@ -35143,7 +35297,7 @@ class KaraokeApp(QWidget):
         try:
             shown = False
             for window_name in ("video_window", "preview_window"):
-                area = getattr(getattr(self, window_name, None), "video_area", None)
+                area = getattr(state.get(window_name), "video_area", None)
                 if area is None or not hasattr(area, "show_song_outro_vfx"):
                     continue
                 shown = bool(area.show_song_outro_vfx(
@@ -35300,12 +35454,13 @@ class KaraokeApp(QWidget):
 
     def _remember_last_sung_from_current(self):
         try:
-            singer = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
+            state = object.__getattribute__(self, "__dict__")
+            singer = str(state.get("_current_karaoke_singer_display", "") or "").strip()
             if not singer:
                 return
-            artist = str(getattr(self, "_current_karaoke_artist", "") or "").strip()
-            title = str(getattr(self, "_current_karaoke_title", "") or "").strip()
-            current_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip()
+            artist = str(state.get("_current_karaoke_artist", "") or "").strip()
+            title = str(state.get("_current_karaoke_title", "") or "").strip()
+            current_path = str(state.get("_current_karaoke_song_path", "") or "").strip()
             if current_path and not (artist and title):
                 display_name = self.lookup_display_name(current_path, artist_title_only=True)
                 if " • " in display_name:
@@ -42166,10 +42321,14 @@ class KaraokeApp(QWidget):
                 return
             now = time.monotonic()
             last = float(getattr(self, "_active_worker_log_last_ts", 0.0) or 0.0)
-            if not force and now - last < 10.0:
+            if not force and now - last < 60.0:
                 return
             self._active_worker_log_last_ts = now
             snap = self._active_background_worker_snapshot()
+            signature = repr(snap)
+            if not force and signature == str(getattr(self, "_active_worker_log_last_signature", "") or ""):
+                return
+            self._active_worker_log_last_signature = signature
             _diag(
                 "[PLAYBACK-WORKERS] "
                 f"reason={reason} karaoke_active={int(bool(getattr(self, 'karaoke_playing', False)))} "
@@ -42781,6 +42940,7 @@ class KaraokeApp(QWidget):
                     self._unmatched_remote_request_ids = set()
                     self._unmatched_request_sigs = set()
                     self._empty_library_request_warned = False
+                    self._relay_last_snapshot_signature = ""
                 except Exception:
                     pass
                 # Show success in green
@@ -44284,6 +44444,7 @@ class KaraokeApp(QWidget):
         self._queue_revision = 0
         self._unmatched_remote_request_ids = set()
         self._unmatched_request_sigs = set()
+        self._relay_last_snapshot_signature = ""
         self.update_queue_display()
         try:
             self.save_data()
@@ -49807,9 +49968,11 @@ class KaraokeApp(QWidget):
                     # the host queue remains authoritative until explicit host
                     # removal or song completion records a tombstone.
                     existing_ids.add(remote_id)
-                    _diag(
+                    _diag_rate_limited(
+                        f"remote_preserve:{remote_id}",
                         "[REMOTE-SYNC] preserving local queued request missing from server payload "
-                        f"request_id={remote_id} singer={singer.get('name', '')!r}"
+                        f"request_id={remote_id} singer={singer.get('name', '')!r}",
+                        300.0,
                     )
                 else:
                     existing_ids.add(remote_id)

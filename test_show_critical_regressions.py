@@ -540,9 +540,13 @@ class ShowCriticalRegressionTests(unittest.TestCase):
     def test_stale_singer_start_generation_cannot_replace_current_animation(self):
         app = self.bare_app()
         calls = []
-        area = type("Area", (), {
-            "show_singer_start_vfx": lambda _self, singer, title, artist: calls.append((singer, artist, title))
-        })()
+
+        def _show_singer_start(_self, singer, title, artist):
+            # The real VideoAreaWidget reports whether the overlay was shown.
+            calls.append((singer, artist, title))
+            return True
+
+        area = type("Area", (), {"show_singer_start_vfx": _show_singer_start})()
         app.video_window = type("Window", (), {"video_area": area})()
         app._confirmed_singer_start_generation = 8
 

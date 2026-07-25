@@ -126,6 +126,28 @@ class HandleRelayRequestsTests(unittest.TestCase):
         self.assertEqual(app.reconciled, [3])
         self.assertEqual(app.acked, [3])
 
+    def test_identical_snapshot_skips_reconciliation_but_retries_ack(self):
+        app = self.make_handler_app({3: True})
+        rows = [{"id": 3, "singer": "A", "artist": "X", "title": "T"}]
+
+        app._handle_relay_requests(rows)
+        app._handle_relay_requests(rows)
+
+        self.assertEqual(app.reconciled, [3])
+        self.assertEqual(app.acked, [3, 3])
+
+    def test_changed_snapshot_reconciles_again(self):
+        app = self.make_handler_app({3: True, 4: True})
+
+        app._handle_relay_requests([{"id": 3, "singer": "A", "artist": "X", "title": "T"}])
+        app._handle_relay_requests([
+            {"id": 3, "singer": "A", "artist": "X", "title": "T"},
+            {"id": 4, "singer": "B", "artist": "Y", "title": "U"},
+        ])
+
+        self.assertEqual(app.reconciled, [3, 3, 4])
+        self.assertEqual(app.acked, [3, 3, 4])
+
     def test_reconcile_exception_not_acked(self):
         app = self.make_handler_app({})
 
@@ -201,6 +223,23 @@ class NetworkRecoveryWatchdogTests(unittest.TestCase):
             app._network_recovery_tick()
 
         self.assertEqual(calls, ["relay watchdog", "relay watchdog"])
+
+    def test_healthy_relay_uses_longer_recovery_interval(self):
+        app = make_app()
+        app.relay_worker = mock.Mock()
+        app.relay_worker.is_connected.return_value = True
+        app._host_request_sync_ops = []
+        app._relay_last_successful_fetch_at = 100.0
+        app._relay_recovery_last_attempt_at = 0.0
+        calls = []
+        app.fetch_remote_requests_once = lambda reason="relay": calls.append(reason)
+
+        with mock.patch.object(MAIN.time, "monotonic", return_value=159.9):
+            app._network_recovery_tick()
+        with mock.patch.object(MAIN.time, "monotonic", return_value=160.1):
+            app._network_recovery_tick()
+
+        self.assertEqual(calls, ["relay watchdog"])
 
     def test_successful_refresh_preserves_batch_identity_for_deduplication(self):
         app = make_app()
@@ -409,7 +448,9 @@ class RelayWorkerTests(unittest.TestCase):
         worker.requests_available.connect(lambda reason: seen.append(reason))
         worker._on_connected()
         self.assertEqual(seen, ["connect"])
+        self.assertTrue(worker.is_connected())
         worker.stop()
+        self.assertFalse(worker.is_connected())
 
     def test_stop_prevents_reconnect(self):
         worker = self.make_worker()
