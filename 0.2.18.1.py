@@ -31907,9 +31907,13 @@ class KaraokeApp(QWidget):
         the 'show_request_qr' setting is on AND requests are accepting; the URL
         is the same network request link the header QR uses. The host preview
         stays QR-free so the badge cannot obscure lyrics at its smaller size."""
-        vw = getattr(self, "video_window", None)
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
+        vw = state.get("video_window")
         area = getattr(vw, "video_area", None) if vw is not None else None
-        preview = getattr(self, "preview_window", None)
+        preview = state.get("preview_window")
         preview_area = getattr(preview, "video_area", None) if preview is not None else None
         if preview_area is not None and hasattr(preview_area, "set_request_qr"):
             preview_area.set_request_qr(None)
