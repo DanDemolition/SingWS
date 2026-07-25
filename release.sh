@@ -48,7 +48,10 @@ echo ">>> current version: $CUR_VER"
 # 1) Tests first — never ship a version that fails the suite. (Runs on current
 #    code; version-independent, so do it before the bump.)
 echo ">>> [1/7] running test suite"
-SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS=1 $PY -m pytest test_*.py -q
+# Via tools/run_tests.sh, not a bare pytest: the runner selects an interpreter
+# backed by a real Python install, forces QT_QPA_PLATFORM=offscreen, and skips
+# the one non-pytest script. Calling pytest directly aborts on every GUI test.
+SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS=1 ./tools/run_tests.sh
 
 # 2) Bump (or set) the version. This writes APP_VERSION + the spec CFBundle
 #    strings so the built app and DMG names use the new version.
