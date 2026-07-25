@@ -128,5 +128,30 @@ class PackagingSpecTests(unittest.TestCase):
                     self.assertIn(dylib, source)
                 self.assertIn('"openssl@3"', source)
 
+    def test_release_specs_bundle_required_qt_plugins(self):
+        required_groups = (
+            '"platforms"',
+            '"multimedia"',
+            '"networkinformation"',
+            '"tls"',
+        )
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+            with self.subTest(spec=spec):
+                source = Path(spec).read_text(encoding="utf-8")
+                self.assertIn('qt_plugins_root = (', source)
+                self.assertIn('f"PyQt6/Qt6/plugins/{plugin_group}"', source)
+                self.assertIn("Required Qt plugin group is missing", source)
+                for group in required_groups:
+                    self.assertIn(group, source)
+
+    def test_release_verifier_requires_cocoa_platform_plugin(self):
+        verifier = Path("tools/verify_macos_arch.py").read_text(encoding="utf-8")
+        self.assertIn('"libqcocoa.dylib"', verifier)
+        universal_build = Path("build_universal.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            "PyQt6/Qt6/plugins/platforms/libqcocoa.dylib",
+            universal_build,
+        )
+
 if __name__ == "__main__":
     unittest.main()

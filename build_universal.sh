@@ -22,7 +22,9 @@ rm -rf build dist
 # dependencies used by only one slice. Verify the launcher itself here; the
 # universal Python/native runtime was already verified above.
 "${UNIVERSAL_PY}" tools/verify_macos_arch.py \
-  --path dist/SingWS.app/Contents/MacOS/SingWS --require arm64 --require x86_64
+  --path dist/SingWS.app/Contents/MacOS/SingWS \
+  --path dist/SingWS.app/Contents/Frameworks/PyQt6/Qt6/plugins/platforms/libqcocoa.dylib \
+  --require arm64 --require x86_64
 echo ">>> universal app arch:"; file dist/SingWS.app/Contents/MacOS/SingWS | sed 's/^/    /'
 lipo -info dist/SingWS.app/Contents/MacOS/SingWS 2>/dev/null | sed 's/^/    /' || true
 rm -f "SingWS-${VER}-universal-installer.dmg"

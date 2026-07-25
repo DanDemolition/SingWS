@@ -50,6 +50,39 @@ for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
             binaries.append((str(candidate), "."))
             break
 
+# PyInstaller 6.21's Qt dependency validator does not resolve the framework-
+# qualified @rpath names used by Qt 6.11 plugins, so it silently excludes even
+# the mandatory Cocoa platform plugin. Bundle the runtime plugin groups
+# explicitly at the path used by PyInstaller's PyQt6 runtime hook.
+qt_plugins_root = (
+    Path(sys.prefix)
+    / "lib"
+    / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    / "site-packages"
+    / "PyQt6"
+    / "Qt6"
+    / "plugins"
+)
+qt_plugin_groups = (
+    "generic",
+    "iconengines",
+    "imageformats",
+    "multimedia",
+    "networkinformation",
+    "platforms",
+    "styles",
+    "tls",
+)
+for plugin_group in qt_plugin_groups:
+    plugin_dir = qt_plugins_root / plugin_group
+    plugin_files = sorted(plugin_dir.glob("*.dylib"))
+    if not plugin_files:
+        raise SystemExit(f"Required Qt plugin group is missing: {plugin_dir}")
+    for plugin_file in plugin_files:
+        binaries.append(
+            (str(plugin_file), f"PyQt6/Qt6/plugins/{plugin_group}")
+        )
+
 # Bundle ffmpeg and ffprobe so the app works without a Homebrew install.
 # ``bin/ffmpeg`` is a universal binary (lipo'd arm64 + x86_64), so we
 # prefer it over Homebrew's single-arch copy.  ffprobe is currently only
@@ -151,8 +184,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.2.6',
-        'CFBundleVersion': '0.4.2.6',
+        'CFBundleShortVersionString': '0.4.2.7',
+        'CFBundleVersion': '0.4.2.7',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
             "SingWS uses System Events to find, queue, and control songs in the KaraFun application."

@@ -60,6 +60,20 @@ def _runtime_paths() -> list[Path]:
 def _bundle_paths(bundle: Path) -> list[Path]:
     if not bundle.is_dir():
         raise FileNotFoundError(f"app bundle not found: {bundle}")
+    cocoa_plugin = (
+        bundle
+        / "Contents"
+        / "Frameworks"
+        / "PyQt6"
+        / "Qt6"
+        / "plugins"
+        / "platforms"
+        / "libqcocoa.dylib"
+    )
+    if not cocoa_plugin.is_file():
+        raise FileNotFoundError(
+            f"required Qt Cocoa platform plugin not found: {cocoa_plugin}"
+        )
     return [path for path in bundle.rglob("*") if path.is_file() and not path.is_symlink()]
 
 
@@ -81,7 +95,11 @@ def main() -> int:
             print(f"architecture verification failed: runtime dependency unavailable: {exc}", file=sys.stderr)
             return 1
     if args.bundle is not None:
-        candidates.extend(_bundle_paths(args.bundle.resolve()))
+        try:
+            candidates.extend(_bundle_paths(args.bundle.resolve()))
+        except FileNotFoundError as exc:
+            print(f"architecture verification failed: {exc}", file=sys.stderr)
+            return 1
     candidates.extend(path.resolve() for path in args.path)
 
     required = set(args.require)

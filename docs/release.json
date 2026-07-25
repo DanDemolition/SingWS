@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.2.6",
+  "version": "0.4.2.7",
   "release_date": "2026-07-24",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.2.6-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.6-arm64-installer.dmg",
-      "size": "83 MB",
-      "sha256": "1521c281a61890ab499b5b450392983981cee9af81603a0a9641fe5994581357"
+      "filename": "SingWS-0.4.2.7-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.7-arm64-installer.dmg",
+      "size": "97 MB",
+      "sha256": "67b7cbfa35ea2ca674f6aff3d47c61b73ec2a8ab2453fb1ad90ae636a0ab4a6c"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.2.6-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.6-x86_64-installer.dmg",
-      "size": "134 MB",
-      "sha256": "7fdf23d0d3f4eda3d1e3f34c6abaf4da9c9fdf05378c29bb9185731eb9780145"
+      "filename": "SingWS-0.4.2.7-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.7-x86_64-installer.dmg",
+      "size": "150 MB",
+      "sha256": "96cfe06650e854298db98572433dce184416011ec3d6e7cc1e54a05c77a96918"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.2.6-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.6-universal-installer.dmg",
-      "size": "195 MB",
-      "sha256": "14cde896a1d7de9f9899e0864ebf66e3fd66811f772766b567b4b698f07b7096"
+      "filename": "SingWS-0.4.2.7-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.7-universal-installer.dmg",
+      "size": "225 MB",
+      "sha256": "2ab24259dc5715e95d492cce8a603ad546e280a2bf938de9e73da6d9623d5c4c"
     }
   }
 }
