@@ -113,7 +113,10 @@ def _perf_log_if_slow(name: str, ms: float, threshold_ms: float = 50.0):
             if now - last < 1.0:
                 return
             _PERF_LAST_PRINT[key] = now
-            print(f"[PERF] {name} took {float(ms):.0f}ms")
+            # Via _log, not print: these are the only numbers that show where
+            # main-thread time goes during playback, and print() never reaches
+            # ~/SingWS/logs, so every one of them was invisible after a show.
+            _log(f"[PERF] {name} took {float(ms):.0f}ms")
     except Exception:
         pass
 
@@ -160,6 +163,8 @@ def reader_pool_stats() -> dict:
             stats["buffered_frames"] += queued
             width = max(0, int(getattr(reader, "width", 0) or 0))
             height = max(0, int(getattr(reader, "height", 0) or 0))
+            # Queue holds converted QImages; RGB888 is still 3 bytes per pixel,
+            # so the size estimate is unchanged by where conversion happens.
             frame_bytes += queued * width * height * 3
             thread = getattr(reader, "thread", None)
             if thread is not None and thread.is_alive():
@@ -831,17 +836,10 @@ class FfmpegVideoReader:
                 selected = self.frames.popleft()
             self.lock.notify_all()
         if selected is not None:
-            _timestamp, raw = selected
-            convert_started = time.perf_counter()
-            self.latest_image = QImage(
-                raw,
-                self.width,
-                self.height,
-                self.width * 3,
-                QImage.Format.Format_RGB888,
-            ).copy()
+            # Already a QImage that owns its pixels (converted on the decode
+            # thread), so the GUI thread just takes the reference -- no memcpy.
+            _timestamp, self.latest_image = selected
             self.frames_delivered += 1
-            _perf_log_if_slow("qimage_convert", (time.perf_counter() - convert_started) * 1000.0, 4.0)
         if dropped:
             self.dropped_frames += dropped
             self._dropped_since_log += dropped
@@ -1022,8 +1020,28 @@ class FfmpegVideoReader:
                 timestamp = self.start_seconds + (self.frame_index / self.fps)
                 self.frame_index += 1
                 self.frames_decoded += 1
+                # Convert here, on the decode thread, not in image_at() on the
+                # GUI thread. QImage(...).copy() is a full-frame memcpy -- at
+                # 720p30 that was ~83MB/s executed on the main thread, which
+                # stalls menu switches, app launches and network work during MP4
+                # playback. GStreamer never touched the GUI thread per frame.
+                # QImage is plain data, safe to build off the main thread, and
+                # .copy() makes it own its pixels so `raw` can be released now.
+                convert_started = time.perf_counter()
+                image = QImage(
+                    raw,
+                    self.width,
+                    self.height,
+                    self.width * 3,
+                    QImage.Format.Format_RGB888,
+                ).copy()
+                _perf_log_if_slow(
+                    "qimage_convert_worker",
+                    (time.perf_counter() - convert_started) * 1000.0,
+                    8.0,
+                )
                 with self.lock:
-                    self.frames.append((timestamp, raw))
+                    self.frames.append((timestamp, image))
                     if len(self.frames) >= self.MAX_BUFFERED_FRAMES and (time.monotonic() - self._last_queue_log_ts) >= 2.0:
                         print(f"[PERF] frame_queue_size count={len(self.frames)}")
                         self._last_queue_log_ts = time.monotonic()
