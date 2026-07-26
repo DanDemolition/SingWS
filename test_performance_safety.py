@@ -95,6 +95,36 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("[MEMORY]", telemetry)
         self.assertIn("queue_songs=", telemetry)
 
+    def test_end_silence_confirmation_shortens_only_at_track_end(self):
+        # The 2.0s floor in _end_trim_threshold_sec is heard as a gap between the
+        # karaoke tail and background music: the 07-25 show triggered at
+        # silent=2.03s every time. Shorten it only when the track is provably
+        # over, never mid-song.
+        trim = function_source("_maybe_trim_end_silence")
+        self.assertIn("_end_silence_confident_remain_s", trim)
+        self.assertIn("_end_silence_confident_min_s", trim)
+        # Both conditions are required: little left to play AND lyrics finished
+        # (or MP4). Either alone would risk cutting a quiet ending short.
+        self.assertIn('cdg_done or getattr(self, "_end_silence_mode", "") == "mp4"', trim)
+        # Must only ever reduce the wait, never extend it.
+        self.assertIn("threshold_s = min(", trim)
+        # The CDG "graphics still changing" safeguard must remain downstream.
+        self.assertIn("CDG/ZIP safeguard", trim)
+
+    def test_end_silence_threshold_floor_allows_short_confirmation(self):
+        # The floor was 2.0 in three places (getter, spin range, save clamp), so
+        # the host could not tune below the value that causes the audible gap.
+        getter = function_source("_end_trim_threshold_sec")
+        self.assertIn("max(0.5, min(60.0, val))", getter)
+        self.assertIn("end_threshold_spin.setRange(0.5, 60.0)", MAIN_SOURCE)
+        self.assertIn(
+            'self.settings["end_silence_trim_threshold_sec"] = max(0.5, min(60.0, float(value)))',
+            MAIN_SOURCE,
+        )
+        # Default must stay at 2.5: widening the range must not change behaviour
+        # for anyone who does not deliberately lower it.
+        self.assertIn('"end_silence_trim_threshold_sec": 2.5', MAIN_SOURCE)
+
     def test_memory_telemetry_reports_live_reader_pool(self):
         # The 2026-07-25 show grew 790MB -> 2148MB while every instrumented
         # cache stayed tiny, so telemetry must also expose the frame pipeline:

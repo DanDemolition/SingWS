@@ -18246,6 +18246,11 @@ class KaraokeApp(QWidget):
         self._end_silence_min_s = 2.5
         self._end_silence_near_end_window_s = 20.0
         self._end_silence_min_elapsed_s = 20.0
+        # Once the track is demonstrably finished (this little left to play AND
+        # lyrics complete / MP4), require only a short silence confirmation.
+        # The full hold there is heard as a gap before background music.
+        self._end_silence_confident_remain_s = 6.0
+        self._end_silence_confident_min_s = 0.7
         # CDG gate: don't early-end while meaningful CDG sectors still remain.
         self._end_silence_cdg_sector_threshold = 120
         self._end_silence_cdg_stale_sec = 1.8
@@ -25360,12 +25365,12 @@ class KaraokeApp(QWidget):
         end_threshold_row = QHBoxLayout()
         end_threshold_row.addWidget(QLabel("Karaoke silence threshold (seconds):"))
         end_threshold_spin = QDoubleSpinBox(dlg)
-        end_threshold_spin.setRange(2.0, 60.0)
+        end_threshold_spin.setRange(0.5, 60.0)
         end_threshold_spin.setDecimals(1)
         end_threshold_spin.setSingleStep(0.5)
         end_threshold_spin.setToolTip("How long audio must stay quiet before a completed or stale karaoke track can end early.")
         try:
-            end_threshold_spin.setValue(max(2.0, min(60.0, float(self.settings.get("end_silence_trim_threshold_sec", 2.5)))))
+            end_threshold_spin.setValue(max(0.5, min(60.0, float(self.settings.get("end_silence_trim_threshold_sec", 2.5)))))
         except Exception:
             end_threshold_spin.setValue(2.5)
         end_threshold_row.addWidget(end_threshold_spin)
@@ -25908,7 +25913,7 @@ class KaraokeApp(QWidget):
 
         def on_end_threshold_changed(value: float):
             try:
-                self.settings["end_silence_trim_threshold_sec"] = max(2.0, min(60.0, float(value)))
+                self.settings["end_silence_trim_threshold_sec"] = max(0.5, min(60.0, float(value)))
             except Exception:
                 self.settings["end_silence_trim_threshold_sec"] = 2.5
             self.save_settings()
@@ -34571,7 +34576,10 @@ class KaraokeApp(QWidget):
             val = float(self.settings.get("end_silence_trim_threshold_sec", self._end_silence_min_s))
         except Exception:
             val = float(getattr(self, "_end_silence_min_s", 2.5))
-        return max(2.0, min(60.0, val))
+        # Floor is 0.5, not 2.0: the old floor made the setting unable to reach
+        # the values that actually close the gap before background music. The
+        # default is unchanged, so this only widens what the host may choose.
+        return max(0.5, min(60.0, val))
 
     def _has_queued_karaoke_after_current(self) -> bool:
         try:
@@ -34645,11 +34653,29 @@ class KaraokeApp(QWidget):
             if rem_sectors is not None:
                 cdg_done = rem_sectors <= float(getattr(self, "_end_silence_cdg_sector_threshold", 120))
 
+        # A 2.5s hold is right in the body of a song, where a quiet passage must
+        # never be mistaken for the end. It is far too long once the track is
+        # demonstrably over -- audio stopped, lyrics finished, only trailing
+        # silence left -- and holding it there is what puts an audible gap
+        # between the karaoke tail and the background music resuming.
+        #
+        # Only shortens the wait; which reasons may fire, and the CDG "graphics
+        # still changing" safeguard below, are left untouched.
+        confident_end = remain <= float(
+            getattr(self, "_end_silence_confident_remain_s", 6.0)
+        ) and (cdg_done or getattr(self, "_end_silence_mode", "") == "mp4")
+        if confident_end:
+            threshold_s = min(
+                threshold_s,
+                max(0.3, float(getattr(self, "_end_silence_confident_min_s", 0.7))),
+            )
+
         if (now - float(getattr(self, "_end_silence_debug_ts", 0.0) or 0.0)) >= 30.0:
             self._end_silence_debug_ts = now
             _diag(
                 f"[END-SILENCE] db={db:.1f} remain={remain:.2f}s "
                 f"silent={self._end_silence_accum_s:.2f}/{threshold_s:.2f}s "
+                f"confident_end={int(confident_end)} "
                 f"cdg_done={cdg_done} cdg_stale={cdg_stale_for:.2f}s"
             )
 
