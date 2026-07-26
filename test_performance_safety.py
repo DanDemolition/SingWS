@@ -95,6 +95,23 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("[MEMORY]", telemetry)
         self.assertIn("queue_songs=", telemetry)
 
+    def test_singer_history_export_memoises_unchanged_singers(self):
+        # _export_singer_history_payload re-normalised every singer on a daemon
+        # thread: 46-79ms of CPU-bound Python, 54 times during the 07-25 show.
+        # It holds the GIL, so the Qt event loop cannot run and the UI stalls.
+        norm = function_source("_normalize_singer_history_store")
+        self.assertIn("cache_scope", norm)
+        # Fingerprint the raw record, do not trust updated_at: a mutation that
+        # forgets to bump it must still invalidate, or sync silently drops data.
+        self.assertIn("json.dumps(", norm)
+        self.assertIn("hit[0] == fingerprint", norm)
+        # Bare-instance safe: getattr on an uninitialised QWidget raises.
+        self.assertIn('object.__getattribute__(self, "__dict__")', norm)
+        # Cache must not outgrow the store it mirrors.
+        self.assertIn("cache.pop(stale_key, None)", norm)
+        export = function_source("_export_singer_history_payload")
+        self.assertIn('cache_scope="export"', export)
+
     def test_end_silence_confirmation_shortens_only_at_track_end(self):
         # The 2.0s floor in _end_trim_threshold_sec is heard as a gap between the
         # karaoke tail and background music: the 07-25 show triggered at

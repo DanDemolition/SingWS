@@ -38898,7 +38898,7 @@ class KaraokeApp(QWidget):
             "songs": {},
         }
 
-    def _normalize_singer_history_store(self, raw_history) -> dict:
+    def _normalize_singer_history_store(self, raw_history, cache_scope: str = "") -> dict:
         singers_out = {}
         try:
             singers = raw_history.get("singers", {}) if isinstance(raw_history, dict) else {}
@@ -38907,10 +38907,48 @@ class KaraokeApp(QWidget):
         if not isinstance(singers, dict):
             singers = {}
 
+        # Optional per-singer memoisation. Only one singer's record changes when
+        # a song finishes, but this loop rebuilt all of them -- 46-79ms of
+        # CPU-bound Python, 54 times during the 2026-07-25 show. Because it runs
+        # on a daemon thread it holds the GIL, so the Qt event loop cannot run
+        # and the UI stalls. Fingerprinting each raw record with json.dumps is
+        # C-speed and measured ~4x cheaper than re-normalising it.
+        #
+        # Keyed by scope so the local store and incoming remote payloads never
+        # share entries. Cached records are shared, not copied, so a scope must
+        # only be passed by callers that treat the result as read-only.
+        # __dict__ rather than getattr: on a bare instance (tests, teardown)
+        # attribute access on an uninitialised QWidget raises RuntimeError, which
+        # is the same trap that broke the outro, singer-start and QR paths.
+        cache = None
+        if cache_scope:
+            try:
+                state = object.__getattribute__(self, "__dict__")
+            except Exception:
+                state = None
+            if state is not None:
+                store = state.get("_singer_history_norm_cache")
+                if not isinstance(store, dict):
+                    store = {}
+                    state["_singer_history_norm_cache"] = store
+                cache = store.setdefault(str(cache_scope), {})
+
         for raw_key, raw_value in singers.items():
             norm_key = self._normalize_singer_pref_key(raw_key)
             if not norm_key or not isinstance(raw_value, dict):
                 continue
+            fingerprint = None
+            if cache is not None:
+                try:
+                    fingerprint = json.dumps(
+                        raw_value, sort_keys=True, separators=(",", ":"), default=str
+                    )
+                    hit = cache.get(norm_key)
+                    if hit is not None and hit[0] == fingerprint:
+                        singers_out[norm_key] = hit[1]
+                        continue
+                except Exception:
+                    fingerprint = None
             record = self._empty_singer_history_record(raw_value.get("name", raw_key))
             record["preferred_disc_priority"] = ", ".join(
                 normalize_disc_priority(raw_value.get("preferred_disc_priority", ""), max_items=10)
@@ -38984,6 +39022,14 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             singers_out[norm_key] = record
+            if cache is not None and fingerprint is not None:
+                cache[norm_key] = (fingerprint, record)
+
+        if cache is not None:
+            # Drop singers that no longer exist so the cache cannot outgrow the
+            # store it mirrors.
+            for stale_key in [k for k in cache if k not in singers_out]:
+                cache.pop(stale_key, None)
 
         deletions_out = {}
         try:
@@ -39288,7 +39334,11 @@ class KaraokeApp(QWidget):
 
     def _export_singer_history_payload(self) -> dict:
         try:
-            normalized = self._normalize_singer_history_store(self.singer_history)
+            # Read-only: the payload is serialised and posted, never mutated, so
+            # it is safe to receive shared cached records.
+            normalized = self._normalize_singer_history_store(
+                self.singer_history, cache_scope="export"
+            )
             return {
                 "singers": normalized.get("singers", {}),
                 "deletions": normalized.get("deletions", {}),
