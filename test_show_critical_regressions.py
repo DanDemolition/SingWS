@@ -507,6 +507,40 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         self.assertEqual(app.presentations, snapshot)
         self.assertEqual(app._current_karaoke_singer_name, "Replay")
 
+    def test_karafun_singer_rotates_to_bottom_after_completion(self):
+        # Live symptom: a KaraFun singer was pulled back near the top instead of
+        # rotating to the bottom. play_next_file pops the singer, and the KaraFun
+        # path left them off the queue for the whole song, so relay sync inserted
+        # a fresh copy at index 0 ("reason=new_singer") and
+        # _merge_duplicate_rotation_singers -- which keeps the earliest slot --
+        # collapsed it with the one appended at completion.
+        start = inspect.getsource(self.singws.KaraokeApp._start_external_karafun_playback)
+        self.assertIn("self.queue.append(singer)", start)
+        finish = inspect.getsource(self.singws.KaraokeApp._finish_external_karafun_playback)
+        # Identity-based removal before re-adding, so the same dict cannot end up
+        # in the queue twice and no songs can be lost.
+        self.assertIn("[s for s in self.queue if s is not singer]", finish)
+        self.assertLess(
+            finish.index("[s for s in self.queue if s is not singer]"),
+            finish.index("self.queue.append(singer)"),
+        )
+        # Return-to-queue must also drop the start-time reference.
+        self.assertEqual(finish.count("[s for s in self.queue if s is not singer]"), 2)
+
+    def test_karafun_completion_leaves_singer_once_at_bottom(self):
+        app = self.playback_app([self.singer("Hanady"), self.singer("Vivek")])
+        hanady = app.queue[0]
+        app.queue.pop(0)                      # play_next_file pops the singer
+        app.queue.append(hanady)              # new: re-added at start of playback
+        self.assertIs(app.queue[-1], hanady)
+        # Simulate the completion re-add, which previously duplicated.
+        app.queue = [s for s in app.queue if s is not hanady]
+        app.queue.append(hanady)
+        names = [s["name"] for s in app.queue]
+        self.assertEqual(names.count("Hanady"), 1, f"duplicated: {names}")
+        self.assertEqual(names[-1], "Hanady", f"not at bottom: {names}")
+        self.assertEqual(len(hanady.get("songs", [])), 1)
+
     def test_play_sequence_is_countdown_then_start_then_pending_performance(self):
         # Was "...then_remote_completion": the request used to be completed as
         # soon as the song started. It is now only stashed there and committed on

@@ -47225,6 +47225,23 @@ class KaraokeApp(QWidget):
             "marker_was_top": bool(marker_was_top),
             "started_at": time.time(),
         }
+        # play_next_file popped this singer, and a KaraFun song plays for minutes
+        # in an external app. Leaving them out of the queue that whole time made
+        # relay reconciliation treat them as brand new -- observed live as
+        # "[QUEUE-INSERT] singer='Hanady' reason=new_singer insertion_index=0" --
+        # and _merge_duplicate_rotation_singers then collapsed that copy with the
+        # one appended at completion, keeping the *earliest* slot. Net effect: the
+        # singer never reached the bottom of the rotation.
+        #
+        # Put them back on the queue now, exactly as the normal playback path
+        # does, so sync recognises them and appends to the existing record.
+        try:
+            self.queue.append(singer)
+            if self._is_rotation_locked():
+                self._rotation_reweave_locked_tail()
+            self.queue = self.queue.copy()
+        except Exception as exc:
+            _diag(f"[KARAFUN] queue re-add at start failed: {exc}")
         self.karaoke_playing = True
         self._eta_hold_current_secs = max(0, int((entry or {}).get("duration") or 0))
         self._current_karaoke_singer_name = str((singer or {}).get("name", "") or "")
@@ -47371,6 +47388,9 @@ class KaraokeApp(QWidget):
             try:
                 self._set_karafun_entry_status(entry, "ready", message="Returned to queue")
                 singer.setdefault("songs", []).insert(0, entry)
+                # Remove the reference added when playback started, otherwise
+                # returning to the queue leaves this singer listed twice.
+                self.queue = [s for s in self.queue if s is not singer]
                 self.queue.insert(0, singer)
                 self.queue = self.queue.copy()
                 self._show_processing_notification("KaraFun song returned to queue.", level="info")
@@ -47409,6 +47429,15 @@ class KaraokeApp(QWidget):
         singer["last_sung_at"] = time.time()
         if self._is_rotation_mode():
             singer["round_sung"] = True
+        # They are already on the queue (added when playback started), so drop
+        # that reference before re-adding, or completion leaves the same singer
+        # in twice. Identity comparison, not name: it is the very same dict, so
+        # nothing can be lost, and a separate record for the same person is left
+        # alone for the normal merge path to handle.
+        try:
+            self.queue = [s for s in self.queue if s is not singer]
+        except Exception as exc:
+            _diag(f"[KARAFUN] queue dedupe before rotation failed: {exc}")
         self.queue.append(singer)
         if self._is_rotation_locked():
             self._rotation_reweave_locked_tail()
