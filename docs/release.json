@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.2.8",
-  "release_date": "2026-07-25",
+  "version": "0.4.2.9",
+  "release_date": "2026-07-26",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.2.8-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.8-arm64-installer.dmg",
+      "filename": "SingWS-0.4.2.9-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.9-arm64-installer.dmg",
       "size": "98 MB",
-      "sha256": "be0ae843191f7a13c36236fb26a1c6ac8be6de458b264fa0ee3518febc7745bc"
+      "sha256": "25af62a169ce216c1271b3bde973ed866f1a23dcdd6aa46d023d095659cfb840"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.2.8-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.8-x86_64-installer.dmg",
+      "filename": "SingWS-0.4.2.9-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.9-x86_64-installer.dmg",
       "size": "150 MB",
-      "sha256": "7a15f71ab1123be0885e3d8f9c26e6a0e1146205164fcdd10ef851eaacee429f"
+      "sha256": "6c3d7217ba9dbdc3ce39fb7895220d7b98ae36e05861e4867fc3dc48a0973db9"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.2.8-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.8-universal-installer.dmg",
+      "filename": "SingWS-0.4.2.9-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.2.9-universal-installer.dmg",
       "size": "226 MB",
-      "sha256": "dab92058b5e6bd5a9a376970fa96af292a804dd42084ddc73cf8120d2624f976"
+      "sha256": "971486121d25660440f73232216bcfe883227406bec86d72f163082a93f99fb0"
     }
   }
 }
