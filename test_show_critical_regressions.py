@@ -507,16 +507,22 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         self.assertEqual(app.presentations, snapshot)
         self.assertEqual(app._current_karaoke_singer_name, "Replay")
 
-    def test_play_sequence_is_countdown_then_start_then_remote_completion(self):
+    def test_play_sequence_is_countdown_then_start_then_pending_performance(self):
+        # Was "...then_remote_completion": the request used to be completed as
+        # soon as the song started. It is now only stashed there and committed on
+        # a real media end, so a song changed or removed part-way through is not
+        # recorded as sung and the singer's slot is not freed early. The ordering
+        # guarantee is unchanged -- nothing is marked until start is accepted.
         source = inspect.getsource(self.singws.KaraokeApp.play_next_file)
         countdown = source.index("_pending_playback_countdown_payload =")
         media_start = source.index("start_ok = bool(self.play_", countdown)
         accepted = source.index("if not start_ok", media_start)
-        remote_complete = source.index("self._complete_remote_request", accepted)
+        stashed = source.index("self._pending_performance = {", accepted)
         self.assertLess(countdown, media_start)
-        self.assertLess(accepted, remote_complete)
+        self.assertLess(accepted, stashed)
+        self.assertNotIn("self._complete_remote_request", source)
         self.assertIn("transport_for_start.started.connect(_commit_pending_start)", source)
-        self.assertLess(source.index("def _commit_pending_start"), remote_complete)
+        self.assertLess(source.index("def _commit_pending_start"), stashed)
         self.assertIn("zip_prepare_pending", source)
         self.assertIn("action=play_start_rollback", source)
         self.assertIn("QTimer.singleShot(3500", source)

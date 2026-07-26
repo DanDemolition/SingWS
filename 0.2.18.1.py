@@ -22651,6 +22651,15 @@ class KaraokeApp(QWidget):
                     f"holding_last={int(bool(video.get('holding_last_frame')))} last_frame_pts_ns={video.get('last_frame_pts_ns')} "
                     f"render_ms={float(diag.get('last_visual_render_ms', 0.0) or 0.0):.1f} "
                     f"render_max_ms={float(diag.get('visual_render_max_ms', 0.0) or 0.0):.1f} "
+                    # Visual tick health. The tick is a 15ms QTimer, so an
+                    # emit_fps well under ~66 means the main thread is not
+                    # getting scheduled on time -- which is what jittery,
+                    # slightly-late lyrics actually are. Without this the app
+                    # measured its own smoothness and discarded it.
+                    f"visual_ticks={int(diag.get('visual_ticks', 0) or 0)} "
+                    f"visual_emits={int(diag.get('visual_emits', 0) or 0)} "
+                    f"visual_emit_fps={float(diag.get('visual_emit_fps', 0.0) or 0.0):.1f} "
+                    f"visual_timer_ms={int(diag.get('visual_timer_ms', 0) or 0)} "
                     f"audible_time_s={float(diag.get('audible_position_seconds', diag.get('position_seconds', 0.0)) or 0.0):.3f} "
                     f"display_time_s={float(diag.get('display_position_seconds', diag.get('position_seconds', 0.0)) or 0.0):.3f} "
                     f"clock_source_s={float(diag.get('audio_clock_source_seconds', 0.0) or 0.0):.3f} "
@@ -23969,8 +23978,72 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
+    def _commit_pending_performance(self, reason: str = "song_completed") -> bool:
+        """Record the song that just finished as actually performed.
+
+        Deferred from song start so that a song changed or removed part-way
+        through is never counted as sung, and so a singer's slot only frees up
+        once their song has genuinely ended.
+        """
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            return False
+        pending = state.pop("_pending_performance", None)
+        if not isinstance(pending, dict):
+            return False
+        request_id = pending.get("remote_request_id")
+        if request_id is not None:
+            try:
+                self._complete_remote_request(
+                    request_id,
+                    entry=pending.get("entry"),
+                    singer_name=str(pending.get("singer_name") or ""),
+                    reason=reason,
+                )
+            except Exception:
+                pass
+        try:
+            self._record_singer_history_play(
+                str(pending.get("singer_name") or ""),
+                pending.get("entry"),
+                str(pending.get("song_path") or ""),
+                key=pending.get("key") or 0,
+                tempo_percent=pending.get("tempo_percent"),
+            )
+            self._schedule_save_data(1000)
+            self._sync_singer_history_async(reason)
+        except Exception:
+            pass
+        _diag(
+            f"[PERFORMANCE] recorded reason={reason} "
+            f"singer={str(pending.get('singer_name') or '')!r} request_id={request_id}"
+        )
+        return True
+
+    def _discard_pending_performance(self, reason: str = "stopped_early") -> bool:
+        """Drop an in-flight song without recording it as performed."""
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            return False
+        pending = state.pop("_pending_performance", None)
+        if not isinstance(pending, dict):
+            return False
+        _diag(
+            f"[PERFORMANCE] not recorded reason={reason} "
+            f"singer={str(pending.get('singer_name') or '')!r} "
+            f"request_id={pending.get('remote_request_id')} (song may be re-added)"
+        )
+        return True
+
     def _finish_media_end_cleanup(self, end_silence_triggered: bool, schedule_bg_resume: bool):
         """Finalize karaoke end: teardown/UI reset and optional delayed BG resume."""
+        try:
+            # Before stop_playback(), which discards anything still pending.
+            self._commit_pending_performance(reason="song_completed")
+        except Exception:
+            pass
         try:
             song_outro_payload = self._song_outro_payload_from_current()
             try:
@@ -48035,28 +48108,28 @@ class KaraokeApp(QWidget):
                 self._rotation_recompute_round_state(force_reset=False)
             self.queue = self.queue.copy()
 
+            # Do NOT mark the song sung here. Starting a song used to complete
+            # the remote request and record the performance immediately, which
+            # meant a song changed or removed mid-play still counted as sung --
+            # the server then answered re-adds with "You already sang this song
+            # tonight" -- and it freed the singer's slot early, letting them
+            # queue another before theirs had finished.
+            #
+            # Stash it instead. _finish_media_end_cleanup commits this on a real
+            # media end; stop_playback discards it on a host stop, skip or
+            # removal. Duplicate protection is unaffected: the request stays
+            # 'active', which already blocks re-adding while it is queued.
             try:
-                if remote_request_id is not None:
-                    self._complete_remote_request(
-                        remote_request_id,
-                        entry=entry,
-                        singer_name=str(singer.get("name", "") or ""),
-                        reason="song_started",
-                    )
+                self._pending_performance = {
+                    "remote_request_id": remote_request_id,
+                    "singer_name": str(singer.get("name", "") or "") or singer_display,
+                    "entry": entry,
+                    "song_path": song_path_display,
+                    "key": key,
+                    "tempo_percent": tempo_percent,
+                }
             except Exception:
-                pass
-            try:
-                self._record_singer_history_play(
-                    singer.get("name", "") or singer_display,
-                    entry,
-                    song_path_display,
-                    key=key,
-                    tempo_percent=tempo_percent,
-                )
-                self._schedule_save_data(1000)
-                self._sync_singer_history_async("play_next")
-            except Exception:
-                pass
+                self._pending_performance = None
             try:
                 self._send_stage_notifications_for_transition(singer_display or singer.get("name", ""))
             except Exception:
@@ -48085,6 +48158,14 @@ class KaraokeApp(QWidget):
             QTimer.singleShot(0, _commit_pending_start)
 
     def stop_playback(self, skip_confirmation=False):
+        # A song stopped before it ended was never performed, so it must not be
+        # recorded as sung -- otherwise the singer cannot re-add it. On a real
+        # media end _finish_media_end_cleanup has already committed it, so this
+        # is a no-op there.
+        try:
+            self._discard_pending_performance(reason="stop_playback")
+        except Exception:
+            pass
         pending_rollback = getattr(self, "_pending_play_start_rollback", None)
         if callable(pending_rollback):
             try:

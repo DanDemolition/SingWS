@@ -95,6 +95,31 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("[MEMORY]", telemetry)
         self.assertIn("queue_songs=", telemetry)
 
+    def test_performance_is_recorded_on_completion_not_on_start(self):
+        # Marking at song start meant a song changed or removed mid-play still
+        # counted as sung, so the server answered re-adds with "You already sang
+        # this song tonight" -- and it freed the singer's slot before their song
+        # had finished.
+        # Start path stashes instead of completing.
+        play = function_source("play_next_file")
+        self.assertIn("self._pending_performance = {", play)
+        self.assertNotIn("_complete_remote_request", play)
+        # Real media end commits it, before stop_playback tears state down.
+        finish = function_source("_finish_media_end_cleanup")
+        self.assertIn('_commit_pending_performance(reason="song_completed")', finish)
+        # Any stop that is not a media end must discard it. Target the karaoke
+        # stop_playback specifically -- the BGM player defines one too.
+        start = MAIN_SOURCE.index("def stop_playback(self, skip_confirmation=False):")
+        stop = MAIN_SOURCE[start:MAIN_SOURCE.index("\n    def ", start + 10)]
+        self.assertIn('_discard_pending_performance(reason="stop_playback")', stop)
+        commit = function_source("_commit_pending_performance")
+        self.assertIn("_complete_remote_request", commit)
+        self.assertIn("_record_singer_history_play", commit)
+        # Pop, so a performance can never be recorded twice.
+        self.assertIn('state.pop("_pending_performance", None)', commit)
+        discard = function_source("_discard_pending_performance")
+        self.assertIn('state.pop("_pending_performance", None)', discard)
+
     def test_singer_history_export_memoises_unchanged_singers(self):
         # _export_singer_history_payload re-normalised every singer on a daemon
         # thread: 46-79ms of CPU-bound Python, 54 times during the 07-25 show.
