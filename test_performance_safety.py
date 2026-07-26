@@ -95,6 +95,20 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("[MEMORY]", telemetry)
         self.assertIn("queue_songs=", telemetry)
 
+    def test_memory_telemetry_reports_live_reader_pool(self):
+        # The 2026-07-25 show grew 790MB -> 2148MB while every instrumented
+        # cache stayed tiny, so telemetry must also expose the frame pipeline:
+        # one 720p reader holds ~36MB of RGB, and ~38 retained readers would
+        # account for the whole climb.
+        self.assertIn("def reader_pool_stats", TRANSPORT_SOURCE)
+        self.assertIn("_LIVE_READERS", TRANSPORT_SOURCE)
+        # A WeakSet is required: a strong container would itself retain readers
+        # and manufacture the leak it is meant to detect.
+        self.assertIn("weakref.WeakSet", TRANSPORT_SOURCE)
+        telemetry = function_source("_log_memory_telemetry")
+        self.assertIn("reader_pool_stats", telemetry)
+        self.assertIn("frames_mb=", telemetry)
+
     def test_high_frequency_diagnostics_are_rate_limited(self):
         helper_start = MAIN_SOURCE.index("def _diag_rate_limited")
         helper_end = MAIN_SOURCE.index("\ndef ", helper_start + 4)

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from PyQt6.QtCore import QIODevice, QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QImage
 from PyQt6.QtMultimedia import QAudioFormat, QAudioSink
@@ -137,6 +138,37 @@ def _log(message: str) -> None:
 # plays many files that share a profile.
 _DECODE_PATH_CACHE: dict[tuple, tuple[bool, float]] = {}
 _DECODE_PATH_LOCK = threading.Lock()
+
+# Live video readers, so memory telemetry can distinguish a frame-pipeline leak
+# from cache growth. A WeakSet drops readers once they are garbage-collected, so
+# a count that climbs across a show means readers are being retained after their
+# song ended -- each one can hold MAX_BUFFERED_FRAMES of full-size RGB.
+_LIVE_READERS: weakref.WeakSet = weakref.WeakSet()
+
+
+def reader_pool_stats() -> dict:
+    """Summarise live video readers and the RGB they are holding."""
+    stats = {"readers": 0, "readers_running": 0, "buffered_frames": 0, "buffered_mb": 0.0}
+    try:
+        readers = list(_LIVE_READERS)
+    except Exception:
+        return stats
+    frame_bytes = 0
+    for reader in readers:
+        try:
+            queued = len(getattr(reader, "frames", None) or ())
+            stats["buffered_frames"] += queued
+            width = max(0, int(getattr(reader, "width", 0) or 0))
+            height = max(0, int(getattr(reader, "height", 0) or 0))
+            frame_bytes += queued * width * height * 3
+            thread = getattr(reader, "thread", None)
+            if thread is not None and thread.is_alive():
+                stats["readers_running"] += 1
+        except Exception:
+            continue
+    stats["readers"] = len(readers)
+    stats["buffered_mb"] = round(frame_bytes / (1024.0 * 1024.0), 1)
+    return stats
 
 
 def _read_exact(stream, wanted: int) -> bytes:
@@ -643,6 +675,10 @@ class FfmpegVideoReader:
         self.use_hwaccel = False
         # Throughput of the chosen decode path, as a multiple of real time.
         self.decode_speed_ratio = 0.0
+        try:
+            _LIVE_READERS.add(self)
+        except Exception:
+            pass
         self.thread = threading.Thread(target=self._read_frames, daemon=True)
         self.thread.start()
 

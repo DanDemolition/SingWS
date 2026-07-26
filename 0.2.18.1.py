@@ -22576,12 +22576,29 @@ class KaraokeApp(QWidget):
                 for singer in (getattr(self, "queue", []) or [])
                 if isinstance(singer, dict)
             )
+            # Live decoder readers and the RGB they hold. The 07-25 show grew
+            # 790MB -> 2148MB while every instrumented cache stayed tiny (215
+            # entries total), so the frame pipeline is the remaining suspect:
+            # each reader can retain MAX_BUFFERED_FRAMES of full-size RGB. A
+            # readers count that climbs across a show means they outlive songs.
+            readers = "n/a"
+            try:
+                from python_karaoke_transport import reader_pool_stats
+
+                pool = reader_pool_stats()
+                readers = (
+                    f"readers={pool['readers']} running={pool['readers_running']} "
+                    f"frames={pool['buffered_frames']} frames_mb={pool['buffered_mb']}"
+                )
+            except Exception:
+                pass
             _diag(
                 "[MEMORY] "
                 f"rss_mb={rss_mb:.0f} growth_mb={growth_mb:+.0f} "
                 f"tracks={len(getattr(self, 'tracks', []) or [])} queue_songs={queue_rows} "
                 f"display_cache={display_cache} search_cache={search_cache} "
-                f"lookup_cache={lookup_cache} threads={threading.active_count()}"
+                f"lookup_cache={lookup_cache} threads={threading.active_count()} "
+                f"{readers}"
             )
         except Exception as exc:
             _diag_rate_limited(
