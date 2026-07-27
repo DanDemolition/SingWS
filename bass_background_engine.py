@@ -116,6 +116,13 @@ class BassBackgroundEngine:
     _bass_init_done: bool = False
     # Reference count of active engine instances using BASS
     _bass_init_refcount: int = 0
+    # Output device the shared BASS runtime is currently bound to. BASS_Init
+    # binds the device process-wide, so switching outputs needs a real
+    # free/re-init -- refcounting alone cannot do it. The host builds two
+    # BackgroundMusicPlayer instances, so the refcount never falls to zero,
+    # BASS_Free was never reached, and every output change was silently
+    # ignored: BASS stayed on whichever device it first opened.
+    _bass_init_device: str = ""
 
     backend_name = "BASS"
 
@@ -275,11 +282,29 @@ class BassBackgroundEngine:
         return exact or partial or default or -1
 
     def _init_output(self):
+        # A different output device than the one BASS is bound to has to be
+        # re-initialized, not refcounted: BASS_Init picks the device for the
+        # whole process. Any handles other engines still hold belong to the old
+        # device and have to be rebuilt anyway, which is what the host's
+        # prepare/apply_audio_output_change pair already arranges.
+        wanted_device = self.output_name or ""
+        if (
+            BassBackgroundEngine._bass_init_done
+            and BassBackgroundEngine._bass_init_device != wanted_device
+        ):
+            try:
+                self.bass.BASS_Free()
+            except Exception:
+                pass
+            BassBackgroundEngine._bass_init_done = False
+            BassBackgroundEngine._bass_init_refcount = 0
+
         # Initialize BASS once per process. Subsequent instances skip initialization.
         if not BassBackgroundEngine._bass_init_done:
             if not self.bass.BASS_Init(self._device_index(), self.sample_rate, 0, None, None):
                 raise self._error("BASS_Init")
             BassBackgroundEngine._bass_init_done = True
+            BassBackgroundEngine._bass_init_device = wanted_device
             # Resilience tuning: prefer a generous playback buffer over low
             # latency.  At a karaoke gig we never need sub-second seek
             # response from BGM; what matters is that audio never breaks
@@ -711,6 +736,7 @@ class BassBackgroundEngine:
                 except Exception:
                     pass
                 BassBackgroundEngine._bass_init_done = False
+                BassBackgroundEngine._bass_init_device = ""
 
     def load(self, path: str, paused: bool = True, volume: float | None = None):
         self.stop()

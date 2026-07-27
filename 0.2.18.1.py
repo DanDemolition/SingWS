@@ -13998,7 +13998,13 @@ class PreviewWindow(QWidget):
             "QWidget#previewWindow { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #02040A, stop:1 #000000); border: 1px solid rgba(124,61,255,0.36); border-radius: 8px; }"
         )
         self.force_black = True
-        self.bg_music = BackgroundMusicPlayer(self)
+        # No BackgroundMusicPlayer here. This window used to build one as part
+        # of a block copied from KaraokeApp and never referenced it, but the
+        # engine it created still took a BASS init reference for the life of
+        # the process. BASS_Init binds the output device process-wide and is
+        # only released when the last reference goes, so that unused player is
+        # what kept the reference count above zero and made every audio-output
+        # change a no-op for background music.
 
         # Flag to indicate an active karaoke track (used to lock out BG play)
         self.karaoke_playing = False
