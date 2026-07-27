@@ -1221,6 +1221,57 @@ class SongSearchThread(QThread):
             return
 
 
+# Search threads that have been stood down but may still be inside an
+# uninterruptible query.  Module scope on purpose: the dialogs that own these
+# threads are torn down while a search can still be in flight, so the parking
+# lot has to outlive them.
+_RETIRED_SEARCH_THREADS = []
+
+
+def _retire_search_thread(search_state: dict):
+    """Stand down a dialog's SongSearchThread without destroying it.
+
+    requestInterruption() is cooperative, and run() spends nearly all of its
+    time inside song_index.search_songs() -- an uninterruptible SQLite scan of
+    134k rows.  The thread therefore keeps running well after the operator has
+    typed the next character or closed the dialog.  Dropping the last Python
+    reference at that point lets PyQt destroy a running QThread, which makes Qt
+    call qFatal() and abort the whole process (seen as SIGABRT out of a replace
+    dialog opened from the queue context menu).  Hold the reference until the
+    thread reports that it has actually finished.
+    """
+    previous = search_state.get("thread")
+    search_state["thread"] = None
+    if previous is None:
+        return
+    _RETIRED_SEARCH_THREADS.append(previous)
+    # Nothing wants a retired search's rows, and the dialog widgets they would
+    # be written into may already be gone by the time it emits.
+    try:
+        previous.results_ready.disconnect()
+    except Exception:
+        pass
+
+    def _release():
+        try:
+            previous.wait(100)
+        except Exception:
+            pass
+        try:
+            _RETIRED_SEARCH_THREADS.remove(previous)
+        except ValueError:
+            pass
+
+    try:
+        previous.finished.connect(_release)
+        if previous.isRunning():
+            previous.requestInterruption()
+        else:
+            _release()
+    except Exception:
+        pass
+
+
 class IndexBuildThread(QThread):
     done = pyqtSignal(bool, str)
     progress = pyqtSignal(str, int, int)  # message, current, total
@@ -29543,16 +29594,16 @@ class KaraokeApp(QWidget):
             query = str(search.text() or "").strip()
             search_state["job_id"] = int(search_state.get("job_id") or 0) + 1
             job_id = int(search_state["job_id"])
+            # Retire before the empty-query check, not after. Backspacing the
+            # box to nothing has to stand the in-flight search down too --
+            # otherwise it keeps scanning the library for a result that is
+            # already discarded, and it is still running when the next
+            # keystroke or the dialog close comes to replace it.
+            _retire_search_thread(search_state)
             if not query:
                 results.clear()
                 refresh_confirm()
                 return
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
             thread = SongSearchThread(
                 job_id,
                 query,
@@ -29567,10 +29618,6 @@ class KaraokeApp(QWidget):
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
             )
             thread.results_ready.connect(on_results)
-            try:
-                thread.finished.connect(thread.deleteLater)
-            except Exception:
-                pass
             search_state["thread"] = thread
             thread.start()
 
@@ -29603,12 +29650,7 @@ class KaraokeApp(QWidget):
                 self.save_settings()
             except Exception:
                 pass
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
+            _retire_search_thread(search_state)
 
         dlg.finished.connect(lambda _r: cleanup())
         seed = " ".join([p for p in (old_artist, old_title) if p]).strip()
@@ -40733,16 +40775,16 @@ class KaraokeApp(QWidget):
             query = str(search.text() or "").strip()
             search_state["job_id"] = int(search_state.get("job_id") or 0) + 1
             job_id = int(search_state["job_id"])
+            # Retire before the empty-query check, not after. Backspacing the
+            # box to nothing has to stand the in-flight search down too --
+            # otherwise it keeps scanning the library for a result that is
+            # already discarded, and it is still running when the next
+            # keystroke or the dialog close comes to replace it.
+            _retire_search_thread(search_state)
             if not query:
                 results.clear()
                 refresh_confirm()
                 return
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
             thread = SongSearchThread(
                 job_id,
                 query,
@@ -40757,10 +40799,6 @@ class KaraokeApp(QWidget):
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
             )
             thread.results_ready.connect(on_results)
-            try:
-                thread.finished.connect(thread.deleteLater)
-            except Exception:
-                pass
             search_state["thread"] = thread
             thread.start()
 
@@ -40823,12 +40861,7 @@ class KaraokeApp(QWidget):
                 self.save_settings()
             except Exception:
                 pass
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
+            _retire_search_thread(search_state)
 
         dlg.finished.connect(lambda _r: persist_size())
         try:
