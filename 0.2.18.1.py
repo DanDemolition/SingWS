@@ -9,7 +9,7 @@ from pathlib import Path
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.2.9"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
-KARAFUN_ESTIMATED_DURATION_SECONDS = 3 * 60 + 30
+KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
 
 def normalize_karafun_duration_seconds(value):
@@ -43728,17 +43728,34 @@ class KaraokeApp(QWidget):
         seconds = normalize_karafun_duration_seconds(value)
         if seconds is None:
             return False
+        scraped = str(source or "").strip() == "karafun_result"
+        if scraped and seconds == KARAFUN_ESTIMATED_DURATION_SECONDS:
+            # A scrape that lands exactly on our own catalog estimate is
+            # indistinguishable from that estimate. Keep whatever we had so it
+            # cannot arm playback completion.
+            return False
         current = normalize_karafun_duration_seconds(entry.get("duration"))
         if current is not None and not bool(entry.get("duration_estimated", False)):
-            return False
-        if (
-            bool(entry.get("duration_estimated", False))
-            and str(source or "").strip() == "karafun_result"
-            and seconds == KARAFUN_ESTIMATED_DURATION_SECONDS
-        ):
-            # A scraped 3:30 result is indistinguishable from our default.
-            # Keep it estimated so it cannot arm playback completion.
-            return False
+            # A scraped result is read off KaraFun's own window for the exact
+            # song about to play, so it outranks machine metadata already on the
+            # entry: our catalog estimate can come back from the server without
+            # its "estimated" flag and then look verified, and refusing to
+            # correct it there is what let the watchdog complete a 4:57 song at
+            # the estimate and start background music over KaraFun mid-song.
+            # A duration the host set by hand is a deliberate override and still
+            # wins over everything.
+            host_set = "manual" in str(entry.get("duration_source", "") or "").strip().lower()
+            if host_set or not scraped:
+                return False
+        if scraped and current is not None and int(current) != int(seconds):
+            try:
+                _diag(
+                    f"[KARAFUN] duration corrected from {int(current)}s to {int(seconds)}s "
+                    f"(was_estimated={int(bool(entry.get('duration_estimated', False)))}) "
+                    f"title={str(entry.get('title', '') or '')!r}"
+                )
+            except Exception:
+                pass
         entry["duration"] = seconds
         entry["duration_estimated"] = False
         entry["duration_source"] = str(source or "verified_metadata")
@@ -46871,7 +46888,15 @@ class KaraokeApp(QWidget):
                         'end tell',
                     ]
                     renderer_result = ""
-                    for renderer_attempt in range(3):
+                    # The open button is a TOGGLE. Clicking it on every failed
+                    # attempt is what made this take three rounds and ~10s of
+                    # dead air: the first click opened the renderer, 0.8s was
+                    # not long enough for the window to appear, so the next
+                    # attempt clicked again and closed it. Click once, then
+                    # poll for the window with a wait that actually covers how
+                    # long KaraFun takes to show it.
+                    renderer_open_clicked = False
+                    for renderer_attempt in range(4):
                         ok, renderer_result, renderer_error = self._run_karafun_applescript_sync(
                             prepare_renderer_script, timeout=8
                         )
@@ -46881,15 +46906,21 @@ class KaraokeApp(QWidget):
                             _diag(
                                 f"[KARAFUN] transparent renderer ready bounds={rx},{ry},{rw},{rh} "
                                 f"attempt={renderer_attempt + 1}"
+                                f"{' (after open click)' if renderer_open_clicked else ''}"
                             )
                             break
                         renderer_parts = renderer_result.split("|")
                         if ok and len(renderer_parts) == 3 and renderer_parts[0] == "OPEN":
-                            _diag(f"[KARAFUN] opening missing Dual Renderer attempt={renderer_attempt + 1}")
-                            self._macos_native_mouse_click(
-                                int(float(renderer_parts[1])), int(float(renderer_parts[2])), clicks=1
-                            )
-                            time.sleep(0.8)
+                            if not renderer_open_clicked:
+                                _diag(f"[KARAFUN] opening missing Dual Renderer attempt={renderer_attempt + 1}")
+                                self._macos_native_mouse_click(
+                                    int(float(renderer_parts[1])), int(float(renderer_parts[2])), clicks=1
+                                )
+                                renderer_open_clicked = True
+                                time.sleep(1.5)
+                            else:
+                                # Already asked for it; just give it more time.
+                                time.sleep(1.0)
                             continue
                         break
                     if not self._karafun_transparent_renderer_ready:
@@ -47217,8 +47248,8 @@ class KaraokeApp(QWidget):
         try:
             # Rotation estimates are presentation metadata, not a playback end
             # signal. Only a verified/manual duration may arm the completion
-            # watchdog; otherwise a song longer than 3:30 could be completed
-            # early merely because its ETA used the catalog fallback.
+            # watchdog; otherwise a song longer than the catalog estimate could
+            # be completed early merely because its ETA used that fallback.
             fallback_duration = (
                 0 if bool(entry.get("duration_estimated", False))
                 else max(0, int(entry.get("duration") or 0))
@@ -47238,6 +47269,12 @@ class KaraokeApp(QWidget):
         # polling thread so a stuck query cannot delay song completion.
         if fallback_duration > 0:
             fallback_delay = max(1.0, float(fallback_duration) - max(0.0, now_mono - started) + 2.0)
+            # Bounded grace so a duration that is still too short cannot cut a
+            # song that KaraFun is audibly still playing. Each extension needs a
+            # *fresh* "still playing" reading, so a stuck accessibility query
+            # cannot hold the song open -- it simply stops producing readings
+            # and the watchdog completes on schedule, as before.
+            watchdog_grace = {"remaining_s": 120.0}
 
             def _duration_watchdog_fired():
                 def _complete_from_duration_watchdog():
@@ -47246,7 +47283,28 @@ class KaraokeApp(QWidget):
                         return
                     if entry.get("karafun_completion_monitor") != monitor_token:
                         return
-                    _diag("[KARAFUN] completion event received reason=duration_watchdog")
+                    last_playing = float(entry.get("karafun_last_playing_ts") or 0.0)
+                    playing_age = (time.monotonic() - last_playing) if last_playing > 0 else None
+                    if (
+                        playing_age is not None
+                        and playing_age <= 20.0
+                        and watchdog_grace["remaining_s"] > 0.0
+                    ):
+                        extend = min(15.0, watchdog_grace["remaining_s"])
+                        watchdog_grace["remaining_s"] -= extend
+                        _diag(
+                            "[KARAFUN] duration watchdog deferred; KaraFun still playing "
+                            f"(last_playing={playing_age:.1f}s ago, grace_left="
+                            f"{watchdog_grace['remaining_s']:.0f}s)"
+                        )
+                        again = threading.Timer(extend, _duration_watchdog_fired)
+                        again.daemon = True
+                        again.start()
+                        return
+                    _diag(
+                        "[KARAFUN] completion event received reason=duration_watchdog "
+                        f"last_playing={'never' if playing_age is None else f'{playing_age:.1f}s ago'}"
+                    )
                     self._finish_external_karafun_playback("complete")
 
                 self._run_on_ui_thread(_complete_from_duration_watchdog)
@@ -47346,12 +47404,20 @@ class KaraokeApp(QWidget):
                             if previous is None or current <= previous:
                                 continue
                             remaining = total - current
+                            # A clock that advanced between polls is the
+                            # strongest proof KaraFun is still playing, so it
+                            # also holds the duration watchdog off.
+                            entry["karafun_last_playing_ts"] = time.monotonic()
                             if current > 2:
                                 seen_playback = True
                     last_clock_candidates = next_clock_candidates
                     if playing_reported:
                         seen_playback = True
                         idle_stop_count = 0
+                        # Timestamp of the newest confirmed "still playing"
+                        # reading. The duration watchdog reads this to avoid
+                        # cutting a song KaraFun has not finished.
+                        entry["karafun_last_playing_ts"] = time.monotonic()
                     elif idle_reported and seen_playback:
                         idle_stop_count += 1
                     else:
