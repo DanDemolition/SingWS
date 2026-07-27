@@ -343,7 +343,7 @@ class ModelBackedViewQATests(unittest.TestCase):
         self.assertEqual(app._queue_item_song_indices(app.queue_display.item(1), 1), (0, 0))
         self.assertEqual(app._queue_item_song_indices(app.queue_display.item(2), 2), (0, 1))
 
-    def test_queue_keeps_singers_without_songs_visible_and_numbered_in_place(self):
+    def test_queue_keeps_singers_without_songs_visible_and_in_place_unnumbered(self):
         app = self.make_app()
         self.setup_queue_shell(app)
         app._first_active_entry_for_singer = lambda singer: next((song for song in singer.get("songs", []) if not song.get("skipped", False)), None)
@@ -368,9 +368,12 @@ class ModelBackedViewQATests(unittest.TestCase):
         singer_rows = [row for row in app.queue_display_model._rows if row.get("kind") == "singer"]
         left_role = app._row_left_role
         right_role = app._row_right_role
+        # Steve holds his row and his place but takes no number: the numbers
+        # count only singers who actually have a song, so "how many until I'm
+        # up" reads straight off the list. Bill is therefore 2, not 3.
         self.assertEqual(
             [row.get("roles", {}).get(left_role) for row in singer_rows],
-            ["1. Dan", "2. Steve", "3. Bill"],
+            ["1. Dan", "\u2014 Steve", "2. Bill"],
         )
         self.assertEqual(
             [row.get("roles", {}).get(right_role) for row in singer_rows],
@@ -432,7 +435,7 @@ class ModelBackedViewQATests(unittest.TestCase):
         self.assertEqual([singer["name"] for singer in app.queue], ["Steve", "Dan", "Bill"])
         self.assertEqual(app._row_for_singer_index(0), 0)
         first = app.queue_display_model.rowDict(0)
-        self.assertEqual(first.get("roles", {}).get(app._row_left_role), "1. Steve")
+        self.assertEqual(first.get("roles", {}).get(app._row_left_role), "\u2014 Steve")
         self.assertEqual(first.get("roles", {}).get(app._row_right_role), "WAITING FOR SONG")
 
     def test_rotation_start_is_visible_in_header_and_waiting_row(self):

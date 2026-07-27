@@ -38642,7 +38642,58 @@ class KaraokeApp(QWidget):
         new_name = str(new_name or "").strip()
         if not new_name or new_name == old_name:
             return
+        if not self._confirm_rename_collision(singer_idx, new_name):
+            return
         self._rename_rotation_singer(singer_idx, new_name, source="rotation_menu")
+
+    def _confirm_rename_collision(self, singer_idx: int, new_name: str) -> bool:
+        """Ask before a rename folds this singer into an existing one.
+
+        Renaming onto a name already in the rotation merges the two rows and
+        their songs. That is right for a typo ("AaronC" -> "Aaron C") and wrong
+        for two different people who happen to share a name -- renaming
+        'Shaunte Y Sahara' to 'Sahara' silently fused two singers into one row
+        holding both their songs. The host is the only one who knows which case
+        it is, so ask rather than guess. Only the interactive path asks; sync
+        and remote renames keep merging automatically, which is what protects
+        against two clients racing the same rename.
+        """
+        try:
+            target_key = self._queue_limit_name_key(new_name)
+            if not target_key:
+                return True
+            clashes = [
+                other for i, other in enumerate(self.queue or [])
+                if i != singer_idx and isinstance(other, dict)
+                and self._queue_limit_name_key(other.get("name", "")) == target_key
+            ]
+            if not clashes:
+                return True
+            song_count = sum(len(other.get("songs") or []) for other in clashes)
+            existing_name = str(clashes[0].get("name", "") or new_name).strip()
+            songs_text = (
+                f"{song_count} song{'s' if song_count != 1 else ''}"
+                if song_count else "no songs"
+            )
+            answer = QMessageBox.question(
+                self,
+                "Name already in the rotation",
+                f"'{existing_name}' is already in the rotation with {songs_text}.\n\n"
+                f"Renaming will merge the two into one singer, and their songs "
+                f"will end up in the same row.\n\n"
+                f"Merge them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                _diag(
+                    f"[SINGER-MERGE] rename cancelled at collision prompt "
+                    f"new={new_name!r} existing_songs={song_count}"
+                )
+                return False
+        except Exception:
+            return True
+        return True
 
     def _rename_rotation_singer(self, singer_idx: int, new_name: str, *, source: str = "host", merge_prefs_history: bool = True) -> bool:
         """Rename a rotation singer, merging into an existing singer when the
@@ -38741,33 +38792,65 @@ class KaraokeApp(QWidget):
 
         Survivor selection follows the spec: oldest created_at when known
         (records without a timestamp predate the field, so they count as
-        oldest), then first appearance in the rotation. The merged record
-        takes the earliest queue slot of its group; the survivor's songs keep
-        their order and every duplicate's songs are appended in their original
-        relative order. Runs after renames, on load, and is safe to call from
-        sync paths — merging twice is a no-op, which is what protects against
-        two clients racing the same rename."""
+        oldest), then first appearance in the rotation. The survivor's songs
+        keep their order and every duplicate's songs are appended in their
+        original relative order. Runs after renames, on load, and is safe to
+        call from sync paths — merging twice is a no-op, which is what protects
+        against two clients racing the same rename.
+
+        Placement depends on whether the group has already had its turn. A
+        plain duplicate keeps the earliest slot, so someone who signed up twice
+        under two spellings does not lose their place. But when any record in
+        the group has already sung this round, the merged singer takes the
+        *latest* slot instead: renaming someone onto an existing name would
+        otherwise hand them that name's earlier position and move them up past
+        singers who are still waiting for their turn."""
         queue = self.queue or []
         groups = {}
-        order = []  # ("raw", obj) | ("key", k) at first appearance
+        slots = []  # one per queue entry: ("raw", obj) | ("key", k)
         for entry in queue:
             key = ""
             if isinstance(entry, dict):
                 key = self._queue_limit_name_key(entry.get("name", ""))
             if not key:
-                order.append(("raw", entry))
+                slots.append(("raw", entry))
                 continue
-            if key in groups:
-                groups[key].append(entry)
-            else:
-                groups[key] = [entry]
-                order.append(("key", key))
+            groups.setdefault(key, []).append(entry)
+            slots.append(("key", key))
+
+        def _already_sang_this_round(group) -> bool:
+            for member in group:
+                if not isinstance(member, dict):
+                    continue
+                if bool(member.get("round_sung")) or bool(member.get("has_sung")):
+                    return True
+            return False
+
+        # Which of a key's slots the merged record ends up occupying.
+        emit_at = {}
+        for key, group in groups.items():
+            indexes = [i for i, (kind, val) in enumerate(slots) if kind == "key" and val == key]
+            if not indexes:
+                continue
+            late = len(group) > 1 and _already_sang_this_round(group)
+            emit_at[key] = indexes[-1] if late else indexes[0]
+            if late:
+                try:
+                    _diag(
+                        "[SINGER-MERGE] merged singer already sang this round; keeping later "
+                        f"rotation slot singer={str(group[0].get('name', '') or '')!r} "
+                        f"from_index={indexes[0]} to_index={indexes[-1]}"
+                    )
+                except Exception:
+                    pass
 
         merged_count = 0
         new_queue = []
-        for kind, val in order:
+        for slot_index, (kind, val) in enumerate(slots):
             if kind == "raw":
                 new_queue.append(val)
+                continue
+            if emit_at.get(val) != slot_index:
                 continue
             group = groups[val]
             if len(group) == 1:
@@ -44370,7 +44453,12 @@ class KaraokeApp(QWidget):
                 for song in singer.get("songs", [])
             )
             
-            if is_singer_skipped:
+            # Only singers who actually have a song queued take a number, so the
+            # numbers answer "how many until I'm up" directly and the host does
+            # not have to subtract the placeholders. A singer with nothing in
+            # still holds their row and their place -- add a song and they take
+            # the next number at that same spot.
+            if is_singer_skipped or not has_songs:
                 singer_left = f"— {singer['name']}"
             else:
                 singer_left = f"{number}. {singer['name']}"
