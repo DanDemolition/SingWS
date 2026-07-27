@@ -34663,6 +34663,44 @@ class KaraokeApp(QWidget):
             pass
         return False
 
+    def _stuck_song_min_seconds(self) -> float:
+        """Evidence window for declaring a song dead in the middle of playback.
+
+        Deliberately NOT the host's trailing-trim setting. That setting answers
+        "how fast should background music come back at the END of a song", and
+        a host who turns it down to 0.5s to close that gap is not asking to
+        have live songs cut. Every other end reason is gated on being near the
+        end of the track; this one can fire anywhere past the 35% mark, so it
+        has to stand on its own evidence.
+
+        A real performance does not sit below the silence threshold with no
+        lyric movement for this long -- a genuinely dead or stalled track does.
+        """
+        try:
+            value = float(self.settings.get("stuck_song_min_seconds", 25.0) or 25.0)
+        except Exception:
+            value = 25.0
+        return max(10.0, min(120.0, value))
+
+    def _stuck_song_confirmed(self, cdg_stale_for: float) -> bool:
+        """True only when audio AND lyrics have both been dead a long time.
+
+        Both clocks must clear the window. Half a second of a quiet passage
+        with no lyric wipe is completely normal mid-song -- an atmospheric
+        break, a breakdown, a gap between phrases -- and cutting there ends a
+        song the singer is still performing.
+        """
+        window = self._stuck_song_min_seconds()
+        try:
+            silent_for = float(getattr(self, "_end_silence_accum_s", 0.0) or 0.0)
+        except Exception:
+            silent_for = 0.0
+        try:
+            stale_for = float(cdg_stale_for or 0.0)
+        except Exception:
+            stale_for = 0.0
+        return silent_for >= window and stale_for >= window
+
     def _maybe_trim_end_silence(self, dur_ns: int, pos_ns: int) -> bool:
         """Return True if intelligent dead-air detection triggered media end."""
         if not self._karaoke_early_silence_trim_enabled():
@@ -34764,7 +34802,10 @@ class KaraokeApp(QWidget):
                 reason = "cdg_lyrics_complete_extended_silence"
             elif cdg_stale and near_end:
                 reason = "empty_trailing_cdg_frames_extended_silence"
-            elif cdg_stale and post_content_elapsed:
+            elif post_content_elapsed and self._stuck_song_confirmed(cdg_stale_for):
+                # The only reason that can fire in the MIDDLE of a song, so it
+                # needs its own, far longer evidence window -- see
+                # _stuck_song_confirmed.
                 reason = "long_no_lyrics_no_audio"
             elif near_end:
                 reason = "near_end_extended_silence"
