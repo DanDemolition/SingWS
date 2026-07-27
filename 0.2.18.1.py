@@ -1074,7 +1074,7 @@ from PyQt6.QtWidgets import (
     QListView, QLineEdit, QFileDialog, QLabel, QComboBox, QHBoxLayout, QGridLayout,
     QSizePolicy, QDialog, QDialogButtonBox, QListWidgetItem, QStyledItemDelegate, QStyle,
     QInputDialog, QMessageBox, QFrame, QMainWindow, QToolButton, QStyleOptionViewItem,
-    QGraphicsDropShadowEffect, QStackedWidget, QSpinBox,
+    QStackedWidget, QSpinBox,
     QTextEdit, QPlainTextEdit
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette
@@ -31753,16 +31753,6 @@ class KaraokeApp(QWidget):
             return
         self._on_search_result_double_clicked(item)
 
-    def _make_shadow_effect(self, *, blur: int = 24, y: int = 8, alpha: int = 95):
-        try:
-            shadow = QGraphicsDropShadowEffect(self)
-            shadow.setBlurRadius(int(blur))
-            shadow.setOffset(0, int(y))
-            shadow.setColor(QColor(0, 0, 0, int(alpha)))
-            return shadow
-        except Exception:
-            return None
-
     def _live_pulse_value(self) -> float:
         """Return a soft 0..1 pulse value on a 1.8s cycle.
 
@@ -31943,18 +31933,15 @@ class KaraokeApp(QWidget):
             self._live_state_polish_installed = True
             self._live_pulse_started_at = time.monotonic()
 
-            for widget, blur, y, alpha in (
-                (getattr(self, "library_card", None), 16, 5, 42),
-                (getattr(self, "rotation_card", None), 16, 5, 42),
-                (getattr(self, "operator_bottom_nav", None), 14, 4, 34),
-                (getattr(self, "transport_bar", None), 24, 8, 70),
-                (getattr(self, "rotation_hero_card", None), 22, 7, 65),
-                (getattr(self, "bg_main_card", None), 20, 7, 62),
-            ):
-                if widget is not None:
-                    effect = self._make_shadow_effect(blur=blur, y=y, alpha=alpha)
-                    if effect is not None:
-                        widget.setGraphicsEffect(effect)
+            # The operator cards used to carry QGraphicsDropShadowEffect here.
+            # A graphics effect opts its whole widget subtree out of Qt's
+            # clipped repaints: any descendant update re-renders the entire
+            # card into an offscreen pixmap and re-runs a software Gaussian
+            # blur on the GUI thread, and nested cards make that cost
+            # multiplicative. On this Intel Mac it ate over half of the main
+            # thread, which starved the transport's 15ms visual timer down to
+            # ~13Hz and capped video at ~12.6fps against a 30fps source.
+            # Card elevation comes from the stylesheet borders instead.
 
             self._live_state_timer = QTimer(self)
             self._live_state_timer.timeout.connect(self._tick_live_state_polish)
