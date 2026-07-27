@@ -24444,12 +24444,21 @@ class KaraokeApp(QWidget):
         # Invalidate cache so ticker recalculates
         if hasattr(self, '_cached_ticker_data'):
             delattr(self, '_cached_ticker_data')
-        
+
+        # A change of current singer has to reach the screen now. Routine queue
+        # edits are deliberately deferred to the end of the scroll pass so the
+        # marquee never visibly restarts, but that same deferral is what left
+        # the ticker naming the singer whose song had already finished for the
+        # whole gap between songs -- a full pass can easily outlast the gap.
+        current_singer = str(getattr(self, "_current_karaoke_singer_display", "") or "")
+        singer_changed = current_singer != getattr(self, "_ticker_last_rendered_singer", None)
+        self._ticker_last_rendered_singer = current_singer
+
         try:
             if hasattr(self, 'video_window') and hasattr(self.video_window, 'ticker'):
                 # Reset ticker's auto-timer to prevent double-updates
                 self.video_window.ticker.queue_update_timer.stop()
-                self.video_window.ticker.update_queue_text()
+                self.video_window.ticker.update_queue_text(force=singer_changed)
                 self.video_window.ticker.queue_update_timer.start(5000)
         except Exception:
             pass
