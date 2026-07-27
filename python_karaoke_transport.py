@@ -400,7 +400,11 @@ class _AudioDecodeWorker(threading.Thread):
                 with self.engine_lock:
                     process_started = time.perf_counter()
                     output = self.engine.process_f32le(source)
-                _perf_log_if_slow("audio_processing", (time.perf_counter() - process_started) * 1000.0, 5.0)
+                # 5ms was below the steady state of this DSP chain, so it fired
+                # its once-per-second cap all night (2937 lines in one show)
+                # and buried the anomalies in its own noise. 6-14ms is normal
+                # here; only a real stall is worth a line.
+                _perf_log_if_slow("audio_processing", (time.perf_counter() - process_started) * 1000.0, 25.0)
                 if output:
                     self.transport._queue_pcm(output, self)
                     self.transport._accept_level(output, self)
@@ -927,6 +931,14 @@ class FfmpegVideoReader:
         except Exception as exc:
             print(f"[FFMPEG] video probe failed: {exc}")
             return
+        # Never ask ffmpeg for more frames than the file actually holds. The
+        # fps filter would otherwise duplicate frames up to the output rate --
+        # a 25fps source decoded at 30 spends a fifth of its decode, queue and
+        # copy budget on duplicates that image_at() then discards as drops.
+        # Clamp before choosing the decode path so the speed probe times the
+        # rate this reader will really run at.
+        if self.source_fps > 0.0:
+            self.fps = min(self.fps, self.source_fps)
         # Decide hwaccel here (on this worker thread) so the probe never blocks
         # the GUI thread that created the reader.
         if not self.stop_event.is_set():
@@ -1559,10 +1571,6 @@ class PythonKaraokeTransport(QObject):
         latency) and overlap-free (no leftover buffered old audio)."""
         if self.audio_sink is not None:
             return
-        fmt = QAudioFormat()
-        fmt.setSampleRate(self.sample_rate)
-        fmt.setChannelCount(self.channels)
-        fmt.setSampleFormat(QAudioFormat.SampleFormat.Float)
         device = self.audio_device
         use_selected_device = device is not None
         if use_selected_device:
@@ -1570,6 +1578,31 @@ class PythonKaraokeTransport(QObject):
                 use_selected_device = not bool(device.isNull())
             except Exception:
                 use_selected_device = True
+
+        # Negotiate against the device instead of assuming 48kHz. An output
+        # that cannot take our format does NOT raise here -- QAudioSink simply
+        # never produces sound, which is indistinguishable from a dead cable.
+        # AirPlay receivers are the common case: they are usually 44.1kHz, so
+        # pinning one gave silence with nothing in the log to explain it.
+        if use_selected_device:
+            if not self._negotiate_sink_format(device):
+                print(
+                    f"[PY-KARAOKE] audio output {self.audio_device_name!r} cannot accept "
+                    f"float PCM at any rate; falling back to the system default"
+                )
+                _log(
+                    f"[AUDIO] pinned output {self.audio_device_name!r} rejected the playback "
+                    f"format; karaoke fell back to the system default"
+                )
+                self.audio_device = None
+                self.audio_device_name = ""
+                device = None
+                use_selected_device = False
+
+        fmt = QAudioFormat()
+        fmt.setSampleRate(self.sample_rate)
+        fmt.setChannelCount(self.channels)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Float)
         try:
             self.audio_sink = QAudioSink(device, fmt, self) if use_selected_device else QAudioSink(fmt, self)
         except Exception as exc:
@@ -1590,6 +1623,85 @@ class PythonKaraokeTransport(QObject):
         self._feeder.open(QIODevice.OpenModeFlag.ReadOnly)
         # Pull mode: hand Qt the feeder; it pulls as the device needs data.
         self.audio_sink.start(self._feeder)
+        self._verify_sink_started()
+
+    def _negotiate_sink_format(self, device) -> bool:
+        """Adopt a sample rate/channel count the device will actually accept.
+
+        The decode pipeline is float32 throughout (ffmpeg emits f32le and the
+        EQ/master processors assume 4-byte samples), so only the rate and
+        channel count are negotiable. Returns False when the device cannot take
+        float PCM at all, which is the caller's cue to fall back.
+        """
+        def supported(rate: int, channels: int):
+            """True/False when the device answers, None when it cannot be asked."""
+            try:
+                probe = QAudioFormat()
+                probe.setSampleRate(int(rate))
+                probe.setChannelCount(int(channels))
+                probe.setSampleFormat(QAudioFormat.SampleFormat.Float)
+                return bool(device.isFormatSupported(probe))
+            except Exception:
+                return None
+
+        # Only a definitive "no" is worth acting on. A device that cannot be
+        # queried keeps the previous behaviour -- hand it to QAudioSink and let
+        # it try -- so this can never reject an output that would have worked.
+        if supported(self.sample_rate, self.channels) is not False:
+            return True
+
+        preferred_rate = 0
+        preferred_channels = 0
+        try:
+            preferred = device.preferredFormat()
+            preferred_rate = int(preferred.sampleRate() or 0)
+            preferred_channels = int(preferred.channelCount() or 0)
+        except Exception:
+            pass
+
+        candidates = []
+        if preferred_rate > 0:
+            candidates.append((preferred_rate, preferred_channels or self.channels))
+        for rate in (48000, 44100, 96000, 88200, 32000):
+            candidates.append((rate, self.channels))
+        if preferred_channels and preferred_channels != self.channels:
+            candidates.append((self.sample_rate, preferred_channels))
+
+        for rate, channels in candidates:
+            if rate <= 0 or channels <= 0:
+                continue
+            if supported(rate, channels) is not True:
+                continue
+            old = (self.sample_rate, self.channels)
+            self.sample_rate = int(rate)
+            self.channels = int(channels)
+            # Nothing has been decoded yet -- _ensure_sink_running() runs before
+            # the decoder is spawned -- so ffmpeg, the byte-rate maths and the
+            # DSP chain all pick this up.
+            print(
+                f"[PY-KARAOKE] audio format negotiated for {self.audio_device_name!r}: "
+                f"{old[0]}Hz/{old[1]}ch -> {self.sample_rate}Hz/{self.channels}ch"
+            )
+            _log(
+                f"[AUDIO] output {self.audio_device_name!r} needed "
+                f"{self.sample_rate}Hz/{self.channels}ch; playback adapted"
+            )
+            return True
+        return False
+
+    def _verify_sink_started(self):
+        """Surface a sink that accepted the format but produced no audio."""
+        try:
+            from PyQt6.QtMultimedia import QAudio
+
+            state = self.audio_sink.state()
+            error = self.audio_sink.error()
+            if error != QAudio.Error.NoError or state == QAudio.State.StoppedState:
+                name = self.audio_device_name or "system default"
+                print(f"[PY-KARAOKE] audio sink failed to start on {name!r} state={state} error={error}")
+                _log(f"[AUDIO] output {name!r} did not start (state={state}, error={error})")
+        except Exception:
+            pass
 
     def _start_audio(self, start_seconds: float):
         # Make sure the (continuous) output device is running, then (re)spawn the

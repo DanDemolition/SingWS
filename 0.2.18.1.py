@@ -9,7 +9,7 @@ from pathlib import Path
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.2.9"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
-KARAFUN_ESTIMATED_DURATION_SECONDS = 3 * 60 + 30
+KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
 
 def normalize_karafun_duration_seconds(value):
@@ -1074,7 +1074,7 @@ from PyQt6.QtWidgets import (
     QListView, QLineEdit, QFileDialog, QLabel, QComboBox, QHBoxLayout, QGridLayout,
     QSizePolicy, QDialog, QDialogButtonBox, QListWidgetItem, QStyledItemDelegate, QStyle,
     QInputDialog, QMessageBox, QFrame, QMainWindow, QToolButton, QStyleOptionViewItem,
-    QGraphicsDropShadowEffect, QStackedWidget, QSpinBox,
+    QStackedWidget, QSpinBox,
     QTextEdit, QPlainTextEdit
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette
@@ -1219,6 +1219,57 @@ class SongSearchThread(QThread):
                 self.results_ready.emit(self.job_id, fuzzy_rows + self._karafun_rows(fuzzy_rows))
         except Exception:
             return
+
+
+# Search threads that have been stood down but may still be inside an
+# uninterruptible query.  Module scope on purpose: the dialogs that own these
+# threads are torn down while a search can still be in flight, so the parking
+# lot has to outlive them.
+_RETIRED_SEARCH_THREADS = []
+
+
+def _retire_search_thread(search_state: dict):
+    """Stand down a dialog's SongSearchThread without destroying it.
+
+    requestInterruption() is cooperative, and run() spends nearly all of its
+    time inside song_index.search_songs() -- an uninterruptible SQLite scan of
+    134k rows.  The thread therefore keeps running well after the operator has
+    typed the next character or closed the dialog.  Dropping the last Python
+    reference at that point lets PyQt destroy a running QThread, which makes Qt
+    call qFatal() and abort the whole process (seen as SIGABRT out of a replace
+    dialog opened from the queue context menu).  Hold the reference until the
+    thread reports that it has actually finished.
+    """
+    previous = search_state.get("thread")
+    search_state["thread"] = None
+    if previous is None:
+        return
+    _RETIRED_SEARCH_THREADS.append(previous)
+    # Nothing wants a retired search's rows, and the dialog widgets they would
+    # be written into may already be gone by the time it emits.
+    try:
+        previous.results_ready.disconnect()
+    except Exception:
+        pass
+
+    def _release():
+        try:
+            previous.wait(100)
+        except Exception:
+            pass
+        try:
+            _RETIRED_SEARCH_THREADS.remove(previous)
+        except ValueError:
+            pass
+
+    try:
+        previous.finished.connect(_release)
+        if previous.isRunning():
+            previous.requestInterruption()
+        else:
+            _release()
+    except Exception:
+        pass
 
 
 class IndexBuildThread(QThread):
@@ -2745,24 +2796,39 @@ def _load_json_file(path: Path, default, *, expected_type=None, label: str = "JS
         print(f"{label} ignored: could not load {path}: {e}")
         return default
 
+# Digest of the payload last written to each path, so an unchanged file is not
+# rewritten. save_data() persists queue/history/preferences together on every
+# call, but a queue edit leaves singer_history.json untouched -- and that file
+# reaches 1.7MB, which is ~67ms of GUI-thread write for a byte-identical
+# result. Serializing to compare costs ~14ms and is skipped entirely on a hit.
+_JSON_WRITE_DIGESTS: dict[str, str] = {}
+
+
 def _save_json_atomic(path: Path, value) -> None:
     _perf_t0 = time.perf_counter()
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path == TRACKS_PATH:
+        # tracks.json grows to hundreds of thousands of rows when several
+        # libraries are combined. Pretty-printing doubled its size and made
+        # both UI-thread startup reads and post-scan writes needlessly
+        # expensive.
+        payload = json.dumps(value, separators=(",", ":")) + "\n"
+    else:
+        payload = json.dumps(value, indent=2) + "\n"
+    key = str(path)
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    if _JSON_WRITE_DIGESTS.get(key) == digest and path.exists():
+        _perf_record(f"json_write_skipped:{path.name}", (time.perf_counter() - _perf_t0) * 1000.0)
+        return
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            if path == TRACKS_PATH:
-                # tracks.json grows to hundreds of thousands of rows when
-                # several libraries are combined. Pretty-printing doubled its
-                # size and made both UI-thread startup reads and post-scan
-                # writes needlessly expensive.
-                json.dump(value, f, separators=(",", ":"))
-            else:
-                json.dump(value, f, indent=2)
-            f.write("\n")
+            f.write(payload)
         os.replace(tmp_name, path)
+        _JSON_WRITE_DIGESTS[key] = digest
         _perf_record(f"json_write:{path.name}", (time.perf_counter() - _perf_t0) * 1000.0)
     except Exception:
+        _JSON_WRITE_DIGESTS.pop(key, None)
         try:
             os.unlink(tmp_name)
         except Exception:
@@ -2887,9 +2953,22 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                     if not stall_logged:
                         frame = sys._current_frames().get(main_ident)
                         stack = "".join(_traceback.format_stack(frame, limit=14)) if frame is not None else "(main-thread frame unavailable)"
+                        # When the block is inside Qt's C++ the Python stack is
+                        # just app.exec() and names nothing, so fall back to the
+                        # last expensive event the filter saw dispatched.
+                        context = ""
+                        try:
+                            last = getattr(owner, "_last_costly_event", None)
+                            if last:
+                                kind, cls, name, when = last
+                                age_ms = max(0.0, (time.monotonic() - float(when)) * 1000.0)
+                                target = f"{cls}#{name}" if name else cls
+                                context = f" last_event={kind} on {target} ({age_ms:.0f}ms before detection)"
+                        except Exception:
+                            context = ""
                         _diag(
-                            f"[STALL] GUI thread blocked >{int(threshold * 1000)}ms; "
-                            f"main-thread stack at detection:\n{stack}"
+                            f"[STALL] GUI thread blocked >{int(threshold * 1000)}ms;{context}"
+                            f" main-thread stack at detection:\n{stack}"
                         )
                         stall_logged = True
                 else:
@@ -3524,6 +3603,45 @@ def detect_lead_silence(path, noise_db=-50.0, min_silence=0.5) -> float:
         ))
     except Exception:
         return 0.0
+
+
+# Where the audio in a karaoke file actually stops, so the end-of-song detector
+# can refuse to cut while notes are still playing. Keyed by resolved audio path.
+_TRAILING_SILENCE_CACHE: dict[str, float] = {}
+_TRAILING_SILENCE_LOCK = threading.Lock()
+
+
+def detect_trailing_silence(path, noise_db=-55.0) -> float:
+    """Trailing-silence length for `path`, cached per resolved audio file.
+
+    The live meter cannot distinguish a quiet outro, a fade, or a reverb tail
+    from the end of the song, which is what made some songs lose their last
+    notes. Scanning the file itself gives the detector a hard floor: the song
+    is not over until playback has passed the last audible sample.
+
+    Returns 0.0 ("no trailing silence, play it all") on any error.
+    """
+    key = str(path or "")
+    if not key:
+        return 0.0
+    with _TRAILING_SILENCE_LOCK:
+        hit = _TRAILING_SILENCE_CACHE.get(key)
+    if hit is not None:
+        return float(hit)
+    try:
+        value = float(phrase_detect.detect_trailing_silence(key, noise_db=noise_db))
+    except Exception:
+        value = 0.0
+    with _TRAILING_SILENCE_LOCK:
+        _TRAILING_SILENCE_CACHE[key] = value
+    return value
+
+
+def trailing_silence_cached(path) -> float | None:
+    """Cached trailing silence for `path`, or None when it has not been scanned."""
+    with _TRAILING_SILENCE_LOCK:
+        return _TRAILING_SILENCE_CACHE.get(str(path or ""))
+
 
 # Trailing-silence (dead-air) detection tunables for background music.
 BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
@@ -13908,7 +14026,13 @@ class PreviewWindow(QWidget):
             "QWidget#previewWindow { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #02040A, stop:1 #000000); border: 1px solid rgba(124,61,255,0.36); border-radius: 8px; }"
         )
         self.force_black = True
-        self.bg_music = BackgroundMusicPlayer(self)
+        # No BackgroundMusicPlayer here. This window used to build one as part
+        # of a block copied from KaraokeApp and never referenced it, but the
+        # engine it created still took a BASS init reference for the life of
+        # the process. BASS_Init binds the output device process-wide and is
+        # only released when the last reference goes, so that unused player is
+        # what kept the reference count above zero and made every audio-output
+        # change a no-op for background music.
 
         # Flag to indicate an active karaoke track (used to lock out BG play)
         self.karaoke_playing = False
@@ -18164,8 +18288,39 @@ class KaraokeApp(QWidget):
                 super().__init__(owner)
                 self._owner = owner
 
+            # Event kinds that can block the GUI thread for a long time. A stall
+            # is almost always inside Qt's C++ (paint, layout, style), where the
+            # Python stack is just `<module>` in app.exec() and says nothing --
+            # 814 of 1630 stalls in one show had exactly that useless stack.
+            # Recording which of these was last dispatched gives the watchdog
+            # something to name. Restricted to this set on purpose: the filter
+            # runs for every event, including mouse moves.
+            _COSTLY_EVENTS = frozenset(int(t) for t in (
+                _QEvent.Type.Paint,
+                _QEvent.Type.UpdateRequest,
+                _QEvent.Type.LayoutRequest,
+                _QEvent.Type.Resize,
+                _QEvent.Type.Show,
+                _QEvent.Type.Polish,
+                _QEvent.Type.StyleChange,
+                _QEvent.Type.FontChange,
+                _QEvent.Type.Timer,
+                _QEvent.Type.DeferredDelete,
+            ))
+
             def eventFilter(self, obj, event):
-                if event.type() == _QEvent.Type.ToolTip:
+                event_type = event.type()
+                if int(event_type) in self._COSTLY_EVENTS:
+                    try:
+                        self._owner._last_costly_event = (
+                            event_type.name,
+                            obj.__class__.__name__,
+                            getattr(obj, "objectName", lambda: "")() or "",
+                            time.monotonic(),
+                        )
+                    except Exception:
+                        pass
+                if event_type == _QEvent.Type.ToolTip:
                     if not bool(self._owner.settings.get("show_tooltips", False)):
                         # On macOS, swallowing the event isn't always enough
                         # (native AppKit tooltips can bypass Qt's filter).
@@ -20097,7 +20252,9 @@ class KaraokeApp(QWidget):
             pass
         
         self.auto_save_timer = QTimer(self)
-        self.auto_save_timer.timeout.connect(self.save_data)
+        # Through the scheduler, not straight to save_data: the direct call was
+        # a synchronous encode+write on the GUI thread once a minute, all night.
+        self.auto_save_timer.timeout.connect(lambda: self._schedule_save_data(0))
         self.auto_save_timer.start(60000)
         self._start_memory_telemetry()
 
@@ -22135,6 +22292,7 @@ class KaraokeApp(QWidget):
                 pass
             return False
         self._setup_end_silence_state(mode, None)
+        self._arm_audio_end_floor(audio_path)
         self._update_karaoke_key_ui()
         _diag(
             f"[PY-KARAOKE] started mode={mode} start={float(start_seconds):.3f}s "
@@ -24330,12 +24488,21 @@ class KaraokeApp(QWidget):
         # Invalidate cache so ticker recalculates
         if hasattr(self, '_cached_ticker_data'):
             delattr(self, '_cached_ticker_data')
-        
+
+        # A change of current singer has to reach the screen now. Routine queue
+        # edits are deliberately deferred to the end of the scroll pass so the
+        # marquee never visibly restarts, but that same deferral is what left
+        # the ticker naming the singer whose song had already finished for the
+        # whole gap between songs -- a full pass can easily outlast the gap.
+        current_singer = str(getattr(self, "_current_karaoke_singer_display", "") or "")
+        singer_changed = current_singer != getattr(self, "_ticker_last_rendered_singer", None)
+        self._ticker_last_rendered_singer = current_singer
+
         try:
             if hasattr(self, 'video_window') and hasattr(self.video_window, 'ticker'):
                 # Reset ticker's auto-timer to prevent double-updates
                 self.video_window.ticker.queue_update_timer.stop()
-                self.video_window.ticker.update_queue_text()
+                self.video_window.ticker.update_queue_text(force=singer_changed)
                 self.video_window.ticker.queue_update_timer.start(5000)
         except Exception:
             pass
@@ -28672,11 +28839,23 @@ class KaraokeApp(QWidget):
                 continue
             if self._remote_request_is_non_actionable(req):
                 handled.add(rid)
-                _diag(
-                    "[WAITING-FOR-ADD] ignored accepted/delivered server row "
-                    f"request_id={rid} singer={str(req.get('singer') or '')!r} title={str(req.get('title') or '')!r} "
-                    f"state={state_name!r} sent={int(bool(req.get('sent') or req.get('delivered')))}"
-                )
+                # Every reconcile re-walks the same non-actionable rows, so
+                # logging one line each pass produced 1435 identical lines in a
+                # single show. Say it once per request/state, matching the
+                # [REMOTE-SYNC] historical handling.
+                # __dict__ access: getattr on a half-built QWidget raises.
+                _wfa_state = object.__getattribute__(self, "__dict__")
+                logged_non_actionable = _wfa_state.get("_wfa_logged_non_actionable")
+                if not isinstance(logged_non_actionable, set):
+                    logged_non_actionable = set()
+                    _wfa_state["_wfa_logged_non_actionable"] = logged_non_actionable
+                if (rid, state_name) not in logged_non_actionable:
+                    logged_non_actionable.add((rid, state_name))
+                    _diag(
+                        "[WAITING-FOR-ADD] ignored accepted/delivered server row "
+                        f"request_id={rid} singer={str(req.get('singer') or '')!r} title={str(req.get('title') or '')!r} "
+                        f"state={state_name!r} sent={int(bool(req.get('sent') or req.get('delivered')))}"
+                    )
                 continue
             if state_name in {"waiting", "failed", "failed_needs_review"} and bool(req.get("sent") or req.get("delivered")):
                 _diag(
@@ -29503,16 +29682,16 @@ class KaraokeApp(QWidget):
             query = str(search.text() or "").strip()
             search_state["job_id"] = int(search_state.get("job_id") or 0) + 1
             job_id = int(search_state["job_id"])
+            # Retire before the empty-query check, not after. Backspacing the
+            # box to nothing has to stand the in-flight search down too --
+            # otherwise it keeps scanning the library for a result that is
+            # already discarded, and it is still running when the next
+            # keystroke or the dialog close comes to replace it.
+            _retire_search_thread(search_state)
             if not query:
                 results.clear()
                 refresh_confirm()
                 return
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
             thread = SongSearchThread(
                 job_id,
                 query,
@@ -29527,10 +29706,6 @@ class KaraokeApp(QWidget):
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
             )
             thread.results_ready.connect(on_results)
-            try:
-                thread.finished.connect(thread.deleteLater)
-            except Exception:
-                pass
             search_state["thread"] = thread
             thread.start()
 
@@ -29563,12 +29738,7 @@ class KaraokeApp(QWidget):
                 self.save_settings()
             except Exception:
                 pass
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
+            _retire_search_thread(search_state)
 
         dlg.finished.connect(lambda _r: cleanup())
         seed = " ".join([p for p in (old_artist, old_title) if p]).strip()
@@ -31671,16 +31841,6 @@ class KaraokeApp(QWidget):
             return
         self._on_search_result_double_clicked(item)
 
-    def _make_shadow_effect(self, *, blur: int = 24, y: int = 8, alpha: int = 95):
-        try:
-            shadow = QGraphicsDropShadowEffect(self)
-            shadow.setBlurRadius(int(blur))
-            shadow.setOffset(0, int(y))
-            shadow.setColor(QColor(0, 0, 0, int(alpha)))
-            return shadow
-        except Exception:
-            return None
-
     def _live_pulse_value(self) -> float:
         """Return a soft 0..1 pulse value on a 1.8s cycle.
 
@@ -31861,18 +32021,15 @@ class KaraokeApp(QWidget):
             self._live_state_polish_installed = True
             self._live_pulse_started_at = time.monotonic()
 
-            for widget, blur, y, alpha in (
-                (getattr(self, "library_card", None), 16, 5, 42),
-                (getattr(self, "rotation_card", None), 16, 5, 42),
-                (getattr(self, "operator_bottom_nav", None), 14, 4, 34),
-                (getattr(self, "transport_bar", None), 24, 8, 70),
-                (getattr(self, "rotation_hero_card", None), 22, 7, 65),
-                (getattr(self, "bg_main_card", None), 20, 7, 62),
-            ):
-                if widget is not None:
-                    effect = self._make_shadow_effect(blur=blur, y=y, alpha=alpha)
-                    if effect is not None:
-                        widget.setGraphicsEffect(effect)
+            # The operator cards used to carry QGraphicsDropShadowEffect here.
+            # A graphics effect opts its whole widget subtree out of Qt's
+            # clipped repaints: any descendant update re-renders the entire
+            # card into an offscreen pixmap and re-runs a software Gaussian
+            # blur on the GUI thread, and nested cards make that cost
+            # multiplicative. On this Intel Mac it ate over half of the main
+            # thread, which starved the transport's 15ms visual timer down to
+            # ~13Hz and capped video at ~12.6fps against a 30fps source.
+            # Card elevation comes from the stylesheet borders instead.
 
             self._live_state_timer = QTimer(self)
             self._live_state_timer.timeout.connect(self._tick_live_state_polish)
@@ -34484,9 +34641,83 @@ class KaraokeApp(QWidget):
         self._end_silence_cdg_last_generation_ts = 0.0
         self._end_silence_auto_advance_next = False
         self._end_silence_last_reason = ""
+        self._karaoke_audio_end_s = None
+        self._karaoke_audio_end_path = ""
+        self._end_audio_hold_log_ts = 0.0
         self._bg_crossfade_prefired = False  # reset per-song BG pre-start flag
         self._bg_prefire_silence_accum_s = 0.0
         self._bg_prefire_silence_last_ts = 0.0
+
+    def _arm_audio_end_floor(self, audio_path: str):
+        """Find where this file's audio really stops, in the background.
+
+        Until the scan lands, ``_karaoke_audio_end_s`` stays None and the
+        detector behaves exactly as before. A song can only ever end later
+        because of this, never earlier.
+        """
+        self._karaoke_audio_end_s = None
+        self._karaoke_audio_end_path = str(audio_path or "")
+        if not audio_path:
+            return
+        if not self._karaoke_early_silence_trim_enabled():
+            return
+        duration = 0.0
+        try:
+            duration = float(self._get_duration_secs(audio_path) or 0.0)
+        except Exception:
+            duration = 0.0
+        if duration <= 0.0:
+            return
+
+        cached = trailing_silence_cached(audio_path)
+        if cached is not None:
+            self._apply_audio_end_floor(audio_path, duration, float(cached), "cache")
+            return
+
+        def worker(scan_path: str, scan_duration: float):
+            trailing = detect_trailing_silence(scan_path)
+            try:
+                QTimer.singleShot(
+                    0,
+                    lambda: self._apply_audio_end_floor(
+                        scan_path, scan_duration, trailing, "scan"
+                    ),
+                )
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(
+                target=worker,
+                args=(str(audio_path), duration),
+                daemon=True,
+                name="singws-audio-end-scan",
+            ).start()
+        except Exception:
+            pass
+
+    def _apply_audio_end_floor(self, scan_path: str, duration: float, trailing: float, source: str):
+        # A late scan must not be applied to whatever is playing now.
+        if str(scan_path) != str(getattr(self, "_karaoke_audio_end_path", "")):
+            return
+        try:
+            trailing = max(0.0, float(trailing))
+            duration = float(duration)
+        except Exception:
+            return
+        if trailing <= 0.0:
+            self._karaoke_audio_end_s = None
+            _diag(
+                f"[END-AUDIO] no trailing silence found; full duration will play "
+                f"source={source} duration={duration:.2f}s file={os.path.basename(scan_path)}"
+            )
+            return
+        self._karaoke_audio_end_s = max(0.0, duration - trailing)
+        _diag(
+            f"[END-AUDIO] last audible audio at {self._karaoke_audio_end_s:.2f}s "
+            f"(trailing_silence={trailing:.2f}s duration={duration:.2f}s source={source}) "
+            f"file={os.path.basename(scan_path)}"
+        )
 
     def _setup_end_silence_state(self, mode: str, level_elem=None):
         self._karaoke_level_elem = level_elem
@@ -34505,6 +34736,7 @@ class KaraokeApp(QWidget):
         self._end_silence_cdg_last_generation_ts = time.monotonic()
         self._end_silence_auto_advance_next = False
         self._end_silence_last_reason = ""
+        self._end_audio_hold_log_ts = 0.0
         if self._end_silence_mode in ("cdg", "mp4"):
             _diag(f"[END-SILENCE] {self._end_silence_mode.upper()} detector armed")
 
@@ -34663,6 +34895,44 @@ class KaraokeApp(QWidget):
             pass
         return False
 
+    def _stuck_song_min_seconds(self) -> float:
+        """Evidence window for declaring a song dead in the middle of playback.
+
+        Deliberately NOT the host's trailing-trim setting. That setting answers
+        "how fast should background music come back at the END of a song", and
+        a host who turns it down to 0.5s to close that gap is not asking to
+        have live songs cut. Every other end reason is gated on being near the
+        end of the track; this one can fire anywhere past the 35% mark, so it
+        has to stand on its own evidence.
+
+        A real performance does not sit below the silence threshold with no
+        lyric movement for this long -- a genuinely dead or stalled track does.
+        """
+        try:
+            value = float(self.settings.get("stuck_song_min_seconds", 25.0) or 25.0)
+        except Exception:
+            value = 25.0
+        return max(10.0, min(120.0, value))
+
+    def _stuck_song_confirmed(self, cdg_stale_for: float) -> bool:
+        """True only when audio AND lyrics have both been dead a long time.
+
+        Both clocks must clear the window. Half a second of a quiet passage
+        with no lyric wipe is completely normal mid-song -- an atmospheric
+        break, a breakdown, a gap between phrases -- and cutting there ends a
+        song the singer is still performing.
+        """
+        window = self._stuck_song_min_seconds()
+        try:
+            silent_for = float(getattr(self, "_end_silence_accum_s", 0.0) or 0.0)
+        except Exception:
+            silent_for = 0.0
+        try:
+            stale_for = float(cdg_stale_for or 0.0)
+        except Exception:
+            stale_for = 0.0
+        return silent_for >= window and stale_for >= window
+
     def _maybe_trim_end_silence(self, dur_ns: int, pos_ns: int) -> bool:
         """Return True if intelligent dead-air detection triggered media end."""
         if not self._karaoke_early_silence_trim_enabled():
@@ -34703,6 +34973,24 @@ class KaraokeApp(QWidget):
         dt = 0.5 if last <= 0.0 else max(0.0, min(1.0, now - last))
         self._end_silence_last_tick = now
         threshold_s = self._end_trim_threshold_sec()
+
+        # Hard floor from the file itself. The meter reads a quiet outro, a
+        # fade, or a reverb tail as silence, which is what cut some songs off
+        # before their last notes. The scan knows where the audio really stops,
+        # so nothing may end before the playhead has passed it. Absent a scan
+        # (still running, or a file we could not read) this is skipped and the
+        # detector behaves exactly as it did before.
+        audio_end = getattr(self, "_karaoke_audio_end_s", None)
+        if audio_end is not None and elapsed < float(audio_end):
+            self._end_silence_accum_s = 0.0
+            last_log = float(getattr(self, "_end_audio_hold_log_ts", 0.0) or 0.0)
+            if (now - last_log) >= 5.0:
+                self._end_audio_hold_log_ts = now
+                _diag(
+                    f"[END-AUDIO] holding; audio continues to {float(audio_end):.2f}s "
+                    f"(pos={elapsed:.2f}s db={db:.1f})"
+                )
+            return False
 
         if db <= float(self._end_silence_db_threshold):
             self._end_silence_accum_s += dt
@@ -34764,7 +35052,10 @@ class KaraokeApp(QWidget):
                 reason = "cdg_lyrics_complete_extended_silence"
             elif cdg_stale and near_end:
                 reason = "empty_trailing_cdg_frames_extended_silence"
-            elif cdg_stale and post_content_elapsed:
+            elif post_content_elapsed and self._stuck_song_confirmed(cdg_stale_for):
+                # The only reason that can fire in the MIDDLE of a song, so it
+                # needs its own, far longer evidence window -- see
+                # _stuck_song_confirmed.
                 reason = "long_no_lyrics_no_audio"
             elif near_end:
                 reason = "near_end_extended_silence"
@@ -36056,14 +36347,19 @@ class KaraokeApp(QWidget):
     def _save_data_scheduled(self):
         """Timer target for debounced saves.
 
-        During active karaoke, keep filesystem writes off the GUI thread.  The
-        live data snapshot is intentionally made on the UI thread, then the
-        actual JSON encoding/write happens in a worker.
+        Keeps filesystem writes off the GUI thread. The live data snapshot is
+        intentionally made on the UI thread, then the actual JSON encoding and
+        write happen in a worker.
         """
+        # Always prefer the worker, not just during karaoke. The snapshot is
+        # still taken here on the UI thread, so durability is unchanged -- only
+        # the encode and the atomic write move off it. On this library that is
+        # ~14ms of deepcopy left on the GUI thread instead of ~67ms of encode
+        # plus write, and an idle host stutters just as visibly as a playing
+        # one when the operator is dragging the queue around.
         try:
-            if bool(getattr(self, "karaoke_playing", False)):
-                if self._start_save_data_worker():
-                    return
+            if self._start_save_data_worker():
+                return
         except Exception:
             pass
         self.save_data()
@@ -38433,7 +38729,58 @@ class KaraokeApp(QWidget):
         new_name = str(new_name or "").strip()
         if not new_name or new_name == old_name:
             return
+        if not self._confirm_rename_collision(singer_idx, new_name):
+            return
         self._rename_rotation_singer(singer_idx, new_name, source="rotation_menu")
+
+    def _confirm_rename_collision(self, singer_idx: int, new_name: str) -> bool:
+        """Ask before a rename folds this singer into an existing one.
+
+        Renaming onto a name already in the rotation merges the two rows and
+        their songs. That is right for a typo ("AaronC" -> "Aaron C") and wrong
+        for two different people who happen to share a name -- renaming
+        'Shaunte Y Sahara' to 'Sahara' silently fused two singers into one row
+        holding both their songs. The host is the only one who knows which case
+        it is, so ask rather than guess. Only the interactive path asks; sync
+        and remote renames keep merging automatically, which is what protects
+        against two clients racing the same rename.
+        """
+        try:
+            target_key = self._queue_limit_name_key(new_name)
+            if not target_key:
+                return True
+            clashes = [
+                other for i, other in enumerate(self.queue or [])
+                if i != singer_idx and isinstance(other, dict)
+                and self._queue_limit_name_key(other.get("name", "")) == target_key
+            ]
+            if not clashes:
+                return True
+            song_count = sum(len(other.get("songs") or []) for other in clashes)
+            existing_name = str(clashes[0].get("name", "") or new_name).strip()
+            songs_text = (
+                f"{song_count} song{'s' if song_count != 1 else ''}"
+                if song_count else "no songs"
+            )
+            answer = QMessageBox.question(
+                self,
+                "Name already in the rotation",
+                f"'{existing_name}' is already in the rotation with {songs_text}.\n\n"
+                f"Renaming will merge the two into one singer, and their songs "
+                f"will end up in the same row.\n\n"
+                f"Merge them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                _diag(
+                    f"[SINGER-MERGE] rename cancelled at collision prompt "
+                    f"new={new_name!r} existing_songs={song_count}"
+                )
+                return False
+        except Exception:
+            return True
+        return True
 
     def _rename_rotation_singer(self, singer_idx: int, new_name: str, *, source: str = "host", merge_prefs_history: bool = True) -> bool:
         """Rename a rotation singer, merging into an existing singer when the
@@ -38532,33 +38879,65 @@ class KaraokeApp(QWidget):
 
         Survivor selection follows the spec: oldest created_at when known
         (records without a timestamp predate the field, so they count as
-        oldest), then first appearance in the rotation. The merged record
-        takes the earliest queue slot of its group; the survivor's songs keep
-        their order and every duplicate's songs are appended in their original
-        relative order. Runs after renames, on load, and is safe to call from
-        sync paths — merging twice is a no-op, which is what protects against
-        two clients racing the same rename."""
+        oldest), then first appearance in the rotation. The survivor's songs
+        keep their order and every duplicate's songs are appended in their
+        original relative order. Runs after renames, on load, and is safe to
+        call from sync paths — merging twice is a no-op, which is what protects
+        against two clients racing the same rename.
+
+        Placement depends on whether the group has already had its turn. A
+        plain duplicate keeps the earliest slot, so someone who signed up twice
+        under two spellings does not lose their place. But when any record in
+        the group has already sung this round, the merged singer takes the
+        *latest* slot instead: renaming someone onto an existing name would
+        otherwise hand them that name's earlier position and move them up past
+        singers who are still waiting for their turn."""
         queue = self.queue or []
         groups = {}
-        order = []  # ("raw", obj) | ("key", k) at first appearance
+        slots = []  # one per queue entry: ("raw", obj) | ("key", k)
         for entry in queue:
             key = ""
             if isinstance(entry, dict):
                 key = self._queue_limit_name_key(entry.get("name", ""))
             if not key:
-                order.append(("raw", entry))
+                slots.append(("raw", entry))
                 continue
-            if key in groups:
-                groups[key].append(entry)
-            else:
-                groups[key] = [entry]
-                order.append(("key", key))
+            groups.setdefault(key, []).append(entry)
+            slots.append(("key", key))
+
+        def _already_sang_this_round(group) -> bool:
+            for member in group:
+                if not isinstance(member, dict):
+                    continue
+                if bool(member.get("round_sung")) or bool(member.get("has_sung")):
+                    return True
+            return False
+
+        # Which of a key's slots the merged record ends up occupying.
+        emit_at = {}
+        for key, group in groups.items():
+            indexes = [i for i, (kind, val) in enumerate(slots) if kind == "key" and val == key]
+            if not indexes:
+                continue
+            late = len(group) > 1 and _already_sang_this_round(group)
+            emit_at[key] = indexes[-1] if late else indexes[0]
+            if late:
+                try:
+                    _diag(
+                        "[SINGER-MERGE] merged singer already sang this round; keeping later "
+                        f"rotation slot singer={str(group[0].get('name', '') or '')!r} "
+                        f"from_index={indexes[0]} to_index={indexes[-1]}"
+                    )
+                except Exception:
+                    pass
 
         merged_count = 0
         new_queue = []
-        for kind, val in order:
+        for slot_index, (kind, val) in enumerate(slots):
             if kind == "raw":
                 new_queue.append(val)
+                continue
+            if emit_at.get(val) != slot_index:
                 continue
             group = groups[val]
             if len(group) == 1:
@@ -40559,16 +40938,16 @@ class KaraokeApp(QWidget):
             query = str(search.text() or "").strip()
             search_state["job_id"] = int(search_state.get("job_id") or 0) + 1
             job_id = int(search_state["job_id"])
+            # Retire before the empty-query check, not after. Backspacing the
+            # box to nothing has to stand the in-flight search down too --
+            # otherwise it keeps scanning the library for a result that is
+            # already discarded, and it is still running when the next
+            # keystroke or the dialog close comes to replace it.
+            _retire_search_thread(search_state)
             if not query:
                 results.clear()
                 refresh_confirm()
                 return
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
             thread = SongSearchThread(
                 job_id,
                 query,
@@ -40583,10 +40962,6 @@ class KaraokeApp(QWidget):
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
             )
             thread.results_ready.connect(on_results)
-            try:
-                thread.finished.connect(thread.deleteLater)
-            except Exception:
-                pass
             search_state["thread"] = thread
             thread.start()
 
@@ -40649,12 +41024,7 @@ class KaraokeApp(QWidget):
                 self.save_settings()
             except Exception:
                 pass
-            try:
-                thr = search_state.get("thread")
-                if thr is not None and thr.isRunning():
-                    thr.requestInterruption()
-            except Exception:
-                pass
+            _retire_search_thread(search_state)
 
         dlg.finished.connect(lambda _r: persist_size())
         try:
@@ -40933,6 +41303,21 @@ class KaraokeApp(QWidget):
                 pass
         except Exception:
             pass
+
+        # Flush the queue/history synchronously on the way out. Saves are
+        # debounced and now always run on a worker, so quitting could otherwise
+        # land between the last edit and its write and lose it. This is the one
+        # place that must not be deferred.
+        try:
+            timer = getattr(self, "_save_data_timer", None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+        try:
+            self.save_data()
+        except Exception as e:
+            _diag(f"[SHUTDOWN] final queue save failed: {e}")
 
         # Stop karaoke playback cleanly
         try:
@@ -43528,17 +43913,34 @@ class KaraokeApp(QWidget):
         seconds = normalize_karafun_duration_seconds(value)
         if seconds is None:
             return False
+        scraped = str(source or "").strip() == "karafun_result"
+        if scraped and seconds == KARAFUN_ESTIMATED_DURATION_SECONDS:
+            # A scrape that lands exactly on our own catalog estimate is
+            # indistinguishable from that estimate. Keep whatever we had so it
+            # cannot arm playback completion.
+            return False
         current = normalize_karafun_duration_seconds(entry.get("duration"))
         if current is not None and not bool(entry.get("duration_estimated", False)):
-            return False
-        if (
-            bool(entry.get("duration_estimated", False))
-            and str(source or "").strip() == "karafun_result"
-            and seconds == KARAFUN_ESTIMATED_DURATION_SECONDS
-        ):
-            # A scraped 3:30 result is indistinguishable from our default.
-            # Keep it estimated so it cannot arm playback completion.
-            return False
+            # A scraped result is read off KaraFun's own window for the exact
+            # song about to play, so it outranks machine metadata already on the
+            # entry: our catalog estimate can come back from the server without
+            # its "estimated" flag and then look verified, and refusing to
+            # correct it there is what let the watchdog complete a 4:57 song at
+            # the estimate and start background music over KaraFun mid-song.
+            # A duration the host set by hand is a deliberate override and still
+            # wins over everything.
+            host_set = "manual" in str(entry.get("duration_source", "") or "").strip().lower()
+            if host_set or not scraped:
+                return False
+        if scraped and current is not None and int(current) != int(seconds):
+            try:
+                _diag(
+                    f"[KARAFUN] duration corrected from {int(current)}s to {int(seconds)}s "
+                    f"(was_estimated={int(bool(entry.get('duration_estimated', False)))}) "
+                    f"title={str(entry.get('title', '') or '')!r}"
+                )
+            except Exception:
+                pass
         entry["duration"] = seconds
         entry["duration_estimated"] = False
         entry["duration_source"] = str(source or "verified_metadata")
@@ -44153,7 +44555,12 @@ class KaraokeApp(QWidget):
                 for song in singer.get("songs", [])
             )
             
-            if is_singer_skipped:
+            # Only singers who actually have a song queued take a number, so the
+            # numbers answer "how many until I'm up" directly and the host does
+            # not have to subtract the placeholders. A singer with nothing in
+            # still holds their row and their place -- add a song and they take
+            # the next number at that same spot.
+            if is_singer_skipped or not has_songs:
                 singer_left = f"— {singer['name']}"
             else:
                 singer_left = f"{number}. {singer['name']}"
@@ -46671,7 +47078,15 @@ class KaraokeApp(QWidget):
                         'end tell',
                     ]
                     renderer_result = ""
-                    for renderer_attempt in range(3):
+                    # The open button is a TOGGLE. Clicking it on every failed
+                    # attempt is what made this take three rounds and ~10s of
+                    # dead air: the first click opened the renderer, 0.8s was
+                    # not long enough for the window to appear, so the next
+                    # attempt clicked again and closed it. Click once, then
+                    # poll for the window with a wait that actually covers how
+                    # long KaraFun takes to show it.
+                    renderer_open_clicked = False
+                    for renderer_attempt in range(4):
                         ok, renderer_result, renderer_error = self._run_karafun_applescript_sync(
                             prepare_renderer_script, timeout=8
                         )
@@ -46681,15 +47096,21 @@ class KaraokeApp(QWidget):
                             _diag(
                                 f"[KARAFUN] transparent renderer ready bounds={rx},{ry},{rw},{rh} "
                                 f"attempt={renderer_attempt + 1}"
+                                f"{' (after open click)' if renderer_open_clicked else ''}"
                             )
                             break
                         renderer_parts = renderer_result.split("|")
                         if ok and len(renderer_parts) == 3 and renderer_parts[0] == "OPEN":
-                            _diag(f"[KARAFUN] opening missing Dual Renderer attempt={renderer_attempt + 1}")
-                            self._macos_native_mouse_click(
-                                int(float(renderer_parts[1])), int(float(renderer_parts[2])), clicks=1
-                            )
-                            time.sleep(0.8)
+                            if not renderer_open_clicked:
+                                _diag(f"[KARAFUN] opening missing Dual Renderer attempt={renderer_attempt + 1}")
+                                self._macos_native_mouse_click(
+                                    int(float(renderer_parts[1])), int(float(renderer_parts[2])), clicks=1
+                                )
+                                renderer_open_clicked = True
+                                time.sleep(1.5)
+                            else:
+                                # Already asked for it; just give it more time.
+                                time.sleep(1.0)
                             continue
                         break
                     if not self._karafun_transparent_renderer_ready:
@@ -47017,8 +47438,8 @@ class KaraokeApp(QWidget):
         try:
             # Rotation estimates are presentation metadata, not a playback end
             # signal. Only a verified/manual duration may arm the completion
-            # watchdog; otherwise a song longer than 3:30 could be completed
-            # early merely because its ETA used the catalog fallback.
+            # watchdog; otherwise a song longer than the catalog estimate could
+            # be completed early merely because its ETA used that fallback.
             fallback_duration = (
                 0 if bool(entry.get("duration_estimated", False))
                 else max(0, int(entry.get("duration") or 0))
@@ -47038,6 +47459,12 @@ class KaraokeApp(QWidget):
         # polling thread so a stuck query cannot delay song completion.
         if fallback_duration > 0:
             fallback_delay = max(1.0, float(fallback_duration) - max(0.0, now_mono - started) + 2.0)
+            # Bounded grace so a duration that is still too short cannot cut a
+            # song that KaraFun is audibly still playing. Each extension needs a
+            # *fresh* "still playing" reading, so a stuck accessibility query
+            # cannot hold the song open -- it simply stops producing readings
+            # and the watchdog completes on schedule, as before.
+            watchdog_grace = {"remaining_s": 120.0}
 
             def _duration_watchdog_fired():
                 def _complete_from_duration_watchdog():
@@ -47046,7 +47473,28 @@ class KaraokeApp(QWidget):
                         return
                     if entry.get("karafun_completion_monitor") != monitor_token:
                         return
-                    _diag("[KARAFUN] completion event received reason=duration_watchdog")
+                    last_playing = float(entry.get("karafun_last_playing_ts") or 0.0)
+                    playing_age = (time.monotonic() - last_playing) if last_playing > 0 else None
+                    if (
+                        playing_age is not None
+                        and playing_age <= 20.0
+                        and watchdog_grace["remaining_s"] > 0.0
+                    ):
+                        extend = min(15.0, watchdog_grace["remaining_s"])
+                        watchdog_grace["remaining_s"] -= extend
+                        _diag(
+                            "[KARAFUN] duration watchdog deferred; KaraFun still playing "
+                            f"(last_playing={playing_age:.1f}s ago, grace_left="
+                            f"{watchdog_grace['remaining_s']:.0f}s)"
+                        )
+                        again = threading.Timer(extend, _duration_watchdog_fired)
+                        again.daemon = True
+                        again.start()
+                        return
+                    _diag(
+                        "[KARAFUN] completion event received reason=duration_watchdog "
+                        f"last_playing={'never' if playing_age is None else f'{playing_age:.1f}s ago'}"
+                    )
                     self._finish_external_karafun_playback("complete")
 
                 self._run_on_ui_thread(_complete_from_duration_watchdog)
@@ -47146,12 +47594,20 @@ class KaraokeApp(QWidget):
                             if previous is None or current <= previous:
                                 continue
                             remaining = total - current
+                            # A clock that advanced between polls is the
+                            # strongest proof KaraFun is still playing, so it
+                            # also holds the duration watchdog off.
+                            entry["karafun_last_playing_ts"] = time.monotonic()
                             if current > 2:
                                 seen_playback = True
                     last_clock_candidates = next_clock_candidates
                     if playing_reported:
                         seen_playback = True
                         idle_stop_count = 0
+                        # Timestamp of the newest confirmed "still playing"
+                        # reading. The duration watchdog reads this to avoid
+                        # cutting a song KaraFun has not finished.
+                        entry["karafun_last_playing_ts"] = time.monotonic()
                     elif idle_reported and seen_playback:
                         idle_stop_count += 1
                     else:
@@ -50457,19 +50913,14 @@ class KaraokeApp(QWidget):
                     f"incoming_order={order} before={before} after={after} decision={decision_reason}"
                 )
             self._apply_order_meta_to_singer(singer, incoming_meta)
+            # Only an order that actually moved is a conflict worth a line; the
+            # no_change case fires for every singer on every reconcile.
             if before != after:
                 _diag(
                     "[ORDER-CONFLICT] singer="
                     f"{singer.get('name','')!r} old_order={before} incoming_order={order} local_order={after} "
                     f"source={incoming_source} local_revision={local_revision} incoming_revision={incoming_revision} "
                     f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision={decision_reason}"
-                )
-            else:
-                _diag(
-                    "[ORDER-CONFLICT] singer="
-                    f"{singer.get('name','')!r} old_order={before} incoming_order={order} local_order={after} "
-                    f"source={incoming_source} local_revision={local_revision} incoming_revision={incoming_revision} "
-                    f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision=no_change"
                 )
 
         try:

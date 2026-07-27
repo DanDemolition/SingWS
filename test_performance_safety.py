@@ -46,11 +46,27 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_debounced_save_timer_uses_playback_safe_wrapper(self):
         self.assertIn("_save_data_timer.timeout.connect(self._save_data_scheduled)", MAIN_SOURCE)
         scheduled = function_source("_save_data_scheduled")
-        self.assertIn("karaoke_playing", scheduled)
+        # The worker is used unconditionally now, not only while karaoke is
+        # playing: the snapshot still happens on the UI thread so durability is
+        # unchanged, and an idle host stutters just as visibly as a playing one.
         self.assertIn("_start_save_data_worker", scheduled)
+        self.assertNotIn("karaoke_playing", scheduled)
         worker = function_source("_start_save_data_worker")
         self.assertIn("threading.Thread", worker)
         self.assertIn("singws-save-data", worker)
+
+    def test_periodic_autosave_does_not_block_the_gui_thread(self):
+        # A direct timeout->save_data connection was a synchronous encode and
+        # write on the GUI thread once a minute for the whole show.
+        self.assertNotIn("auto_save_timer.timeout.connect(self.save_data)", MAIN_SOURCE)
+        self.assertIn("auto_save_timer.timeout.connect(lambda: self._schedule_save_data(0))", MAIN_SOURCE)
+
+    def test_shutdown_flushes_the_queue_synchronously(self):
+        # Saves are debounced and run on a worker, so quitting must force one
+        # last synchronous write or the final edits are lost.
+        # function_source() finds the first closeEvent in the file (the
+        # rotation window's), so match the main window's flush directly.
+        self.assertIn("[SHUTDOWN] final queue save failed", MAIN_SOURCE)
 
     def test_queue_rebuild_suspends_repaints(self):
         source = function_source("update_queue_display")
