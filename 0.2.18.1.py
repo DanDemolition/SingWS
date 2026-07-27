@@ -2953,9 +2953,22 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                     if not stall_logged:
                         frame = sys._current_frames().get(main_ident)
                         stack = "".join(_traceback.format_stack(frame, limit=14)) if frame is not None else "(main-thread frame unavailable)"
+                        # When the block is inside Qt's C++ the Python stack is
+                        # just app.exec() and names nothing, so fall back to the
+                        # last expensive event the filter saw dispatched.
+                        context = ""
+                        try:
+                            last = getattr(owner, "_last_costly_event", None)
+                            if last:
+                                kind, cls, name, when = last
+                                age_ms = max(0.0, (time.monotonic() - float(when)) * 1000.0)
+                                target = f"{cls}#{name}" if name else cls
+                                context = f" last_event={kind} on {target} ({age_ms:.0f}ms before detection)"
+                        except Exception:
+                            context = ""
                         _diag(
-                            f"[STALL] GUI thread blocked >{int(threshold * 1000)}ms; "
-                            f"main-thread stack at detection:\n{stack}"
+                            f"[STALL] GUI thread blocked >{int(threshold * 1000)}ms;{context}"
+                            f" main-thread stack at detection:\n{stack}"
                         )
                         stall_logged = True
                 else:
@@ -18275,8 +18288,39 @@ class KaraokeApp(QWidget):
                 super().__init__(owner)
                 self._owner = owner
 
+            # Event kinds that can block the GUI thread for a long time. A stall
+            # is almost always inside Qt's C++ (paint, layout, style), where the
+            # Python stack is just `<module>` in app.exec() and says nothing --
+            # 814 of 1630 stalls in one show had exactly that useless stack.
+            # Recording which of these was last dispatched gives the watchdog
+            # something to name. Restricted to this set on purpose: the filter
+            # runs for every event, including mouse moves.
+            _COSTLY_EVENTS = frozenset(int(t) for t in (
+                _QEvent.Type.Paint,
+                _QEvent.Type.UpdateRequest,
+                _QEvent.Type.LayoutRequest,
+                _QEvent.Type.Resize,
+                _QEvent.Type.Show,
+                _QEvent.Type.Polish,
+                _QEvent.Type.StyleChange,
+                _QEvent.Type.FontChange,
+                _QEvent.Type.Timer,
+                _QEvent.Type.DeferredDelete,
+            ))
+
             def eventFilter(self, obj, event):
-                if event.type() == _QEvent.Type.ToolTip:
+                event_type = event.type()
+                if int(event_type) in self._COSTLY_EVENTS:
+                    try:
+                        self._owner._last_costly_event = (
+                            event_type.name,
+                            obj.__class__.__name__,
+                            getattr(obj, "objectName", lambda: "")() or "",
+                            time.monotonic(),
+                        )
+                    except Exception:
+                        pass
+                if event_type == _QEvent.Type.ToolTip:
                     if not bool(self._owner.settings.get("show_tooltips", False)):
                         # On macOS, swallowing the event isn't always enough
                         # (native AppKit tooltips can bypass Qt's filter).
