@@ -28839,11 +28839,23 @@ class KaraokeApp(QWidget):
                 continue
             if self._remote_request_is_non_actionable(req):
                 handled.add(rid)
-                _diag(
-                    "[WAITING-FOR-ADD] ignored accepted/delivered server row "
-                    f"request_id={rid} singer={str(req.get('singer') or '')!r} title={str(req.get('title') or '')!r} "
-                    f"state={state_name!r} sent={int(bool(req.get('sent') or req.get('delivered')))}"
-                )
+                # Every reconcile re-walks the same non-actionable rows, so
+                # logging one line each pass produced 1435 identical lines in a
+                # single show. Say it once per request/state, matching the
+                # [REMOTE-SYNC] historical handling.
+                # __dict__ access: getattr on a half-built QWidget raises.
+                _wfa_state = object.__getattribute__(self, "__dict__")
+                logged_non_actionable = _wfa_state.get("_wfa_logged_non_actionable")
+                if not isinstance(logged_non_actionable, set):
+                    logged_non_actionable = set()
+                    _wfa_state["_wfa_logged_non_actionable"] = logged_non_actionable
+                if (rid, state_name) not in logged_non_actionable:
+                    logged_non_actionable.add((rid, state_name))
+                    _diag(
+                        "[WAITING-FOR-ADD] ignored accepted/delivered server row "
+                        f"request_id={rid} singer={str(req.get('singer') or '')!r} title={str(req.get('title') or '')!r} "
+                        f"state={state_name!r} sent={int(bool(req.get('sent') or req.get('delivered')))}"
+                    )
                 continue
             if state_name in {"waiting", "failed", "failed_needs_review"} and bool(req.get("sent") or req.get("delivered")):
                 _diag(
@@ -50901,19 +50913,14 @@ class KaraokeApp(QWidget):
                     f"incoming_order={order} before={before} after={after} decision={decision_reason}"
                 )
             self._apply_order_meta_to_singer(singer, incoming_meta)
+            # Only an order that actually moved is a conflict worth a line; the
+            # no_change case fires for every singer on every reconcile.
             if before != after:
                 _diag(
                     "[ORDER-CONFLICT] singer="
                     f"{singer.get('name','')!r} old_order={before} incoming_order={order} local_order={after} "
                     f"source={incoming_source} local_revision={local_revision} incoming_revision={incoming_revision} "
                     f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision={decision_reason}"
-                )
-            else:
-                _diag(
-                    "[ORDER-CONFLICT] singer="
-                    f"{singer.get('name','')!r} old_order={before} incoming_order={order} local_order={after} "
-                    f"source={incoming_source} local_revision={local_revision} incoming_revision={incoming_revision} "
-                    f"local_ts={max(local_host_ts, local_singer_ts)} incoming_ts={incoming_ts} decision=no_change"
                 )
 
         try:
