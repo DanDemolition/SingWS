@@ -213,8 +213,8 @@ class BeatAlignedLoopTests(unittest.TestCase):
         self.assertIsNone(pd.beat_aligned_loop(0.0, 120, 0.0, 0))
 
 
-class DetectLeadSilenceTests(unittest.TestCase):
-    """FFmpeg-based lead-silence scan (replaces the GStreamer level scan)."""
+class ToneWavFixture:
+    """Builds stereo tone WAVs for the silence-scan tests."""
 
     SR = 16000
 
@@ -240,6 +240,10 @@ class DetectLeadSilenceTests(unittest.TestCase):
             wav.writeframes(bytes(chunk))
         handle.close()
         return handle.name
+
+
+class DetectLeadSilenceTests(ToneWavFixture, unittest.TestCase):
+    """FFmpeg-based lead-silence scan (replaces the GStreamer level scan)."""
 
     def test_measures_leading_silence(self):
         path = self._write_wav((1.2, 0.0), (1.0, 0.5))
@@ -269,6 +273,49 @@ class DetectLeadSilenceTests(unittest.TestCase):
         # measured as silence before the real content starts.
         path = self._write_wav((1.0, 0.001), (1.0, 0.5))
         self.assertAlmostEqual(pd.detect_lead_silence(path), 1.0, delta=0.15)
+
+
+class DetectTrailingSilenceTests(ToneWavFixture, unittest.TestCase):
+    """Tail scan that tells the end-of-song detector where audio really stops.
+
+    Every ambiguous or failed case must report 0.0 ("no trailing silence"), so
+    the caller plays the file out in full rather than clipping a final note.
+    """
+
+    def test_measures_trailing_silence(self):
+        path = self._write_wav((2.0, 0.5), (1.5, 0.0))
+        self.assertAlmostEqual(pd.detect_trailing_silence(path), 1.5, delta=0.15)
+
+    def test_tone_to_the_end_returns_zero(self):
+        path = self._write_wav((2.0, 0.5))
+        self.assertAlmostEqual(pd.detect_trailing_silence(path), 0.0, delta=0.15)
+
+    def test_quiet_outro_is_not_counted_as_silence(self):
+        # The case that clipped last notes: a -34 dBFS outro is quiet enough to
+        # read as "silent" on the live meter, but it is still music and must
+        # not be reported as trailing silence.
+        path = self._write_wav((2.0, 0.5), (2.0, 0.02))
+        self.assertAlmostEqual(pd.detect_trailing_silence(path), 0.0, delta=0.15)
+
+    def test_fade_out_tail_stops_at_the_last_audible_moment(self):
+        path = self._write_wav((1.0, 0.5), (1.0, 0.05), (1.0, 0.005), (1.0, 0.0))
+        # 0.005 is ~-46 dBFS, still above the -55 dB floor, so only the true
+        # digital-silence second counts.
+        self.assertAlmostEqual(pd.detect_trailing_silence(path), 1.0, delta=0.15)
+
+    def test_fully_silent_scan_returns_zero(self):
+        path = self._write_wav((2.0, 0.0))
+        self.assertEqual(pd.detect_trailing_silence(path), 0.0)
+
+    def test_missing_file_returns_zero(self):
+        self.assertEqual(pd.detect_trailing_silence("/nonexistent/file.mp3"), 0.0)
+
+    def test_noise_floor_above_threshold_reports_no_silence(self):
+        # Analogue-sourced karaoke tracks often have a hissy tail. Reporting no
+        # trailing silence makes the song play to full duration -- the safe way
+        # to be wrong.
+        path = self._write_wav((1.0, 0.5), (2.0, 0.01))
+        self.assertEqual(pd.detect_trailing_silence(path), 0.0)
 
 
 if __name__ == "__main__":

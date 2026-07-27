@@ -117,6 +117,80 @@ def detect_lead_silence(
         return 0.0
 
 
+def detect_trailing_silence(
+    path: str,
+    noise_db: float = -55.0,
+    max_scan_seconds: float = 60.0,
+    sr: int = 16000,
+) -> float:
+    """Length of the trailing silence (seconds) at the end of `path`.
+
+    The mirror of :func:`detect_lead_silence`, and used for the opposite
+    purpose: the live meter cannot tell a quiet outro from the end of a song,
+    so the end-of-song detector needs to know where the audio *really* stops
+    before it is allowed to cut. Same window/threshold shape as the lead scan
+    -- 100 ms windows, RMS per channel, a window is silent when its louder
+    channel sits at or below `noise_db` dBFS.
+
+    Only the last `max_scan_seconds` are decoded (ffmpeg ``-sseof``), so cost
+    does not grow with song length.
+
+    Returns 0.0 on any decode error, on a fully silent scan, and -- crucially
+    -- whenever the tail never drops below the threshold. Every failure mode
+    reports "no trailing silence", which makes the caller play the file to its
+    full duration rather than risk clipping a final note.
+    """
+    try:
+        import os
+
+        if not path or not os.path.exists(str(path)):
+            return 0.0
+        noise_db = float(noise_db)
+        sr = max(1000, int(sr))
+        scan = max(1.0, float(max_scan_seconds))
+        cmd = [
+            _ffmpeg(), "-v", "quiet", "-nostdin",
+            "-sseof", f"-{scan:g}",
+            "-i", str(path),
+            "-vn", "-ac", "2", "-ar", str(sr), "-f", "f32le", "-",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                check=False, timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            return 0.0
+        if proc.returncode != 0 or not proc.stdout:
+            return 0.0
+        samples = np.frombuffer(proc.stdout, dtype="<f4")
+        frames = samples.size // 2
+        if frames <= 0:
+            return 0.0
+        stereo = samples[: frames * 2].reshape(-1, 2)
+        window = max(1, sr // 10)  # 100 ms windows, matching the lead scan
+        n_windows = frames // window
+        if n_windows <= 0:
+            return 0.0
+        blocks = stereo[: n_windows * window].reshape(n_windows, window, 2)
+        rms = np.sqrt(np.mean(np.square(blocks.astype(np.float64)), axis=1))
+        rms_db = 20.0 * np.log10(np.maximum(rms.max(axis=1), 1e-9))
+        loud = np.flatnonzero(rms_db > noise_db)
+        if loud.size == 0:
+            # Whole tail is below threshold. That usually means the scan window
+            # opened after the music already stopped, and reporting the entire
+            # window as silence would cut real audio on a long fade. Say
+            # "unknown" and let the caller fall back to the live detector.
+            return 0.0
+        window_s = float(window) / float(sr)
+        decoded_s = float(n_windows) * window_s
+        # +1 window: silence starts at the END of the last loud window.
+        trailing = decoded_s - ((float(loud[-1]) + 1.0) * window_s)
+        return max(0.0, trailing)
+    except Exception:
+        return 0.0
+
+
 def peaks(pcm: np.ndarray, n_cols: int) -> np.ndarray:
     """min/max envelope per output column for the waveform.
     Returns an (n_cols, 2) array of (min, max) in [-1, 1]."""

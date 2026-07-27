@@ -3525,6 +3525,45 @@ def detect_lead_silence(path, noise_db=-50.0, min_silence=0.5) -> float:
     except Exception:
         return 0.0
 
+
+# Where the audio in a karaoke file actually stops, so the end-of-song detector
+# can refuse to cut while notes are still playing. Keyed by resolved audio path.
+_TRAILING_SILENCE_CACHE: dict[str, float] = {}
+_TRAILING_SILENCE_LOCK = threading.Lock()
+
+
+def detect_trailing_silence(path, noise_db=-55.0) -> float:
+    """Trailing-silence length for `path`, cached per resolved audio file.
+
+    The live meter cannot distinguish a quiet outro, a fade, or a reverb tail
+    from the end of the song, which is what made some songs lose their last
+    notes. Scanning the file itself gives the detector a hard floor: the song
+    is not over until playback has passed the last audible sample.
+
+    Returns 0.0 ("no trailing silence, play it all") on any error.
+    """
+    key = str(path or "")
+    if not key:
+        return 0.0
+    with _TRAILING_SILENCE_LOCK:
+        hit = _TRAILING_SILENCE_CACHE.get(key)
+    if hit is not None:
+        return float(hit)
+    try:
+        value = float(phrase_detect.detect_trailing_silence(key, noise_db=noise_db))
+    except Exception:
+        value = 0.0
+    with _TRAILING_SILENCE_LOCK:
+        _TRAILING_SILENCE_CACHE[key] = value
+    return value
+
+
+def trailing_silence_cached(path) -> float | None:
+    """Cached trailing silence for `path`, or None when it has not been scanned."""
+    with _TRAILING_SILENCE_LOCK:
+        return _TRAILING_SILENCE_CACHE.get(str(path or ""))
+
+
 # Trailing-silence (dead-air) detection tunables for background music.
 BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
 BG_SILENCE_MIN_S = 1.2      # sustained silence required before advancing
@@ -22135,6 +22174,7 @@ class KaraokeApp(QWidget):
                 pass
             return False
         self._setup_end_silence_state(mode, None)
+        self._arm_audio_end_floor(audio_path)
         self._update_karaoke_key_ui()
         _diag(
             f"[PY-KARAOKE] started mode={mode} start={float(start_seconds):.3f}s "
@@ -34484,9 +34524,83 @@ class KaraokeApp(QWidget):
         self._end_silence_cdg_last_generation_ts = 0.0
         self._end_silence_auto_advance_next = False
         self._end_silence_last_reason = ""
+        self._karaoke_audio_end_s = None
+        self._karaoke_audio_end_path = ""
+        self._end_audio_hold_log_ts = 0.0
         self._bg_crossfade_prefired = False  # reset per-song BG pre-start flag
         self._bg_prefire_silence_accum_s = 0.0
         self._bg_prefire_silence_last_ts = 0.0
+
+    def _arm_audio_end_floor(self, audio_path: str):
+        """Find where this file's audio really stops, in the background.
+
+        Until the scan lands, ``_karaoke_audio_end_s`` stays None and the
+        detector behaves exactly as before. A song can only ever end later
+        because of this, never earlier.
+        """
+        self._karaoke_audio_end_s = None
+        self._karaoke_audio_end_path = str(audio_path or "")
+        if not audio_path:
+            return
+        if not self._karaoke_early_silence_trim_enabled():
+            return
+        duration = 0.0
+        try:
+            duration = float(self._get_duration_secs(audio_path) or 0.0)
+        except Exception:
+            duration = 0.0
+        if duration <= 0.0:
+            return
+
+        cached = trailing_silence_cached(audio_path)
+        if cached is not None:
+            self._apply_audio_end_floor(audio_path, duration, float(cached), "cache")
+            return
+
+        def worker(scan_path: str, scan_duration: float):
+            trailing = detect_trailing_silence(scan_path)
+            try:
+                QTimer.singleShot(
+                    0,
+                    lambda: self._apply_audio_end_floor(
+                        scan_path, scan_duration, trailing, "scan"
+                    ),
+                )
+            except Exception:
+                pass
+
+        try:
+            threading.Thread(
+                target=worker,
+                args=(str(audio_path), duration),
+                daemon=True,
+                name="singws-audio-end-scan",
+            ).start()
+        except Exception:
+            pass
+
+    def _apply_audio_end_floor(self, scan_path: str, duration: float, trailing: float, source: str):
+        # A late scan must not be applied to whatever is playing now.
+        if str(scan_path) != str(getattr(self, "_karaoke_audio_end_path", "")):
+            return
+        try:
+            trailing = max(0.0, float(trailing))
+            duration = float(duration)
+        except Exception:
+            return
+        if trailing <= 0.0:
+            self._karaoke_audio_end_s = None
+            _diag(
+                f"[END-AUDIO] no trailing silence found; full duration will play "
+                f"source={source} duration={duration:.2f}s file={os.path.basename(scan_path)}"
+            )
+            return
+        self._karaoke_audio_end_s = max(0.0, duration - trailing)
+        _diag(
+            f"[END-AUDIO] last audible audio at {self._karaoke_audio_end_s:.2f}s "
+            f"(trailing_silence={trailing:.2f}s duration={duration:.2f}s source={source}) "
+            f"file={os.path.basename(scan_path)}"
+        )
 
     def _setup_end_silence_state(self, mode: str, level_elem=None):
         self._karaoke_level_elem = level_elem
@@ -34505,6 +34619,7 @@ class KaraokeApp(QWidget):
         self._end_silence_cdg_last_generation_ts = time.monotonic()
         self._end_silence_auto_advance_next = False
         self._end_silence_last_reason = ""
+        self._end_audio_hold_log_ts = 0.0
         if self._end_silence_mode in ("cdg", "mp4"):
             _diag(f"[END-SILENCE] {self._end_silence_mode.upper()} detector armed")
 
@@ -34741,6 +34856,24 @@ class KaraokeApp(QWidget):
         dt = 0.5 if last <= 0.0 else max(0.0, min(1.0, now - last))
         self._end_silence_last_tick = now
         threshold_s = self._end_trim_threshold_sec()
+
+        # Hard floor from the file itself. The meter reads a quiet outro, a
+        # fade, or a reverb tail as silence, which is what cut some songs off
+        # before their last notes. The scan knows where the audio really stops,
+        # so nothing may end before the playhead has passed it. Absent a scan
+        # (still running, or a file we could not read) this is skipped and the
+        # detector behaves exactly as it did before.
+        audio_end = getattr(self, "_karaoke_audio_end_s", None)
+        if audio_end is not None and elapsed < float(audio_end):
+            self._end_silence_accum_s = 0.0
+            last_log = float(getattr(self, "_end_audio_hold_log_ts", 0.0) or 0.0)
+            if (now - last_log) >= 5.0:
+                self._end_audio_hold_log_ts = now
+                _diag(
+                    f"[END-AUDIO] holding; audio continues to {float(audio_end):.2f}s "
+                    f"(pos={elapsed:.2f}s db={db:.1f})"
+                )
+            return False
 
         if db <= float(self._end_silence_db_threshold):
             self._end_silence_accum_s += dt
