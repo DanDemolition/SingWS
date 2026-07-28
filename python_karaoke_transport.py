@@ -1476,7 +1476,27 @@ class PythonKaraokeTransport(QObject):
             pulled_bytes = int(self._audible_output_bytes)
 
         audio_delta_s = max(0.0, pulled_bytes / float(byte_rate))
-        position = float(self._clock_source_seconds) + audio_delta_s * float(self.tempo_ratio)
+        # _audible_output_bytes counts what the device PULLED, not what it has
+        # played, so this clock ran ahead of the sound by the whole device
+        # buffer -- measured at 198ms mean against a 200ms buffer on this Qt.
+        # Every visual consumer keyed off it (CDG frames above all) was early by
+        # that much. Subtract the backlog still sitting in the device so the
+        # clock reports audible time.
+        #
+        # processedUSecs() is the device's own played-time counter and advances
+        # through underrun padding, which pulled bytes deliberately do not --
+        # so it is used only to measure the backlog, never as the clock itself.
+        backlog_s = 0.0
+        try:
+            played_s = max(0.0, (self._processed_us() - int(self._clock_processed_us)) / 1_000_000.0)
+            backlog_s = audio_delta_s - played_s
+            # Clamp: negative means the device outran our accounting (underrun
+            # padding), and nothing legitimate exceeds one buffer.
+            backlog_s = max(0.0, min(backlog_s, self._device_buffer_seconds()))
+        except Exception:
+            backlog_s = 0.0
+        audible_delta_s = max(0.0, audio_delta_s - backlog_s)
+        position = float(self._clock_source_seconds) + audible_delta_s * float(self.tempo_ratio)
         if self.duration_seconds > 0.0:
             position = max(0.0, min(self.duration_seconds, position))
         else:
@@ -1618,6 +1638,11 @@ class PythonKaraokeTransport(QObject):
         # Small buffer: pull mode keeps the device fed from a background thread,
         # so we don't need a big cushion against UI hitches, and a small buffer
         # keeps output latency (and any residual seek artifact) tight.
+        #
+        # Do NOT enlarge this to ride out GUI stalls without also retuning the
+        # video offset: position_seconds() counts bytes pulled by the device, so
+        # a deeper buffer makes the clock lead what is actually audible and the
+        # lyrics land early by the same amount.
         self.audio_sink.setBufferSize(int(self.sample_rate * self.channels * 4 * 0.2))
         self._feeder = _PcmFeeder(self)
         self._feeder.open(QIODevice.OpenModeFlag.ReadOnly)
