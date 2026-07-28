@@ -20310,6 +20310,13 @@ class KaraokeApp(QWidget):
             print("ℹ️ Network not configured - polling disabled")
             print("   Configure network settings (Settings > Network) to enable request polling")
 
+        # Refresh where this laptop is as soon as the app is up. Until now the
+        # session location was only pushed when Network settings were saved,
+        # when the rotation was posted, or on quit -- so a laptop carried to a
+        # new venue kept advertising the previous one until the first rotation
+        # upload, and nearby-signup checks were made against the wrong place.
+        QTimer.singleShot(2500, self._sync_session_location_on_startup)
+
         QTimer.singleShot(9000, self._maybe_auto_check_for_updates)
 
         # DIAGNOSTIC: Freeze detector
@@ -25503,6 +25510,126 @@ class KaraokeApp(QWidget):
             self.set_cdg_timing_offset_ms(int(val))
         video_offset_spin.valueChanged.connect(on_video_offset_changed)
         video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(0))
+
+        # ---- Venues ----
+        v = _section_card(
+            tab_general, "Venue",
+            "Save the settings that change room to room -- location, audio output, "
+            "display timing, between-song screens, ticker and window placement -- "
+            "and switch between them. Library, KaraFun and server credentials are "
+            "always shared, so switching venues can never change who you sync as.",
+        )
+        venue_global_cb = QCheckBox("Use one set of settings everywhere (ignore venue profiles)")
+        venue_global_cb.setChecked(not self.venue_profiles_enabled())
+        v.addWidget(venue_global_cb)
+
+        venue_row = QHBoxLayout()
+        venue_row.addWidget(QLabel("Venue:"))
+        venue_combo = QComboBox(dlg)
+        venue_combo.setMinimumWidth(240)
+        venue_row.addWidget(venue_combo, 1)
+        venue_save_btn = QPushButton("Save As…")
+        venue_update_btn = QPushButton("Update")
+        venue_delete_btn = QPushButton("Delete")
+        for _b in (venue_save_btn, venue_update_btn, venue_delete_btn):
+            venue_row.addWidget(_b)
+        v.addLayout(venue_row)
+        venue_status = QLabel("")
+        try:
+            venue_status.setStyleSheet(section_meta_css())
+        except Exception:
+            pass
+        venue_status.setWordWrap(True)
+        v.addWidget(venue_status)
+
+        def _rebaseline_after_venue_change():
+            """Venue actions are immediate, not pending dialog edits.
+
+            cancel_settings() restores original_settings wholesale, which would
+            otherwise undo a Save As, a Delete, or a venue switch the moment the
+            operator hit Cancel on an unrelated tab.
+            """
+            original_settings.clear()
+            original_settings.update(_copy.deepcopy(self.settings))
+
+        def _refresh_venue_ui(select: str = ""):
+            names = self.venue_names()
+            venue_combo.blockSignals(True)
+            venue_combo.clear()
+            venue_combo.addItems(names)
+            target = select or self.active_venue()
+            if target and target in names:
+                venue_combo.setCurrentIndex(names.index(target))
+            venue_combo.blockSignals(False)
+            profiles_on = not venue_global_cb.isChecked()
+            for w in (venue_combo, venue_save_btn, venue_update_btn, venue_delete_btn):
+                w.setEnabled(profiles_on)
+            if not profiles_on:
+                venue_status.setText("Global settings in use — venue profiles are ignored.")
+            elif not names:
+                venue_status.setText("No venues saved yet. 'Save As…' stores the current settings as a venue.")
+            else:
+                venue_status.setText(
+                    f"Active venue: {self.active_venue() or 'none'} — {len(names)} saved."
+                )
+
+        def _on_venue_global_toggled(checked):
+            self.settings["venue_profiles_enabled"] = not bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            _rebaseline_after_venue_change()
+            _refresh_venue_ui()
+
+        def _on_venue_selected(index):
+            name = venue_combo.itemText(index) if index >= 0 else ""
+            if not name or name == self.active_venue():
+                return
+            if self.apply_venue(name):
+                _rebaseline_after_venue_change()
+                _refresh_venue_ui(name)
+                QMessageBox.information(dlg, "Venue", f"Switched to '{name}'.")
+
+        def _on_venue_save_as():
+            name, ok = QInputDialog.getText(dlg, "Save Venue", "Venue name:")
+            name = str(name or "").strip()
+            if not ok or not name:
+                return
+            if name in self.venue_names() and QMessageBox.question(
+                dlg, "Save Venue", f"'{name}' already exists. Overwrite it?",
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            self.save_current_venue(name)
+            _rebaseline_after_venue_change()
+            _refresh_venue_ui(name)
+
+        def _on_venue_update():
+            name = venue_combo.currentText().strip()
+            if not name:
+                return
+            self.save_current_venue(name)
+            _rebaseline_after_venue_change()
+            venue_status.setText(f"Updated '{name}' with the current settings.")
+
+        def _on_venue_delete():
+            name = venue_combo.currentText().strip()
+            if not name:
+                return
+            if QMessageBox.question(
+                dlg, "Delete Venue", f"Delete the venue '{name}'?"
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            self.delete_venue(name)
+            _rebaseline_after_venue_change()
+            _refresh_venue_ui()
+
+        venue_global_cb.toggled.connect(_on_venue_global_toggled)
+        venue_combo.currentIndexChanged.connect(_on_venue_selected)
+        venue_save_btn.clicked.connect(_on_venue_save_as)
+        venue_update_btn.clicked.connect(_on_venue_update)
+        venue_delete_btn.clicked.connect(_on_venue_delete)
+        _refresh_venue_ui()
 
         v = _section_card(tab_general, "General")  # ---- General ----
         perf_debug_cb = QCheckBox("Runtime diagnostic logging")
@@ -31716,6 +31843,160 @@ class KaraokeApp(QWidget):
         self._commit_singer_history_change("history_clear_inactive")
             
     # --- Settings JSON for persistent background image ---
+    # ---- venue profiles -----------------------------------------------------
+    # Settings that genuinely differ room to room. Everything else -- library
+    # paths, KaraFun setup, normalisation, and above all the network/tenant
+    # credentials -- deliberately stays global, so switching venues can never
+    # silently carry the wrong server identity into a new room.
+    VENUE_SCOPED_SETTINGS = (
+        # Where the laptop is, for nearby-signup checks.
+        "session_location_latitude",
+        "session_location_longitude",
+        "session_location_source",
+        "session_location_accuracy_meters",
+        "session_location_detected_at",
+        "session_location_auto_detect",
+        "session_location_ttl_minutes",
+        # The rig: which output, and how far the room's display lags.
+        "audio_output_id",
+        "audio_output_name",
+        "video_timing_offset_ms",
+        "cdg_display_mode",
+        # Between-song screens.
+        "background_image_path",
+        "background_closed_image_path",
+        "background_slideshow_enabled",
+        "background_slideshow_folder",
+        "background_slideshow_interval_sec",
+        # The scrolling ticker, which is usually venue-branded.
+        "ticker_enabled",
+        "ticker_custom_enabled",
+        "ticker_custom_message",
+        "ticker_color",
+        "ticker_speed_px_per_sec",
+        "ticker_size_index",
+        "ticker_bold",
+        # Window placement follows the room's screen layout.
+        "main_window_geometry",
+        "karaoke_window_pos",
+        "rotation_window_geometry",
+    )
+
+    def venue_profiles_enabled(self) -> bool:
+        """False means one set of settings everywhere (the global switch)."""
+        try:
+            return bool(self.settings.get("venue_profiles_enabled", False))
+        except Exception:
+            return False
+
+    def _venue_store(self) -> dict:
+        store = self.settings.get("venues")
+        if not isinstance(store, dict):
+            store = {}
+            self.settings["venues"] = store
+        return store
+
+    def venue_names(self) -> list:
+        return sorted(self._venue_store().keys(), key=lambda s: s.lower())
+
+    def active_venue(self) -> str:
+        return str(self.settings.get("active_venue", "") or "").strip()
+
+    def _capture_venue_settings(self) -> dict:
+        """Snapshot the venue-scoped settings as they stand right now."""
+        return {
+            key: self.settings[key]
+            for key in self.VENUE_SCOPED_SETTINGS
+            if key in self.settings
+        }
+
+    def save_current_venue(self, name: str = "") -> str:
+        """Store the live settings under `name` (default: the active venue)."""
+        name = str(name or self.active_venue() or "").strip()
+        if not name:
+            return ""
+        self._venue_store()[name] = self._capture_venue_settings()
+        self.settings["active_venue"] = name
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        _diag(f"[VENUE] saved profile {name!r} keys={len(self._venue_store()[name])}")
+        return name
+
+    def apply_venue(self, name: str, *, save_current: bool = True) -> bool:
+        """Switch to `name`, first banking whatever the current venue looks like.
+
+        Banking first is what makes this safe to use mid-show: a tweak made at
+        the current venue is not silently lost by switching away and back.
+        """
+        name = str(name or "").strip()
+        if not name:
+            return False
+        store = self._venue_store()
+        if name not in store:
+            _diag(f"[VENUE] cannot apply unknown profile {name!r}")
+            return False
+        previous = self.active_venue()
+        if save_current and previous and previous != name:
+            self.save_current_venue(previous)
+        profile = store.get(name) or {}
+        applied = 0
+        for key in self.VENUE_SCOPED_SETTINGS:
+            if key in profile:
+                self.settings[key] = profile[key]
+                applied += 1
+        self.settings["active_venue"] = name
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        _diag(f"[VENUE] applied profile {name!r} settings={applied} (was {previous or 'none'})")
+        self._apply_venue_settings_live(name)
+        return True
+
+    def delete_venue(self, name: str) -> bool:
+        name = str(name or "").strip()
+        store = self._venue_store()
+        if name not in store:
+            return False
+        store.pop(name, None)
+        if self.active_venue() == name:
+            self.settings["active_venue"] = ""
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        _diag(f"[VENUE] deleted profile {name!r}")
+        return True
+
+    def _apply_venue_settings_live(self, name: str):
+        """Push the newly loaded settings into the running app."""
+        for label, call in (
+            ("runtime media", lambda: self._apply_runtime_media_settings()),
+            ("audio output", lambda: self._update_audio_output_button()),
+            ("ticker", lambda: self.schedule_ticker_update()),
+            ("idle background", lambda: self._apply_idle_background(force=True, advance_slideshow=False)),
+            ("session location", lambda: self._sync_session_location_for_venue()),
+        ):
+            try:
+                call()
+            except Exception as e:
+                _diag(f"[VENUE] {label} refresh failed after switching to {name!r}: {e}")
+
+    def _sync_session_location_for_venue(self):
+        """Re-publish the location after a venue switch, off the GUI thread."""
+        if not self.is_network_configured():
+            return
+
+        def worker():
+            try:
+                self.sync_session_location(active=True)
+            except Exception as e:
+                _diag(f"[VENUE] session location sync failed: {e}")
+
+        threading.Thread(target=worker, daemon=True, name="singws-venue-location").start()
+
     def load_settings(self):
         return _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
 
@@ -34038,6 +34319,40 @@ class KaraokeApp(QWidget):
             "detected_at": detected_at or int(time.time()),
             "ttl_minutes": ttl,
         }
+
+    def _sync_session_location_on_startup(self):
+        """Push this laptop's location once the app is running.
+
+        Runs on a worker thread on purpose. sync_session_location() builds its
+        payload on the calling thread, and that includes
+        _detect_current_device_location(), which spins a CoreLocation run loop
+        until it gets a fix or times out -- up to ten seconds. On the GUI thread
+        that would be a ten-second freeze during launch. CLLocationManager
+        delivers to the run loop of whichever thread created it, and the
+        detector already spins currentRunLoop() rather than assuming main, so a
+        worker is a supported home for it. If it turns out not to be, detection
+        simply reports unavailable and the stored coordinates are sent instead.
+        """
+        if not self.is_network_configured():
+            _diag("[SESSION-LOCATION] startup sync skipped: network not configured")
+            return
+        if getattr(self, "_startup_location_sync_started", False):
+            return
+        self._startup_location_sync_started = True
+
+        def worker():
+            try:
+                self.sync_session_location(active=True)
+                _diag("[SESSION-LOCATION] startup sync dispatched")
+            except Exception as e:
+                _diag(f"[SESSION-LOCATION] startup sync failed: {e}")
+
+        try:
+            threading.Thread(
+                target=worker, daemon=True, name="singws-startup-location"
+            ).start()
+        except Exception as e:
+            _diag(f"[SESSION-LOCATION] startup sync thread failed: {e}")
 
     def sync_session_location(self, active: bool = True):
         payload = self._session_location_payload(allow_auto_detect=bool(active))
