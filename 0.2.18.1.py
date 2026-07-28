@@ -48840,12 +48840,35 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 _diag(f"Manual stop: BG crossfade start failed: {e}")
 
-        # If we have a karaoke volume element and a running pipeline, fade it down first
-        # The legacy fade-then-teardown path is gone: karaoke_volume and
-        # gst_pipeline were always None, so manual stop always took this
-        # immediate path.
-        # No karaoke pipeline/fader found; fall back to immediate async stop
+        # Fade the karaoke audio out before tearing it down, so Stop sounds like
+        # the end of a song rather than a cut cable. The visual handoff above
+        # has already happened, and the background music is crossfading in
+        # underneath, so the fade only governs when the karaoke audio stops.
+        transport = getattr(self, "karaoke_transport", None)
+        fade_ms = self._manual_stop_fade_ms()
+        if transport is not None and hasattr(transport, "fade_out"):
+            try:
+                if transport.fade_out(fade_ms, on_finished=self._finish_manual_stop_teardown):
+                    self._log_manual_stop_timeline("fade_started")
+                    return
+            except Exception as e:
+                _diag(f"[MANUAL-STOP] fade unavailable ({e}); stopping immediately")
+        # Nothing to fade (no transport, or it declined): stop immediately.
         self._log_manual_stop_timeline("no_fade_path")
+        self._finish_manual_stop_teardown()
+
+    def _manual_stop_fade_ms(self) -> int:
+        """How long Stop takes to fade the karaoke audio out."""
+        try:
+            value = int(self.settings.get("manual_stop_fade_ms", 2000) or 2000)
+        except Exception:
+            value = 2000
+        # 0 restores the old instant cut; the cap keeps Stop responsive and
+        # stays inside the 3s _manual_stop_in_progress guard.
+        return max(0, min(2800, value))
+
+    def _finish_manual_stop_teardown(self):
+        self._log_manual_stop_timeline("teardown")
         self._gst_teardown_async()  # ← Use the non-blocking version
         self.clear_now_singing()
         
