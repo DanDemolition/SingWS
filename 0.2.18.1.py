@@ -48088,6 +48088,51 @@ class KaraokeApp(QWidget):
         self._next_in_progress = False
         return True
 
+    def _flash_play_control_kept_current(self):
+        """Briefly say why Play did nothing, so the press is not silent.
+
+        The old behaviour answered a press with a modal; the new one keeps the
+        current song. Without some acknowledgement that reads as a dead button,
+        which is the complaint that started this.
+        """
+        button = getattr(self, "play_next", None)
+        if button is None:
+            return
+        try:
+            restore = "Starting queued song…" if bool(
+                getattr(self, "_play_control_starting", False)
+            ) else "Play Next Singer"
+            button.setToolTip("Current song kept — use Skip or Stop to end it")
+            try:
+                from PyQt6.QtWidgets import QToolTip
+                from PyQt6.QtGui import QCursor
+
+                QToolTip.showText(QCursor.pos(), button.toolTip(), button)
+            except Exception:
+                pass
+            timer = getattr(self, "_play_kept_current_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                self._play_kept_current_timer = timer
+            try:
+                timer.timeout.disconnect()
+            except Exception:
+                pass
+            timer.timeout.connect(lambda: self._restore_play_control_tooltip(restore))
+            timer.start(2500)
+        except Exception:
+            pass
+
+    def _restore_play_control_tooltip(self, text: str):
+        button = getattr(self, "play_next", None)
+        if button is None:
+            return
+        try:
+            button.setToolTip(str(text or "Play Next Singer"))
+        except Exception:
+            pass
+
     def _on_play_control_clicked(self, _checked=False):
         """Single UI entry point for mouse, touch, keyboard, and accessibility."""
         starting = bool(
@@ -48104,21 +48149,18 @@ class KaraokeApp(QWidget):
         if not active:
             self.play_next_file(skip_confirmation=True, command_source="manual_idle")
             return
-        if not self._confirm_repeated_play_advance():
-            _diag("[PLAY-COMMAND] repeated play canceled; audio and queue unchanged")
-            return
-        # The modal dialog runs a Qt event loop; preroll may legitimately
-        # become playing while it is open. Re-evaluate after confirmation so
-        # the approved action still targets the same current/next transition.
-        pending_now = isinstance(getattr(self, "_pending_play_start_context", None), dict)
-        if pending_now:
-            if not self._advance_from_pending_start_after_confirmation():
-                return
-        elif isinstance(getattr(self, "_active_external_karafun", None), dict):
-            # The confirmation explicitly authorizes ending the active
-            # external performance before the next queue entry is selected.
-            self._finish_external_karafun_playback("complete")
-        self.play_next_file(skip_confirmation=True, command_source="manual_confirmed_advance")
+        # Pressing Play while something is already going keeps the current
+        # song. It used to raise a "Stop Current and Play Next?" dialog, but
+        # confirming it could still end in a silent no-op: when the advance
+        # came from a pending start, a failed rollback just returned without
+        # a word, so the press looked broken. Interrupting a singer mid-song
+        # is not a decision worth a modal on a live console either -- the
+        # explicit Skip and Stop controls already do that deliberately.
+        _diag(
+            "[PLAY-COMMAND] play pressed while active; keeping current song "
+            f"(starting={int(starting)})"
+        )
+        self._flash_play_control_kept_current()
 
     def play_next_file(self, skip_confirmation=False, *, command_source="internal"):
         # Intro Loop release: if the next song is held in a looping intro, a
