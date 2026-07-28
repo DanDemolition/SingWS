@@ -6,6 +6,17 @@ import logging
 import logging.handlers
 from pathlib import Path
 
+# The BASS master/EQ processors run as Python DSP callbacks on the audio
+# thread, so producing sound needs the GIL -- unlike the old GStreamer pipeline,
+# which was pure C and could not be blocked by anything the UI did. At Python's
+# default 5ms switch interval a burst of GUI work (opening Settings, the EQ, the
+# rotation or karaoke windows) keeps re-taking the GIL and the audio callback
+# misses its 25ms deadline, which is audible as a split-second dropout.
+#
+# 1ms lets the audio thread back in five times sooner. The cost is more frequent
+# thread switches in a process that is not CPU-bound on Python anyway.
+sys.setswitchinterval(0.001)
+
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.3.0"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -17568,8 +17579,40 @@ class RotationView(QMainWindow):
             sb.setValue(sb.value() - main_height)
 
     def lookup_display_name(self, song_path, tracks, artist_title_only=False):
+        """Resolve a queue path to its display name.
+
+        This used to walk `tracks` linearly, lowercasing every path on the way:
+        134k tracks per singer, ~15 singers, on the GUI thread every time the
+        rotation window refreshed. Holding the GIL that long starves the BASS
+        DSP callback -- which runs in Python on the audio thread -- and the
+        music audibly drops out. Under GStreamer the audio path was pure C and
+        never noticed.
+
+        The host already solved this: its own lookup_display_name() goes
+        through song_index.find_by_path() (<1ms) behind a cache. Use it. The
+        linear walk stays only as a last resort for a detached view.
+        """
         song_path = str(song_path)
-        for track in tracks:
+        owner = self.parent()
+        lookup = getattr(owner, "lookup_display_name", None)
+        if callable(lookup):
+            try:
+                return lookup(song_path, artist_title_only=artist_title_only)
+            except Exception:
+                pass
+        try:
+            track = song_index.find_by_path(song_path)
+        except Exception:
+            track = None
+        if track:
+            disp = track.get("display", os.path.basename(song_path))
+            if not artist_title_only:
+                return disp
+            parts = [p.strip() for p in disp.split(" - ") if p.strip()]
+            if len(parts) >= 2:
+                return f"{parts[0]} • {parts[1]}"
+            return parts[0] if parts else os.path.basename(song_path)
+        for track in tracks or []:
             if str(track.get("path", "")).lower() == song_path.lower():
                 disp = track.get("display", os.path.basename(song_path))
                 if artist_title_only:
