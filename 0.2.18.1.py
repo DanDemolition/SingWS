@@ -24188,11 +24188,28 @@ class KaraokeApp(QWidget):
         pending = state.pop("_pending_performance", None)
         if not isinstance(pending, dict):
             return False
+        singer_name = str(pending.get("singer_name") or "")
+        request_id = pending.get("remote_request_id")
         _diag(
             f"[PERFORMANCE] not recorded reason={reason} "
-            f"singer={str(pending.get('singer_name') or '')!r} "
-            f"request_id={pending.get('remote_request_id')} (song may be re-added)"
+            f"singer={singer_name!r} request_id={request_id}"
         )
+        # Dropping it locally was not enough. The request stayed active on the
+        # server, so the next poll saw a live phone request with no local row
+        # and re-created it -- a song stopped at 01:45 reappeared at 01:51,
+        # after the host had already removed the singer. Tombstone it here so
+        # a host stop actually sticks. This does NOT mark it sung, so the
+        # singer is still free to request it again from their phone.
+        try:
+            if request_id is not None:
+                self._delete_remote_request(
+                    request_id,
+                    entry=pending.get("entry"),
+                    singer_name=singer_name,
+                    reason=f"host_stopped:{reason}",
+                )
+        except Exception as e:
+            _diag(f"[PERFORMANCE] could not retire request {request_id}: {e}")
         return True
 
     def _finish_media_end_cleanup(self, end_silence_triggered: bool, schedule_bg_resume: bool):
