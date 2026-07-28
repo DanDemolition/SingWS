@@ -117,6 +117,40 @@ def detect_lead_silence(
         return 0.0
 
 
+def probe_duration_seconds(path: str) -> float:
+    """Duration of `path` straight from the file, via ffprobe. 0.0 if unknown.
+
+    Needed because the library database is keyed on the *zip* path for MP3+G
+    tracks, while playback hands round the extracted mp3 -- so a DB lookup
+    returns nothing for the very files that make up most of a library.
+    """
+    try:
+        import os
+        import subprocess as _sp
+
+        if not path or not os.path.exists(str(path)):
+            return 0.0
+        proc = _sp.run(
+            [_ffmpeg_path_probe(), "-v", "error", "-show_entries",
+             "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if proc.returncode != 0:
+            return 0.0
+        return max(0.0, float((proc.stdout or "0").strip() or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _ffmpeg_path_probe() -> str:
+    try:
+        from python_karaoke_transport import _ffmpeg_path
+        return _ffmpeg_path("ffprobe")
+    except Exception:
+        import shutil
+        return shutil.which("ffprobe") or "ffprobe"
+
+
 def detect_trailing_silence(
     path: str,
     noise_db: float = -55.0,

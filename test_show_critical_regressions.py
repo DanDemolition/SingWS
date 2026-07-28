@@ -315,13 +315,12 @@ class ShowCriticalRegressionTests(unittest.TestCase):
 
     def test_rapid_double_click_during_startup_cannot_consume_second_song(self):
         app = self.playback_app([self.singer("First"), self.singer("Second")])
-        confirmations = []
-        app._confirm_repeated_play_advance = lambda: confirmations.append("asked") or False
         with mock.patch.object(self.singws.os.path, "exists", return_value=True):
             app._on_play_control_clicked()
             queue_after_first = list(app.queue)
             app._on_play_control_clicked()
-        self.assertEqual(confirmations, ["asked"])
+        # No prompt any more -- a second press simply keeps the current song,
+        # which protects the next song more strongly than confirming did.
         self.assertEqual(len(app.created_transports), 1)
         self.assertEqual(app.queue, queue_after_first)
         self.assertEqual(app.queue[0]["name"], "Second")
@@ -336,23 +335,31 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         self.assertEqual(len(app.created_transports), 1)
         self.assertEqual([row["name"] for row in app.queue], ["Touch Two"])
 
-    def test_confirmed_repeated_play_during_startup_retains_first_song_and_advances(self):
+    def test_repeated_play_during_startup_keeps_the_pending_song(self):
+        """Play during a pending start no longer interrupts it.
+
+        This used to raise "Stop Current and Play Next?" and advance on
+        confirmation. The prompt is gone: a live console should not put an
+        interrupt behind a modal, and confirming it could still end in a silent
+        no-op when the pending-start rollback failed. Skip and Stop remain the
+        deliberate ways to end a song.
+        """
         first = self.singer("Pending")
-        retained_entry = first["songs"][0]
-        second = self.singer("Confirmed Next")
-        app = self.playback_app([first, second])
-        app._confirm_repeated_play_advance = lambda: True
+        app = self.playback_app([first, self.singer("Next")])
         with mock.patch.object(self.singws.os.path, "exists", return_value=True):
             app._on_play_control_clicked()
             old_transport = app.created_transports[-1]
+            # Snapshot rather than predict: a pending start has already popped
+            # its singer, and only re-appends once playback confirms.
+            queue_after_first = [(row["name"], list(row.get("songs", []))) for row in app.queue]
             app._on_play_control_clicked()
-        self.assertTrue(old_transport.stopped)
-        self.assertEqual(len(app.created_transports), 2)
-        self.assertEqual([row["name"] for row in app.queue], ["Pending"])
-        self.assertIs(app.queue[0]["songs"][0], retained_entry)
+        self.assertFalse(old_transport.stopped)
+        self.assertEqual(len(app.created_transports), 1)
+        self.assertEqual(
+            [(row["name"], list(row.get("songs", []))) for row in app.queue],
+            queue_after_first,
+        )
         self.assertFalse(first.get("skipped", False))
-        app.created_transports[-1].started.emit()
-        self.assertEqual(app._current_karaoke_singer_name, "Confirmed Next")
 
     def test_repeated_play_while_playing_cancel_is_side_effect_free(self):
         app = self.playback_app([self.singer("Current"), self.singer("Next")])
@@ -362,25 +369,23 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         queue_snapshot = [(row["name"], list(row.get("songs", []))) for row in app.queue]
         presentation_snapshot = list(app.presentations)
         transport_snapshot = app.karaoke_transport
-        app._confirm_repeated_play_advance = lambda: False
         app._on_play_control_clicked()
         self.assertIs(app.karaoke_transport, transport_snapshot)
         self.assertEqual([(row["name"], list(row.get("songs", []))) for row in app.queue], queue_snapshot)
         self.assertEqual(app.presentations, presentation_snapshot)
         self.assertEqual(len(app.created_transports), 1)
 
-    def test_repeated_play_while_playing_requires_confirmation_before_advance(self):
+    def test_repeated_play_while_playing_never_advances(self):
         app = self.playback_app([self.singer("Current"), self.singer("Next")])
         with mock.patch.object(self.singws.os.path, "exists", return_value=True):
             app._on_play_control_clicked()
         app.created_transports[-1].started.emit()
-        app._confirm_repeated_play_advance = lambda: True
         with mock.patch.object(self.singws.os.path, "exists", return_value=True):
             app._on_play_control_clicked()
-        self.assertEqual(len(app.created_transports), 2)
+        # The singer keeps singing; nothing is torn down or started.
+        self.assertEqual(len(app.created_transports), 1)
         self.assertEqual(app._current_karaoke_singer_name, "Current")
-        app.created_transports[-1].started.emit()
-        self.assertEqual(app._current_karaoke_singer_name, "Next")
+        self.assertEqual([row["name"] for row in app.queue], ["Next", "Current"])
 
     def test_repeated_play_payload_identifies_paused_current_and_next(self):
         app = self.playback_app([self.singer("Paused"), self.singer("Next")])

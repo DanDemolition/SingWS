@@ -6,6 +6,17 @@ import logging
 import logging.handlers
 from pathlib import Path
 
+# The BASS master/EQ processors run as Python DSP callbacks on the audio
+# thread, so producing sound needs the GIL -- unlike the old GStreamer pipeline,
+# which was pure C and could not be blocked by anything the UI did. At Python's
+# default 5ms switch interval a burst of GUI work (opening Settings, the EQ, the
+# rotation or karaoke windows) keeps re-taking the GIL and the audio callback
+# misses its 25ms deadline, which is audible as a split-second dropout.
+#
+# 1ms lets the audio thread back in five times sooner. The cost is more frequent
+# thread switches in a process that is not CPU-bound on Python anyway.
+sys.setswitchinterval(0.001)
+
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.3.0"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -17568,8 +17579,40 @@ class RotationView(QMainWindow):
             sb.setValue(sb.value() - main_height)
 
     def lookup_display_name(self, song_path, tracks, artist_title_only=False):
+        """Resolve a queue path to its display name.
+
+        This used to walk `tracks` linearly, lowercasing every path on the way:
+        134k tracks per singer, ~15 singers, on the GUI thread every time the
+        rotation window refreshed. Holding the GIL that long starves the BASS
+        DSP callback -- which runs in Python on the audio thread -- and the
+        music audibly drops out. Under GStreamer the audio path was pure C and
+        never noticed.
+
+        The host already solved this: its own lookup_display_name() goes
+        through song_index.find_by_path() (<1ms) behind a cache. Use it. The
+        linear walk stays only as a last resort for a detached view.
+        """
         song_path = str(song_path)
-        for track in tracks:
+        owner = self.parent()
+        lookup = getattr(owner, "lookup_display_name", None)
+        if callable(lookup):
+            try:
+                return lookup(song_path, artist_title_only=artist_title_only)
+            except Exception:
+                pass
+        try:
+            track = song_index.find_by_path(song_path)
+        except Exception:
+            track = None
+        if track:
+            disp = track.get("display", os.path.basename(song_path))
+            if not artist_title_only:
+                return disp
+            parts = [p.strip() for p in disp.split(" - ") if p.strip()]
+            if len(parts) >= 2:
+                return f"{parts[0]} • {parts[1]}"
+            return parts[0] if parts else os.path.basename(song_path)
+        for track in tracks or []:
             if str(track.get("path", "")).lower() == song_path.lower():
                 disp = track.get("display", os.path.basename(song_path))
                 if artist_title_only:
@@ -20266,6 +20309,13 @@ class KaraokeApp(QWidget):
         if not self._start_configured_network_transport():
             print("ℹ️ Network not configured - polling disabled")
             print("   Configure network settings (Settings > Network) to enable request polling")
+
+        # Refresh where this laptop is as soon as the app is up. Until now the
+        # session location was only pushed when Network settings were saved,
+        # when the rotation was posted, or on quit -- so a laptop carried to a
+        # new venue kept advertising the previous one until the first rotation
+        # upload, and nearby-signup checks were made against the wrong place.
+        QTimer.singleShot(2500, self._sync_session_location_on_startup)
 
         QTimer.singleShot(9000, self._maybe_auto_check_for_updates)
 
@@ -24188,11 +24238,28 @@ class KaraokeApp(QWidget):
         pending = state.pop("_pending_performance", None)
         if not isinstance(pending, dict):
             return False
+        singer_name = str(pending.get("singer_name") or "")
+        request_id = pending.get("remote_request_id")
         _diag(
             f"[PERFORMANCE] not recorded reason={reason} "
-            f"singer={str(pending.get('singer_name') or '')!r} "
-            f"request_id={pending.get('remote_request_id')} (song may be re-added)"
+            f"singer={singer_name!r} request_id={request_id}"
         )
+        # Dropping it locally was not enough. The request stayed active on the
+        # server, so the next poll saw a live phone request with no local row
+        # and re-created it -- a song stopped at 01:45 reappeared at 01:51,
+        # after the host had already removed the singer. Tombstone it here so
+        # a host stop actually sticks. This does NOT mark it sung, so the
+        # singer is still free to request it again from their phone.
+        try:
+            if request_id is not None:
+                self._delete_remote_request(
+                    request_id,
+                    entry=pending.get("entry"),
+                    singer_name=singer_name,
+                    reason=f"host_stopped:{reason}",
+                )
+        except Exception as e:
+            _diag(f"[PERFORMANCE] could not retire request {request_id}: {e}")
         return True
 
     def _finish_media_end_cleanup(self, end_silence_triggered: bool, schedule_bg_resume: bool):
@@ -25443,6 +25510,126 @@ class KaraokeApp(QWidget):
             self.set_cdg_timing_offset_ms(int(val))
         video_offset_spin.valueChanged.connect(on_video_offset_changed)
         video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(0))
+
+        # ---- Venues ----
+        v = _section_card(
+            tab_general, "Venue",
+            "Save the settings that change room to room -- location, audio output, "
+            "display timing, between-song screens, ticker and window placement -- "
+            "and switch between them. Library, KaraFun and server credentials are "
+            "always shared, so switching venues can never change who you sync as.",
+        )
+        venue_global_cb = QCheckBox("Use one set of settings everywhere (ignore venue profiles)")
+        venue_global_cb.setChecked(not self.venue_profiles_enabled())
+        v.addWidget(venue_global_cb)
+
+        venue_row = QHBoxLayout()
+        venue_row.addWidget(QLabel("Venue:"))
+        venue_combo = QComboBox(dlg)
+        venue_combo.setMinimumWidth(240)
+        venue_row.addWidget(venue_combo, 1)
+        venue_save_btn = QPushButton("Save As…")
+        venue_update_btn = QPushButton("Update")
+        venue_delete_btn = QPushButton("Delete")
+        for _b in (venue_save_btn, venue_update_btn, venue_delete_btn):
+            venue_row.addWidget(_b)
+        v.addLayout(venue_row)
+        venue_status = QLabel("")
+        try:
+            venue_status.setStyleSheet(section_meta_css())
+        except Exception:
+            pass
+        venue_status.setWordWrap(True)
+        v.addWidget(venue_status)
+
+        def _rebaseline_after_venue_change():
+            """Venue actions are immediate, not pending dialog edits.
+
+            cancel_settings() restores original_settings wholesale, which would
+            otherwise undo a Save As, a Delete, or a venue switch the moment the
+            operator hit Cancel on an unrelated tab.
+            """
+            original_settings.clear()
+            original_settings.update(_copy.deepcopy(self.settings))
+
+        def _refresh_venue_ui(select: str = ""):
+            names = self.venue_names()
+            venue_combo.blockSignals(True)
+            venue_combo.clear()
+            venue_combo.addItems(names)
+            target = select or self.active_venue()
+            if target and target in names:
+                venue_combo.setCurrentIndex(names.index(target))
+            venue_combo.blockSignals(False)
+            profiles_on = not venue_global_cb.isChecked()
+            for w in (venue_combo, venue_save_btn, venue_update_btn, venue_delete_btn):
+                w.setEnabled(profiles_on)
+            if not profiles_on:
+                venue_status.setText("Global settings in use — venue profiles are ignored.")
+            elif not names:
+                venue_status.setText("No venues saved yet. 'Save As…' stores the current settings as a venue.")
+            else:
+                venue_status.setText(
+                    f"Active venue: {self.active_venue() or 'none'} — {len(names)} saved."
+                )
+
+        def _on_venue_global_toggled(checked):
+            self.settings["venue_profiles_enabled"] = not bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            _rebaseline_after_venue_change()
+            _refresh_venue_ui()
+
+        def _on_venue_selected(index):
+            name = venue_combo.itemText(index) if index >= 0 else ""
+            if not name or name == self.active_venue():
+                return
+            if self.apply_venue(name):
+                _rebaseline_after_venue_change()
+                _refresh_venue_ui(name)
+                QMessageBox.information(dlg, "Venue", f"Switched to '{name}'.")
+
+        def _on_venue_save_as():
+            name, ok = QInputDialog.getText(dlg, "Save Venue", "Venue name:")
+            name = str(name or "").strip()
+            if not ok or not name:
+                return
+            if name in self.venue_names() and QMessageBox.question(
+                dlg, "Save Venue", f"'{name}' already exists. Overwrite it?",
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            self.save_current_venue(name)
+            _rebaseline_after_venue_change()
+            _refresh_venue_ui(name)
+
+        def _on_venue_update():
+            name = venue_combo.currentText().strip()
+            if not name:
+                return
+            self.save_current_venue(name)
+            _rebaseline_after_venue_change()
+            venue_status.setText(f"Updated '{name}' with the current settings.")
+
+        def _on_venue_delete():
+            name = venue_combo.currentText().strip()
+            if not name:
+                return
+            if QMessageBox.question(
+                dlg, "Delete Venue", f"Delete the venue '{name}'?"
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            self.delete_venue(name)
+            _rebaseline_after_venue_change()
+            _refresh_venue_ui()
+
+        venue_global_cb.toggled.connect(_on_venue_global_toggled)
+        venue_combo.currentIndexChanged.connect(_on_venue_selected)
+        venue_save_btn.clicked.connect(_on_venue_save_as)
+        venue_update_btn.clicked.connect(_on_venue_update)
+        venue_delete_btn.clicked.connect(_on_venue_delete)
+        _refresh_venue_ui()
 
         v = _section_card(tab_general, "General")  # ---- General ----
         perf_debug_cb = QCheckBox("Runtime diagnostic logging")
@@ -31656,6 +31843,160 @@ class KaraokeApp(QWidget):
         self._commit_singer_history_change("history_clear_inactive")
             
     # --- Settings JSON for persistent background image ---
+    # ---- venue profiles -----------------------------------------------------
+    # Settings that genuinely differ room to room. Everything else -- library
+    # paths, KaraFun setup, normalisation, and above all the network/tenant
+    # credentials -- deliberately stays global, so switching venues can never
+    # silently carry the wrong server identity into a new room.
+    VENUE_SCOPED_SETTINGS = (
+        # Where the laptop is, for nearby-signup checks.
+        "session_location_latitude",
+        "session_location_longitude",
+        "session_location_source",
+        "session_location_accuracy_meters",
+        "session_location_detected_at",
+        "session_location_auto_detect",
+        "session_location_ttl_minutes",
+        # The rig: which output, and how far the room's display lags.
+        "audio_output_id",
+        "audio_output_name",
+        "video_timing_offset_ms",
+        "cdg_display_mode",
+        # Between-song screens.
+        "background_image_path",
+        "background_closed_image_path",
+        "background_slideshow_enabled",
+        "background_slideshow_folder",
+        "background_slideshow_interval_sec",
+        # The scrolling ticker, which is usually venue-branded.
+        "ticker_enabled",
+        "ticker_custom_enabled",
+        "ticker_custom_message",
+        "ticker_color",
+        "ticker_speed_px_per_sec",
+        "ticker_size_index",
+        "ticker_bold",
+        # Window placement follows the room's screen layout.
+        "main_window_geometry",
+        "karaoke_window_pos",
+        "rotation_window_geometry",
+    )
+
+    def venue_profiles_enabled(self) -> bool:
+        """False means one set of settings everywhere (the global switch)."""
+        try:
+            return bool(self.settings.get("venue_profiles_enabled", False))
+        except Exception:
+            return False
+
+    def _venue_store(self) -> dict:
+        store = self.settings.get("venues")
+        if not isinstance(store, dict):
+            store = {}
+            self.settings["venues"] = store
+        return store
+
+    def venue_names(self) -> list:
+        return sorted(self._venue_store().keys(), key=lambda s: s.lower())
+
+    def active_venue(self) -> str:
+        return str(self.settings.get("active_venue", "") or "").strip()
+
+    def _capture_venue_settings(self) -> dict:
+        """Snapshot the venue-scoped settings as they stand right now."""
+        return {
+            key: self.settings[key]
+            for key in self.VENUE_SCOPED_SETTINGS
+            if key in self.settings
+        }
+
+    def save_current_venue(self, name: str = "") -> str:
+        """Store the live settings under `name` (default: the active venue)."""
+        name = str(name or self.active_venue() or "").strip()
+        if not name:
+            return ""
+        self._venue_store()[name] = self._capture_venue_settings()
+        self.settings["active_venue"] = name
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        _diag(f"[VENUE] saved profile {name!r} keys={len(self._venue_store()[name])}")
+        return name
+
+    def apply_venue(self, name: str, *, save_current: bool = True) -> bool:
+        """Switch to `name`, first banking whatever the current venue looks like.
+
+        Banking first is what makes this safe to use mid-show: a tweak made at
+        the current venue is not silently lost by switching away and back.
+        """
+        name = str(name or "").strip()
+        if not name:
+            return False
+        store = self._venue_store()
+        if name not in store:
+            _diag(f"[VENUE] cannot apply unknown profile {name!r}")
+            return False
+        previous = self.active_venue()
+        if save_current and previous and previous != name:
+            self.save_current_venue(previous)
+        profile = store.get(name) or {}
+        applied = 0
+        for key in self.VENUE_SCOPED_SETTINGS:
+            if key in profile:
+                self.settings[key] = profile[key]
+                applied += 1
+        self.settings["active_venue"] = name
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        _diag(f"[VENUE] applied profile {name!r} settings={applied} (was {previous or 'none'})")
+        self._apply_venue_settings_live(name)
+        return True
+
+    def delete_venue(self, name: str) -> bool:
+        name = str(name or "").strip()
+        store = self._venue_store()
+        if name not in store:
+            return False
+        store.pop(name, None)
+        if self.active_venue() == name:
+            self.settings["active_venue"] = ""
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        _diag(f"[VENUE] deleted profile {name!r}")
+        return True
+
+    def _apply_venue_settings_live(self, name: str):
+        """Push the newly loaded settings into the running app."""
+        for label, call in (
+            ("runtime media", lambda: self._apply_runtime_media_settings()),
+            ("audio output", lambda: self._update_audio_output_button()),
+            ("ticker", lambda: self.schedule_ticker_update()),
+            ("idle background", lambda: self._apply_idle_background(force=True, advance_slideshow=False)),
+            ("session location", lambda: self._sync_session_location_for_venue()),
+        ):
+            try:
+                call()
+            except Exception as e:
+                _diag(f"[VENUE] {label} refresh failed after switching to {name!r}: {e}")
+
+    def _sync_session_location_for_venue(self):
+        """Re-publish the location after a venue switch, off the GUI thread."""
+        if not self.is_network_configured():
+            return
+
+        def worker():
+            try:
+                self.sync_session_location(active=True)
+            except Exception as e:
+                _diag(f"[VENUE] session location sync failed: {e}")
+
+        threading.Thread(target=worker, daemon=True, name="singws-venue-location").start()
+
     def load_settings(self):
         return _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
 
@@ -33979,6 +34320,40 @@ class KaraokeApp(QWidget):
             "ttl_minutes": ttl,
         }
 
+    def _sync_session_location_on_startup(self):
+        """Push this laptop's location once the app is running.
+
+        Runs on a worker thread on purpose. sync_session_location() builds its
+        payload on the calling thread, and that includes
+        _detect_current_device_location(), which spins a CoreLocation run loop
+        until it gets a fix or times out -- up to ten seconds. On the GUI thread
+        that would be a ten-second freeze during launch. CLLocationManager
+        delivers to the run loop of whichever thread created it, and the
+        detector already spins currentRunLoop() rather than assuming main, so a
+        worker is a supported home for it. If it turns out not to be, detection
+        simply reports unavailable and the stored coordinates are sent instead.
+        """
+        if not self.is_network_configured():
+            _diag("[SESSION-LOCATION] startup sync skipped: network not configured")
+            return
+        if getattr(self, "_startup_location_sync_started", False):
+            return
+        self._startup_location_sync_started = True
+
+        def worker():
+            try:
+                self.sync_session_location(active=True)
+                _diag("[SESSION-LOCATION] startup sync dispatched")
+            except Exception as e:
+                _diag(f"[SESSION-LOCATION] startup sync failed: {e}")
+
+        try:
+            threading.Thread(
+                target=worker, daemon=True, name="singws-startup-location"
+            ).start()
+        except Exception as e:
+            _diag(f"[SESSION-LOCATION] startup sync thread failed: {e}")
+
     def sync_session_location(self, active: bool = True):
         payload = self._session_location_payload(allow_auto_detect=bool(active))
         if payload is None:
@@ -34666,15 +35041,30 @@ class KaraokeApp(QWidget):
             duration = float(self._get_duration_secs(audio_path) or 0.0)
         except Exception:
             duration = 0.0
-        if duration <= 0.0:
-            return
+        # Do NOT give up when the database has no duration. _get_duration_secs
+        # is keyed on the library path, which for MP3+G is the .zip -- but
+        # playback hands us the extracted mp3, so it returns None for the vast
+        # majority of tracks and this whole feature silently never ran (zero
+        # [END-AUDIO] lines across a full show). The worker probes the file
+        # itself when the database cannot answer.
 
         cached = trailing_silence_cached(audio_path)
-        if cached is not None:
+        if cached is not None and duration > 0.0:
             self._apply_audio_end_floor(audio_path, duration, float(cached), "cache")
             return
 
         def worker(scan_path: str, scan_duration: float):
+            if scan_duration <= 0.0:
+                try:
+                    scan_duration = float(phrase_detect.probe_duration_seconds(scan_path))
+                except Exception:
+                    scan_duration = 0.0
+            if scan_duration <= 0.0:
+                _diag(
+                    "[END-AUDIO] duration unknown; end-of-song floor unavailable "
+                    f"file={os.path.basename(scan_path)}"
+                )
+                return
             trailing = detect_trailing_silence(scan_path)
             try:
                 QTimer.singleShot(
@@ -48056,6 +48446,51 @@ class KaraokeApp(QWidget):
         self._next_in_progress = False
         return True
 
+    def _flash_play_control_kept_current(self):
+        """Briefly say why Play did nothing, so the press is not silent.
+
+        The old behaviour answered a press with a modal; the new one keeps the
+        current song. Without some acknowledgement that reads as a dead button,
+        which is the complaint that started this.
+        """
+        button = getattr(self, "play_next", None)
+        if button is None:
+            return
+        try:
+            restore = "Starting queued song…" if bool(
+                getattr(self, "_play_control_starting", False)
+            ) else "Play Next Singer"
+            button.setToolTip("Current song kept — use Skip or Stop to end it")
+            try:
+                from PyQt6.QtWidgets import QToolTip
+                from PyQt6.QtGui import QCursor
+
+                QToolTip.showText(QCursor.pos(), button.toolTip(), button)
+            except Exception:
+                pass
+            timer = getattr(self, "_play_kept_current_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                self._play_kept_current_timer = timer
+            try:
+                timer.timeout.disconnect()
+            except Exception:
+                pass
+            timer.timeout.connect(lambda: self._restore_play_control_tooltip(restore))
+            timer.start(2500)
+        except Exception:
+            pass
+
+    def _restore_play_control_tooltip(self, text: str):
+        button = getattr(self, "play_next", None)
+        if button is None:
+            return
+        try:
+            button.setToolTip(str(text or "Play Next Singer"))
+        except Exception:
+            pass
+
     def _on_play_control_clicked(self, _checked=False):
         """Single UI entry point for mouse, touch, keyboard, and accessibility."""
         starting = bool(
@@ -48072,21 +48507,18 @@ class KaraokeApp(QWidget):
         if not active:
             self.play_next_file(skip_confirmation=True, command_source="manual_idle")
             return
-        if not self._confirm_repeated_play_advance():
-            _diag("[PLAY-COMMAND] repeated play canceled; audio and queue unchanged")
-            return
-        # The modal dialog runs a Qt event loop; preroll may legitimately
-        # become playing while it is open. Re-evaluate after confirmation so
-        # the approved action still targets the same current/next transition.
-        pending_now = isinstance(getattr(self, "_pending_play_start_context", None), dict)
-        if pending_now:
-            if not self._advance_from_pending_start_after_confirmation():
-                return
-        elif isinstance(getattr(self, "_active_external_karafun", None), dict):
-            # The confirmation explicitly authorizes ending the active
-            # external performance before the next queue entry is selected.
-            self._finish_external_karafun_playback("complete")
-        self.play_next_file(skip_confirmation=True, command_source="manual_confirmed_advance")
+        # Pressing Play while something is already going keeps the current
+        # song. It used to raise a "Stop Current and Play Next?" dialog, but
+        # confirming it could still end in a silent no-op: when the advance
+        # came from a pending start, a failed rollback just returned without
+        # a word, so the press looked broken. Interrupting a singer mid-song
+        # is not a decision worth a modal on a live console either -- the
+        # explicit Skip and Stop controls already do that deliberately.
+        _diag(
+            "[PLAY-COMMAND] play pressed while active; keeping current song "
+            f"(starting={int(starting)})"
+        )
+        self._flash_play_control_kept_current()
 
     def play_next_file(self, skip_confirmation=False, *, command_source="internal"):
         # Intro Loop release: if the next song is held in a looping intro, a
@@ -48823,12 +49255,35 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 _diag(f"Manual stop: BG crossfade start failed: {e}")
 
-        # If we have a karaoke volume element and a running pipeline, fade it down first
-        # The legacy fade-then-teardown path is gone: karaoke_volume and
-        # gst_pipeline were always None, so manual stop always took this
-        # immediate path.
-        # No karaoke pipeline/fader found; fall back to immediate async stop
+        # Fade the karaoke audio out before tearing it down, so Stop sounds like
+        # the end of a song rather than a cut cable. The visual handoff above
+        # has already happened, and the background music is crossfading in
+        # underneath, so the fade only governs when the karaoke audio stops.
+        transport = getattr(self, "karaoke_transport", None)
+        fade_ms = self._manual_stop_fade_ms()
+        if transport is not None and hasattr(transport, "fade_out"):
+            try:
+                if transport.fade_out(fade_ms, on_finished=self._finish_manual_stop_teardown):
+                    self._log_manual_stop_timeline("fade_started")
+                    return
+            except Exception as e:
+                _diag(f"[MANUAL-STOP] fade unavailable ({e}); stopping immediately")
+        # Nothing to fade (no transport, or it declined): stop immediately.
         self._log_manual_stop_timeline("no_fade_path")
+        self._finish_manual_stop_teardown()
+
+    def _manual_stop_fade_ms(self) -> int:
+        """How long Stop takes to fade the karaoke audio out."""
+        try:
+            value = int(self.settings.get("manual_stop_fade_ms", 2000) or 2000)
+        except Exception:
+            value = 2000
+        # 0 restores the old instant cut; the cap keeps Stop responsive and
+        # stays inside the 3s _manual_stop_in_progress guard.
+        return max(0, min(2800, value))
+
+    def _finish_manual_stop_teardown(self):
+        self._log_manual_stop_timeline("teardown")
         self._gst_teardown_async()  # ← Use the non-blocking version
         self.clear_now_singing()
         

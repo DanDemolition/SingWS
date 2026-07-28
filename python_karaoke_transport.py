@@ -1280,6 +1280,7 @@ class PythonKaraokeTransport(QObject):
         self.start_delay_ms = 0
         self._start_pending = False
         self._stopped = True
+        self._fade_timer = None  # manual-stop fade ramp; see fade_out()
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.setInterval(self.visual_timer_interval_ms)
@@ -1476,7 +1477,27 @@ class PythonKaraokeTransport(QObject):
             pulled_bytes = int(self._audible_output_bytes)
 
         audio_delta_s = max(0.0, pulled_bytes / float(byte_rate))
-        position = float(self._clock_source_seconds) + audio_delta_s * float(self.tempo_ratio)
+        # _audible_output_bytes counts what the device PULLED, not what it has
+        # played, so this clock ran ahead of the sound by the whole device
+        # buffer -- measured at 198ms mean against a 200ms buffer on this Qt.
+        # Every visual consumer keyed off it (CDG frames above all) was early by
+        # that much. Subtract the backlog still sitting in the device so the
+        # clock reports audible time.
+        #
+        # processedUSecs() is the device's own played-time counter and advances
+        # through underrun padding, which pulled bytes deliberately do not --
+        # so it is used only to measure the backlog, never as the clock itself.
+        backlog_s = 0.0
+        try:
+            played_s = max(0.0, (self._processed_us() - int(self._clock_processed_us)) / 1_000_000.0)
+            backlog_s = audio_delta_s - played_s
+            # Clamp: negative means the device outran our accounting (underrun
+            # padding), and nothing legitimate exceeds one buffer.
+            backlog_s = max(0.0, min(backlog_s, self._device_buffer_seconds()))
+        except Exception:
+            backlog_s = 0.0
+        audible_delta_s = max(0.0, audio_delta_s - backlog_s)
+        position = float(self._clock_source_seconds) + audible_delta_s * float(self.tempo_ratio)
         if self.duration_seconds > 0.0:
             position = max(0.0, min(self.duration_seconds, position))
         else:
@@ -1553,6 +1574,94 @@ class PythonKaraokeTransport(QObject):
         except Exception:
             return None
 
+    def fade_out(self, duration_ms: int = 2000, on_finished=None) -> bool:
+        """Ramp the output to silence, then call `on_finished` on the GUI thread.
+
+        Manual Stop used to fade the karaoke bus over ~2s through a GStreamer
+        volume element. That element went away with the engine swap and the fade
+        went with it -- stop has been an abrupt cut ever since, while the
+        background music still crossfades in over 3s underneath it.
+
+        The ramp is logarithmic (a linear dB glide to -60dB, then silence) to
+        match the native BASS_SLIDE_LOG fades the background engine uses, so
+        both sides of the handoff sound the same. Returns False when there is
+        nothing to fade, leaving the caller to tear down immediately.
+        """
+        sink = self.audio_sink
+        if sink is None or self._stopped:
+            return False
+        try:
+            duration_ms = max(0, int(duration_ms))
+        except Exception:
+            duration_ms = 2000
+        if duration_ms <= 0:
+            return False
+        if getattr(self, "_fade_timer", None) is not None:
+            # Already fading; a second Stop press must not restart the ramp.
+            return True
+
+        try:
+            start_volume = float(sink.volume())
+        except Exception:
+            start_volume = 1.0
+        step_ms = 25
+        steps = max(1, duration_ms // step_ms)
+        state = {"i": 0}
+
+        timer = QTimer(self)
+        self._fade_timer = timer
+
+        def _finish():
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._fade_timer = None
+            try:
+                if self.audio_sink is not None:
+                    self.audio_sink.setVolume(0.0)
+            except Exception:
+                pass
+            if callable(on_finished):
+                try:
+                    on_finished()
+                except Exception:
+                    pass
+
+        def _tick():
+            state["i"] += 1
+            fraction = state["i"] / float(steps)
+            if fraction >= 1.0 or self.audio_sink is None or self._stopped:
+                _finish()
+                return
+            # -60dB over the ramp, i.e. 10 ** (-3 * fraction).
+            try:
+                self.audio_sink.setVolume(start_volume * (10.0 ** (-3.0 * fraction)))
+            except Exception:
+                _finish()
+
+        timer.timeout.connect(_tick)
+        timer.start(step_ms)
+        _log(f"[KARAOKE-FADE] manual stop fade started duration_ms={duration_ms}")
+        return True
+
+    def _device_buffer_seconds(self) -> float:
+        """How much audio the output device holds, in seconds.
+
+        Qt reports the buffer it actually granted, which may differ from what
+        setBufferSize() asked for. Used to bound the backlog correction so a
+        bad reading can never rewind the clock further than one buffer.
+        """
+        sink = self.audio_sink
+        if sink is None:
+            return 0.0
+        try:
+            frame_bytes = max(1, int(self.channels) * 4)
+            byte_rate = max(1, int(self.sample_rate) * frame_bytes)
+            return max(0.0, float(sink.bufferSize()) / float(byte_rate))
+        except Exception:
+            return 0.0
+
     def _processed_us(self) -> int:
         sink = self.audio_sink
         if sink is None:
@@ -1618,6 +1727,11 @@ class PythonKaraokeTransport(QObject):
         # Small buffer: pull mode keeps the device fed from a background thread,
         # so we don't need a big cushion against UI hitches, and a small buffer
         # keeps output latency (and any residual seek artifact) tight.
+        #
+        # Do NOT enlarge this to ride out GUI stalls without also retuning the
+        # video offset: position_seconds() counts bytes pulled by the device, so
+        # a deeper buffer makes the clock lead what is actually audible and the
+        # lyrics land early by the same amount.
         self.audio_sink.setBufferSize(int(self.sample_rate * self.channels * 4 * 0.2))
         self._feeder = _PcmFeeder(self)
         self._feeder.open(QIODevice.OpenModeFlag.ReadOnly)
