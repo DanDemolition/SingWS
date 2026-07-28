@@ -34683,15 +34683,30 @@ class KaraokeApp(QWidget):
             duration = float(self._get_duration_secs(audio_path) or 0.0)
         except Exception:
             duration = 0.0
-        if duration <= 0.0:
-            return
+        # Do NOT give up when the database has no duration. _get_duration_secs
+        # is keyed on the library path, which for MP3+G is the .zip -- but
+        # playback hands us the extracted mp3, so it returns None for the vast
+        # majority of tracks and this whole feature silently never ran (zero
+        # [END-AUDIO] lines across a full show). The worker probes the file
+        # itself when the database cannot answer.
 
         cached = trailing_silence_cached(audio_path)
-        if cached is not None:
+        if cached is not None and duration > 0.0:
             self._apply_audio_end_floor(audio_path, duration, float(cached), "cache")
             return
 
         def worker(scan_path: str, scan_duration: float):
+            if scan_duration <= 0.0:
+                try:
+                    scan_duration = float(phrase_detect.probe_duration_seconds(scan_path))
+                except Exception:
+                    scan_duration = 0.0
+            if scan_duration <= 0.0:
+                _diag(
+                    "[END-AUDIO] duration unknown; end-of-song floor unavailable "
+                    f"file={os.path.basename(scan_path)}"
+                )
+                return
             trailing = detect_trailing_silence(scan_path)
             try:
                 QTimer.singleShot(
