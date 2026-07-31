@@ -1,30 +1,30 @@
 {
   "name": "SingWS",
-  "version": "0.4.3.1",
-  "release_date": "2026-07-28",
+  "version": "0.4.3.2",
+  "release_date": "2026-07-31",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
     "mac_arm64": {
       "label": "Apple Silicon Mac",
-      "filename": "SingWS-0.4.3.1-arm64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.3.1-arm64-installer.dmg",
-      "size": "117 MB",
-      "sha256": "991342c4c338f84988acc7716e84e01e23d70144bb6c761ff60ae7f482c6b8ce"
+      "filename": "SingWS-0.4.3.2-arm64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.3.2-arm64-installer.dmg",
+      "size": "115 MB",
+      "sha256": "010350853c3edfaea788690daea587a3e3ff61a8ec75d8c4e20ce6af55773623"
     },
     "mac_x86_64": {
       "label": "Intel Mac",
-      "filename": "SingWS-0.4.3.1-x86_64-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.3.1-x86_64-installer.dmg",
-      "size": "171 MB",
-      "sha256": "0f16e4cd96bbd40d964af1bd501e3f7039b286ffc300f81331f0ca8f10b681e6"
+      "filename": "SingWS-0.4.3.2-x86_64-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.3.2-x86_64-installer.dmg",
+      "size": "170 MB",
+      "sha256": "c3ce512884bbe33b71aff6fe354fe2ff7fc3805c7eae620c0fa4fb78c9e8f9b5"
     },
     "mac_universal": {
       "label": "Universal Mac",
-      "filename": "SingWS-0.4.3.1-universal-installer.dmg",
-      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.3.1-universal-installer.dmg",
-      "size": "265 MB",
-      "sha256": "5a766a7768dc61a86ac746b5a19ad243f2fb477046d9327e58ce4b0fb85b7ec0"
+      "filename": "SingWS-0.4.3.2-universal-installer.dmg",
+      "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.3.2-universal-installer.dmg",
+      "size": "262 MB",
+      "sha256": "a32c4660b9b4f97ec161682cf5beaa98537e5c563212b07955a295beb9e9535a"
     }
   }
 }
