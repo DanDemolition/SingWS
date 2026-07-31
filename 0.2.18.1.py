@@ -32130,18 +32130,36 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 _diag(f"[VENUE] {label} refresh failed after switching to {name!r}: {e}")
 
-    def _sync_session_location_for_venue(self):
-        """Re-publish the location after a venue switch, off the GUI thread."""
+    def sync_session_location_async(self, reason: str = "manual"):
+        """Publish the session location without blocking the GUI thread.
+
+        sync_session_location() builds its payload on the calling thread, and
+        that includes _detect_current_device_location(), which spins a
+        CoreLocation run loop until it gets a fix or times out -- up to ten
+        seconds. Every caller that runs while the operator is looking at the UI
+        must go through here; calling it directly froze the Network dialog on
+        OK/Save for as long as the fix took.
+        """
         if not self.is_network_configured():
+            _diag(f"[SESSION-LOCATION] sync skipped ({reason}): network not configured")
             return
 
         def worker():
             try:
                 self.sync_session_location(active=True)
+                _diag(f"[SESSION-LOCATION] sync dispatched ({reason})")
             except Exception as e:
-                _diag(f"[VENUE] session location sync failed: {e}")
+                _diag(f"[SESSION-LOCATION] sync failed ({reason}): {e}")
 
-        threading.Thread(target=worker, daemon=True, name="singws-venue-location").start()
+        try:
+            threading.Thread(
+                target=worker, daemon=True, name=f"singws-location-{reason}"
+            ).start()
+        except Exception as e:
+            _diag(f"[SESSION-LOCATION] sync thread failed ({reason}): {e}")
+
+    def _sync_session_location_for_venue(self):
+        self.sync_session_location_async("venue_switch")
 
     def load_settings(self):
         return _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
@@ -34230,7 +34248,9 @@ class KaraokeApp(QWidget):
                 except Exception as e:
                     _diag(f"[HOST-CONTROLS] settings sync schedule failed: {e}")
                 self._refresh_header_status()
-                self.sync_session_location(active=True)
+                # Off-thread: a CoreLocation fix can take ten seconds, and this
+                # runs the moment the operator hits OK/Save.
+                self.sync_session_location_async("network_settings_saved")
     
                 # Restart polling with new base_url/tenant
                 try:
@@ -34485,20 +34505,7 @@ class KaraokeApp(QWidget):
         if getattr(self, "_startup_location_sync_started", False):
             return
         self._startup_location_sync_started = True
-
-        def worker():
-            try:
-                self.sync_session_location(active=True)
-                _diag("[SESSION-LOCATION] startup sync dispatched")
-            except Exception as e:
-                _diag(f"[SESSION-LOCATION] startup sync failed: {e}")
-
-        try:
-            threading.Thread(
-                target=worker, daemon=True, name="singws-startup-location"
-            ).start()
-        except Exception as e:
-            _diag(f"[SESSION-LOCATION] startup sync thread failed: {e}")
+        self.sync_session_location_async("startup")
 
     def sync_session_location(self, active: bool = True):
         payload = self._session_location_payload(allow_auto_detect=bool(active))
@@ -52235,8 +52242,11 @@ class KaraokeApp(QWidget):
         if not self.is_network_configured():
             return  # Silently skip if network not configured
 
-        self.sync_session_location(active=True)
-        
+        # Off-thread for the same reason as the Network dialog: this is called
+        # from queue changes on the GUI thread, and a CoreLocation fix can take
+        # ten seconds.
+        self.sync_session_location_async("post_rotation")
+
         import threading, requests, json as _json
 
         def send():
