@@ -1,4 +1,6 @@
 import importlib.util
+import inspect
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -75,6 +77,28 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(int(self.singws.DEFAULTS["next_up_overlay_duration_sec"]), 10)
         self.assertIn("lyrics_background_video_opacity", self.singws.DEFAULTS)
         self.assertIn("crash_log_email_to", self.singws.DEFAULTS)
+
+    def test_intel_macos_rotation_uses_native_widget_renderer(self):
+        with mock.patch.object(self.singws.sys, "platform", "darwin"), \
+             mock.patch.object(self.singws.platform, "machine", return_value="x86_64"), \
+             mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": ""}):
+            self.assertFalse(self.singws._rotation_quick_surfaces_supported())
+
+    def test_rotation_summary_uses_index_instead_of_full_library_scan(self):
+        source = inspect.getsource(self.singws.KaraokeApp._update_rotation_summary_card)
+        self.assertIn("song_index.find_by_path(current_path)", source)
+        self.assertNotIn('for t in (getattr(self, "tracks", []) or [])', source)
+
+    def test_polling_restart_waits_asynchronously_for_retirement(self):
+        app = SimpleNamespace()
+        app.settings = {"base_url": "https://wskar.com", "user": "wsk"}
+        calls = []
+        app._app_closing = False
+        app.is_network_configured = lambda: True
+        app._stop_request_polling_async = lambda callback: (calls.append("retire"), callback())
+        app.start_request_polling = lambda **kwargs: calls.append(("start", kwargs))
+        self.singws.KaraokeApp.restart_request_polling(app)
+        self.assertEqual(calls, ["retire", ("start", {"stop_existing": False})])
 
     def test_log_package_redacts_credentials_and_skips_old_files(self):
         with tempfile.TemporaryDirectory() as td:

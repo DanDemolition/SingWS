@@ -17301,6 +17301,25 @@ class RenderThreadRotationRail(QFrame):
         self._root.setProperty("effectsEnabled", bool(enabled))
 
 
+def _rotation_quick_surfaces_supported() -> bool:
+    """Avoid native child QQuickViews on Intel macOS.
+
+    Qt's Cocoa backing-store path can dereference a released paint device when
+    a top-level widget containing multiple createWindowContainer() children is
+    hidden. The QWidget rotation fallback is visually complete and avoids both
+    that crash and the scene-graph activation spike during live playback.
+    """
+    if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
+        return True
+    try:
+        return not (
+            sys.platform == "darwin"
+            and platform.machine().lower() in {"x86_64", "amd64"}
+        )
+    except Exception:
+        return True
+
+
 class RotationView(QMainWindow):
     class SingerItemDelegate(QStyledItemDelegate):
         def paint(self, painter, option, index):
@@ -17456,24 +17475,28 @@ class RotationView(QMainWindow):
         now_layout.addWidget(self.now_singing_subtitle)
 
         self.now_singing_surface = None
-        try:
-            self.now_singing_surface = RenderThreadNowSingingCard(self)
-            self.now_singing_card.hide()
-        except Exception as exc:
-            _diag(f"[ROTATION] animated now-singing card unavailable; using Qt fallback: {exc}")
-            self.now_singing_surface = None
+        if _rotation_quick_surfaces_supported():
+            try:
+                self.now_singing_surface = RenderThreadNowSingingCard(self)
+                self.now_singing_card.hide()
+            except Exception as exc:
+                _diag(f"[ROTATION] animated now-singing card unavailable; using Qt fallback: {exc}")
+                self.now_singing_surface = None
+        else:
+            _diag("[ROTATION] using native-widget renderer on Intel macOS")
 
         self.list_widget = AutoResizingListWidget(self)
         self.list_widget.setItemDelegate(self.SingerItemDelegate(self.list_widget))
         self.list_widget.setSpacing(6)
         self.rotation_rail = None
-        try:
-            self.rotation_rail = RenderThreadRotationRail(self)
-            self.rotation_rail.set_scroll_speed(34)
-            self.list_widget.hide()
-        except Exception as exc:
-            _diag(f"[ROTATION] render-thread rail unavailable; using list fallback: {exc}")
-            self.rotation_rail = None
+        if _rotation_quick_surfaces_supported():
+            try:
+                self.rotation_rail = RenderThreadRotationRail(self)
+                self.rotation_rail.set_scroll_speed(34)
+                self.list_widget.hide()
+            except Exception as exc:
+                _diag(f"[ROTATION] render-thread rail unavailable; using list fallback: {exc}")
+                self.rotation_rail = None
 
         self.queue_title_label = QLabel("SINGER ROTATION", self)
         self.queue_title_label.setObjectName("rotationQueueTitle")
@@ -17670,6 +17693,11 @@ class RotationView(QMainWindow):
     def update_countdown(self, countdown_text):
         if self.now_singing_surface is not None:
             self.now_singing_surface.set_countdown(countdown_text)
+        else:
+            value = str(countdown_text or "").strip()
+            self.now_singing_subtitle.setText(
+                f"Live on the karaoke stage  •  {value}" if value else "Live on the karaoke stage"
+            )
 
     def display_name_for_queue_entry(self, entry, song_path, tracks):
         """Prefer queue metadata, especially for synthetic streaming paths."""
@@ -21854,10 +21882,9 @@ class KaraokeApp(QWidget):
                 # Pull the disc/brand (e.g. "CC") to show as the third metadata line.
                 current_brand = ""
                 try:
-                    for t in (getattr(self, "tracks", []) or []):
-                        if str(t.get("path", "")).lower() == current_path.lower():
-                            current_brand = str(t.get("disc_id", "") or "").strip()
-                            break
+                    current_track = song_index.find_by_path(current_path)
+                    if current_track:
+                        current_brand = str(current_track.get("disc_id", "") or "").strip()
                 except Exception:
                     pass
                 self.rotation_summary_kicker.setText("NOW SINGING")
@@ -23652,12 +23679,13 @@ class KaraokeApp(QWidget):
         # intake/in-flight sets make duplicate active snapshots idempotent.
         self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
 
-    def start_request_polling(self):
+    def start_request_polling(self, *, stop_existing=True):
         base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
         tenant   = self.settings.get("user", self.settings.get("tenant", ""))
 
         # Safety: ensure any previous thread is gone
-        self.stop_request_polling()
+        if stop_existing:
+            self.stop_request_polling()
 
         api_key = self.settings.get("api_key", "")
 
@@ -23740,6 +23768,52 @@ class KaraokeApp(QWidget):
 
         self.poll_worker = None
         self.poll_thread = None
+
+    def _stop_request_polling_async(self, on_stopped=None):
+        """Retire the polling thread without waiting on the GUI/audio thread."""
+        self._stop_network_recovery_timer()
+        self._stop_request_relay()
+        self._stop_host_control_relay()
+
+        t = getattr(self, "poll_thread", None)
+        w = getattr(self, "poll_worker", None)
+        self.poll_worker = None
+        self.poll_thread = None
+
+        if t is None or not t.isRunning():
+            if callable(on_stopped):
+                QTimer.singleShot(0, on_stopped)
+            return
+
+        retired = getattr(self, "_retiring_poll_threads", None)
+        if not isinstance(retired, list):
+            retired = []
+            self._retiring_poll_threads = retired
+        pair = (t, w)
+        retired.append(pair)
+
+        def finished():
+            def finish_on_ui():
+                try:
+                    retired.remove(pair)
+                except ValueError:
+                    pass
+                if callable(on_stopped):
+                    on_stopped()
+
+            self._run_on_ui_thread(finish_on_ui)
+
+        t.finished.connect(finished)
+        if w is not None:
+            t.finished.connect(w.deleteLater)
+            try:
+                w.stop()
+            except Exception:
+                pass
+        t.finished.connect(t.deleteLater)
+        t.requestInterruption()
+        t.quit()
+        _diag("[NETWORK] polling retirement scheduled off the GUI thread")
 
     def _shutdown_network_transports(self):
         """Idempotently stop network timers, relays, and poll threads during app quit."""
@@ -23871,14 +23945,23 @@ class KaraokeApp(QWidget):
         optional sync probes such as host controls or singer history; those can
         be partial or temporarily unavailable while request intake still works.
         """
-        self.stop_request_polling()
-        if self.is_network_configured():
-            base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
-            user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
-            self.start_request_polling()
-            print(f"✅ Polling restarted for request intake: {base_url}/get_requests.php (tenant={user_id})")
-        else:
-            print("ℹ️ Network not fully configured - polling disabled")
+        generation = int(getattr(self, "_request_poll_restart_generation", 0) or 0) + 1
+        self._request_poll_restart_generation = generation
+
+        def start_after_retirement():
+            if generation != int(getattr(self, "_request_poll_restart_generation", 0) or 0):
+                return
+            if bool(getattr(self, "_app_closing", False)):
+                return
+            if self.is_network_configured():
+                base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+                user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
+                self.start_request_polling(stop_existing=False)
+                print(f"✅ Polling restarted for request intake: {base_url}/get_requests.php (tenant={user_id})")
+            else:
+                print("ℹ️ Network not fully configured - polling disabled")
+
+        self._stop_request_polling_async(start_after_retirement)
 
     def configure_ticker(self):
         """Enable/disable the ticker and pick its color; persist both."""
