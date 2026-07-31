@@ -20413,6 +20413,10 @@ class KaraokeApp(QWidget):
         # upload, and nearby-signup checks were made against the wrong place.
         QTimer.singleShot(2500, self._sync_session_location_on_startup)
 
+        # Build the rotation window while the app is idle, so its Qt Quick
+        # startup cost is not paid on the first click during a show.
+        QTimer.singleShot(6000, self._warm_rotation_view)
+
         QTimer.singleShot(9000, self._maybe_auto_check_for_updates)
 
         # DIAGNOSTIC: Freeze detector
@@ -35793,28 +35797,58 @@ class KaraokeApp(QWidget):
             pass
         _perf_log_if_slow("ui_update_time_left", (time.perf_counter() - _perf_t0) * 1000.0)
 
+    def _ensure_rotation_view(self, reason: str = "open") -> bool:
+        """Build the rotation window if it does not exist yet.
+
+        Creating it is expensive: RotationView brings up a QQuickView, writes
+        and compiles a QML file, and creates a native window container -- the
+        Qt Quick scene graph starting from cold. Doing that on the first click
+        means the freeze lands mid-show, which is exactly when Show Rotation
+        gets used. _warm_rotation_view() pays it at launch instead.
+        """
+        if self.rotation_view is not None:
+            return False
+        _diag(f"[ROTATION] creating persistent window reason={reason}")
+        started = time.perf_counter()
+        self.rotation_view = RotationView(self)
+        try:
+            saved = (self.settings or {}).get("rotation_window_geometry")
+            if isinstance(saved, dict) and int(saved.get("width", 0) or 0) > 0:
+                from PyQt6.QtWidgets import QApplication
+                from PyQt6.QtCore import QRect
+                rect = QRect(
+                    int(saved.get("x", 300)),
+                    int(saved.get("y", 200)),
+                    int(saved.get("width", 540)),
+                    int(saved.get("height", 520)),
+                )
+                screens = QApplication.screens() or []
+                visible = any(s.availableGeometry().intersects(rect) for s in screens)
+                if visible:
+                    self.rotation_view.setGeometry(rect)
+        except Exception:
+            pass
+        _diag(f"[ROTATION] window built in {(time.perf_counter()-started)*1000:.0f}ms reason={reason}")
+        return True
+
+    def _warm_rotation_view(self):
+        """Build the rotation window at launch so the first click is instant.
+
+        Skipped while a song is playing: the whole point is to keep the Qt
+        Quick startup cost away from a live performance.
+        """
+        try:
+            if bool(getattr(self, "karaoke_playing", False)):
+                QTimer.singleShot(30000, self._warm_rotation_view)
+                return
+            self._ensure_rotation_view("warmup")
+        except Exception as e:
+            _diag(f"[ROTATION] warmup failed: {e}")
+
     def open_rotation_view(self):
         try:
-            if self.rotation_view is None:
-                _diag("[ROTATION] creating persistent window")
-                self.rotation_view = RotationView(self)
-                try:
-                    saved = (self.settings or {}).get("rotation_window_geometry")
-                    if isinstance(saved, dict) and int(saved.get("width", 0) or 0) > 0:
-                        from PyQt6.QtWidgets import QApplication
-                        from PyQt6.QtCore import QRect
-                        rect = QRect(
-                            int(saved.get("x", 300)),
-                            int(saved.get("y", 200)),
-                            int(saved.get("width", 540)),
-                            int(saved.get("height", 520)),
-                        )
-                        screens = QApplication.screens() or []
-                        visible = any(s.availableGeometry().intersects(rect) for s in screens)
-                        if visible:
-                            self.rotation_view.setGeometry(rect)
-                except Exception:
-                    pass
+            if self._ensure_rotation_view("open"):
+                pass
             else:
                 _diag("[ROTATION] reusing persistent window")
             now_singing_text = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
