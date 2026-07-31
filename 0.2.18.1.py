@@ -27732,7 +27732,10 @@ class KaraokeApp(QWidget):
         key = int(getattr(self, "_current_karaoke_semitones", 0) or 0)
         tempo_percent = int(getattr(self, "_karaoke_tempo_percent", 100) or 100)
         bg_volume = float(getattr(bg, "volume", self.settings.get("bg_volume", 0.8)) or 0.0) if bg is not None else 0.0
-        karaoke_volume = max(0.0, min(1.0, float(getattr(self, "_host_karaoke_live_volume", 1.0) or 0.0)))
+        karaoke_volume = max(
+            0.0,
+            min(1.0, float(self.__dict__.get("_host_karaoke_live_volume", 1.0) or 0.0)),
+        )
         # Title/artist of the song that is actually playing right now.
         play_title = ""
         play_artist = ""
