@@ -246,6 +246,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("_macos_native_mouse_click", worker)
         self.assertIn("playback pre-click state=", worker)
         self.assertIn("prepare_renderer_script", worker)
+        self.assertIn("set frontmost of kf to true", worker)
         self.assertIn('descriptionText contains "Dual Renderer"', worker)
         self.assertIn('helpText contains "Dual-Screen Display"', worker)
         self.assertIn('if value of attribute "AXFullScreen" of outputWindow then return "READY"', worker)
@@ -266,6 +267,12 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('_schedule_early_handoff("pre_click_playing")', worker)
         self.assertIn('_schedule_early_handoff("playback_verified")', worker)
         self.assertIn("self._run_on_ui_thread(self._handoff_show_screen_to_karafun)", worker)
+        pre_play_handoff = worker[
+            worker.index('# Finish the audience-display transition before activating the'):
+            worker.index('activating KaraFun result mode=')
+        ]
+        self.assertIn('if bool(self.settings.get("karafun_manage_show_screen", True)):', pre_play_handoff)
+        self.assertNotIn("if self._karafun_transparent_renderer_ready:", pre_play_handoff)
         self.assertIn('verified_playing = bool(ok and initial_probe_state == "PLAYING")', worker)
         self.assertIn("if not verified_playing:", worker)
         self.assertIn('while bool(getattr(self, "_karafun_handoff_in_progress", False))', worker)

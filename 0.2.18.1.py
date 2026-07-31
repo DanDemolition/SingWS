@@ -3097,7 +3097,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
 # Settings defaults
 TICKER_COLOR_DEFAULT = "#39FF88"  # lively green; operator can override in Ticker Settings
-FFMPEG_CDG_BASE_OFFSET_MS = 600
+FFMPEG_CDG_BASE_OFFSET_MS = 750
 
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
@@ -3132,8 +3132,9 @@ DEFAULTS = {
     "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "karaoke_engine": "ffmpeg",      # internal only; GStreamer removed, FFmpeg is the sole engine (chooser removed from Settings). Stale gstreamer/auto values map to ffmpeg.
-    "cdg_timing_offset_ms": 0,       # Fine tuning added to the FFmpeg CDG +600ms baseline
+    "cdg_timing_offset_ms": 0,       # Fine tuning added to the calibrated FFmpeg CDG +750ms baseline
     "ffmpeg_cdg_timing_migrated": True,
+    "ffmpeg_cdg_750_baseline_migrated": False,
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "next_up_overlay_enabled": False, # legacy Next Up panel retired; QR remains visible between singers
@@ -3755,6 +3756,7 @@ BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
 BG_SILENCE_MIN_S = 1.2      # sustained silence required before advancing
 BG_SILENCE_TAIL_WINDOW = 45.0  # only act within this many seconds of the track end
 BGM_UNKNOWN_ANALYSIS_PREGAIN = 1.0  # uncached BG tracks play raw; analysis is for future starts only
+BGM_TRACK_CROSSFADE_MS = 5000  # overlap adjacent background tracks for a smooth mix
 
 
 class BackgroundMusicPlayer(QObject):
@@ -3786,7 +3788,8 @@ class BackgroundMusicPlayer(QObject):
         # CROSSFADE PIPELINE (next track for seamless transitions)
         self.gst_crossfade_pipeline = None
         self.crossfade_active = False
-        self.crossfade_duration_ms = 3000  # 3 second crossfade
+        self.crossfade_duration_ms = BGM_TRACK_CROSSFADE_MS
+        self._crossfade_target_index = None
         
         # Fade timers
         self.fade_timer = QTimer(self)
@@ -4825,40 +4828,50 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             return False
     
-    def _start_crossfade(self):
+    def _start_crossfade(self, target_index=None):
         """Start crossfade to next track"""
         # Reset trailing-silence detector for the upcoming track.
         self._bg_silence_accum_s = 0.0
         self._bg_silence_last_ts = 0.0
         if self._bass_ready():
             if self.crossfade_active or not self.playlist:
-                return
+                return False
             self._sync_volume_from_ui_or_settings("crossfade-start")
-            next_index = (self.current_index + 1) % len(self.playlist)
+            next_index = (
+                int(target_index) % len(self.playlist)
+                if target_index is not None
+                else (self.current_index + 1) % len(self.playlist)
+            )
             next_file = self.playlist[next_index]
             try:
                 norm_gain, info = self._bg_norm_factor_for_path(next_file)
                 if not self._bass_engine.start_crossfade(next_file, self.crossfade_duration_ms, norm_gain=norm_gain):
-                    return
+                    return False
                 _diag(f"[BG-AUDIO] track={Path(next_file).name} deck=secondary chain={self._bg_dsp_chain_label(next_file, info)}")
                 print(f"Starting BASSmix crossfade to: {Path(next_file).name}")
                 self.crossfade_active = True
                 self.crossfade_progress = 0.0
+                self._crossfade_target_index = next_index
                 self._bass_crossfade_generation += 1
                 generation = int(self._bass_crossfade_generation)
                 QTimer.singleShot(
                     max(1, int(self.crossfade_duration_ms)),
                     lambda g=generation: self._complete_crossfade(g),
                 )
+                return True
             except Exception as e:
                 print(f"Failed to start BASSmix crossfade: {e}")
-            return
+                return False
         if self.crossfade_active or not self.playlist:
-            return
+            return False
         self._sync_volume_from_ui_or_settings("crossfade-start")
             
         # Get next track
-        next_index = (self.current_index + 1) % len(self.playlist)
+        next_index = (
+            int(target_index) % len(self.playlist)
+            if target_index is not None
+            else (self.current_index + 1) % len(self.playlist)
+        )
         next_file = self.playlist[next_index]
         
         print(f"Starting crossfade to: {Path(next_file).name}")
@@ -4876,12 +4889,15 @@ class BackgroundMusicPlayer(QObject):
             # Start crossfade process
             self.crossfade_active = True
             self.crossfade_progress = 0.0
+            self._crossfade_target_index = next_index
             steps = self.crossfade_duration_ms // 50  # 50ms per step
             self.crossfade_step_size = 1.0 / steps if steps > 0 else 1.0
             self.crossfade_timer.start(50)
+            return True
             
         except Exception as e:
             print(f"Failed to start crossfade: {e}")
+            return False
     
     def _crossfade_step(self):
         """Single step of crossfade animation"""
@@ -4896,9 +4912,11 @@ class BackgroundMusicPlayer(QObject):
             self._complete_crossfade()
             return
         
-        # Update volumes for smooth crossfade
-        main_volume = self.volume * (1.0 - self.crossfade_progress) * self._gst_pipeline_norm("bg_music")
-        crossfade_volume = self.volume * self.crossfade_progress * self._gst_pipeline_norm("bg_crossfade")
+        # Equal-power mixing avoids the audible dip that a linear blend has at
+        # its midpoint while still leaving each endpoint at the exact target.
+        main_mix, crossfade_mix = self._crossfade_mix_gains(self.crossfade_progress)
+        main_volume = self.volume * main_mix * self._gst_pipeline_norm("bg_music")
+        crossfade_volume = self.volume * crossfade_mix * self._gst_pipeline_norm("bg_crossfade")
         
         # Apply volumes
         if self.gst_bg_pipeline:
@@ -4910,6 +4928,15 @@ class BackgroundMusicPlayer(QObject):
             crossfade_vol_element = self.gst_crossfade_pipeline.get_by_name("bg_crossfade_volume")
             if crossfade_vol_element:
                 crossfade_vol_element.set_property("volume", crossfade_volume)
+
+    @staticmethod
+    def _crossfade_mix_gains(progress):
+        """Return equal-power outgoing/incoming gains for a 0..1 blend."""
+        progress = max(0.0, min(1.0, float(progress)))
+        return (
+            math.cos(progress * math.pi * 0.5),
+            math.sin(progress * math.pi * 0.5),
+        )
     
     def _complete_crossfade(self, bass_generation=None):
         """Complete the crossfade and switch to the new track"""
@@ -4924,7 +4951,13 @@ class BackgroundMusicPlayer(QObject):
             except Exception as e:
                 _diag(f"[BG-BASS] crossfade completion failed: {e}")
                 return
-            self.current_index = (self.current_index + 1) % len(self.playlist)
+            target_index = getattr(self, "_crossfade_target_index", None)
+            self.current_index = (
+                int(target_index) % len(self.playlist)
+                if target_index is not None
+                else (self.current_index + 1) % len(self.playlist)
+            )
+            self._crossfade_target_index = None
             self.crossfade_active = False
             self.crossfade_progress = 0.0
             if hasattr(self.parent(), "update_bg_track_display"):
@@ -4953,7 +4986,13 @@ class BackgroundMusicPlayer(QObject):
             pass
         
         # Update track index
-        self.current_index = (self.current_index + 1) % len(self.playlist)
+        target_index = getattr(self, "_crossfade_target_index", None)
+        self.current_index = (
+            int(target_index) % len(self.playlist)
+            if target_index is not None
+            else (self.current_index + 1) % len(self.playlist)
+        )
+        self._crossfade_target_index = None
         
         # Set correct volume
         if self.gst_bg_pipeline:
@@ -5364,6 +5403,7 @@ class BackgroundMusicPlayer(QObject):
                 pass
             self.crossfade_active = False
             self.crossfade_progress = 0.0
+            self._crossfade_target_index = None
             self.is_playing = False
             self._meter_level = 0.0
             self._play_probe_pos = None
@@ -5400,6 +5440,7 @@ class BackgroundMusicPlayer(QObject):
         
         # Reset crossfade state
         self.crossfade_active = False
+        self._crossfade_target_index = None
         self.crossfade_timer.stop()
         self.is_playing = False
         self._meter_level = 0.0
@@ -5476,6 +5517,16 @@ class BackgroundMusicPlayer(QObject):
             return
             
         was_playing = self.is_playing
+
+        # Keep both decks playing during manual skips and EOS recovery. The
+        # old stop()/play() path made Next sound like a hard edit even though
+        # natural track endings already used the crossfade mixer.
+        if was_playing:
+            if self.crossfade_active:
+                return
+            target_index = (self.current_index + 1) % len(self.playlist)
+            if self._start_crossfade(target_index=target_index):
+                return
         
         # IMMEDIATE UI UPDATE - Update index and display BEFORE audio processing
         self.current_index = (self.current_index + 1) % len(self.playlist)
@@ -5499,6 +5550,13 @@ class BackgroundMusicPlayer(QObject):
             return
             
         was_playing = self.is_playing
+
+        if was_playing:
+            if self.crossfade_active:
+                return
+            target_index = (self.current_index - 1) % len(self.playlist)
+            if self._start_crossfade(target_index=target_index):
+                return
         
         # IMMEDIATE UI UPDATE - Update index and display BEFORE audio processing
         self.current_index = (self.current_index - 1) % len(self.playlist)
@@ -5535,6 +5593,12 @@ class BackgroundMusicPlayer(QObject):
     def _target_volume_from_ui(self):
         """Prefer the manager's visible slider; fall back to saved setting."""
         try:
+            live_volume = getattr(self.parent(), "_host_bgm_live_volume", None)
+            if live_volume is not None:
+                return max(0.0, min(1.0, float(live_volume)))
+        except Exception:
+            pass
+        try:
             # Try BackgroundMusicManager's slider if the window is open
             p = self.parent()
             mgr = getattr(p, "bg_manager", None)
@@ -5569,7 +5633,8 @@ class BackgroundMusicPlayer(QObject):
             if volume_element:
                 # If crossfade is active, apply crossfade volume
                 if self.crossfade_active:
-                    main_volume = self.volume * (1.0 - self.crossfade_progress) * self._gst_pipeline_norm("bg_music")
+                    main_mix, _incoming_mix = self._crossfade_mix_gains(self.crossfade_progress)
+                    main_volume = self.volume * main_mix * self._gst_pipeline_norm("bg_music")
                     volume_element.set_property("volume", main_volume)
                 else:
                     volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
@@ -5580,7 +5645,8 @@ class BackgroundMusicPlayer(QObject):
             crossfade_volume_element = self.gst_crossfade_pipeline.get_by_name("bg_crossfade_volume")
             if crossfade_volume_element:
                 if self.crossfade_active:
-                    crossfade_volume = self.volume * self.crossfade_progress * self._gst_pipeline_norm("bg_crossfade")
+                    _main_mix, incoming_mix = self._crossfade_mix_gains(self.crossfade_progress)
+                    crossfade_volume = self.volume * incoming_mix * self._gst_pipeline_norm("bg_crossfade")
                     crossfade_volume_element.set_property("volume", crossfade_volume)
                 applied_any = True
         backend = "GStreamer" if self.gst_bg_pipeline else "none"
@@ -5593,6 +5659,7 @@ class BackgroundMusicPlayer(QObject):
             self._bass_crossfade_generation += 1
             self.crossfade_active = False
             self.crossfade_progress = 0.0
+            self._crossfade_target_index = None
             self._bass_engine.cancel_crossfade()
             if not restore_to_target:
                 return
@@ -5613,6 +5680,7 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             pass
         self.crossfade_active = False
+        self._crossfade_target_index = None
 
         if not restore_to_target:
             return
@@ -5669,6 +5737,7 @@ class BackgroundMusicPlayer(QObject):
             self._bass_crossfade_generation += 1
             self.crossfade_active = False
             self.crossfade_progress = 0.0
+            self._crossfade_target_index = None
             self._bass_engine.cancel_crossfade()
             generation = int(self._bass_fade_generation)
             self._bass_engine.slide_master_volume(0.0, duration_ms)
@@ -5692,6 +5761,7 @@ class BackgroundMusicPlayer(QObject):
         # Stop any crossfade in progress
         self.crossfade_timer.stop()
         self.crossfade_active = False
+        self._crossfade_target_index = None
         if self.gst_crossfade_pipeline:
             self.gst_crossfade_pipeline.set_state(Gst.State.NULL)
             self.gst_crossfade_pipeline = None
@@ -18568,7 +18638,7 @@ class KaraokeApp(QWidget):
             changed = True
         if not bool(self.settings.get("ffmpeg_cdg_timing_migrated", False)):
             # GStreamer used a zero-offset pipeline clock. FFmpeg CDG playback
-            # needs the calibrated +600ms visual lead. Convert the old total
+            # needs the calibrated visual lead. Convert the old total
             # offset into fine tuning so calibrated installs keep their timing.
             try:
                 old_total = int(
@@ -18584,6 +18654,18 @@ class KaraokeApp(QWidget):
                 old_total - FFMPEG_CDG_BASE_OFFSET_MS if old_total else 0
             )
             self.settings["ffmpeg_cdg_timing_migrated"] = True
+            changed = True
+        if not bool(self.settings.get("ffmpeg_cdg_750_baseline_migrated", False)):
+            # Show testing established that the former +600ms baseline needed a
+            # +150ms fine adjustment. Bake that into the baseline and return the
+            # control to zero without changing the effective +750ms timing.
+            try:
+                saved_fine = int(self.settings.get("cdg_timing_offset_ms", 0) or 0)
+            except Exception:
+                saved_fine = 0
+            if saved_fine == 150:
+                self.settings["cdg_timing_offset_ms"] = 0
+            self.settings["ffmpeg_cdg_750_baseline_migrated"] = True
             changed = True
         if not bool(self.settings.get("end_silence_threshold_2_5_migrated", False)):
             # Earlier releases used 6s by default and show testing commonly
@@ -22312,6 +22394,10 @@ class KaraokeApp(QWidget):
         except Exception:
             transport.max_video_height = 720
         try:
+            transport.set_volume(float(getattr(self, "_host_karaoke_live_volume", 1.0) or 0.0))
+        except Exception:
+            pass
+        try:
             transport.start_delay_ms = max(0, int(getattr(self, "_playback_start_countdown_ms", 0) or 0))
         except Exception:
             pass
@@ -22601,9 +22687,6 @@ class KaraokeApp(QWidget):
             self._apply_idle_background(force=True, advance_slideshow=True)
             self.video_window.update()
             self.preview_window.update()
-            if sys.platform == "darwin":
-                gc.collect()
-                self.video_window.repaint()
         except Exception:
             pass
 
@@ -22650,7 +22733,9 @@ class KaraokeApp(QWidget):
                 return
             pw.force_black = True
             try:
-                pw.recreate_video_surface(f"idle_reassert:{reason}:{phase}")
+                area = getattr(pw, "video_area", None)
+                if area is not None and hasattr(area, "clear_karaoke_frame"):
+                    area.clear_karaoke_frame()
             except Exception:
                 pass
             pw.update()
@@ -22698,32 +22783,31 @@ class KaraokeApp(QWidget):
             return 0
 
     def _recreate_video_surfaces(self, reason: str):
-        """Recreate main/preview native video surfaces to guarantee stale overlay eviction."""
-        # Destroying and rebuilding native surfaces is the app's own way of
-        # invalidating windows, so record the topology either side of it. If the
-        # QBackingStore::flush crash is self-inflicted rather than a display
-        # event, the difference between these two lines is where it shows.
+        """Clear stale frames without replacing live native macOS widgets.
+
+        Native surface replacement was required by the removed GStreamer video
+        overlay. The Python renderer paints into persistent Qt widgets, and
+        deleting those widgets during pending Cocoa backing-store flushes can
+        leave Qt with a window whose screen paint device has already gone away.
+        """
         try:
-            _diag(f"[VIDSURFACE-DIAG] before recreate reason={reason} | {_describe_window_topology()}")
+            _diag(f"[VIDSURFACE-DIAG] stable refresh reason={reason} | {_describe_window_topology()}")
         except Exception:
             pass
+        for window_name in ("video_window", "preview_window"):
+            try:
+                window = getattr(self, window_name, None)
+                area = getattr(window, "video_area", None) if window is not None else None
+                if area is not None and hasattr(area, "clear_karaoke_frame"):
+                    area.clear_karaoke_frame()
+                if area is not None:
+                    area.update()
+                if window is not None:
+                    window.update()
+            except Exception:
+                pass
         try:
-            if hasattr(self, "video_window") and self.video_window is not None:
-                self.video_window.recreate_video_surface(reason)
-        except Exception:
-            pass
-        try:
-            if hasattr(self, "preview_window") and self.preview_window is not None:
-                self.preview_window.recreate_video_surface(reason)
-        except Exception:
-            pass
-        # A fresh VideoAreaWidget starts with no QR; re-push it.
-        try:
-            self._refresh_show_screen_qr(f"surface_recreate:{reason}", force=True)
-        except Exception:
-            pass
-        try:
-            _diag(f"[VIDSURFACE-DIAG] after recreate reason={reason} | {_describe_window_topology()}")
+            self._refresh_show_screen_qr(f"surface_refresh:{reason}", force=True)
         except Exception:
             pass
 
@@ -23276,7 +23360,8 @@ class KaraokeApp(QWidget):
             "playback": playback,
         }
         sig = json.dumps([full["rotation"], playback.get("key"), playback.get("tempo"),
-                          playback.get("bgm_volume"), playback.get("title")], sort_keys=True)
+                          playback.get("bgm_volume"), playback.get("karaoke_volume"),
+                          playback.get("title")], sort_keys=True)
         now = time.monotonic()
         if force or sig != getattr(self, "_host_relay_last_full_sig", "") or \
            (now - getattr(self, "_host_relay_last_full_at", 0.0)) > 3.0:
@@ -25930,18 +26015,18 @@ class KaraokeApp(QWidget):
         karaoke_bgm_crossfade_cb.setChecked(bool(self.settings.get("karaoke_bgm_crossfade_enabled", False)))
         v.addWidget(karaoke_bgm_crossfade_cb)
 
-        end_silence_cb = QCheckBox("Early-stop long trailing silence")
-        end_silence_cb.setToolTip("Off: karaoke files play through to their real end, including silent tails and final frames.")
+        end_silence_cb = QCheckBox("Use verified silent tail for background-music handoff")
+        end_silence_cb.setToolTip("Never stops the karaoke song; background music may fade in after the file scan confirms its audio has ended.")
         end_silence_cb.setChecked(bool(self.settings.get("karaoke_allow_early_silence_trim", False)))
         v.addWidget(end_silence_cb)
 
         end_threshold_row = QHBoxLayout()
-        end_threshold_row.addWidget(QLabel("Karaoke silence threshold (seconds):"))
+        end_threshold_row.addWidget(QLabel("Verified tail hold (seconds):"))
         end_threshold_spin = QDoubleSpinBox(dlg)
         end_threshold_spin.setRange(0.5, 60.0)
         end_threshold_spin.setDecimals(1)
         end_threshold_spin.setSingleStep(0.5)
-        end_threshold_spin.setToolTip("How long audio must stay quiet before a completed or stale karaoke track can end early.")
+        end_threshold_spin.setToolTip("How long the verified silent tail must remain quiet before background music may fade in.")
         try:
             end_threshold_spin.setValue(max(0.5, min(60.0, float(self.settings.get("end_silence_trim_threshold_sec", 2.5)))))
         except Exception:
@@ -27647,6 +27732,7 @@ class KaraokeApp(QWidget):
         key = int(getattr(self, "_current_karaoke_semitones", 0) or 0)
         tempo_percent = int(getattr(self, "_karaoke_tempo_percent", 100) or 100)
         bg_volume = float(getattr(bg, "volume", self.settings.get("bg_volume", 0.8)) or 0.0) if bg is not None else 0.0
+        karaoke_volume = max(0.0, min(1.0, float(getattr(self, "_host_karaoke_live_volume", 1.0) or 0.0)))
         # Title/artist of the song that is actually playing right now.
         play_title = ""
         play_artist = ""
@@ -27685,6 +27771,7 @@ class KaraokeApp(QWidget):
                 "key": key,
                 "tempo": round(tempo_percent / 100.0, 4),
                 "bgm_volume": round(bg_volume, 4),
+                "karaoke_volume": round(karaoke_volume, 4),
             },
         }
 
@@ -27844,7 +27931,7 @@ class KaraokeApp(QWidget):
             return self._host_seek_relative(-float(args.get("seconds", 10) or 10))
         if action in ("seek_forward", "seek_fwd"):
             return self._host_seek_relative(float(args.get("seconds", 10) or 10))
-        if action == "set_volume":
+        if action in ("set_volume", "set_karaoke_volume"):
             return self._host_set_karaoke_volume(float(args.get("value", args.get("volume", 1.0))))
         if action == "key_up":
             self._step_karaoke_key(1)
@@ -27897,29 +27984,23 @@ class KaraokeApp(QWidget):
             return False, str(e)
 
     def _host_set_karaoke_volume(self, value: float) -> tuple[bool, str]:
-        volume = max(0.0, min(1.5, float(value)))
-        vol = getattr(self, "karaoke_volume", None)
-        if vol is None:
-            return False, "karaoke volume unavailable"
-        self._safe_set_volume(vol, volume)
-        return True, f"volume {volume:.2f}"
+        volume = max(0.0, min(1.0, float(value)))
+        self._host_karaoke_live_volume = volume
+        transport = getattr(self, "karaoke_transport", None)
+        if transport is not None:
+            try:
+                transport.set_volume(volume)
+            except Exception as e:
+                return False, str(e)
+        return True, f"karaoke volume {volume:.2f}"
 
     def _host_set_bg_volume(self, value: float) -> tuple[bool, str]:
         volume = max(0.0, min(1.0, float(value)))
         bg = getattr(self, "bg_music", None)
         if bg is None:
             return False, "bgm unavailable"
+        self._host_bgm_live_volume = volume
         bg.set_volume(volume)
-        self.settings["bg_volume"] = volume
-        try:
-            if hasattr(self, "bg_volume_slider"):
-                self.bg_volume_slider.setValue(int(round(volume * 100)))
-        except Exception:
-            pass
-        try:
-            self.save_settings()
-        except Exception:
-            pass
         return True, f"bg volume {volume:.2f}"
 
     def _ack_host_control_command(self, command_id: int, ok: bool, message: str):
@@ -35175,9 +35256,11 @@ class KaraokeApp(QWidget):
         self._end_silence_cdg_last_generation_ts = 0.0
         self._end_silence_auto_advance_next = False
         self._end_silence_last_reason = ""
+        self._end_silence_tail_handoff_started = False
         self._karaoke_audio_end_s = None
         self._karaoke_audio_end_path = ""
         self._end_audio_hold_log_ts = 0.0
+        self._end_audio_unknown_log_ts = 0.0
         self._bg_crossfade_prefired = False  # reset per-song BG pre-start flag
         self._bg_prefire_silence_accum_s = 0.0
         self._bg_prefire_silence_last_ts = 0.0
@@ -35185,9 +35268,9 @@ class KaraokeApp(QWidget):
     def _arm_audio_end_floor(self, audio_path: str):
         """Find where this file's audio really stops, in the background.
 
-        Until the scan lands, ``_karaoke_audio_end_s`` stays None and the
-        detector behaves exactly as before. A song can only ever end later
-        because of this, never earlier.
+        Until the scan lands, ``_karaoke_audio_end_s`` stays None and silence
+        trimming remains suppressed. A song can only ever end later because of
+        this, never earlier.
         """
         self._karaoke_audio_end_s = None
         self._karaoke_audio_end_path = str(audio_path or "")
@@ -35289,7 +35372,9 @@ class KaraokeApp(QWidget):
         self._end_silence_cdg_last_generation_ts = time.monotonic()
         self._end_silence_auto_advance_next = False
         self._end_silence_last_reason = ""
+        self._end_silence_tail_handoff_started = False
         self._end_audio_hold_log_ts = 0.0
+        self._end_audio_unknown_log_ts = 0.0
         if self._end_silence_mode in ("cdg", "mp4"):
             _diag(f"[END-SILENCE] {self._end_silence_mode.upper()} detector armed")
 
@@ -35487,12 +35572,12 @@ class KaraokeApp(QWidget):
         return silent_for >= window and stale_for >= window
 
     def _maybe_trim_end_silence(self, dur_ns: int, pos_ns: int) -> bool:
-        """Return True if intelligent dead-air detection triggered media end."""
+        """Detect a verified silent tail without terminating karaoke playback."""
         if not self._karaoke_early_silence_trim_enabled():
             return False
         if getattr(self, "_end_silence_mode", "") not in ("cdg", "mp4"):
             return False
-        if getattr(self, "_end_silence_triggered", False):
+        if getattr(self, "_end_silence_tail_handoff_started", False):
             return False
         if dur_ns <= 0 or pos_ns <= 0:
             return False
@@ -35529,12 +35614,21 @@ class KaraokeApp(QWidget):
 
         # Hard floor from the file itself. The meter reads a quiet outro, a
         # fade, or a reverb tail as silence, which is what cut some songs off
-        # before their last notes. The scan knows where the audio really stops,
-        # so nothing may end before the playhead has passed it. Absent a scan
-        # (still running, or a file we could not read) this is skipped and the
-        # detector behaves exactly as it did before.
+        # before their last notes. Only the file scan is trustworthy enough to
+        # authorize an early stop. If it is pending, failed, or found no
+        # trailing silence, wait for the decoder's real EOS instead.
         audio_end = getattr(self, "_karaoke_audio_end_s", None)
-        if audio_end is not None and elapsed < float(audio_end):
+        if audio_end is None:
+            self._end_silence_accum_s = 0.0
+            last_log = float(getattr(self, "_end_audio_unknown_log_ts", 0.0) or 0.0)
+            if (now - last_log) >= 10.0:
+                self._end_audio_unknown_log_ts = now
+                _diag(
+                    f"[END-AUDIO] trim suppressed; verified audio endpoint unavailable "
+                    f"(pos={elapsed:.2f}s remain={remain:.2f}s db={db:.1f})"
+                )
+            return False
+        if elapsed < float(audio_end):
             self._end_silence_accum_s = 0.0
             last_log = float(getattr(self, "_end_audio_hold_log_ts", 0.0) or 0.0)
             if (now - last_log) >= 5.0:
@@ -35650,23 +35744,35 @@ class KaraokeApp(QWidget):
             if not reason:
                 return False
 
-            self._end_silence_triggered = True
-            self._end_silence_last_reason = reason
-            # Only auto-play the next queued karaoke if the operator opted in.
-            # Default off: each song ends and BG resumes, and the operator starts
-            # the next one manually.
-            self._end_silence_auto_advance_next = (
-                bool(self.settings.get("karaoke_auto_advance", False))
-                and self._has_queued_karaoke_after_current()
-            )
+            # A verified silent tail is useful for starting background music,
+            # but it is never permission to stop karaoke. CDG graphics can pause
+            # well before a quiet fade has truly finished, and even a file scan
+            # uses an audibility threshold rather than a perfect semantic end.
+            # Keep the decoder alive until its real EOS; at most, begin the
+            # explicitly enabled background crossfade underneath the silent tail.
+            self._end_silence_tail_handoff_started = True
             _diag(
-                f"[END-SILENCE] Triggered early end reason={reason} "
+                f"[END-SILENCE] verified tail handoff reason={reason}; karaoke continues to EOS "
                 f"(db={db:.1f}, silent={self._end_silence_accum_s:.2f}s, "
-                f"remain={remain:.2f}s, cdg_done={cdg_done}, cdg_stale={cdg_stale_for:.2f}s, "
-                f"auto_advance={self._end_silence_auto_advance_next})"
+                f"remain={remain:.2f}s, cdg_done={cdg_done}, cdg_stale={cdg_stale_for:.2f}s)"
             )
-            QTimer.singleShot(0, self._handle_media_end_safe)
-            return True
+            if (
+                self._karaoke_bgm_crossfade_enabled()
+                and not bool(getattr(self, "_bg_crossfade_prefired", False))
+                and hasattr(self, "bg_music")
+                and bool(getattr(self.bg_music, "playlist", None))
+                and not bool(getattr(self.bg_music, "is_playing", False))
+                and bool(self.settings.get("bg_enabled", True))
+                and bool(self.settings.get("bg_autoplay_on_idle", True))
+            ):
+                self._bg_crossfade_prefired = True
+                try:
+                    self._bg_resume_reason = "karaoke_verified_silent_tail"
+                    self.bg_music.fade_in(None, 3000, allow_during_karaoke=True)
+                    _diag("[CROSSFADE] BG fade started under verified silent karaoke tail")
+                except Exception as exc:
+                    _diag(f"[CROSSFADE] verified-tail BG fade failed: {exc}")
+            return False
         return False
 
     def update_time_left(self):
@@ -46026,10 +46132,6 @@ class KaraokeApp(QWidget):
             self._preview_overlay_refresh_recreate = False
             if recreate_surface and sys.platform == "darwin":
                 try:
-                    preview.recreate_video_surface("live_resize")
-                except Exception:
-                    pass
-                try:
                     preview.force_black = False
                     preview.update()
                 except Exception:
@@ -47606,7 +47708,12 @@ class KaraokeApp(QWidget):
                         'tell application "System Events"',
                         'set matches to every application process whose name contains "KaraFun"',
                         'if (count of matches) is 0 then return "NOT_READY|no_app"',
-                        'tell item 1 of matches',
+                        'set kf to item 1 of matches',
+                        '-- The renderer toggle is clicked by screen coordinates after',
+                        '-- this script returns. Make KaraFun frontmost first so that',
+                        '-- click cannot land on the SingWS control window instead.',
+                        'set frontmost of kf to true',
+                        'tell kf',
                         'set mainWindow to missing value',
                         'set outputWindow to missing value',
                         'repeat with candidateWindow in windows',
@@ -47748,7 +47855,7 @@ class KaraokeApp(QWidget):
                 # handing off afterward exposes several seconds of the song in
                 # KaraFun's normal window before its fullscreen Space is ready.
                 _schedule_bgm_fade("before_fullscreen_handoff")
-                if self._karafun_transparent_renderer_ready:
+                if bool(self.settings.get("karafun_manage_show_screen", True)):
                     _schedule_early_handoff("before_result_activation")
                     handoff_deadline = time.monotonic() + 12.0
                     while time.monotonic() < handoff_deadline:

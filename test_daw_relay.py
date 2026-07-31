@@ -24,6 +24,22 @@ class FakeWorker:
         return True
 
 
+class FakeBackgroundMusic:
+    def __init__(self):
+        self.volume = 0.8
+
+    def set_volume(self, value):
+        self.volume = value
+
+
+class FakeKaraokeTransport:
+    def __init__(self):
+        self.volume = 1.0
+
+    def set_volume(self, value):
+        self.volume = value
+
+
 def make_app(module):
     app = module.KaraokeApp.__new__(module.KaraokeApp)
     app.settings = {"request_transport": "auto", "user": "acme"}
@@ -102,6 +118,31 @@ class DawRelayTests(unittest.TestCase):
         before = len(worker.sent)
         app._publish_host_state_ws(force=True)
         self.assertEqual(len(worker.sent), before)
+
+    def test_live_mix_volumes_do_not_change_saved_defaults(self):
+        app = make_app(self.singws)
+        app.settings["bg_volume"] = 0.72
+        app.bg_music = FakeBackgroundMusic()
+        app.karaoke_transport = FakeKaraokeTransport()
+
+        self.assertEqual(app._host_set_bg_volume(0.35), (True, "bg volume 0.35"))
+        self.assertEqual(app._host_set_karaoke_volume(0.55), (True, "karaoke volume 0.55"))
+
+        self.assertEqual(app.settings["bg_volume"], 0.72)
+        self.assertEqual(app._host_bgm_live_volume, 0.35)
+        self.assertEqual(app.bg_music.volume, 0.35)
+        self.assertEqual(app._host_karaoke_live_volume, 0.55)
+        self.assertEqual(app.karaoke_transport.volume, 0.55)
+
+    def test_karaoke_live_volume_is_kept_for_next_track(self):
+        app = make_app(self.singws)
+        app.karaoke_transport = None
+
+        self.assertEqual(
+            app._execute_host_control_command("set_karaoke_volume", {"value": 0.4}),
+            (True, "karaoke volume 0.40"),
+        )
+        self.assertEqual(app._host_karaoke_live_volume, 0.4)
 
 
 if __name__ == "__main__":

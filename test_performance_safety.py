@@ -432,12 +432,15 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("return", accept)
 
     def test_ffmpeg_cdg_timing_restores_legacy_baseline(self):
-        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 600", MAIN_SOURCE)
+        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 750", MAIN_SOURCE)
         effective = function_source("_effective_cdg_timing_offset_ms")
         self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS + fine_ms", effective)
         start = function_source("_start_python_karaoke_transport")
         self.assertIn("off = self._effective_cdg_timing_offset_ms()", start)
         self.assertIn("ffmpeg_cdg_timing_migrated", MAIN_SOURCE)
+        self.assertIn('saved_fine == 150', MAIN_SOURCE)
+        self.assertIn('self.settings["cdg_timing_offset_ms"] = 0', MAIN_SOURCE)
+        self.assertIn("ffmpeg_cdg_750_baseline_migrated", MAIN_SOURCE)
 
     def test_deferred_remote_adds_save_off_thread_during_playback(self):
         source = function_source("_save_deferred_remote_adds")
@@ -787,13 +790,20 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('getattr(vw, "idle", True)', video_area)
         paint = function_source("paintEvent")
         self.assertIn("not self._is_live_karaoke_active()", paint)
-        recreate = function_source("recreate_video_surface")
-        self.assertIn("new_area.karaoke_frame = QImage(old.karaoke_frame)", recreate)
-        self.assertIn("new_area._ensure_karaoke_scaled_pixmap()", recreate)
-        self.assertIn("duplicate recreate skipped", recreate)
-        self.assertIn("(now - last_completed) < 1.25", recreate)
-        self.assertIn("old_overlay.setParent(new_area)", recreate)
-        self.assertIn("new_area.set_show_vfx_overlay(old_overlay)", recreate)
+
+    def test_active_surface_reset_keeps_native_widgets_alive(self):
+        refresh = function_source("_recreate_video_surfaces")
+        self.assertIn("clear_karaoke_frame", refresh)
+        self.assertIn("surface_refresh", refresh)
+        self.assertNotIn("recreate_video_surface(reason)", refresh)
+        self.assertNotIn("deleteLater", refresh)
+
+        preview_idle = function_source("_reassert_preview_idle")
+        self.assertIn("clear_karaoke_frame", preview_idle)
+        self.assertNotIn("recreate_video_surface", preview_idle)
+
+        idle_recovery = function_source("_recover_idle_output")
+        self.assertNotIn(".repaint()", idle_recovery)
 
     def test_fallback_transition_timeout_is_owned_by_video_area(self):
         start = MAIN_SOURCE.index("class VideoAreaWidget")
@@ -825,8 +835,9 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("silent_prefire", timer_tick)
         trim = function_source("_maybe_trim_end_silence")
         self.assertIn("self._karaoke_early_silence_trim_enabled()", trim)
-        self.assertNotIn("self._karaoke_bgm_crossfade_enabled()", trim)
-        self.assertNotIn("BG overlap fade-in started at trim", trim)
+        self.assertIn("self._karaoke_bgm_crossfade_enabled()", trim)
+        self.assertIn("karaoke continues to EOS", trim)
+        self.assertNotIn("QTimer.singleShot(0, self._handle_media_end_safe)", trim)
         self.assertIn("and (not end_silence_triggered)", end_handler)
         fade = function_source("_start_bg_with_fade")
         self.assertIn('resume_reason == "karaoke_end_overlap" and self._karaoke_bgm_crossfade_enabled()', fade)
@@ -839,6 +850,21 @@ class PerformanceSafetyTests(unittest.TestCase):
         trim = function_source("_maybe_trim_end_silence")
         self.assertIn("cdg_lyrics_finished", trim)
         self.assertIn("near_end", trim)
+
+    def test_silence_trim_requires_verified_audio_endpoint(self):
+        trim = function_source("_maybe_trim_end_silence")
+        unknown_guard = trim.index("if audio_end is None:")
+        handoff = trim.index("self._end_silence_tail_handoff_started = True")
+        self.assertLess(unknown_guard, handoff)
+        self.assertIn("trim suppressed; verified audio endpoint unavailable", trim)
+        self.assertIn("return False", trim[unknown_guard:handoff])
+
+    def test_verified_silent_tail_never_terminates_karaoke(self):
+        trim = function_source("_maybe_trim_end_silence")
+        self.assertIn("verified tail handoff", trim)
+        self.assertIn("bg_music.fade_in", trim)
+        self.assertNotIn("_handle_media_end_safe", trim)
+        self.assertNotIn("_end_silence_triggered = True", trim)
 
     def test_high_frame_rate_hevc_uses_bounded_software_decode_profile(self):
         self.assertIn('self.codec_name in {"hevc", "h265"}', TRANSPORT_SOURCE)

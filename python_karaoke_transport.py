@@ -1184,6 +1184,10 @@ class PythonKaraokeTransport(QObject):
         # Loudness-normalization gain (dB) applied by the decoder's ffmpeg
         # volume filter so every song plays at a consistent level. 0 = unity.
         self.normalize_gain_db = 0.0
+        # Session-only output gain used by remote/live mixing controls. This is
+        # applied at QAudioSink so it stays independent of per-track loudness
+        # normalization and can be changed while playback is running.
+        self.output_volume = 1.0
         # Cap MP4 decode resolution (downscale only) to keep playback smooth on
         # weaker GPUs (notably Intel Macs).  Owner code may lower/raise this.
         self.max_video_height = 720
@@ -1733,11 +1737,24 @@ class PythonKaraokeTransport(QObject):
         # a deeper buffer makes the clock lead what is actually audible and the
         # lyrics land early by the same amount.
         self.audio_sink.setBufferSize(int(self.sample_rate * self.channels * 4 * 0.2))
+        try:
+            self.audio_sink.setVolume(float(self.output_volume))
+        except Exception:
+            pass
         self._feeder = _PcmFeeder(self)
         self._feeder.open(QIODevice.OpenModeFlag.ReadOnly)
         # Pull mode: hand Qt the feeder; it pulls as the device needs data.
         self.audio_sink.start(self._feeder)
         self._verify_sink_started()
+
+    def set_volume(self, value: float) -> None:
+        """Set session-only output gain without changing track normalization."""
+        self.output_volume = max(0.0, min(1.0, float(value)))
+        if self.audio_sink is not None:
+            try:
+                self.audio_sink.setVolume(self.output_volume)
+            except Exception:
+                pass
 
     def _negotiate_sink_format(self, device) -> bool:
         """Adopt a sample rate/channel count the device will actually accept.

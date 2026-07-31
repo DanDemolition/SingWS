@@ -241,5 +241,42 @@ class NormalizeRetryTests(unittest.TestCase):
         self.assertEqual(len(captured), 12)
 
 
+class BackgroundTrackCrossfadeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def make_player(self):
+        player = self.singws.BackgroundMusicPlayer.__new__(self.singws.BackgroundMusicPlayer)
+        player.playlist = ["/a.mp3", "/b.mp3", "/c.mp3"]
+        player.current_index = 1
+        player.is_playing = True
+        player.crossfade_active = False
+        player.targets = []
+        player._start_crossfade = lambda target_index=None: player.targets.append(target_index) or True
+        player.stop = lambda: self.fail("playing track navigation must not hard-stop audio")
+        return player
+
+    def test_default_track_crossfade_is_five_seconds(self):
+        self.assertEqual(self.singws.BGM_TRACK_CROSSFADE_MS, 5000)
+
+    def test_equal_power_midpoint_keeps_constant_power(self):
+        outgoing, incoming = self.singws.BackgroundMusicPlayer._crossfade_mix_gains(0.5)
+        self.assertAlmostEqual((outgoing * outgoing) + (incoming * incoming), 1.0, places=6)
+        self.assertAlmostEqual(outgoing, incoming, places=6)
+
+    def test_next_track_crossfades_without_changing_index_early(self):
+        player = self.make_player()
+        player.next_track()
+        self.assertEqual(player.targets, [2])
+        self.assertEqual(player.current_index, 1)
+
+    def test_previous_track_crossfades_without_changing_index_early(self):
+        player = self.make_player()
+        player.previous_track()
+        self.assertEqual(player.targets, [0])
+        self.assertEqual(player.current_index, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
