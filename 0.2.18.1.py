@@ -35066,15 +35066,19 @@ class KaraokeApp(QWidget):
                 )
                 return
             trailing = detect_trailing_silence(scan_path)
+            # _run_on_ui_thread, NOT QTimer.singleShot: a two-argument
+            # singleShot called from a worker starts a timer on a thread with
+            # no event loop, so the callback never runs. The scan completed and
+            # posted its answer into a void -- which is why [END-AUDIO] still
+            # logged nothing at all after the last fix.
             try:
-                QTimer.singleShot(
-                    0,
+                self._run_on_ui_thread(
                     lambda: self._apply_audio_end_floor(
                         scan_path, scan_duration, trailing, "scan"
-                    ),
+                    )
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                _diag(f"[END-AUDIO] could not deliver scan result: {e}")
 
         try:
             threading.Thread(
