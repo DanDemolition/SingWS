@@ -2920,6 +2920,80 @@ def _perf_log_if_slow(name: str, ms: float):
         pass
 
 
+def _fit_dialog_to_screen(dlg, *, preferred=(760, 640), minimum=(520, 360), margin=80):
+    """Size a dialog to its preferred size, but never larger than the screen.
+
+    The old code did `min(760, max(680, avail.width() - 120))` with a hard
+    setMinimumWidth(680), so on a laptop screen the dialog could not shrink
+    below 680x480 no matter how little room there was -- controls ended up
+    clipped or pushed off the bottom. Preferred size is a ceiling here, not a
+    floor: on a small display the dialog gets what actually fits, and its
+    scroll areas take over.
+    """
+    try:
+        from PyQt6.QtGui import QCursor
+
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        if avail is None:
+            dlg.resize(*preferred)
+            return
+        width = max(min(preferred[0], avail.width() - margin), min(minimum[0], avail.width()))
+        height = max(min(preferred[1], avail.height() - margin), min(minimum[1], avail.height()))
+        dlg.setMinimumSize(min(minimum[0], width), min(minimum[1], height))
+        dlg.resize(int(width), int(height))
+    except Exception:
+        try:
+            dlg.resize(*preferred)
+        except Exception:
+            pass
+
+
+def _describe_window_topology() -> str:
+    """Compact description of every top-level window and the screens they sit on.
+
+    GUI THREAD ONLY -- QWidget/QScreen access is not thread safe.
+
+    Exists because of a SIGSEGV inside QBackingStore::flush() on 2026-07-30:
+    QPaintDevice::devicePixelRatio() dereferenced null while flushing a repaint,
+    which means a widget was flushing to a window Qt no longer considered valid.
+    The Qt-internal stack says nothing about WHICH window, so record the state
+    the watchdog can print when it next detects a stall.
+    """
+    try:
+        from PyQt6.QtGui import QGuiApplication
+
+        parts = []
+        try:
+            screens = QGuiApplication.screens() or []
+            parts.append("screens=" + ",".join(
+                f"{s.name()}@{s.devicePixelRatio():.1f}"
+                f"[{s.geometry().width()}x{s.geometry().height()}]"
+                for s in screens
+            ))
+        except Exception:
+            parts.append("screens=?")
+        app = QApplication.instance()
+        for w in list(app.topLevelWidgets() if app is not None else []):
+            try:
+                if not w.isVisible():
+                    continue
+                name = w.objectName() or w.__class__.__name__
+                handle = w.windowHandle()
+                scr = handle.screen().name() if (handle is not None and handle.screen() is not None) else "none"
+                # A visible window with no handle, or a handle with no screen,
+                # is precisely the state that makes flush() dereference null.
+                parts.append(
+                    f"{name}(handle={'y' if handle is not None else 'NONE'},"
+                    f"screen={scr},dpr={w.devicePixelRatio():.1f})"
+                )
+            except Exception:
+                continue
+        return " ".join(parts)
+    except Exception:
+        return ""
+
+
 def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
     """Log the GUI-thread stack when the event loop stalls.
 
@@ -2943,8 +3017,23 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         owner._mt_hb = time.monotonic()
         owner._mt_watch_stop = False
 
+        def _heartbeat():
+            owner._mt_hb = time.monotonic()
+            # Snapshot the window/screen topology here, on the GUI thread. The
+            # watchdog runs on a worker and must never touch Qt, but a crash in
+            # QBackingStore::flush (a null window during a repaint, 2026-07-30)
+            # is exactly the kind of fault where that state is the evidence.
+            # Throttled: the heartbeat itself is 50ms.
+            try:
+                now = time.monotonic()
+                if (now - float(getattr(owner, "_topology_ts", 0.0) or 0.0)) >= 2.0:
+                    owner._topology_ts = now
+                    owner._window_topology = _describe_window_topology()
+            except Exception:
+                pass
+
         hb_timer = QTimer(owner)
-        hb_timer.timeout.connect(lambda: setattr(owner, "_mt_hb", time.monotonic()))
+        hb_timer.timeout.connect(_heartbeat)
         hb_timer.start(50)
         owner._mt_hb_timer = hb_timer
 
@@ -2977,9 +3066,16 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                                 context = f" last_event={kind} on {target} ({age_ms:.0f}ms before detection)"
                         except Exception:
                             context = ""
+                        topology = ""
+                        try:
+                            snap = str(getattr(owner, "_window_topology", "") or "")
+                            if snap:
+                                topology = f"\n  windows: {snap}"
+                        except Exception:
+                            topology = ""
                         _diag(
                             f"[STALL] GUI thread blocked >{int(threshold * 1000)}ms;{context}"
-                            f" main-thread stack at detection:\n{stack}"
+                            f" main-thread stack at detection:\n{stack}{topology}"
                         )
                         stall_logged = True
                 else:
@@ -20317,6 +20413,10 @@ class KaraokeApp(QWidget):
         # upload, and nearby-signup checks were made against the wrong place.
         QTimer.singleShot(2500, self._sync_session_location_on_startup)
 
+        # Build the rotation window while the app is idle, so its Qt Quick
+        # startup cost is not paid on the first click during a show.
+        QTimer.singleShot(6000, self._warm_rotation_view)
+
         QTimer.singleShot(9000, self._maybe_auto_check_for_updates)
 
         # DIAGNOSTIC: Freeze detector
@@ -22599,6 +22699,14 @@ class KaraokeApp(QWidget):
 
     def _recreate_video_surfaces(self, reason: str):
         """Recreate main/preview native video surfaces to guarantee stale overlay eviction."""
+        # Destroying and rebuilding native surfaces is the app's own way of
+        # invalidating windows, so record the topology either side of it. If the
+        # QBackingStore::flush crash is self-inflicted rather than a display
+        # event, the difference between these two lines is where it shows.
+        try:
+            _diag(f"[VIDSURFACE-DIAG] before recreate reason={reason} | {_describe_window_topology()}")
+        except Exception:
+            pass
         try:
             if hasattr(self, "video_window") and self.video_window is not None:
                 self.video_window.recreate_video_surface(reason)
@@ -22612,6 +22720,10 @@ class KaraokeApp(QWidget):
         # A fresh VideoAreaWidget starts with no QR; re-push it.
         try:
             self._refresh_show_screen_qr(f"surface_recreate:{reason}", force=True)
+        except Exception:
+            pass
+        try:
+            _diag(f"[VIDSURFACE-DIAG] after recreate reason={reason} | {_describe_window_topology()}")
         except Exception:
             pass
 
@@ -24926,6 +25038,43 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[AUDIO] Soundboard output switch failed: {e}")
 
+    def _ensure_screen_change_watcher(self):
+        """Log screen topology changes.
+
+        A display appearing, vanishing, or being re-laid-out invalidates the
+        native windows Qt is painting into, and flushing a repaint to one of
+        those is what SIGSEGV'd inside QBackingStore::flush on 2026-07-30. The
+        crash stack is entirely Qt-internal, so if a screen event precedes the
+        next one, this is the line that will say so.
+        """
+        if getattr(self, "_screen_watcher_installed", False):
+            return
+        try:
+            from PyQt6.QtGui import QGuiApplication
+
+            app = QGuiApplication.instance()
+            if app is None:
+                return
+
+            def _log(event: str, screen=None):
+                try:
+                    who = ""
+                    if screen is not None:
+                        geo = screen.geometry()
+                        who = (f" screen={screen.name()!r} "
+                               f"{geo.width()}x{geo.height()} dpr={screen.devicePixelRatio():.1f}")
+                    _diag(f"[SCREEN] {event}{who} | {_describe_window_topology()}")
+                except Exception:
+                    pass
+
+            app.screenAdded.connect(lambda s: _log("screen added", s))
+            app.screenRemoved.connect(lambda s: _log("screen removed", s))
+            app.primaryScreenChanged.connect(lambda s: _log("primary screen changed", s))
+            self._screen_watcher_installed = True
+            _log("initial topology")
+        except Exception as e:
+            _diag(f"[SCREEN] watcher unavailable: {e}")
+
     def _ensure_audio_output_watcher(self):
         """Watch for CoreAudio device-list changes (AirPlay/Bluetooth)."""
         if getattr(self, "_qt_media_devices_watcher", None) is not None:
@@ -24968,6 +25117,7 @@ class KaraokeApp(QWidget):
 
     def _update_audio_output_button(self):
         self._ensure_audio_output_watcher()
+        self._ensure_screen_change_watcher()
         selected = self._get_selected_audio_output_id()
         outputs = self._refresh_audio_output_cache()
         item = next((x for x in outputs if x.get("id") == selected), outputs[0] if outputs else None)
@@ -25181,15 +25331,8 @@ class KaraokeApp(QWidget):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Settings")
-        dlg.setMinimumWidth(680)
         original_settings = _copy.deepcopy(self.settings)
-        try:
-            screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-            avail = screen.availableGeometry() if screen is not None else None
-            if avail is not None:
-                dlg.resize(min(760, max(680, avail.width() - 120)), min(600, max(480, avail.height() - 140)))
-        except Exception:
-            pass
+        _fit_dialog_to_screen(dlg, preferred=(760, 640), minimum=(560, 380))
 
         root = QVBoxLayout(dlg)
         root.setContentsMargins(0, 0, 0, 0)
@@ -25409,7 +25552,7 @@ class KaraokeApp(QWidget):
         bg_video_shuffle_cb.setChecked(bool(self.settings.get("bg_video_shuffle", True)))
         v.addWidget(bg_video_shuffle_cb)
 
-        bg_video_transcode_cb = QCheckBox("Automatically transcode transparent background videos to optimized 720p playback copies")
+        bg_video_transcode_cb = QCheckBox("Transcode transparent videos to 720p")
         bg_video_transcode_cb.setToolTip("Creates cached H.264 720p copies in the SingWS cache folder. Originals are never modified; uncached videos play normally while the copy is prepared for next time.")
         bg_video_transcode_cb.setChecked(bool(self.settings.get("bg_video_auto_transcode_720p", False)))
         v.addWidget(bg_video_transcode_cb)
@@ -25462,8 +25605,11 @@ class KaraokeApp(QWidget):
 
         bg_video_folder_btn.clicked.connect(on_choose_bg_video_folder)
 
-        v = _section_card(tab_display, "Show Screen Transition")
-        show_screen_vfx_cb = QCheckBox("Use animated Show Screen VFX (more GPU)")
+        v = _section_card(
+            tab_display, "Animated Effects",
+            "Each of these uses the GPU. Turn them off if the show screen stutters.",
+        )
+        show_screen_vfx_cb = QCheckBox("Show Screen transitions")
         show_screen_vfx_cb.setToolTip(
             "Full-screen 3-2-1 after Play, spotlights, shockwaves, and singer-start confetti. "
             "Turn off to skip the animated countdown on slower laptops."
@@ -25471,7 +25617,7 @@ class KaraokeApp(QWidget):
         show_screen_vfx_cb.setChecked(bool(self.settings.get("show_screen_vfx_enabled", True)))
         v.addWidget(show_screen_vfx_cb)
 
-        rotation_vfx_cb = QCheckBox("Use animated Singer Rotation VFX (more GPU)")
+        rotation_vfx_cb = QCheckBox("Singer Rotation")
         rotation_vfx_cb.setToolTip(
             "Particles, glow loops, parallax, flashes, and singer-change explosions. "
             "The smooth vertical rotation scroll stays enabled when this is off."
@@ -25479,7 +25625,7 @@ class KaraokeApp(QWidget):
         rotation_vfx_cb.setChecked(bool(self.settings.get("rotation_vfx_enabled", True)))
         v.addWidget(rotation_vfx_cb)
 
-        ticker_vfx_cb = QCheckBox("Use animated Ticker VFX (more GPU)")
+        ticker_vfx_cb = QCheckBox("Ticker")
         ticker_vfx_cb.setToolTip(
             "Ambient lighting, queue-change accents, countdown pulse, and edge glow. "
             "The smooth ticker scroll stays enabled when this is off."
@@ -25519,7 +25665,7 @@ class KaraokeApp(QWidget):
             "and switch between them. Library, KaraFun and server credentials are "
             "always shared, so switching venues can never change who you sync as.",
         )
-        venue_global_cb = QCheckBox("Use one set of settings everywhere (ignore venue profiles)")
+        venue_global_cb = QCheckBox("Use one set of settings everywhere")
         venue_global_cb.setChecked(not self.venue_profiles_enabled())
         v.addWidget(venue_global_cb)
 
@@ -25779,12 +25925,12 @@ class KaraokeApp(QWidget):
         v.addLayout(gap_row)
 
         v.addSpacing(8)
-        karaoke_bgm_crossfade_cb = QCheckBox("Allow BGM to crossfade over the end of karaoke")
+        karaoke_bgm_crossfade_cb = QCheckBox("Crossfade background music over the song end")
         karaoke_bgm_crossfade_cb.setToolTip("Off: background music starts only after karaoke playback has fully ended.")
         karaoke_bgm_crossfade_cb.setChecked(bool(self.settings.get("karaoke_bgm_crossfade_enabled", False)))
         v.addWidget(karaoke_bgm_crossfade_cb)
 
-        end_silence_cb = QCheckBox("Advanced: early-stop long trailing karaoke silence")
+        end_silence_cb = QCheckBox("Early-stop long trailing silence")
         end_silence_cb.setToolTip("Off: karaoke files play through to their real end, including silent tails and final frames.")
         end_silence_cb.setChecked(bool(self.settings.get("karaoke_allow_early_silence_trim", False)))
         v.addWidget(end_silence_cb)
@@ -25804,17 +25950,17 @@ class KaraokeApp(QWidget):
         end_threshold_row.addStretch(1)
         v.addLayout(end_threshold_row)
 
-        auto_advance_cb = QCheckBox("Auto-play the next queued karaoke when a song ends")
+        auto_advance_cb = QCheckBox("Auto-play the next song when one ends")
         auto_advance_cb.setToolTip("Off: each karaoke song ends and waits — you start the next one manually.")
         auto_advance_cb.setChecked(bool(self.settings.get("karaoke_auto_advance", False)))
         v.addWidget(auto_advance_cb)
 
-        bg_end_silence_cb = QCheckBox("Auto-skip trailing silence between background-music tracks")
+        bg_end_silence_cb = QCheckBox("Auto-skip trailing silence between tracks")
         bg_end_silence_cb.setChecked(bool(self.settings.get("bg_end_silence_trim_enabled", False)))
         v.addWidget(bg_end_silence_cb)
 
         if sys.platform == "darwin":
-            keep_awake_cb = QCheckBox("Keep this Mac awake during a session (recommended for shows)")
+            keep_awake_cb = QCheckBox("Keep this Mac awake during a session")
             keep_awake_cb.setToolTip(
                 "Prevents macOS App Nap and idle system/display sleep while SingWS is running, so the app\n"
                 "doesn't stall or 'freeze' when left idle between songs. (Cannot override a closed lid.)"
@@ -25834,22 +25980,27 @@ class KaraokeApp(QWidget):
                     pass
             keep_awake_cb.toggled.connect(on_keep_awake_toggled)
 
-        v = _section_card(tab_audio, "Audio Processing")
-        simple_audio_cb = QCheckBox("Simple Audio Mode — clean signal, no EQ or normalization (recommended)")
+        v = _section_card(
+            tab_audio, "Audio Processing",
+            "Simple Audio Mode sends a clean signal with no EQ or normalization. "
+            "The normalization options below are experimental — they can alter "
+            "the sound and cost CPU.",
+        )
+        simple_audio_cb = QCheckBox("Simple Audio Mode (recommended)")
         simple_audio_cb.setToolTip("Leaves tone-shaping to your mixer/engine. Uses only clean volume controls\n"
                                    "and optional per-track trim. Lowest CPU and most reliable for live shows.")
         simple_audio_cb.setChecked(bool(self.settings.get("simple_audio_mode", True)))
         v.addWidget(simple_audio_cb)
 
-        normalize_cb = QCheckBox("Normalize karaoke volume — experimental (may alter sound / increase CPU)")
+        normalize_cb = QCheckBox("Normalize karaoke volume")
         normalize_cb.setChecked(bool(self.settings.get("karaoke_normalize_enabled", True)))
         v.addWidget(normalize_cb)
 
-        bg_normalize_cb = QCheckBox("Normalize background-music volume — experimental (may alter sound / increase CPU)")
+        bg_normalize_cb = QCheckBox("Normalize background-music volume")
         bg_normalize_cb.setChecked(bool(self.settings.get("bg_normalize_enabled", True)))
         v.addWidget(bg_normalize_cb)
 
-        master_audio_cb = QCheckBox("Master Audio Processing — consistent, polished sound (compressor / limiter / EQ)")
+        master_audio_cb = QCheckBox("Master Audio Processing")
         master_audio_cb.setToolTip(
             "A light 'mix bus' chain (in the spirit of a dbx 266 + BBE Sonic Maximizer)\n"
             "for a steadier perceived volume. Each stage can be toggled below.\n"
@@ -25863,7 +26014,7 @@ class KaraokeApp(QWidget):
         gate_cb.setChecked(bool(self.settings.get("master_audio_gate_enabled", False)))
         eq_cb = QCheckBox("Tilt EQ / enhance (tone + air)")
         eq_cb.setChecked(bool(self.settings.get("master_audio_eq_enabled", True)))
-        comp_cb = QCheckBox("Compressor (level/consistency) — also applies to background music")
+        comp_cb = QCheckBox("Compressor (also applies to background music)")
         comp_cb.setChecked(bool(self.settings.get("master_audio_comp_enabled", True)))
         limiter_cb = QCheckBox("Limiter (prevent clipping)")
         limiter_cb.setChecked(bool(self.settings.get("master_audio_limiter_enabled", True)))
@@ -31984,18 +32135,36 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 _diag(f"[VENUE] {label} refresh failed after switching to {name!r}: {e}")
 
-    def _sync_session_location_for_venue(self):
-        """Re-publish the location after a venue switch, off the GUI thread."""
+    def sync_session_location_async(self, reason: str = "manual"):
+        """Publish the session location without blocking the GUI thread.
+
+        sync_session_location() builds its payload on the calling thread, and
+        that includes _detect_current_device_location(), which spins a
+        CoreLocation run loop until it gets a fix or times out -- up to ten
+        seconds. Every caller that runs while the operator is looking at the UI
+        must go through here; calling it directly froze the Network dialog on
+        OK/Save for as long as the fix took.
+        """
         if not self.is_network_configured():
+            _diag(f"[SESSION-LOCATION] sync skipped ({reason}): network not configured")
             return
 
         def worker():
             try:
                 self.sync_session_location(active=True)
+                _diag(f"[SESSION-LOCATION] sync dispatched ({reason})")
             except Exception as e:
-                _diag(f"[VENUE] session location sync failed: {e}")
+                _diag(f"[SESSION-LOCATION] sync failed ({reason}): {e}")
 
-        threading.Thread(target=worker, daemon=True, name="singws-venue-location").start()
+        try:
+            threading.Thread(
+                target=worker, daemon=True, name=f"singws-location-{reason}"
+            ).start()
+        except Exception as e:
+            _diag(f"[SESSION-LOCATION] sync thread failed ({reason}): {e}")
+
+    def _sync_session_location_for_venue(self):
+        self.sync_session_location_async("venue_switch")
 
     def load_settings(self):
         return _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
@@ -33351,8 +33520,9 @@ class KaraokeApp(QWidget):
     
             dlg = QDialog(self)
             dlg.setWindowTitle("Network Settings")
-            dlg.resize(560, 640)
-            dlg.setMinimumSize(480, 420)
+            # 640 tall did not fit a laptop screen once the menu bar and dock
+            # were accounted for; the buttons at the bottom were unreachable.
+            _fit_dialog_to_screen(dlg, preferred=(560, 640), minimum=(460, 360))
 
             def _network_label_css() -> str:
                 return section_meta_css()
@@ -34084,7 +34254,9 @@ class KaraokeApp(QWidget):
                 except Exception as e:
                     _diag(f"[HOST-CONTROLS] settings sync schedule failed: {e}")
                 self._refresh_header_status()
-                self.sync_session_location(active=True)
+                # Off-thread: a CoreLocation fix can take ten seconds, and this
+                # runs the moment the operator hits OK/Save.
+                self.sync_session_location_async("network_settings_saved")
     
                 # Restart polling with new base_url/tenant
                 try:
@@ -34339,20 +34511,7 @@ class KaraokeApp(QWidget):
         if getattr(self, "_startup_location_sync_started", False):
             return
         self._startup_location_sync_started = True
-
-        def worker():
-            try:
-                self.sync_session_location(active=True)
-                _diag("[SESSION-LOCATION] startup sync dispatched")
-            except Exception as e:
-                _diag(f"[SESSION-LOCATION] startup sync failed: {e}")
-
-        try:
-            threading.Thread(
-                target=worker, daemon=True, name="singws-startup-location"
-            ).start()
-        except Exception as e:
-            _diag(f"[SESSION-LOCATION] startup sync thread failed: {e}")
+        self.sync_session_location_async("startup")
 
     def sync_session_location(self, active: bool = True):
         payload = self._session_location_payload(allow_auto_detect=bool(active))
@@ -35066,15 +35225,19 @@ class KaraokeApp(QWidget):
                 )
                 return
             trailing = detect_trailing_silence(scan_path)
+            # _run_on_ui_thread, NOT QTimer.singleShot: a two-argument
+            # singleShot called from a worker starts a timer on a thread with
+            # no event loop, so the callback never runs. The scan completed and
+            # posted its answer into a void -- which is why [END-AUDIO] still
+            # logged nothing at all after the last fix.
             try:
-                QTimer.singleShot(
-                    0,
+                self._run_on_ui_thread(
                     lambda: self._apply_audio_end_floor(
                         scan_path, scan_duration, trailing, "scan"
-                    ),
+                    )
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                _diag(f"[END-AUDIO] could not deliver scan result: {e}")
 
         try:
             threading.Thread(
@@ -35636,28 +35799,58 @@ class KaraokeApp(QWidget):
             pass
         _perf_log_if_slow("ui_update_time_left", (time.perf_counter() - _perf_t0) * 1000.0)
 
+    def _ensure_rotation_view(self, reason: str = "open") -> bool:
+        """Build the rotation window if it does not exist yet.
+
+        Creating it is expensive: RotationView brings up a QQuickView, writes
+        and compiles a QML file, and creates a native window container -- the
+        Qt Quick scene graph starting from cold. Doing that on the first click
+        means the freeze lands mid-show, which is exactly when Show Rotation
+        gets used. _warm_rotation_view() pays it at launch instead.
+        """
+        if self.rotation_view is not None:
+            return False
+        _diag(f"[ROTATION] creating persistent window reason={reason}")
+        started = time.perf_counter()
+        self.rotation_view = RotationView(self)
+        try:
+            saved = (self.settings or {}).get("rotation_window_geometry")
+            if isinstance(saved, dict) and int(saved.get("width", 0) or 0) > 0:
+                from PyQt6.QtWidgets import QApplication
+                from PyQt6.QtCore import QRect
+                rect = QRect(
+                    int(saved.get("x", 300)),
+                    int(saved.get("y", 200)),
+                    int(saved.get("width", 540)),
+                    int(saved.get("height", 520)),
+                )
+                screens = QApplication.screens() or []
+                visible = any(s.availableGeometry().intersects(rect) for s in screens)
+                if visible:
+                    self.rotation_view.setGeometry(rect)
+        except Exception:
+            pass
+        _diag(f"[ROTATION] window built in {(time.perf_counter()-started)*1000:.0f}ms reason={reason}")
+        return True
+
+    def _warm_rotation_view(self):
+        """Build the rotation window at launch so the first click is instant.
+
+        Skipped while a song is playing: the whole point is to keep the Qt
+        Quick startup cost away from a live performance.
+        """
+        try:
+            if bool(getattr(self, "karaoke_playing", False)):
+                QTimer.singleShot(30000, self._warm_rotation_view)
+                return
+            self._ensure_rotation_view("warmup")
+        except Exception as e:
+            _diag(f"[ROTATION] warmup failed: {e}")
+
     def open_rotation_view(self):
         try:
-            if self.rotation_view is None:
-                _diag("[ROTATION] creating persistent window")
-                self.rotation_view = RotationView(self)
-                try:
-                    saved = (self.settings or {}).get("rotation_window_geometry")
-                    if isinstance(saved, dict) and int(saved.get("width", 0) or 0) > 0:
-                        from PyQt6.QtWidgets import QApplication
-                        from PyQt6.QtCore import QRect
-                        rect = QRect(
-                            int(saved.get("x", 300)),
-                            int(saved.get("y", 200)),
-                            int(saved.get("width", 540)),
-                            int(saved.get("height", 520)),
-                        )
-                        screens = QApplication.screens() or []
-                        visible = any(s.availableGeometry().intersects(rect) for s in screens)
-                        if visible:
-                            self.rotation_view.setGeometry(rect)
-                except Exception:
-                    pass
+            if self._ensure_rotation_view("open"):
+                pass
             else:
                 _diag("[ROTATION] reusing persistent window")
             now_singing_text = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
@@ -52085,8 +52278,11 @@ class KaraokeApp(QWidget):
         if not self.is_network_configured():
             return  # Silently skip if network not configured
 
-        self.sync_session_location(active=True)
-        
+        # Off-thread for the same reason as the Network dialog: this is called
+        # from queue changes on the GUI thread, and a CoreLocation fix can take
+        # ten seconds.
+        self.sync_session_location_async("post_rotation")
+
         import threading, requests, json as _json
 
         def send():
