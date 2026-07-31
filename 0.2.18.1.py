@@ -2920,6 +2920,80 @@ def _perf_log_if_slow(name: str, ms: float):
         pass
 
 
+def _fit_dialog_to_screen(dlg, *, preferred=(760, 640), minimum=(520, 360), margin=80):
+    """Size a dialog to its preferred size, but never larger than the screen.
+
+    The old code did `min(760, max(680, avail.width() - 120))` with a hard
+    setMinimumWidth(680), so on a laptop screen the dialog could not shrink
+    below 680x480 no matter how little room there was -- controls ended up
+    clipped or pushed off the bottom. Preferred size is a ceiling here, not a
+    floor: on a small display the dialog gets what actually fits, and its
+    scroll areas take over.
+    """
+    try:
+        from PyQt6.QtGui import QCursor
+
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        if avail is None:
+            dlg.resize(*preferred)
+            return
+        width = max(min(preferred[0], avail.width() - margin), min(minimum[0], avail.width()))
+        height = max(min(preferred[1], avail.height() - margin), min(minimum[1], avail.height()))
+        dlg.setMinimumSize(min(minimum[0], width), min(minimum[1], height))
+        dlg.resize(int(width), int(height))
+    except Exception:
+        try:
+            dlg.resize(*preferred)
+        except Exception:
+            pass
+
+
+def _describe_window_topology() -> str:
+    """Compact description of every top-level window and the screens they sit on.
+
+    GUI THREAD ONLY -- QWidget/QScreen access is not thread safe.
+
+    Exists because of a SIGSEGV inside QBackingStore::flush() on 2026-07-30:
+    QPaintDevice::devicePixelRatio() dereferenced null while flushing a repaint,
+    which means a widget was flushing to a window Qt no longer considered valid.
+    The Qt-internal stack says nothing about WHICH window, so record the state
+    the watchdog can print when it next detects a stall.
+    """
+    try:
+        from PyQt6.QtGui import QGuiApplication
+
+        parts = []
+        try:
+            screens = QGuiApplication.screens() or []
+            parts.append("screens=" + ",".join(
+                f"{s.name()}@{s.devicePixelRatio():.1f}"
+                f"[{s.geometry().width()}x{s.geometry().height()}]"
+                for s in screens
+            ))
+        except Exception:
+            parts.append("screens=?")
+        app = QApplication.instance()
+        for w in list(app.topLevelWidgets() if app is not None else []):
+            try:
+                if not w.isVisible():
+                    continue
+                name = w.objectName() or w.__class__.__name__
+                handle = w.windowHandle()
+                scr = handle.screen().name() if (handle is not None and handle.screen() is not None) else "none"
+                # A visible window with no handle, or a handle with no screen,
+                # is precisely the state that makes flush() dereference null.
+                parts.append(
+                    f"{name}(handle={'y' if handle is not None else 'NONE'},"
+                    f"screen={scr},dpr={w.devicePixelRatio():.1f})"
+                )
+            except Exception:
+                continue
+        return " ".join(parts)
+    except Exception:
+        return ""
+
+
 def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
     """Log the GUI-thread stack when the event loop stalls.
 
@@ -2943,8 +3017,23 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         owner._mt_hb = time.monotonic()
         owner._mt_watch_stop = False
 
+        def _heartbeat():
+            owner._mt_hb = time.monotonic()
+            # Snapshot the window/screen topology here, on the GUI thread. The
+            # watchdog runs on a worker and must never touch Qt, but a crash in
+            # QBackingStore::flush (a null window during a repaint, 2026-07-30)
+            # is exactly the kind of fault where that state is the evidence.
+            # Throttled: the heartbeat itself is 50ms.
+            try:
+                now = time.monotonic()
+                if (now - float(getattr(owner, "_topology_ts", 0.0) or 0.0)) >= 2.0:
+                    owner._topology_ts = now
+                    owner._window_topology = _describe_window_topology()
+            except Exception:
+                pass
+
         hb_timer = QTimer(owner)
-        hb_timer.timeout.connect(lambda: setattr(owner, "_mt_hb", time.monotonic()))
+        hb_timer.timeout.connect(_heartbeat)
         hb_timer.start(50)
         owner._mt_hb_timer = hb_timer
 
@@ -2977,9 +3066,16 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                                 context = f" last_event={kind} on {target} ({age_ms:.0f}ms before detection)"
                         except Exception:
                             context = ""
+                        topology = ""
+                        try:
+                            snap = str(getattr(owner, "_window_topology", "") or "")
+                            if snap:
+                                topology = f"\n  windows: {snap}"
+                        except Exception:
+                            topology = ""
                         _diag(
                             f"[STALL] GUI thread blocked >{int(threshold * 1000)}ms;{context}"
-                            f" main-thread stack at detection:\n{stack}"
+                            f" main-thread stack at detection:\n{stack}{topology}"
                         )
                         stall_logged = True
                 else:
@@ -22599,6 +22695,14 @@ class KaraokeApp(QWidget):
 
     def _recreate_video_surfaces(self, reason: str):
         """Recreate main/preview native video surfaces to guarantee stale overlay eviction."""
+        # Destroying and rebuilding native surfaces is the app's own way of
+        # invalidating windows, so record the topology either side of it. If the
+        # QBackingStore::flush crash is self-inflicted rather than a display
+        # event, the difference between these two lines is where it shows.
+        try:
+            _diag(f"[VIDSURFACE-DIAG] before recreate reason={reason} | {_describe_window_topology()}")
+        except Exception:
+            pass
         try:
             if hasattr(self, "video_window") and self.video_window is not None:
                 self.video_window.recreate_video_surface(reason)
@@ -22612,6 +22716,10 @@ class KaraokeApp(QWidget):
         # A fresh VideoAreaWidget starts with no QR; re-push it.
         try:
             self._refresh_show_screen_qr(f"surface_recreate:{reason}", force=True)
+        except Exception:
+            pass
+        try:
+            _diag(f"[VIDSURFACE-DIAG] after recreate reason={reason} | {_describe_window_topology()}")
         except Exception:
             pass
 
@@ -24926,6 +25034,43 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[AUDIO] Soundboard output switch failed: {e}")
 
+    def _ensure_screen_change_watcher(self):
+        """Log screen topology changes.
+
+        A display appearing, vanishing, or being re-laid-out invalidates the
+        native windows Qt is painting into, and flushing a repaint to one of
+        those is what SIGSEGV'd inside QBackingStore::flush on 2026-07-30. The
+        crash stack is entirely Qt-internal, so if a screen event precedes the
+        next one, this is the line that will say so.
+        """
+        if getattr(self, "_screen_watcher_installed", False):
+            return
+        try:
+            from PyQt6.QtGui import QGuiApplication
+
+            app = QGuiApplication.instance()
+            if app is None:
+                return
+
+            def _log(event: str, screen=None):
+                try:
+                    who = ""
+                    if screen is not None:
+                        geo = screen.geometry()
+                        who = (f" screen={screen.name()!r} "
+                               f"{geo.width()}x{geo.height()} dpr={screen.devicePixelRatio():.1f}")
+                    _diag(f"[SCREEN] {event}{who} | {_describe_window_topology()}")
+                except Exception:
+                    pass
+
+            app.screenAdded.connect(lambda s: _log("screen added", s))
+            app.screenRemoved.connect(lambda s: _log("screen removed", s))
+            app.primaryScreenChanged.connect(lambda s: _log("primary screen changed", s))
+            self._screen_watcher_installed = True
+            _log("initial topology")
+        except Exception as e:
+            _diag(f"[SCREEN] watcher unavailable: {e}")
+
     def _ensure_audio_output_watcher(self):
         """Watch for CoreAudio device-list changes (AirPlay/Bluetooth)."""
         if getattr(self, "_qt_media_devices_watcher", None) is not None:
@@ -24968,6 +25113,7 @@ class KaraokeApp(QWidget):
 
     def _update_audio_output_button(self):
         self._ensure_audio_output_watcher()
+        self._ensure_screen_change_watcher()
         selected = self._get_selected_audio_output_id()
         outputs = self._refresh_audio_output_cache()
         item = next((x for x in outputs if x.get("id") == selected), outputs[0] if outputs else None)
