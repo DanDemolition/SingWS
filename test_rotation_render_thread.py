@@ -127,18 +127,23 @@ class RenderThreadRotationTests(unittest.TestCase):
     def test_rotation_view_populates_cards_and_count(self):
         view = mod.RotationView()
         self.addCleanup(view.close)
-        if view.rotation_rail is None:
-            self.skipTest("PyQt6.QtQuick unavailable")
         queue = [{
             "name": "Alice",
             "songs": [{"song_info": ("/music/faithfully.mp3",), "skipped": False}],
         }]
         tracks = [{"path": "/music/faithfully.mp3", "display": "Journey - Faithfully"}]
         view.update_rotation(queue, tracks, "Alice")
-        cards = json.loads(view.rotation_rail._root.property("itemsJson"))
-        self.assertEqual(cards, [{
-            "number": "1", "singer": "Alice", "song": "Journey • Faithfully",
-        }])
+        if view.rotation_rail is not None:
+            cards = json.loads(view.rotation_rail._root.property("itemsJson"))
+            self.assertEqual(cards, [{
+                "number": "1", "singer": "Alice", "song": "Journey • Faithfully",
+            }])
+        else:
+            self.assertEqual(view.list_widget.count(), 1)
+            self.assertEqual(
+                view.list_widget.item(0).text(),
+                "1. Alice  •  Journey • Faithfully",
+            )
         self.assertEqual(view.queue_count_label.text(), "1 SINGER")
 
     def test_rotation_view_close_hides_and_retains_native_surfaces(self):
@@ -174,8 +179,6 @@ class RenderThreadRotationTests(unittest.TestCase):
     def test_karafun_streaming_card_uses_artist_and_title_not_provider_id(self):
         view = mod.RotationView()
         self.addCleanup(view.close)
-        if view.rotation_rail is None:
-            self.skipTest("PyQt6.QtQuick unavailable")
         queue = [{
             "name": "Maya",
             "songs": [{
@@ -189,9 +192,15 @@ class RenderThreadRotationTests(unittest.TestCase):
             }],
         }]
         view.update_rotation(queue, [], "Maya")
-        cards = json.loads(view.rotation_rail._root.property("itemsJson"))
-        self.assertEqual(cards[0]["song"], "Alain Souchon • Allô Maman bobo")
-        self.assertNotIn("kf_7271", cards[0]["song"])
+        if view.rotation_rail is not None:
+            rendered_song = json.loads(
+                view.rotation_rail._root.property("itemsJson")
+            )[0]["song"]
+        else:
+            self.assertEqual(view.list_widget.count(), 1)
+            rendered_song = view.list_widget.item(0).text()
+        self.assertIn("Alain Souchon • Allô Maman bobo", rendered_song)
+        self.assertNotIn("kf_7271", rendered_song)
 
 
 if __name__ == "__main__":

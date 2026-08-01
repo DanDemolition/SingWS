@@ -866,12 +866,36 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("_handle_media_end_safe", trim)
         self.assertNotIn("_end_silence_triggered = True", trim)
 
-    def test_high_frame_rate_hevc_uses_bounded_software_decode_profile(self):
-        self.assertIn('self.codec_name in {"hevc", "h265"}', TRANSPORT_SOURCE)
+    def test_slow_high_frame_rate_1080p_uses_bounded_decode_profile(self):
+        self.assertIn("self.src_height >= 1080", TRANSPORT_SOURCE)
         self.assertIn("self.source_fps > 45.0", TRANSPORT_SOURCE)
-        self.assertIn("self.fps = min(self.fps, 24.0)", TRANSPORT_SOURCE)
-        self.assertIn("adaptive_height = 540", TRANSPORT_SOURCE)
+        self.assertIn("24.0 if is_hevc else 30.0", TRANSPORT_SOURCE)
+        self.assertIn("540 if is_hevc else 720", TRANSPORT_SOURCE)
         self.assertIn('command.extend(["-threads", "2"])', TRANSPORT_SOURCE)
+
+    def test_karaoke_dsp_does_not_run_in_qt_audio_pull_callback(self):
+        feeder_start = TRANSPORT_SOURCE.index("class _PcmFeeder")
+        feeder_end = TRANSPORT_SOURCE.index("class PythonKaraokeTransport")
+        feeder = TRANSPORT_SOURCE[feeder_start:feeder_end]
+        self.assertNotIn("_process_output_dsp", feeder)
+        worker = TRANSPORT_SOURCE[TRANSPORT_SOURCE.index("def _run_output_dsp"):]
+        worker = worker[:worker.index("\n    def ", 4)]
+        self.assertIn("self._process_output_dsp(raw)", worker)
+        self.assertIn("byte_rate * 0.17", worker)
+
+    def test_large_tracks_json_save_runs_off_the_gui_thread(self):
+        persist = function_source("_persist_tracks_json")
+        self.assertNotIn("_save_json_atomic", persist)
+        self.assertIn("_start_tracks_save_worker", persist)
+        worker = function_source("_start_tracks_save_worker")
+        self.assertIn("threading.Thread", worker)
+        self.assertIn("singws-save-tracks", worker)
+
+    def test_confirmed_manual_stop_unwinds_dialog_before_surface_handoff(self):
+        stop = function_source("stop_and_clear_now_singing")
+        self.assertIn("_manual_stop_deferred", stop)
+        self.assertIn("QTimer.singleShot(75, finish_confirmed_stop)", stop)
+        self.assertIn("skip_confirmation=True", stop)
 
     def test_videotoolbox_probe_rejects_silent_software_fallback(self):
         self.assertIn('"hwaccel initialisation returned error"', TRANSPORT_SOURCE)

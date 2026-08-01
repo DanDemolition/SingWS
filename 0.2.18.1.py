@@ -12912,6 +12912,22 @@ FILENAME_FORMATS: dict[str, str] = {
 DEFAULT_FILENAME_FORMAT = "disc-artist-title"
 
 
+def _native_quick_child_surfaces_supported() -> bool:
+    """Return whether QWidget-hosted QQuickView children are safe here."""
+    # Tests need the real Quick implementations even when they run on an Intel
+    # host. The offscreen platform does not use Cocoa's backing-store flush
+    # path, which is the path implicated in the native crashes.
+    if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
+        return True
+    try:
+        return not (
+            sys.platform == "darwin"
+            and platform.machine().lower() in {"x86_64", "amd64"}
+        )
+    except Exception:
+        return True
+
+
 def parse_filename_stem(stem: str, fmt: str = DEFAULT_FILENAME_FORMAT) -> tuple[str, str, str]:
     """Parse a filename stem (no extension) into (artist, title, disc_id).
 
@@ -12998,15 +13014,19 @@ class VideoWindow(QWidget):
         # QPainter Ticker (still functional, just GUI-thread paced).
         self.ticker = None
         self.ticker_backend = "none"
-        try:
-            self.ticker = RenderThreadTicker(
-                get_singer_list_callback,
-                self,
-                get_time_left_callback=get_time_left_callback,
-            )
-            self.ticker_backend = "quick-render-thread"
-        except Exception as e:
-            _diag(f"[TICKER] Qt Quick unavailable, using legacy painter ticker: {e}")
+        if _native_quick_child_surfaces_supported():
+            try:
+                self.ticker = RenderThreadTicker(
+                    get_singer_list_callback,
+                    self,
+                    get_time_left_callback=get_time_left_callback,
+                )
+                self.ticker_backend = "quick-render-thread"
+            except Exception as e:
+                _diag(f"[TICKER] Qt Quick unavailable, using legacy painter ticker: {e}")
+        else:
+            _diag("[TICKER] using legacy painter ticker on Intel macOS")
+        if self.ticker is None:
             self.ticker = Ticker(
                 get_singer_list_callback,
                 self,
@@ -13040,6 +13060,14 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer.start(50)
 
     def _attach_show_vfx(self, area):
+        if not _native_quick_child_surfaces_supported():
+            self.show_vfx = None
+            try:
+                area.set_show_vfx_overlay(None)
+            except Exception:
+                pass
+            _diag("[SHOW-VFX] using painter transition on Intel macOS")
+            return False
         try:
             overlay = RenderThreadShowScreenVfx(area)
             area.set_show_vfx_overlay(overlay)
@@ -17309,15 +17337,7 @@ def _rotation_quick_surfaces_supported() -> bool:
     hidden. The QWidget rotation fallback is visually complete and avoids both
     that crash and the scene-graph activation spike during live playback.
     """
-    if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
-        return True
-    try:
-        return not (
-            sys.platform == "darwin"
-            and platform.machine().lower() in {"x86_64", "amd64"}
-        )
-    except Exception:
-        return True
+    return _native_quick_child_surfaces_supported()
 
 
 class RotationView(QMainWindow):
@@ -22827,10 +22847,6 @@ class KaraokeApp(QWidget):
                 area = getattr(window, "video_area", None) if window is not None else None
                 if area is not None and hasattr(area, "clear_karaoke_frame"):
                     area.clear_karaoke_frame()
-                if area is not None:
-                    area.update()
-                if window is not None:
-                    window.update()
             except Exception:
                 pass
         try:
@@ -43976,25 +43992,69 @@ class KaraokeApp(QWidget):
         changed_paths=None,
         removed_paths=None,
     ):
-        # keep the on-disk library up to date as durations are discovered
+        """Persist the large library snapshot without blocking the GUI thread."""
         try:
-            _save_json_atomic(TRACKS_PATH, self.tracks)
-            print("✅ Saved durations to tracks.json")
-        except Exception as e:
-            print("⚠️ Failed to persist durations:", e)
+            snapshot = list(getattr(self, "tracks", []) or [])
+        except Exception:
+            snapshot = []
+        reindex_args = (
+            bool(trigger_reindex),
+            list(changed_paths) if changed_paths is not None else None,
+            list(removed_paths) if removed_paths is not None else None,
+        )
+        if bool(getattr(self, "_tracks_save_inflight", False)):
+            self._tracks_save_pending = (snapshot, reindex_args)
             return
-        
-        if trigger_reindex:
-            # Rebuild search index so durations appear in search results
+        self._start_tracks_save_worker(snapshot, reindex_args)
+
+    def _start_tracks_save_worker(self, snapshot: list, reindex_args: tuple):
+        self._tracks_save_inflight = True
+        self._tracks_save_pending = None
+
+        def worker():
+            error = ""
+            started = time.perf_counter()
             try:
-                print("🔍 Rebuilding search index with durations...")
-                self.ensure_song_index_async(
-                    force=True,
-                    changed_paths=changed_paths,
-                    removed_paths=removed_paths,
+                _save_json_atomic(TRACKS_PATH, snapshot)
+            except Exception as exc:
+                error = str(exc)
+            finally:
+                _perf_log_if_slow(
+                    "json_save_tracks_worker",
+                    (time.perf_counter() - started) * 1000.0,
                 )
-            except Exception as e:
-                print(f"⚠️ Failed to rebuild search index: {e}")
+                self._run_on_ui_thread(
+                    lambda: self._finish_tracks_save_worker(error, reindex_args)
+                )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="singws-save-tracks",
+        ).start()
+
+    def _finish_tracks_save_worker(self, error: str, reindex_args: tuple):
+        self._tracks_save_inflight = False
+        if error:
+            print("⚠️ Failed to persist durations:", error)
+        else:
+            print("✅ Saved durations to tracks.json")
+            trigger_reindex, changed_paths, removed_paths = reindex_args
+            if trigger_reindex:
+                try:
+                    print("🔍 Rebuilding search index with durations...")
+                    self.ensure_song_index_async(
+                        force=True,
+                        changed_paths=changed_paths,
+                        removed_paths=removed_paths,
+                    )
+                except Exception as exc:
+                    print(f"⚠️ Failed to rebuild search index: {exc}")
+        pending = getattr(self, "_tracks_save_pending", None)
+        self._tracks_save_pending = None
+        if pending is not None:
+            snapshot, pending_reindex_args = pending
+            self._start_tracks_save_worker(snapshot, pending_reindex_args)
 
     def _on_duration_progress_counts(self, done: int, total: int):
         # Update processing label with duration progress
@@ -49601,11 +49661,27 @@ class KaraokeApp(QWidget):
         if getattr(self, "_manual_stop_in_progress", False):
             _diag("Manual stop ignored (already in progress)")
             return
-        if (not skip_confirmation) and (not self._confirm_audio_interrupt(
-            title="Stop Playback?",
-            message=("A track is currently playing.\n"
-                     "Stop the current singer and return to background music?"),
-        )):
+        if getattr(self, "_manual_stop_deferred", False):
+            _diag("Manual stop ignored (confirmation handoff pending)")
+            return
+        if not skip_confirmation:
+            if not self._confirm_audio_interrupt(
+                title="Stop Playback?",
+                message=("A track is currently playing.\n"
+                         "Stop the current singer and return to background music?"),
+            ):
+                return
+            # A QDialog opened from a menu action runs inside two nested native
+            # event loops on macOS. Changing the show/preview paint targets
+            # before both loops unwind left Cocoa flushing a dead paint device
+            # (the three 07-31 crashes all died in devicePixelRatio()).
+            self._manual_stop_deferred = True
+
+            def finish_confirmed_stop():
+                self._manual_stop_deferred = False
+                self.stop_and_clear_now_singing(skip_confirmation=True)
+
+            QTimer.singleShot(75, finish_confirmed_stop)
             return
         self._manual_stop_in_progress = True
         self._cancel_pending_karaoke_start_transition()

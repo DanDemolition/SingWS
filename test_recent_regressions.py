@@ -78,11 +78,17 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("lyrics_background_video_opacity", self.singws.DEFAULTS)
         self.assertIn("crash_log_email_to", self.singws.DEFAULTS)
 
-    def test_intel_macos_rotation_uses_native_widget_renderer(self):
+    def test_intel_macos_avoids_native_quick_child_surfaces(self):
         with mock.patch.object(self.singws.sys, "platform", "darwin"), \
              mock.patch.object(self.singws.platform, "machine", return_value="x86_64"), \
              mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": ""}):
+            self.assertFalse(self.singws._native_quick_child_surfaces_supported())
             self.assertFalse(self.singws._rotation_quick_surfaces_supported())
+
+        video_init = inspect.getsource(self.singws.VideoWindow.__init__)
+        show_vfx = inspect.getsource(self.singws.VideoWindow._attach_show_vfx)
+        self.assertIn("_native_quick_child_surfaces_supported()", video_init)
+        self.assertIn("_native_quick_child_surfaces_supported()", show_vfx)
 
     def test_rotation_summary_uses_index_instead_of_full_library_scan(self):
         source = inspect.getsource(self.singws.KaraokeApp._update_rotation_summary_card)

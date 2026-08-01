@@ -955,12 +955,13 @@ class FfmpegVideoReader:
         # mitigation at the same time.
         if (
             self.decode_speed_ratio < self.MIN_COMFORTABLE_SPEED
-            and self.codec_name in {"hevc", "h265"}
+            and self.src_height >= 1080
             and self.source_fps > 45.0
         ):
             self.software_decode_profile = True
-            self.fps = min(self.fps, 24.0)
-            adaptive_height = 540
+            is_hevc = self.codec_name in {"hevc", "h265"}
+            self.fps = min(self.fps, 24.0 if is_hevc else 30.0)
+            adaptive_height = 540 if is_hevc else 720
             if self.max_height > 0:
                 adaptive_height = min(adaptive_height, self.max_height)
             self.width, self.height = self._compute_output_size(
@@ -1071,13 +1072,10 @@ class FfmpegVideoReader:
 class _PcmFeeder(QIODevice):
     """Pull-mode audio source for QAudioSink.
 
-    Qt's audio backend calls readData() on its own audio thread whenever the
-    output device needs more samples, so audio is no longer drained on the Qt
-    main thread. That means:
-      * a UI hitch can't starve the output (no main-thread dropout), and
-      * the output device runs *continuously* across a seek — we just swap the
-        buffered PCM underneath it, so there's no stop/restart (no gap) and no
-        leftover old-position audio (no overlap).
+    The output device runs continuously across a seek; we swap the buffered PCM
+    underneath it, so there is no stop/restart gap or old-position overlap.
+    Qt may invoke readData() on the GUI thread on macOS, so this callback only
+    moves bytes. The bounded DSP worker prepares EQ/master output ahead of it.
     On underrun we return silence so the device never stalls; the only audible
     seek artifact left is the brief decoder spin-up, which is tiny.
     """
@@ -1093,7 +1091,7 @@ class _PcmFeeder(QIODevice):
         t = self._t
         try:
             with t._pcm_lock:
-                buffered = t._pcm_bytes + len(t._pending_output)
+                buffered = t._processed_bytes + len(t._pending_output)
         except Exception:
             buffered = 0
         # Always advertise at least a small floor so the sink keeps pulling
@@ -1112,9 +1110,9 @@ class _PcmFeeder(QIODevice):
                 take = t._pending_output[:n]
                 raw += take
                 t._pending_output = t._pending_output[len(take):]
-            while len(raw) < n and t._pcm_chunks:
-                chunk = t._pcm_chunks.popleft()
-                t._pcm_bytes -= len(chunk)
+            while len(raw) < n and t._processed_chunks:
+                chunk = t._processed_chunks.popleft()
+                t._processed_bytes -= len(chunk)
                 need = n - len(raw)
                 if len(chunk) > need:
                     raw += chunk[:need]
@@ -1122,17 +1120,10 @@ class _PcmFeeder(QIODevice):
                 else:
                     raw += chunk
             t._pcm_lock.notify_all()
-        # Apply the EQ/master DSP here, at output time, so live changes are
-        # heard immediately instead of after the multi-second decode buffer
-        # drains. Length-preserving on whole frames; _dsp_ready smooths the
-        # sub-frame carry so the device still gets exactly n bytes.
-        try:
-            processed = t._process_output_dsp(bytes(raw))
-        except Exception:
-            processed = bytes(raw)
-        t._dsp_ready += processed
-        out = bytearray(t._dsp_ready[:n])
-        del t._dsp_ready[:len(out)]
+        # EQ/master work is prepared by the bounded DSP worker. On Intel macOS,
+        # QAudioSink invokes this Python callback on the GUI thread; doing SciPy
+        # filtering here caused repeated 120-230ms show/audio stalls.
+        out = raw
         real_audio_bytes = len(out)
         if real_audio_bytes > 0:
             # Meter the PCM being handed to the device, not decoder output.
@@ -1205,12 +1196,19 @@ class PythonKaraokeTransport(QObject):
         self._pcm_chunks = deque()
         self._pcm_bytes = 0
         self._pcm_lock = threading.Condition()
+        self._processed_chunks = deque()
+        self._processed_bytes = 0
         self._pending_output = b""
-        # Output-stage DSP buffers (audio thread only): sub-frame input carry
-        # to keep the stateful EQ/master filters frame-aligned, and a small
-        # ready buffer of already-processed bytes waiting to reach the device.
+        # The DSP worker stays only a small distance ahead of the output. That
+        # keeps live EQ/master changes responsive without doing NumPy/SciPy work
+        # inside QAudioSink's pull callback (which runs on the GUI thread on the
+        # Intel macOS build used during shows).
         self._dsp_output_carry = bytearray()
-        self._dsp_ready = bytearray()
+        self._dsp_state_lock = threading.Lock()
+        self._dsp_generation = 0
+        self._dsp_processing = False
+        self._dsp_stop_event = threading.Event()
+        self._dsp_thread = None
         self._decoder = None
         self._decoder_done = False
         self._ended_sent = False
@@ -1339,13 +1337,13 @@ class PythonKaraokeTransport(QObject):
         # teardown (keeps the seek snappy, especially on slower CPUs).
         self._stop_decoder(wait=False)
         with self._pcm_lock:
+            self._dsp_generation += 1
+            self._dsp_processing = False
             self._pcm_chunks.clear()
             self._pcm_bytes = 0
+            self._processed_chunks.clear()
+            self._processed_bytes = 0
             self._pending_output = b""
-            # Drop output-DSP buffers too, or a seek would splice pre-seek
-            # audio (and stale filter carry) in front of the new position.
-            self._dsp_output_carry = bytearray()
-            self._dsp_ready = bytearray()
             self._audible_output_bytes = 0
             self._pcm_lock.notify_all()
         self._decoder_done = False
@@ -1355,18 +1353,22 @@ class PythonKaraokeTransport(QObject):
         self._clock_last_position_seconds = target
         self._paused = False
         self._paused_position = 0.0
-        if self.eq is not None:
-            try:
-                self.eq.reset_state()
-                self._eq_config_signature = None
-            except Exception:
-                pass
-        if self.master is not None:
-            try:
-                self.master.reset_state()
-                self._master_config_signature = None
-            except Exception:
-                pass
+        # Serialize filter reset with the DSP worker so an old-position block
+        # cannot restore stale carry/state after this seek has cleared it.
+        with self._dsp_state_lock:
+            self._dsp_output_carry = bytearray()
+            if self.eq is not None:
+                try:
+                    self.eq.reset_state()
+                    self._eq_config_signature = None
+                except Exception:
+                    pass
+            if self.master is not None:
+                try:
+                    self.master.reset_state()
+                    self._master_config_signature = None
+                except Exception:
+                    pass
         self._start_audio(target)
         if self.mode == "mp4" and self.video_path:
             self.video_reader = FfmpegVideoReader(
@@ -1523,7 +1525,7 @@ class PythonKaraokeTransport(QObject):
         frame_bytes = max(1, int(self.channels) * 4)
         byte_rate = max(1, int(self.sample_rate) * frame_bytes)
         with self._pcm_lock:
-            buffered = self._pcm_bytes + len(self._pending_output)
+            buffered = self._pcm_bytes + self._processed_bytes + len(self._pending_output)
             audible_output_bytes = int(self._audible_output_bytes)
         audio_buffer_ms = float(buffered) / float(byte_rate) * 1000.0
         audible_delta_seconds = max(0.0, float(audible_output_bytes) / float(byte_rate)) * float(self.tempo_ratio)
@@ -1837,6 +1839,7 @@ class PythonKaraokeTransport(QObject):
     def _start_audio(self, start_seconds: float):
         # Make sure the (continuous) output device is running, then (re)spawn the
         # decoder for the new position. The sink is NOT restarted on a seek.
+        self._ensure_output_dsp_worker()
         self._ensure_sink_running()
         self._decoder = _AudioDecodeWorker(
             self,
@@ -1945,6 +1948,9 @@ class PythonKaraokeTransport(QObject):
         # Full teardown (used on stop()/song end). Destroy the sink + feeder.
         # (seek() leaves these running and just swaps the buffered audio.)
         self._full_decode_abort = True
+        self._dsp_stop_event.set()
+        with self._pcm_lock:
+            self._pcm_lock.notify_all()
         sink = self.audio_sink
         feeder = self._feeder
         self.audio_sink = None
@@ -1977,14 +1983,9 @@ class PythonKaraokeTransport(QObject):
         # the buffer (and the playback clock) aligned to the new position.
         if worker is not None and worker is not self._decoder:
             return
-        # NOTE: the EQ and master "mix bus" DSP are intentionally NOT applied
-        # here. The decoder buffers several seconds of audio ahead for gapless
-        # seeks, so processing at queue time meant a live EQ/master change was
-        # not audible until that buffer drained (~4s) — while BGM's BASS DSP
-        # runs at the output and responds instantly. The DSP now runs in the
-        # feeder (_process_output_dsp) as each block is handed to the device,
-        # so karaoke live-adjust matches BGM. Queued audio is the raw
-        # tempo/pitch-processed stream.
+        self._ensure_output_dsp_worker()
+        # Keep decoded PCM raw here. A separate, tightly bounded DSP stage
+        # prepares only the next ~170ms for the output callback.
         with self._pcm_lock:
             while self._pcm_bytes > self.sample_rate * self.channels * 4 * 4 and self._decoder is not None:
                 self._pcm_lock.wait(timeout=0.05)
@@ -1992,16 +1993,66 @@ class PythonKaraokeTransport(QObject):
             self._pcm_bytes += len(data)
             self._pcm_lock.notify_all()
 
+    def _ensure_output_dsp_worker(self):
+        thread = self._dsp_thread
+        if thread is not None and thread.is_alive():
+            return
+        if self._dsp_stop_event.is_set():
+            return
+        with self._pcm_lock:
+            thread = self._dsp_thread
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._run_output_dsp,
+                daemon=True,
+                name="singws-karaoke-dsp",
+            )
+            self._dsp_thread = thread
+            thread.start()
+
+    def _run_output_dsp(self):
+        """Prepare a short queue of processed PCM away from Qt's GUI callback."""
+        while not self._dsp_stop_event.is_set():
+            with self._pcm_lock:
+                byte_rate = max(1, int(self.sample_rate) * int(self.channels) * 4)
+                ahead_limit = max(32768, int(byte_rate * 0.17))
+                while (
+                    not self._dsp_stop_event.is_set()
+                    and (not self._pcm_chunks or self._processed_bytes >= ahead_limit)
+                ):
+                    self._pcm_lock.wait(timeout=0.05)
+                if self._dsp_stop_event.is_set():
+                    return
+                generation = int(self._dsp_generation)
+                raw = self._pcm_chunks.popleft()
+                self._pcm_bytes -= len(raw)
+                self._dsp_processing = True
+                self._pcm_lock.notify_all()
+            try:
+                with self._dsp_state_lock:
+                    processed = self._process_output_dsp(raw)
+            except Exception:
+                processed = raw
+            with self._pcm_lock:
+                self._dsp_processing = False
+                if (
+                    processed
+                    and generation == self._dsp_generation
+                    and not self._dsp_stop_event.is_set()
+                ):
+                    self._processed_chunks.append(processed)
+                    self._processed_bytes += len(processed)
+                self._pcm_lock.notify_all()
+
     def _process_output_dsp(self, data: bytes) -> bytes:
-        """Apply EQ then master to output-bound PCM, on the audio thread.
+        """Apply EQ then master to output-bound PCM on the DSP worker.
 
         Runs the SAME GraphicEQ / MasterAudioProcessor the host attaches, but
-        at the moment audio is handed to the device rather than at decode time,
-        so live knob changes take effect immediately (mirrors the BGM BASS DSP,
-        which already processes on its realtime callback). Frame-aligned and
-        stateful: a sub-frame remainder is carried to the next call so the IIR
-        filter state stays continuous. Fail-safe — returns the raw input on any
-        error, never silence.
+        only about 170ms ahead of the device, so live changes remain responsive.
+        Frame-aligned and stateful: a sub-frame remainder is carried to the next
+        call so the IIR filter state stays continuous. Fail-safe: returns the
+        raw input on any error, never silence.
         """
         eq = self.eq
         master = self.master
@@ -2102,7 +2153,12 @@ class PythonKaraokeTransport(QObject):
                 self.frame_ready.emit(image)
         if self._decoder_done and self._loop_start is None:
             with self._pcm_lock:
-                empty = (not self._pcm_chunks) and (not self._pending_output)
+                empty = (
+                    not self._pcm_chunks
+                    and not self._processed_chunks
+                    and not self._pending_output
+                    and not self._dsp_processing
+                )
             if empty and not self._ended_sent:
                 self._ended_sent = True
                 self.ended.emit()
@@ -2117,7 +2173,7 @@ class PythonKaraokeTransport(QObject):
         try:
             sink_delta_s = max(0, self._processed_us() - int(self._clock_processed_us)) / 1_000_000.0
             with self._pcm_lock:
-                buffered = self._pcm_bytes + len(self._pending_output)
+                buffered = self._pcm_bytes + self._processed_bytes + len(self._pending_output)
             print(
                 "[SYNC] audio-master visual catch-up "
                 f"mode={self.mode} pos={position:.3f}s render={render_ms:.1f}ms "

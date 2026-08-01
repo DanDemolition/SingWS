@@ -1,17 +1,17 @@
-"""Karaoke EQ/master DSP runs at OUTPUT time for instant live response.
+"""Karaoke EQ/master DSP stays close to output without blocking Qt's callback.
 
 Before this, the transport applied EQ/master when queueing decoded audio, but
 it buffers several seconds ahead for gapless seeks, so a live EQ/master change
-was not audible until that buffer drained (~4s) — while BGM's BASS DSP runs at
-the output and responds instantly. The user read this as "advanced audio DSP
-works for BGM, not karaoke" (2026-07-20). The DSP now runs in the feeder as
-each block reaches the device. These tests pin: byte-exact passthrough when no
-DSP is attached, correct processing through the feeder, and instant response
-to a mid-stream gain change.
+was not audible until that buffer drained (~4s). Applying it in QIODevice's
+read callback fixed latency but stalled the Intel macOS GUI because Qt invokes
+that callback on the main thread there. A bounded worker now processes only a
+short distance ahead. These tests pin byte-exact passthrough, correct DSP, and
+bounded response to live changes.
 """
 
 import os
 import sys
+import time
 import unittest
 
 os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
@@ -42,17 +42,36 @@ class KaraokeOutputDspTests(unittest.TestCase):
         t.master = master
         feeder = _PcmFeeder(t)
         feeder.open(QIODevice.OpenModeFlag.ReadOnly)
-        with t._pcm_lock:
-            step = 9600 * 4
-            for i in range(0, len(raw), step):
-                t._pcm_chunks.append(raw[i:i + step])
-                t._pcm_bytes += len(raw[i:i + step])
+        self.addCleanup(t.stop)
+        step = 9600 * 4
+        for i in range(0, len(raw), step):
+            t._queue_pcm(raw[i:i + step])
         return t, feeder
+
+    @staticmethod
+    def _wait_for_output(t, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        with t._pcm_lock:
+            while (
+                t._processed_bytes <= 0
+                and not t._pending_output
+                and time.monotonic() < deadline
+            ):
+                t._pcm_lock.wait(timeout=0.02)
+            return t._processed_bytes > 0 or bool(t._pending_output)
 
     def _drain(self, feeder, total_bytes, read_size=9600 * 4):
         out = bytearray()
         while len(out) < total_bytes:
-            d = feeder.readData(read_size)
+            self.assertTrue(self._wait_for_output(feeder._t))
+            with feeder._t._pcm_lock:
+                available = feeder._t._processed_bytes + len(feeder._t._pending_output)
+            # The real audio device pulls at wall-clock pace. Tests drain much
+            # faster, so request only bytes the worker has prepared; otherwise
+            # the feeder correctly interprets the synthetic burst as an
+            # underrun and pads it with silence.
+            request_bytes = min(read_size, available, total_bytes - len(out))
+            d = feeder.readData(request_bytes)
             if not d:
                 break
             out += d
@@ -88,26 +107,30 @@ class KaraokeOutputDspTests(unittest.TestCase):
         eq.set_all_gains_db([0.0] * 10)
         eq.set_enabled(True)
         t, feeder = self._transport_with(raw, eq=eq)
+        self.assertTrue(self._wait_for_output(t))
         first = np.frombuffer(feeder.readData(9600 * 4), dtype=np.float32)
         eq.set_all_gains_db([12.0] * 10)  # boost NOW
-        nxt = np.frombuffer(feeder.readData(9600 * 4), dtype=np.float32)
-        # Instant: the very next block is already much louder (no multi-second
-        # buffer lag). Flat block ~ unchanged, boosted block clearly up.
-        self.assertGreater(_rms(nxt), _rms(first) * 1.5)
+        later = []
+        for _ in range(5):
+            self.assertTrue(self._wait_for_output(t))
+            later.append(np.frombuffer(feeder.readData(9600 * 4), dtype=np.float32))
+        # The worker is capped near 170ms, so the change reaches one of the next
+        # few 100ms blocks rather than sitting behind the 4s decoder queue.
+        self.assertGreater(max(_rms(block) for block in later), _rms(first) * 1.5)
 
-    def test_queue_pcm_no_longer_processes(self):
-        # Queued audio must be the raw stream now (DSP moved to the feeder), so
-        # a strong EQ leaves _pcm_chunks untouched.
+    def test_dsp_is_prepared_before_the_feeder_reads(self):
         raw = _tone(freq=60.0)
         eq = GraphicEQ(sample_rate=SR, channels=2)
         eq.set_all_gains_db([12.0] * 10)
         eq.set_enabled(True)
         t = PythonKaraokeTransport("/dev/null", mode="audio", probe_duration_on_init=False)
+        self.addCleanup(t.stop)
         t.eq = eq
         t._queue_pcm(raw)
+        self.assertTrue(self._wait_for_output(t))
         with t._pcm_lock:
-            queued = b"".join(t._pcm_chunks)
-        self.assertEqual(queued, raw)
+            queued = b"".join(t._processed_chunks)
+        self.assertNotEqual(queued, raw[:len(queued)])
 
 
 def _rms(a):
