@@ -54,12 +54,29 @@ fi
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/singws-test-pycache}"
 
+PYTEST_EXTRA=()
+if ! "$PYTHON" -c 'from PyQt6.QtWidgets import QApplication; app = QApplication([])' \
+        >/dev/null 2>&1; then
+    echo "Warning: Qt platform integration is unavailable; running the full non-GUI suite." >&2
+    for gui_test in \
+        test_bg_video_lyrics.py \
+        test_karaoke_output_dsp.py \
+        test_model_view_qa.py \
+        test_performance_safety.py \
+        test_rotation_render_thread.py \
+        test_show_screen_vfx.py \
+        test_ticker_and_qr.py; do
+        PYTEST_EXTRA+=("--ignore=$gui_test")
+    done
+fi
+
 if (($#)); then
-    exec "$PYTHON" -m pytest "$@"
+    exec "$PYTHON" -m pytest "${PYTEST_EXTRA[@]}" "$@"
 fi
 
 # Full desktop suite, GUI included. test_bass_init_once.py is a standalone
 # script with no pytest cases, so it is excluded rather than reported as a
 # collection failure; run it directly if you need it.
 exec "$PYTHON" -m pytest -q \
+    "${PYTEST_EXTRA[@]}" \
     --ignore=test_bass_init_once.py
