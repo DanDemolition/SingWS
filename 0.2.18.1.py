@@ -2575,6 +2575,43 @@ def _diag_rate_limited(key: str, msg: str, interval_sec: float = 60.0):
         _diag(msg)
         return True
 
+def _bounded_filesystem_call(call, *, default=None, timeout_sec: float = 0.45, label: str = "path probe"):
+    """Run a potentially blocking File Provider lookup outside the GUI thread.
+
+    macOS can leave ``stat``/``listdir`` waiting in LIFS for tens of seconds
+    when an iCloud, third-party File Provider, or mounted location is offline.
+    Python cannot cancel that kernel lookup, so the probe thread is a daemon;
+    the caller gets a conservative result after a short bounded wait.
+    """
+    done = threading.Event()
+    result = {"value": default}
+
+    def worker():
+        try:
+            result["value"] = call()
+        except Exception:
+            result["value"] = default
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, daemon=True, name="singws-fs-probe").start()
+    if not done.wait(max(0.01, float(timeout_sec))):
+        _diag_rate_limited(
+            f"fs_probe_timeout:{label}",
+            f"[FILESYSTEM] timed out after {float(timeout_sec):.2f}s label={label}; treating path as unavailable",
+            30.0,
+        )
+        return default
+    return result.get("value", default)
+
+def _bounded_path_exists(path, *, timeout_sec: float = 0.45, label: str = "exists") -> bool:
+    value = str(path or "").strip()
+    if not value:
+        return False
+    return bool(_bounded_filesystem_call(
+        lambda: os.path.exists(value), default=False, timeout_sec=timeout_sec, label=label
+    ))
+
 def _network_log(msg: str):
     _diag(f"[NETWORK-SYNC] {msg}")
 
@@ -6221,18 +6258,23 @@ def scan_background_video_folder(folder: str) -> list[str]:
     """MP4 files in the configured background-video folder, sorted for a
     stable baseline order. Missing/empty folder -> [] and the caller falls
     back to the normal CDG background."""
-    try:
-        if not folder:
-            return []
-        base = Path(folder).expanduser()
-        if not base.is_dir():
-            return []
-        return [
-            str(p) for p in sorted(base.iterdir())
-            if p.is_file() and p.suffix.lower() in BG_VIDEO_EXTENSIONS
-        ]
-    except Exception:
+    if not folder:
         return []
+    value = str(Path(folder).expanduser())
+
+    def scan():
+        if not os.path.isdir(value):
+            return []
+        matches = []
+        with os.scandir(value) as entries:
+            for entry in entries:
+                if entry.is_file() and os.path.splitext(entry.name)[1].lower() in BG_VIDEO_EXTENSIONS:
+                    matches.append(entry.path)
+        return sorted(matches, key=lambda p: p.lower())
+
+    return list(_bounded_filesystem_call(
+        scan, default=[], timeout_sec=0.75, label="background video folder scan"
+    ) or [])
 
 
 _BG_VIDEO_TRANSCODE_INFLIGHT = set()
@@ -25768,8 +25810,9 @@ class KaraokeApp(QWidget):
             if not folder:
                 bg_video_folder_label.setText("No folder selected")
                 return
-            count = len(scan_background_video_folder(folder))
-            bg_video_folder_label.setText(f"{folder}  ({count} video{'s' if count != 1 else ''})")
+            # Do not enumerate a File Provider/mounted folder from this button
+            # callback. Playback scans it on its worker path when needed.
+            bg_video_folder_label.setText(folder)
 
         _refresh_bg_video_folder_label()
         bg_video_folder_row.addWidget(bg_video_folder_label, 1)
@@ -25785,7 +25828,7 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 _refresh_bg_video_folder_label()
-                _diag(f"[BG-VIDEO] folder selected folder={folder!r} videos={len(scan_background_video_folder(folder))}")
+                _diag(f"[BG-VIDEO] folder selected folder={folder!r}")
 
         bg_video_folder_btn.clicked.connect(on_choose_bg_video_folder)
 
@@ -32178,10 +32221,10 @@ class KaraokeApp(QWidget):
             
     # --- Settings JSON for persistent background image ---
     # ---- venue profiles -----------------------------------------------------
-    # Settings that genuinely differ room to room. Everything else -- library
-    # paths, KaraFun setup, normalisation, and above all the network/tenant
-    # credentials -- deliberately stays global, so switching venues can never
-    # silently carry the wrong server identity into a new room.
+    # Settings that genuinely differ room to room. Library paths, KaraFun setup,
+    # and normalisation remain machine-global.  Signup-server identity belongs
+    # to the venue: switching rooms must also switch the public request page and
+    # the credentials used to poll it.
     VENUE_SCOPED_SETTINGS = (
         # Where the laptop is, for nearby-signup checks.
         "session_location_latitude",
@@ -32191,6 +32234,16 @@ class KaraokeApp(QWidget):
         "session_location_detected_at",
         "session_location_auto_detect",
         "session_location_ttl_minutes",
+        # Singer signup server and venue-specific request controls.
+        "base_url",
+        "user",
+        "tenant",  # Back-compat alias; keep it paired with user.
+        "api_key",
+        "header_qr_url",
+        "host_controls_pin",
+        "requests_accepting",
+        "use_waiting_for_add",
+        "show_request_qr",
         # The rig: which output, and how far the room's display lags.
         "audio_output_id",
         "audio_output_name",
@@ -32310,7 +32363,15 @@ class KaraokeApp(QWidget):
             ("runtime media", lambda: self._apply_runtime_media_settings()),
             ("audio output", lambda: self._update_audio_output_button()),
             ("ticker", lambda: self.schedule_ticker_update()),
-            ("idle background", lambda: self._apply_idle_background(force=True, advance_slideshow=False)),
+            # Do not replace the surface underneath an active karaoke frame and
+            # do not force a second fade-from-black.  When idle, the normal
+            # image-to-image crossfade is enough; when playing, the new venue's
+            # background is resolved naturally as soon as the song ends.
+            ("idle background", lambda: self._apply_idle_background(force=False, advance_slideshow=False)),
+            ("header status", lambda: self._refresh_header_status()),
+            ("request QR", lambda: self._update_header_qr_widget()),
+            ("show-screen QR", lambda: self._refresh_show_screen_qr("venue_switch", force=True)),
+            ("request polling", lambda: self.restart_request_polling()),
             ("session location", lambda: self._sync_session_location_for_venue()),
         ):
             try:
@@ -33060,7 +33121,7 @@ class KaraokeApp(QWidget):
         if not file_path:
             return ""
         src = Path(file_path)
-        if not src.exists():
+        if not _bounded_path_exists(src, label="background image source"):
             return ""
         # Avoid accidental overwrite collisions by appending timestamp on conflict.
         dst = IMAGES_DIR / src.name
@@ -33379,25 +33440,33 @@ class KaraokeApp(QWidget):
         self._idle_bg_slideshow_images = []
         self._idle_bg_slideshow_idx = -1
         self._idle_bg_slideshow_next_ts = 0.0
-        if not folder or not os.path.isdir(folder):
+        if not folder:
             return
         exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
-        try:
+
+        def scan_slideshow_folder():
+            if not os.path.isdir(folder):
+                return []
             files = []
-            for fn in os.listdir(folder):
-                p = os.path.join(folder, fn)
-                if os.path.isfile(p) and os.path.splitext(fn)[1].lower() in exts:
-                    files.append(p)
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_file() and os.path.splitext(entry.name)[1].lower() in exts:
+                        files.append(entry.path)
             files.sort(key=lambda s: s.lower())
-            self._idle_bg_slideshow_images = files
-        except Exception:
-            self._idle_bg_slideshow_images = []
+            return files
+
+        self._idle_bg_slideshow_images = list(_bounded_filesystem_call(
+            scan_slideshow_folder,
+            default=[],
+            timeout_sec=0.75,
+            label="idle slideshow folder scan",
+        ) or [])
 
     def _resolve_idle_background_path(self, advance_slideshow: bool = False) -> str:
         # 1) Closed-requests override image (if configured)
         if not self._is_requests_accepting_cached():
             p = str(self.settings.get("background_closed_image_path", "") or "").strip()
-            if p and os.path.exists(p):
+            if p and _bounded_path_exists(p, label="closed background image"):
                 return p
 
         # 2) Slideshow mode
@@ -33422,7 +33491,7 @@ class KaraokeApp(QWidget):
 
         # 3) Normal idle background
         p = str(self.settings.get("background_image_path", "") or "").strip()
-        if p and os.path.exists(p):
+        if p and _bounded_path_exists(p, label="idle background image"):
             return p
         return self._default_background_path()
 

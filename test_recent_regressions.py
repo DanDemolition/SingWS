@@ -106,6 +106,70 @@ class RecentRegressionTests(unittest.TestCase):
         self.singws.KaraokeApp.restart_request_polling(app)
         self.assertEqual(calls, ["retire", ("start", {"stop_existing": False})])
 
+    def test_venue_profiles_capture_signup_server_settings(self):
+        app = SimpleNamespace(settings={
+            "base_url": "https://requests.example",
+            "user": "downtown",
+            "tenant": "downtown",
+            "api_key": "venue-secret",
+            "header_qr_url": "https://requests.example/downtown",
+            "host_controls_pin": "2468",
+            "requests_accepting": False,
+            "use_waiting_for_add": True,
+            "show_request_qr": True,
+        })
+        app.VENUE_SCOPED_SETTINGS = self.singws.KaraokeApp.VENUE_SCOPED_SETTINGS
+
+        captured = self.singws.KaraokeApp._capture_venue_settings(app)
+
+        for key, value in app.settings.items():
+            self.assertIn(key, captured)
+            self.assertEqual(captured[key], value)
+
+    def test_venue_live_refresh_avoids_forced_background_fade_and_rebinds_network(self):
+        calls = []
+        app = SimpleNamespace(
+            _apply_runtime_media_settings=lambda: calls.append("media"),
+            _update_audio_output_button=lambda: calls.append("audio"),
+            schedule_ticker_update=lambda: calls.append("ticker"),
+            _apply_idle_background=lambda **kwargs: calls.append(("background", kwargs)),
+            _refresh_header_status=lambda: calls.append("status"),
+            _update_header_qr_widget=lambda: calls.append("header_qr"),
+            _refresh_show_screen_qr=lambda *args, **kwargs: calls.append(("show_qr", args, kwargs)),
+            restart_request_polling=lambda: calls.append("polling"),
+            _sync_session_location_for_venue=lambda: calls.append("location"),
+        )
+
+        self.singws.KaraokeApp._apply_venue_settings_live(app, "Downtown")
+
+        self.assertIn(("background", {"force": False, "advance_slideshow": False}), calls)
+        self.assertIn("polling", calls)
+        self.assertIn(("show_qr", ("venue_switch",), {"force": True}), calls)
+
+    def test_filesystem_probe_timeout_keeps_gui_path_bounded(self):
+        started = time.monotonic()
+        result = self.singws._bounded_filesystem_call(
+            lambda: time.sleep(2.0) or True,
+            default=False,
+            timeout_sec=0.03,
+            label="regression blocked provider",
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(result)
+        self.assertLess(elapsed, 0.25)
+
+    def test_background_video_settings_do_not_enumerate_folder_on_button_click(self):
+        source = inspect.getsource(self.singws.KaraokeApp.configure_settings)
+        refresh_source = source.split("def _refresh_bg_video_folder_label():", 1)[1].split(
+            "bg_video_folder_row.addWidget", 1
+        )[0]
+        choose_source = source.split("def on_choose_bg_video_folder():", 1)[1].split(
+            "bg_video_folder_btn.clicked.connect", 1
+        )[0]
+        self.assertNotIn("scan_background_video_folder", refresh_source)
+        self.assertNotIn("scan_background_video_folder", choose_source)
+
     def test_log_package_redacts_credentials_and_skips_old_files(self):
         with tempfile.TemporaryDirectory() as td:
             old_logs_dir = self.singws.LOGS_DIR
