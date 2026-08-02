@@ -829,6 +829,11 @@ class PerformanceSafetyTests(unittest.TestCase):
         idle_recovery = function_source("_recover_idle_output")
         self.assertNotIn(".repaint()", idle_recovery)
 
+    def test_idle_overlay_tick_never_forces_synchronous_backing_store_flush(self):
+        tick = function_source("_tick_idle_overlay")
+        self.assertIn("self.video_area.update()", tick)
+        self.assertNotIn("self.video_area.repaint()", tick)
+
     def test_fallback_transition_timeout_is_owned_by_video_area(self):
         start = MAIN_SOURCE.index("class VideoAreaWidget")
         end = MAIN_SOURCE.index("class MusicDatabaseWidget", start)

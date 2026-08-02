@@ -13246,9 +13246,15 @@ class VideoWindow(QWidget):
                 pass
             if should_draw or self._idle_overlay_visible_last:
                 try:
-                    self.video_area.repaint()
-                except Exception:
+                    # Do not force a synchronous backing-store flush here.
+                    # The final idle tick can race the idle -> karaoke window
+                    # transition on macOS; repaint() may then enter Qt/Cocoa
+                    # while the screen paint device is changing and crash in
+                    # QPaintDevice::devicePixelRatio(). update() coalesces the
+                    # paint onto the normal event-loop pass.
                     self.video_area.update()
+                except Exception:
+                    pass
             self._idle_overlay_visible_last = should_draw
         except Exception:
             pass
