@@ -179,8 +179,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.3.3',
-        'CFBundleVersion': '0.4.3.3',
+        'CFBundleShortVersionString': '0.4.3.4',
+        'CFBundleVersion': '0.4.3.4',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
             "SingWS uses System Events to find, queue, and control songs in the KaraFun application."
