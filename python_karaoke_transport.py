@@ -5,6 +5,7 @@ from collections import OrderedDict, deque
 import json
 import logging
 import math
+import platform
 from pathlib import Path
 import shutil
 import subprocess
@@ -1345,6 +1346,17 @@ class PythonKaraokeTransport(QObject):
         # Non-blocking stop so the new decoder isn't delayed by the old one's
         # teardown (keeps the seek snappy, especially on slower CPUs).
         self._stop_decoder(wait=False)
+        # A seek must retire the old raw-video producer too. Replacing the
+        # reference without stopping it leaves the previous FFmpeg process
+        # decoding in the background, which steals enough CPU on Intel Macs
+        # that the new reader can never catch the post-seek audio clock.
+        old_video_reader = self.video_reader
+        self.video_reader = None
+        if old_video_reader is not None:
+            try:
+                old_video_reader.stop()
+            except Exception:
+                pass
         with self._pcm_lock:
             self._dsp_generation += 1
             self._dsp_processing = False
@@ -1381,8 +1393,16 @@ class PythonKaraokeTransport(QObject):
                     pass
         self._start_audio(target)
         if self.mode == "mp4" and self.video_path:
+            # Post-seek decode has to recover FFmpeg startup time while audio is
+            # already live. A 24fps output gives older Intel CPUs enough
+            # headroom to refill the queue instead of falling progressively
+            # farther behind a 30fps clock.
+            reader_fps = 24.0 if sys.platform == "darwin" and platform.machine() == "x86_64" else None
             self.video_reader = FfmpegVideoReader(
-                self.video_path, target, max_height=self.max_video_height
+                self.video_path,
+                target,
+                max_height=self.max_video_height,
+                fps=reader_fps,
             )
         if self.cdg is not None:
             _fp = max(0.0, target + float(getattr(self, "video_offset_seconds", 0.0) or 0.0))

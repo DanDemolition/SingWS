@@ -13124,10 +13124,12 @@ class VideoWindow(QWidget):
         # toggle.
         self._install_fullscreen_mouse_targets()
 
-        _diag(
-            f"[TICKER] init title={title} winId={int(self.video_area.winId())} "
-            f"backend={self.ticker_backend}"
-        )
+        # Do not call video_area.winId() merely for diagnostics. That call
+        # permanently promotes the painted child to a native Cocoa window.
+        # The FFmpeg/QImage renderer needs no native child handle, and nested
+        # native backing stores are the common factor in the Intel macOS
+        # QPaintDevice::devicePixelRatio() crashes seen during MP4 playback.
+        _diag(f"[TICKER] init title={title} backend={self.ticker_backend}")
 
         # Keep idle BG overlay repainting even when this window is not focused.
         self._idle_overlay_visible_last = False
@@ -14332,15 +14334,14 @@ class PreviewWindow(QWidget):
         # While karaoke is playing, keep current song duration included in queue ETA.
         self._eta_hold_current_secs = 0
 
-        # Replaceable native video child (same strategy as main window).
+        # Plain painted child. The current FFmpeg/QImage renderer does not need
+        # the native child window that the removed GStreamer overlay required.
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self._main_layout = layout
 
         self.video_area = VideoAreaWidget(self)
-        self.video_area.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        self.video_area.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
 

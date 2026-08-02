@@ -834,6 +834,18 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("self.video_area.update()", tick)
         self.assertNotIn("self.video_area.repaint()", tick)
 
+    def test_seek_retires_old_video_reader_and_caps_intel_recovery_rate(self):
+        seek = transport_function_source("seek")
+        self.assertIn("old_video_reader.stop()", seek)
+        self.assertIn('platform.machine() == "x86_64"', seek)
+        self.assertIn("fps=reader_fps", seek)
+
+    def test_intel_qimage_outputs_are_not_promoted_native_for_diagnostics(self):
+        video_init = MAIN_SOURCE[MAIN_SOURCE.index("class VideoWindow(QWidget):"):MAIN_SOURCE.index("def _attach_show_vfx", MAIN_SOURCE.index("class VideoWindow(QWidget):"))]
+        self.assertNotIn("int(self.video_area.winId())", video_init)
+        preview_init = MAIN_SOURCE[MAIN_SOURCE.index("class PreviewWindow(QWidget):"):MAIN_SOURCE.index("def winId", MAIN_SOURCE.index("class PreviewWindow(QWidget):"))]
+        self.assertNotIn("WA_NativeWindow", preview_init)
+
     def test_fallback_transition_timeout_is_owned_by_video_area(self):
         start = MAIN_SOURCE.index("class VideoAreaWidget")
         end = MAIN_SOURCE.index("class MusicDatabaseWidget", start)
