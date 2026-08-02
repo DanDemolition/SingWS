@@ -3134,7 +3134,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
 # Settings defaults
 TICKER_COLOR_DEFAULT = "#39FF88"  # lively green; operator can override in Ticker Settings
-FFMPEG_CDG_BASE_OFFSET_MS = 750
+FFMPEG_CDG_BASE_OFFSET_MS = 600
 
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
@@ -3169,7 +3169,7 @@ DEFAULTS = {
     "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "karaoke_engine": "ffmpeg",      # internal only; GStreamer removed, FFmpeg is the sole engine (chooser removed from Settings). Stale gstreamer/auto values map to ffmpeg.
-    "cdg_timing_offset_ms": 0,       # Fine tuning added to the calibrated FFmpeg CDG +750ms baseline
+    "cdg_timing_offset_ms": 0,       # Fine tuning added to the calibrated FFmpeg CDG +600ms baseline
     "ffmpeg_cdg_timing_migrated": True,
     "ffmpeg_cdg_750_baseline_migrated": False,
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
@@ -3192,6 +3192,8 @@ DEFAULTS = {
     "karafun_submission_retries": 1,
     "disc_id_priority": "",          # comma-separated prefixes for remote request matching (blank = no priority)
     "background_closed_image_path": "",   # optional background shown when requests are closed
+    "background_closed_waitlist_on_image_path": "",  # server off + waitlist enabled
+    "background_closed_waitlist_off_image_path": "", # server off + waitlist disabled
     "background_slideshow_enabled": False, # rotate images while idle
     "background_slideshow_folder": "",     # folder for slideshow images
     "background_slideshow_interval_sec": 10, # slideshow interval in seconds
@@ -7274,7 +7276,7 @@ Rectangle {
 
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "MAKE SOME NOISE FOR"
+            text: "APPLAUSE!"
             color: "#f6c945"
             font.pixelSize: Math.max(24, root.height * 0.055)
             font.bold: true
@@ -7576,6 +7578,9 @@ class VideoAreaWidget(QWidget):
         self._fallback_transition_timer = QTimer(self)
         self._fallback_transition_timer.setSingleShot(True)
         self._fallback_transition_timer.timeout.connect(self._clear_fallback_transition)
+        self._fallback_transition_frame_timer = QTimer(self)
+        self._fallback_transition_frame_timer.setInterval(33)
+        self._fallback_transition_frame_timer.timeout.connect(self.update)
         self._show_vfx_overlay = None
         self._show_vfx_enabled = True
         # Request QR shown on the show screen, bottom-right, right-aligned with
@@ -7632,7 +7637,7 @@ class VideoAreaWidget(QWidget):
             return False
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is None:
-            self._show_fallback_transition("THANK YOU", singer, title, artist)
+            self._show_fallback_transition("APPLAUSE!", singer, title, artist)
             return True
         try:
             overlay.show_song_outro(singer, title, artist)
@@ -7654,11 +7659,15 @@ class VideoAreaWidget(QWidget):
             "singer": str(singer or ""),
             "title": str(title or ""),
             "artist": str(artist or ""),
+            "started_at": time.monotonic(),
+            "burst": bool(getattr(self, "_show_vfx_enabled", True)),
         }
         self.update()
+        self._fallback_transition_frame_timer.start()
         self._fallback_transition_timer.start(max(500, int(duration_ms)))
 
     def _clear_fallback_transition(self):
+        self._fallback_transition_frame_timer.stop()
         self._fallback_transition_payload = {}
         self.update()
 
@@ -7666,8 +7675,36 @@ class VideoAreaWidget(QWidget):
         payload = getattr(self, "_fallback_transition_payload", {}) or {}
         if not payload:
             return
+        elapsed = max(0.0, time.monotonic() - float(payload.get("started_at", time.monotonic())))
         painter.save()
-        painter.fillRect(self.rect(), QColor(4, 6, 15, 225))
+        backdrop_alpha = max(0, min(225, int(225 * min(1.0, elapsed / 0.16))))
+        painter.fillRect(self.rect(), QColor(4, 6, 15, backdrop_alpha))
+        # Intel-safe explosion: painter-only flash, shockwave, and radial
+        # confetti. This replaces the native Qt Quick child surface that was
+        # removed after real-show crashes on older Macs.
+        cx = self.width() * 0.5
+        cy = self.height() * 0.46
+        burst_t = min(1.0, elapsed / 0.72)
+        flash_alpha = max(0, int(150 * (1.0 - min(1.0, elapsed / 0.28))))
+        if bool(payload.get("burst", True)) and flash_alpha:
+            painter.fillRect(self.rect(), QColor(255, 245, 190, flash_alpha))
+        wave_radius = min(self.width(), self.height()) * (0.05 + 0.58 * burst_t)
+        if bool(payload.get("burst", True)):
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(246, 201, 69, max(0, int(230 * (1.0 - burst_t)))), max(2, int(self.height() * 0.009))))
+            painter.drawEllipse(QPointF(cx, cy), wave_radius, wave_radius)
+            colors = (QColor("#F6C945"), QColor("#FF5D8F"), QColor("#7FDBFF"), QColor("#B388FF"), QColor("#FFFFFF"))
+            for i in range(30):
+                angle = (i / 30.0) * math.tau + (i % 4) * 0.11
+                distance = min(self.width(), self.height()) * (0.10 + 0.52 * burst_t) * (0.72 + (i % 5) * 0.07)
+                px = cx + math.cos(angle) * distance
+                py = cy + math.sin(angle) * distance + burst_t * burst_t * self.height() * 0.10
+                size = max(4, int(self.height() * (0.010 + (i % 3) * 0.004)))
+                color = QColor(colors[i % len(colors)])
+                color.setAlpha(max(0, int(255 * (1.0 - max(0.0, burst_t - 0.62) / 0.38))))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(color)
+                painter.drawEllipse(QPointF(px, py), size, size)
         width = max(120, int(self.width() * 0.88))
         left = (self.width() - width) // 2
         center_y = self.height() // 2
@@ -13106,6 +13143,9 @@ class VideoWindow(QWidget):
             self.show_vfx = None
             try:
                 area.set_show_vfx_overlay(None)
+                owner = getattr(self, "_external_owner", None)
+                settings = getattr(owner, "settings", {}) if owner is not None else {}
+                area.set_show_vfx_enabled(bool(settings.get("show_screen_vfx_enabled", True)))
             except Exception:
                 pass
             _diag("[SHOW-VFX] using painter transition on Intel macOS")
@@ -22429,6 +22469,7 @@ class KaraokeApp(QWidget):
         semitones: int,
         start_seconds: float = 0.0,
         loop_seconds=None,
+        duration_seconds: float | None = None,
     ):
         engine_pref, transport_cls = self._select_karaoke_transport_cls()
         if transport_cls is None:
@@ -22454,9 +22495,8 @@ class KaraokeApp(QWidget):
                 pass
             return False
         self._gst_teardown_async()
-        duration = 0.0
         try:
-            duration = float(self._get_duration_secs(audio_path) or 0.0)
+            duration = float(duration_seconds or self._get_duration_secs(audio_path) or 0.0)
         except Exception:
             duration = 0.0
 
@@ -22670,15 +22710,16 @@ class KaraokeApp(QWidget):
             loop_seconds=loop_seconds,
         )
 
-    def _play_python_cdg(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, loop_seconds=None):
+    def _play_python_cdg(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, loop_seconds=None, duration_seconds=None):
         self._prepare_python_karaoke_start(mp3_path)
         self._current_karaoke_mode = "cdg"
         self._current_karaoke_cdg_path = str(cdg_path or "")
         self._current_karaoke_mp3_path = str(mp3_path or "")
         self._current_karaoke_semitones = int(semitones or 0)
         try:
-            current_singer = self._get_current_singer()
-            duration = self._get_duration_secs(mp3_path)
+            pending = getattr(self, "_pending_playback_countdown_payload", None)
+            current_singer = str(pending.get("singer") or "") if isinstance(pending, dict) else self._get_current_singer()
+            duration = float(duration_seconds or self._get_duration_secs(mp3_path) or 0.0)
             SingWSLogger.log_playback_start("CDG", cdg_path, semitones, current_singer, duration)
         except Exception:
             pass
@@ -22689,6 +22730,7 @@ class KaraokeApp(QWidget):
             semitones=self._current_karaoke_semitones,
             start_seconds=start_seconds,
             loop_seconds=loop_seconds,
+            duration_seconds=duration_seconds,
         )
         # Optional shuffled MP4 background behind the CDG lyrics. Runs on its
         # own muted video-only pipeline so audio timing/key/tempo are
@@ -26994,7 +27036,7 @@ class KaraokeApp(QWidget):
             try:
                 tp = getattr(self, "karaoke_transport", None)
                 if tp is not None:
-                    tp.max_video_height = val
+                    tp.max_video_height = self._effective_mp4_max_height()
             except Exception:
                 pass
         mp4_quality_combo.currentIndexChanged.connect(on_mp4_quality_changed)
@@ -27185,7 +27227,7 @@ class KaraokeApp(QWidget):
         dur, _member_key = fast_mp3_duration_from_zip(zip_path)
         return int(dur) if dur and dur > 0 else None
 
-    def play_mp3g_zip(self, zip_path, semitones=0, start_seconds=0.0, loop_seconds=None):
+    def play_mp3g_zip(self, zip_path, semitones=0, start_seconds=0.0, loop_seconds=None, duration_seconds=None):
         # Phrase-start / intro-loop: the start offset + loop region must survive
         # the async extraction round-trip, since _on_zip_extract_finished re-enters
         # this method without them. Stash per zip_path and read them back here.
@@ -27193,10 +27235,13 @@ class KaraokeApp(QWidget):
             self._mp3g_pending_start = {}
         if not hasattr(self, "_mp3g_pending_loop"):
             self._mp3g_pending_loop = {}
+        if not hasattr(self, "_mp3g_pending_duration"):
+            self._mp3g_pending_duration = {}
         effective_start = float(start_seconds or 0.0)
         if effective_start <= 0.0:
             effective_start = float(self._mp3g_pending_start.get(str(zip_path), 0.0))
         effective_loop = loop_seconds or self._mp3g_pending_loop.get(str(zip_path))
+        effective_duration = float(duration_seconds or self._mp3g_pending_duration.get(str(zip_path), 0.0) or 0.0)
         # Cached ZIPs can start immediately; uncached extraction happens in a
         # worker so Python zipfile or fallback `unzip` cannot freeze the GUI.
         cdg_path, mp3_path = self.zip_cache.cached_paths_if_ready(zip_path)
@@ -27205,6 +27250,8 @@ class KaraokeApp(QWidget):
                 self._mp3g_pending_start[str(zip_path)] = float(start_seconds)
             if loop_seconds:
                 self._mp3g_pending_loop[str(zip_path)] = loop_seconds
+            if float(duration_seconds or 0.0) > 0.0:
+                self._mp3g_pending_duration[str(zip_path)] = float(duration_seconds)
             print("[PERF] main_thread_blocking_call removed task=zip_extract worker=QThread")
             try:
                 if getattr(self, "_zip_extract_thread", None) is not None and self._zip_extract_thread.isRunning():
@@ -27246,7 +27293,15 @@ class KaraokeApp(QWidget):
         # Run playback (with any phrase-start offset + loop carried across extraction)
         self._mp3g_pending_start.pop(str(zip_path), None)
         self._mp3g_pending_loop.pop(str(zip_path), None)
-        return bool(self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones, start_seconds=effective_start, loop_seconds=effective_loop))
+        self._mp3g_pending_duration.pop(str(zip_path), None)
+        return bool(self.play_cdg_mp3_dual(
+            cdg_path,
+            mp3_path,
+            semitones,
+            start_seconds=effective_start,
+            loop_seconds=effective_loop,
+            duration_seconds=effective_duration,
+        ))
 
     def _on_zip_extract_finished(self, zip_path: str, cdg_path: str, mp3_path: str, semitones: int, ok: bool, message: str):
         try:
@@ -32252,6 +32307,8 @@ class KaraokeApp(QWidget):
         # Between-song screens.
         "background_image_path",
         "background_closed_image_path",
+        "background_closed_waitlist_on_image_path",
+        "background_closed_waitlist_off_image_path",
         "background_slideshow_enabled",
         "background_slideshow_folder",
         "background_slideshow_interval_sec",
@@ -33218,6 +33275,10 @@ class KaraokeApp(QWidget):
             self._refresh_waitlist_toggle_button()
         except Exception:
             pass
+        try:
+            self._apply_idle_background(force=False, advance_slideshow=False)
+        except Exception:
+            pass
         return new_value
 
     def _refresh_waitlist_toggle_button(self, syncing: bool = False):
@@ -33463,9 +33524,19 @@ class KaraokeApp(QWidget):
         ) or [])
 
     def _resolve_idle_background_path(self, advance_slideshow: bool = False) -> str:
-        # 1) Closed-requests override image (if configured)
+        # 1) Server-off override, split by waitlist state. The original closed
+        # image remains the fallback for settings created before this split.
         if not self._is_requests_accepting_cached():
-            p = str(self.settings.get("background_closed_image_path", "") or "").strip()
+            state_key = (
+                "background_closed_waitlist_on_image_path"
+                if self._is_waitlist_enabled_cached()
+                else "background_closed_waitlist_off_image_path"
+            )
+            p = str(
+                self.settings.get(state_key, "")
+                or self.settings.get("background_closed_image_path", "")
+                or ""
+            ).strip()
             if p and _bounded_path_exists(p, label="closed background image"):
                 return p
 
@@ -33599,7 +33670,7 @@ class KaraokeApp(QWidget):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Set Background")
-        dlg.resize(620, 360)
+        dlg.resize(680, 440)
 
         # Match network dialog style
         try:
@@ -33637,17 +33708,31 @@ class KaraokeApp(QWidget):
         normal_row.addWidget(normal_pick)
         v.addLayout(normal_row)
 
-        # Closed-requests image
-        closed_row = QHBoxLayout()
-        closed_row.addWidget(QLabel("When Requests Closed:"))
-        closed_edit = QLineEdit(str(self.settings.get("background_closed_image_path", "") or ""))
-        closed_edit.setReadOnly(True)
-        closed_row.addWidget(closed_edit, 1)
-        closed_pick = QPushButton("Choose…")
-        closed_clear = QPushButton("Clear")
-        closed_row.addWidget(closed_pick)
-        closed_row.addWidget(closed_clear)
-        v.addLayout(closed_row)
+        # Server-off images, selected by waitlist state. Seed both fields from
+        # the legacy closed image so existing venue profiles keep their look.
+        legacy_closed = str(self.settings.get("background_closed_image_path", "") or "")
+
+        def add_closed_background_row(label, setting_key):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            edit = QLineEdit(str(self.settings.get(setting_key, "") or legacy_closed))
+            edit.setReadOnly(True)
+            row.addWidget(edit, 1)
+            pick = QPushButton("Choose…")
+            clear = QPushButton("Clear")
+            row.addWidget(pick)
+            row.addWidget(clear)
+            v.addLayout(row)
+            return edit, pick, clear
+
+        closed_waitlist_on_edit, closed_waitlist_on_pick, closed_waitlist_on_clear = add_closed_background_row(
+            "Server Off — Waitlist On:",
+            "background_closed_waitlist_on_image_path",
+        )
+        closed_waitlist_off_edit, closed_waitlist_off_pick, closed_waitlist_off_clear = add_closed_background_row(
+            "Server Off — Waitlist Off:",
+            "background_closed_waitlist_off_image_path",
+        )
 
         # Slideshow
         slideshow_title = QLabel("Slideshow")
@@ -33704,10 +33789,10 @@ class KaraokeApp(QWidget):
             if fp:
                 normal_edit.setText(fp)
 
-        def pick_closed():
-            fp, _ = QFileDialog.getOpenFileName(dlg, "Select Closed Requests Background Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
+        def pick_closed(edit, title):
+            fp, _ = QFileDialog.getOpenFileName(dlg, title, "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
             if fp:
-                closed_edit.setText(fp)
+                edit.setText(fp)
 
         def pick_slide_folder():
             fd = QFileDialog.getExistingDirectory(dlg, "Select Slideshow Folder")
@@ -33715,15 +33800,22 @@ class KaraokeApp(QWidget):
                 slide_edit.setText(fd)
 
         normal_pick.clicked.connect(pick_normal)
-        closed_pick.clicked.connect(pick_closed)
-        closed_clear.clicked.connect(lambda: closed_edit.setText(""))
+        closed_waitlist_on_pick.clicked.connect(
+            lambda: pick_closed(closed_waitlist_on_edit, "Select Server-Off / Waitlist-On Background")
+        )
+        closed_waitlist_off_pick.clicked.connect(
+            lambda: pick_closed(closed_waitlist_off_edit, "Select Server-Off / Waitlist-Off Background")
+        )
+        closed_waitlist_on_clear.clicked.connect(lambda: closed_waitlist_on_edit.setText(""))
+        closed_waitlist_off_clear.clicked.connect(lambda: closed_waitlist_off_edit.setText(""))
         slide_pick.clicked.connect(pick_slide_folder)
         slide_clear.clicked.connect(lambda: slide_edit.setText(""))
 
         def accept():
             # Persist selections
             normal_src = normal_edit.text().strip()
-            closed_src = closed_edit.text().strip()
+            closed_waitlist_on_src = closed_waitlist_on_edit.text().strip()
+            closed_waitlist_off_src = closed_waitlist_off_edit.text().strip()
             slide_folder = slide_edit.text().strip()
 
             if normal_src:
@@ -33734,16 +33826,26 @@ class KaraokeApp(QWidget):
             else:
                 normal_stored = ""
 
-            if closed_src:
+            stored_backgrounds = {}
+
+            def store_background(source):
+                if not source:
+                    return ""
+                if source in stored_backgrounds:
+                    return stored_backgrounds[source]
                 try:
-                    closed_stored = self._copy_background_image_to_storage(closed_src)
+                    stored = self._copy_background_image_to_storage(source)
                 except Exception:
-                    closed_stored = closed_src if os.path.exists(closed_src) else ""
-            else:
-                closed_stored = ""
+                    stored = source if os.path.exists(source) else ""
+                stored_backgrounds[source] = stored
+                return stored
+
+            closed_waitlist_on_stored = store_background(closed_waitlist_on_src)
+            closed_waitlist_off_stored = store_background(closed_waitlist_off_src)
 
             self.settings["background_image_path"] = normal_stored
-            self.settings["background_closed_image_path"] = closed_stored
+            self.settings["background_closed_waitlist_on_image_path"] = closed_waitlist_on_stored
+            self.settings["background_closed_waitlist_off_image_path"] = closed_waitlist_off_stored
             self.settings["background_slideshow_enabled"] = bool(slide_cb.isChecked())
             self.settings["background_slideshow_folder"] = slide_folder
             self.settings["background_slideshow_interval_sec"] = int(speed_spin.value())
@@ -43786,11 +43888,22 @@ class KaraokeApp(QWidget):
         return "fit"
 
     def _effective_mp4_max_height(self) -> int:
-        """MP4 decode cap; lower pixel throughput is a major Intel win."""
+        """MP4 decode cap; never permit unsafe native/1080p decode on Intel Macs."""
         try:
-            return int(self.settings.get("mp4_max_height", 720) or 0)
+            requested = int(self.settings.get("mp4_max_height", 720) or 0)
         except Exception:
+            requested = 720
+        try:
+            intel_mac = sys.platform == "darwin" and platform.machine().lower() in {"x86_64", "amd64"}
+        except Exception:
+            intel_mac = False
+        # Show logs measured 1080p/60 native decode at only 14-15fps, with
+        # hundreds of dropped frames and repeated GUI stalls. Preserve the
+        # quality choice on Apple Silicon, but enforce the known-safe ceiling
+        # on Intel even when an older settings file persisted Native (0).
+        if intel_mac and (requested <= 0 or requested > 720):
             return 720
+        return requested
 
     def _effective_cdg_timing_offset_ms(self) -> int:
         """Return FFmpeg's CDG baseline plus the host's saved fine tuning."""
@@ -43844,16 +43957,9 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         if intel_mac:
-            # Keep the functional 3-2-1 singer cue, but disable particle,
-            # ticker-glow, and rotation animation work that competes with
-            # decoder/device preroll on older Intel Macs. These are runtime
-            # overrides only; the user's saved preferences are untouched.
-            try:
-                area = getattr(getattr(self, "video_window", None), "video_area", None)
-                if area is not None and hasattr(area, "set_show_vfx_enabled"):
-                    area.set_show_vfx_enabled(False)
-            except Exception:
-                pass
+            # The show screen uses its lightweight painter transition on Intel;
+            # keep it enabled. Continue suppressing the heavier rotation and
+            # ticker effects that compete with decoder/device preroll.
             try:
                 rotation_view = getattr(self, "rotation_view", None)
                 if rotation_view is not None and hasattr(rotation_view, "set_effects_enabled"):
@@ -47240,6 +47346,33 @@ class KaraokeApp(QWidget):
 
         QTimer.singleShot(0, _fullscreen_karafun)
 
+    def _activate_host_window_after_karafun(self, attempt: int = 0):
+        """Return keyboard focus to the main host window after KaraFun exits.
+
+        The audience window is restored separately. On macOS, closing KaraFun's
+        fullscreen Space can finish after Qt's first activation request, so make
+        one short bounded retry once that animation has had time to settle.
+        """
+        if isinstance(getattr(self, "_active_external_karafun", None), dict):
+            return
+        try:
+            state = self.windowState()
+            if state & Qt.WindowState.WindowMinimized:
+                self.setWindowState(state & ~Qt.WindowState.WindowMinimized)
+            self.show()
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except Exception:
+                pass
+            self.raise_()
+            self.activateWindow()
+            _diag(f"[KARAFUN] activated SingWS host window attempt={attempt + 1}")
+        except Exception as e:
+            _diag(f"[KARAFUN] host window activation failed attempt={attempt + 1}: {e}")
+        if attempt < 1:
+            QTimer.singleShot(350, lambda: self._activate_host_window_after_karafun(attempt + 1))
+
     def _restore_show_screen_from_karafun(self):
         """Restore the SingWS audience output after external KaraFun playback."""
         state = getattr(self, "_karafun_show_screen_restore", None)
@@ -47312,8 +47445,10 @@ class KaraokeApp(QWidget):
                         f"[KARAFUN] restored SingWS show screen opacity={opacity:.2f} "
                         f"fullscreen={int(vw.isFullScreen())} reason={reason}"
                     )
+                    self._activate_host_window_after_karafun()
                 except Exception as e:
                     _diag(f"[KARAFUN] transparent show-screen restore failed: {e}")
+                    self._activate_host_window_after_karafun()
 
             def _after_transparent_karafun_hidden(result=""):
                 if getattr(self, "_karafun_restore_token", None) != restore_token:
@@ -47429,11 +47564,13 @@ class KaraokeApp(QWidget):
                 if not was_visible:
                     vw.hide()
                     _diag("[KARAFUN] restored SingWS show screen hidden")
+                    self._activate_host_window_after_karafun()
                     return
                 if not restore_fullscreen:
                     vw.showNormal()
                     vw.raise_()
                     _diag("[KARAFUN] restored SingWS show screen fullscreen=0")
+                    self._activate_host_window_after_karafun()
                     return
 
                 def _enter_singws_fullscreen(attempt=0):
@@ -47459,8 +47596,10 @@ class KaraokeApp(QWidget):
                         _diag(f"[KARAFUN] fullscreen retry failed: {e}")
 
                 _enter_singws_fullscreen()
+                self._activate_host_window_after_karafun()
             except Exception as e:
                 _diag(f"[KARAFUN] show-screen restore failed: {e}")
+                self._activate_host_window_after_karafun()
 
         def _after_karafun_hidden(_result=""):
             if getattr(self, "_karafun_restore_token", None) != restore_token:
@@ -49286,13 +49425,18 @@ class KaraokeApp(QWidget):
         # Keep this song in ETA while it is actively playing.
         current_song_dur = 0
         try:
-            if isinstance(entry, dict) and "duration" in entry:
+            if isinstance(entry, dict):
                 current_song_dur = int(entry.get("duration") or 0)
-            else:
-                dur_path = song_info[0] if isinstance(song_info, (tuple, list)) else song_info
+            if current_song_dur <= 0:
+                dur_path = primary_path or (song_info[0] if isinstance(song_info, (tuple, list)) else song_info)
                 current_song_dur = int(self._get_duration_secs(dur_path) or 0)
-                if isinstance(entry, dict):
-                    entry["duration"] = current_song_dur
+                # A queue dict may legitimately have no cached duration yet.
+                # MP3+G ZIPs are cheap to probe from the MP3 header and need a
+                # duration before transport start for the timer/end trim.
+                if current_song_dur <= 0 and str(dur_path).lower().endswith(".zip"):
+                    current_song_dur = int(self.probe_mp3g_duration(dur_path) or 0)
+            if isinstance(entry, dict) and current_song_dur > 0:
+                entry["duration"] = current_song_dur
         except Exception:
             current_song_dur = 0
 
@@ -49331,6 +49475,7 @@ class KaraokeApp(QWidget):
                     semitones=key,
                     start_seconds=phrase_start,
                     loop_seconds=intro_loop_seconds,
+                    duration_seconds=current_song_dur,
                 ):
                     self._mp3g_prepare_then_play_next = ""
                     self._next_in_progress = False
@@ -49360,7 +49505,7 @@ class KaraokeApp(QWidget):
             if isinstance(song_info[0], str) and song_info[0].endswith(".cdg"):
                 cdg_path, mp3_path = song_info
                 song_path_display = cdg_path
-                start_ok = bool(self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
+                start_ok = bool(self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds, duration_seconds=current_song_dur))
             elif isinstance(song_info[0], str) and song_info[0].endswith(".mp4"):
                 # Old tuple (original, processed) — play original with realtime key change
                 orig_mp4 = song_info[0]
@@ -49387,7 +49532,7 @@ class KaraokeApp(QWidget):
             elif song_info.endswith(".zip"):
                 # NEW: Handle MP3G zip files
                 if self.is_mp3g_zip(song_info):
-                    start_ok = bool(self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
+                    start_ok = bool(self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds, duration_seconds=current_song_dur))
                 else:
                     print("Invalid zip format:", song_info)
                     _restore_play_transaction("invalid_zip")
@@ -49396,7 +49541,7 @@ class KaraokeApp(QWidget):
                 base, _ = os.path.splitext(song_info)
                 mp3_path = base + ".mp3"
                 if os.path.exists(mp3_path):
-                    start_ok = bool(self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
+                    start_ok = bool(self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds, duration_seconds=current_song_dur))
                 else:
                     _diag(f"[PLAYNEXT] failed: missing MP3 pair for CDG {song_info}")
                     print("Missing MP3 for CDG:", song_info)
@@ -49898,8 +50043,15 @@ class KaraokeApp(QWidget):
         return self._play_python_mp4(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
-    def play_cdg_mp3_dual(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, fast_restart=False, loop_seconds=None):
-        return self._play_python_cdg(cdg_path, mp3_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
+    def play_cdg_mp3_dual(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, fast_restart=False, loop_seconds=None, duration_seconds=None):
+        return self._play_python_cdg(
+            cdg_path,
+            mp3_path,
+            semitones,
+            start_seconds=start_seconds,
+            loop_seconds=loop_seconds,
+            duration_seconds=duration_seconds,
+        )
 
 
     def on_media_ended(self, event=None):

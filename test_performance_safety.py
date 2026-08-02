@@ -24,6 +24,14 @@ def function_source(name: str) -> str:
     raise AssertionError(f"Could not find function {name}")
 
 
+def transport_function_source(name: str) -> str:
+    pattern = rf"(?ms)^    def {re.escape(name)}\(.*?^    def "
+    match = re.search(pattern, TRANSPORT_SOURCE)
+    if match:
+        return match.group(0).rsplit("\n    def ", 1)[0]
+    raise AssertionError(f"Could not find transport function {name}")
+
+
 class PerformanceSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -432,7 +440,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("return", accept)
 
     def test_ffmpeg_cdg_timing_restores_legacy_baseline(self):
-        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 750", MAIN_SOURCE)
+        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 600", MAIN_SOURCE)
         effective = function_source("_effective_cdg_timing_offset_ms")
         self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS + fine_ms", effective)
         start = function_source("_start_python_karaoke_transport")
@@ -441,6 +449,22 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('saved_fine == 150', MAIN_SOURCE)
         self.assertIn('self.settings["cdg_timing_offset_ms"] = 0', MAIN_SOURCE)
         self.assertIn("ffmpeg_cdg_750_baseline_migrated", MAIN_SOURCE)
+
+    def test_mp4_timing_anchors_on_real_audio_and_intel_caps_native_decode(self):
+        feeder = TRANSPORT_SOURCE[
+            TRANSPORT_SOURCE.index("class _PcmFeeder"):TRANSPORT_SOURCE.index("class PythonKaraokeTransport")
+        ]
+        self.assertIn("if not t._clock_has_real_audio_anchor:", feeder)
+        self.assertIn("anchor_processed_us = t._processed_us()", feeder)
+        self.assertIn("t._clock_processed_us = anchor_processed_us", feeder)
+        self.assertIn("t._clock_has_real_audio_anchor = True", feeder)
+        position = transport_function_source("position_seconds")
+        self.assertIn("if not self._clock_has_real_audio_anchor:", position)
+        effective = function_source("_effective_mp4_max_height")
+        self.assertIn('platform.machine().lower() in {"x86_64", "amd64"}', effective)
+        self.assertIn("requested <= 0 or requested > 720", effective)
+        self.assertIn("return 720", effective)
+        self.assertIn("tp.max_video_height = self._effective_mp4_max_height()", MAIN_SOURCE)
 
     def test_deferred_remote_adds_save_off_thread_during_playback(self):
         source = function_source("_save_deferred_remote_adds")

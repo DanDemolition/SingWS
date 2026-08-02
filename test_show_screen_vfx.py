@@ -204,6 +204,18 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertTrue(mod.DEFAULTS["show_screen_vfx_enabled"])
         self.assertTrue(mod.DEFAULTS["rotation_vfx_enabled"])
 
+    def test_intel_fallback_keeps_explosions_and_uses_applause_copy(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn('self._show_fallback_transition("APPLAUSE!", singer, title, artist)', source)
+        self.assertIn('text: "APPLAUSE!"', source)
+        self.assertIn("self._fallback_transition_frame_timer.setInterval(33)", source)
+        self.assertIn("for i in range(30):", source)
+        self.assertIn("painter.drawEllipse(QPointF(cx, cy), wave_radius, wave_radius)", source)
+        self.assertIn('area.set_show_vfx_enabled(bool(settings.get("show_screen_vfx_enabled", True)))', source)
+        runtime = source[source.index("def _apply_runtime_media_settings"):]
+        runtime = runtime[:runtime.index("def ", 10)]
+        self.assertNotIn("area.set_show_vfx_enabled(False)", runtime)
+
 
 if __name__ == "__main__":
     unittest.main()

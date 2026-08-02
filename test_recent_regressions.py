@@ -607,6 +607,49 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(app._processing_notification_timer.started, [])
         self.assertEqual(app._processing_notification_timer.stopped, 1)
 
+    def test_mp3g_queue_duration_reaches_timer_and_transport(self):
+        queue_source = inspect.getsource(self.singws.KaraokeApp.play_next_file)
+        zip_source = inspect.getsource(self.singws.KaraokeApp.play_mp3g_zip)
+        wrapper_source = inspect.getsource(self.singws.KaraokeApp.play_cdg_mp3_dual)
+
+        self.assertIn("self.probe_mp3g_duration(dur_path)", queue_source)
+        self.assertGreaterEqual(queue_source.count("duration_seconds=current_song_dur"), 4)
+        self.assertIn("duration_seconds=effective_duration", zip_source)
+        self.assertIn("duration_seconds=duration_seconds", wrapper_source)
+
+    def test_server_off_background_follows_waitlist_state(self):
+        app = make_app(self.singws)
+        app._is_requests_accepting_cached = lambda: bool(app.settings["requests_accepting"])
+        app._is_waitlist_enabled_cached = lambda: bool(app.settings["use_waiting_for_add"])
+        app._default_background_path = lambda: "/default.png"
+
+        with tempfile.TemporaryDirectory() as folder:
+            normal = os.path.join(folder, "normal.png")
+            waitlist_on = os.path.join(folder, "waitlist-on.png")
+            waitlist_off = os.path.join(folder, "waitlist-off.png")
+            for path in (normal, waitlist_on, waitlist_off):
+                Path(path).touch()
+            app.settings.update({
+                "background_image_path": normal,
+                "background_closed_waitlist_on_image_path": waitlist_on,
+                "background_closed_waitlist_off_image_path": waitlist_off,
+                "background_slideshow_enabled": False,
+            })
+
+            app.settings["requests_accepting"] = True
+            app.settings["use_waiting_for_add"] = True
+            self.assertEqual(self.singws.KaraokeApp._resolve_idle_background_path(app), normal)
+
+            app.settings["requests_accepting"] = False
+            self.assertEqual(self.singws.KaraokeApp._resolve_idle_background_path(app), waitlist_on)
+
+            app.settings["use_waiting_for_add"] = False
+            self.assertEqual(self.singws.KaraokeApp._resolve_idle_background_path(app), waitlist_off)
+
+    def test_waitlist_toggle_refreshes_idle_background(self):
+        source = inspect.getsource(self.singws.KaraokeApp._set_waitlist_enabled_local)
+        self.assertIn("self._apply_idle_background(force=False", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1126,11 +1126,19 @@ class _PcmFeeder(QIODevice):
         out = raw
         real_audio_bytes = len(out)
         if real_audio_bytes > 0:
+            anchor_processed_us = t._processed_us() if not t._clock_has_real_audio_anchor else 0
             # Meter the PCM being handed to the device, not decoder output.
             # FFmpeg can decode several seconds ahead, so decoder-side levels
             # can report the silent tail while audible music is still buffered.
             t._accept_level(bytes(out))
             with t._pcm_lock:
+                # processedUSecs() has already advanced through any startup or
+                # seek underrun silence. Anchor it at the first real song PCM;
+                # otherwise that silence cancels the device-backlog correction
+                # and leaves video about one sink buffer ahead of the audio.
+                if not t._clock_has_real_audio_anchor:
+                    t._clock_processed_us = anchor_processed_us
+                    t._clock_has_real_audio_anchor = True
                 t._audible_output_bytes += int(real_audio_bytes)
         if len(out) < n:
             # Underrun: pad with silence so the output device never stalls.
@@ -1218,6 +1226,7 @@ class PythonKaraokeTransport(QObject):
         self._loop_end = None
         self._clock_source_seconds = 0.0
         self._clock_processed_us = 0
+        self._clock_has_real_audio_anchor = False
         # Count only real karaoke PCM pulled by the output device. Silence
         # padding during decoder underruns is intentionally excluded so CDG/MP4
         # follows audible song content, not UI wall time or startup gaps.
@@ -1345,6 +1354,7 @@ class PythonKaraokeTransport(QObject):
             self._processed_bytes = 0
             self._pending_output = b""
             self._audible_output_bytes = 0
+            self._clock_has_real_audio_anchor = False
             self._pcm_lock.notify_all()
         self._decoder_done = False
         self._ended_sent = False
@@ -1420,6 +1430,7 @@ class PythonKaraokeTransport(QObject):
         self._clock_processed_us = self._processed_us()
         with self._pcm_lock:
             self._audible_output_bytes = 0
+            self._clock_has_real_audio_anchor = False
         self._clock_last_position_seconds = position
         self.tempo_ratio = max(0.5, min(2.0, float(tempo_ratio or 1.0)))
         self.semitones = max(-24.0, min(24.0, float(semitones or 0.0)))
@@ -1455,6 +1466,7 @@ class PythonKaraokeTransport(QObject):
         self._clock_processed_us = self._processed_us()
         with self._pcm_lock:
             self._audible_output_bytes = 0
+            self._clock_has_real_audio_anchor = False
         self._clock_last_position_seconds = float(self._paused_position)
         self._paused = False
         sink = self.audio_sink
@@ -1495,6 +1507,8 @@ class PythonKaraokeTransport(QObject):
         # so it is used only to measure the backlog, never as the clock itself.
         backlog_s = 0.0
         try:
+            if not self._clock_has_real_audio_anchor:
+                raise RuntimeError("real audio clock is not anchored yet")
             played_s = max(0.0, (self._processed_us() - int(self._clock_processed_us)) / 1_000_000.0)
             backlog_s = audio_delta_s - played_s
             # Clamp: negative means the device outran our accounting (underrun
