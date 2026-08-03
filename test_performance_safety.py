@@ -1045,6 +1045,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         build = function_source("_build_chat_page")
         poll = function_source("_schedule_chat_poll")
         send = function_source("_send_chat_message")
+        clear = function_source("_clear_chat_history")
         self.assertIn("self.chat_singer_list", build)
         self.assertIn("self._chat_night_start", build)
         self.assertIn('host_chat.php', poll)
@@ -1052,6 +1053,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("threading.Thread", poll)
         self.assertIn("_show_processing_notification", poll)
         self.assertIn("_net_send_direct_message", send)
+        self.assertIn("Clear Chat History", build)
+        self.assertIn('"action":"clear_history"', clear)
+        self.assertIn("QMessageBox.StandardButton.Cancel", clear)
+        self.assertIn("_chat_data_generation", poll)
 
     def test_hidden_singer_history_does_not_rebuild_models(self):
         schedule = function_source("_schedule_singer_history_refresh")

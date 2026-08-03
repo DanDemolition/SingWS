@@ -41154,7 +41154,11 @@ class KaraokeApp(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page); layout.setContentsMargins(16, 16, 16, 16); layout.setSpacing(10)
         title = QLabel("Singer Chat"); title.setStyleSheet(f"color:{_v('text_bright')};font-size:20px;font-weight:850;")
-        layout.addWidget(title)
+        title_row = QHBoxLayout(); title_row.addWidget(title); title_row.addStretch(1)
+        self.chat_clear_button = QPushButton("Clear Chat History")
+        self.chat_clear_button.setToolTip("Permanently delete all singer chat messages from the server")
+        self.chat_clear_button.clicked.connect(self._clear_chat_history)
+        title_row.addWidget(self.chat_clear_button); layout.addLayout(title_row)
         split = QSplitter(Qt.Orientation.Horizontal)
         self.chat_singer_list = QListWidget(); self.chat_singer_list.setMinimumWidth(190)
         self.chat_singer_list.currentRowChanged.connect(lambda *_: (self._chat_mark_current_read(), self._render_chat_page()))
@@ -41167,7 +41171,7 @@ class KaraokeApp(QWidget):
         self.chat_message_input.returnPressed.connect(self._send_chat_message)
         send_row.addWidget(self.chat_message_input, 1); send_row.addWidget(self.chat_send_button); right_layout.addLayout(send_row)
         split.addWidget(right); split.setStretchFactor(1, 1); layout.addWidget(split, 1)
-        self._chat_messages = []; self._chat_last_id = 0; self._chat_poll_inflight = False
+        self._chat_messages = []; self._chat_last_id = 0; self._chat_poll_inflight = False; self._chat_data_generation = 0
         _now = time.localtime(); self._chat_night_start = int(time.mktime((_now.tm_year, _now.tm_mon, _now.tm_mday, 0, 0, 0, _now.tm_wday, _now.tm_yday, _now.tm_isdst)))
         self._chat_poll_timer = QTimer(self); self._chat_poll_timer.timeout.connect(self._schedule_chat_poll); self._chat_poll_timer.start(3000)
         self._chat_pulse_timer = QTimer(self); self._chat_pulse_timer.setInterval(420); self._chat_pulse_timer.timeout.connect(self._update_chat_nav_state); self._chat_pulse_timer.start()
@@ -41220,7 +41224,7 @@ class KaraokeApp(QWidget):
         if getattr(self,"_chat_poll_inflight",False): return
         base=_network_normalize_base_url(self.settings.get("base_url","")); user=str(self.settings.get("user",self.settings.get("tenant","")) or "").strip(); key=str(self.settings.get("api_key","") or "").strip()
         if not base or not user or not key: return
-        self._chat_poll_inflight=True; since=int(getattr(self,"_chat_last_id",0) or 0)
+        self._chat_poll_inflight=True; since=int(getattr(self,"_chat_last_id",0) or 0); generation=int(getattr(self,"_chat_data_generation",0) or 0)
         def worker():
             items=[]
             try:
@@ -41228,10 +41232,42 @@ class KaraokeApp(QWidget):
             except Exception: pass
             def finish():
                 self._chat_poll_inflight=False
+                if generation != int(getattr(self,"_chat_data_generation",0) or 0): return
                 if items:
                     self._chat_messages.extend(items); self._chat_last_id=max(self._chat_last_id,max(int(x.get("id",0)) for x in items)); self._render_chat_page()
                     incoming=[x for x in items if x.get("direction")=="in"]
                     if incoming: self._show_processing_notification(f"💬 {incoming[-1].get('singer','Singer')}: {incoming[-1].get('message','')}",level="info")
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker,daemon=True).start()
+
+    def _clear_chat_history(self):
+        answer = QMessageBox.question(
+            self,
+            "Clear Chat History",
+            "Permanently delete all singer chat messages for this venue from the server? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes: return
+        base=_network_normalize_base_url(self.settings.get("base_url","")); user=str(self.settings.get("user",self.settings.get("tenant","")) or "").strip(); api=str(self.settings.get("api_key","") or "").strip()
+        if not base or not user or not api:
+            self._show_processing_notification("Chat history could not be cleared because the server connection is not configured.",level="error"); return
+        self.chat_clear_button.setEnabled(False)
+        def worker():
+            ok=False; error=""
+            try:
+                r=requests.post(f"{base}/api/v1/host_chat.php",data={"user":user,"action":"clear_history"},headers={"X-API-Key":api,"Accept":"application/json"},timeout=8)
+                data=r.json() if r.content else {}
+                ok=bool(r.ok and data.get("ok"))
+                if not ok: error=str(data.get("error") or f"Server returned {r.status_code}")
+            except Exception as exc: error=str(exc)
+            def finish():
+                self.chat_clear_button.setEnabled(True)
+                if ok:
+                    self._chat_data_generation=int(getattr(self,"_chat_data_generation",0) or 0)+1
+                    self._chat_messages=[]; self._chat_last_id=0; self._render_chat_page()
+                    self._show_processing_notification("Chat history permanently deleted from the server.",level="success")
+                else: self._show_processing_notification(error or "Could not clear chat history.",level="error")
             self._run_on_ui_thread(finish)
         threading.Thread(target=worker,daemon=True).start()
 
