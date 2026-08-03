@@ -193,6 +193,24 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("karafun_url_edit.setEchoMode(QLineEdit.EchoMode.Password)", source)
         self.assertNotIn('"karafun_request_url": "https://', source)
 
+    def test_karafun_audio_is_pinned_and_fast_start_avoids_blocking_scans(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn('"karafun_audio_output_follow_singws": True', source)
+        self.assertIn('"karafun_fast_start_enabled": True', source)
+        self.assertIn("def _ensure_karafun_audio_output", source)
+        route = source[source.index("def _ensure_karafun_audio_output"):]
+        route = route[:route.index("def _show_karafun_accessibility_setup")]
+        self.assertIn('contains "choose an audio output"', route)
+        self.assertIn('perform action "AXPress" of routeButton', route)
+        self.assertIn("KaraFun output device not available", route)
+        self.assertIn("_karafun_audio_route_cache", route)
+        worker = source[source.index("def _automate_karafun_search_and_play"):]
+        worker = worker[:worker.index("def _karafun_clock_seconds")]
+        self.assertLess(worker.index("_ensure_karafun_audio_output()"), worker.index("search attempt="))
+        self.assertIn("fast start skipped unreliable transparent renderer preflight", worker)
+        self.assertIn("background monitor will verify playback", worker)
+        self.assertIn("KaraFun audio safety check failed", worker)
+
     def test_location_permission_is_once_and_karafun_restore_has_fallback(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"session_location_permission_requested": False', source)

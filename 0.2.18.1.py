@@ -3184,6 +3184,9 @@ DEFAULTS = {
     "karafun_manage_show_screen": True, # macOS: hand the show display to KaraFun, then restore SingWS on completion
     "karafun_transparent_handoff": True, # Reveal an already-positioned KaraFun renderer through the SingWS show window
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
+    "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
+    "karafun_audio_output_follow_singws": True, # Pin KaraFun to SingWS's saved physical output instead of AirPlay/system default
+    "karafun_audio_output_name": "", # Optional KaraFun-only device name; blank follows audio_output_name
     "karafun_request_url": "",       # Private KaraFun host/session link; never included in public/server payloads
     "karafun_auto_submit_server": True,
     "karafun_auto_submit_host": True,
@@ -34216,6 +34219,24 @@ class KaraokeApp(QWidget):
             )
             v.addWidget(karafun_transparent_cb)
 
+            karafun_audio_follow_cb = QCheckBox("Always route KaraFun to SingWS's saved audio output")
+            karafun_audio_follow_cb.setChecked(bool(self.settings.get("karafun_audio_output_follow_singws", True)))
+            karafun_audio_follow_cb.setToolTip(
+                "Before KaraFun starts, selects the same named headphones or USB interface used by SingWS. "
+                "Playback is stopped if the device is missing, preventing accidental AirPlay audio."
+            )
+            v.addWidget(karafun_audio_follow_cb)
+
+            karafun_audio_row = QHBoxLayout()
+            karafun_audio_row.addWidget(QLabel("KaraFun output override:"))
+            karafun_audio_edit = QLineEdit(str(self.settings.get("karafun_audio_output_name", "") or ""))
+            karafun_audio_edit.setPlaceholderText(
+                str(self.settings.get("audio_output_name", "") or "Same as SingWS saved output")
+            )
+            karafun_audio_edit.setToolTip("Leave blank to follow SingWS. Enter an exact KaraFun Audio output device name to override it.")
+            karafun_audio_row.addWidget(karafun_audio_edit, 1)
+            v.addLayout(karafun_audio_row)
+
             karafun_search_cb = QCheckBox("Include online KaraFun catalog results in SingWS search")
             karafun_search_cb.setChecked(bool(self.settings.get("karafun_include_online_search", False)))
             karafun_search_cb.setToolTip("Shows CSV catalog-only tracks with a KaraFun Online badge. Local matches remain preferred.")
@@ -34604,6 +34625,9 @@ class KaraokeApp(QWidget):
                 self.settings["host_controls_pin"] = host_pin_edit.text().strip()
                 self.settings["karafun_auto_queue_enabled"] = bool(karafun_enable_cb.isChecked())
                 self.settings["karafun_transparent_handoff"] = bool(karafun_transparent_cb.isChecked())
+                self.settings["karafun_audio_output_follow_singws"] = bool(karafun_audio_follow_cb.isChecked())
+                self.settings["karafun_audio_output_name"] = karafun_audio_edit.text().strip()
+                self._karafun_audio_route_cache = None
                 self.settings["karafun_include_online_search"] = bool(karafun_search_cb.isChecked())
                 self.settings["karafun_request_url"] = karafun_url_edit.text().strip()
                 self.settings["karafun_auto_submit_server"] = bool(karafun_server_cb.isChecked())
@@ -46952,14 +46976,111 @@ class KaraokeApp(QWidget):
         ok, stdout, stderr = self._run_karafun_applescript_sync(
             [
                 'tell application "System Events"',
-                'return "AUTHORIZED"',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) is 0 then return "AUTHORIZED|0"',
+                'return "AUTHORIZED|" & (unix id of item 1 of matches as text)',
                 'end tell',
             ],
             timeout=8,
         )
         if ok:
+            try:
+                self._karafun_process_id = int(str(stdout or "").split("|")[-1])
+            except Exception:
+                self._karafun_process_id = 0
             return True, str(stdout or "AUTHORIZED")
         return False, str(stderr or stdout or "Apple Events authorization failed")
+
+    def _karafun_target_audio_output_name(self) -> str:
+        explicit = str(self.settings.get("karafun_audio_output_name", "") or "").strip()
+        if explicit:
+            return explicit
+        if bool(self.settings.get("karafun_audio_output_follow_singws", True)):
+            return str(self.settings.get("audio_output_name", "") or "").strip()
+        return ""
+
+    def _ensure_karafun_audio_output(self) -> tuple[bool, str]:
+        """Pin KaraFun's own route picker to the saved physical show output."""
+        target = self._karafun_target_audio_output_name()
+        if not target:
+            return False, "Choose a named SingWS audio output before playing KaraFun (System Default is unsafe with AirPlay)."
+        target_key = self._normalized_audio_output_name(target)
+        if any(word in target_key for word in ("airplay", "apple tv", "bravia", "television", "display")):
+            return False, f"KaraFun audio output {target!r} looks like a display/AirPlay route. Choose headphones or a USB interface."
+        cache_key = (int(getattr(self, "_karafun_process_id", 0) or 0), target_key)
+        if getattr(self, "_karafun_audio_route_cache", None) == cache_key:
+            _diag(f"[KARAFUN-AUDIO] cached route verified device={target!r} pid={cache_key[0]}")
+            return True, target
+
+        target_literal = self._karafun_applescript_literal(target)
+        script = [
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
+            'set kf to item 1 of matches',
+            'set frontmost of kf to true',
+            'tell kf',
+            'if (count of windows) is 0 then return "ERROR|KaraFun window not found"',
+            'set mainWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
+            'end try',
+            'end repeat',
+            'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+            'try',
+            'set elems to entire contents of mainWindow',
+            'on error',
+            'set elems to UI elements of mainWindow',
+            'end try',
+            'set routeButton to missing value',
+            'repeat with elem in elems',
+            'try',
+            'if role of elem is "AXButton" then',
+            'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
+            'ignoring case',
+            'if labelText contains "choose an audio output" or labelText contains "audio output" then set routeButton to elem',
+            'end ignoring',
+            'end if',
+            'end try',
+            'end repeat',
+            'if routeButton is missing value then return "ERROR|KaraFun Audio output button was not found"',
+            'try',
+            'set currentLabel to (name of routeButton as text) & " " & (description of routeButton as text) & " " & (help of routeButton as text) & " " & (value of routeButton as text)',
+            'ignoring case',
+            f'if currentLabel contains {target_literal} then return "READY|" & {target_literal}',
+            'end ignoring',
+            'end try',
+            'perform action "AXPress" of routeButton',
+            'delay 0.35',
+            'set allElems to entire contents',
+            'repeat with elem in allElems',
+            'try',
+            'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
+            'ignoring case',
+            f'if labelText contains {target_literal} then',
+            'try',
+            'perform action "AXPress" of elem',
+            'on error',
+            'click elem',
+            'end try',
+            f'return "SET|" & {target_literal}',
+            'end if',
+            'end ignoring',
+            'end try',
+            'end repeat',
+            f'return "ERROR|KaraFun output device not available: " & {target_literal}',
+            'end tell',
+            'end tell',
+        ]
+        ok, stdout, stderr = self._run_karafun_applescript_sync(script, timeout=10)
+        result = str(stdout or stderr or "").strip()
+        if ok and result.startswith(("READY|", "SET|")):
+            self._karafun_audio_route_cache = cache_key
+            _diag(f"[KARAFUN-AUDIO] route verified result={result!r} pid={cache_key[0]}")
+            return True, target
+        _diag(f"[KARAFUN-AUDIO] route verification failed result={result!r}")
+        return False, result.split("|", 1)[-1] or f"Could not select KaraFun output {target!r}"
 
     def _show_karafun_accessibility_setup(self, *, notify: bool = True):
         message = (
@@ -48214,8 +48335,14 @@ class KaraokeApp(QWidget):
                 permission_ok, permission_error = self._karafun_apple_events_preflight()
                 if not permission_ok:
                     raise RuntimeError(permission_error)
+                audio_ok, audio_result = self._ensure_karafun_audio_output()
+                if not audio_ok:
+                    raise RuntimeError(f"KaraFun audio safety check failed: {audio_result}")
                 self._karafun_transparent_renderer_ready = False
-                if transparent_renderer_bounds is not None:
+                if (
+                    transparent_renderer_bounds is not None
+                    and not bool(self.settings.get("karafun_fast_start_enabled", True))
+                ):
                     rx, ry, rw, rh = transparent_renderer_bounds
                     prepare_renderer_script = [
                         'tell application "System Events"',
@@ -48321,6 +48448,8 @@ class KaraokeApp(QWidget):
                             f"[KARAFUN] transparent renderer preflight unavailable result={renderer_result!r}; "
                             "using legacy show-screen handoff"
                         )
+                elif transparent_renderer_bounds is not None:
+                    _diag("[KARAFUN-AUTO] fast start skipped unreliable transparent renderer preflight")
 
                 found = ""
                 selected_query = ""
@@ -48433,8 +48562,17 @@ class KaraokeApp(QWidget):
                     'end tell',
                     'end tell',
                 ]
-                ok, initial_probe, initial_probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
-                initial_probe_state = str(initial_probe or initial_probe_error or "").strip()
+                fast_start = bool(self.settings.get("karafun_fast_start_enabled", True))
+                if fast_start:
+                    # A native double-click on a resolved KaraFun result starts
+                    # playback directly. The old full accessibility-tree scan
+                    # blocked 11-18 seconds after audio had already begun. Let
+                    # the completion monitor verify state in the background.
+                    ok, initial_probe_state = True, "PLAYING"
+                    _diag("[KARAFUN-AUTO] fast start accepted activated result; background monitor will verify playback")
+                else:
+                    ok, initial_probe, initial_probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
+                    initial_probe_state = str(initial_probe or initial_probe_error or "").strip()
                 _diag(f"[KARAFUN-AUTO] playback pre-click state={initial_probe_state!r}")
                 if ok and initial_probe_state == "PLAYING":
                     _schedule_early_handoff("pre_click_playing")
