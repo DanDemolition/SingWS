@@ -1000,6 +1000,20 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("render_limit = 220 if playing else 700", refresh)
         self.assertIn("song_scan_limit = 120 if playing else 500", refresh)
 
+    def test_rotation_fallback_uses_ticker_time_based_scroll_cadence(self):
+        start = MAIN_SOURCE.index("class RotationView(QMainWindow)")
+        end = MAIN_SOURCE.index("class SoundboardPad", start)
+        rotation = MAIN_SOURCE[start:end]
+        step_start = rotation.index("    def scroll_step(self):")
+        step_end = rotation.index("\n    def ", step_start + 8)
+        step = rotation[step_start:step_end]
+        self.assertIn("Qt.TimerType.PreciseTimer", rotation)
+        self.assertIn("ticker_frame_interval_ms_for_refresh", rotation)
+        self.assertIn("time.monotonic()", step)
+        self.assertIn("_scroll_speed_px_per_sec", step)
+        self.assertIn("* dt", step)
+        self.assertNotIn("sb.value() + 1", step)
+
     def test_singer_history_edits_use_debounced_save_path(self):
         source = function_source("_commit_singer_history_change")
         self.assertIn("_schedule_save_data", source)

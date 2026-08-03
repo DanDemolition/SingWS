@@ -17647,9 +17647,13 @@ class RotationView(QMainWindow):
         self.list_widget.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_timer = QTimer(self)
+        self.scroll_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.scroll_timer.timeout.connect(self.scroll_step)
         self.autoscroll_active = False
-        self.scroll_speed = 30  # ms per scroll step
+        self._scroll_speed_px_per_sec = 34.0
+        self._scroll_position = 0.0
+        self._last_scroll_ts = None
+        self._scroll_frame_interval_ms = TICKER_FRAME_INTERVAL_MS
         self.duplicate_count = 0
         self.last_scroll_percent = 0.0
         settings = getattr(parent, "settings", {}) if parent is not None else {}
@@ -17831,6 +17835,7 @@ class RotationView(QMainWindow):
         main_count = self.list_widget.count() - self.duplicate_count if self.duplicate_count else self.list_widget.count()
         main_height = sum(self.list_widget.sizeHintForRow(i) for i in range(main_count)) or 1
         target_value = int(self.last_scroll_percent * main_height)
+        self._scroll_position = float(target_value)
         sb.setValue(min(target_value, sb.maximum()))
 
     def resizeEvent(self, event):
@@ -17838,6 +17843,23 @@ class RotationView(QMainWindow):
         if self.rotation_rail is None:
             self.list_widget.refresh_size_hints()
             self.check_autoscroll()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.rotation_rail is None:
+            self._apply_scroll_cadence()
+            self._last_scroll_ts = None
+
+    def _apply_scroll_cadence(self):
+        """Use the ticker's display-aware 60-120 FPS repaint cadence."""
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            hz = float(screen.refreshRate()) if screen is not None else 0.0
+        except Exception:
+            hz = 0.0
+        self._scroll_frame_interval_ms = ticker_frame_interval_ms_for_refresh(hz)
+        if self.autoscroll_active:
+            self.scroll_timer.start(self._scroll_frame_interval_ms)
 
     def check_autoscroll(self):
         total_items = self.list_widget.count()
@@ -17855,11 +17877,14 @@ class RotationView(QMainWindow):
             self.duplicate_count = len(self.queue_items)
             self.list_widget.refresh_size_hints()
             if not self.autoscroll_active:
-                self.scroll_timer.start(self.scroll_speed)
                 self.autoscroll_active = True
+                self._last_scroll_ts = None
+                self._apply_scroll_cadence()
         else:
             self.scroll_timer.stop()
             self.autoscroll_active = False
+            self._last_scroll_ts = None
+            self._scroll_position = 0.0
             self.list_widget.verticalScrollBar().setValue(0)
             if self.duplicate_count:
                 for _ in range(self.duplicate_count):
@@ -17867,15 +17892,20 @@ class RotationView(QMainWindow):
                 self.duplicate_count = 0
 
     def scroll_step(self):
+        now = time.monotonic()
+        last = self._last_scroll_ts
+        self._last_scroll_ts = now
+        if last is None or not self.autoscroll_active or not self.isVisible():
+            return
+        dt = min(0.25, max(0.0, now - last))
         sb = self.list_widget.verticalScrollBar()
         main_count = self.list_widget.count() - self.duplicate_count
         main_height = sum(self.list_widget.sizeHintForRow(i) for i in range(main_count)) or 1
-        view_height = self.list_widget.viewport().height()
-        wrap_point = max(0, main_height - view_height)
-        if sb.value() < wrap_point + main_height:
-            sb.setValue(sb.value() + 1)
-        else:
-            sb.setValue(sb.value() - main_height)
+        self._scroll_position += float(self._scroll_speed_px_per_sec) * dt
+        if self._scroll_position >= float(main_height):
+            self._scroll_position %= float(main_height)
+        sb.setValue(int(round(self._scroll_position)))
+        self.last_scroll_percent = self._scroll_position / float(main_height)
 
     def lookup_display_name(self, song_path, tracks, artist_title_only=False):
         """Resolve a queue path to its display name.
