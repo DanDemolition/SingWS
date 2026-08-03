@@ -369,16 +369,14 @@ class PerformanceSafetyTests(unittest.TestCase):
         history_refresh = function_source("_schedule_singer_history_refresh")
         self.assertIn("owner_thread = self.thread()", history_refresh)
         self.assertIn("self._run_on_ui_thread(lambda: self._schedule_singer_history_refresh", history_refresh)
-        self.assertIn("_singer_history_refresh_deferred", history_refresh)
-        self.assertIn("timer.start(1000)", history_refresh)
         history_build = function_source("_refresh_singer_history_view")
-        self.assertIn('if bool(getattr(self, "karaoke_playing", False)):', history_build)
+        self.assertIn("render_limit = 220 if playing else 700", history_build)
         history_apply = function_source("_on_singer_history_directory_built")
-        self.assertIn("worker_finished_during_playback", history_apply)
+        self.assertNotIn("worker_finished_during_playback", history_apply)
         history_details = function_source("_update_singer_history_details")
-        self.assertIn("details_requested_during_playback", history_details)
+        self.assertIn("editing_allowed", history_details)
         history_songs_apply = function_source("_on_singer_history_songs_built")
-        self.assertIn("songs_worker_finished_during_playback", history_songs_apply)
+        self.assertNotIn("songs_worker_finished_during_playback", history_songs_apply)
         self.assertIn('if bool(getattr(self, "_app_closing", False)):', function_source("_dispatch_ui_call"))
 
     def test_karaoke_start_does_not_predecode_entire_track(self):
@@ -1006,6 +1004,28 @@ class PerformanceSafetyTests(unittest.TestCase):
         source = function_source("_commit_singer_history_change")
         self.assertIn("_schedule_save_data", source)
         self.assertNotIn("self.save_data()", source)
+
+    def test_singer_history_remains_readable_but_edits_are_locked_during_playback(self):
+        refresh = function_source("_refresh_singer_history_view")
+        details = function_source("_update_singer_history_details")
+        directory_apply = function_source("_on_singer_history_directory_built")
+        songs_apply = function_source("_on_singer_history_songs_built")
+        self.assertNotIn('reason="playback_active"', refresh)
+        self.assertNotIn("worker_finished_during_playback", directory_apply)
+        self.assertNotIn("songs_worker_finished_during_playback", songs_apply)
+        self.assertIn('editing_allowed = not bool(getattr(self, "karaoke_playing", False))', details)
+        for name in (
+            "_rename_selected_singer_history",
+            "_add_song_to_selected_singer_history",
+            "_edit_selected_singer_history_brand",
+            "_edit_selected_singer_history_song",
+            "_delete_selected_singer_history_song",
+            "_delete_selected_singer_history",
+            "_clear_all_singer_history",
+            "_clear_small_singer_history",
+            "_clear_inactive_singer_history",
+        ):
+            self.assertIn('getattr(self, "karaoke_playing", False)', function_source(name))
 
     def test_hidden_singer_history_does_not_rebuild_models(self):
         schedule = function_source("_schedule_singer_history_refresh")

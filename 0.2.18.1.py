@@ -28333,14 +28333,6 @@ class KaraokeApp(QWidget):
                 timer.setSingleShot(True)
                 timer.timeout.connect(self._refresh_singer_history_view)
                 self._singer_history_refresh_timer = timer
-            playing = bool(getattr(self, "karaoke_playing", False))
-            if playing:
-                already_deferred = bool(state.get("_singer_history_refresh_deferred", False))
-                self._singer_history_refresh_deferred = True
-                timer.start(1000)
-                if not already_deferred:
-                    _diag(f"[PERF] singer_history_refresh_deferred reason={reason} playback_active=1")
-                return
             self._singer_history_refresh_deferred = False
             if delay_ms is None:
                 delay_ms = self._playback_safe_ui_delay_ms(160)
@@ -31066,14 +31058,21 @@ class KaraokeApp(QWidget):
     def _refresh_singer_history_view(self):
         if not hasattr(self, "singer_history_singer_list"):
             return
+        editing_allowed = not bool(getattr(self, "karaoke_playing", False))
+        for button_name in (
+            "history_clear_all_button",
+            "history_clear_small_button",
+            "history_clear_inactive_button",
+            "singer_history_sync_button",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(editing_allowed)
         try:
             if self.left_workspace_stack.currentWidget() is not self.singer_history_page:
                 self._singer_history_refresh_hidden_deferred = True
                 return
         except Exception:
-            return
-        if bool(getattr(self, "karaoke_playing", False)):
-            self._schedule_singer_history_refresh(1000, reason="playback_active")
             return
         self._singer_history_refresh_deferred = False
         open_t0 = time.perf_counter()
@@ -31191,9 +31190,6 @@ class KaraokeApp(QWidget):
                 return
             if isinstance(result, dict) and result.get("cancelled"):
                 return
-            if bool(getattr(self, "karaoke_playing", False)):
-                self._schedule_singer_history_refresh(1000, reason="worker_finished_during_playback")
-                return
             self._apply_singer_history_directory_rows(job_id, result, current_key)
         except Exception as e:
             _diag(f"[PERF] singer_history_directory_apply_failed error={e}")
@@ -31301,9 +31297,7 @@ class KaraokeApp(QWidget):
     def _update_singer_history_details(self, singer_key: str):
         if not hasattr(self, "singer_history_name_label"):
             return
-        if bool(getattr(self, "karaoke_playing", False)):
-            self._schedule_singer_history_refresh(1000, reason="details_requested_during_playback")
-            return
+        editing_allowed = not bool(getattr(self, "karaoke_playing", False))
         old_worker = getattr(self, "_singer_history_songs_worker", None)
         try:
             if old_worker is not None and hasattr(old_worker, "cancel"):
@@ -31352,11 +31346,21 @@ class KaraokeApp(QWidget):
             summary += f"  ·  Preferred brand {pref}"
         if hasattr(self, "singer_history_summary_label"):
             self.singer_history_summary_label.setText(summary)
-        self.singer_history_rename_button.setEnabled(True)
-        self.singer_history_brand_button.setEnabled(True)
+        self.singer_history_rename_button.setEnabled(editing_allowed)
+        self.singer_history_brand_button.setEnabled(editing_allowed)
         self._refresh_singer_history_brand_combo(pref)
-        self.singer_history_delete_singer_button.setEnabled(True)
-        self.singer_history_add_song_button.setEnabled(True)
+        self.singer_history_brand_combo.setEnabled(editing_allowed)
+        self.singer_history_delete_singer_button.setEnabled(editing_allowed)
+        self.singer_history_add_song_button.setEnabled(editing_allowed)
+        for button_name in (
+            "history_clear_all_button",
+            "history_clear_small_button",
+            "history_clear_inactive_button",
+            "singer_history_sync_button",
+        ):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(editing_allowed)
         current_song_key = self._selected_singer_history_song_key()
         render_limit = 180 if bool(getattr(self, "karaoke_playing", False)) else 500
         try:
@@ -31444,9 +31448,6 @@ class KaraokeApp(QWidget):
                 return
             if isinstance(result, dict) and result.get("cancelled"):
                 return
-            if bool(getattr(self, "karaoke_playing", False)):
-                self._schedule_singer_history_refresh(1000, reason="songs_worker_finished_during_playback")
-                return
             self._apply_singer_history_song_rows(job_id, singer_key, result, current_song_key)
         except Exception as e:
             _diag(f"[PERF] singer_history_songs_apply_failed singer={singer_key} error={e}")
@@ -31475,8 +31476,9 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         has_rows = any((row or {}).get("selectable") for row in rows)
-        self.singer_history_edit_song_button.setEnabled(bool(has_rows))
-        self.singer_history_delete_song_button.setEnabled(bool(has_rows))
+        editing_allowed = not bool(getattr(self, "karaoke_playing", False))
+        self.singer_history_edit_song_button.setEnabled(bool(has_rows) and editing_allowed)
+        self.singer_history_delete_song_button.setEnabled(bool(has_rows) and editing_allowed)
         if has_rows:
             target_index = self.singer_history_songs_model.indexForSongKey(current_song_key)
             if not target_index.isValid():
@@ -31681,6 +31683,8 @@ class KaraokeApp(QWidget):
         self._sync_singer_history_async(reason)
 
     def _rename_selected_singer_history(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         singer_key = self._selected_singer_history_key()
         record = self.singer_history.get("singers", {}).get(singer_key)
         if not isinstance(record, dict):
@@ -31840,6 +31844,8 @@ class KaraokeApp(QWidget):
         dlg.exec()
 
     def _add_song_to_selected_singer_history(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         singer_key = self._selected_singer_history_key()
         if singer_key:
             self._edit_history_song_dialog(singer_key, None)
@@ -32073,6 +32079,8 @@ class KaraokeApp(QWidget):
         dlg.exec()
 
     def _edit_selected_singer_history_brand(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         singer_key = self._selected_singer_history_key()
         record = self.singer_history.get("singers", {}).get(singer_key)
         if not isinstance(record, dict):
@@ -32119,12 +32127,16 @@ class KaraokeApp(QWidget):
         dlg.exec()
 
     def _edit_selected_singer_history_song(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         singer_key = self._selected_singer_history_key()
         song_key = self._selected_singer_history_song_key()
         if singer_key and song_key:
             self._edit_history_song_dialog(singer_key, song_key)
 
     def _delete_selected_singer_history_song(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         singer_key = self._selected_singer_history_key()
         song_key = self._selected_singer_history_song_key()
         record = self.singer_history.get("singers", {}).get(singer_key)
@@ -32149,6 +32161,8 @@ class KaraokeApp(QWidget):
         self._commit_singer_history_change("history_song_delete")
 
     def _delete_selected_singer_history(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         singer_key = self._selected_singer_history_key()
         record = self.singer_history.get("singers", {}).get(singer_key)
         if not isinstance(record, dict):
@@ -32169,6 +32183,8 @@ class KaraokeApp(QWidget):
         self._commit_singer_history_change("history_singer_delete")
 
     def _clear_all_singer_history(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         answer = QMessageBox.question(
             self,
             "Clear All Singer History",
@@ -32189,6 +32205,8 @@ class KaraokeApp(QWidget):
         self._commit_singer_history_change("history_clear_all")
 
     def _clear_small_singer_history(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         answer = QMessageBox.question(
             self,
             "Clear Small Histories",
@@ -32213,6 +32231,8 @@ class KaraokeApp(QWidget):
         self._commit_singer_history_change("history_clear_small")
 
     def _clear_inactive_singer_history(self):
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
         answer = QMessageBox.question(
             self,
             "Clear Inactive Histories",
