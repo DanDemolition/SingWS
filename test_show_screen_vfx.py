@@ -211,6 +211,10 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertIn("self._fallback_transition_frame_timer.setInterval(33)", source)
         self.assertIn("for i in range(30):", source)
         self.assertIn("painter.drawEllipse(QPointF(cx, cy), wave_radius, wave_radius)", source)
+        self.assertIn('"NOW SINGING", singer, title, artist, duration_ms=3600', source)
+        self.assertIn('"duration_ms": max(500, int(duration_ms))', source)
+        self.assertIn("painter.setOpacity(1.0 - (exit_progress * exit_progress))", source)
+        self.assertIn("burst_t = min(1.0, elapsed / 1.05)", source)
         self.assertIn('area.set_show_vfx_enabled(bool(settings.get("show_screen_vfx_enabled", True)))', source)
         runtime = source[source.index("def _apply_runtime_media_settings"):]
         runtime = runtime[:runtime.index("def ", 10)]

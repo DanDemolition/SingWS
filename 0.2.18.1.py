@@ -7623,7 +7623,12 @@ class VideoAreaWidget(QWidget):
     def show_singer_start_vfx(self, singer: str, title: str = "", artist: str = ""):
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is None:
-            self._show_fallback_transition("UP NEXT", singer, title, artist)
+            # Intel uses the painter-only sequence (no countdown/native Quick
+            # surface). Give its burst, hero hold, and fade enough room to feel
+            # like a proper stage entrance instead of a brief title card.
+            self._show_fallback_transition(
+                "NOW SINGING", singer, title, artist, duration_ms=3600
+            )
             return True
         try:
             overlay.show_singer_start(singer, title, artist)
@@ -7660,6 +7665,7 @@ class VideoAreaWidget(QWidget):
             "title": str(title or ""),
             "artist": str(artist or ""),
             "started_at": time.monotonic(),
+            "duration_ms": max(500, int(duration_ms)),
             "burst": bool(getattr(self, "_show_vfx_enabled", True)),
         }
         self.update()
@@ -7676,7 +7682,12 @@ class VideoAreaWidget(QWidget):
         if not payload:
             return
         elapsed = max(0.0, time.monotonic() - float(payload.get("started_at", time.monotonic())))
+        duration_sec = max(0.5, float(payload.get("duration_ms", 2400) or 2400) / 1000.0)
         painter.save()
+        # Ease away over the final half-second instead of disappearing on the
+        # timer edge. The countdown-free entrance gets a longer readable hold.
+        exit_progress = max(0.0, min(1.0, (elapsed - (duration_sec - 0.55)) / 0.55))
+        painter.setOpacity(1.0 - (exit_progress * exit_progress))
         backdrop_alpha = max(0, min(225, int(225 * min(1.0, elapsed / 0.16))))
         painter.fillRect(self.rect(), QColor(4, 6, 15, backdrop_alpha))
         # Intel-safe explosion: painter-only flash, shockwave, and radial
@@ -7684,8 +7695,8 @@ class VideoAreaWidget(QWidget):
         # removed after real-show crashes on older Macs.
         cx = self.width() * 0.5
         cy = self.height() * 0.46
-        burst_t = min(1.0, elapsed / 0.72)
-        flash_alpha = max(0, int(150 * (1.0 - min(1.0, elapsed / 0.28))))
+        burst_t = min(1.0, elapsed / 1.05)
+        flash_alpha = max(0, int(170 * (1.0 - min(1.0, elapsed / 0.38))))
         if bool(payload.get("burst", True)) and flash_alpha:
             painter.fillRect(self.rect(), QColor(255, 245, 190, flash_alpha))
         wave_radius = min(self.width(), self.height()) * (0.05 + 0.58 * burst_t)
