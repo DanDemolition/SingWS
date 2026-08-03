@@ -52115,12 +52115,13 @@ class KaraokeApp(QWidget):
 
         # Return every candidate that is the SAME song as the best pick so
         # pick_by_disc_priority can still choose the preferred disc version.
-        best_ak = song_index.fuzzy_match_key(str(best.get("artist") or ""))
         best_tk = song_index.fuzzy_match_key(str(best.get("title") or ""))
         same = [
             c for c in candidates
             if song_index.fuzzy_match_key(str(c.get("title") or "")) == best_tk
-            and song_index.fuzzy_match_key(str(c.get("artist") or "")) == best_ak
+            and song_index.artist_names_match(
+                str(c.get("artist") or ""), str(best.get("artist") or "")
+            )
         ]
         return same or [best]
 

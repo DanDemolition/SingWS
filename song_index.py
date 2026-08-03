@@ -126,6 +126,19 @@ _NUMWORDS = {
 }
 _BRACKETS_RE = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
 _ALNUM_RE = re.compile(r"[a-z0-9]+")
+_PHRASE_ALIASES = {"gonna": ("going", "to"), "wanna": ("want", "to")}
+
+def _identity_tokens(s: str) -> List[str]:
+    """Canonical words used only for song identity comparisons."""
+    text = (s or "").lower().replace("\u00A0", " ")
+    text = _BRACKETS_RE.sub(" ", text).replace("&", " and ")
+    tokens: List[str] = []
+    for token in _ALNUM_RE.findall(text):
+        replacement = _PHRASE_ALIASES.get(token, (token,))
+        tokens.extend(_NUMWORDS.get(part, part) for part in replacement)
+    if len(tokens) > 1 and tokens[0] == "the":
+        tokens = tokens[1:]
+    return tokens
 
 def fuzzy_match_key(s: str) -> str:
     """Aggressive normalization for tolerant artist/title matching.
@@ -133,14 +146,27 @@ def fuzzy_match_key(s: str) -> str:
     e.g. 'B.O.B. (Bombs Over Baghdad)' -> 'bob',
          'Matchbox Twenty' -> 'matchbox20', '3 AM'/'3AM' -> '3am'.
     """
-    s = (s or "").lower().replace("\u00A0", " ")
-    s = _BRACKETS_RE.sub(" ", s)            # drop "(...)", "[...]", "{...}"
-    s = s.replace("&", " and ")
-    tokens = _ALNUM_RE.findall(s)
-    if len(tokens) > 1 and tokens[0] == "the":
-        tokens = tokens[1:]                 # ignore a leading "the"
-    tokens = [_NUMWORDS.get(t, t) for t in tokens]
-    return "".join(tokens)
+    return "".join(_identity_tokens(s))
+
+def artist_match_keys(s: str) -> set[str]:
+    """Return artist aliases, including common personal-name orderings."""
+    raw = (s or "").strip()
+    tokens = _identity_tokens(raw)
+    keys = {"".join(tokens)} if tokens else set()
+    if "," in raw:
+        left, right = raw.split(",", 1)
+        reordered = _identity_tokens(right) + _identity_tokens(left)
+        if reordered:
+            keys.add("".join(reordered))
+    elif len(tokens) == 2:
+        keys.add("".join(reversed(tokens)))
+    elif len(tokens) > 2:
+        # "John Michael Smith" may be catalogued as "Smith, John Michael".
+        keys.add("".join(tokens[-1:] + tokens[:-1]))
+    return keys
+
+def artist_names_match(left: str, right: str) -> bool:
+    return bool(artist_match_keys(left) & artist_match_keys(right))
 
 def _get_track_path(track: Dict[str, Any]) -> str:
     return str(track.get("path") or track.get("file") or "")
@@ -279,6 +305,7 @@ def init_schema(con: sqlite3.Connection) -> None:
         if col not in existing_cols:
             con.execute(f"ALTER TABLE songs ADD COLUMN {col} {decl};")
     con.execute("CREATE INDEX IF NOT EXISTS idx_songs_fuzzy ON songs(artist_norm, title_norm);")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_songs_title_norm ON songs(title_norm);")
     con.execute("CREATE INDEX IF NOT EXISTS idx_songs_provider ON songs(provider, provider_track_id);")
 
     cur_ver = None
@@ -287,7 +314,7 @@ def init_schema(con: sqlite3.Connection) -> None:
         cur_ver = r[0] if r else None
     except Exception:
         cur_ver = None
-    if cur_ver != "4":
+    if cur_ver != "5":
         # One-time backfill of normalized columns for an existing library.
         try:
             con.create_function("fuzzykey", 1, fuzzy_match_key, deterministic=True)
@@ -295,7 +322,7 @@ def init_schema(con: sqlite3.Connection) -> None:
             con.create_function("fuzzykey", 1, fuzzy_match_key)
         con.execute("UPDATE songs SET artist_norm = fuzzykey(artist), title_norm = fuzzykey(title);")
         con.execute("UPDATE songs SET provider = COALESCE(NULLIF(provider, ''), 'local');")
-        con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('schema_version','4');")
+        con.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('schema_version','5');")
     con.commit()
 
 def rebuild_from_tracks_json(
@@ -706,27 +733,30 @@ def find_by_artist_title(artist: str, title: str, *, dbfile: Optional[Path]=None
     con = _connect(dbfile, read_only=True)
     
     # Case-insensitive exact match using the composite index
-    rows = con.execute(
+    rows = list(con.execute(
         "SELECT * FROM songs WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?)",
         (artist, title)
-    ).fetchall()
+    ).fetchall())
 
-    # Fallback: tolerant normalized match (parentheticals, punctuation,
-    # number-words, leading "the") via the indexed *_norm columns.
-    if not rows:
-        ak = fuzzy_match_key(artist)
-        tk = fuzzy_match_key(title)
-        if ak and tk:
-            try:
-                rows = con.execute(
-                    "SELECT * FROM songs WHERE artist_norm = ? AND title_norm = ?",
-                    (ak, tk)
-                ).fetchall()
-            except sqlite3.OperationalError:
-                # Read-only lookup path: do not run schema migrations here.
-                # Older DBs without *_norm columns simply skip the fuzzy
-                # fallback until the next explicit index rebuild.
-                rows = []
+    # Always union tolerant matches with exact matches. Returning immediately
+    # after one exact row hid sibling disc versions whose punctuation or artist
+    # name order differed, preventing the automatic version picker from seeing
+    # the complete set.
+    artist_keys = artist_match_keys(artist)
+    tk = fuzzy_match_key(title)
+    if artist_keys and tk:
+        try:
+            placeholders = ",".join("?" for _ in artist_keys)
+            tolerant_rows = con.execute(
+                f"SELECT * FROM songs WHERE title_norm = ? AND artist_norm IN ({placeholders})",
+                (tk, *sorted(artist_keys)),
+            ).fetchall()
+            seen_paths = {str(row["path"] or "") for row in rows}
+            rows.extend(row for row in tolerant_rows if str(row["path"] or "") not in seen_paths)
+        except sqlite3.OperationalError:
+            # Older DBs without *_norm columns retain their exact results until
+            # the next explicit index rebuild performs the schema migration.
+            pass
 
     con.close()
     result = [dict(r) for r in rows]
