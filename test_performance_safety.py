@@ -45,6 +45,26 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn(".repaint(", source)
         self.assertIn(".update()", source)
 
+    def test_python_video_surfaces_do_not_create_native_child_windows(self):
+        preview_start = MAIN_SOURCE.index("class PreviewVideoAreaWidget")
+        preview_end = MAIN_SOURCE.index("class PreviewWindow", preview_start)
+        preview_source = MAIN_SOURCE[preview_start:preview_end]
+        ticker_start = MAIN_SOURCE.index("class Ticker(QFrame)")
+        ticker_source = MAIN_SOURCE[ticker_start:]
+        self.assertNotIn("WA_NativeWindow", preview_source)
+        self.assertNotIn("WA_DontCreateNativeAncestors", preview_source)
+        self.assertNotIn("WA_NativeWindow", ticker_source)
+        self.assertNotIn("WA_DontCreateNativeAncestors", ticker_source)
+
+    def test_removed_gstreamer_detach_does_not_create_parking_window(self):
+        detach = function_source("_detach_video_sinks_now")
+        parking = function_source("_get_sink_parking_winid")
+        recover = function_source("_recover_idle_output")
+        self.assertNotIn("set_window_handle", detach)
+        self.assertNotIn("QWidget", parking)
+        self.assertNotIn("winId", parking)
+        self.assertNotIn("_get_sink_parking_winid", recover)
+
     def test_bgm_pulse_styles_are_cached(self):
         source = function_source("_apply_bg_pulse_style")
         self.assertIn("_bg_player_frame_css_cache", source)

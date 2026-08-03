@@ -14199,7 +14199,7 @@ class PhraseStartDialog(QDialog):
 
 
 class PreviewVideoAreaWidget(QWidget):
-    """Native preview surface widget that can be replaced to evict stale GL overlays."""
+    """Painted preview surface used by the Python/QImage renderer."""
     def __init__(self, owner):
         super().__init__(owner)
         self._owner = owner
@@ -14211,8 +14211,6 @@ class PreviewVideoAreaWidget(QWidget):
         self._karaoke_scaled_pos = QPoint(0, 0)
         self._karaoke_frame_count = 0
         self._karaoke_scale_time_ms = 0.0
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         try:
             self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
             self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
@@ -14358,8 +14356,6 @@ class PreviewWindow(QWidget):
             old_size = old.size()
             old_policy = old.sizePolicy()
             new_area = VideoAreaWidget(self)
-            new_area.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-            new_area.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
             new_area.setSizePolicy(old_policy)
             if not old.background_pixmap.isNull():
                 new_area.background_pixmap = QPixmap(old.background_pixmap)
@@ -22803,18 +22799,10 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        try:
-            if sys.platform == "darwin":
-                park_win = self._get_sink_parking_winid()
-                for _sink in list(getattr(self, "_teardown_detach_sinks", []) or []):
-                    try:
-                        _sink.set_window_handle(int(park_win))
-                    except Exception:
-                        pass
-                self._teardown_detach_sinks = []
-                _diag(f"[TEARDOWN] macOS sink detach reasserted ({reason}) park={int(park_win)}")
-        except Exception:
-            pass
+        # GStreamer video sinks were removed.  Do not create or touch native
+        # parking windows here: a hidden Cocoa child can still participate in
+        # QBackingStore flushes while screens are changing at song handoff.
+        self._teardown_detach_sinks = []
 
         try:
             self._recreate_video_surfaces(f"idle_recover:{reason}")
@@ -22881,44 +22869,12 @@ class KaraokeApp(QWidget):
             pass
 
     def _detach_video_sinks_now(self, reason: str):
-        """Detach karaoke video sinks from windows immediately (macOS), without full teardown."""
-        try:
-            if sys.platform != "darwin":
-                return
-            park_win = self._get_sink_parking_winid()
-            detach_targets = [
-                ("main", getattr(self, "gst_main_video_sink", None)),
-                ("preview", getattr(self, "gst_preview_video_sink", None)),
-            ]
-            # Keep refs so teardown/recovery can reassert detach if needed.
-            self._teardown_detach_sinks = [s for _, s in detach_targets if s is not None]
-            for _name, _sink in detach_targets:
-                if _sink is not None:
-                    try:
-                        _sink.set_window_handle(int(park_win))
-                        _diag(f"[TEARDOWN] sink_detach phase={reason} sink={_name} result=ok")
-                    except Exception:
-                        _diag(f"[TEARDOWN] sink_detach phase={reason} sink={_name} result=fail")
-            _diag(f"[TEARDOWN] macOS sink early detach requested ({reason}) park={int(park_win)}")
-        except Exception:
-            pass
+        """Compatibility no-op now that karaoke uses the Python renderer."""
+        self._teardown_detach_sinks = []
 
     def _get_sink_parking_winid(self):
-        """Return a hidden native window id used to park/detach glimagesink safely on macOS."""
-        try:
-            w = getattr(self, "_sink_parking_widget", None)
-            if w is None:
-                w = QWidget(None)
-                w.setWindowFlag(Qt.WindowType.Tool, True)
-                w.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-                w.resize(1, 1)
-                w.move(-10000, -10000)
-                w.show()
-                w.hide()
-                self._sink_parking_widget = w
-            return int(w.winId())
-        except Exception:
-            return 0
+        """Legacy API retained for callers; no native parking surface exists."""
+        return 0
 
     def _recreate_video_surfaces(self, reason: str):
         """Clear stale frames without replacing live native macOS widgets.
@@ -54108,16 +54064,10 @@ class Ticker(QFrame):
 
         self.setStyleSheet("background-color: black;")
         self.setContentsMargins(0, 0, 0, 0)
-        # Give the ticker its own native window handle so it composites on its
-        # own surface layer, independent of the GStreamer video sink hosted in
-        # the same VideoWindow. Without this, the ticker shares a Qt scene
-        # graph with the video surface and animation hitches whenever the
-        # video does heavy compositing work (fullscreen toggles, frame pushes,
-        # etc.). WA_DontCreateNativeAncestors is critical — it prevents Qt
-        # from also promoting the parent VideoWindow to a native window,
-        # which would defeat the purpose.
-        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        # This QPainter ticker shares the parent backing store.  The removed
+        # GStreamer overlay once required a separate native child here, but on
+        # macOS that extra Cocoa surface can outlive its screen during a
+        # multi-display song transition and crash QBackingStore::flush().
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAutoFillBackground(False)
