@@ -1041,6 +1041,18 @@ class PerformanceSafetyTests(unittest.TestCase):
         ):
             self.assertIn('getattr(self, "karaoke_playing", False)', function_source(name))
 
+    def test_singer_chat_has_nightly_threads_unread_state_and_background_networking(self):
+        build = function_source("_build_chat_page")
+        poll = function_source("_schedule_chat_poll")
+        send = function_source("_send_chat_message")
+        self.assertIn("self.chat_singer_list", build)
+        self.assertIn("self._chat_night_start", build)
+        self.assertIn('host_chat.php', poll)
+        self.assertIn('"since_time"', poll)
+        self.assertIn("threading.Thread", poll)
+        self.assertIn("_show_processing_notification", poll)
+        self.assertIn("_net_send_direct_message", send)
+
     def test_hidden_singer_history_does_not_rebuild_models(self):
         schedule = function_source("_schedule_singer_history_refresh")
         self.assertIn("stack.currentWidget() is history_page", schedule)

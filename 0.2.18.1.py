@@ -1088,7 +1088,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QSpinBox,
     QTextEdit, QPlainTextEdit
 )
-from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette
+from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery
 
@@ -20400,6 +20400,8 @@ class KaraokeApp(QWidget):
 
         self.singer_history_page = self._build_singer_history_page()
         self.left_workspace_stack.addWidget(self.singer_history_page)
+        self.chat_page = self._build_chat_page()
+        self.left_workspace_stack.addWidget(self.chat_page)
         self.waiting_for_add_page = self._build_waiting_for_add_page()
         self.left_workspace_stack.addWidget(self.waiting_for_add_page)
         left_shell_layout.addWidget(self.left_workspace_stack, 1)
@@ -20469,6 +20471,7 @@ class KaraokeApp(QWidget):
         self.bottom_show_button = _build_nav_item("⌂", "Show")
         self.bottom_bgm_button = _build_nav_item("♪", "BGM")
         self.bottom_history_button = _build_nav_item("♙", "Singer History")
+        self.bottom_chat_button = _build_nav_item("✉", "Chat")
         self.bottom_waiting_for_add_button = _build_nav_item("◈", "Waitlist")
         self.bottom_network_button = _build_nav_item("◎", "Network")
         self.bottom_rotation_button = _build_nav_item("↻", "Show Rotation")
@@ -20479,6 +20482,7 @@ class KaraokeApp(QWidget):
             self.bottom_show_button: "Show",
             self.bottom_bgm_button: "BGM",
             self.bottom_history_button: "Singer History",
+            self.bottom_chat_button: "Chat",
             self.bottom_waiting_for_add_button: "Waitlist",
             self.bottom_network_button: "Network",
             self.bottom_rotation_button: "Show Rotation",
@@ -20491,6 +20495,7 @@ class KaraokeApp(QWidget):
             self.bottom_show_button,
             self.bottom_bgm_button,
             self.bottom_history_button,
+            self.bottom_chat_button,
             self.bottom_waiting_for_add_button,
             self.bottom_network_button,
             self.bottom_rotation_button,
@@ -20504,6 +20509,7 @@ class KaraokeApp(QWidget):
         self.bottom_show_button.clicked.connect(lambda: self._set_left_workspace_view("main"))
         self.bottom_bgm_button.clicked.connect(lambda: self._set_left_workspace_view("bg"))
         self.bottom_history_button.clicked.connect(lambda: self._set_left_workspace_view("history"))
+        self.bottom_chat_button.clicked.connect(lambda: self._set_left_workspace_view("chat"))
         self.bottom_waiting_for_add_button.clicked.connect(lambda: self._set_left_workspace_view("waiting"))
         self.bottom_network_button.clicked.connect(self.configure_network)
         self.bottom_rotation_button.clicked.connect(self.open_rotation_view)
@@ -28261,13 +28267,17 @@ class KaraokeApp(QWidget):
     def _set_left_workspace_view(self, mode: str):
         try:
             mode = str(mode or "").lower()
-            if mode not in {"main", "bg", "history", "waiting"}:
+            if mode not in {"main", "bg", "history", "chat", "waiting"}:
                 mode = "main"
             if mode == "bg":
                 self.left_workspace_stack.setCurrentWidget(self.bg_manager)
             elif mode == "history":
                 self.left_workspace_stack.setCurrentWidget(self.singer_history_page)
                 self._schedule_singer_history_refresh(reason="tab_switch")
+            elif mode == "chat":
+                self.left_workspace_stack.setCurrentWidget(self.chat_page)
+                self._chat_mark_current_read()
+                self._render_chat_page()
             elif mode == "waiting":
                 self.left_workspace_stack.setCurrentWidget(self.waiting_for_add_page)
                 self._schedule_waiting_for_add_view_refresh(reason="tab_switch")
@@ -28317,6 +28327,7 @@ class KaraokeApp(QWidget):
                 ("main", getattr(self, "bottom_show_button", None)),
                 ("bg", getattr(self, "bottom_bgm_button", None)),
                 ("history", getattr(self, "bottom_history_button", None)),
+                ("chat", getattr(self, "bottom_chat_button", None)),
                 ("waiting", getattr(self, "bottom_waiting_for_add_button", None)),
             ):
                 if button is not None:
@@ -41114,6 +41125,120 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         return []
+
+    def _build_chat_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page); layout.setContentsMargins(16, 16, 16, 16); layout.setSpacing(10)
+        title = QLabel("Singer Chat"); title.setStyleSheet(f"color:{_v('text_bright')};font-size:20px;font-weight:850;")
+        layout.addWidget(title)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        self.chat_singer_list = QListWidget(); self.chat_singer_list.setMinimumWidth(190)
+        self.chat_singer_list.currentRowChanged.connect(lambda *_: (self._chat_mark_current_read(), self._render_chat_page()))
+        split.addWidget(self.chat_singer_list)
+        right = QWidget(); right_layout = QVBoxLayout(right); right_layout.setContentsMargins(8,0,0,0)
+        self.chat_transcript = QTextEdit(); self.chat_transcript.setReadOnly(True); self.chat_transcript.setPlaceholderText("Select a singer conversation.")
+        right_layout.addWidget(self.chat_transcript, 1)
+        send_row = QHBoxLayout(); self.chat_message_input = QLineEdit(); self.chat_message_input.setPlaceholderText("Message singer…")
+        self.chat_send_button = QPushButton("Send"); self.chat_send_button.clicked.connect(self._send_chat_message)
+        self.chat_message_input.returnPressed.connect(self._send_chat_message)
+        send_row.addWidget(self.chat_message_input, 1); send_row.addWidget(self.chat_send_button); right_layout.addLayout(send_row)
+        split.addWidget(right); split.setStretchFactor(1, 1); layout.addWidget(split, 1)
+        self._chat_messages = []; self._chat_last_id = 0; self._chat_poll_inflight = False
+        _now = time.localtime(); self._chat_night_start = int(time.mktime((_now.tm_year, _now.tm_mon, _now.tm_mday, 0, 0, 0, _now.tm_wday, _now.tm_yday, _now.tm_isdst)))
+        self._chat_poll_timer = QTimer(self); self._chat_poll_timer.timeout.connect(self._schedule_chat_poll); self._chat_poll_timer.start(3000)
+        self._chat_pulse_timer = QTimer(self); self._chat_pulse_timer.setInterval(420); self._chat_pulse_timer.timeout.connect(self._update_chat_nav_state); self._chat_pulse_timer.start()
+        QTimer.singleShot(800, self._schedule_chat_poll)
+        return page
+
+    def _chat_conversations(self):
+        grouped = {}
+        for msg in list(getattr(self, "_chat_messages", []) or []):
+            key = str(msg.get("singer_key") or msg.get("singer") or "").casefold()
+            if key: grouped.setdefault(key, []).append(msg)
+        return grouped
+
+    def _render_chat_page(self):
+        if not hasattr(self, "chat_singer_list"): return
+        grouped = self._chat_conversations(); current_key = self.chat_singer_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.chat_singer_list.currentItem() else ""
+        self.chat_singer_list.blockSignals(True); self.chat_singer_list.clear(); target = -1
+        for key, messages in sorted(grouped.items(), key=lambda pair: max(int(m.get("id",0)) for m in pair[1]), reverse=True):
+            unread = sum(1 for m in messages if m.get("direction") == "in" and not m.get("read"))
+            name = str(messages[-1].get("singer") or key); item = QListWidgetItem(f"{name}{f'  • {unread} new' if unread else ''}")
+            item.setData(Qt.ItemDataRole.UserRole, key); self.chat_singer_list.addItem(item)
+            if key == current_key: target = self.chat_singer_list.count()-1
+        if target < 0 and self.chat_singer_list.count(): target = 0
+        if target >= 0: self.chat_singer_list.setCurrentRow(target)
+        self.chat_singer_list.blockSignals(False)
+        item = self.chat_singer_list.currentItem(); key = item.data(Qt.ItemDataRole.UserRole) if item else ""; lines=[]
+        for m in grouped.get(key, []):
+            who = "Singer" if m.get("direction") == "in" else "You"
+            stamp = time.strftime("%I:%M %p", time.localtime(int(m.get("created_at") or 0))) if m.get("created_at") else ""
+            lines.append(f"{who}  {stamp}\n{m.get('message','')}")
+        self.chat_transcript.setPlainText("\n\n".join(lines)); self.chat_transcript.moveCursor(QTextCursor.MoveOperation.End)
+        self._update_chat_nav_state()
+
+    def _update_chat_nav_state(self):
+        unread = sum(1 for m in list(getattr(self,"_chat_messages",[]) or []) if m.get("direction")=="in" and not m.get("read"))
+        label = getattr(self,"_nav_text_labels",{}).get(getattr(self,"bottom_chat_button",None))
+        if label is not None: label.setText(f"Chat ({unread})" if unread else "Chat")
+        btn = getattr(self,"bottom_chat_button",None)
+        if btn is not None:
+            is_active = bool(
+                hasattr(self, "left_workspace_stack")
+                and hasattr(self, "chat_page")
+                and self.left_workspace_stack.currentWidget() is self.chat_page
+            )
+            pulse_alpha = 0.45 + (0.45 * ((time.monotonic() * 1.4) % 1.0))
+            alert_css = f" QPushButton{{border:2px solid rgba(34,211,160,{pulse_alpha:.2f});background:rgba(34,211,160,{pulse_alpha * 0.22:.2f});}}" if unread else ""
+            btn.setStyleSheet((SINGWS_THEME.nav_item_css(active=is_active) if SINGWS_THEME and hasattr(SINGWS_THEME,"nav_item_css") else (button_css() if is_active else subtle_button_css())) + alert_css)
+
+    def _schedule_chat_poll(self):
+        if getattr(self,"_chat_poll_inflight",False): return
+        base=_network_normalize_base_url(self.settings.get("base_url","")); user=str(self.settings.get("user",self.settings.get("tenant","")) or "").strip(); key=str(self.settings.get("api_key","") or "").strip()
+        if not base or not user or not key: return
+        self._chat_poll_inflight=True; since=int(getattr(self,"_chat_last_id",0) or 0)
+        def worker():
+            items=[]
+            try:
+                r=requests.get(f"{base}/api/v1/host_chat.php",params={"user":user,"since_id":since,"since_time":int(getattr(self,"_chat_night_start",0) or 0)},headers={"X-API-Key":key,"Accept":"application/json"},timeout=6); data=r.json() if r.ok else {}; items=list(data.get("messages") or [])
+            except Exception: pass
+            def finish():
+                self._chat_poll_inflight=False
+                if items:
+                    self._chat_messages.extend(items); self._chat_last_id=max(self._chat_last_id,max(int(x.get("id",0)) for x in items)); self._render_chat_page()
+                    incoming=[x for x in items if x.get("direction")=="in"]
+                    if incoming: self._show_processing_notification(f"💬 {incoming[-1].get('singer','Singer')}: {incoming[-1].get('message','')}",level="info")
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker,daemon=True).start()
+
+    def _chat_mark_current_read(self):
+        item=getattr(self,"chat_singer_list",None).currentItem() if hasattr(self,"chat_singer_list") else None
+        if item is None: return
+        key=str(item.data(Qt.ItemDataRole.UserRole) or ""); singer=""
+        for m in self._chat_messages:
+            if str(m.get("singer_key") or "")==key: m["read"]=True; singer=str(m.get("singer") or singer)
+        if not singer: return
+        base=_network_normalize_base_url(self.settings.get("base_url","")); user=str(self.settings.get("user",self.settings.get("tenant","")) or ""); api=str(self.settings.get("api_key","") or "")
+        def mark_read():
+            try:
+                requests.post(f"{base}/api/v1/host_chat.php",data={"user":user,"action":"mark_read","singer":singer},headers={"X-API-Key":api},timeout=6)
+            except Exception:
+                pass
+        threading.Thread(target=mark_read,daemon=True).start()
+
+    def _send_chat_message(self):
+        item=self.chat_singer_list.currentItem(); message=self.chat_message_input.text().strip()
+        if item is None or not message: return
+        key=str(item.data(Qt.ItemDataRole.UserRole) or ""); grouped=self._chat_conversations(); singer=str((grouped.get(key) or [{}])[-1].get("singer") or "")
+        self.chat_message_input.clear(); self.chat_send_button.setEnabled(False)
+        def worker():
+            ok,err=self._net_send_direct_message(singer,message)
+            def finish():
+                self.chat_send_button.setEnabled(True)
+                if ok: self._chat_last_id=0; self._chat_messages=[]; self._schedule_chat_poll()
+                else: self._show_processing_notification(err or "Could not send chat message.",level="error")
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker,daemon=True).start()
 
     def open_direct_message_dialog(self, singer_idx: int):
         if singer_idx < 0 or singer_idx >= len(self.queue):
