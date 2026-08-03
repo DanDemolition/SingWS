@@ -11,6 +11,7 @@ instead of silent unpinning, and the name recorded alongside the id.
 import importlib.util
 import os
 import sys
+import types
 import unittest
 
 os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
@@ -68,14 +69,36 @@ class AudioOutputPinningTests(unittest.TestCase):
         )
         self.assertEqual(app._get_selected_audio_output_id(), "qt_headphones01")
 
-    def test_unplugged_device_falls_back_to_default(self):
+    def test_unplugged_device_keeps_saved_pin_while_playback_can_fallback(self):
         app = self._app(
             {"audio_output_id": "dev_stale", "audio_output_name": "USB Interface"},
             self._cache(),
         )
-        self.assertEqual(app._get_selected_audio_output_id(), "default")
-        self.assertEqual(app.settings["audio_output_id"], "default")
-        # The name is kept so a later recovery can still re-pin by hand/name.
+        self.assertEqual(app._get_selected_audio_output_id(), "dev_stale")
+        self.assertEqual(app.settings["audio_output_id"], "dev_stale")
+        self.assertEqual(app.settings["audio_output_name"], "USB Interface")
+
+    def test_missing_pin_is_not_persistently_reset_by_legacy_sink_fallback(self):
+        app = self._app(
+            {"audio_output_id": "dev_stale", "audio_output_name": "USB Interface"},
+            self._cache(),
+        )
+        app._audio_device_missing_notice_shown = False
+        app._update_audio_output_button = lambda: None
+
+        class _Factory:
+            @staticmethod
+            def make(factory, name):
+                return factory, name
+
+        old_gst = self.singws.Gst
+        self.singws.Gst = types.SimpleNamespace(ElementFactory=_Factory)
+        try:
+            sink = app._create_audio_sink_for_selected_output("test_sink")
+        finally:
+            self.singws.Gst = old_gst
+        self.assertEqual(sink, ("autoaudiosink", "test_sink"))
+        self.assertEqual(app.settings["audio_output_id"], "dev_stale")
         self.assertEqual(app.settings["audio_output_name"], "USB Interface")
 
     def test_set_audio_output_persists_display_name(self):

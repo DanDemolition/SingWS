@@ -25178,14 +25178,8 @@ class KaraokeApp(QWidget):
             _diag(
                 f"[AUDIO] selected output id={out_id!r} "
                 f"name={str(self.settings.get('audio_output_name', '') or '')!r} not found; "
-                "falling back to system default (device unplugged or renamed)"
+                "temporarily using system default without changing the saved preference"
             )
-            self.settings["audio_output_id"] = "default"
-            try:
-                self.save_settings()
-            except Exception:
-                pass
-            out_id = "default"
         return out_id
 
     def _recover_audio_output_selection(self, stale_id: str) -> str:
@@ -25248,19 +25242,12 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        # Selected device disappeared: auto-fallback to default once.
+        # Selected device disappeared: use default for this sink only. Never
+        # overwrite the durable preference; hot-plug recovery should return to
+        # the saved device automatically when it is available again.
         if not self._audio_device_missing_notice_shown:
             _diag("[AUDIO] Selected output unavailable; reverting to Default (System)")
             self._audio_device_missing_notice_shown = True
-        self.settings["audio_output_id"] = "default"
-        try:
-            self.save_settings()
-        except Exception:
-            pass
-        try:
-            self._update_audio_output_button()
-        except Exception:
-            pass
         return Gst.ElementFactory.make(default_factory, sink_name)
 
     def _set_audio_output_id(self, output_id: str):
@@ -25393,12 +25380,20 @@ class KaraokeApp(QWidget):
         selected = self._get_selected_audio_output_id()
         outputs = self._refresh_audio_output_cache()
         item = next((x for x in outputs if x.get("id") == selected), outputs[0] if outputs else None)
+        if selected != "default" and not any(str(x.get("id") or "") == selected for x in outputs):
+            saved_name = str(self.settings.get("audio_output_name", "") or "Saved audio output")
+            item = {"id": selected, "name": saved_name, "kind": self._classify_audio_output_name(saved_name)}
+            unavailable = True
+        else:
+            unavailable = False
         if item is None:
             icon = "🔊"
             tip = "Audio Output: Default (System)"
         else:
             icon = self._audio_icon_for_kind(item.get("kind", "speaker"))
             tip = f"Audio Output: {item.get('name', 'Default (System)')}"
+            if unavailable:
+                tip += " (unavailable; temporarily using system default)"
         self._audio_output_button_label = icon
         try:
             # Use native monochrome icon so it blends with transport controls.
@@ -25457,6 +25452,15 @@ class KaraokeApp(QWidget):
         style_app_menu(menu)
         selected = self._get_selected_audio_output_id()
         outputs = self._refresh_audio_output_cache()
+
+        if selected != "default" and not any(str(out.get("id") or "") == selected for out in outputs):
+            saved_name = str(self.settings.get("audio_output_name", "") or "Saved audio output")
+            missing = QAction(f"{saved_name} (Unavailable — saved)", menu)
+            missing.setCheckable(True)
+            missing.setChecked(True)
+            missing.setEnabled(False)
+            menu.addAction(missing)
+            menu.addSeparator()
 
         for out in outputs:
             oid = str(out.get("id", "default"))
@@ -26878,12 +26882,18 @@ class KaraokeApp(QWidget):
             audio_output_combo.clear()
             outputs = self._refresh_audio_output_cache()
             selected_idx = 0
+            found_wanted = False
             for i, out in enumerate(outputs):
                 oid = str(out.get("id", "default"))
                 label = f"{out.get('name', 'Audio Output')}"
                 audio_output_combo.addItem(label, oid)
                 if oid == wanted:
                     selected_idx = i
+                    found_wanted = True
+            if wanted != "default" and not found_wanted:
+                saved_name = str(self.settings.get("audio_output_name", "") or "Saved audio output")
+                audio_output_combo.addItem(f"{saved_name} (Unavailable — saved)", wanted)
+                selected_idx = audio_output_combo.count() - 1
             audio_output_combo.setCurrentIndex(selected_idx)
             audio_output_combo.blockSignals(False)
 
