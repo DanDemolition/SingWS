@@ -3,23 +3,26 @@
 from pathlib import Path
 import os
 import platform
+import subprocess
 import sys
 
 project_root = Path(SPECPATH)
 machine = platform.machine().lower()
 brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("/usr/local")
 
-# GStreamer has been removed from SingWS. Nothing here bundles gstreamer
-# plugins, the plugin scanner, gi typelibs, or a plugin registry — `gi` is in
-# `excludes` below so PyInstaller cannot pull GStreamer back in transitively.
+# Permanent Intel legacy build for macOS 12/13. It intentionally excludes mpv,
+# whose current Intel binaries require macOS 14, and retains the proven
+# FFmpeg/Signalsmith karaoke path.
+# GStreamer has been removed from SingWS. This Intel build no longer
+# copies GStreamer (framework plugins, typelibs, scanner, core dylibs) —
+# that framework was the single largest thing in the bundle (~315 MiB). `gi`
+# is in `excludes` below so PyInstaller cannot pull GStreamer back in.
 
 extra_datas = []
 binaries = []
 
 for helper in (
     "python_karaoke_transport.py",
-    "mpv_playback.py",
-    "mpv_karaoke_transport.py",
     "bass_background_engine.py",
     "song_index.py",
     "singws_eq.py",
@@ -29,22 +32,6 @@ for helper in (
     helper_path = project_root / helper
     if helper_path.exists():
         extra_datas.append((str(helper_path), "."))
-
-# Add the complete Apple Silicon mpv/Metal runtime while retaining the
-# FFmpeg/Signalsmith karaoke engine as the default and fallback path.
-mpv_binary = brew_root / "bin" / "mpv"
-libmpv = brew_root / "lib" / "libmpv.2.dylib"
-moltenvk = brew_root / "lib" / "libMoltenVK.dylib"
-moltenvk_icd = project_root / "MoltenVK_icd.json"
-for required in (mpv_binary, libmpv, moltenvk, moltenvk_icd):
-    if not required.exists():
-        raise SystemExit(f"Required mpv bundle input is missing: {required}")
-binaries.extend((
-    (str(mpv_binary), "."),
-    (str(libmpv), "."),
-    (str(moltenvk), "."),
-))
-extra_datas.append((str(moltenvk_icd), "vulkan/icd.d"))
 
 for bass_lib in (Path("vendor/bass") / name for name in (
     "libbass.dylib",
@@ -101,12 +88,13 @@ for plugin_group in qt_plugin_groups:
         )
 
 # Bundle ffmpeg and ffprobe so the app works without a Homebrew install.
-# Prefer the checked universal launchers so cross-builds do not pick up the
-# build host's architecture-specific Homebrew binaries.
-# The runtime hook adds Frameworks/ to PATH so _ffmpeg_path() finds them
-# via shutil.which() in the frozen app.
+# The copies in bin/ are universal launchers. Their arm64 slices use Homebrew
+# codec dylibs, while their x86_64 slices do not. PyInstaller analyzes the
+# native arm64 slice during this cross-build, so its dependency scan can add
+# ARM-only Homebrew codec libraries that the Intel slices never reference.
 for ff_binary in ("ffmpeg", "ffprobe"):
     candidates = (
+        project_root / "build-intel-legacy-input" / ff_binary,
         project_root / "bin" / ff_binary,
         brew_root / "bin" / ff_binary,
         Path("/usr/local/bin") / ff_binary,
@@ -125,11 +113,9 @@ a = Analysis(
         'signalsmith_audio_native',
         'mutagen',
         'python_karaoke_transport',
-        'mpv_playback',
-        'mpv_karaoke_transport',
-        'mpv',
         'bass_background_engine',
         'song_index',
+        # 10-band graphic EQ added this session — pulls in numpy + scipy.
         'singws_eq',
         'singws_master_audio',
         'mac_keep_awake',
@@ -148,10 +134,11 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[str(project_root / 'singws_pyinstaller_runtime.py')],
-    # Keep GStreamer out of the graph entirely: no plugins, scanner, typelibs,
-    # or GLib gir get pulled in, and a stray transitive `import gi` cannot
-    # resurrect ~315 MiB of frameworks.
+    runtime_hooks=[
+        str(project_root / 'singws_pyinstaller_runtime.py'),
+        str(project_root / 'singws_intel_legacy_runtime.py'),
+    ],
+    # Keep GStreamer out of the graph entirely (no plugins/scanner/typelibs).
     excludes=['gi', 'gi.repository'],
     noarchive=False,
     optimize=0,
@@ -161,6 +148,23 @@ a = Analysis(
 _gst_binaries = [item for item in a.binaries if 'gst' in str(item[0]).lower() or 'gstreamer' in str(item[0]).lower()]
 if _gst_binaries:
     raise SystemExit(f"GStreamer artifacts unexpectedly present in build: {_gst_binaries[:5]}")
+
+
+def _keep_intel_binary(item):
+    """Exclude ARM-only Homebrew dependencies discovered from universal tools."""
+    source = Path(str(item[1]))
+    if not str(source).startswith("/opt/homebrew/") or not source.exists():
+        return True
+    result = subprocess.run(
+        ["lipo", "-archs", str(source)], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0 or "x86_64" in result.stdout.split():
+        return True
+    print(f"[intel-build] excluding unreachable ARM-only dependency: {source}")
+    return False
+
+
+a.binaries = [item for item in a.binaries if _keep_intel_binary(item)]
 
 pyz = PYZ(a.pure)
 
@@ -177,7 +181,11 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch='arm64',
+    # Produce a universal2 executable so the .app runs on both Apple
+    # Silicon and Intel Macs.  Requires every bundled native dependency
+    # (Python, numpy, scipy, PyQt6, signalsmith_audio_native, BASS, ffmpeg,
+    # GStreamer) to also be universal2.
+    target_arch='x86_64',
     codesign_identity=None,
     entitlements_file=str(project_root / 'SingWS.entitlements'),
 )
@@ -202,6 +210,7 @@ app = BUNDLE(
         'CFBundleDisplayName': 'SingWS',
         'CFBundleShortVersionString': '0.4.3.5',
         'CFBundleVersion': '0.4.3.5',
+        'LSMinimumSystemVersion': '12.0',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
             "SingWS uses System Events to find, queue, and control songs in the KaraFun application."

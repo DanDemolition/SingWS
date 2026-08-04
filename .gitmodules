@@ -1,0 +1,9 @@
+[submodule "vendor/pybind11"]
+	path = vendor/pybind11
+	url = https://github.com/pybind/pybind11.git
+[submodule "vendor/signalsmith-linear"]
+	path = vendor/signalsmith-linear
+	url = https://github.com/Signalsmith-Audio/linear.git
+[submodule "vendor/signalsmith-stretch"]
+	path = vendor/signalsmith-stretch
+	url = https://github.com/Signalsmith-Audio/signalsmith-stretch.git

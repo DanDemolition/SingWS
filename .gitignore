@@ -14,15 +14,21 @@ venv/
 .venv-test/
 .venv-test-brew/
 .venv-universal/
+.venv-intel-legacy/
+.legacy-intel-wheelhouse/
 
 # Build outputs and packaged artifacts
 build/
 dist/
+build-intel-legacy-input/
+build-intel-legacy/
+dist-intel-legacy/
 *.app
 *.dmg
 *.pkg
 *.zip
 *.log
+signalsmith_audio_native.cpython-312-darwin.so
 
 # Large local media/tooling artifacts
 bin/
@@ -45,3 +51,4 @@ tmp_live_test_backup/
 !SingWS-universal.spec
 !SingWS-x86_64.spec
 !SingWS-arm64.spec
+!SingWS-intel-legacy.spec

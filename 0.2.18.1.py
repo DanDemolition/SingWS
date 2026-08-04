@@ -1355,7 +1355,14 @@ def _preferred_update_asset(assets: list) -> dict | None:
         if machine in {"arm64", "aarch64"}:
             preferred_terms = ["arm64", "universal"]
         elif machine in {"x86_64", "amd64", "i386", "i686"}:
-            preferred_terms = ["x86_64", "intel", "universal"]
+            try:
+                mac_major = int((platform.mac_ver()[0] or "0").split(".")[0])
+            except Exception:
+                mac_major = 0
+            if 0 < mac_major < 14:
+                preferred_terms = ["intel-legacy", "x86_64", "universal"]
+            else:
+                preferred_terms = ["x86_64", "intel", "universal"]
     for term in preferred_terms:
         for asset in dmg_assets:
             if term in str(asset.get("name", "")).lower():
@@ -1441,7 +1448,15 @@ class GitHubUpdateWorker(QThread):
             if machine in {"arm64", "aarch64"}:
                 keys = ["mac_arm64", "mac_universal"]
             elif machine in {"x86_64", "amd64", "i386", "i686"}:
-                keys = ["mac_x86_64", "mac_universal"]
+                try:
+                    mac_major = int((platform.mac_ver()[0] or "0").split(".")[0])
+                except Exception:
+                    mac_major = 0
+                keys = (
+                    ["mac_intel_legacy", "mac_x86_64", "mac_universal"]
+                    if 0 < mac_major < 14
+                    else ["mac_x86_64", "mac_universal"]
+                )
         keys.append("mac_universal")
         for key in keys:
             item = downloads.get(key)
@@ -13211,6 +13226,13 @@ class VideoWindow(QWidget):
         self._install_fullscreen_mouse_target(getattr(overlay, "_view", None))
 
     def _toggle_output_fullscreen(self):
+        try:
+            owner = getattr(self, "_external_owner", None)
+            plugin = getattr(owner, "_mpv_playback", None) if owner is not None else None
+            if plugin is not None and hasattr(plugin, "beginWindowTransition"):
+                plugin.beginWindowTransition(1100)
+        except Exception:
+            pass
         if self.isFullScreen():
             self.showNormal()
         else:
@@ -18620,6 +18642,11 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
+        # Playback-engine changes made in Settings are deliberately applied on
+        # the next application launch, never halfway through a show/session.
+        self._karaoke_engine_session_pref = str(
+            self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg"
+        ).strip().lower()
         _, library_settings_changed = _migrate_library_locations(self.settings)
         if library_settings_changed:
             self.save_settings()
@@ -22367,6 +22394,7 @@ class KaraokeApp(QWidget):
                 transport.stop()
             except Exception as e:
                 _diag(f"[PY-KARAOKE] stop failed: {e}")
+        self._set_mpv_hosts_visible(False)
         self._stop_lyrics_background_video("karaoke_stopped")
 
     # -------------------- MP4 background videos behind CDG lyrics ----------
@@ -22500,18 +22528,144 @@ class KaraokeApp(QWidget):
     def _select_karaoke_transport_cls(self):
         """Resolve the live karaoke engine.
 
-        GStreamer has been removed; the FFmpeg/Qt ``PythonKaraokeTransport`` is
-        the sole engine. A stale ``karaoke_engine`` setting of gstreamer/auto is
-        accepted and simply maps to the FFmpeg engine. Returns
+        mpv is an experimental macOS path. FFmpeg/Qt remains the default and
+        automatic fallback. A stale ``karaoke_engine`` setting of gstreamer/auto
+        is accepted and simply maps to the FFmpeg engine. Returns
         (normalized_pref, transport_cls_or_None).
         """
         try:
-            pref = str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").strip().lower()
+            override = str(os.environ.get("SINGWS_KARAOKE_ENGINE", "") or "").strip()
+            session_pref = getattr(self, "_karaoke_engine_session_pref", None)
+            pref = str(
+                override
+                or session_pref
+                or self.settings.get("karaoke_engine", "ffmpeg")
+                or "ffmpeg"
+            ).strip().lower()
+            if os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1":
+                pref = "ffmpeg"
         except Exception:
             pref = "ffmpeg"
         if pref in ("gstreamer", "gst", "auto"):
             _diag(f"[KARAOKE-ENGINE] preference {pref!r} obsolete (GStreamer removed); using FFmpeg engine")
+            pref = "ffmpeg"
+        if pref == "mpv" and sys.platform == "darwin":
+            return "mpv", PythonKaraokeTransport
         return "ffmpeg", PythonKaraokeTransport
+
+    def _ensure_mpv_karaoke_core(self):
+        """Lazily attach mpv's two Metal windows to the existing video areas."""
+        plugin = getattr(self, "_mpv_playback", None)
+        if plugin is not None:
+            return plugin
+        from mpv_playback import MpvPlaybackPlugin
+        from mpv_karaoke_transport import MpvVideoHost
+
+        plugin = MpvPlaybackPlugin(log=_diag)
+        output_parent = self.video_window.video_area
+        preview_parent = self.preview_window.video_area
+        output_host = MpvVideoHost(output_parent)
+        preview_host = MpvVideoHost(preview_parent)
+        output_host.setObjectName("mpv_karaoke_output")
+        preview_host.setObjectName("mpv_karaoke_preview")
+        for parent, host in ((output_parent, output_host), (preview_parent, preview_host)):
+            layout = parent.layout()
+            if layout is None:
+                layout = QVBoxLayout(parent)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(0)
+            layout.addWidget(host)
+            host.show()
+        QApplication.processEvents()
+        if not plugin.attach(preview_host, output_host):
+            try:
+                plugin.shutdown()
+            except Exception:
+                pass
+            output_host.deleteLater()
+            preview_host.deleteLater()
+            raise RuntimeError(plugin.errorString() or "mpv surface attach failed")
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(plugin.shutdown)
+        self._mpv_playback = plugin
+        self._mpv_output_host = output_host
+        self._mpv_preview_host = preview_host
+        self._apply_mpv_display_mode()
+        _diag(f"[MPV] initialized plugin={plugin.version()} audio={plugin.audioDescription()}")
+        return plugin
+
+    def _set_mpv_hosts_visible(self, visible: bool):
+        for name in ("_mpv_output_host", "_mpv_preview_host"):
+            host = getattr(self, name, None)
+            if host is not None:
+                host.setVisible(bool(visible))
+                if visible:
+                    host.raise_()
+
+    def _apply_mpv_display_mode(self):
+        plugin = getattr(self, "_mpv_playback", None)
+        if plugin is None:
+            return
+        mode = self._effective_cdg_display_mode()
+        plugin.setVideoStretch(mode == "stretch")
+        plugin.setCdgOutputSidefill(mode == "sidefill")
+
+    def _start_mpv_karaoke_transport(
+        self, *, audio_path, video_path, mode, semitones,
+        start_seconds=0.0, loop_seconds=None, duration_seconds=None,
+    ):
+        from mpv_karaoke_transport import MpvKaraokeTransport
+
+        plugin = self._ensure_mpv_karaoke_core()
+        self._stop_python_karaoke_transport()
+        transport = MpvKaraokeTransport(
+            plugin,
+            audio_path=audio_path,
+            video_path=video_path,
+            mode=mode,
+            parent=self,
+        )
+        transport.duration_seconds = float(duration_seconds or 0.0)
+        transport.started.connect(lambda: _diag("[MPV] audible playback started"))
+        if str(mode).lower() != "audio":
+            transport.started.connect(lambda: self._set_mpv_hosts_visible(True))
+        transport.ended.connect(self._on_python_karaoke_ended)
+        transport.set_modifiers(
+            float(self._clamp_karaoke_tempo(self._karaoke_tempo_percent)) / 100.0,
+            float(self._clamp_karaoke_key(semitones)),
+        )
+        transport.set_volume(float(getattr(self, "_host_karaoke_live_volume", 1.0) or 0.0))
+        transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
+        self._apply_mpv_display_mode()
+        # Persistent Metal surfaces can retain the preceding texture. Reveal
+        # only from the readiness-gated started signal above.
+        self._set_mpv_hosts_visible(False)
+        self._current_karaoke_audio_path = str(audio_path or "")
+        self.karaoke_transport = transport
+        self.karaoke_volume = None
+        try:
+            transport.start(start_seconds)
+            if loop_seconds and len(loop_seconds) == 2:
+                transport.set_loop(float(loop_seconds[0]), float(loop_seconds[1]))
+        except Exception:
+            self.karaoke_transport = None
+            self._set_mpv_hosts_visible(False)
+            try:
+                transport.stop()
+            except Exception:
+                pass
+            raise
+        self._last_karaoke_engine = "mpv"
+        self._setup_end_silence_state(mode, None)
+        self._arm_audio_end_floor(audio_path)
+        self._update_karaoke_key_ui()
+        _diag(
+            f"[KARAOKE-ENGINE] engine=mpv mode={mode} "
+            f"file={os.path.basename(audio_path)} key={int(semitones):+d} "
+            f"tempo={float(self._karaoke_tempo_percent):.0f}%"
+        )
+        return True
 
     def _start_python_karaoke_transport(
         self,
@@ -22525,6 +22679,21 @@ class KaraokeApp(QWidget):
         duration_seconds: float | None = None,
     ):
         engine_pref, transport_cls = self._select_karaoke_transport_cls()
+        if engine_pref == "mpv":
+            try:
+                return self._start_mpv_karaoke_transport(
+                    audio_path=audio_path,
+                    video_path=video_path,
+                    mode=mode,
+                    semitones=semitones,
+                    start_seconds=start_seconds,
+                    loop_seconds=loop_seconds,
+                    duration_seconds=duration_seconds,
+                )
+            except Exception as exc:
+                _diag(f"[MPV] experimental engine failed; falling back to FFmpeg: {exc}")
+                self._set_mpv_hosts_visible(False)
+                engine_pref = "ffmpeg-fallback"
         if transport_cls is None:
             detail = str(
                 PYTHON_KARAOKE_IMPORT_ERROR
@@ -26192,8 +26361,28 @@ class KaraokeApp(QWidget):
         v.addLayout(pad_row)
 
         v = _section_card(tab_audio, "Playback")  # ---- Audio ----
-        # (Karaoke playback engine chooser removed — GStreamer is gone; the
-        # FFmpeg/Qt engine is the only one. See _select_karaoke_transport_cls.)
+        mpv_engine_cb = QCheckBox("Use experimental mpv video engine")
+        mpv_engine_cb.setChecked(
+            str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").strip().lower() == "mpv"
+        )
+        legacy_intel_build = os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1"
+        mpv_engine_cb.setEnabled(sys.platform == "darwin" and not legacy_intel_build)
+        mpv_engine_cb.setToolTip(
+            "Uses mpv for CDG/MP4 video and audio-master playback. "
+            "FFmpeg/SignalSmith remains available as the automatic fallback."
+        )
+        v.addWidget(mpv_engine_cb)
+        mpv_engine_note = QLabel(
+            "This macOS 12/13 Intel edition permanently uses the compatible "
+            "FFmpeg/SignalSmith engine."
+            if legacy_intel_build
+            else "Experimental macOS option. Restart SingWS after changing it. "
+                 "The current session keeps its existing engine."
+            if sys.platform == "darwin"
+            else "The experimental mpv engine is currently available on macOS only."
+        )
+        mpv_engine_note.setWordWrap(True)
+        v.addWidget(mpv_engine_note)
 
         gap_row = QHBoxLayout()
         gap_row.addWidget(QLabel("BG -> Karaoke Gap (seconds):"))
@@ -26831,6 +27020,17 @@ class KaraokeApp(QWidget):
             # re-evaluate on the next song start.
             self._apply_simple_audio_mode_live(checked)
 
+        def on_mpv_engine_toggled(checked: bool):
+            self.settings["karaoke_engine"] = "mpv" if bool(checked) else "ffmpeg"
+            self.save_settings()
+            mpv_engine_note.setText(
+                "Saved. Restart SingWS to use the mpv engine. "
+                "The current session is unchanged."
+                if checked
+                else "Saved. Restart SingWS to use the FFmpeg/SignalSmith engine. "
+                     "The current session is unchanged."
+            )
+
         def on_normalize_toggled(checked: bool):
             self.settings["karaoke_normalize_enabled"] = bool(checked)
             self.save_settings()
@@ -26951,6 +27151,7 @@ class KaraokeApp(QWidget):
                 filename_fmt_combo.findData(DEFAULT_FILENAME_FORMAT)
             )
             bg_gap_spin.setValue(0.0)
+            mpv_engine_cb.setChecked(False)
             end_silence_cb.setChecked(True)
             end_threshold_spin.setValue(2.5)
             bg_end_silence_cb.setChecked(False)
@@ -27035,6 +27236,7 @@ class KaraokeApp(QWidget):
 
         audio_output_combo.currentIndexChanged.connect(on_audio_output_changed)
         bg_gap_spin.valueChanged.connect(on_bg_gap_changed)
+        mpv_engine_cb.toggled.connect(on_mpv_engine_toggled)
         karaoke_bgm_crossfade_cb.toggled.connect(on_karaoke_bgm_crossfade_toggled)
         end_silence_cb.toggled.connect(on_end_silence_toggled)
         auto_advance_cb.toggled.connect(on_auto_advance_toggled)

@@ -20,6 +20,8 @@ binaries = []
 
 for helper in (
     "python_karaoke_transport.py",
+    "mpv_playback.py",
+    "mpv_karaoke_transport.py",
     "bass_background_engine.py",
     "song_index.py",
     "singws_eq.py",
@@ -29,6 +31,23 @@ for helper in (
     helper_path = project_root / helper
     if helper_path.exists():
         extra_datas.append((str(helper_path), "."))
+
+# mpv's macOS gpu-next windows use Vulkan through MoltenVK. Keep the current
+# FFmpeg/Signalsmith path in the bundle as fallback, while adding every native
+# runtime required by the experimental mpv engine on an Intel Mac.
+mpv_binary = brew_root / "bin" / "mpv"
+libmpv = brew_root / "lib" / "libmpv.2.dylib"
+moltenvk = brew_root / "lib" / "libMoltenVK.dylib"
+moltenvk_icd = project_root / "MoltenVK_icd.json"
+for required in (mpv_binary, libmpv, moltenvk, moltenvk_icd):
+    if not required.exists():
+        raise SystemExit(f"Required mpv bundle input is missing: {required}")
+binaries.extend((
+    (str(mpv_binary), "."),
+    (str(libmpv), "."),
+    (str(moltenvk), "."),
+))
+extra_datas.append((str(moltenvk_icd), "vulkan/icd.d"))
 
 for bass_lib in (Path("vendor/bass") / name for name in (
     "libbass.dylib",
@@ -109,6 +128,9 @@ a = Analysis(
         'signalsmith_audio_native',
         'mutagen',
         'python_karaoke_transport',
+        'mpv_playback',
+        'mpv_karaoke_transport',
+        'mpv',
         'bass_background_engine',
         'song_index',
         # 10-band graphic EQ added this session — pulls in numpy + scipy.
@@ -144,9 +166,19 @@ if _gst_binaries:
 
 
 def _keep_intel_binary(item):
-    """Exclude ARM-only Homebrew dependencies discovered from universal tools."""
+    """Exclude ARM-only dependencies discovered from universal tools.
+
+    This used to only consider sources under /opt/homebrew/, which misses the
+    case that actually happens on an Intel host: bin/ffmpeg is universal and
+    the ARM-only codec dylibs it pulls in live beside it in the project's own
+    bin/ directory, not in Homebrew. Those slipped through and the bundle
+    failed verify_macos_arch.py --require x86_64 with 15 arm64 files.
+
+    Judge by architecture, not by path -- anything carrying an x86_64 slice is
+    kept, so universal binaries are never dropped.
+    """
     source = Path(str(item[1]))
-    if not str(source).startswith("/opt/homebrew/") or not source.exists():
+    if not source.exists():
         return True
     result = subprocess.run(
         ["lipo", "-archs", str(source)], capture_output=True, text=True, check=False
