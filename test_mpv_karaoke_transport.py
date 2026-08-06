@@ -4,8 +4,18 @@ import unittest
 
 from PyQt6.QtCore import QCoreApplication
 
-import mpv_playback
 from mpv_karaoke_transport import MpvKaraokeTransport
+
+try:
+    import mpv_playback
+except Exception as exc:  # pragma: no cover - depends on the interpreter used
+    # The plugin needs python-mpv (and libmpv). The release test runner uses the
+    # system Python framework, which has neither; the venv used for development
+    # does. Skip the plugin-level cases there instead of failing collection.
+    mpv_playback = None
+    MPV_IMPORT_ERROR = str(exc)
+else:
+    MPV_IMPORT_ERROR = ""
 
 
 class _Plugin:
@@ -150,6 +160,7 @@ class _FakeFollower:
         return self.clock
 
 
+@unittest.skipIf(mpv_playback is None, f"python-mpv unavailable: {MPV_IMPORT_ERROR}")
 class CoordinatedSeekTests(unittest.TestCase):
     """A seek must leave audio and video on the SAME position, not on the same
     requested timestamp — the video engine needs far longer to get there."""
@@ -263,6 +274,7 @@ class _FakeAudioEngine:
         self.position = seconds
 
 
+@unittest.skipIf(mpv_playback is None, f"python-mpv unavailable: {MPV_IMPORT_ERROR}")
 class ExternalAudioMasterTests(unittest.TestCase):
     """Best of both: mpv renders video, SingWS's audio engine keeps the clock,
     so the karaoke DSP chain stays in the signal path."""
