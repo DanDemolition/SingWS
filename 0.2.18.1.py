@@ -22686,8 +22686,15 @@ class KaraokeApp(QWidget):
         plugin.setExternalAudioMaster(transport)
         self._set_mpv_hosts_visible(False)
         follower_audio = audio_path if str(mode).lower() == "cdg" else None
+        # The followers must open at the song's CURRENT tempo. Starting them at
+        # 100% while the audio runs at, say, 115% desyncs immediately and
+        # permanently: _sync_loop can only skew +/-6%, and the tempo control
+        # goes to 150%. Key is deliberately not forwarded — the followers are
+        # muted, so pitch is the audio engine's business alone.
+        tempo_percent = float(self._clamp_karaoke_tempo(self._karaoke_tempo_percent))
         if not plugin.loadSingWSMedia(
-            video_path, follower_audio, autoplay=True, semitones=0, tempo_percent=100
+            video_path, follower_audio, autoplay=True, semitones=0,
+            tempo_percent=tempo_percent,
         ):
             plugin.setExternalAudioMaster(None)
             raise RuntimeError(plugin.errorString() or "mpv video load failed")
@@ -24590,6 +24597,18 @@ class KaraokeApp(QWidget):
         transport = getattr(self, "karaoke_transport", None)
         if transport is None:
             return False
+        # Same reasoning as pause: seeking the audio transport on its own would
+        # strand the picture, and a CDG follower is never re-seeked by the sync
+        # loop. plugin.seekMedia holds the audio, seeks both followers, then
+        # realigns the audio to where the video actually landed.
+        if getattr(self, "_mpv_video_follower_active", False):
+            plugin = getattr(self, "_mpv_playback", None)
+            if plugin is not None:
+                try:
+                    plugin.seekMedia(int(max(0.0, float(seconds)) * 1000.0))
+                    return True
+                except Exception as e:
+                    _diag(f"[MPV] coordinated seek failed: {e}")
         try:
             transport.seek(seconds)
             return True
@@ -24625,7 +24644,23 @@ class KaraokeApp(QWidget):
             ):
                 return
         transport = getattr(self, "karaoke_transport", None)
-        if transport is not None:
+        # With mpv rendering video against this transport, route pause through
+        # the plugin: it pauses the audio master AND both followers together.
+        # Pausing the transport alone would leave the picture running on.
+        mpv_video_plugin = (
+            getattr(self, "_mpv_playback", None)
+            if getattr(self, "_mpv_video_follower_active", False)
+            else None
+        )
+        if mpv_video_plugin is not None:
+            try:
+                if paused:
+                    mpv_video_plugin.playMedia()
+                else:
+                    mpv_video_plugin.pauseMedia()
+            except Exception as e:
+                _diag(f"[MPV] pause/resume failed: {e}")
+        elif transport is not None:
             try:
                 if paused:
                     transport.resume()
@@ -35805,6 +35840,16 @@ class KaraokeApp(QWidget):
             )
         except Exception as e:
             _diag(f"[PY-KARAOKE] modifier update failed: {e}")
+        # With mpv rendering video against this transport's clock, a tempo
+        # change has to reach the followers too. Audio alone would run away
+        # from the picture by far more than the +/-6% the sync loop can skew.
+        if getattr(self, "_mpv_video_follower_active", False):
+            plugin = getattr(self, "_mpv_playback", None)
+            if plugin is not None:
+                try:
+                    plugin.setTempoRatio(max(0.5, min(2.0, float(tempo_ratio or 1.0))))
+                except Exception as e:
+                    _diag(f"[MPV] follower tempo update failed: {e}")
 
     def _apply_karaoke_key_live(self):
         self._apply_karaoke_key_live_value(float(self._clamp_karaoke_key(self._current_karaoke_semitones)))
