@@ -57,13 +57,23 @@ for bass_lib in (Path("vendor/bass") / name for name in (
     if bass_lib.exists():
         binaries.append((str(bass_lib), "vendor/bass"))
 
+# libssl and libcrypto MUST come from one OpenSSL build. libmpv links
+# Homebrew's, Python links the framework's, and the two share sonames, so
+# whichever pair the bundle ends up with has to satisfy both. Taking the
+# Homebrew pair does: it is the newer build, and an older consumer resolves
+# against it. Mixing them does not — a Homebrew libssl beside the framework's
+# libcrypto dies on a missing _CRYPTO_calloc, which is exactly what the
+# post-build libmpv load test caught.
+_already_bundled = {os.path.basename(source) for source, _ in binaries}
 for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
+    if openssl_lib in _already_bundled:
+        continue  # libmpv's closure already supplied the matching pair
     candidates = (
-        Path(sys.base_prefix) / "lib" / openssl_lib,
         brew_root / "opt" / "openssl@3" / "lib" / openssl_lib,
         Path("/opt/homebrew/opt/openssl@3/lib") / openssl_lib,
         Path("/usr/local/opt/openssl@3/lib") / openssl_lib,
         Path("/usr/local/lib") / openssl_lib,
+        Path(sys.base_prefix) / "lib" / openssl_lib,
     )
     for candidate in candidates:
         if candidate.exists():
