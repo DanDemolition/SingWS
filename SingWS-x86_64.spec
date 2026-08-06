@@ -36,17 +36,22 @@ for helper in (
 # FFmpeg/Signalsmith path in the bundle as fallback, while adding every native
 # runtime required by the experimental mpv engine on an Intel Mac.
 mpv_binary = brew_root / "bin" / "mpv"
-libmpv = brew_root / "lib" / "libmpv.2.dylib"
 moltenvk = brew_root / "lib" / "libMoltenVK.dylib"
 moltenvk_icd = project_root / "MoltenVK_icd.json"
-for required in (mpv_binary, libmpv, moltenvk, moltenvk_icd):
+for required in (mpv_binary, moltenvk, moltenvk_icd):
     if not required.exists():
         raise SystemExit(f"Required mpv bundle input is missing: {required}")
 binaries.extend((
     (str(mpv_binary), "."),
-    (str(libmpv), "."),
     (str(moltenvk), "."),
 ))
+# libmpv plus its full FFmpeg 8 dependency closure. Collecting only libmpv
+# leaves @rpath/libavcodec.62.dylib unresolvable in the bundle, which is what
+# made shipped builds fall back to the FFmpeg engine on every song.
+sys.path.insert(0, str(project_root / "tools"))
+from mpv_bundle_deps import libmpv_binaries  # noqa: E402
+
+binaries.extend(libmpv_binaries(brew_root))
 extra_datas.append((str(moltenvk_icd), "vulkan/icd.d"))
 
 for bass_lib in (Path("vendor/bass") / name for name in (

@@ -1060,6 +1060,8 @@ class MpvPlaybackPlugin:
     SKEW_CAP = 0.06        # >6% off real speed becomes audible/visible
     DEAD_ZONE = 0.050      # 50ms: close enough, stop correcting
     SEEK_THRESHOLD = 0.40  # non-CDG only: close a gap this big with one seek, not 20s of skew
+    SEEK_SETTLE_TIMEOUT = 5.0    # longest a follower may take to finish one seek
+    SEEK_HOLD_TIMEOUT_MS = 6000  # the audible clock is never held longer than this
 
     def __init__(self, log=print, preview_fast_profile=False):
         self.log = log
@@ -1098,7 +1100,22 @@ class MpvPlaybackPlugin:
         # whether the pipeline is cold or already warm.
         self._start_gate_generation = 0
         self._start_gate_started_at = 0.0
+        # A seek costs the audible engine and a video follower wildly
+        # different amounts of time, so seeks are coordinated too. See
+        # seekMedia().
+        self._seek_lock = threading.Lock()
+        self._seek_generation = 0
+        self._seek_pending = set()
+        self._seek_landed = None
+        self._seek_target = 0.0
+        self._seek_resume = False
+        self._seek_started_at = 0.0
+        self._seek_hold_active = False
         self._screen_change_handlers = []
+        # When SingWS drives audio itself (its own decoder -> tempo/key ->
+        # normalize -> EQ -> master bus), the followers chase THAT clock and
+        # the mpv audio engine stays idle. See setExternalAudioMaster.
+        self._external_audio = None
         self._engine = MpvIpcClient("karaoke", log=log)
 
     # -- contract: setup -------------------------------------------------------------------
@@ -1340,6 +1357,8 @@ class MpvPlaybackPlugin:
         try:
             self._media_generation += 1
             generation = self._media_generation
+            # A seek hold from the outgoing song must never release into this one.
+            self._cancel_seek_hold()
             source = str(source or "")
             audio_path = str(audio_path or "") or None
             low = source.lower()
@@ -1358,14 +1377,22 @@ class MpvPlaybackPlugin:
             engine_file = audio_path if (self._is_cdg and audio_path) else source
 
             self._tempo = max(0.25, min(4.0, float(tempo_percent or 100) / 100.0))
-            self._apply_key(semitones)
 
-            self._engine.set_property("speed", self._tempo)
-            if gate_visual_start:
-                # Pause before loadfile so even the first decoded audio packet
-                # cannot escape while the video followers initialize.
-                self._engine.set_property("pause", True)
-            self._engine.loadfile(engine_file)
+            if self._external_audio is not None:
+                # SingWS owns audio: key and tempo are applied by its own
+                # decoder, and mpv must not open the audio file at all — a
+                # second decoder would double the sound. Only the video
+                # followers below are loaded.
+                if gate_visual_start:
+                    self._audio_set_paused(True)
+            else:
+                self._apply_key(semitones)
+                self._engine.set_property("speed", self._tempo)
+                if gate_visual_start:
+                    # Pause before loadfile so even the first decoded audio
+                    # packet cannot escape while the video followers initialize.
+                    self._engine.set_property("pause", True)
+                self._engine.loadfile(engine_file)
 
             if not self._audio_only:
                 followers = [
@@ -1499,25 +1526,103 @@ class MpvPlaybackPlugin:
 
     def setPitchSemitones(self, semitones) -> None:
         """Apply a live key change without changing playback tempo."""
+        if self._external_audio is not None:
+            return  # SingWS's own decoder handles key
         self._apply_key(semitones)
 
     def setTempoRatio(self, ratio) -> None:
         """Apply live tempo to the audio master and both muted followers."""
         self._tempo = max(0.25, min(4.0, float(ratio or 1.0)))
-        self._engine.set_property("speed", self._tempo)
+        # Video followers always take the tempo; the mpv audio engine only
+        # when it is the one making sound.
+        if self._external_audio is None:
+            self._engine.set_property("speed", self._tempo)
         for follower in self._followers():
             follower.enqueue_operation(
                 "tempo", setattr, follower.player, "speed", self._tempo
             )
 
+    # -- audible clock ---------------------------------------------------------------------
+    # Everything below routes through these five helpers instead of touching
+    # self._engine, so the audible clock can be either mpv's own audio engine
+    # or SingWS's Python audio transport. The video followers, the coordinated
+    # seek and the A/V sync loop are identical either way.
+
+    def setExternalAudioMaster(self, master) -> None:
+        """Hand the audible clock to SingWS's own audio engine.
+
+        `master` needs position_seconds(), is_paused(), pause(), resume() and
+        seek(seconds) — the surface PythonKaraokeTransport already exposes.
+        Pass None to go back to mpv's audio engine. mpv then renders video
+        only, so the karaoke DSP chain (EQ, loudness normalization, master
+        bus) stays in the signal path instead of being bypassed.
+        """
+        self._external_audio = master
+        self.log(
+            "[MPV] audible clock = "
+            + ("SingWS audio engine (mpv is video-only)" if master is not None
+               else "mpv audio engine")
+        )
+
+    def _audio_position(self):
+        master = self._external_audio
+        if master is not None:
+            try:
+                return float(master.position_seconds())
+            except Exception:
+                return None
+        value = self._engine.get("audio-pts")
+        if not isinstance(value, float):
+            value = self._engine.get("time-pos")
+        return value if isinstance(value, float) else None
+
+    def _audio_is_paused(self) -> bool:
+        master = self._external_audio
+        if master is not None:
+            try:
+                return bool(master.is_paused())
+            except Exception:
+                return False
+        return bool(self._engine.get("pause", False))
+
+    def _audio_set_paused(self, paused: bool) -> None:
+        master = self._external_audio
+        if master is not None:
+            try:
+                master.pause() if paused else master.resume()
+            except Exception as exc:
+                self.log(f"[MPV] external audio {'pause' if paused else 'resume'} failed: {exc}")
+            return
+        self._engine.set_property("pause", bool(paused))
+
+    def _audio_seek(self, seconds: float) -> None:
+        master = self._external_audio
+        if master is not None:
+            try:
+                master.seek(float(seconds))
+            except Exception as exc:
+                self.log(f"[MPV] external audio seek failed: {exc}")
+            return
+        self._engine.command("seek", float(seconds), "absolute+exact")
+
     # -- contract: transport ---------------------------------------------------------------
     def playMedia(self):
-        self._engine.set_property("pause", False)
+        # While a seek hold is up the engine is paused on purpose. Record the
+        # new intent instead of unpausing into the middle of it; the release
+        # honours it.
+        with self._seek_lock:
+            if self._seek_hold_active:
+                self._seek_resume = True
+                return
+        self._audio_set_paused(False)
         for f in self._followers():
             f.enqueue_operation("play", setattr, f.player, "pause", False)
 
     def pauseMedia(self):
-        self._engine.set_property("pause", True)
+        with self._seek_lock:
+            if self._seek_hold_active:
+                self._seek_resume = False
+        self._audio_set_paused(True)
         for f in self._followers():
             f.enqueue_operation("pause", setattr, f.player, "pause", True)
 
@@ -1528,6 +1633,7 @@ class MpvPlaybackPlugin:
         self._loaded = False
         self._media_generation += 1
         self._start_gate_generation = 0
+        self._cancel_seek_hold()
         with self._follower_state_lock:
             self._followers_loading.clear()
         self._engine.stop()
@@ -1538,17 +1644,143 @@ class MpvPlaybackPlugin:
         self._rearm_attach()   # harmless no-op while the windows are alive
 
     def seekMedia(self, ms):
+        """Seek every engine and land them on the SAME position.
+
+        An exact seek costs the audio-only engine ~40ms. A video follower
+        costs far more: ~80ms for MP4, and 0.6-3.5s for CDG, because the
+        cdgraphics decoder has to replay packets to rebuild the tile state at
+        the target. Issuing both seeks together therefore drops the video
+        exactly that far behind the audio, permanently — 1.4s measured on a
+        CDG here — and _sync_loop cannot repair it: it refuses to re-seek CDG
+        at all, and its 6% skew cap needs ~24s to walk a gap that size in.
+
+        So hold the audible clock instead of seeking it, let the followers
+        finish their own seek at their own pace, then drop the master onto
+        wherever the video actually landed. The user hears one short hold and
+        the lyrics stay on the beat afterwards.
+        """
         secs = max(0.0, float(ms) / 1000.0)
-        self._engine.command("seek", secs, "absolute+exact")
-        for f in self._followers():
-            f.enqueue_operation(
-                "seek", f.player.command, "seek", secs, "absolute+exact"
+        followers = self._followers()
+        if self._audio_only or not followers:
+            self._audio_seek(secs)
+            return
+        with self._seek_lock:
+            self._seek_generation += 1
+            generation = self._seek_generation
+            self._seek_pending = {f.tag for f in followers}
+            self._seek_landed = None
+            self._seek_target = secs
+            self._seek_resume = not self._audio_is_paused()
+            self._seek_started_at = time.monotonic()
+            self._seek_hold_active = True
+        self._audio_set_paused(True)
+        for f in followers:
+            f.enqueue_operation("seek", self._seek_follower, f, secs, generation)
+        # A follower that never settles must not leave the song silent.
+        try:
+            QTimer.singleShot(
+                int(self.SEEK_HOLD_TIMEOUT_MS),
+                lambda g=generation: self._finish_seek(g, "hold timeout"),
             )
+        except Exception:
+            pass
+
+    def _seek_follower(self, follower, secs, generation):
+        """Run serialized on the follower's worker, like every other libmpv call."""
+        landed = None
+        try:
+            if generation != self._seek_generation:
+                return
+            follower.player.command("seek", secs, "absolute+exact")
+            landed = self._await_follower_seek(follower, secs, generation)
+        except Exception as exc:
+            self.log(f"[MPV-SEEK] {follower.tag} seek failed: {exc}")
+        finally:
+            released = False
+            with self._seek_lock:
+                if generation == self._seek_generation:
+                    # Align the master to the OUTPUT follower — that is the
+                    # picture the room is singing to. Preview converges on the
+                    # usual skew.
+                    if isinstance(landed, float) and (
+                        follower is self._out or self._seek_landed is None
+                    ):
+                        self._seek_landed = landed
+                    self._seek_pending.discard(follower.tag)
+                    released = not self._seek_pending
+            if released:
+                self._finish_seek(generation, "followers settled")
+
+    def _await_follower_seek(self, follower, secs, generation):
+        """Wait until this follower's clock is actually running again.
+
+        mpv's seek command returns immediately; the cost is the demux/decode
+        that follows it. 'seeking' going false is necessary but not sufficient
+        on CDG, so also require the clock to have advanced between samples.
+        """
+        deadline = time.monotonic() + self.SEEK_SETTLE_TIMEOUT
+        previous = None
+        while time.monotonic() < deadline:
+            if generation != self._seek_generation or self._stop_evt.is_set():
+                return None
+            now = follower.time()
+            if isinstance(now, float) and now >= secs - 0.5:
+                try:
+                    seeking = bool(follower.player.seeking)
+                except Exception:
+                    seeking = False
+                if not seeking and previous is not None and now - previous > 0.02:
+                    return now
+                previous = now
+            time.sleep(0.03)
+        self.log(
+            f"[MPV-SEEK] {follower.tag} did not settle within "
+            f"{self.SEEK_SETTLE_TIMEOUT:.1f}s"
+        )
+        return follower.time()
+
+    def _finish_seek(self, generation, reason):
+        with self._seek_lock:
+            if generation != self._seek_generation or not self._seek_hold_active:
+                return
+            self._seek_hold_active = False
+            landed = self._seek_landed
+            target = self._seek_target
+            resume = self._seek_resume
+            held_ms = (time.monotonic() - self._seek_started_at) * 1000.0
+        position = landed if isinstance(landed, float) else target
+        try:
+            self._audio_seek(position)
+            if resume:
+                self._audio_set_paused(False)
+        except Exception as exc:
+            self.log(f"[MPV-SEEK] master realign failed: {exc}")
+        self.log(
+            f"[MPV-SEEK] audio held {held_ms:.0f}ms ({reason}); master aligned "
+            f"to {position:.3f}s (requested {target:.3f}s)"
+        )
+
+    def _cancel_seek_hold(self):
+        """Abandon an in-flight coordinated seek (stop / new song)."""
+        with self._seek_lock:
+            self._seek_generation += 1
+            self._seek_pending.clear()
+            self._seek_hold_active = False
+
+    def isSeekHolding(self) -> bool:
+        """True while the audible clock is paused only to complete a seek."""
+        with self._seek_lock:
+            return bool(self._seek_hold_active and self._seek_resume)
 
     def positionMs(self) -> int:
-        t = self._engine.get("audio-pts")
-        if not isinstance(t, float):
-            t = self._engine.get("time-pos")
+        # While the audible clock is held for a seek it still reports the OLD
+        # position. Report where the seek is going instead, so the transport
+        # clock and the time-remaining readout do not jump backwards for the
+        # length of the hold.
+        with self._seek_lock:
+            if self._seek_hold_active:
+                return int(self._seek_target * 1000.0)
+        t = self._audio_position()
         return int(t * 1000.0) if isinstance(t, float) else 0
 
     def durationMs(self) -> int:
@@ -1556,7 +1788,9 @@ class MpvPlaybackPlugin:
         return int(d * 1000.0) if isinstance(d, float) else 0
 
     def isPlaying(self) -> bool:
-        return bool(self._loaded and not self._engine.get("pause", False)
+        if self._external_audio is not None:
+            return bool(self._loaded and not self._audio_is_paused())
+        return bool(self._loaded and not self._audio_is_paused()
                     and not self._engine.ended.is_set())
 
     def visualsReady(self) -> bool:
@@ -1587,7 +1821,18 @@ class MpvPlaybackPlugin:
             follower.enqueue_operation(
                 "cold-start-release", setattr, follower.player, "pause", False
             )
-        self._engine.set_property("pause", False)
+        # Starting at an offset seeks immediately after load. Let that seek's
+        # own release start the audio, or the master runs while the followers
+        # are still seeking to the start position.
+        with self._seek_lock:
+            if self._seek_hold_active:
+                self._seek_resume = True
+                self.log(
+                    f"[MPV-START-GATE] audio start deferred to the in-flight "
+                    f"seek release (generation={generation})"
+                )
+                return
+        self._audio_set_paused(False)
         elapsed_ms = int(
             max(0.0, time.monotonic() - self._start_gate_started_at) * 1000
         )
@@ -1597,11 +1842,17 @@ class MpvPlaybackPlugin:
         )
 
     def atEnd(self) -> bool:
+        # With SingWS driving audio, end-of-song belongs to its transport; the
+        # idle mpv audio engine would never report it anyway.
+        if self._external_audio is not None:
+            return False
         return bool(self._engine.ended.is_set())
 
     # -- contract: settings ----------------------------------------------------------------
     def setVolume(self, value) -> None:
         self._volume = max(0.0, min(2.0, float(value)))
+        if self._external_audio is not None:
+            return  # SingWS's master bus owns level; followers are muted
         self._engine.set_property("volume", self._volume * 100.0)
 
     def setAudioDevice(self, name) -> None:
@@ -1667,10 +1918,18 @@ class MpvPlaybackPlugin:
             try:
                 with self._follower_state_lock:
                     followers_loading = bool(self._followers_loading)
-                if self._loaded and not self._audio_only and not followers_loading:
-                    master = self._engine.get("audio-pts")
-                    if not isinstance(master, float):
-                        master = self._engine.get("time-pos")
+                with self._seek_lock:
+                    seeking = bool(self._seek_hold_active)
+                # A held master clock is a deliberately stale reference: acting
+                # on it would seek/skew the followers back to the pre-seek
+                # position that the hold exists to abandon.
+                if (
+                    self._loaded
+                    and not self._audio_only
+                    and not followers_loading
+                    and not seeking
+                ):
+                    master = self._audio_position()
                     if isinstance(master, float):
                         for f in self._followers():
                             t = f.time()

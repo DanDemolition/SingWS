@@ -1,7 +1,10 @@
+import threading
+import time
 import unittest
 
 from PyQt6.QtCore import QCoreApplication
 
+import mpv_playback
 from mpv_karaoke_transport import MpvKaraokeTransport
 
 
@@ -86,6 +89,230 @@ class MpvTransportTests(unittest.TestCase):
         plugin.position = 20000
         transport._poll()
         self.assertEqual(plugin.seeks[-1], 10000)
+
+
+class _FakeEngine:
+    """Stands in for the out-of-process audio master."""
+
+    def __init__(self):
+        self.paused = False
+        self.log = []
+        self.ended = threading.Event()
+
+    def command(self, *args):
+        self.log.append(args)
+
+    def set_property(self, name, value):
+        self.log.append(("set", name, value))
+        if name == "pause":
+            self.paused = bool(value)
+
+    def get(self, name, default=None):
+        return self.paused if name == "pause" else default
+
+
+class _FakePlayer:
+    def __init__(self, follower):
+        self._follower = follower
+        self.seeking = False
+
+    def command(self, name, *args):
+        if name == "seek":
+            self._follower.begin_seek(float(args[0]))
+
+
+class _FakeFollower:
+    """A follower whose seek takes `settle_samples` polls to complete."""
+
+    def __init__(self, tag, settle_samples=3):
+        self.tag = tag
+        self.player = _FakePlayer(self)
+        self.clock = 5.0
+        self.settle_samples = settle_samples
+        self._samples = 0
+        self.threads = []
+
+    def begin_seek(self, secs):
+        self.clock = secs
+        self._samples = 0
+        self.player.seeking = True
+
+    def enqueue_operation(self, label, func, *args):
+        thread = threading.Thread(target=func, args=args, daemon=True)
+        self.threads.append(thread)
+        thread.start()
+
+    def time(self):
+        self._samples += 1
+        if self._samples > self.settle_samples:
+            self.player.seeking = False
+            self.clock += 0.05          # running again
+        return self.clock
+
+
+class CoordinatedSeekTests(unittest.TestCase):
+    """A seek must leave audio and video on the SAME position, not on the same
+    requested timestamp — the video engine needs far longer to get there."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    def make_plugin(self, audio_only=False, settle_samples=3):
+        plugin = mpv_playback.MpvPlaybackPlugin.__new__(
+            mpv_playback.MpvPlaybackPlugin
+        )
+        plugin.log = lambda *a, **k: None
+        plugin._engine = _FakeEngine()
+        plugin._out = _FakeFollower("out", settle_samples)
+        plugin._prev = _FakeFollower("prev", settle_samples)
+        plugin._audio_only = audio_only
+        plugin._is_cdg = True
+        plugin._loaded = True
+        plugin._shutdown = False
+        plugin._stop_evt = threading.Event()
+        plugin._seek_lock = threading.Lock()
+        plugin._seek_generation = 0
+        plugin._seek_pending = set()
+        plugin._seek_landed = None
+        plugin._seek_target = 0.0
+        plugin._seek_resume = False
+        plugin._seek_started_at = 0.0
+        plugin._seek_hold_active = False
+        plugin._external_audio = None
+        return plugin
+
+    def wait_for_release(self, plugin, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with plugin._seek_lock:
+                if not plugin._seek_hold_active:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    def test_master_is_held_then_aligned_to_where_the_video_landed(self):
+        plugin = self.make_plugin()
+        plugin.seekMedia(42000)
+
+        # The audible clock is paused immediately and NOT seeked yet.
+        self.assertTrue(plugin._engine.paused)
+        self.assertNotIn("seek", [c[0] for c in plugin._engine.log])
+        self.assertTrue(plugin.isSeekHolding())
+
+        self.assertTrue(self.wait_for_release(plugin))
+        for follower in (plugin._out, plugin._prev):
+            for thread in follower.threads:
+                thread.join(timeout=2)
+
+        seeks = [c for c in plugin._engine.log if c[0] == "seek"]
+        self.assertEqual(len(seeks), 1)
+        # Aligned to the output follower's real position, which has moved past
+        # the requested timestamp while it was seeking.
+        self.assertAlmostEqual(seeks[0][1], plugin._out.clock, delta=0.2)
+        self.assertGreater(seeks[0][1], 42.0)
+        self.assertFalse(plugin._engine.paused)
+        self.assertFalse(plugin.isSeekHolding())
+
+    def test_seek_while_paused_stays_paused(self):
+        plugin = self.make_plugin()
+        plugin._engine.paused = True
+        plugin.seekMedia(42000)
+        self.assertTrue(self.wait_for_release(plugin))
+        self.assertTrue(plugin._engine.paused)
+
+    def test_audio_only_seeks_the_master_directly(self):
+        plugin = self.make_plugin(audio_only=True)
+        plugin.seekMedia(42000)
+        self.assertEqual(plugin._engine.log, [("seek", 42.0, "absolute+exact")])
+        self.assertFalse(plugin._engine.paused)
+        self.assertFalse(plugin.isSeekHolding())
+
+    def test_a_second_seek_supersedes_the_first(self):
+        plugin = self.make_plugin(settle_samples=8)
+        plugin.seekMedia(42000)
+        plugin.seekMedia(90000)
+        self.assertTrue(self.wait_for_release(plugin))
+        seeks = [c for c in plugin._engine.log if c[0] == "seek"]
+        self.assertEqual(len(seeks), 1)
+        self.assertGreater(seeks[0][1], 90.0)
+
+
+class _FakeAudioEngine:
+    """Stands in for SingWS's own PythonKaraokeTransport."""
+
+    def __init__(self):
+        self.position = 5.0
+        self.paused = False
+        self.seeks = []
+
+    def position_seconds(self):
+        return self.position
+
+    def is_paused(self):
+        return self.paused
+
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
+    def seek(self, seconds):
+        self.seeks.append(seconds)
+        self.position = seconds
+
+
+class ExternalAudioMasterTests(unittest.TestCase):
+    """Best of both: mpv renders video, SingWS's audio engine keeps the clock,
+    so the karaoke DSP chain stays in the signal path."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    def make_plugin(self, settle_samples=3):
+        plugin = CoordinatedSeekTests.make_plugin(self, False, settle_samples)
+        plugin._audio = _FakeAudioEngine()
+        plugin.setExternalAudioMaster(plugin._audio)
+        return plugin
+
+    def wait_for_release(self, plugin, timeout=5.0):
+        return CoordinatedSeekTests.wait_for_release(self, plugin, timeout)
+
+    def test_the_mpv_audio_engine_is_never_touched(self):
+        plugin = self.make_plugin()
+        plugin.seekMedia(42000)
+        self.assertTrue(self.wait_for_release(plugin))
+        self.assertEqual(plugin._engine.log, [])
+
+    def test_seek_holds_and_realigns_the_singws_audio_engine(self):
+        plugin = self.make_plugin()
+        plugin.seekMedia(42000)
+        self.assertTrue(plugin._audio.paused)
+        self.assertEqual(plugin._audio.seeks, [])
+
+        self.assertTrue(self.wait_for_release(plugin))
+        self.assertEqual(len(plugin._audio.seeks), 1)
+        self.assertGreater(plugin._audio.seeks[0], 42.0)
+        self.assertFalse(plugin._audio.paused)
+
+    def test_position_and_playing_state_come_from_singws_audio(self):
+        plugin = self.make_plugin()
+        plugin._audio.position = 63.5
+        self.assertEqual(plugin.positionMs(), 63500)
+        self.assertTrue(plugin.isPlaying())
+        plugin._audio.pause()
+        self.assertFalse(plugin.isPlaying())
+
+    def test_volume_key_and_tempo_stay_with_singws(self):
+        plugin = self.make_plugin()
+        plugin.setVolume(0.5)
+        plugin.setPitchSemitones(3)
+        plugin.setTempoRatio(1.1)
+        # Only the muted video followers may take tempo; nothing reaches the
+        # mpv audio engine, whose sound would bypass the master bus.
+        self.assertEqual(plugin._engine.log, [])
 
 
 if __name__ == "__main__":

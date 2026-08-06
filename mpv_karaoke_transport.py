@@ -90,6 +90,13 @@ class MpvKaraokeTransport(QObject):
         self.plugin.playMedia()
 
     def is_paused(self) -> bool:
+        # A coordinated seek pauses the audible engine while the video
+        # followers catch up. That is not a user-visible pause state.
+        try:
+            if self.plugin.isSeekHolding():
+                return False
+        except AttributeError:
+            pass
         return not bool(self.plugin.isPlaying())
 
     def position_seconds(self) -> float:

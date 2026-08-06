@@ -22394,6 +22394,7 @@ class KaraokeApp(QWidget):
                 transport.stop()
             except Exception as e:
                 _diag(f"[PY-KARAOKE] stop failed: {e}")
+        self._detach_mpv_video_follower()
         self._set_mpv_hosts_visible(False)
         self._stop_lyrics_background_video("karaoke_stopped")
 
@@ -22549,8 +22550,12 @@ class KaraokeApp(QWidget):
         if pref in ("gstreamer", "gst", "auto"):
             _diag(f"[KARAOKE-ENGINE] preference {pref!r} obsolete (GStreamer removed); using FFmpeg engine")
             pref = "ffmpeg"
-        if pref == "mpv" and sys.platform == "darwin":
-            return "mpv", PythonKaraokeTransport
+        # "mpv"       -> mpv owns audio AND video (its own audio engine; the
+        #                SingWS EQ/normalization/master bus is bypassed).
+        # "mpv-video" -> mpv renders video only and follows SingWS's audio
+        #                engine, keeping the full karaoke DSP chain.
+        if pref in ("mpv", "mpv-video") and sys.platform == "darwin":
+            return pref, PythonKaraokeTransport
         return "ffmpeg", PythonKaraokeTransport
 
     def _ensure_mpv_karaoke_core(self):
@@ -22667,6 +22672,48 @@ class KaraokeApp(QWidget):
         )
         return True
 
+    def _attach_mpv_video_follower(self, transport, *, audio_path, video_path, mode,
+                                   start_seconds=0.0):
+        """Best of both: mpv's Metal video, SingWS's audio engine.
+
+        The Python transport keeps the audible clock, so the karaoke chain
+        (tempo/key -> loudness normalization -> EQ -> master bus) is untouched,
+        and mpv's followers render the CDG/MP4 against that clock. mpv never
+        opens the audio for playback — for CDG its followers still load the MP3
+        as their main file (muted) because a bare .cdg has no usable clock.
+        """
+        plugin = self._ensure_mpv_karaoke_core()
+        plugin.setExternalAudioMaster(transport)
+        self._set_mpv_hosts_visible(False)
+        follower_audio = audio_path if str(mode).lower() == "cdg" else None
+        if not plugin.loadSingWSMedia(
+            video_path, follower_audio, autoplay=True, semitones=0, tempo_percent=100
+        ):
+            plugin.setExternalAudioMaster(None)
+            raise RuntimeError(plugin.errorString() or "mpv video load failed")
+        if float(start_seconds or 0.0) > 0.0:
+            plugin.seekMedia(int(float(start_seconds) * 1000.0))
+        self._mpv_video_follower_active = True
+        self._set_mpv_hosts_visible(True)
+        _diag(
+            f"[KARAOKE-ENGINE] engine=mpv-video mode={mode} "
+            f"video={os.path.basename(str(video_path))} "
+            "audio=SingWS (EQ/normalize/master bus retained)"
+        )
+
+    def _detach_mpv_video_follower(self):
+        if not getattr(self, "_mpv_video_follower_active", False):
+            return
+        self._mpv_video_follower_active = False
+        plugin = getattr(self, "_mpv_playback", None)
+        if plugin is None:
+            return
+        try:
+            plugin.stopMedia()
+            plugin.setExternalAudioMaster(None)
+        except Exception as exc:
+            _diag(f"[MPV] video follower detach failed: {exc}")
+
     def _start_python_karaoke_transport(
         self,
         *,
@@ -22694,6 +22741,17 @@ class KaraokeApp(QWidget):
                 _diag(f"[MPV] experimental engine failed; falling back to FFmpeg: {exc}")
                 self._set_mpv_hosts_visible(False)
                 engine_pref = "ffmpeg-fallback"
+        # "mpv-video" keeps this Python transport as the audible engine and
+        # hands only the picture to mpv, so it runs the whole block below with
+        # the transport in audio-only mode and attaches mpv after the start.
+        mpv_video = bool(
+            engine_pref == "mpv-video"
+            and sys.platform == "darwin"
+            and str(mode).lower() in {"cdg", "mp4"}
+            and video_path
+        )
+        transport_mode = "audio" if mpv_video else mode
+        transport_video_path = None if mpv_video else video_path
         if transport_cls is None:
             detail = str(
                 PYTHON_KARAOKE_IMPORT_ERROR
@@ -22725,18 +22783,18 @@ class KaraokeApp(QWidget):
         device, device_name = self._qt_audio_device_for_selected_output()
         transport = transport_cls(
             audio_path,
-            video_path=video_path,
-            mode=mode,
+            video_path=transport_video_path,
+            mode=transport_mode,
             duration_seconds=duration,
             probe_duration_on_init=False,
             audio_device=device,
             audio_device_name=device_name,
             parent=self,
         )
-        self._last_karaoke_engine = "ffmpeg"
+        self._last_karaoke_engine = "mpv-video" if mpv_video else "ffmpeg"
         _diag(
-            f"[KARAOKE-ENGINE] engine=ffmpeg pref={engine_pref} mode={mode} "
-            f"file={os.path.basename(audio_path)}"
+            f"[KARAOKE-ENGINE] engine={'mpv-video' if mpv_video else 'ffmpeg'} "
+            f"pref={engine_pref} mode={mode} file={os.path.basename(audio_path)}"
         )
         # MP4 decode-resolution cap (downscale only).  Lower values keep
         # playback smooth on weak GPUs (Intel Macs); 0 = native resolution.
@@ -22878,6 +22936,23 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             return False
+        if mpv_video:
+            # Audio is already live and keeping time; hand the picture to mpv.
+            # A failure here costs the video, not the song — fall back to this
+            # transport's own renderer rather than dropping playback.
+            try:
+                self._attach_mpv_video_follower(
+                    transport,
+                    audio_path=audio_path,
+                    video_path=video_path,
+                    mode=mode,
+                    start_seconds=start_seconds,
+                )
+            except Exception as exc:
+                _diag(f"[MPV] video follower unavailable; audio continues: {exc}")
+                self._detach_mpv_video_follower()
+                self._set_mpv_hosts_visible(False)
+                self._last_karaoke_engine = "ffmpeg"
         self._setup_end_silence_state(mode, None)
         self._arm_audio_end_floor(audio_path)
         self._update_karaoke_key_ui()
@@ -26384,6 +26459,26 @@ class KaraokeApp(QWidget):
         mpv_engine_note.setWordWrap(True)
         v.addWidget(mpv_engine_note)
 
+        # mpv's own audio engine bypasses the karaoke chain entirely (EQ,
+        # loudness normalization and the master bus all live on the SingWS
+        # audio path). This keeps that chain and uses mpv for the picture only.
+        mpv_keep_audio_cb = QCheckBox(
+            "Keep the SingWS audio engine (mpv renders video only)"
+        )
+        mpv_keep_audio_cb.setChecked(
+            str(self.settings.get("karaoke_engine", "ffmpeg") or "").strip().lower()
+            == "mpv-video"
+        )
+        mpv_keep_audio_cb.setEnabled(
+            mpv_engine_cb.isEnabled() and mpv_engine_cb.isChecked()
+        )
+        mpv_keep_audio_cb.setToolTip(
+            "On: mpv draws the CDG/MP4 and follows SingWS's audio clock, so the "
+            "EQ, loudness normalization and master bus stay in the signal path.\n"
+            "Off: mpv plays the audio itself and that whole chain is bypassed."
+        )
+        v.addWidget(mpv_keep_audio_cb)
+
         gap_row = QHBoxLayout()
         gap_row.addWidget(QLabel("BG -> Karaoke Gap (seconds):"))
         bg_gap_spin = QDoubleSpinBox(dlg)
@@ -27020,16 +27115,31 @@ class KaraokeApp(QWidget):
             # re-evaluate on the next song start.
             self._apply_simple_audio_mode_live(checked)
 
-        def on_mpv_engine_toggled(checked: bool):
-            self.settings["karaoke_engine"] = "mpv" if bool(checked) else "ffmpeg"
+        def _save_karaoke_engine_choice():
+            if not mpv_engine_cb.isChecked():
+                engine = "ffmpeg"
+                summary = "the FFmpeg/SignalSmith engine"
+            elif mpv_keep_audio_cb.isChecked():
+                engine = "mpv-video"
+                summary = "mpv video with the SingWS audio engine"
+            else:
+                engine = "mpv"
+                summary = "the mpv engine (audio and video)"
+            self.settings["karaoke_engine"] = engine
             self.save_settings()
             mpv_engine_note.setText(
-                "Saved. Restart SingWS to use the mpv engine. "
+                f"Saved. Restart SingWS to use {summary}. "
                 "The current session is unchanged."
-                if checked
-                else "Saved. Restart SingWS to use the FFmpeg/SignalSmith engine. "
-                     "The current session is unchanged."
             )
+
+        def on_mpv_engine_toggled(checked: bool):
+            mpv_keep_audio_cb.setEnabled(bool(checked))
+            _save_karaoke_engine_choice()
+
+        def on_mpv_keep_audio_toggled(_checked: bool):
+            _save_karaoke_engine_choice()
+
+        mpv_keep_audio_cb.toggled.connect(on_mpv_keep_audio_toggled)
 
         def on_normalize_toggled(checked: bool):
             self.settings["karaoke_normalize_enabled"] = bool(checked)

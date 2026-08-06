@@ -63,6 +63,23 @@ for bundled in \
     [[ -e "$bundled" ]] || { echo "Bundled mpv dependency is missing: $bundled"; exit 1; }
 done
 
+# A bundled libmpv that cannot dlopen sends every song to the FFmpeg fallback
+# engine, silently — shipped builds did exactly that for want of the FFmpeg 8
+# dylibs. Prove both names load before this bundle goes any further.
+"$PYTHON" - "$APP_PATH" <<'PYCHECK'
+import ctypes, pathlib, sys
+frameworks = pathlib.Path(sys.argv[1]) / "Contents" / "Frameworks"
+for name in ("libmpv.dylib", "libmpv.2.dylib"):
+    target = frameworks / name
+    if not target.exists():
+        sys.exit(f"Bundled {name} is missing")
+    try:
+        ctypes.CDLL(str(target))
+    except OSError as exc:
+        sys.exit(f"Bundled {name} cannot be loaded:\n{exc}")
+print("Bundled libmpv loads cleanly (both names)")
+PYCHECK
+
 # Stage the bundle BEFORE signing, and sign the staged copy.
 #
 # This project lives under ~/Documents, which is file-provider (iCloud)
