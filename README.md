@@ -81,11 +81,8 @@ python 0.2.18.1.py
 ## Building a Release
 
 ```bash
-# Universal macOS .app + .dmg
+# Native macOS .app + .dmg for this Mac's architecture
 ./build_all.sh
-
-# Universal binary only (arm64 + x86_64 lipo'd)
-./build_universal.sh
 ```
 
 The build scripts use PyInstaller under the hood. The resulting `.app` bundles ffmpeg and all Python dependencies — no external installs needed for end users.

@@ -27,7 +27,7 @@ class BumpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             entry = Path(d) / "0.2.18.1.py"
             entry.write_text('APP_VERSION = "0.2.18.1"\nprint("hi")\n')
-            spec = Path(d) / "SingWS-universal.spec"
+            spec = Path(d) / "SingWS-x86_64.spec"
             spec.write_text(
                 "info_plist={\n"
                 "    'CFBundleShortVersionString': '0.2.18.1',\n"
@@ -53,8 +53,7 @@ class ManifestTests(unittest.TestCase):
     def _fake_dmgs(self, d: Path, version: str):
         for arch, content in (("arm64", b"A" * 1000),
                               ("x86_64", b"B" * 2000),
-                              ("intel-legacy", b"L" * 2500),
-                              ("universal", b"C" * 3000)):
+                              ("intel-legacy", b"L" * 2500)):
             (d / f"SingWS-{version}-{arch}-installer.dmg").write_bytes(content)
 
     def test_build_manifest_structure_and_hashes(self):
@@ -67,7 +66,7 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(man["version"], "0.3.0")  # 'v' stripped
             self.assertEqual(man["release_date"], "2026-06-07")
             self.assertEqual(set(man["downloads"]), {
-                "mac_arm64", "mac_x86_64", "mac_intel_legacy", "mac_universal"
+                "mac_arm64", "mac_x86_64", "mac_intel_legacy"
             })
             arm = man["downloads"]["mac_arm64"]
             self.assertEqual(arm["filename"], "SingWS-0.3.0-arm64-installer.dmg")
@@ -97,7 +96,7 @@ class PackagingSpecTests(unittest.TestCase):
         # GStreamer removal: specs must not set up a GST_REGISTRY, bundle the
         # plugin scanner/typelibs/framework, and must exclude gi so PyInstaller
         # cannot pull GStreamer back in transitively.
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec", "SingWS-universal.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn("excludes=['gi', 'gi.repository']", source)
@@ -114,14 +113,14 @@ class PackagingSpecTests(unittest.TestCase):
     def test_release_specs_include_karafun_apple_events_authorization(self):
         entitlements = Path("SingWS.entitlements").read_text(encoding="utf-8")
         self.assertIn("com.apple.security.automation.apple-events", entitlements)
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec", "SingWS-universal.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn("NSAppleEventsUsageDescription", source)
                 self.assertIn("entitlements_file=str(project_root / 'SingWS.entitlements')", source)
 
     def test_release_specs_bundle_requests_tls_support(self):
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec", "SingWS-universal.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn("project_root = Path(SPECPATH)", source)
@@ -138,7 +137,7 @@ class PackagingSpecTests(unittest.TestCase):
             '"networkinformation"',
             '"tls"',
         )
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec", "SingWS-universal.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn('qt_plugins_root = (', source)
@@ -150,11 +149,6 @@ class PackagingSpecTests(unittest.TestCase):
     def test_release_verifier_requires_cocoa_platform_plugin(self):
         verifier = Path("tools/verify_macos_arch.py").read_text(encoding="utf-8")
         self.assertIn('"libqcocoa.dylib"', verifier)
-        universal_build = Path("build_universal.sh").read_text(encoding="utf-8")
-        self.assertIn(
-            "PyQt6/Qt6/plugins/platforms/libqcocoa.dylib",
-            universal_build,
-        )
 
 if __name__ == "__main__":
     unittest.main()

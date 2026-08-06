@@ -44,7 +44,7 @@ class GStreamerRemovedGuardTests(unittest.TestCase):
         self.assertNotIn("gi.require_version", src)
 
     def test_specs_exclude_gi_and_bundle_no_gst_plugins(self):
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-universal.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
             text = (ROOT / spec).read_text(encoding="utf-8", errors="ignore")
             self.assertIn("'gi'", text, f"{spec} must exclude gi")
             self.assertNotIn("gst_plugins", text.replace("gstreamer plugins", ""),

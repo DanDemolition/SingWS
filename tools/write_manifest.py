@@ -24,7 +24,6 @@ ARCHES = [
     ("mac_arm64", "Apple Silicon Mac", "arm64"),
     ("mac_x86_64", "Intel Mac", "x86_64"),
     ("mac_intel_legacy", "Intel Mac (macOS 12/13)", "intel-legacy"),
-    ("mac_universal", "Universal Mac", "universal"),
 ]
 
 

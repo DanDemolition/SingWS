@@ -4,15 +4,15 @@
 #   ./release.sh          # auto-increment patch (0.2.18.1 -> 0.2.18.2)
 #   ./release.sh 0.3.0    # release a specific version
 #
-# Steps: run tests -> bump version (APP_VERSION + spec CFBundle) -> build all
-# four DMGs (arm64, Intel, Intel legacy, universal) -> regenerate
+# Steps: run tests -> bump version (APP_VERSION + spec CFBundle) -> build the
+# three native DMGs (arm64, Intel, Intel legacy) -> regenerate
 # docs/release.json with real
 # size+sha256 -> commit + tag, push tag -> draft GitHub release, upload + verify
 # the DMGs, publish -> push main. Auto-update clients pick the release up from
 # docs/release.json on GitHub Pages, so main is pushed LAST: the manifest must
 # never go live before the installers it points at are downloadable.
 #
-# Plain ./build_all.sh and ./build_universal.sh remain non-publishing test builds.
+# Plain ./build_all.sh remains a non-publishing test build.
 set -euo pipefail
 cd "$(dirname "$0")"
 # See build_all.sh: fall back to ~/.singws-python314 when the system Python 3.14
@@ -67,28 +67,24 @@ echo ">>> [2/7] version: $CUR_VER -> $NEW_VER (tag $TAG)"
 if git rev-parse "$TAG" >/dev/null 2>&1 || gh release view "$TAG" >/dev/null 2>&1; then
   echo "!! $TAG already exists — bump to a new version or delete the old release/tag first."
   echo "   (reverting the version bump)"
-  git checkout -- 0.2.18.1.py SingWS-universal.spec SingWS-x86_64.spec SingWS-arm64.spec SingWS-intel-legacy.spec 2>/dev/null || true
+  git checkout -- 0.2.18.1.py SingWS-x86_64.spec SingWS-arm64.spec SingWS-intel-legacy.spec 2>/dev/null || true
   exit 1
 fi
 
 # 3) Build the native flavor for this Mac. mpv/MoltenVK cannot be safely
 # cross-packaged from the opposite Homebrew architecture; build the other
-# native DMG on its matching Mac and copy it into this directory. Universal
-# packaging remains a separate compatibility artifact.
+# native DMG on its matching Mac and copy it into this directory.
 echo ">>> [3/7] building native installer for $(uname -m)"
 ./build_all.sh
 if [[ "$(uname -m)" == "x86_64" ]]; then
   echo ">>> [3/7] building Intel legacy installer for macOS 12/13"
   ./build_singws_mac_intel_legacy.sh
 fi
-echo ">>> [3/7] building universal"
-./build_universal.sh
 
 DMG_ARM="SingWS-$NEW_VER-arm64-installer.dmg"
 DMG_X86="SingWS-$NEW_VER-x86_64-installer.dmg"
 DMG_X86_LEGACY="SingWS-$NEW_VER-intel-legacy-installer.dmg"
-DMG_UNI="SingWS-$NEW_VER-universal-installer.dmg"
-for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY" "$DMG_UNI"; do
+for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY"; do
   [ -f "$d" ] || {
     echo "!! expected DMG not found: $d"
     echo "   Build the missing native installer on its matching Mac, copy it"
@@ -110,7 +106,7 @@ git add \
   vendor/pybind11 vendor/signalsmith-linear vendor/signalsmith-stretch \
   0.2.18.1.py \
   mpv_playback.py mpv_karaoke_transport.py MoltenVK_icd.json \
-  SingWS-universal.spec SingWS-x86_64.spec SingWS-arm64.spec \
+  SingWS-x86_64.spec SingWS-arm64.spec \
   SingWS-intel-legacy.spec singws_intel_legacy_runtime.py \
   build_all.sh build_singws_mac_intel.sh build_singws_mac_arm64.sh \
   build_singws_mac_intel_legacy.sh setup_intel_legacy_env.sh \
@@ -131,7 +127,7 @@ gh release create "$TAG" \
   --title "SingWS $NEW_VER" \
   --notes "Automated release $TAG."
 
-for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY" "$DMG_UNI"; do
+for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY"; do
   uploaded=""
   for attempt in 1 2 3; do
     if gh release upload "$TAG" "$d" --clobber; then uploaded=1; break; fi
@@ -142,14 +138,14 @@ for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY" "$DMG_UNI"; do
     echo "!! could not upload $d after 3 attempts."
     echo "   The release is still an UNPUBLISHED DRAFT and main was not pushed, so"
     echo "   auto-update clients are unaffected. To finish by hand:"
-    echo "     gh release upload $TAG $DMG_ARM $DMG_X86 $DMG_X86_LEGACY $DMG_UNI --clobber"
+    echo "     gh release upload $TAG $DMG_ARM $DMG_X86 $DMG_X86_LEGACY --clobber"
     echo "     gh release edit $TAG --draft=false --latest"
     echo "     git push origin main"
     exit 1
   fi
 done
 
-for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY" "$DMG_UNI"; do
+for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY"; do
   local_size="$(stat -f%z "$d")"
   remote_size="$(gh release view "$TAG" --json assets --jq ".assets[] | select(.name == \"$d\") | .size")"
   if [ "$local_size" != "$remote_size" ]; then
