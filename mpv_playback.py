@@ -1111,6 +1111,8 @@ class MpvPlaybackPlugin:
         self._seek_resume = False
         self._seek_started_at = 0.0
         self._seek_hold_active = False
+        # Consecutive over-threshold samples per follower; see _sync_loop.
+        self._sync_seek_strikes = {}
         self._screen_change_handlers = []
         # When SingWS drives audio itself (its own decoder -> tempo/key ->
         # normalize -> EQ -> master bus), the followers chase THAT clock and
@@ -1969,7 +1971,24 @@ class MpvPlaybackPlugin:
                             # A cold start on slower hardware can leave video >1s behind, and at
                             # a 6% cap that takes ~20s to close. One seek fixes it — but NEVER on
                             # CDG, where a mid-stream seek corrupts tiles until the next redraw.
-                            if not self._is_cdg and abs(delta) > self.SEEK_THRESHOLD:
+                            #
+                            # Demand TWO consecutive over-threshold samples. A
+                            # corrective seek lands mid-GOP and shows as a brief
+                            # macroblock, so one jittery reading must not trigger
+                            # it — and with SingWS driving audio, the two clocks
+                            # being compared are wholly independent and do jitter.
+                            over = (
+                                not self._is_cdg
+                                and abs(delta) > self.SEEK_THRESHOLD
+                            )
+                            strikes = self._sync_seek_strikes.get(f.tag, 0) + 1 if over else 0
+                            self._sync_seek_strikes[f.tag] = strikes
+                            if over and strikes >= 2:
+                                self._sync_seek_strikes[f.tag] = 0
+                                self.log(
+                                    f"[MPV-SYNC] {f.tag} re-seek delta={delta:+.3f}s "
+                                    f"-> {master:.3f}s (sustained)"
+                                )
                                 try:
                                     f.enqueue_operation(
                                         "sync-seek",
