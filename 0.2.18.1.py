@@ -22937,22 +22937,34 @@ class KaraokeApp(QWidget):
                 pass
             return False
         if mpv_video:
-            # Audio is already live and keeping time; hand the picture to mpv.
-            # A failure here costs the video, not the song — fall back to this
-            # transport's own renderer rather than dropping playback.
-            try:
-                self._attach_mpv_video_follower(
-                    transport,
-                    audio_path=audio_path,
-                    video_path=video_path,
-                    mode=mode,
-                    start_seconds=start_seconds,
-                )
-            except Exception as exc:
-                _diag(f"[MPV] video follower unavailable; audio continues: {exc}")
-                self._detach_mpv_video_follower()
-                self._set_mpv_hosts_visible(False)
-                self._last_karaoke_engine = "ffmpeg"
+            # Attach on the NEXT Qt turn, never inline. _ensure_mpv_karaoke_core
+            # calls QApplication.processEvents(), which runs the transport's
+            # queued _finish_delayed_start and fires started() before
+            # play_next_file has connected its confirmation slot. The pending
+            # start token then never clears: the console sits at "starting"
+            # forever and every later Play press is refused with "keeping
+            # current song". Deferring keeps that reentrancy out of the window
+            # between transport.start() and the caller's connect.
+            def _attach_mpv_video_when_settled(expected=transport):
+                if getattr(self, "karaoke_transport", None) is not expected:
+                    return  # song already replaced or stopped
+                # A failure here costs the video, not the song — fall back to
+                # this transport's own renderer rather than dropping playback.
+                try:
+                    self._attach_mpv_video_follower(
+                        expected,
+                        audio_path=audio_path,
+                        video_path=video_path,
+                        mode=mode,
+                        start_seconds=start_seconds,
+                    )
+                except Exception as exc:
+                    _diag(f"[MPV] video follower unavailable; audio continues: {exc}")
+                    self._detach_mpv_video_follower()
+                    self._set_mpv_hosts_visible(False)
+                    self._last_karaoke_engine = "ffmpeg"
+
+            QTimer.singleShot(0, _attach_mpv_video_when_settled)
         self._setup_end_silence_state(mode, None)
         self._arm_audio_end_floor(audio_path)
         self._update_karaoke_key_ui()
