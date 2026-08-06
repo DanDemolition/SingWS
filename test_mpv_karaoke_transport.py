@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+import unittest.mock
 
 from PyQt6.QtCore import QCoreApplication
 
@@ -329,3 +330,60 @@ class ExternalAudioMasterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(mpv_playback is None, f"python-mpv unavailable: {MPV_IMPORT_ERROR}")
+class OrphanedEngineReapTests(unittest.TestCase):
+    """`mpv --idle` never exits on its own, so an engine outlives any SingWS
+    that does not shut down cleanly. It must be reaped — and nothing else."""
+
+    LISTING = (
+        " 101 /Applications/SingWS.app/Contents/Frameworks/mpv --idle=yes"
+        " --input-ipc-server=/tmp/singws-mpv-100-karaoke.sock\n"
+        " 201 /Applications/SingWS.app/Contents/Frameworks/mpv --idle=yes"
+        " --input-ipc-server=/tmp/singws-mpv-200-karaoke.sock\n"
+        " 301 /Applications/SingWS.app/Contents/Frameworks/mpv --idle=yes"
+        " --input-ipc-server=/tmp/singws-mpv-300-karaoke.sock\n"
+        " 401 /usr/local/bin/mpv --idle=yes --input-ipc-server=/tmp/other-app.sock\n"
+        " 501 /Applications/VLC.app/Contents/MacOS/VLC\n"
+    )
+
+    def run_sweep(self, *, own_pid, live_pids):
+        killed = []
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                if pid not in live_pids:
+                    raise OSError("no such process")
+                return
+            killed.append((pid, sig))
+
+        class _Result:
+            stdout = self.LISTING
+
+        with unittest.mock.patch.object(mpv_playback.os, "kill", fake_kill), \
+             unittest.mock.patch.object(mpv_playback.os, "getpid", lambda: own_pid), \
+             unittest.mock.patch.object(mpv_playback.subprocess, "run",
+                                        lambda *a, **k: _Result()), \
+             unittest.mock.patch.object(mpv_playback.glob, "glob", lambda p: []), \
+             unittest.mock.patch.object(mpv_playback.time, "sleep", lambda s: None):
+            mpv_playback._sweep_stale_sockets()
+        return killed
+
+    def test_engines_of_dead_sessions_are_killed(self):
+        killed = self.run_sweep(own_pid=999, live_pids={999})
+        self.assertEqual({pid for pid, _sig in killed}, {101, 201, 301})
+
+    def test_a_live_session_keeps_its_engine(self):
+        killed = self.run_sweep(own_pid=999, live_pids={999, 200})
+        self.assertEqual({pid for pid, _sig in killed}, {101, 301})
+
+    def test_this_session_never_reaps_itself(self):
+        killed = self.run_sweep(own_pid=300, live_pids={300})
+        self.assertNotIn(301, {pid for pid, _sig in killed})
+
+    def test_unrelated_processes_are_never_touched(self):
+        killed = self.run_sweep(own_pid=999, live_pids={999})
+        touched = {pid for pid, _sig in killed}
+        self.assertNotIn(401, touched)  # another app's mpv
+        self.assertNotIn(501, touched)  # not mpv at all

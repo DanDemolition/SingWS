@@ -38,9 +38,11 @@ import locale
 import os
 import platform
 import queue
+import re
 import socket
 import subprocess
 import shutil
+import signal
 import sys
 import threading
 import time
@@ -427,7 +429,25 @@ def find_mpv_binary():
     return None
 
 
-def _sweep_stale_sockets():
+_ENGINE_SOCKET_ARG = re.compile(
+    r"--input-ipc-server=(/tmp/singws-mpv-(\d+)-[A-Za-z0-9_]+\.sock)"
+)
+
+
+def _sweep_stale_sockets(log=None):
+    """Drop stale socket files AND kill engines whose SingWS session is gone.
+
+    `mpv --idle=yes` never exits on its own, so every engine depends on being
+    told to quit. atexit and the plugin's shutdown cover a clean exit, but not
+    a force-quit, a crash, or an installer replacing a running app -- and each
+    of those strands an idle engine holding an audio device.
+
+    Unlinking the socket file was not enough on its own: it left the process
+    running AND invisible, because the next sweep globs for a file that no
+    longer exists. Observed in practice as five stray engines from one
+    evening's testing, with a single socket left on disk. So scan processes,
+    not files: the owning SingWS pid is in mpv's own command line.
+    """
     for path in glob.glob("/tmp/singws-mpv-*.sock"):
         try:
             pid = int(os.path.basename(path).split("-")[2])
@@ -437,6 +457,53 @@ def _sweep_stale_sockets():
         except OSError:
             try:
                 os.unlink(path)
+            except OSError:
+                pass
+
+    own_pid = os.getpid()
+    try:
+        listing = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return
+
+    orphans = []
+    for line in listing.splitlines():
+        match = _ENGINE_SOCKET_ARG.search(line)
+        if match is None:
+            continue
+        owner_pid = int(match.group(2))
+        if owner_pid == own_pid:
+            continue  # this session's own engine
+        try:
+            os.kill(owner_pid, 0)
+            continue  # that SingWS is still running; leave its engine alone
+        except OSError:
+            pass
+        try:
+            orphans.append((int(line.split(None, 1)[0]), owner_pid))
+        except (IndexError, ValueError):
+            continue
+
+    for engine_pid, owner_pid in orphans:
+        try:
+            os.kill(engine_pid, signal.SIGTERM)
+        except OSError:
+            continue
+        if log is not None:
+            log(
+                f"[MPV] reaped orphaned engine pid={engine_pid} "
+                f"from dead session {owner_pid}"
+            )
+    # mpv exits promptly on SIGTERM; anything still up gets one SIGKILL rather
+    # than being left to accumulate again.
+    if orphans:
+        time.sleep(0.2)
+        for engine_pid, _owner in orphans:
+            try:
+                os.kill(engine_pid, signal.SIGKILL)
             except OSError:
                 pass
 
@@ -463,7 +530,7 @@ class MpvIpcClient:
         _LIVE_ENGINES.append(self)
 
     def _spawn(self):
-        _sweep_stale_sockets()
+        _sweep_stale_sockets(log=self.log)
         binary = find_mpv_binary()
         if not binary:
             raise RuntimeError("mpv binary not found (set SINGWS_MPV, or brew install mpv)")
