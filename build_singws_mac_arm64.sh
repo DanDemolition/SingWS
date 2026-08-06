@@ -10,9 +10,15 @@ SPEC="SingWS-arm64.spec"
 PYTHON=".venv/bin/python"
 DMGBUILD=".venv/bin/dmgbuild"
 
+# A native Apple Silicon build bundles the mpv engine. An Intel host can still
+# cross-build this arm64 app (both venvs are universal2), it just cannot supply
+# arm64 libmpv -- Homebrew publishes no arm64 bottle for mpv -- so that build
+# ships without the mpv engine, as every arm64 DMG has to date.
+CROSS_BUILD=0
 if [[ "$(uname -m)" != "arm64" ]]; then
-    echo "This dedicated build must run natively on an Apple Silicon Mac."
-    exit 1
+    CROSS_BUILD=1
+    echo "Cross-building the arm64 app from $(uname -m): the mpv engine will be"
+    echo "omitted. Build on an Apple Silicon Mac to include it."
 fi
 
 for required in \
@@ -26,17 +32,19 @@ for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
 
-for required in \
-    /opt/homebrew/bin/mpv \
-    /opt/homebrew/lib/libmpv.2.dylib \
-    /opt/homebrew/bin/ffmpeg \
-    /opt/homebrew/lib/libMoltenVK.dylib; do
-    [[ -e "$required" ]] || { echo "Missing Apple Silicon playback dependency: $required"; exit 1; }
-    file "$required" | grep -q "arm64" || {
-        echo "Playback dependency is not Apple Silicon arm64: $required"
-        exit 1
-    }
-done
+if [[ "$CROSS_BUILD" == "0" ]]; then
+    for required in \
+        /opt/homebrew/bin/mpv \
+        /opt/homebrew/lib/libmpv.2.dylib \
+        /opt/homebrew/bin/ffmpeg \
+        /opt/homebrew/lib/libMoltenVK.dylib; do
+        [[ -e "$required" ]] || { echo "Missing Apple Silicon playback dependency: $required"; exit 1; }
+        file "$required" | grep -q "arm64" || {
+            echo "Playback dependency is not Apple Silicon arm64: $required"
+            exit 1
+        }
+    done
+fi
 
 "$PYTHON" tools/verify_macos_arch.py --runtime --require arm64
 "$PYTHON" -c "import mpv; import PyQt6; import signalsmith_audio_native"
@@ -55,17 +63,47 @@ APP_PATH="dist/$APP_NAME.app"
 [[ -d "$APP_PATH" ]] || { echo "Build failed: $APP_PATH was not created"; exit 1; }
 "$PYTHON" tools/verify_macos_arch.py --bundle "$APP_PATH" --require arm64
 
-for bundled in \
-    "$APP_PATH/Contents/Frameworks/mpv" \
-    "$APP_PATH/Contents/Frameworks/libmpv.2.dylib" \
-    "$APP_PATH/Contents/Frameworks/libMoltenVK.dylib" \
-    "$APP_PATH/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"; do
-    [[ -e "$bundled" ]] || { echo "Bundled mpv dependency is missing: $bundled"; exit 1; }
-done
+if [[ "$CROSS_BUILD" == "0" ]]; then
+    for bundled in \
+        "$APP_PATH/Contents/Frameworks/mpv" \
+        "$APP_PATH/Contents/Frameworks/libmpv.2.dylib" \
+        "$APP_PATH/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"; do
+        [[ -e "$bundled" ]] || { echo "Bundled mpv dependency is missing: $bundled"; exit 1; }
+    done
+    # A bundled libmpv that cannot dlopen sends every song to the FFmpeg
+    # fallback, silently. Prove it loads before shipping.
+    "$PYTHON" - "$APP_PATH" <<'PYCHECK'
+import ctypes, pathlib, sys
+frameworks = pathlib.Path(sys.argv[1]) / "Contents" / "Frameworks"
+for name in ("libmpv.dylib", "libmpv.2.dylib"):
+    target = frameworks / name
+    if not target.exists():
+        sys.exit(f"Bundled {name} is missing")
+    try:
+        ctypes.CDLL(str(target))
+    except OSError as exc:
+        sys.exit(f"Bundled {name} cannot be loaded:\n{exc}")
+print("Bundled libmpv loads cleanly (both names)")
+PYCHECK
+else
+    for unexpected in \
+        "$APP_PATH/Contents/Frameworks/mpv" \
+        "$APP_PATH/Contents/Frameworks/libmpv.2.dylib"; do
+        [[ -e "$unexpected" ]] && {
+            echo "Cross-build unexpectedly bundled an mpv runtime: $unexpected"
+            exit 1
+        }
+    done
+    echo "Cross-build verified: no mpv runtime bundled (FFmpeg engine only)"
+fi
 
-codesign --force --deep --sign - --entitlements SingWS.entitlements "$APP_PATH"
-codesign --verify --deep --strict "$APP_PATH"
-
+# Stage the bundle BEFORE signing, and sign the staged copy -- same reason as
+# the Intel script. This project lives under ~/Documents, which is
+# file-provider (iCloud) managed: every file carries com.apple.FinderInfo and
+# com.apple.fileprovider xattrs, and codesign refuses them with "resource fork,
+# Finder information, or similar detritus not allowed". They cannot be stripped
+# in place; the file provider restores them immediately. A
+# `ditto --norsrc --noextattr` copy outside that tree has none of them.
 STAGING="$(mktemp -d "${TMPDIR:-/tmp}/singws-arm64-dmg.XXXXXX")"
 cleanup() {
     rm -rf "$STAGING"
@@ -73,6 +111,10 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$STAGING/dist"
 ditto --norsrc --noextattr "$APP_PATH" "$STAGING/dist/$APP_NAME.app"
+
+codesign --force --deep --sign - \
+    --entitlements SingWS.entitlements "$STAGING/dist/$APP_NAME.app"
+codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"
 
 rm -f "$DMG_NAME"
 SINGWS_DMG_APP_ROOT="$STAGING" "$DMGBUILD" \

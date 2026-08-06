@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import platform
+import subprocess
 import sys
 
 project_root = Path(SPECPATH)
@@ -30,24 +31,49 @@ for helper in (
     if helper_path.exists():
         extra_datas.append((str(helper_path), "."))
 
-# Add the complete Apple Silicon mpv/Metal runtime while retaining the
-# FFmpeg/Signalsmith karaoke engine as the default and fallback path.
+# The mpv/Metal runtime is an ARCHITECTURE-SPECIFIC Homebrew install, so it can
+# only be bundled when this build runs on Apple Silicon. An Intel host can still
+# cross-build this arm64 app -- both venvs are universal2 and PyInstaller targets
+# arm64 fine -- it just cannot supply arm64 libmpv, because Homebrew publishes no
+# arm64 bottle for mpv at all. Rather than fail, such a build ships without the
+# mpv engine, exactly as every arm64 DMG has to date; the app falls back to the
+# FFmpeg/Signalsmith engine, which is the default anyway.
 mpv_binary = brew_root / "bin" / "mpv"
+libmpv = brew_root / "lib" / "libmpv.2.dylib"
 moltenvk = brew_root / "lib" / "libMoltenVK.dylib"
 moltenvk_icd = project_root / "MoltenVK_icd.json"
-for required in (mpv_binary, moltenvk, moltenvk_icd):
-    if not required.exists():
-        raise SystemExit(f"Required mpv bundle input is missing: {required}")
-binaries.extend((
-    (str(mpv_binary), "."),
-    (str(moltenvk), "."),
-))
-# libmpv plus its full FFmpeg 8 dependency closure — see tools/mpv_bundle_deps.py.
-sys.path.insert(0, str(project_root / "tools"))
-from mpv_bundle_deps import libmpv_binaries  # noqa: E402
 
-binaries.extend(libmpv_binaries(brew_root))
-extra_datas.append((str(moltenvk_icd), "vulkan/icd.d"))
+
+def _has_arm64_slice(path):
+    if not path.exists():
+        return False
+    result = subprocess.run(
+        ["lipo", "-archs", str(path)], capture_output=True, text=True, check=False
+    )
+    return result.returncode == 0 and "arm64" in result.stdout.split()
+
+
+mpv_available = all(
+    _has_arm64_slice(p) for p in (mpv_binary, libmpv, moltenvk)
+) and moltenvk_icd.exists()
+
+if mpv_available:
+    binaries.extend((
+        (str(mpv_binary), "."),
+        (str(moltenvk), "."),
+    ))
+    # libmpv plus its full FFmpeg 8 dependency closure — see tools/mpv_bundle_deps.py.
+    sys.path.insert(0, str(project_root / "tools"))
+    from mpv_bundle_deps import libmpv_binaries  # noqa: E402
+
+    binaries.extend(libmpv_binaries(brew_root))
+    extra_datas.append((str(moltenvk_icd), "vulkan/icd.d"))
+    print("SingWS-arm64: bundling the mpv engine (native Apple Silicon build)")
+else:
+    print(
+        "SingWS-arm64: no arm64 mpv runtime present — building WITHOUT the mpv "
+        "engine (cross-build); the app uses the FFmpeg/Signalsmith engine"
+    )
 
 for bass_lib in (Path("vendor/bass") / name for name in (
     "libbass.dylib",
@@ -68,15 +94,19 @@ _already_bundled = {os.path.basename(source) for source, _ in binaries}
 for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
     if openssl_lib in _already_bundled:
         continue  # libmpv's closure already supplied the matching pair
+    # Only a candidate carrying an arm64 slice is usable here. On an Intel host
+    # Homebrew's OpenSSL is x86_64-only, while the Python framework ships
+    # universal2 -- so the framework wins a cross-build and Homebrew wins a
+    # native Apple Silicon build, keeping the pair consistent either way.
     candidates = (
         brew_root / "opt" / "openssl@3" / "lib" / openssl_lib,
         Path("/opt/homebrew/opt/openssl@3/lib") / openssl_lib,
+        Path(sys.base_prefix) / "lib" / openssl_lib,
         Path("/usr/local/opt/openssl@3/lib") / openssl_lib,
         Path("/usr/local/lib") / openssl_lib,
-        Path(sys.base_prefix) / "lib" / openssl_lib,
     )
     for candidate in candidates:
-        if candidate.exists():
+        if _has_arm64_slice(candidate):
             binaries.append((str(candidate), "."))
             break
 
@@ -138,9 +168,7 @@ a = Analysis(
         'signalsmith_audio_native',
         'mutagen',
         'python_karaoke_transport',
-        'mpv_playback',
-        'mpv_karaoke_transport',
-        'mpv',
+        *(('mpv_playback', 'mpv_karaoke_transport', 'mpv') if mpv_available else ()),
         'bass_background_engine',
         'song_index',
         'singws_eq',
@@ -165,7 +193,7 @@ a = Analysis(
     # Keep GStreamer out of the graph entirely: no plugins, scanner, typelibs,
     # or GLib gir get pulled in, and a stray transitive `import gi` cannot
     # resurrect ~315 MiB of frameworks.
-    excludes=['gi', 'gi.repository'],
+    excludes=['gi', 'gi.repository'] + ([] if mpv_available else ['mpv']),
     noarchive=False,
     optimize=0,
 )
@@ -174,6 +202,35 @@ a = Analysis(
 _gst_binaries = [item for item in a.binaries if 'gst' in str(item[0]).lower() or 'gstreamer' in str(item[0]).lower()]
 if _gst_binaries:
     raise SystemExit(f"GStreamer artifacts unexpectedly present in build: {_gst_binaries[:5]}")
+
+
+def _keep_arm64_binary(item):
+    """Drop anything with no arm64 slice.
+
+    PyInstaller's analysis resolves libraries against the HOST, so an Intel
+    machine cross-building this app can pull x86_64-only dylibs into an arm64
+    bundle -- python-mpv's ctypes lookup dragged in Homebrew's Intel libmpv and
+    its whole closure, and verify_macos_arch.py then failed on 25 files. Judge
+    by architecture rather than by path, so universal dependencies are kept.
+    """
+    source = Path(str(item[1]))
+    if not source.exists():
+        return True
+    result = subprocess.run(
+        ["lipo", "-archs", str(source)], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        return True
+    return "arm64" in result.stdout.split()
+
+
+_dropped = [item for item in a.binaries if not _keep_arm64_binary(item)]
+if _dropped:
+    print(
+        f"SingWS-arm64: dropping {len(_dropped)} binaries with no arm64 slice: "
+        + ", ".join(sorted({Path(str(i[0])).name for i in _dropped})[:8])
+    )
+    a.binaries = [item for item in a.binaries if _keep_arm64_binary(item)]
 
 pyz = PYZ(a.pure)
 

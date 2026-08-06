@@ -79,6 +79,12 @@ echo ">>> [3/7] building native installer for $(uname -m)"
 if [[ "$(uname -m)" == "x86_64" ]]; then
   echo ">>> [3/7] building Intel legacy installer for macOS 12/13"
   ./build_singws_mac_intel_legacy.sh
+  # Both venvs are universal2, so an Intel host cross-builds the arm64 app.
+  # It ships without the mpv engine -- Homebrew has no arm64 mpv to bundle --
+  # which is what every arm64 DMG has contained to date. Build on an Apple
+  # Silicon Mac and copy the DMG in here to ship arm64 WITH mpv.
+  echo ">>> [3/7] cross-building arm64 installer (no mpv engine)"
+  ./build_singws_mac_arm64.sh
 fi
 
 DMG_ARM="SingWS-$NEW_VER-arm64-installer.dmg"
