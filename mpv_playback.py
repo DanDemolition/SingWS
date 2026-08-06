@@ -1468,6 +1468,7 @@ class MpvPlaybackPlugin:
                 and self._cdg_output_sidefill
             )
             self._set_follower_cdg_sidefill(follower, sidefill)
+            self._set_follower_scaler(follower, is_cdg=bool(cdg_audio))
             player.speed = tempo
             if start_paused:
                 player.pause = True
@@ -1875,6 +1876,35 @@ class MpvPlaybackPlugin:
             self.log(
                 f"[MPV-VIDEO] CDG output side-fill "
                 f"{'enabled' if enabled else 'disabled'}"
+            )
+
+    def _set_follower_scaler(self, follower, *, is_cdg: bool) -> None:
+        """Match SingWS's own rule: CDG is pixel art, real video is not.
+
+        A CDG frame is 288x192 in 16 colours and reaches a 1080p screen at
+        about 5.6x. mpv's default lanczos + sigmoid upscaling smears the lyric
+        edges into mush at that ratio — which is why the FFmpeg renderer has
+        always drawn CDG with Qt's FastTransformation (nearest). Give mpv the
+        same treatment for CDG and leave its defaults alone for MP4, where
+        lanczos is exactly right.
+        """
+        player = follower.player
+        try:
+            if is_cdg:
+                player["scale"] = "nearest"
+                player["cscale"] = "nearest"
+                player["sigmoid-upscaling"] = "no"
+            else:
+                player["scale"] = "lanczos"
+                player["cscale"] = ""
+                player["sigmoid-upscaling"] = "yes"
+        except Exception as exc:
+            self.log(f"[MPV-VIDEO] {follower.tag} scaler setup failed: {exc}")
+            return
+        if follower is self._out:
+            self.log(
+                f"[MPV-VIDEO] output scaler = "
+                f"{'nearest (CDG pixel art)' if is_cdg else 'lanczos (video)'}"
             )
 
     def setCdgOutputSidefill(self, enabled) -> None:
