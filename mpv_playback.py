@@ -90,6 +90,7 @@ os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(
 os.environ["MPVBUNDLE"] = "true"
 
 import mpv as libmpv  # noqa: E402
+from mpv_audio_filters import build_af_chain, describe_chain  # noqa: E402
 from PyQt6.QtCore import QEventLoop, QPoint, QTimer  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
@@ -766,6 +767,21 @@ class MpvVideoFollower:
         with self._visual_state_lock:
             return self._ready_visual_generation == int(generation)
 
+    def awaiting_visual(self, generation) -> bool:
+        """Whether a replacement file is armed/loading and has not configured
+        its video output yet — i.e. this surface must stay hidden.
+
+        Deliberately does NOT report True for a generation nothing has armed
+        yet: between songs the persistent window keeps showing its last frame,
+        and only a load actually in flight may hold the reveal back.
+        """
+        generation = int(generation)
+        with self._visual_state_lock:
+            armed = generation in (
+                self._pending_visual_generation, self._active_visual_generation
+            )
+            return armed and self._ready_visual_generation != generation
+
     def _on_mpv_event(self, event):
         """Latch the new generation only from mpv's own file/VO events.
 
@@ -1129,6 +1145,7 @@ class MpvPlaybackPlugin:
     SEEK_THRESHOLD = 0.40  # non-CDG only: close a gap this big with one seek, not 20s of skew
     SEEK_SETTLE_TIMEOUT = 5.0    # longest a follower may take to finish one seek
     SEEK_HOLD_TIMEOUT_MS = 6000  # the audible clock is never held longer than this
+    REVEAL_HOLD_TIMEOUT = 2.5    # longest a surface stays hidden waiting on its VO
 
     def __init__(self, log=print, preview_fast_profile=False):
         self.log = log
@@ -1167,6 +1184,9 @@ class MpvPlaybackPlugin:
         # whether the pipeline is cold or already warm.
         self._start_gate_generation = 0
         self._start_gate_started_at = 0.0
+        # Deadline for holding a hidden surface back until mpv has configured
+        # the replacement stream; see _reveal_held().
+        self._reveal_hold_started_at = 0.0
         # A seek costs the audible engine and a video follower wildly
         # different amounts of time, so seeks are coordinated too. See
         # seekMedia().
@@ -1185,6 +1205,13 @@ class MpvPlaybackPlugin:
         # normalize -> EQ -> master bus), the followers chase THAT clock and
         # the mpv audio engine stays idle. See setExternalAudioMaster.
         self._external_audio = None
+        # When mpv IS the audible engine, the SingWS chain (normalize -> EQ ->
+        # master bus) cannot run: samples never reach Python. It is expressed as
+        # an mpv `af` chain instead. Key lives in the same chain, so both are
+        # kept here and the whole chain is rebuilt whenever either changes.
+        self._key_semitones = 0
+        self._audio_spec = {}
+        self._af_chain = ""
         self._engine = MpvIpcClient("karaoke", log=log)
 
     # -- contract: setup -------------------------------------------------------------------
@@ -1405,6 +1432,14 @@ class MpvPlaybackPlugin:
                 if not visible:
                     follower.hide()
                     continue
+                if self._reveal_held(follower):
+                    # A replacement file is loading. Revealing now uncovers the
+                    # surface before gpu-next has configured the new stream, and
+                    # the compositor shows one frame of whatever the Metal
+                    # drawable happened to hold — the colour flash at song
+                    # start. force-render keeps it decoding while hidden, so
+                    # waiting costs nothing but the flash.
+                    continue
                 rebuild_after_reveal = follower.show()  # no-op unless it was hidden
                 moved |= follower.reposition()
                 if rebuild_after_reveal:
@@ -1418,6 +1453,34 @@ class MpvPlaybackPlugin:
                 pass
         if moved and self._pending_rebuild:
             self._settle_timer.start(300)   # still dragging: push the deadline out
+        # Poll the readiness the followers publish from mpv's own VO events.
+        # Nothing else calls visualsReady(), so without this the coordinated
+        # start could only ever be released by its 1400ms safety timeout — the
+        # picture sat held long after both surfaces had configured.
+        if self._start_gate_generation:
+            try:
+                self.visualsReady()
+            except Exception:
+                pass
+
+    def _reveal_held(self, follower) -> bool:
+        """Whether this surface must stay hidden until its new stream is up."""
+        if self._audio_only:
+            return False
+        # Never trade a one-frame flash for a permanently dark screen. A file
+        # that never configures a video output (no video track behind a video
+        # extension, an unsupported codec, a decoder that dies) would otherwise
+        # hold the reveal forever, so the hold always expires.
+        started = self._reveal_hold_started_at
+        if not started or (time.monotonic() - started) > self.REVEAL_HOLD_TIMEOUT:
+            return False
+        generation = self._media_generation
+        with self._follower_state_lock:
+            if follower.tag in self._followers_loading:
+                # Covers the gap between loadSingWSMedia bumping the generation
+                # and the follower's worker actually arming readiness.
+                return True
+        return follower.awaiting_visual(generation)
 
     # -- contract: load --------------------------------------------------------------------
     def loadSingWSMedia(self, source, audio_path=None, autoplay=True,
@@ -1435,6 +1498,12 @@ class MpvPlaybackPlugin:
             self._audio_only = not (self._is_cdg or low.endswith(
                 (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".mpg", ".mpeg")))
             gate_visual_start = bool(autoplay and not self._audio_only)
+            # Arm the reveal hold for every video load, autoplay or not: the
+            # flash comes from uncovering the surface mid-load, which does not
+            # depend on who starts playback.
+            self._reveal_hold_started_at = (
+                time.monotonic() if not self._audio_only else 0.0
+            )
             if gate_visual_start:
                 self._start_gate_generation = generation
                 self._start_gate_started_at = time.monotonic()
@@ -1582,17 +1651,52 @@ class MpvPlaybackPlugin:
                 with self._follower_state_lock:
                     self._followers_loading.discard(follower.tag)
 
+    def _rebuild_af_chain(self):
+        """Push the full audio chain (key + SingWS DSP) to the mpv engine.
+
+        Engine only: the video followers are muted, so filtering silence would
+        just burn CPU. Rubberband is mpv's OWN built-in filter (the bundled
+        ffmpeg has no librubberband), which is why this chain is only ever
+        valid against mpv, not against a plain ffmpeg graph.
+        """
+        spec = dict(self._audio_spec or {})
+        chain = build_af_chain(
+            semitones=self._key_semitones,
+            normalize_gain_db=spec.get("normalize_gain_db", 0.0),
+            eq_enabled=bool(spec.get("eq_enabled", False)),
+            eq_gains_db=spec.get("eq_gains_db"),
+            master_enabled=bool(spec.get("master_enabled", False)),
+            master_params=spec.get("master_params"),
+        )
+        if chain == self._af_chain:
+            return
+        self._af_chain = chain
+        self._engine.set_property("af", chain)
+        self.log(f"[MPV-AUDIO] af chain = {describe_chain(chain)}")
+        if chain:
+            self.log(f"[MPV-AUDIO] af = {chain}")
+
+    def setAudioProcessing(self, spec: dict | None) -> None:
+        """Apply the SingWS audio chain to mpv's own audio engine.
+
+        ``spec`` carries normalize_gain_db, eq_enabled, eq_gains_db,
+        master_enabled and master_params -- the same engine-param dict that
+        drives MasterAudioProcessor, so the host's friendly knobs keep one
+        source of truth. No-op when SingWS owns the audio: its real DSP is in
+        the sample path there and duplicating it here would process twice.
+        """
+        if self._external_audio is not None:
+            return
+        self._audio_spec = dict(spec or {})
+        self._rebuild_af_chain()
+
     def _apply_key(self, semitones):
         try:
             n = int(semitones or 0)
         except Exception:
             n = 0
-        # Rubberband is mpv's OWN built-in filter (ffmpeg here has no librubberband). Engine only:
-        # the followers are muted, so pitching silence would just burn CPU.
-        if n == 0:
-            self._engine.set_property("af", "")
-        else:
-            self._engine.set_property("af", f"rubberband=pitch-scale={2 ** (n / 12.0):.6f}")
+        self._key_semitones = n
+        self._rebuild_af_chain()
 
     def setPitchSemitones(self, semitones) -> None:
         """Apply a live key change without changing playback tempo."""
@@ -1703,6 +1807,7 @@ class MpvPlaybackPlugin:
         self._loaded = False
         self._media_generation += 1
         self._start_gate_generation = 0
+        self._reveal_hold_started_at = 0.0
         self._cancel_seek_hold()
         with self._follower_state_lock:
             self._followers_loading.clear()
@@ -1927,6 +2032,11 @@ class MpvPlaybackPlugin:
 
     def setAudioDevice(self, name) -> None:
         self._engine.set_property("audio-device", str(name or "auto"))
+
+    @staticmethod
+    def supportsVideoStretch() -> bool:
+        """mpv's own keepaspect handles this, so the host may offer it."""
+        return True
 
     def setVideoStretch(self, stretch) -> None:
         if self._out is not None:

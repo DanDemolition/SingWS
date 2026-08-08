@@ -358,5 +358,135 @@ class ShowScreenQrGatingTests(unittest.TestCase):
         self.assertEqual(preview_area.calls, [None])
 
 
+class RotationRequestQrGatingTests(unittest.TestCase):
+    """The rotation window's QR card shares the show screen's URL and
+    accepting gate but has its own enable setting and caption."""
+
+    class _StubRotationView:
+        def __init__(self):
+            self.calls = []
+
+        def set_request_qr(self, pixmap, caption=""):
+            self.calls.append((pixmap, caption))
+
+    def make_app(self, *, enabled=True, accepting=True, caption=None,
+                 url="https://x/tenants/t/"):
+        app = mod.KaraokeApp.__new__(mod.KaraokeApp)
+        settings = {
+            "rotation_request_qr_enabled": enabled,
+            "requests_accepting": accepting,
+        }
+        if caption is not None:
+            settings["rotation_request_qr_caption"] = caption
+        app.settings = settings
+        app._rotation_qr_key = None
+        view = self._StubRotationView()
+        app.rotation_view = view
+        app._is_requests_accepting_cached = lambda: bool(accepting)
+        app._header_qr_url = lambda: url
+        app._build_qr_pixmap = lambda u, size=300: self._nonnull_pixmap()
+        return app, view
+
+    @staticmethod
+    def _nonnull_pixmap():
+        pm = QPixmap(10, 10)
+        pm.fill(QColor("white"))
+        return pm
+
+    def test_default_caption_is_the_call_to_action(self):
+        self.assertEqual(
+            mod.DEFAULTS.get("rotation_request_qr_caption"), "JOIN THE QUEUE!"
+        )
+        self.assertTrue(mod.DEFAULTS.get("rotation_request_qr_enabled"))
+
+    def test_shows_with_caption_when_enabled_and_accepting(self):
+        app, view = self.make_app()
+        app._refresh_rotation_request_qr("test")
+        pixmap, caption = view.calls[-1]
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
+        self.assertEqual(caption, "JOIN THE QUEUE!")
+
+    def test_custom_caption_is_used(self):
+        app, view = self.make_app(caption="SING WITH US")
+        app._refresh_rotation_request_qr("test")
+        self.assertEqual(view.calls[-1][1], "SING WITH US")
+
+    def test_blank_caption_falls_back_to_default(self):
+        app, view = self.make_app(caption="   ")
+        app._refresh_rotation_request_qr("test")
+        self.assertEqual(view.calls[-1][1], "JOIN THE QUEUE!")
+
+    def test_cleared_when_not_accepting(self):
+        app, view = self.make_app(accepting=False)
+        app._refresh_rotation_request_qr("test")
+        self.assertEqual(view.calls[-1][0], None)
+
+    def test_cleared_when_disabled(self):
+        app, view = self.make_app(enabled=False)
+        app._refresh_rotation_request_qr("test")
+        self.assertEqual(view.calls[-1][0], None)
+
+    def test_cleared_when_no_url(self):
+        app, view = self.make_app(url="")
+        app._refresh_rotation_request_qr("test")
+        self.assertEqual(view.calls[-1][0], None)
+
+    def test_cache_skips_redundant_rebuild(self):
+        app, view = self.make_app()
+        app._refresh_rotation_request_qr("first")
+        app._refresh_rotation_request_qr("second")
+        self.assertEqual(len(view.calls), 1)
+        app._refresh_rotation_request_qr("third", force=True)
+        self.assertEqual(len(view.calls), 2)
+
+    def test_missing_rotation_window_is_a_no_op(self):
+        app, _ = self.make_app()
+        del app.rotation_view
+        app._refresh_rotation_request_qr("test")  # must not raise
+
+    def test_show_screen_refresh_also_drives_the_rotation_card(self):
+        # One trigger, both screens: the show-screen refresh runs the rotation
+        # push first so a missing video area cannot skip it.
+        app, view = self.make_app()
+        app._show_screen_qr_key = None
+        app._refresh_show_screen_qr("test")
+        self.assertEqual(len(view.calls), 1)
+        self.assertIsNotNone(view.calls[-1][0])
+
+
+class RotationQrCardRenderTests(unittest.TestCase):
+    """RotationView.set_request_qr shows/hides the card and scales the code."""
+
+    def _view(self):
+        view = mod.RotationView.__new__(mod.RotationView)
+        from PyQt6.QtWidgets import QFrame, QLabel
+        view.qr_card = QFrame()
+        view.qr_image_label = QLabel()
+        view.qr_caption_label = QLabel()
+        return view
+
+    def test_sets_pixmap_caption_and_shows_card(self):
+        view = self._view()
+        qr = QPixmap(300, 300)
+        qr.fill(QColor("black"))
+        mod.RotationView.set_request_qr(view, qr, "JOIN THE QUEUE!")
+        self.assertFalse(view.qr_image_label.pixmap().isNull())
+        self.assertLessEqual(
+            view.qr_image_label.pixmap().height(), mod.RotationView.ROTATION_QR_SIZE
+        )
+        self.assertEqual(view.qr_caption_label.text(), "JOIN THE QUEUE!")
+        self.assertFalse(view.qr_card.isHidden())
+
+    def test_none_hides_the_card(self):
+        view = self._view()
+        qr = QPixmap(300, 300)
+        qr.fill(QColor("black"))
+        mod.RotationView.set_request_qr(view, qr, "X")
+        mod.RotationView.set_request_qr(view, None)
+        self.assertTrue(view.qr_card.isHidden())
+        self.assertTrue(view.qr_image_label.pixmap().isNull())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -458,9 +458,21 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("return", accept)
 
     def test_ffmpeg_cdg_timing_restores_legacy_baseline(self):
-        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 600", MAIN_SOURCE)
+        # 750, matching what ffmpeg_cdg_750_baseline_migrated already assumes:
+        # it zeroes a saved +150 fine on the basis that the baseline carries it.
+        # The constant sat at 600 for several releases, so installs calibrated
+        # to +750 silently ran 150ms early.
+        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 750", MAIN_SOURCE)
+        # The baseline is now chosen per engine (mpv needs a different one and
+        # was wrongly getting FFmpeg's), so the constant is applied in
+        # _cdg_timing_base_offset_ms rather than inline. That selection is
+        # covered behaviourally by CdgTimingBaselinePerEngineTests in
+        # test_karaoke_engine_selection.
         effective = function_source("_effective_cdg_timing_offset_ms")
-        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS + fine_ms", effective)
+        self.assertIn("self._cdg_timing_base_offset_ms() + fine_ms", effective)
+        self.assertIn(
+            "FFMPEG_CDG_BASE_OFFSET_MS", function_source("_cdg_timing_base_offset_ms")
+        )
         start = function_source("_start_python_karaoke_transport")
         self.assertIn("off = self._effective_cdg_timing_offset_ms()", start)
         self.assertIn("ffmpeg_cdg_timing_migrated", MAIN_SOURCE)
@@ -468,7 +480,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('self.settings["cdg_timing_offset_ms"] = 0', MAIN_SOURCE)
         self.assertIn("ffmpeg_cdg_750_baseline_migrated", MAIN_SOURCE)
 
-    def test_mp4_timing_anchors_on_real_audio_and_intel_caps_native_decode(self):
+    def test_mp4_timing_anchors_on_real_audio(self):
         feeder = TRANSPORT_SOURCE[
             TRANSPORT_SOURCE.index("class _PcmFeeder"):TRANSPORT_SOURCE.index("class PythonKaraokeTransport")
         ]
@@ -478,11 +490,6 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("t._clock_has_real_audio_anchor = True", feeder)
         position = transport_function_source("position_seconds")
         self.assertIn("if not self._clock_has_real_audio_anchor:", position)
-        effective = function_source("_effective_mp4_max_height")
-        self.assertIn('platform.machine().lower() in {"x86_64", "amd64"}', effective)
-        self.assertIn("requested <= 0 or requested > 720", effective)
-        self.assertIn("return 720", effective)
-        self.assertIn("tp.max_video_height = self._effective_mp4_max_height()", MAIN_SOURCE)
 
     def test_deferred_remote_adds_save_off_thread_during_playback(self):
         source = function_source("_save_deferred_remote_adds")
@@ -881,7 +888,17 @@ class PerformanceSafetyTests(unittest.TestCase):
         source = MAIN_SOURCE
         self.assertNotIn('"performance_mode": False', source)
         self.assertNotIn('"safe_mode": False', source)
-        self.assertIn('for obsolete_key in ("performance_mode", "safe_mode")', source)
+        self.assertNotIn('"mp4_max_height"', source.replace(
+            'for obsolete_key in ("performance_mode", "safe_mode", "mp4_max_height")', ""
+        ))
+        self.assertIn(
+            'for obsolete_key in ("performance_mode", "safe_mode", "mp4_max_height")',
+            source,
+        )
+        # mpv is the shipping video path, so nothing may cap decode resolution
+        # or force show effects off on Intel any more.
+        self.assertNotIn("_effective_mp4_max_height", source)
+        self.assertNotIn("_intel_show_effects_backoff_logged", source)
 
     def test_karaoke_to_bgm_overlap_requires_explicit_setting(self):
         self.assertIn('"karaoke_bgm_crossfade_enabled": False', MAIN_SOURCE)

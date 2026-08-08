@@ -20,7 +20,9 @@ binaries = []
 
 for helper in (
     "python_karaoke_transport.py",
-    "mpv_playback.py",
+    "mpv_playback.py" if os.environ.get(
+        "SINGWS_MEDIA_STACK", "homebrew").strip().lower() != "iina"
+    else "mpv_playback_iina.py",
     "mpv_karaoke_transport.py",
     "bass_background_engine.py",
     "song_index.py",
@@ -38,20 +40,63 @@ for helper in (
 mpv_binary = brew_root / "bin" / "mpv"
 moltenvk = brew_root / "lib" / "libMoltenVK.dylib"
 moltenvk_icd = project_root / "MoltenVK_icd.json"
-for required in (mpv_binary, moltenvk, moltenvk_icd):
-    if not required.exists():
-        raise SystemExit(f"Required mpv bundle input is missing: {required}")
-binaries.extend((
-    (str(mpv_binary), "."),
-    (str(moltenvk), "."),
-))
+# The IINA stack runs libmpv in process through the native bridge, so it needs
+# neither the out-of-process `mpv` binary nor MoltenVK. Bundling them anyway
+# would drag Homebrew's whole macOS-14 dependency closure back in and defeat
+# the point of the swap.
+_media_stack_early = os.environ.get("SINGWS_MEDIA_STACK", "homebrew").strip().lower()
+if _media_stack_early == "iina":
+    for required in (moltenvk_icd,):
+        if not required.exists():
+            raise SystemExit(f"Required bundle input is missing: {required}")
+else:
+    for required in (mpv_binary, moltenvk, moltenvk_icd):
+        if not required.exists():
+            raise SystemExit(f"Required mpv bundle input is missing: {required}")
+    binaries.extend((
+        (str(mpv_binary), "."),
+        (str(moltenvk), "."),
+    ))
 # libmpv plus its full FFmpeg 8 dependency closure. Collecting only libmpv
 # leaves @rpath/libavcodec.62.dylib unresolvable in the bundle, which is what
 # made shipped builds fall back to the FFmpeg engine on every song.
 sys.path.insert(0, str(project_root / "tools"))
 from mpv_bundle_deps import libmpv_binaries  # noqa: E402
 
-binaries.extend(libmpv_binaries(brew_root))
+# SINGWS_MEDIA_STACK=iina swaps Homebrew's libmpv closure for the IINA-derived
+# one, which is built against macOS 10.15 rather than Homebrew's 14/15. That is
+# what allows a single Intel build to run on macOS 12 (see
+# constraints-macos12.txt). Opt-in: the default build is unchanged.
+#
+# The two stacks are NOT interchangeable consumers. Homebrew's libmpv is driven
+# by python-mpv/ctypes and the out-of-process `mpv` binary; the IINA stack is
+# driven by libsingws_mpv_bridge.dylib + mpv_playback_iina.py. Selecting `iina`
+# therefore also requires the bridge dylib.
+media_stack = os.environ.get("SINGWS_MEDIA_STACK", "homebrew").strip().lower()
+if media_stack == "iina":
+    iina_frameworks = Path(
+        os.environ.get("SINGWS_MPV_FRAMEWORKS", "")
+        or (Path.home() / "Downloads" / "native_dual_view" / "Frameworks")
+    )
+    bridge_dylib = project_root / "native" / "mpv_bridge" / "libsingws_mpv_bridge.dylib"
+    if not iina_frameworks.is_dir():
+        raise SystemExit(
+            f"SINGWS_MEDIA_STACK=iina but frameworks are missing: {iina_frameworks}\n"
+            "Set SINGWS_MPV_FRAMEWORKS to the directory holding singws_libmpv.2.dylib."
+        )
+    if not bridge_dylib.is_file():
+        raise SystemExit(
+            f"SINGWS_MEDIA_STACK=iina but the native bridge is missing: {bridge_dylib}\n"
+            "Build it first: native/mpv_bridge/build_bridge.sh --arch x86_64"
+        )
+    iina_dylibs = sorted(iina_frameworks.glob("*.dylib"))
+    if not iina_dylibs:
+        raise SystemExit(f"No dylibs found in {iina_frameworks}")
+    binaries.extend((str(path), ".") for path in iina_dylibs)
+    binaries.append((str(bridge_dylib), "."))
+    print(f"[spec] IINA media stack: {len(iina_dylibs)} dylibs + native bridge")
+else:
+    binaries.extend(libmpv_binaries(brew_root))
 extra_datas.append((str(moltenvk_icd), "vulkan/icd.d"))
 
 for bass_lib in (Path("vendor/bass") / name for name in (
@@ -70,16 +115,30 @@ for bass_lib in (Path("vendor/bass") / name for name in (
 # libcrypto dies on a missing _CRYPTO_calloc, which is exactly what the
 # post-build libmpv load test caught.
 _already_bundled = {os.path.basename(source) for source, _ in binaries}
+# Only the Homebrew stack needs this pair. The IINA libmpv links GnuTLS, and
+# the project-local ffmpeg/ffprobe have no OpenSSL dependency at all, so
+# bundling Homebrew's macOS-15 libssl/libcrypto there adds nothing but the last
+# remaining blocker to a macOS 12 build.
 for openssl_lib in ("libssl.3.dylib", "libcrypto.3.dylib"):
     if openssl_lib in _already_bundled:
         continue  # libmpv's closure already supplied the matching pair
-    candidates = (
-        brew_root / "opt" / "openssl@3" / "lib" / openssl_lib,
-        Path("/opt/homebrew/opt/openssl@3/lib") / openssl_lib,
-        Path("/usr/local/opt/openssl@3/lib") / openssl_lib,
-        Path("/usr/local/lib") / openssl_lib,
-        Path(sys.base_prefix) / "lib" / openssl_lib,
-    )
+    if _media_stack_early == "iina":
+        # Homebrew's OpenSSL is built for macOS 15; the python.org framework's
+        # is built for macOS 12 and is what _ssl actually links. Prefer it, and
+        # bundle it explicitly so PyInstaller's own dependency scan cannot pull
+        # the Homebrew pair in behind our back.
+        candidates = (
+            Path(sys.base_prefix) / "lib" / openssl_lib,
+            Path(sys.prefix) / "lib" / openssl_lib,
+        )
+    else:
+        candidates = (
+            brew_root / "opt" / "openssl@3" / "lib" / openssl_lib,
+            Path("/opt/homebrew/opt/openssl@3/lib") / openssl_lib,
+            Path("/usr/local/opt/openssl@3/lib") / openssl_lib,
+            Path("/usr/local/lib") / openssl_lib,
+            Path(sys.base_prefix) / "lib" / openssl_lib,
+        )
     for candidate in candidates:
         if candidate.exists():
             binaries.append((str(candidate), "."))
@@ -143,10 +202,15 @@ a = Analysis(
         'signalsmith_audio_native',
         'mutagen',
         'python_karaoke_transport',
-        'mpv_playback',
         'mpv_karaoke_transport',
-        'mpv',
         'bass_background_engine',
+        # The Homebrew backend and the python-mpv module are added below only
+        # for the homebrew stack: PyInstaller's ctypes hook resolves
+        # ctypes.util.find_library('mpv') for the `mpv` module and bundles
+        # Homebrew's libmpv plus its whole macOS-14 closure, which is exactly
+        # what the IINA swap exists to remove.
+        *(['mpv_playback', 'mpv'] if _media_stack_early != 'iina'
+          else ['mpv_playback_iina']),
         'song_index',
         # 10-band graphic EQ added this session — pulls in numpy + scipy.
         'singws_eq',
@@ -169,7 +233,12 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[str(project_root / 'singws_pyinstaller_runtime.py')],
     # Keep GStreamer out of the graph entirely (no plugins/scanner/typelibs).
-    excludes=['gi', 'gi.repository'],
+    # 0.2.18.1.py imports mpv_playback lazily inside _ensure_mpv_karaoke_core,
+    # and PyInstaller's module analysis follows it to `import mpv`, whose ctypes
+    # hook then bundles Homebrew's libmpv and its whole macOS-14 closure. The
+    # IINA build must not carry that second media stack, so both are excluded.
+    excludes=(['gi', 'gi.repository'] +
+              (['mpv', 'mpv_playback'] if _media_stack_early == 'iina' else [])),
     noarchive=False,
     optimize=0,
 )
@@ -248,8 +317,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.3.6',
-        'CFBundleVersion': '0.4.3.6',
+        'CFBundleShortVersionString': '0.4.3.7',
+        'CFBundleVersion': '0.4.3.7',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
             "SingWS uses System Events to find, queue, and control songs in the KaraFun application."

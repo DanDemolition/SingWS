@@ -4,6 +4,7 @@ import importlib.util
 import os
 import sys
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
