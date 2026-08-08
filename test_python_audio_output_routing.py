@@ -160,5 +160,80 @@ class HostDeviceAdapterTests(unittest.TestCase):
         self.assertEqual(name, "MacBook Pro Speakers")
 
 
+class SeekHoldResumesTheSinkTests(unittest.TestCase):
+    """The coordinated mpv seek does pause -> seek -> resume on this transport
+    (MpvPlaybackPlugin.seekMedia / _finish_seek). A seek that cleared the paused
+    flag made the following resume() a no-op, so QAudioSink stayed suspended for
+    the rest of the song: the feeder was never pulled again, the clock froze at
+    the seek target, and the mpv followers re-seeked back onto that frozen
+    master every couple of seconds until the stall watchdog force-ended the
+    song."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtCore import QCoreApplication
+
+        cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    def make_transport(self):
+        class FakeSink:
+            def __init__(self):
+                self.suspended = False
+
+            def suspend(self):
+                self.suspended = True
+
+            def resume(self):
+                self.suspended = False
+
+            def processedUSecs(self):
+                return 0
+
+            def bufferSize(self):
+                return 0
+
+        t = transport_module.PythonKaraokeTransport(
+            "/nonexistent.mp3", mode="audio", duration_seconds=300.0
+        )
+        t.audio_sink = FakeSink()
+        # Keep ffmpeg out of the unit test; the decoder is irrelevant here.
+        t._start_audio = lambda _seconds: None
+        return t, t.audio_sink
+
+    def test_seek_while_held_leaves_the_sink_running_after_resume(self):
+        t, sink = self.make_transport()
+        t.pause()
+        self.assertTrue(sink.suspended)
+
+        t.seek(131.88)
+        t.resume()
+
+        self.assertFalse(sink.suspended)
+        self.assertFalse(t.is_paused())
+
+    def test_a_seek_does_not_un_pause_on_its_own(self):
+        t, sink = self.make_transport()
+        t.pause()
+        t.seek(131.88)
+
+        # Still paused, still suspended, and the frozen clock reports the new
+        # target rather than the pre-seek position.
+        self.assertTrue(t.is_paused())
+        self.assertTrue(sink.suspended)
+        self.assertAlmostEqual(t.position_seconds(), 131.88, places=3)
+
+    def test_resume_recovers_a_sink_suspended_behind_a_stale_flag(self):
+        t, sink = self.make_transport()
+        sink.suspend()  # device suspended without the flag ever being set
+        t.resume()
+        self.assertFalse(sink.suspended)
+
+    def test_seek_while_playing_still_plays(self):
+        t, sink = self.make_transport()
+        t.seek(42.0)
+        self.assertFalse(t.is_paused())
+        self.assertFalse(sink.suspended)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -250,6 +250,154 @@ class CoordinatedSeekTests(unittest.TestCase):
         self.assertGreater(seeks[0][1], 90.0)
 
 
+class _FakeHost:
+    def __init__(self, visible=True):
+        self._visible = visible
+
+    def isVisible(self):
+        return self._visible
+
+
+class _RevealFollower:
+    """Follower stub carrying the real readiness state machine's outputs."""
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.host = _FakeHost()
+        self.win = object()
+        self.always_visible = False
+        self._hidden = True
+        self.shown = 0
+        self.hidden_calls = 0
+        self.ready_for = None
+        self.armed_for = None
+
+    def window_alive(self):
+        return True
+
+    def awaiting_visual(self, generation):
+        return self.armed_for == generation and self.ready_for != generation
+
+    def show(self):
+        self._hidden = False
+        self.shown += 1
+        return False
+
+    def hide(self):
+        self._hidden = True
+        self.hidden_calls += 1
+
+    def reposition(self, force=False):
+        return False
+
+
+@unittest.skipIf(mpv_playback is None, f"python-mpv unavailable: {MPV_IMPORT_ERROR}")
+class VisualRevealGateTests(unittest.TestCase):
+    """A surface uncovered before gpu-next has configured the replacement
+    stream shows one frame of whatever the Metal drawable held — the colour
+    flash at song start. The readiness the followers already publish from mpv's
+    VO events has to actually gate the reveal."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    def make_plugin(self, audio_only=False):
+        plugin = mpv_playback.MpvPlaybackPlugin.__new__(
+            mpv_playback.MpvPlaybackPlugin
+        )
+        plugin.log = lambda *a, **k: None
+        plugin._out = _RevealFollower("out")
+        plugin._prev = _RevealFollower("prev")
+        plugin._audio_only = audio_only
+        plugin._loaded = True
+        plugin._shutdown = False
+        plugin._window_transition_active = False
+        plugin._media_generation = 3
+        plugin._follower_state_lock = threading.Lock()
+        plugin._followers_loading = set()
+        plugin._reveal_hold_started_at = time.monotonic()
+        plugin._start_gate_generation = 0
+        plugin._pending_rebuild = set()
+        plugin._settle_timer = unittest.mock.Mock()
+        return plugin
+
+    def test_surface_stays_hidden_while_its_file_is_still_loading(self):
+        plugin = self.make_plugin()
+        with plugin._follower_state_lock:
+            plugin._followers_loading = {"out", "prev"}
+        plugin._tick()
+        self.assertEqual(plugin._out.shown, 0)
+        self.assertEqual(plugin._prev.shown, 0)
+
+    def test_surface_stays_hidden_until_the_new_stream_is_configured(self):
+        plugin = self.make_plugin()
+        plugin._out.armed_for = 3
+        plugin._prev.armed_for = 3
+        plugin._tick()
+        self.assertEqual(plugin._out.shown, 0)
+
+        # mpv reports video-out-params for the new generation.
+        plugin._out.ready_for = 3
+        plugin._prev.ready_for = 3
+        plugin._tick()
+        self.assertEqual(plugin._out.shown, 1)
+        self.assertEqual(plugin._prev.shown, 1)
+
+    def test_a_file_that_never_configures_still_reveals(self):
+        """Better a stale frame than a permanently dark show screen."""
+        plugin = self.make_plugin()
+        plugin._out.armed_for = 3
+        plugin._prev.armed_for = 3
+        plugin._reveal_hold_started_at = (
+            time.monotonic() - mpv_playback.MpvPlaybackPlugin.REVEAL_HOLD_TIMEOUT - 0.1
+        )
+        plugin._tick()
+        self.assertEqual(plugin._out.shown, 1)
+
+    def test_audio_only_never_holds_a_reveal(self):
+        plugin = self.make_plugin(audio_only=True)
+        plugin._out.armed_for = 3
+        plugin._out.always_visible = True
+        plugin._prev.always_visible = True
+        plugin._tick()
+        self.assertEqual(plugin._out.shown, 1)
+
+    def test_between_songs_the_persistent_window_is_not_held(self):
+        """Nothing armed for this generation: no load in flight, so the last
+        frame keeps showing instead of being blanked."""
+        plugin = self.make_plugin()
+        plugin._out.armed_for = 2  # previous song
+        plugin._out.ready_for = 2
+        plugin._prev.armed_for = 2
+        plugin._prev.ready_for = 2
+        plugin._tick()
+        self.assertEqual(plugin._out.shown, 1)
+
+    def test_the_start_gate_is_released_as_soon_as_visuals_are_ready(self):
+        """visualsReady() had no callers, so the coordinated start could only
+        ever be released by its 1400ms safety timeout."""
+        plugin = self.make_plugin()
+        plugin._start_gate_generation = 3
+        plugin._start_gate_started_at = time.monotonic()
+        plugin._seek_lock = threading.Lock()
+        plugin._seek_hold_active = False
+        plugin._external_audio = None
+        plugin._engine = _FakeEngine()
+        for f in (plugin._out, plugin._prev):
+            f.armed_for = 3
+            f.ready_for = 3
+            f.is_visual_ready = lambda g, _f=f: _f.ready_for == g
+            f.enqueue_operation = lambda label, func, *a: func(*a)
+            f.player = _FakePlayer(f)
+            f.player.pause = True
+
+        plugin._tick()
+
+        self.assertEqual(plugin._start_gate_generation, 0)
+        self.assertFalse(plugin._engine.paused)
+
+
 class _FakeAudioEngine:
     """Stands in for SingWS's own PythonKaraokeTransport."""
 
