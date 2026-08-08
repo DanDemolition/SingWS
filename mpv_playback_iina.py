@@ -1,0 +1,329 @@
+"""SingWS macOS playback contract backed by one native libmpv render core.
+
+The native bridge and its two child views persist between media loads. New
+tracks replace media inside the same libmpv core, avoiding repeated GPU/audio
+initialization and eliminating the previous-frame flash between songs.
+"""
+from __future__ import annotations
+
+import ctypes
+import locale
+import os
+import sys
+import threading
+from pathlib import Path
+
+VERSION = "native-libmpv-shared-frame 0.1"
+
+
+def _runtime_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent
+
+
+class _BridgeApi:
+    def __init__(self):
+        path = _runtime_root() / "libsingws_mpv_bridge.dylib"
+        if not path.is_file():
+            raise RuntimeError(f"native bridge missing: {path}")
+        self.lib = ctypes.CDLL(str(path), mode=os.RTLD_LAZY | os.RTLD_LOCAL)
+        L = self.lib
+        L.singws_bridge_create.restype = ctypes.c_void_p
+        L.singws_bridge_create.argtypes = [ctypes.c_size_t, ctypes.c_size_t,
+                                           ctypes.c_char_p, ctypes.c_char_p]
+        L.singws_bridge_load.restype = ctypes.c_int
+        L.singws_bridge_load.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                         ctypes.c_char_p]
+        L.singws_bridge_destroy.argtypes = [ctypes.c_void_p]
+        for name in ("play", "pause", "stop"):
+            getattr(L, f"singws_bridge_{name}").argtypes = [ctypes.c_void_p]
+        L.singws_bridge_seek.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+        for name in ("position", "duration"):
+            fn = getattr(L, f"singws_bridge_{name}")
+            fn.argtypes = [ctypes.c_void_p]; fn.restype = ctypes.c_int64
+        for name in ("is_playing", "at_end", "visual_ready"):
+            fn = getattr(L, f"singws_bridge_{name}")
+            fn.argtypes = [ctypes.c_void_p]; fn.restype = ctypes.c_int
+        L.singws_bridge_set_volume.argtypes = [ctypes.c_void_p, ctypes.c_double]
+        L.singws_bridge_set_device.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        L.singws_bridge_set_tempo.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        L.singws_bridge_set_key.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        L.singws_bridge_set_dsp_chain.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        L.singws_bridge_set_audio_delay.argtypes = [ctypes.c_void_p, ctypes.c_double]
+        L.singws_bridge_set_sidefill.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        L.singws_bridge_begin_transition.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        L.singws_bridge_scan_silence.restype = ctypes.c_int
+        L.singws_bridge_scan_silence.argtypes = [
+            ctypes.c_char_p, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_double),
+        ]
+        L.singws_bridge_scanner_shutdown.argtypes = []
+
+
+_bridge_api = None
+_bridge_api_lock = threading.Lock()
+
+
+def _get_bridge_api() -> _BridgeApi:
+    global _bridge_api
+    with _bridge_api_lock:
+        if _bridge_api is None:
+            _bridge_api = _BridgeApi()
+        return _bridge_api
+
+
+def scan_silence(path, noise_db=-50.0, lead_minimum=0.5,
+                 trail_minimum=0.4):
+    """Return ``(lead_seconds, content_end_seconds, duration_seconds)``.
+
+    A reusable hidden libmpv core performs one untimed, audio-only pass. It
+    uses the exact IINA-derived codec/filter stack already bundled for
+    playback, so no FFmpeg executable or subprocess is involved.
+    """
+    locale.setlocale(locale.LC_NUMERIC, "C")
+    lead = ctypes.c_double()
+    trail = ctypes.c_double()
+    duration = ctypes.c_double()
+    ok = _get_bridge_api().lib.singws_bridge_scan_silence(
+        os.fsencode(str(path)), float(noise_db), float(lead_minimum),
+        float(trail_minimum), ctypes.byref(lead), ctypes.byref(trail),
+        ctypes.byref(duration),
+    )
+    if not ok:
+        return None
+    return float(lead.value), float(trail.value), float(duration.value)
+
+
+class MpvPlaybackPlugin:
+    """The same 17-method contract used by SingWS's stable mpv backend."""
+    def __init__(self, log=print, preview_fast_profile=False):
+        del preview_fast_profile
+        self.log = log
+        self.api = _get_bridge_api()
+        self._handle = None
+        self._preview_id = 0
+        self._output_id = 0
+        self._error = ""
+        self._volume = 1.0
+        self._device = "auto"
+        self._loaded = False
+        self._audio_only = False
+        self._shutdown = False
+        self._lock = threading.RLock()
+        self._stretch = False
+        self._sidefill = False
+        self._tempo_percent = 100
+        self._semitones = 0
+        # SingWS DSP (normalize -> EQ -> master bus) as an mpv filter string.
+        # The bridge composes it with the key filter into mpv's single "af"
+        # property, so neither can clobber the other.
+        self._dsp_chain = ""
+        self._video_offset_ms = 0
+
+    def attach(self, preview_widget, output_widget) -> bool:
+        try:
+            self._preview_id = int(preview_widget.winId())
+            self._output_id = int(output_widget.winId())
+            if not self._preview_id or not self._output_id:
+                raise RuntimeError("Qt did not create native NSView hosts")
+            self.log(f"[MPV-NATIVE] hosts attached output={self._output_id} preview={self._preview_id}")
+            return True
+        except Exception as exc:
+            self._error = str(exc); return False
+
+    def _destroy_bridge(self):
+        handle, self._handle = self._handle, None
+        if handle:
+            self.api.lib.singws_bridge_destroy(handle)
+
+    def loadSingWSMedia(self, source, audio_path=None, autoplay=True,
+                        semitones=0, tempo_percent=100) -> bool:
+        with self._lock:
+            try:
+                # libmpv requires the process numeric locale to use a dot as
+                # the decimal separator. QApplication can restore the user's
+                # Terminal locale after module import, so reassert this before
+                # every native core creation (matching the stable backend).
+                locale.setlocale(locale.LC_NUMERIC, "C")
+                source_b = os.fsencode(str(source))
+                audio_b = os.fsencode(str(audio_path)) if audio_path else None
+                if self._handle:
+                    if not self.api.lib.singws_bridge_load(
+                            self._handle, source_b, audio_b):
+                        raise RuntimeError("native libmpv media replacement failed")
+                    handle = self._handle
+                else:
+                    handle = self.api.lib.singws_bridge_create(
+                        self._output_id, self._preview_id, source_b, audio_b)
+                    if not handle:
+                        raise RuntimeError("native libmpv bridge creation failed")
+                    self._handle = handle
+                self.api.lib.singws_bridge_set_volume(handle, self._volume * 100.0)
+                self.api.lib.singws_bridge_set_device(handle, self._device.encode())
+                self._tempo_percent = int(tempo_percent or 100)
+                self._semitones = int(semitones or 0)
+                self.api.lib.singws_bridge_set_tempo(handle, self._tempo_percent)
+                self.api.lib.singws_bridge_set_key(handle, self._semitones)
+                # Re-assert the DSP chain: the bridge rebuilds "af" from key on
+                # every FILE_LOADED, so a chain set for the previous song would
+                # otherwise be dropped at the next one.
+                self.api.lib.singws_bridge_set_dsp_chain(
+                    handle, self._dsp_chain.encode())
+                # loadfile resets audio-delay; re-assert the CDG calibration or
+                # it would apply only to the first song of the session.
+                self.api.lib.singws_bridge_set_audio_delay(
+                    handle, self._video_offset_ms / 1000.0)
+                self.api.lib.singws_bridge_set_sidefill(handle, int(self._sidefill))
+                if autoplay:
+                    self.api.lib.singws_bridge_play(handle)
+                self._loaded = True
+                self._audio_only = not audio_path and str(source).lower().endswith(
+                    (".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg"))
+                self.log(f"[MPV-NATIVE] load source={source!r} key={semitones:+d} tempo={tempo_percent}%")
+                return True
+            except Exception as exc:
+                self._error = str(exc); self._loaded = False
+                self.log(f"[MPV-NATIVE] load failed: {exc}")
+                return False
+
+    def playMedia(self):
+        if self._handle: self.api.lib.singws_bridge_play(self._handle)
+    def pauseMedia(self):
+        if self._handle: self.api.lib.singws_bridge_pause(self._handle)
+    def stopMedia(self):
+        self._loaded = False
+        if self._handle: self.api.lib.singws_bridge_stop(self._handle)
+    def seekMedia(self, ms):
+        if self._handle: self.api.lib.singws_bridge_seek(self._handle, max(0, int(ms)))
+    def positionMs(self) -> int:
+        return int(self.api.lib.singws_bridge_position(self._handle)) if self._handle else 0
+    def durationMs(self) -> int:
+        return int(self.api.lib.singws_bridge_duration(self._handle)) if self._handle else 0
+    def isPlaying(self) -> bool:
+        return bool(self._loaded and self._handle and self.api.lib.singws_bridge_is_playing(self._handle))
+    def visualsReady(self) -> bool:
+        return bool(self._audio_only or (self._handle and self.api.lib.singws_bridge_visual_ready(self._handle)))
+    def atEnd(self) -> bool:
+        return bool(self._handle and self.api.lib.singws_bridge_at_end(self._handle))
+    def setVolume(self, value) -> None:
+        self._volume = max(0.0, min(2.0, float(value)))
+        if self._handle: self.api.lib.singws_bridge_set_volume(self._handle, self._volume * 100.0)
+    def setAudioDevice(self, name) -> None:
+        self._device = str(name or "auto")
+        if self._handle: self.api.lib.singws_bridge_set_device(self._handle, self._device.encode())
+    def setTempoRatio(self, ratio) -> None:
+        """Live tempo without pitch change. mpv's `speed` property."""
+        try:
+            self._tempo_percent = max(25, min(400, int(round(float(ratio or 1.0) * 100))))
+        except (TypeError, ValueError):
+            self._tempo_percent = 100
+        if self._handle:
+            self.api.lib.singws_bridge_set_tempo(self._handle, self._tempo_percent)
+
+    def setPitchSemitones(self, semitones) -> None:
+        """Live key without tempo change (rubberband, composed into `af`)."""
+        try:
+            self._semitones = int(semitones or 0)
+        except (TypeError, ValueError):
+            self._semitones = 0
+        if self._handle:
+            self.api.lib.singws_bridge_set_key(self._handle, self._semitones)
+
+    def setAudioProcessing(self, spec: dict | None) -> None:
+        """Apply the SingWS audio chain (normalize -> EQ -> master bus).
+
+        mpv decodes and plays in process here, so the NumPy processors in
+        singws_eq / singws_master_audio have no sample path to sit in. The same
+        chain is expressed as mpv filters instead -- identical maths for
+        normalization and the graphic EQ, an approximation for the master bus.
+        See mpv_audio_filters for the fidelity notes.
+
+        Key is deliberately excluded: the bridge owns composing it with this
+        chain, so pushing it here too would apply rubberband twice.
+        """
+        from mpv_audio_filters import build_af_chain, describe_chain
+
+        spec = dict(spec or {})
+        chain = build_af_chain(
+            semitones=0,
+            normalize_gain_db=spec.get("normalize_gain_db", 0.0),
+            eq_enabled=bool(spec.get("eq_enabled", False)),
+            eq_gains_db=spec.get("eq_gains_db"),
+            master_enabled=bool(spec.get("master_enabled", False)),
+            master_params=spec.get("master_params"),
+        )
+        if chain == self._dsp_chain:
+            return
+        self._dsp_chain = chain
+        if self._handle:
+            self.api.lib.singws_bridge_set_dsp_chain(self._handle, chain.encode())
+        self.log(f"[MPV-NATIVE] dsp chain = {describe_chain(chain)}")
+
+    def setVideoOffsetMs(self, ms) -> None:
+        """CDG visual-timing calibration.
+
+        SingWS defines this as a visual lead -- ``display_position =
+        audible_position + offset`` -- so a positive value shows lyrics
+        earlier. mpv's ``audio-delay`` delays audio relative to video, which
+        moves the picture ahead by the same amount: same sign, direct mapping.
+
+        The follower-based backend cannot do this (mpv chases SingWS's audio
+        clock there, so there is nothing to offset), which is why CDG ran about
+        750ms out on mpv with the Settings slider doing nothing. One in-process
+        core owning both streams makes it a single property.
+        """
+        try:
+            self._video_offset_ms = max(-3000, min(3000, int(ms or 0)))
+        except (TypeError, ValueError):
+            self._video_offset_ms = 0
+        if self._handle:
+            self.api.lib.singws_bridge_set_audio_delay(
+                self._handle, self._video_offset_ms / 1000.0)
+        self.log(f"[MPV-NATIVE] cdg visual offset = {self._video_offset_ms:+d}ms")
+
+    def setExternalAudioMaster(self, master) -> None:
+        """Not supported on this backend.
+
+        The stable backend runs mpv as muted video followers chasing SingWS's
+        own audio clock. This one is a single in-process core that owns both
+        audio and video, which is what makes its seek and tempo/key fast. There
+        is no follower to hand an external clock to.
+
+        Raising (rather than omitting the method) keeps the host's fallback
+        deliberate and diagnosable instead of an AttributeError from an
+        unguarded call site.
+        """
+        if master is None:
+            return  # detach is a no-op; nothing was ever attached
+        raise RuntimeError(
+            "the native IINA backend owns its own audio clock; "
+            "mpv-video mode needs the follower-based backend"
+        )
+
+    def setVideoStretch(self, stretch) -> None:
+        # Retained only for the cross-platform 17-method contract. SingWS no
+        # longer exposes stretch; native playback always preserves aspect.
+        self._stretch = False
+    def setCdgOutputSidefill(self, enabled) -> None:
+        self._sidefill = bool(enabled)
+        if self._handle:
+            self.api.lib.singws_bridge_set_sidefill(
+                self._handle, int(self._sidefill))
+    def beginWindowTransition(self, duration_ms=1100):
+        if self._handle:
+            self.api.lib.singws_bridge_begin_transition(
+                self._handle, max(100, int(duration_ms)))
+    def errorString(self) -> str:
+        return self._error
+    def version(self) -> str:
+        return VERSION
+    def audioDescription(self) -> str:
+        return "in-process IINA/libmpv core (shared-frame native views)"
+    def shutdown(self):
+        with self._lock:
+            if self._shutdown: return
+            self._shutdown = True; self._loaded = False; self._destroy_bridge()
+            self.api.lib.singws_bridge_scanner_shutdown()
+            self.log("[MPV-NATIVE] clean shutdown")

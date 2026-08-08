@@ -1188,9 +1188,11 @@ class PythonKaraokeTransport(QObject):
         # applied at QAudioSink so it stays independent of per-track loudness
         # normalization and can be changed while playback is running.
         self.output_volume = 1.0
-        # Cap MP4 decode resolution (downscale only) to keep playback smooth on
-        # weaker GPUs (notably Intel Macs).  Owner code may lower/raise this.
-        self.max_video_height = 720
+        # MP4 decode resolution: 0 = native, no downscale.  mpv is the shipping
+        # video path, so this FFmpeg fallback no longer trades away resolution
+        # up front; _read_frames() still downshifts a source that measurably
+        # cannot keep up.
+        self.max_video_height = 0
         self.last_level_db = None
         self.last_level_ts = 0.0
         self.decoder_error = ""
@@ -1373,8 +1375,17 @@ class PythonKaraokeTransport(QObject):
         self._clock_source_seconds = target
         self._clock_processed_us = self._processed_us()
         self._clock_last_position_seconds = target
-        self._paused = False
-        self._paused_position = 0.0
+        # A seek must NOT silently un-pause. The coordinated mpv seek does
+        # pause -> seek -> resume (MpvPlayback.seekMedia/_finish_seek): if the
+        # seek clears the flag here, the resume() that follows sees
+        # already-running and returns without ever calling sink.resume(), so
+        # QAudioSink stays suspended for the rest of the song -- silent audio,
+        # a clock frozen at the seek target, and mpv followers re-seeking back
+        # onto that frozen master every couple of seconds.
+        if self._paused:
+            self._paused_position = target
+        else:
+            self._paused_position = 0.0
         # Serialize filter reset with the DSP worker so an old-position block
         # cannot restore stale carry/state after this seek has cleared it.
         with self._dsp_state_lock:
@@ -1478,17 +1489,21 @@ class PythonKaraokeTransport(QObject):
 
     def resume(self):
         """Resume audio output and continue advancing the playback clock."""
-        if not self._paused:
-            return
-        # Re-anchor the clock to where we paused so position_seconds() picks
-        # up right where it left off, no matter how long the pause lasted.
-        self._clock_source_seconds = float(self._paused_position)
-        self._clock_processed_us = self._processed_us()
-        with self._pcm_lock:
-            self._audible_output_bytes = 0
-            self._clock_has_real_audio_anchor = False
-        self._clock_last_position_seconds = float(self._paused_position)
-        self._paused = False
+        if self._paused:
+            # Re-anchor the clock to where we paused so position_seconds() picks
+            # up right where it left off, no matter how long the pause lasted.
+            self._clock_source_seconds = float(self._paused_position)
+            self._clock_processed_us = self._processed_us()
+            with self._pcm_lock:
+                self._audible_output_bytes = 0
+                self._clock_has_real_audio_anchor = False
+            self._clock_last_position_seconds = float(self._paused_position)
+            self._paused = False
+        # Hand the device back its running state unconditionally. The paused
+        # FLAG and the sink's suspended STATE are set by different callers and
+        # can disagree; a stale flag must never be able to strand QAudioSink in
+        # SuspendedState, because nothing else ever un-suspends it. resume() on
+        # a sink that is already active is a no-op in Qt.
         sink = self.audio_sink
         if sink is not None:
             try:

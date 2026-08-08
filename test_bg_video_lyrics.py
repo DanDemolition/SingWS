@@ -149,10 +149,8 @@ class StartStopGatingTests(unittest.TestCase):
             "bg_video_shuffle": True,
             "bg_video_quality": "auto",
             "lyrics_background_video_opacity": 40,
-            "mp4_max_height": 720,
         }
         app.settings.update(settings)
-        app._effective_mp4_max_height = lambda: 720
         app.video_window = FakeVideoWindow()
         # bare __new__ QObject: preset attrs that getattr() would otherwise
         # turn into Qt "super-class __init__ never called" RuntimeErrors.

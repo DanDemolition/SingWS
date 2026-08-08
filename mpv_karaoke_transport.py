@@ -44,6 +44,7 @@ class MpvKaraokeTransport(QObject):
         self.normalize_gain_db = 0.0
         self._tempo_ratio = 1.0
         self._pitch_semitones = 0.0
+        self._video_offset_warned = False
         self._volume = 1.0
         self._stopped = False
         self._started_emitted = False
@@ -130,9 +131,40 @@ class MpvKaraokeTransport(QObject):
     def set_visual_timer_interval_ms(self, value: int):
         self._timer.setInterval(max(16, min(250, int(value or 50))))
 
-    def set_video_offset_ms(self, _value: int):
-        # mpv followers use the audible engine clock directly.
-        return None
+    def set_video_offset_ms(self, value: int):
+        """CDG visual-timing calibration, forwarded when the backend can apply it.
+
+        This used to be an unconditional no-op, which is why CDG lyrics ran
+        about 750ms out on mpv and the Display tab's fine tuning had no effect:
+        the host called this on every song start and on every slider move, and
+        it silently discarded the value.
+
+        The in-process (IINA) backend owns both audio and video in one core, so
+        it maps this straight onto mpv's ``audio-delay``. The follower-based
+        backend still cannot -- there mpv chases SingWS's audio clock and has
+        nothing to offset -- so it keeps the old behaviour, but says so.
+        """
+        try:
+            plugin = self.plugin
+        except Exception:
+            plugin = None
+        if plugin is not None and hasattr(plugin, "setVideoOffsetMs"):
+            plugin.setVideoOffsetMs(value)
+            return
+        try:
+            warned = self._video_offset_warned
+        except Exception:
+            warned = False
+        if int(value or 0) and not warned:
+            try:
+                self._video_offset_warned = True
+            except Exception:
+                pass
+            print(
+                f"[MPV] WARNING this backend cannot apply the {int(value):+d}ms "
+                "CDG visual offset; lyrics will run early/late and the Display "
+                "tab fine tuning has no effect"
+            )
 
     def fade_out(self, duration_ms: int, on_finished=None) -> bool:
         duration_ms = max(0, int(duration_ms or 0))

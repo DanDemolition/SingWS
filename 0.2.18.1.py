@@ -2038,6 +2038,33 @@ HOST_REQUEST_SYNC_PATH = APP_USER_DIR / "host_request_sync.json"
 IMAGES_DIR = APP_USER_DIR / "images"
 IMAGES_DIR.mkdir(exist_ok=True)
 
+
+def _configured_karaoke_engine_label() -> str:
+    """Human-readable engine for the startup banner.
+
+    The banner used to be a hardcoded string, so it reported FFmpeg even on
+    sessions that were really running mpv -- which made a correctly saved
+    setting look like it had reverted.  Read the settings file directly: this
+    runs during startup logging, before the app object exists.
+    """
+    try:
+        raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8") or "{}")
+        pref = str((raw or {}).get("karaoke_engine", "") or "").strip().lower()
+    except Exception:
+        pref = ""
+    if not pref:
+        pref = "ffmpeg"
+    override = str(os.environ.get("SINGWS_KARAOKE_ENGINE", "") or "").strip().lower()
+    if override:
+        pref = override
+    if os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1" or sys.platform != "darwin":
+        return "FFmpeg/Qt (mpv unavailable on this build)"
+    if pref == "mpv":
+        return "mpv (audio and video)"
+    if pref == "mpv-video":
+        return "mpv video + SingWS audio engine"
+    return "FFmpeg/Qt (GStreamer removed)"
+
 # --- Background Music JSON index ---
 BG_MUSIC_INDEX_PATH = APP_USER_DIR / "bgmusic.json"
 
@@ -3183,7 +3210,14 @@ DEFAULTS = {
     "bg_video_quality": "auto",       # auto | 1080 | 720 | 540 | off; decorative layer only
     "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
-    "karaoke_engine": "ffmpeg",      # internal only; GStreamer removed, FFmpeg is the sole engine (chooser removed from Settings). Stale gstreamer/auto values map to ffmpeg.
+    "rotation_request_qr_enabled": True, # show the request QR + call to action on the rotation window; gated by requests_accepting
+    "rotation_request_qr_caption": "JOIN THE QUEUE!", # call-to-action printed beside the rotation QR
+    # FFmpeg/Qt remains the default until mpv is proven in a live show. The CDG
+    # timing offset now works on the in-process (IINA) backend, which maps it
+    # onto mpv's audio-delay; the follower-based backend still cannot apply it
+    # and says so in the log. mpv stays opt-in per machine.
+    # Stale gstreamer/auto values map to ffmpeg.
+    "karaoke_engine": "ffmpeg",
     "cdg_timing_offset_ms": 0,       # Fine tuning added to the calibrated FFmpeg CDG +600ms baseline
     "ffmpeg_cdg_timing_migrated": True,
     "ffmpeg_cdg_750_baseline_migrated": False,
@@ -3202,6 +3236,7 @@ DEFAULTS = {
     "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
     "karafun_audio_output_follow_singws": True, # Pin KaraFun to SingWS's saved physical output instead of AirPlay/system default
     "karafun_audio_output_name": "", # Optional KaraFun-only device name; blank follows audio_output_name
+    "karafun_audio_route_strict": False, # True = abort the song when KaraFun's output control can't be read (a wrong/unavailable route always blocks)
     "karafun_request_url": "",       # Private KaraFun host/session link; never included in public/server payloads
     "karafun_auto_submit_server": True,
     "karafun_auto_submit_host": True,
@@ -3269,7 +3304,6 @@ DEFAULTS = {
     "log_smtp_password": "",               # SMTP/app password; never written to logs
     "log_smtp_from": "",                   # optional sender address; defaults to SMTP username
     "log_smtp_tls": True,                  # use STARTTLS
-    "mp4_max_height": 720,                  # Cap MP4 decode resolution (downscale only): 720/1080/0=native. Lower = smoother on weak GPUs (Intel).
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
@@ -11225,7 +11259,7 @@ class SingWSLogger:
             logging.info(f"- PyQt6: {PYQT_VERSION_STR}")
         except:
             pass
-        logging.info("- Karaoke engine: FFmpeg/Qt (GStreamer removed)")
+        logging.info(f"- Karaoke engine: {_configured_karaoke_engine_label()}")
         if PSUTIL_AVAILABLE:
             logging.info(f"- psutil: {psutil.__version__}")
         
@@ -11280,7 +11314,7 @@ class SingWSLogger:
             except Exception:
                 pass
 
-        logging.info("- engine: FFmpeg/Qt (GStreamer removed)")
+        logging.info(f"- engine: {_configured_karaoke_engine_label()}")
         logging.info("")
     
     @staticmethod
@@ -17577,6 +17611,28 @@ class RotationView(QMainWindow):
                 border: 1px solid rgba(255,255,255,0.07);
                 border-radius: 9px;
             }
+            QFrame#rotationQrCard {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 rgba(246,201,69,0.16),
+                    stop:1 rgba(246,201,69,0.05));
+                border: 1px solid rgba(246,201,69,0.40);
+                border-radius: 20px;
+            }
+            QLabel#rotationQrCaption {
+                color: #F6C945;
+                font-size: 30px;
+                font-weight: 800;
+            }
+            QLabel#rotationQrHint {
+                color: #D8D2E4;
+                font-size: 15px;
+                font-weight: 600;
+            }
+            QLabel#rotationQrImage {
+                background: #FFFFFF;
+                border-radius: 10px;
+                padding: 6px;
+            }
             QListWidget {
                 background: rgba(255,255,255,0.012);
                 border: 1px solid rgba(255,255,255,0.03);
@@ -17639,6 +17695,39 @@ class RotationView(QMainWindow):
                 _diag(f"[ROTATION] render-thread rail unavailable; using list fallback: {exc}")
                 self.rotation_rail = None
 
+        # ---- Request QR call-to-action ----
+        # Audience-facing, so it sits at the bottom of the shell where it stays
+        # readable across the room without competing with the rotation list.
+        # Hidden until the host pushes a QR (set_request_qr); the host gates on
+        # the rotation_request_qr_enabled setting AND requests_accepting, so an
+        # unreachable request page never advertises itself.
+        self.qr_image_label = QLabel(self)
+        self.qr_image_label.setObjectName("rotationQrImage")
+        self.qr_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_caption_label = QLabel("", self)
+        self.qr_caption_label.setObjectName("rotationQrCaption")
+        self.qr_caption_label.setWordWrap(True)
+        self.qr_hint_label = QLabel("Scan with your phone camera to request a song", self)
+        self.qr_hint_label.setObjectName("rotationQrHint")
+        self.qr_hint_label.setWordWrap(True)
+
+        qr_text_column = QVBoxLayout()
+        qr_text_column.setContentsMargins(0, 0, 0, 0)
+        qr_text_column.setSpacing(4)
+        qr_text_column.addStretch(1)
+        qr_text_column.addWidget(self.qr_caption_label)
+        qr_text_column.addWidget(self.qr_hint_label)
+        qr_text_column.addStretch(1)
+
+        self.qr_card = QFrame(self)
+        self.qr_card.setObjectName("rotationQrCard")
+        qr_layout = QHBoxLayout(self.qr_card)
+        qr_layout.setContentsMargins(20, 16, 22, 16)
+        qr_layout.setSpacing(20)
+        qr_layout.addWidget(self.qr_image_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        qr_layout.addLayout(qr_text_column, 1)
+        self.qr_card.hide()
+
         self.queue_title_label = QLabel("SINGER ROTATION", self)
         self.queue_title_label.setObjectName("rotationQueueTitle")
         self.queue_count_label = QLabel("0 SINGERS", self)
@@ -17671,6 +17760,7 @@ class RotationView(QMainWindow):
             shell_layout.addWidget(self.rotation_rail, 1)
         else:
             shell_layout.addWidget(self.list_widget, 1)
+        shell_layout.addWidget(self.qr_card)
 
         safe_layout.addWidget(shell)
 
@@ -17701,6 +17791,32 @@ class RotationView(QMainWindow):
             self.now_singing_surface.set_effects_enabled(enabled)
         if self.rotation_rail is not None:
             self.rotation_rail.set_effects_enabled(enabled)
+
+    ROTATION_QR_SIZE = 180
+
+    def set_request_qr(self, pixmap, caption: str = ""):
+        """Show (or hide with None) the request QR card at the bottom of the
+        rotation window. The host owns the URL, the enable/accepting gate and
+        the caption text; this only renders what it is handed."""
+        if pixmap is None or (hasattr(pixmap, "isNull") and pixmap.isNull()):
+            if self.qr_card.isVisible():
+                self.qr_card.hide()
+            self.qr_image_label.setPixmap(QPixmap())
+            return
+        pm = pixmap if isinstance(pixmap, QPixmap) else QPixmap(pixmap)
+        if pm.isNull():
+            self.qr_card.hide()
+            return
+        self.qr_image_label.setPixmap(pm.scaled(
+            self.ROTATION_QR_SIZE, self.ROTATION_QR_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+        text = str(caption or "").strip() or str(
+            DEFAULTS.get("rotation_request_qr_caption", "JOIN THE QUEUE!")
+        )
+        self.qr_caption_label.setText(text)
+        self.qr_card.show()
 
     def closeEvent(self, event):
         owner = self.parent()
@@ -18829,7 +18945,7 @@ class KaraokeApp(QWidget):
 
         # Merge defaults (non-destructive) and persist if anything was missing
         changed = False
-        for obsolete_key in ("performance_mode", "safe_mode"):
+        for obsolete_key in ("performance_mode", "safe_mode", "mp4_max_height"):
             if obsolete_key in self.settings:
                 self.settings.pop(obsolete_key, None)
                 changed = True
@@ -20925,6 +21041,71 @@ class KaraokeApp(QWidget):
             pass
         return params
 
+    def _mpv_audio_processing_spec(self, audio_path: str = "") -> dict:
+        """The SingWS audio chain expressed for mpv's own audio engine.
+
+        mpv runs out of process, so the NumPy processors in singws_eq /
+        singws_master_audio cannot sit in the sample path. mpv_audio_filters
+        turns this spec into an `af` chain instead. Gating mirrors the Python
+        transport exactly (see _start_python_karaoke_transport): Simple Audio
+        Mode bypasses EQ and normalization, master processing is an independent
+        opt-in, and master processing forces normalization on so the
+        compressor sees a consistent input level.
+        """
+        simple_audio = self._simple_audio_mode()
+        eq_gains: list[float] = []
+        eq_enabled = False
+        if not simple_audio:
+            try:
+                raw = self.settings.get("eq_karaoke", []) or []
+                if isinstance(raw, list):
+                    eq_gains = [float(v or 0.0) for v in raw]
+            except Exception:
+                eq_gains = []
+            eq_enabled = bool(self.settings.get("eq_karaoke_enabled", False)) and any(
+                abs(g) > 0.05 for g in eq_gains
+            )
+        master_enabled = self._master_processing_active()
+        master_params = self._compute_master_audio_params() if master_enabled else None
+
+        trim_db = self._track_trim_db(audio_path) if audio_path else 0.0
+        normalize_gain_db = trim_db
+        try:
+            if self._karaoke_normalize_active(master_active=master_enabled) and audio_path:
+                gain = loudness_gain_db_cached(audio_path)
+                if gain is None:
+                    analyze_loudness_async(audio_path)
+                else:
+                    normalize_gain_db = float(gain) + trim_db
+        except Exception:
+            normalize_gain_db = trim_db
+        return {
+            "normalize_gain_db": float(normalize_gain_db or 0.0),
+            "eq_enabled": eq_enabled,
+            "eq_gains_db": eq_gains,
+            "master_enabled": master_enabled,
+            "master_params": master_params,
+        }
+
+    def _push_mpv_audio_processing(self, reason: str = "update", audio_path: str = ""):
+        """Send the audio chain to mpv. No-op unless mpv owns the audio."""
+        plugin = getattr(self, "_mpv_playback", None)
+        if plugin is None or not hasattr(plugin, "setAudioProcessing"):
+            return
+        if str(getattr(self, "_last_karaoke_engine", "") or "").lower() != "mpv":
+            return
+        path = audio_path or str(getattr(self, "_current_karaoke_audio_path", "") or "")
+        try:
+            spec = self._mpv_audio_processing_spec(path)
+            plugin.setAudioProcessing(spec)
+            _diag(
+                f"[MPV-AUDIO] chain pushed reason={reason} "
+                f"normalize={spec['normalize_gain_db']:+.1f}dB "
+                f"eq={int(spec['eq_enabled'])} master={int(spec['master_enabled'])}"
+            )
+        except Exception as exc:
+            _diag(f"[MPV-AUDIO] chain push failed reason={reason}: {exc}")
+
     def _ensure_master_processor(self):
         """Create/refresh the master processor when active; returns it or None.
 
@@ -21025,6 +21206,9 @@ class KaraokeApp(QWidget):
                 transport.master = self._ensure_master_processor()
         except Exception:
             pass
+        # mpv processes out of process, so its master-bus stages live in the
+        # `af` chain and are rebuilt rather than re-parameterised.
+        self._push_mpv_audio_processing("master_audio_settings_changed")
         try:
             self._apply_bgm_master_processing()
         except Exception:
@@ -21144,6 +21328,11 @@ class KaraokeApp(QWidget):
 
             # --- wiring ---
             def refresh_live_eq_attachment():
+                if settings_key == "eq_karaoke":
+                    # mpv's engine has no Python EQ object to re-point; its
+                    # bands live in the `af` chain, so rebuild it live.
+                    self._push_mpv_audio_processing("eq_dialog_change")
+                    return
                 if settings_key != "eq_bgm":
                     return
                 try:
@@ -22529,9 +22718,12 @@ class KaraokeApp(QWidget):
     def _select_karaoke_transport_cls(self):
         """Resolve the live karaoke engine.
 
-        mpv is an experimental macOS path. FFmpeg/Qt remains the default and
-        automatic fallback. A stale ``karaoke_engine`` setting of gstreamer/auto
-        is accepted and simply maps to the FFmpeg engine. Returns
+        mpv is an opt-in macOS path. FFmpeg/Qt remains the default and
+        automatic fallback until mpv is proven in a live show. The CDG timing
+        offset now applies on the in-process (IINA) backend via mpv's
+        audio-delay; the follower-based backend still cannot honour it. A stale
+        ``karaoke_engine`` setting of gstreamer/auto is accepted and simply
+        maps to the FFmpeg engine. Returns
         (normalized_pref, transport_cls_or_None).
         """
         try:
@@ -22558,12 +22750,46 @@ class KaraokeApp(QWidget):
             return pref, PythonKaraokeTransport
         return "ffmpeg", PythonKaraokeTransport
 
+    @staticmethod
+    def _load_mpv_playback_backend():
+        """Return (MpvPlaybackPlugin, backend_name) for whichever stack shipped.
+
+        Two backends satisfy the same plugin contract:
+
+        * ``mpv_playback_iina`` -- one in-process libmpv core behind a native
+          bridge, built against macOS 10.15, which is what lets a single Intel
+          build run on macOS 12.
+        * ``mpv_playback`` -- the out-of-process Homebrew mpv driven over JSON
+          IPC, which needs macOS 14.
+
+        A build ships exactly one (SingWS-x86_64.spec excludes the other), so
+        prefer IINA and fall back rather than hard-coding either. Without this
+        the IINA build raised ImportError here and silently fell back to the
+        FFmpeg engine, leaving its whole bundled media stack unused.
+        """
+        try:
+            import mpv_playback_iina
+            # Importing is not enough: the module only fails when it dlopens
+            # libsingws_mpv_bridge.dylib, which sits beside it in a packaged
+            # IINA build but lives under native/mpv_bridge/ in a source tree.
+            # Checking here keeps a dev checkout (where BOTH modules exist) on
+            # the Homebrew backend it can actually run.
+            bridge = mpv_playback_iina._runtime_root() / "libsingws_mpv_bridge.dylib"
+            if bridge.is_file():
+                return mpv_playback_iina.MpvPlaybackPlugin, "iina"
+            _diag(f"[MPV] IINA backend present but bridge missing at {bridge}; using Homebrew backend")
+        except ImportError:
+            pass
+        from mpv_playback import MpvPlaybackPlugin
+        return MpvPlaybackPlugin, "homebrew"
+
     def _ensure_mpv_karaoke_core(self):
         """Lazily attach mpv's two Metal windows to the existing video areas."""
         plugin = getattr(self, "_mpv_playback", None)
         if plugin is not None:
             return plugin
-        from mpv_playback import MpvPlaybackPlugin
+        MpvPlaybackPlugin, _mpv_backend_name = self._load_mpv_playback_backend()
+        _diag(f"[MPV] backend={_mpv_backend_name}")
         from mpv_karaoke_transport import MpvVideoHost
 
         plugin = MpvPlaybackPlugin(log=_diag)
@@ -22662,6 +22888,22 @@ class KaraokeApp(QWidget):
                 pass
             raise
         self._last_karaoke_engine = "mpv"
+        # mpv owns the audio here, so the SingWS chain runs as mpv `af` filters
+        # rather than in the Python sample path. Pushed after start() so the
+        # engine has a stream to attach the filters to.
+        self._push_mpv_audio_processing("song_start", audio_path=audio_path)
+        # CDG visual-timing calibration. This path never applied it at all, so
+        # even a backend that CAN honour the offset would have started every
+        # song uncalibrated and only picked it up if the operator happened to
+        # nudge the Display slider mid-song.
+        try:
+            if str(mode or "").lower() == "cdg":
+                off = self._effective_cdg_timing_offset_ms()
+                if hasattr(transport, "set_video_offset_ms"):
+                    transport.set_video_offset_ms(off)
+                    _diag(f"[VIDEO-OFFSET] applying {off:+d}ms visual offset mode={mode} engine=mpv")
+        except Exception as exc:
+            _diag(f"[VIDEO-OFFSET] mpv offset apply failed: {exc}")
         self._setup_end_silence_state(mode, None)
         self._arm_audio_end_floor(audio_path)
         self._update_karaoke_key_ui()
@@ -22803,12 +23045,6 @@ class KaraokeApp(QWidget):
             f"[KARAOKE-ENGINE] engine={'mpv-video' if mpv_video else 'ffmpeg'} "
             f"pref={engine_pref} mode={mode} file={os.path.basename(audio_path)}"
         )
-        # MP4 decode-resolution cap (downscale only).  Lower values keep
-        # playback smooth on weak GPUs (Intel Macs); 0 = native resolution.
-        try:
-            transport.max_video_height = self._effective_mp4_max_height()
-        except Exception:
-            transport.max_video_height = 720
         try:
             transport.set_volume(float(getattr(self, "_host_karaoke_live_volume", 1.0) or 0.0))
         except Exception:
@@ -22907,6 +23143,20 @@ class KaraokeApp(QWidget):
                 transport.set_video_offset_ms(off)
             if off:
                 _diag(f"[VIDEO-OFFSET] applying {off:+d}ms visual offset mode={mode}")
+            # mpv renders the picture itself and chases the audio clock with no
+            # In mpv-video mode the offset lands on an audio-only transport that
+            # draws nothing, so it cannot move the lyrics. (Full-mpv mode is a
+            # different path and applies the offset via audio-delay on the
+            # in-process backend.) Say so rather than letting a host chase a
+            # slider that does nothing.
+            if off and mode_l == "cdg" and mpv_video:
+                _diag(
+                    f"[VIDEO-OFFSET] WARNING mpv-video cannot apply the {off:+d}ms CDG "
+                    "offset — mpv renders the picture while SingWS owns the clock, so "
+                    "the Display tab fine tuning has no effect. Use the full mpv engine "
+                    "(untick 'Keep the SingWS audio engine') or FFmpeg for calibrated "
+                    "CDG timing."
+                )
         except Exception:
             pass
         self._current_karaoke_audio_path = str(audio_path or "")
@@ -23011,7 +23261,7 @@ class KaraokeApp(QWidget):
             _diag(
                 "[MP4-PERF] start "
                 f"media_type=MP4 file={Path(song_path).name!r} "
-                f"platform={sys.platform}/{machine} max_video_height={self._effective_mp4_max_height()} "
+                f"platform={sys.platform}/{machine} "
                 f"visual_timer_ms={self._effective_visual_timer_interval_ms()} "
                 f"workers={self._active_worker_snapshot()}"
             )
@@ -26483,28 +26733,26 @@ class KaraokeApp(QWidget):
         v.addLayout(pad_row)
 
         v = _section_card(tab_audio, "Playback")  # ---- Audio ----
-        mpv_engine_cb = QCheckBox("Use experimental mpv video engine")
-        mpv_engine_cb.setChecked(
-            str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").strip().lower() == "mpv"
-        )
         legacy_intel_build = os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1"
-        mpv_engine_cb.setEnabled(sys.platform == "darwin" and not legacy_intel_build)
+        mpv_available = sys.platform == "darwin" and not legacy_intel_build
+
+        # Engine chooser. FFmpeg/SignalSmith is the default and the automatic
+        # fallback; mpv is opt-in per machine. Both boxes read the saved engine
+        # by testing for their OWN value -- an earlier version rendered the mpv
+        # box with `== "mpv"` while the save wrote "mpv-video", so it came back
+        # unticked on every reopen and looked like the setting would not save.
+        saved_engine = str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").strip().lower()
+        mpv_engine_cb = QCheckBox("Use the mpv video engine")
+        mpv_engine_cb.setChecked(saved_engine in ("mpv", "mpv-video"))
+        mpv_engine_cb.setEnabled(mpv_available)
         mpv_engine_cb.setToolTip(
-            "Uses mpv for CDG/MP4 video and audio-master playback. "
-            "FFmpeg/SignalSmith remains available as the automatic fallback."
+            "Uses mpv to render CDG/MP4 video. FFmpeg/SignalSmith stays the "
+            "automatic fallback.\n\n"
+            "CDG timing: the in-process (IINA) build applies the Display tab's "
+            "offset via mpv's audio-delay. The follower-based build cannot, so "
+            "CDG runs about 750ms out there. MP4 playback is unaffected."
         )
         v.addWidget(mpv_engine_cb)
-        mpv_engine_note = QLabel(
-            "This macOS 12/13 Intel edition permanently uses the compatible "
-            "FFmpeg/SignalSmith engine."
-            if legacy_intel_build
-            else "Experimental macOS option. Restart SingWS after changing it. "
-                 "The current session keeps its existing engine."
-            if sys.platform == "darwin"
-            else "The experimental mpv engine is currently available on macOS only."
-        )
-        mpv_engine_note.setWordWrap(True)
-        v.addWidget(mpv_engine_note)
 
         # mpv's own audio engine bypasses the karaoke chain entirely (EQ,
         # loudness normalization and the master bus all live on the SingWS
@@ -26512,19 +26760,28 @@ class KaraokeApp(QWidget):
         mpv_keep_audio_cb = QCheckBox(
             "Keep the SingWS audio engine (mpv renders video only)"
         )
-        mpv_keep_audio_cb.setChecked(
-            str(self.settings.get("karaoke_engine", "ffmpeg") or "").strip().lower()
-            == "mpv-video"
-        )
-        mpv_keep_audio_cb.setEnabled(
-            mpv_engine_cb.isEnabled() and mpv_engine_cb.isChecked()
-        )
+        mpv_keep_audio_cb.setChecked(saved_engine == "mpv-video")
+        mpv_keep_audio_cb.setEnabled(mpv_available and mpv_engine_cb.isChecked())
         mpv_keep_audio_cb.setToolTip(
             "On: mpv draws the CDG/MP4 and follows SingWS's audio clock, so the "
             "EQ, loudness normalization and master bus stay in the signal path.\n"
             "Off: mpv plays the audio itself and that whole chain is bypassed."
         )
         v.addWidget(mpv_keep_audio_cb)
+
+        mpv_engine_note = QLabel(
+            "This macOS 12/13 Intel edition uses the compatible "
+            "FFmpeg/SignalSmith engine."
+            if legacy_intel_build
+            else "CDG timing calibration applies on the in-process (IINA) build; "
+                 "the follower-based build cannot apply it. Restart SingWS after "
+                 "changing this; the current session keeps its existing engine."
+            if sys.platform == "darwin"
+            else "mpv is currently available on macOS only; this build uses the "
+                 "FFmpeg/SignalSmith engine."
+        )
+        mpv_engine_note.setWordWrap(True)
+        v.addWidget(mpv_engine_note)
 
         gap_row = QHBoxLayout()
         gap_row.addWidget(QLabel("BG -> Karaoke Gap (seconds):"))
@@ -26739,25 +26996,6 @@ class KaraokeApp(QWidget):
             bg_normalize_cb.setEnabled(adv)
         _sync_advanced_audio_enabled()
         simple_audio_cb.toggled.connect(lambda *_: _sync_advanced_audio_enabled())
-
-        v = _section_card(tab_display, "MP4 Video Quality",
-                          "Caps the decode resolution for MP4 karaoke (downscale only). "
-                          "Lower settings play far smoother on older/Intel Macs.")  # ---- Display / Ticker ----
-        mp4_row = QHBoxLayout()
-        mp4_row.addWidget(QLabel("Max resolution:"))
-        mp4_quality_combo = QComboBox(dlg)
-        mp4_quality_combo.addItem("720p (smoothest)", 720)
-        mp4_quality_combo.addItem("1080p", 1080)
-        mp4_quality_combo.addItem("Native (sharpest, heaviest)", 0)
-        try:
-            cur_mp4 = int(self.settings.get("mp4_max_height", 720))
-        except Exception:
-            cur_mp4 = 720
-        mp4_idx = mp4_quality_combo.findData(cur_mp4)
-        mp4_quality_combo.setCurrentIndex(mp4_idx if mp4_idx >= 0 else 0)
-        mp4_row.addWidget(mp4_quality_combo)
-        mp4_row.addStretch(1)
-        v.addLayout(mp4_row)
 
         v = _section_card(tab_general, "Queue Mode")  # ---- General ----
         queue_mode_row = QHBoxLayout()
@@ -27174,18 +27412,21 @@ class KaraokeApp(QWidget):
                 summary = "the mpv engine (audio and video)"
             self.settings["karaoke_engine"] = engine
             self.save_settings()
-            mpv_engine_note.setText(
-                f"Saved. Restart SingWS to use {summary}. "
-                "The current session is unchanged."
-            )
+            note = f"Saved. Restart SingWS to use {summary}. The current session is unchanged."
+            if engine != "ffmpeg":
+                note += (" CDG timing calibration applies on the in-process"
+                         " (IINA) build; the follower-based build cannot"
+                         " apply it.")
+            mpv_engine_note.setText(note)
 
         def on_mpv_engine_toggled(checked: bool):
-            mpv_keep_audio_cb.setEnabled(bool(checked))
+            mpv_keep_audio_cb.setEnabled(mpv_available and bool(checked))
             _save_karaoke_engine_choice()
 
         def on_mpv_keep_audio_toggled(_checked: bool):
             _save_karaoke_engine_choice()
 
+        mpv_engine_cb.toggled.connect(on_mpv_engine_toggled)
         mpv_keep_audio_cb.toggled.connect(on_mpv_keep_audio_toggled)
 
         def on_normalize_toggled(checked: bool):
@@ -27393,7 +27634,6 @@ class KaraokeApp(QWidget):
 
         audio_output_combo.currentIndexChanged.connect(on_audio_output_changed)
         bg_gap_spin.valueChanged.connect(on_bg_gap_changed)
-        mpv_engine_cb.toggled.connect(on_mpv_engine_toggled)
         karaoke_bgm_crossfade_cb.toggled.connect(on_karaoke_bgm_crossfade_toggled)
         end_silence_cb.toggled.connect(on_end_silence_toggled)
         auto_advance_cb.toggled.connect(on_auto_advance_toggled)
@@ -27403,25 +27643,6 @@ class KaraokeApp(QWidget):
         normalize_cb.toggled.connect(on_normalize_toggled)
         bg_normalize_cb.toggled.connect(on_bg_normalize_toggled)
 
-        def on_mp4_quality_changed(_idx: int):
-            try:
-                val = int(mp4_quality_combo.currentData())
-            except Exception:
-                val = 720
-            self.settings["mp4_max_height"] = val
-            try:
-                self.save_settings()
-            except Exception:
-                pass
-            # Applies to the next MP4 that starts; live transport, if any, also
-            # picks it up so a re-seek/next song renders at the new resolution.
-            try:
-                tp = getattr(self, "karaoke_transport", None)
-                if tp is not None:
-                    tp.max_video_height = self._effective_mp4_max_height()
-            except Exception:
-                pass
-        mp4_quality_combo.currentIndexChanged.connect(on_mp4_quality_changed)
         def on_disc_priority_changed(_text: str):
             normalized = normalize_disc_priority(disc_priority_edit.text(), max_items=10)
             # Store as comma-separated string to keep settings file human-editable.
@@ -32706,6 +32927,8 @@ class KaraokeApp(QWidget):
         "requests_accepting",
         "use_waiting_for_add",
         "show_request_qr",
+        "rotation_request_qr_enabled",
+        "rotation_request_qr_caption",
         # The rig: which output, and how far the room's display lags.
         "audio_output_id",
         "audio_output_name",
@@ -33372,11 +33595,65 @@ class KaraokeApp(QWidget):
         self.header_qr_widget.setToolTip("Set a request QR URL in Settings")
         self._refresh_show_screen_qr("header_update")
 
+    def _rotation_request_qr_caption(self) -> str:
+        try:
+            caption = str(self.settings.get("rotation_request_qr_caption", "") or "").strip()
+        except Exception:
+            caption = ""
+        return caption or str(DEFAULTS.get("rotation_request_qr_caption", "JOIN THE QUEUE!"))
+
+    def _refresh_rotation_request_qr(self, reason: str = "update", *, force: bool = False):
+        """Push (or clear) the request QR card on the rotation window.
+
+        Same URL and accepting gate as the show screen, but its own enable
+        setting: the rotation window is often on a second monitor facing the
+        room, so hosts want it advertising requests even when the lyrics output
+        stays clean.
+        """
+        try:
+            state = object.__getattribute__(self, "__dict__")
+        except Exception:
+            state = {}
+        view = state.get("rotation_view")
+        if view is None or not hasattr(view, "set_request_qr"):
+            return
+        show = (
+            bool(self.settings.get("rotation_request_qr_enabled", True))
+            and self._is_requests_accepting_cached()
+        )
+        url = self._header_qr_url() if show else ""
+        if not url:
+            show = False
+        caption = self._rotation_request_qr_caption() if show else ""
+        key = (bool(show), url, caption)
+        if not force and key == state.get("_rotation_qr_key"):
+            return
+        self._rotation_qr_key = key
+        if not show:
+            view.set_request_qr(None)
+            _diag(f"[QR-ROTATION] cleared reason={reason} "
+                  f"enabled={int(bool(self.settings.get('rotation_request_qr_enabled', True)))} "
+                  f"accepting={int(self._is_requests_accepting_cached())}")
+            return
+        pix = self._build_qr_pixmap(url, size=300)
+        view.set_request_qr(None if pix.isNull() else pix, caption)
+        _diag(f"[QR-ROTATION] shown url={url} reason={reason} "
+              f"caption={caption!r} built={int(not pix.isNull())}")
+
     def _refresh_show_screen_qr(self, reason: str = "update", *, force: bool = False):
         """Push (or clear) the request QR painted on the show screen. Shown when
         the 'show_request_qr' setting is on AND requests are accepting; the URL
         is the same network request link the header QR uses. The host preview
-        stays QR-free so the badge cannot obscure lyrics at its smaller size."""
+        stays QR-free so the badge cannot obscure lyrics at its smaller size.
+
+        Also refreshes the rotation window's QR card, so every existing trigger
+        (accepting change, venue switch, settings toggle, surface rebuild)
+        covers both screens. It runs first because the show-screen path below
+        returns early when there is no video area yet."""
+        try:
+            self._refresh_rotation_request_qr(reason, force=force)
+        except Exception as exc:
+            _diag(f"[QR-ROTATION] refresh failed reason={reason}: {exc}")
         try:
             state = object.__getattribute__(self, "__dict__")
         except Exception:
@@ -34425,6 +34702,42 @@ class KaraokeApp(QWidget):
 
             show_qr_cb.toggled.connect(on_show_qr_toggled)
             v.addWidget(show_qr_cb)
+
+            rotation_qr_cb = QCheckBox("Show request QR on the rotation window (with a call to action)")
+            rotation_qr_cb.setChecked(bool(self.settings.get("rotation_request_qr_enabled", True)))
+            rotation_qr_cb.setToolTip("Adds a QR card to the bottom of the Show Rotation window, sized for a room-facing second display. Only visible while requests are accepting.")
+
+            def on_rotation_qr_toggled(checked: bool):
+                self.settings["rotation_request_qr_enabled"] = bool(checked)
+                try:
+                    self.save_settings()
+                except Exception:
+                    pass
+                self._refresh_rotation_request_qr("settings_toggle", force=True)
+
+            rotation_qr_cb.toggled.connect(on_rotation_qr_toggled)
+            v.addWidget(rotation_qr_cb)
+
+            rotation_caption_row = QHBoxLayout()
+            rotation_caption_row.addWidget(QLabel("Rotation QR message:"))
+            rotation_caption_edit = QLineEdit(dlg)
+            rotation_caption_edit.setText(self._rotation_request_qr_caption())
+            rotation_caption_edit.setPlaceholderText(
+                str(DEFAULTS.get("rotation_request_qr_caption", "JOIN THE QUEUE!"))
+            )
+            rotation_caption_edit.setMaxLength(60)
+            rotation_caption_row.addWidget(rotation_caption_edit, 1)
+            v.addLayout(rotation_caption_row)
+
+            def on_rotation_caption_changed(text: str):
+                self.settings["rotation_request_qr_caption"] = str(text or "").strip()
+                try:
+                    self.save_settings()
+                except Exception:
+                    pass
+                self._refresh_rotation_request_qr("caption_edit", force=True)
+
+            rotation_caption_edit.textChanged.connect(on_rotation_caption_changed)
 
             v.addSpacing(10)
 
@@ -36648,6 +36961,12 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         _diag(f"[ROTATION] window built in {(time.perf_counter()-started)*1000:.0f}ms reason={reason}")
+        # The window is built lazily (warmup or first open), long after the
+        # QR triggers that fired at startup, so seed its card here.
+        try:
+            self._refresh_rotation_request_qr(f"rotation_window_built:{reason}", force=True)
+        except Exception as exc:
+            _diag(f"[QR-ROTATION] initial push failed: {exc}")
         return True
 
     def _warm_rotation_view(self):
@@ -44275,6 +44594,9 @@ class KaraokeApp(QWidget):
                 )
         except Exception:
             pass
+        # mpv's audio engine has no Python sample path to swap, so its whole
+        # `af` chain is rebuilt instead. No-op on the other engines.
+        self._push_mpv_audio_processing("simple_audio_toggle")
 
     def _log_bgm_eq_route(self, reason: str) -> None:
         try:
@@ -44475,24 +44797,6 @@ class KaraokeApp(QWidget):
             pass
         return "fit"
 
-    def _effective_mp4_max_height(self) -> int:
-        """MP4 decode cap; never permit unsafe native/1080p decode on Intel Macs."""
-        try:
-            requested = int(self.settings.get("mp4_max_height", 720) or 0)
-        except Exception:
-            requested = 720
-        try:
-            intel_mac = sys.platform == "darwin" and platform.machine().lower() in {"x86_64", "amd64"}
-        except Exception:
-            intel_mac = False
-        # Show logs measured 1080p/60 native decode at only 14-15fps, with
-        # hundreds of dropped frames and repeated GUI stalls. Preserve the
-        # quality choice on Apple Silicon, but enforce the known-safe ceiling
-        # on Intel even when an older settings file persisted Native (0).
-        if intel_mac and (requested <= 0 or requested > 720):
-            return 720
-        return requested
-
     def _effective_cdg_timing_offset_ms(self) -> int:
         """Return FFmpeg's CDG baseline plus the host's saved fine tuning."""
         try:
@@ -44516,10 +44820,6 @@ class KaraokeApp(QWidget):
     def _apply_runtime_media_settings(self):
         """Apply runtime media settings without overwriting user choices."""
         try:
-            intel_mac = sys.platform == "darwin" and platform.machine().lower() in {"x86_64", "amd64"}
-        except Exception:
-            intel_mac = False
-        try:
             ticker = getattr(getattr(self, "video_window", None), "ticker", None)
             if ticker is not None and hasattr(ticker, "set_scroll_speed"):
                 ticker.set_scroll_speed(self._effective_ticker_speed_px_per_sec())
@@ -44529,8 +44829,6 @@ class KaraokeApp(QWidget):
             transport = getattr(self, "karaoke_transport", None)
             if transport is not None and hasattr(transport, "set_visual_timer_interval_ms"):
                 transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
-                if hasattr(transport, "max_video_height"):
-                    transport.max_video_height = self._effective_mp4_max_height()
         except Exception:
             pass
         # Re-evaluate the attachment for the current song when settings change.
@@ -44544,26 +44842,6 @@ class KaraokeApp(QWidget):
             self._apply_bgm_master_processing()
         except Exception:
             pass
-        if intel_mac:
-            # The show screen uses its lightweight painter transition on Intel;
-            # keep it enabled. Continue suppressing the heavier rotation and
-            # ticker effects that compete with decoder/device preroll.
-            try:
-                rotation_view = getattr(self, "rotation_view", None)
-                if rotation_view is not None and hasattr(rotation_view, "set_effects_enabled"):
-                    rotation_view.set_effects_enabled(False)
-            except Exception:
-                pass
-            try:
-                ticker = getattr(getattr(self, "video_window", None), "ticker", None)
-                if ticker is not None and hasattr(ticker, "set_effects_enabled"):
-                    ticker.set_effects_enabled(False)
-            except Exception:
-                pass
-            if not bool(getattr(self, "_intel_show_effects_backoff_logged", False)):
-                self._intel_show_effects_backoff_logged = True
-                _diag("[PERF] Intel Mac show-effects backoff active; countdown retained")
-
     def _track_trim_db(self, path: str) -> float:
         """Host-set per-track playback trim in dB (plain gain, no DSP). 0 if unset."""
         try:
@@ -47426,30 +47704,44 @@ class KaraokeApp(QWidget):
             'set frontmost of kf to true',
             'tell kf',
             'if (count of windows) is 0 then return "ERROR|KaraFun window not found"',
-            'set mainWindow to missing value',
+            # Search EVERY non-renderer window rather than committing to one.
+            # The old loop assigned mainWindow on each match, so the LAST
+            # non-"Dual Renderer" window won -- any popover, sheet or utility
+            # window KaraFun had open became the search target and the route
+            # button was genuinely absent from it.
+            'set routeButton to missing value',
+            'set seenButtons to ""',
             'repeat with candidateWindow in windows',
             'try',
-            'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
-            'end try',
-            'end repeat',
-            'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+            'if name of candidateWindow is not "Dual Renderer" then',
             'try',
-            'set elems to entire contents of mainWindow',
+            'set elems to entire contents of candidateWindow',
             'on error',
-            'set elems to UI elements of mainWindow',
+            'set elems to UI elements of candidateWindow',
             'end try',
-            'set routeButton to missing value',
             'repeat with elem in elems',
             'try',
-            'if role of elem is "AXButton" then',
+            # A route picker is commonly an AXPopUpButton or AXMenuButton, not
+            # a plain AXButton. Restricting to AXButton skipped it outright.
+            'set elemRole to (role of elem as text)',
+            'if elemRole is "AXButton" or elemRole is "AXPopUpButton" or elemRole is "AXMenuButton" then',
+            'set labelText to ""',
+            'try',
             'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
+            'end try',
+            'if labelText is not "" then set seenButtons to seenButtons & "[" & elemRole & ":" & labelText & "]"',
             'ignoring case',
-            'if labelText contains "choose an audio output" or labelText contains "audio output" then set routeButton to elem',
+            'if routeButton is missing value and (labelText contains "choose an audio output" or labelText contains "audio output" or labelText contains "output device") then set routeButton to elem',
             'end ignoring',
             'end if',
             'end try',
             'end repeat',
-            'if routeButton is missing value then return "ERROR|KaraFun Audio output button was not found"',
+            'end if',
+            'end try',
+            'end repeat',
+            # Report what WAS found. The old message named only what was
+            # missing, which made every failure undiagnosable from the log.
+            'if routeButton is missing value then return "ERROR|KaraFun Audio output button was not found; candidates=" & seenButtons',
             'try',
             'set currentLabel to (name of routeButton as text) & " " & (description of routeButton as text) & " " & (help of routeButton as text) & " " & (value of routeButton as text)',
             'ignoring case',
@@ -47485,7 +47777,32 @@ class KaraokeApp(QWidget):
             _diag(f"[KARAFUN-AUDIO] route verified result={result!r} pid={cache_key[0]}")
             return True, target
         _diag(f"[KARAFUN-AUDIO] route verification failed result={result!r}")
+        # Distinguish "the route is wrong" from "the control could not be read".
+        #
+        # The first is the danger this check exists for -- audio escaping to
+        # AirPlay/a TV -- and still hard-blocks the song. The second is a
+        # SingWS/KaraFun accessibility mismatch, and blocking on it killed
+        # every KaraFun song on 2026-08-06 (five attempts, zero successes)
+        # before anything was ever sent to KaraFun to play. An unreadable UI
+        # is not evidence of an unsafe route, so it warns and proceeds.
+        if not self._karafun_audio_route_block_on_unreadable() and (
+            "was not found" in result or "window not found" in result or not result
+        ):
+            _diag(
+                "[KARAFUN-AUDIO] WARNING proceeding without route verification — "
+                f"could not read KaraFun's output control (target={target!r}). "
+                "Check KaraFun's own audio output manually if sound is missing. "
+                "Set karafun_audio_route_strict=true to block instead."
+            )
+            return True, target
         return False, result.split("|", 1)[-1] or f"Could not select KaraFun output {target!r}"
+
+    def _karafun_audio_route_block_on_unreadable(self) -> bool:
+        """Whether an unreadable route control should abort the song."""
+        try:
+            return bool(self.settings.get("karafun_audio_route_strict", False))
+        except Exception:
+            return False
 
     def _show_karafun_accessibility_setup(self, *, notify: bool = True):
         message = (
