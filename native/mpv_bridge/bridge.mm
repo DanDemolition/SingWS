@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -17,6 +18,28 @@
 #include "mpv/client.h"
 #include "mpv/render.h"
 #include "mpv/render_gl.h"
+
+// Every diagnostic in this file used to go to stderr, which a bundled .app
+// discards -- so nothing the bridge knows (load failures, transition holds,
+// per-view present skips) ever reached singws_*.log, and an output window that
+// went blank left no evidence at all. Route through a host-installed callback
+// when there is one, and keep stderr for the unbundled/dev case.
+typedef void (*SingWSBridgeLogFn)(const char *);
+static std::atomic<SingWSBridgeLogFn> g_bridgeLog{nullptr};
+
+static void bridgeLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void bridgeLog(const char *fmt, ...) {
+    char line[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    // mpv's own log lines already end in a newline; the host log adds its own.
+    for (size_t n = strlen(line); n && (line[n-1] == '\n' || line[n-1] == '\r'); --n)
+        line[n-1] = '\0';
+    SingWSBridgeLogFn sink = g_bridgeLog.load();
+    if (sink) sink(line); else fprintf(stderr, "%s\n", line);
+}
 
 @class BridgeRenderer;
 
@@ -92,13 +115,13 @@ static mpv_handle *makeSilenceScanner(void) {
     for(const auto &option:options){
         int r=mpv_set_option_string(h,option[0],option[1]);
         if(r<0){
-            fprintf(stderr,"[scanner] option %s failed: %s\n",option[0],mpv_error_string(r));
+            bridgeLog("[scanner] option %s failed: %s",option[0],mpv_error_string(r));
             mpv_terminate_destroy(h); return nullptr;
         }
     }
     int r=mpv_initialize(h);
     if(r<0){
-        fprintf(stderr,"[scanner] initialize failed: %s\n",mpv_error_string(r));
+        bridgeLog("[scanner] initialize failed: %s",mpv_error_string(r));
         mpv_terminate_destroy(h); return nullptr;
     }
     // mpv maps libavfilter's AV_LOG_INFO messages to its "v" level.
@@ -142,7 +165,7 @@ static int scanSilence(const char *path,double noiseDb,double leadMinimum,
              "lavfi=[silencedetect=noise=%.3fdB:d=%.3f]",noiseDb,detectorMinimum);
     int r=mpv_set_property_string(h,"af",filter);
     if(r<0){
-        fprintf(stderr,"[scanner] silencedetect unavailable: %s\n",mpv_error_string(r));
+        bridgeLog("[scanner] silencedetect unavailable: %s",mpv_error_string(r));
         return 0;
     }
 
@@ -154,7 +177,7 @@ static int scanSilence(const char *path,double noiseDb,double leadMinimum,
     const char *cmd[]={"loadfile",path,"replace",nullptr};
     r=mpv_command(h,cmd);
     if(r<0){
-        fprintf(stderr,"[scanner] load failed: %s\n",mpv_error_string(r));
+        bridgeLog("[scanner] load failed: %s",mpv_error_string(r));
         return 0;
     }
 
@@ -189,11 +212,11 @@ static int scanSilence(const char *path,double noiseDb,double leadMinimum,
 
     if(!finished||gScannerCancel.load()){
         const char *stop[]={"stop",nullptr}; mpv_command(h,stop);
-        fprintf(stderr,"[scanner] scan cancelled or timed out: %s\n",path);
+        bridgeLog("[scanner] scan cancelled or timed out: %s",path);
         return 0;
     }
     if(!loaded||!cleanEof||duration<=0.0){
-        fprintf(stderr,"[scanner] scan did not reach a clean EOF: %s\n",path);
+        bridgeLog("[scanner] scan did not reach a clean EOF: %s",path);
         return 0;
     }
     if(activeStart>=0.0){
@@ -212,7 +235,7 @@ static int scanSilence(const char *path,double noiseDb,double leadMinimum,
         trail=std::max(0.0,std::min(duration,lastStart));
     }
     *leadOut=lead; *trailOut=trail; *durationOut=duration;
-    fprintf(stderr,"[scanner] ready lead=%.3f trail=%.3f duration=%.3f %s\n",
+    bridgeLog("[scanner] ready lead=%.3f trail=%.3f duration=%.3f %s",
             lead,trail,duration,path);
     return 1;
 }
@@ -233,7 +256,7 @@ static GLuint compileShader(GLenum type, const char *source) {
     GLint ok = GL_FALSE; glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
     if (!ok) {
         char log[2048] = {0}; glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
-        fprintf(stderr, "[bridge] shader error: %s\n", log);
+        bridgeLog("[bridge] shader error: %s", log);
         glDeleteShader(shader); return 0;
     }
     return shader;
@@ -281,7 +304,7 @@ static GLuint makeProgram(void) {
     glDeleteShader(v); glDeleteShader(f);
     GLint ok=GL_FALSE; glGetProgramiv(p,GL_LINK_STATUS,&ok);
     if (!ok) { char log[2048]={0}; glGetProgramInfoLog(p,sizeof(log),nullptr,log);
-        fprintf(stderr,"[bridge] link error: %s\n",log); glDeleteProgram(p); return 0; }
+        bridgeLog("[bridge] link error: %s",log); glDeleteProgram(p); return 0; }
     return p;
 }
 
@@ -293,6 +316,8 @@ static GLuint makeProgram(void) {
     GLint _scaleUniform, _uvScaleUniform, _uvOffsetUniform, _textureUniform, _sidefillUniform;
     int _width, _height;
     BOOL _hasFrame, _isCdg, _cdgSidefill;
+    // Last presentView skip reason per view; -1 so the first pass always logs.
+    int _lastOutputSkip, _lastPreviewSkip;
     BOOL _loading, _playWhenLoaded;
     int _desiredTempoPercent, _desiredSemitones;
     // SingWS DSP stages (normalize/EQ/master bus) as an mpv filter string,
@@ -312,6 +337,7 @@ static GLuint makeProgram(void) {
 - (instancetype)initWithOutput:(NSView *)output preview:(NSView *)preview {
     if ((self=[super init])) {
         _width=1920; _height=1080; _renderQueued=false; _eventQueued=false; _stopping=false;
+        _lastOutputSkip=-1; _lastPreviewSkip=-1;
         _loading=NO; _playWhenLoaded=NO;
         _desiredTempoPercent=100; _desiredSemitones=0; _loadSerial=0;
         _desiredAudioDelay=0.0;
@@ -357,7 +383,7 @@ static GLuint makeProgram(void) {
 
 - (BOOL)setOption:(const char *)name value:(const char *)value {
     int r=mpv_set_option_string(_mpv,name,value);
-    if (r<0) fprintf(stderr,"[bridge] option %s failed: %s\n",name,mpv_error_string(r));
+    if (r<0) bridgeLog("[bridge] option %s failed: %s",name,mpv_error_string(r));
     return r>=0;
 }
 
@@ -379,7 +405,7 @@ static GLuint makeProgram(void) {
         mpv_request_log_messages(_mpv,"warn");
         mpv_set_wakeup_callback(_mpv,eventWake,(__bridge void *)self);
         int r=mpv_initialize(_mpv); if (r<0) return NO;
-        fprintf(stderr,"[bridge] playback buffering audio=1.0s readahead=10s cache=256MiB\n");
+        bridgeLog("[bridge] playback buffering audio=1.0s readahead=10s cache=256MiB");
         [_master makeCurrentContext];
         mpv_opengl_init_params init={.get_proc_address=getProc,.get_proc_address_ctx=nullptr};
         mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,(void *)MPV_RENDER_API_TYPE_OPENGL},
@@ -395,7 +421,7 @@ static GLuint makeProgram(void) {
         const char *stop[]={"stop",nullptr};
         int stopResult=mpv_command(_mpv,stop);
         if(stopResult<0)
-            fprintf(stderr,"[bridge] pre-load stop failed: %s\n",mpv_error_string(stopResult));
+            bridgeLog("[bridge] pre-load stop failed: %s",mpv_error_string(stopResult));
     }
 
     // Reuse the one initialized mpv core and its two child views. Clear the
@@ -414,7 +440,7 @@ static GLuint makeProgram(void) {
     // preserves the audio clock and resets the normal threshold for MP4/audio.
     int probeResult=mpv_set_property_string(_mpv,"demuxer-lavf-probescore",_isCdg?"1":"26");
     if(probeResult<0)
-        fprintf(stderr,"[bridge] demuxer probe threshold failed: %s\n",mpv_error_string(probeResult));
+        bridgeLog("[bridge] demuxer probe threshold failed: %s",mpv_error_string(probeResult));
     int r=0;
     if (audio.length) {
         r=mpv_set_property_string(_mpv,"audio-files",audio.fileSystemRepresentation);
@@ -425,11 +451,11 @@ static GLuint makeProgram(void) {
         r=mpv_set_property(_mpv,"audio-files",MPV_FORMAT_NODE,&emptyNode);
     }
     if (r<0) {
-        fprintf(stderr,"[bridge] audio-files failed: %s\n",mpv_error_string(r));
+        bridgeLog("[bridge] audio-files failed: %s",mpv_error_string(r));
         return NO;
     }
     const uint64_t serial=++_loadSerial;
-    fprintf(stderr,"[bridge] load queued serial=%llu video=%s audio=%s\n",
+    bridgeLog("[bridge] load queued serial=%llu video=%s audio=%s",
             (unsigned long long)serial,video.fileSystemRepresentation,
             audio.length?audio.fileSystemRepresentation:"(internal)");
     const char *cmd[]={"loadfile",video.fileSystemRepresentation,"replace",nullptr};
@@ -524,9 +550,9 @@ static GLuint makeProgram(void) {
         chain+=_dspChain;
     }
     int r=mpv_set_property_string(_mpv,"af",chain.c_str());
-    if(r<0)fprintf(stderr,"[bridge] af chain rejected (%s): %s\n",
+    if(r<0)bridgeLog("[bridge] af chain rejected (%s): %s",
                    mpv_error_string(r),chain.c_str());
-    else fprintf(stderr,"[bridge] af key=%d dsp=%zu chars -> %s\n",
+    else bridgeLog("[bridge] af key=%d dsp=%zu chars -> %s",
                  _desiredSemitones,_dspChain.size(),
                  chain.empty()?"(passthrough)":chain.c_str());
 }
@@ -552,8 +578,8 @@ static GLuint makeProgram(void) {
     if(!_mpv||_loading)return;
     double value=_desiredAudioDelay;
     int r=mpv_set_property(_mpv,"audio-delay",MPV_FORMAT_DOUBLE,&value);
-    if(r<0)fprintf(stderr,"[bridge] audio-delay rejected: %s\n",mpv_error_string(r));
-    else fprintf(stderr,"[bridge] audio-delay=%.3fs (CDG visual lead)\n",value);
+    if(r<0)bridgeLog("[bridge] audio-delay rejected: %s",mpv_error_string(r));
+    else bridgeLog("[bridge] audio-delay=%.3fs (CDG visual lead)",value);
 }
 - (void)setCdgSidefill:(BOOL)enabled {
     _cdgSidefill=enabled;
@@ -565,7 +591,7 @@ static GLuint makeProgram(void) {
     const uint64_t serial=++_transitionSerial;
     _outputTransitioning=true;
     const int settleMs=MAX(100,durationMs)+80;
-    fprintf(stderr,"[bridge] output transition hold serial=%llu duration=%dms\n",
+    bridgeLog("[bridge] output transition hold serial=%llu duration=%dms",
             (unsigned long long)serial,settleMs);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)settleMs*NSEC_PER_MSEC),
                    dispatch_get_main_queue(),^{
@@ -576,7 +602,7 @@ static GLuint makeProgram(void) {
         // waiting for another mpv render callback.
         [self presentView:self->_outputView];
         [self->_outputView setNeedsDisplay:YES];
-        fprintf(stderr,"[bridge] output transition released serial=%llu\n",
+        bridgeLog("[bridge] output transition released serial=%llu",
                 (unsigned long long)serial);
     });
 }
@@ -594,7 +620,7 @@ static GLuint makeProgram(void) {
 - (void)drainEvents {
     while (_mpv) { mpv_event *e=mpv_wait_event(_mpv,0); if(!e||e->event_id==MPV_EVENT_NONE)break;
         if(e->event_id==MPV_EVENT_LOG_MESSAGE){mpv_event_log_message*m=(mpv_event_log_message*)e->data;
-            fprintf(stderr,"[mpv/%s] %s",m->level,m->text);}
+            bridgeLog("[mpv/%s] %s",m->level,m->text);}
         else if(e->event_id==MPV_EVENT_FILE_LOADED){
             _loading=NO;
             // Apply file-local tuning only after the replacement file owns the
@@ -611,13 +637,13 @@ static GLuint makeProgram(void) {
             BOOL shouldPlay=_playWhenLoaded;
             int paused=shouldPlay?0:1;
             mpv_set_property(_mpv,"pause",MPV_FORMAT_FLAG,&paused);
-            fprintf(stderr,"[bridge] media loaded serial=%llu play=%d tempo=%d key=%d\n",
+            bridgeLog("[bridge] media loaded serial=%llu play=%d tempo=%d key=%d",
                     (unsigned long long)_loadSerial,shouldPlay?1:0,tempo,semitones);
         }else if(e->event_id==MPV_EVENT_END_FILE && _loading){
             mpv_event_end_file *end=(mpv_event_end_file *)e->data;
             if(end && end->reason==MPV_END_FILE_REASON_ERROR){
                 _loading=NO;
-                fprintf(stderr,"[bridge] load ended with error: %s\n",mpv_error_string(end->error));
+                bridgeLog("[bridge] load ended with error: %s",mpv_error_string(end->error));
             }
         } }
 }
@@ -627,13 +653,46 @@ static GLuint makeProgram(void) {
         glBindFramebuffer(GL_FRAMEBUFFER,_fbo); glViewport(0,0,_width,_height);
         mpv_opengl_fbo target={(int)_fbo,_width,_height,GL_RGBA8}; int flip=1;
         mpv_render_param p[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
-        mpv_render_context_render(_render,p); glBindFramebuffer(GL_FRAMEBUFFER,0); glFinish();
+        // glFlush, not glFinish: this runs on the Qt GUI thread (see
+        // queueRender), so blocking until the GPU drains stalls the whole UI
+        // once per frame and shows up as choppy playback on integrated GPUs.
+        // The following presentView drawing is ordered against this work by the
+        // shared context, and each flushBuffer syncs before it swaps.
+        mpv_render_context_render(_render,p); glBindFramebuffer(GL_FRAMEBUFFER,0); glFlush();
         CGLUnlockContext(_master.CGLContextObj); _hasFrame=YES; }
     [self presentView:_outputView]; [self presentView:_previewView];
 }
 - (void)presentView:(BridgeVideoView *)view {
-    if(!view||!view.openGLContext)return; NSOpenGLContext*ctx=view.openGLContext;
-    if(view==_outputView && _outputTransitioning.load())return;
+    if(!view)return;  // nil belongs to neither view; labelling it would mislead
+    // Why a present was skipped is the whole question when one window goes
+    // blank while the other keeps drawing, so name the reason. Rate-limited to
+    // one line per view per reason-change: this runs at frame rate.
+    const BOOL isOutput = (view == _outputView);
+    int state = 0;
+    if(!view.openGLContext) state = 1;
+    else if(isOutput && _outputTransitioning.load()) state = 2;
+    else if(view.isHiddenOrHasHiddenAncestor) state = 3;
+    else if(!view.window) state = 4;
+    else if(!view.window.isVisible) state = 5;
+    // Not a skip -- the view is still cleared to black below, exactly as
+    // before. Reported because "drawing, but there is no frame to draw" and
+    // "not drawing at all" look identical on screen and have different causes.
+    else if(!_hasFrame) state = 6;
+    int &last = isOutput ? _lastOutputSkip : _lastPreviewSkip;
+    if(state != last){
+        last = state;
+        static const char *why[]={"presenting","no-gl-context","window-transition",
+                                  "view-hidden","no-window","window-not-visible",
+                                  "no-frame (black)"};
+        bridgeLog("[bridge] %s view %s", isOutput?"output":"preview", why[state]);
+    }
+    if(state && state != 6) return;
+    NSOpenGLContext*ctx=view.openGLContext;
+    // Drawing a view nobody can see costs a full clear+draw+flushBuffer per
+    // frame on the GUI thread. During a show the preview is often closed, so
+    // this halves the per-frame cost outright. Safe to skip: BridgeVideoView's
+    // drawRect: calls back into presentView, so AppKit repaints from the
+    // retained shared texture as soon as the view is on screen again.
     [ctx makeCurrentContext]; [ctx update]; CGLLockContext(ctx.CGLContextObj);
     NSSize s=[view convertSizeToBacking:view.bounds.size]; int w=MAX(1,(int)s.width),h=MAX(1,(int)s.height);
     glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
@@ -641,11 +700,17 @@ static GLuint makeProgram(void) {
         if(va>sa)sx=sa/va; else sy=va/sa;
         GLfloat uvx=1,uvy=1,uox=0,uoy=0;
         if(view==_previewView && _isCdg){
-            // libmpv presents CDG as 4:3 inside the shared 16:9 texture.
-            // The app's preview host is the exact raw CDG canvas ratio
-            // (300x216 / 25:18), so discard only those generated pillar bars
-            // and map the complete CDG canvas edge-to-edge in the preview.
-            sx=1; sy=1; uvx=0.75f; uox=0.125f;
+            // libmpv presents CDG as 4:3 inside the shared 16:9 texture, so the
+            // picture lives between x=.125 and x=.875. Discard those generated
+            // pillar bars, then letterbox what is left against the host's real
+            // aspect. This used to draw the cropped region edge-to-edge on the
+            // assumption that the preview host was a fixed 300x216 (25:18)
+            // panel; it is a freely resizable window whose sole child fills it,
+            // so the picture was stretched by whatever the mismatch happened to
+            // be -- 4% at the default size, 33% once resized to 16:9.
+            uvx=0.75f; uox=0.125f;
+            const double ca=4.0/3.0;
+            if(va>ca)sx=(GLfloat)(ca/va); else sy=(GLfloat)(va/ca);
         }
         int sidefill=(view==_outputView && _isCdg && _cdgSidefill)?1:0;
         glUseProgram(_program); GLuint*vao=(view==_outputView)?&_outVao:&_prevVao;
@@ -663,11 +728,13 @@ static GLuint makeProgram(void) {
     if(_render){[_master makeCurrentContext];mpv_render_context_free(_render);_render=nullptr;}
     if(_mpv){mpv_terminate_destroy(_mpv);_mpv=nullptr;}
     [_outputView removeFromSuperview]; [_previewView removeFromSuperview];
-    fprintf(stderr,"[bridge] clean shutdown\n");
+    bridgeLog("[bridge] clean shutdown");
 }
 @end
 
 extern "C" {
+void singws_bridge_set_log_callback(SingWSBridgeLogFn cb) { g_bridgeLog.store(cb); }
+
 void *singws_bridge_create(uintptr_t outputView, uintptr_t previewView,
                            const char *videoPath, const char *audioPath) {
     @autoreleasepool {

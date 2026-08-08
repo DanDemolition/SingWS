@@ -3176,7 +3176,17 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
 # Settings defaults
 TICKER_COLOR_DEFAULT = "#39FF88"  # lively green; operator can override in Ticker Settings
-FFMPEG_CDG_BASE_OFFSET_MS = 600
+# 750, not 600: show testing established the +600 baseline needed another
+# +150, and ffmpeg_cdg_750_baseline_migrated below already zeroes that saved
+# +150 fine tuning on the assumption this constant carries it. The constant was
+# never actually raised, so installs calibrated to +750 quietly dropped to +600.
+FFMPEG_CDG_BASE_OFFSET_MS = 750
+# The mpv baseline is a different number because it corrects a different thing.
+# FFMPEG_CDG_BASE_OFFSET_MS compensates SingWS's own CDG decoder; the in-process
+# (IINA) backend decodes the .cdg inside mpv off real timestamps and needs
+# almost nothing. Applying the FFmpeg figure there put CDG ~750ms out and left
+# the operator cancelling it by hand on the Display slider.
+MPV_CDG_BASE_OFFSET_MS = -150
 
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
@@ -3218,9 +3228,14 @@ DEFAULTS = {
     # and says so in the log. mpv stays opt-in per machine.
     # Stale gstreamer/auto values map to ffmpeg.
     "karaoke_engine": "ffmpeg",
-    "cdg_timing_offset_ms": 0,       # Fine tuning added to the calibrated FFmpeg CDG +600ms baseline
+    "cdg_timing_offset_ms": 0,       # Fine tuning added to the calibrated FFmpeg CDG +750ms baseline
+    # Fine tuning for the mpv baseline. Kept separate from the FFmpeg key on
+    # purpose: the two engines need opposite-signed baselines, so one shared
+    # value meant calibrating on either engine silently de-calibrated the other.
+    "cdg_timing_offset_mpv_ms": 0,
     "ffmpeg_cdg_timing_migrated": True,
     "ffmpeg_cdg_750_baseline_migrated": False,
+    "cdg_timing_engine_split_migrated": False,
     "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "next_up_overlay_enabled": False, # legacy Next Up panel retired; QR remains visible between singers
@@ -7720,13 +7735,27 @@ class VideoAreaWidget(QWidget):
             "duration_ms": max(500, int(duration_ms)),
             "burst": bool(getattr(self, "_show_vfx_enabled", True)),
         }
+        self._set_overlay_suppresses_mpv(True)
         self.update()
         self._fallback_transition_frame_timer.start()
         self._fallback_transition_timer.start(max(500, int(duration_ms)))
 
+    def _set_overlay_suppresses_mpv(self, active: bool):
+        """mpv's native surface would otherwise cover this painted overlay."""
+        try:
+            window = self.parent()
+            owner = getattr(window, "_external_owner", None) if window is not None else None
+            if owner is not None and hasattr(owner, "_suppress_mpv_hosts_for_overlay"):
+                owner._suppress_mpv_hosts_for_overlay(
+                    f"fallback_transition:{id(self)}", bool(active)
+                )
+        except Exception:
+            pass  # never let presentation bookkeeping break the transition
+
     def _clear_fallback_transition(self):
         self._fallback_transition_frame_timer.stop()
         self._fallback_transition_payload = {}
+        self._set_overlay_suppresses_mpv(False)
         self.update()
 
     def _draw_fallback_transition(self, painter: QPainter):
@@ -18987,6 +19016,33 @@ class KaraokeApp(QWidget):
                 self.settings["cdg_timing_offset_ms"] = 0
             self.settings["ffmpeg_cdg_750_baseline_migrated"] = True
             changed = True
+        if not bool(self.settings.get("cdg_timing_engine_split_migrated", False)):
+            # CDG fine tuning used to be one key shared by both engines while
+            # only FFmpeg's baseline was ever added to it, so a value dialled in
+            # on mpv was really cancelling a baseline that did not belong there
+            # -- and it stayed applied when the operator switched back. Move any
+            # saved value to the key for the engine it was calibrated on: that
+            # is necessarily whichever engine is configured now.
+            try:
+                saved_fine = int(self.settings.get("cdg_timing_offset_ms", 0) or 0)
+            except Exception:
+                saved_fine = 0
+            if saved_fine and self._cdg_timing_engine() == "mpv":
+                # Re-express it against the mpv baseline so the effective
+                # timing the operator calibrated survives the split.
+                #
+                # 600 is a literal on purpose: it is the baseline that was live
+                # when any such value was dialled in, so it is what reconstructs
+                # the effective timing the operator actually saw. Reading
+                # FFMPEG_CDG_BASE_OFFSET_MS here would silently re-interpret
+                # those saved settings when that constant changes -- as it just
+                # did, 600 -> 750.
+                LEGACY_SHARED_BASE_MS = 600
+                self.settings["cdg_timing_offset_mpv_ms"] = max(-3000, min(3000,
+                    LEGACY_SHARED_BASE_MS + saved_fine - MPV_CDG_BASE_OFFSET_MS))
+                self.settings["cdg_timing_offset_ms"] = 0
+            self.settings["cdg_timing_engine_split_migrated"] = True
+            changed = True
         if not bool(self.settings.get("end_silence_threshold_2_5_migrated", False)):
             # Earlier releases used 6s by default and show testing commonly
             # lowered that to 5s. Both still leave an obviously dead tail.
@@ -22834,11 +22890,82 @@ class KaraokeApp(QWidget):
                 if visible:
                     host.raise_()
 
+    def _reveal_mpv_hosts_if_allowed(self):
+        """Readiness-gated reveal that yields to a running painted overlay."""
+        if getattr(self, "_mpv_host_overlay_suppressions", None):
+            return  # the overlay restores the surface when it clears
+        self._set_mpv_hosts_visible(True)
+
+    def _mpv_hosts_should_show(self) -> bool:
+        """Whether the mpv surfaces belong on screen right now.
+
+        Mirrors the reveal condition in _start_mpv_karaoke_transport: the mpv
+        engine is the live one and it is rendering a picture (audio-only mode
+        has nothing to show).
+        """
+        if str(getattr(self, "_last_karaoke_engine", "") or "").lower() != "mpv":
+            return False
+        if getattr(self, "karaoke_transport", None) is None:
+            return False
+        return str(getattr(self, "_current_karaoke_mode", "") or "").lower() in {"cdg", "mp4"}
+
+    def _suppress_mpv_hosts_for_overlay(self, reason: str, active: bool):
+        """Hide the mpv surfaces while a painter-drawn show overlay is running.
+
+        Qt composites a WA_NativeWindow child above everything its parent
+        widget paints, so the singer-start / outro transitions -- which
+        VideoAreaWidget draws in paintEvent -- were invisible from the moment
+        playback started and the host was revealed. Hiding the host for the
+        overlay's lifetime is the same mechanism the idle background already
+        depends on. Reason-counted so two windows (or a transition overlapping
+        another overlay) cannot restore the surface out from under each other.
+        """
+        reasons = getattr(self, "_mpv_host_overlay_suppressions", None)
+        if reasons is None:
+            reasons = set()
+            self._mpv_host_overlay_suppressions = reasons
+        if active:
+            reasons.add(str(reason))
+        else:
+            reasons.discard(str(reason))
+        if getattr(self, "_mpv_playback", None) is None:
+            return  # no native surfaces to get in the way
+        self._set_mpv_hosts_visible(not reasons and self._mpv_hosts_should_show())
+
+    def _video_stretch_supported(self) -> bool:
+        """Whether "Stretch to fill" does anything on the engine in use.
+
+        The FFmpeg/painter path scales the frame itself and always can. On mpv
+        it depends which backend shipped: the follower maps it to mpv's
+        keepaspect, the in-process bridge composites from a fixed shared texture
+        and cannot. Ask a live plugin when there is one; otherwise resolve the
+        backend the same way _ensure_mpv_karaoke_core will.
+        """
+        try:
+            if self._cdg_timing_engine() != "mpv" and str(
+                self.settings.get("karaoke_engine", "ffmpeg") or ""
+            ).strip().lower() != "mpv-video":
+                return True  # FFmpeg/painter path
+            plugin = getattr(self, "_mpv_playback", None)
+            if plugin is None:
+                plugin, _name = self._load_mpv_playback_backend()
+            return bool(getattr(plugin, "supportsVideoStretch", lambda: True)())
+        except Exception:
+            return True
+
     def _apply_mpv_display_mode(self):
         plugin = getattr(self, "_mpv_playback", None)
         if plugin is None:
             return
         mode = self._effective_cdg_display_mode()
+        if mode == "stretch" and not bool(
+            getattr(plugin, "supportsVideoStretch", lambda: True)()
+        ):
+            # Do not fail silently: the saved mode renders as "fit" here.
+            _diag(
+                "[MPV] CDG display mode 'stretch' is not supported by this backend; "
+                "rendering as 'fit'"
+            )
         plugin.setVideoStretch(mode == "stretch")
         plugin.setCdgOutputSidefill(mode == "sidefill")
 
@@ -22860,7 +22987,10 @@ class KaraokeApp(QWidget):
         transport.duration_seconds = float(duration_seconds or 0.0)
         transport.started.connect(lambda: _diag("[MPV] audible playback started"))
         if str(mode).lower() != "audio":
-            transport.started.connect(lambda: self._set_mpv_hosts_visible(True))
+            # Not _set_mpv_hosts_visible directly: a singer-start transition is
+            # normally already on screen by the time this fires, and revealing
+            # the native surface would paint over it.
+            transport.started.connect(self._reveal_mpv_hosts_if_allowed)
         transport.ended.connect(self._on_python_karaoke_ended)
         transport.set_modifiers(
             float(self._clamp_karaoke_tempo(self._karaoke_tempo_percent)) / 100.0,
@@ -26322,8 +26452,19 @@ class KaraokeApp(QWidget):
         cdg_display_combo = QComboBox(dlg)
         cdg_display_combo.addItem("Fit original lyrics", "fit")
         cdg_display_combo.addItem("Widescreen side fill", "sidefill")
-        cdg_display_combo.addItem("Stretch to fill", "stretch")
-        cdg_display_combo.setToolTip("Side fill keeps lyrics unstretched and fills widescreen side bars from the CDG background/border color.")
+        # Offered only where it actually renders. The in-process mpv backend
+        # always preserves aspect, so listing it there was a control that
+        # silently did nothing.
+        _stretch_ok = self._video_stretch_supported()
+        if _stretch_ok:
+            cdg_display_combo.addItem("Stretch to fill", "stretch")
+        cdg_display_combo.setToolTip(
+            "Side fill keeps lyrics unstretched and fills widescreen side bars "
+            "from the CDG background/border color."
+            + ("" if _stretch_ok else
+               "\n\nStretch to fill is unavailable on the current mpv backend, "
+               "which always preserves aspect.")
+        )
         cur_cdg_display = self._effective_cdg_display_mode()
         cdg_display_idx = cdg_display_combo.findData(cur_cdg_display)
         cdg_display_combo.setCurrentIndex(cdg_display_idx if cdg_display_idx >= 0 else 0)
@@ -26461,16 +26602,21 @@ class KaraokeApp(QWidget):
         v.addWidget(ticker_vfx_cb)
 
         # --- CDG lyric timing offset (visual-only calibration backup) ---
+        # Each engine carries its own baseline and its own fine tuning, so name
+        # the one being edited: the number here means nothing without it.
+        _cdg_engine = self._cdg_timing_engine()
         v = _section_card(tab_display, "CDG Lyric Timing Offset",
-                          "Fine tuning around FFmpeg's automatic +600 ms correction. "
-                          "Audio and MP4 timing are unaffected. Positive = lyrics earlier.")
+                          f"Fine tuning around the {_cdg_engine} engine's automatic "
+                          f"{self._cdg_timing_base_offset_ms():+d} ms correction. Each engine is "
+                          "calibrated separately. Audio and MP4 timing are unaffected. "
+                          "Positive = lyrics earlier.")
         vto_row = QHBoxLayout()
         vto_row.addWidget(QLabel("Offset (ms):"))
         video_offset_spin = QSpinBox(dlg)
         video_offset_spin.setRange(-3000, 3000)
         video_offset_spin.setSingleStep(50)
         try:
-            video_offset_spin.setValue(max(-3000, min(3000, int(self.settings.get("cdg_timing_offset_ms", 0) or 0))))
+            video_offset_spin.setValue(max(-3000, min(3000, int(self.settings.get(self._cdg_timing_offset_key(), 0) or 0))))
         except Exception:
             video_offset_spin.setValue(0)
         vto_row.addWidget(video_offset_spin)
@@ -27747,7 +27893,7 @@ class KaraokeApp(QWidget):
                 self._apply_tooltip_visibility()
                 self._transition_gap_sec = max(-3.0, min(3.0, float(self.settings.get("bg_to_karaoke_gap_sec", 0.0))))
                 self._apply_runtime_media_settings()
-                self.set_cdg_timing_offset_ms(int(self.settings.get("cdg_timing_offset_ms", 0) or 0))
+                self.set_cdg_timing_offset_ms(int(self.settings.get(self._cdg_timing_offset_key(), 0) or 0))
                 if hasattr(self, "bg_music") and self.bg_music is not None:
                     self.bg_music._refresh_bg_normalize()
                     eng = getattr(self.bg_music, "_bass_engine", None)
@@ -44522,12 +44668,17 @@ class KaraokeApp(QWidget):
             pass
 
     def set_cdg_timing_offset_ms(self, ms: int):
-        """Save CDG fine tuning on top of FFmpeg's automatic timing correction."""
+        """Save CDG fine tuning on top of the active engine's timing baseline.
+
+        Written to the key for the engine currently selected, so calibrating on
+        mpv cannot move FFmpeg's timing (or the reverse).
+        """
         try:
             ms = max(-3000, min(3000, int(ms)))
         except Exception:
             ms = 0
-        self.settings["cdg_timing_offset_ms"] = ms
+        engine = self._cdg_timing_engine()
+        self.settings[self._cdg_timing_offset_key()] = ms
         try:
             self.save_settings()
         except Exception:
@@ -44539,7 +44690,8 @@ class KaraokeApp(QWidget):
                     effective_ms = self._effective_cdg_timing_offset_ms()
                     t.set_video_offset_ms(effective_ms)
                     _diag(
-                        f"[VIDEO-OFFSET] live CDG offset base={FFMPEG_CDG_BASE_OFFSET_MS:+d}ms "
+                        f"[VIDEO-OFFSET] live CDG offset engine={engine} "
+                        f"base={self._cdg_timing_base_offset_ms():+d}ms "
                         f"fine={ms:+d}ms total={effective_ms:+d}ms"
                     )
         except Exception:
@@ -44797,13 +44949,48 @@ class KaraokeApp(QWidget):
             pass
         return "fit"
 
-    def _effective_cdg_timing_offset_ms(self) -> int:
-        """Return FFmpeg's CDG baseline plus the host's saved fine tuning."""
+    def _cdg_timing_engine(self) -> str:
+        """Which CDG timing baseline applies: "mpv" or "ffmpeg".
+
+        Resolved the same way as _select_karaoke_transport_cls, minus the
+        transport lookup and its one-shot diagnostics, because this runs on
+        every offset read. "mpv-video" resolves to "ffmpeg": that path cannot
+        apply an offset at all, so the FFmpeg key is the one the operator sees.
+        """
         try:
-            fine_ms = int(self.settings.get("cdg_timing_offset_ms", 0) or 0)
+            pref = str(
+                os.environ.get("SINGWS_KARAOKE_ENGINE", "")
+                or getattr(self, "_karaoke_engine_session_pref", None)
+                or self.settings.get("karaoke_engine", "ffmpeg")
+                or "ffmpeg"
+            ).strip().lower()
+        except Exception:
+            return "ffmpeg"
+        if os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1":
+            return "ffmpeg"
+        return "mpv" if (pref == "mpv" and sys.platform == "darwin") else "ffmpeg"
+
+    def _cdg_timing_offset_key(self) -> str:
+        return (
+            "cdg_timing_offset_mpv_ms"
+            if self._cdg_timing_engine() == "mpv"
+            else "cdg_timing_offset_ms"
+        )
+
+    def _cdg_timing_base_offset_ms(self) -> int:
+        return (
+            MPV_CDG_BASE_OFFSET_MS
+            if self._cdg_timing_engine() == "mpv"
+            else FFMPEG_CDG_BASE_OFFSET_MS
+        )
+
+    def _effective_cdg_timing_offset_ms(self) -> int:
+        """Return the active engine's CDG baseline plus its saved fine tuning."""
+        try:
+            fine_ms = int(self.settings.get(self._cdg_timing_offset_key(), 0) or 0)
         except Exception:
             fine_ms = 0
-        return max(-3000, min(3000, FFMPEG_CDG_BASE_OFFSET_MS + fine_ms))
+        return max(-3000, min(3000, self._cdg_timing_base_offset_ms() + fine_ms))
 
     def _effective_visual_timer_interval_ms(self) -> int:
         """Throttle visual polling only. Audio timing remains authoritative."""

@@ -124,11 +124,12 @@ class EngineSelectionTests(unittest.TestCase):
                         self.singws._configured_karaoke_engine_label(), expected, pref
                     )
 
-    def test_mpv_stays_opt_in_while_it_ignores_the_cdg_timing_offset(self):
-        # MpvKaraokeTransport.set_video_offset_ms() is a no-op, so the
-        # calibrated +750ms CDG baseline never reaches mpv's renderer and the
-        # Settings fine tuning does nothing there. Until that is fixed, nothing
-        # may make mpv the default or migrate saved settings onto it.
+    def test_mpv_stays_opt_in(self):
+        # The offset does now reach the in-process backend (see
+        # test_iina_plugin_maps_the_offset_onto_audio_delay), but the
+        # follower-based backend still cannot apply it, and mpv has not yet run
+        # a full show. Until it has, nothing may make mpv the default or
+        # migrate saved settings onto it.
         self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "ffmpeg")
         self.assertNotIn("mpv_default_engine_migrated", MAIN_SOURCE)
         self.assertNotIn('self.settings["karaoke_engine"] = "mpv-video"', MAIN_SOURCE)
@@ -264,6 +265,208 @@ class CdgVisualOffsetTests(unittest.TestCase):
         self.assertIn("singws_bridge_set_audio_delay", src)
         # Same sign, direct mapping: SingWS ms -> mpv seconds.
         self.assertIn("self._video_offset_ms / 1000.0", src)
+
+
+class CdgTimingBaselinePerEngineTests(unittest.TestCase):
+    """The two engines need different CDG baselines and separate fine tuning.
+
+    One shared key plus an FFmpeg-only baseline meant a value dialled in on mpv
+    was really cancelling a baseline that did not apply there -- and it stayed
+    applied after switching back, silently de-calibrating FFmpeg by the same
+    amount.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def setUp(self):
+        self._orig_override = os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
+        self._orig_legacy = os.environ.pop("SINGWS_INTEL_LEGACY_BUILD", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
+        if self._orig_override is not None:
+            os.environ["SINGWS_KARAOKE_ENGINE"] = self._orig_override
+        os.environ.pop("SINGWS_INTEL_LEGACY_BUILD", None)
+        if self._orig_legacy is not None:
+            os.environ["SINGWS_INTEL_LEGACY_BUILD"] = self._orig_legacy
+
+    def _host(self, **settings):
+        """Minimal stand-in: these resolvers only touch settings + the pref."""
+        app = self.singws.KaraokeApp
+        host = mock.Mock(spec=[])
+        host.settings = dict(settings)
+        host._karaoke_engine_session_pref = settings.pop("_session_pref", None)
+        for name in (
+            "_cdg_timing_engine",
+            "_cdg_timing_offset_key",
+            "_cdg_timing_base_offset_ms",
+            "_effective_cdg_timing_offset_ms",
+        ):
+            setattr(host, name, getattr(app, name).__get__(host, app))
+        return host
+
+    def test_baselines_are_distinct(self):
+        self.assertNotEqual(
+            self.singws.FFMPEG_CDG_BASE_OFFSET_MS,
+            self.singws.MPV_CDG_BASE_OFFSET_MS,
+        )
+
+    def test_ffmpeg_keeps_its_own_baseline_and_key(self):
+        host = self._host(karaoke_engine="ffmpeg", cdg_timing_offset_ms=25)
+        self.assertEqual(host._cdg_timing_engine(), "ffmpeg")
+        self.assertEqual(host._cdg_timing_offset_key(), "cdg_timing_offset_ms")
+        self.assertEqual(
+            host._effective_cdg_timing_offset_ms(),
+            self.singws.FFMPEG_CDG_BASE_OFFSET_MS + 25,
+        )
+
+    @mock.patch("sys.platform", "darwin")
+    def test_mpv_uses_the_mpv_baseline_and_key(self):
+        host = self._host(karaoke_engine="mpv", cdg_timing_offset_mpv_ms=25)
+        self.assertEqual(host._cdg_timing_engine(), "mpv")
+        self.assertEqual(host._cdg_timing_offset_key(), "cdg_timing_offset_mpv_ms")
+        self.assertEqual(
+            host._effective_cdg_timing_offset_ms(),
+            self.singws.MPV_CDG_BASE_OFFSET_MS + 25,
+        )
+
+    @mock.patch("sys.platform", "darwin")
+    def test_calibrating_one_engine_cannot_move_the_other(self):
+        # The regression this split exists to prevent.
+        settings = {"cdg_timing_offset_ms": 0, "cdg_timing_offset_mpv_ms": -750}
+        mpv = self._host(karaoke_engine="mpv", **settings)
+        ffmpeg = self._host(karaoke_engine="ffmpeg", **settings)
+        self.assertEqual(
+            ffmpeg._effective_cdg_timing_offset_ms(),
+            self.singws.FFMPEG_CDG_BASE_OFFSET_MS,
+        )
+        self.assertNotEqual(
+            mpv._effective_cdg_timing_offset_ms(),
+            ffmpeg._effective_cdg_timing_offset_ms(),
+        )
+
+    @mock.patch("sys.platform", "darwin")
+    def test_mpv_video_follower_reads_the_ffmpeg_key(self):
+        # That path cannot apply an offset at all, so it must not get a
+        # second, separately-calibrated value the operator never sees.
+        host = self._host(karaoke_engine="mpv-video")
+        self.assertEqual(host._cdg_timing_offset_key(), "cdg_timing_offset_ms")
+
+    @mock.patch("sys.platform", "linux")
+    def test_mpv_is_macos_only(self):
+        host = self._host(karaoke_engine="mpv")
+        self.assertEqual(host._cdg_timing_engine(), "ffmpeg")
+
+    def test_split_migration_uses_the_historical_baseline_not_the_live_one(self):
+        # The migration reconstructs an effective offset that was dialled in
+        # while the shared baseline was 600. Reading FFMPEG_CDG_BASE_OFFSET_MS
+        # there would re-interpret saved settings every time that constant
+        # moves -- and it has now moved to 750.
+        # Anchor on the migration itself: the key also appears in DEFAULTS.
+        start = MAIN_SOURCE.index(
+            'if not bool(self.settings.get("cdg_timing_engine_split_migrated"'
+        )
+        block = MAIN_SOURCE[start:start + 2000]
+        self.assertIn("LEGACY_SHARED_BASE_MS = 600", block)
+        self.assertNotIn(
+            "FFMPEG_CDG_BASE_OFFSET_MS + saved_fine", block,
+            "the split migration must not read the live FFmpeg baseline",
+        )
+
+    def test_legacy_intel_build_pins_the_ffmpeg_baseline(self):
+        os.environ["SINGWS_INTEL_LEGACY_BUILD"] = "1"
+        host = self._host(karaoke_engine="mpv")
+        self.assertEqual(host._cdg_timing_engine(), "ffmpeg")
+
+
+class PaintedOverlayVsMpvSurfaceTests(unittest.TestCase):
+    """Painted show overlays must win over mpv's native child surface.
+
+    Qt composites a WA_NativeWindow child above everything its parent widget
+    paints, so the singer-start / outro transitions VideoAreaWidget draws in
+    paintEvent were invisible for the whole of playback once the mpv host was
+    revealed. No test covered the ordering, so nothing caught it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def _host(self, *, playing=True, has_plugin=True):
+        app = self.singws.KaraokeApp
+        host = mock.Mock(spec=[])
+        host._mpv_playback = object() if has_plugin else None
+        host._mpv_output_host = mock.Mock(spec=["setVisible", "raise_"])
+        host._mpv_preview_host = mock.Mock(spec=["setVisible", "raise_"])
+        host._last_karaoke_engine = "mpv"
+        host.karaoke_transport = object() if playing else None
+        host._current_karaoke_mode = "cdg"
+        for name in ("_set_mpv_hosts_visible", "_mpv_hosts_should_show",
+                     "_reveal_mpv_hosts_if_allowed",
+                     "_suppress_mpv_hosts_for_overlay"):
+            setattr(host, name, getattr(app, name).__get__(host, app))
+        return host
+
+    def _visible_calls(self, host):
+        return [c.args[0] for c in host._mpv_output_host.setVisible.call_args_list]
+
+    def test_overlay_hides_the_native_surface(self):
+        host = self._host()
+        host._suppress_mpv_hosts_for_overlay("transition", True)
+        self.assertEqual(self._visible_calls(host)[-1], False)
+        host._mpv_preview_host.setVisible.assert_called_with(False)
+
+    def test_playback_start_cannot_reveal_over_a_running_overlay(self):
+        # The exact regression: transport.started fired mid-transition and
+        # painted the video straight over it.
+        host = self._host()
+        host._suppress_mpv_hosts_for_overlay("transition", True)
+        host._reveal_mpv_hosts_if_allowed()
+        self.assertEqual(self._visible_calls(host)[-1], False)
+
+    def test_surface_returns_when_the_overlay_clears(self):
+        host = self._host()
+        host._suppress_mpv_hosts_for_overlay("transition", True)
+        host._suppress_mpv_hosts_for_overlay("transition", False)
+        self.assertEqual(self._visible_calls(host)[-1], True)
+
+    def test_two_overlays_both_have_to_clear(self):
+        # Output and preview each run their own transition timer.
+        host = self._host()
+        host._suppress_mpv_hosts_for_overlay("output", True)
+        host._suppress_mpv_hosts_for_overlay("preview", True)
+        host._suppress_mpv_hosts_for_overlay("preview", False)
+        self.assertEqual(self._visible_calls(host)[-1], False)
+        host._suppress_mpv_hosts_for_overlay("output", False)
+        self.assertEqual(self._visible_calls(host)[-1], True)
+
+    def test_clearing_while_idle_does_not_resurrect_the_surface(self):
+        # Between songs the surface must stay hidden so the idle background,
+        # which is also painted by VideoAreaWidget, remains visible.
+        host = self._host(playing=False)
+        host._suppress_mpv_hosts_for_overlay("transition", True)
+        host._suppress_mpv_hosts_for_overlay("transition", False)
+        self.assertEqual(self._visible_calls(host)[-1], False)
+
+    def test_no_mpv_plugin_is_a_no_op(self):
+        host = self._host(has_plugin=False)
+        host._suppress_mpv_hosts_for_overlay("transition", True)
+        host._mpv_output_host.setVisible.assert_not_called()
+
+    def test_started_signal_is_routed_through_the_gate(self):
+        # A direct _set_mpv_hosts_visible(True) here would bypass suppression.
+        start = MAIN_SOURCE.index("def _start_mpv_karaoke_transport")
+        end = MAIN_SOURCE.index("def _attach_mpv_video_follower")
+        block = MAIN_SOURCE[start:end]
+        self.assertIn("transport.started.connect(self._reveal_mpv_hosts_if_allowed)", block)
+        self.assertNotIn("lambda: self._set_mpv_hosts_visible(True)", block)
+
+    def test_fallback_transition_drives_the_suppression(self):
+        self.assertIn("self._set_overlay_suppresses_mpv(True)", MAIN_SOURCE)
+        self.assertIn("self._set_overlay_suppresses_mpv(False)", MAIN_SOURCE)
 
 
 if __name__ == "__main__":

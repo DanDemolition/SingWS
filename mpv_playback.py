@@ -2033,6 +2033,11 @@ class MpvPlaybackPlugin:
     def setAudioDevice(self, name) -> None:
         self._engine.set_property("audio-device", str(name or "auto"))
 
+    @staticmethod
+    def supportsVideoStretch() -> bool:
+        """mpv's own keepaspect handles this, so the host may offer it."""
+        return True
+
     def setVideoStretch(self, stretch) -> None:
         if self._out is not None:
             self._out.enqueue_operation(

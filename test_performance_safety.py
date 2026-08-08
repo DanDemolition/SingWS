@@ -458,9 +458,21 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("return", accept)
 
     def test_ffmpeg_cdg_timing_restores_legacy_baseline(self):
-        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 600", MAIN_SOURCE)
+        # 750, matching what ffmpeg_cdg_750_baseline_migrated already assumes:
+        # it zeroes a saved +150 fine on the basis that the baseline carries it.
+        # The constant sat at 600 for several releases, so installs calibrated
+        # to +750 silently ran 150ms early.
+        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 750", MAIN_SOURCE)
+        # The baseline is now chosen per engine (mpv needs a different one and
+        # was wrongly getting FFmpeg's), so the constant is applied in
+        # _cdg_timing_base_offset_ms rather than inline. That selection is
+        # covered behaviourally by CdgTimingBaselinePerEngineTests in
+        # test_karaoke_engine_selection.
         effective = function_source("_effective_cdg_timing_offset_ms")
-        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS + fine_ms", effective)
+        self.assertIn("self._cdg_timing_base_offset_ms() + fine_ms", effective)
+        self.assertIn(
+            "FFMPEG_CDG_BASE_OFFSET_MS", function_source("_cdg_timing_base_offset_ms")
+        )
         start = function_source("_start_python_karaoke_transport")
         self.assertIn("off = self._effective_cdg_timing_offset_ms()", start)
         self.assertIn("ffmpeg_cdg_timing_migrated", MAIN_SOURCE)

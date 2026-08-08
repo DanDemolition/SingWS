@@ -22,6 +22,42 @@ def _runtime_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+_BRIDGE_LOG_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
+# ctypes does not retain the trampoline, so a module-level reference is what
+# keeps the native side from calling into freed memory.
+_bridge_log_thunk = None
+_bridge_log_target = None
+
+
+def _install_bridge_log(api, log):
+    """Route the native bridge's diagnostics into the SingWS log.
+
+    They were written to stderr, which a bundled .app discards -- so bridge
+    load failures, window-transition holds and per-view present skips left no
+    trace at all in singws_*.log.
+    """
+    global _bridge_log_thunk, _bridge_log_target
+    if not getattr(api, "has_log_callback", False):
+        return
+    _bridge_log_target = log
+    if _bridge_log_thunk is not None:
+        return  # already installed; only the target changes
+
+    def _sink(text):
+        fn = _bridge_log_target
+        if fn is None:
+            return
+        try:
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", "replace")
+            fn(str(text))
+        except Exception:
+            pass  # a logging failure must never propagate into native code
+
+    _bridge_log_thunk = _BRIDGE_LOG_CB(_sink)
+    api.lib.singws_bridge_set_log_callback(_bridge_log_thunk)
+
+
 class _BridgeApi:
     def __init__(self):
         path = _runtime_root() / "libsingws_mpv_bridge.dylib"
@@ -60,6 +96,11 @@ class _BridgeApi:
             ctypes.POINTER(ctypes.c_double),
         ]
         L.singws_bridge_scanner_shutdown.argtypes = []
+        # Optional: a dylib built before the log callback existed still loads.
+        self.has_log_callback = hasattr(L, "singws_bridge_set_log_callback")
+        if self.has_log_callback:
+            L.singws_bridge_set_log_callback.argtypes = [_BRIDGE_LOG_CB]
+            L.singws_bridge_set_log_callback.restype = None
 
 
 _bridge_api = None
@@ -102,6 +143,7 @@ class MpvPlaybackPlugin:
         del preview_fast_profile
         self.log = log
         self.api = _get_bridge_api()
+        _install_bridge_log(self.api, log)
         self._handle = None
         self._preview_id = 0
         self._output_id = 0
@@ -302,9 +344,16 @@ class MpvPlaybackPlugin:
             "mpv-video mode needs the follower-based backend"
         )
 
+    @staticmethod
+    def supportsVideoStretch() -> bool:
+        """This backend cannot stretch; the host hides the option rather than
+        offering a control that silently does nothing."""
+        return False
+
     def setVideoStretch(self, stretch) -> None:
-        # Retained only for the cross-platform 17-method contract. SingWS no
-        # longer exposes stretch; native playback always preserves aspect.
+        # Retained only for the cross-platform 17-method contract. The bridge
+        # composites from a fixed shared texture and always preserves aspect,
+        # so there is nothing to toggle. See supportsVideoStretch().
         self._stretch = False
     def setCdgOutputSidefill(self, enabled) -> None:
         self._sidefill = bool(enabled)
@@ -327,3 +376,11 @@ class MpvPlaybackPlugin:
             self._shutdown = True; self._loaded = False; self._destroy_bridge()
             self.api.lib.singws_bridge_scanner_shutdown()
             self.log("[MPV-NATIVE] clean shutdown")
+            # Detach the log sink last: anything the native side emits during
+            # teardown above is still worth having, but calling back into a
+            # tearing-down interpreter afterwards is not.
+            global _bridge_log_target
+            _bridge_log_target = None
+            if getattr(self.api, "has_log_callback", False):
+                self.api.lib.singws_bridge_set_log_callback(
+                    ctypes.cast(None, _BRIDGE_LOG_CB))

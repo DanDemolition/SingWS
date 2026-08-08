@@ -99,7 +99,13 @@ class PackagingSpecTests(unittest.TestCase):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
-                self.assertIn("excludes=['gi', 'gi.repository']", source)
+                # Matched on the list contents, not the whole assignment: the
+                # specs legitimately differ in how they build the rest of the
+                # list (arm64 appends 'mpv' conditionally, x86_64 wraps the
+                # expression in parens), and asserting the exact literal made
+                # this fail on formatting rather than on gi being importable.
+                self.assertIn("excludes=", source)
+                self.assertIn("'gi', 'gi.repository'", source)
                 self.assertNotIn("GST_REGISTRY", source)
                 self.assertNotIn("gst-plugin-scanner", source)
                 self.assertNotIn("gi_typelibs", source)
