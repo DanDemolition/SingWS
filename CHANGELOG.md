@@ -1,3 +1,55 @@
+## 0.4.3.7
+
+### Fixed
+- **CDG was stretched in the preview window on the mpv engine.** The bridge
+  cropped libmpv's 4:3 CDG region out of the shared 16:9 texture and then drew
+  it edge-to-edge, on the assumption that the preview host is a fixed 300x216
+  (25:18) panel. It is a freely resizable window whose only child fills it, so
+  the picture was stretched by whatever the mismatch happened to be — 4% at the
+  default size, 33% once resized to 16:9. It now letterboxes the cropped region
+  against the host's measured aspect.
+- **Between-singer animations stopped appearing on the mpv engine.** Qt
+  composites a `WA_NativeWindow` child above everything its parent widget
+  paints, and the mpv host is one. The Intel painter transition is drawn in
+  `VideoAreaWidget.paintEvent`, so revealing the mpv surface at
+  `transport.started` painted straight over it. The surface is now suppressed
+  for the overlay's lifetime (reason-counted, so the output and preview windows
+  cannot restore it out from under each other) and the readiness-gated reveal
+  yields to a running overlay. **Known gap:** the next-up card and the request
+  QR share this root cause but are meant to sit *over* live video, so hiding the
+  surface is the wrong fix for them — they need a native overlay sibling and are
+  still invisible on the mpv engine.
+- **CDG lyrics ran ~750 ms out on the mpv engine, and calibrating one engine
+  silently de-calibrated the other.** `FFMPEG_CDG_BASE_OFFSET_MS` compensates
+  SingWS's own CDG decoder; the in-process backend decodes inside mpv off real
+  timestamps and needs a different baseline entirely, but was handed FFmpeg's.
+  Both engines also shared one fine-tuning key. Baselines and fine tuning are
+  now per engine (`cdg_timing_offset_mpv_ms`), with a migration that
+  re-expresses any saved value against the engine it was calibrated on. That
+  migration is pinned to a `600` literal on purpose: it reconstructs an offset
+  dialled in while that was the live baseline, so reading the constant would
+  re-interpret saved settings whenever it changes.
+- **The FFmpeg CDG baseline is now 750 ms**, finishing a change
+  `ffmpeg_cdg_750_baseline_migrated` already assumed had happened — it zeroes a
+  saved +150 fine on the basis that the baseline carries it, but the constant
+  was never raised, so installs calibrated to +750 quietly ran 150 ms early.
+- **Choppy video on the mpv engine.** `glFinish()` and an unconditional present
+  to both the output and preview views ran once per frame on the Qt GUI thread.
+  Now `glFlush()`, and off-screen views are skipped — `drawRect:` repaints them
+  from the retained shared texture when they come back on screen.
+- **"Stretch to fill" silently did nothing** on the in-process backend, which
+  always preserves aspect. Backends now report whether they support it and the
+  option is offered only where it works; a saved `stretch` that cannot render
+  says so in the log instead of quietly falling back to `fit`.
+
+### Changed
+- **The native bridge's diagnostics now reach `singws_*.log`.** All 25 of them
+  went to `stderr`, which a bundled `.app` discards — so an output window that
+  went blank left no evidence at all. They route through a host-installed
+  callback, and `presentView:` reports a per-view state naming why a view is not
+  drawing (`window-transition`, `view-hidden`, `no-window`,
+  `window-not-visible`, `no-frame (black)`).
+
 ## Unreleased
 
 ### Added
