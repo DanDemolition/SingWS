@@ -28,6 +28,42 @@ written up here ships as 0.4.3.9.
 - **Show-screen images were letterboxed inside the video area.** Idle
   background art and the lyrics background now stretch to fill the whole area
   above the ticker rather than sitting centred inside black bars.
+- **The `QPaintDevice::devicePixelRatio()` crash, chased since 0.4.3.4, is
+  identified and its call site disabled.** Disassembling the shipped
+  `libqcocoa.dylib` and matching it against Qt 6.9's `qcocoabackingstore.mm`
+  puts the faulting instruction inside `QCALayerBackingStore::blitBuffer`:
+
+      QPainter painter(destinationBuffer->asImage());
+      painter.setCompositionMode(QPainter::CompositionMode_Source);
+      ... painter.device()->devicePixelRatio()      // <- device() is null
+
+  `QPainter::device()` is null only when the painter never began — the
+  destination buffer's QImage was unusable (empty, or its IOSurface lock
+  failed) — and nothing between there and the caller checks. `blitBuffer` is
+  reached from one place: `finalizeBackBuffer()`, and only on the
+  `m_buffers.back() != m_buffers.front()` branch, which exists purely because
+  the CALayer backing store keeps a multi-buffer swap chain. `m_buffers` starts
+  at 1 and only `ensureBackBuffer()` grows it — and that returns immediately for
+  `SwapBehavior::SingleBuffer`. So widget windows are now created single-
+  buffered on macOS, which makes the crashing call site unreachable rather than
+  merely rarer. (The other `blitBuffer` caller, static-contents preservation,
+  needs `WA_StaticContents`, which this app never sets.)
+
+  Scope: raster widget painting only. Qt Quick keeps its double buffering —
+  every `QQuickView` now sets `DoubleBuffer` explicitly, since it inherits the
+  changed default — and mpv draws into its own NSView, so neither animated
+  surface is touched. Single buffering lets the window server read the surface
+  mid-paint; on static operator chrome that should not be visible, and
+  `SINGWS_WIDGET_SWAP=double` restores Qt's default without a rebuild.
+
+  **Not yet confirmed in the wild.** The reasoning is from Qt's source and the
+  shipped binary, not from a reproduction — the crash appeared twice in 9 hours
+  but on no fixed trigger, so only a stretch of crash-free shows will settle it.
+  0.4.3.8's attribution (native ancestor promotion) is separately disproven: the
+  04:11:44 crash happened with **no native surfaces of any kind** — Quick
+  resolved off, legacy painter ticker, native-widget rotation renderer, and
+  mpv's core never created because nothing had played.
+
 - **The show window restored onto a screen that was no longer attached.** The
   saved `karaoke_window_pos` was applied verbatim — the 2026-08-09 04:10 launch
   restored it at x=1680 with a single 1680x1050 display, i.e. entirely off the
@@ -37,21 +73,6 @@ written up here ships as 0.4.3.9.
   saved size, and the move is logged. A genuinely multi-monitor placement is
   untouched.
 
-### Known issues
-- **The `QPaintDevice::devicePixelRatio()` crash is NOT fixed, and 0.4.3.8's
-  attribution of it was wrong.** Both 0.4.3.8 crashes (2026-08-09 04:11:44,
-  hiding the rotation window 0.3s earlier; and 13:05:54, 7s into launch) are the
-  same null dereference in `QWidgetRepaintManager::flush` →
-  `QBackingStore::flush` → the platform backing store's paint device. The 04:11
-  session had **no native surfaces of any kind**: the log shows Qt Quick
-  resolved off (`[SHOW-VFX] quick surfaces … resolved=off`, legacy painter
-  ticker, native-widget rotation renderer) and mpv's core is created lazily on
-  first play, which had not happened. So neither the window containers nor
-  `MpvVideoHost` can be the cause — `WA_DontCreateNativeAncestors` was worth
-  setting on its own merits, but it did not address this crash. What both
-  crashes share is a top-level backing store being flushed with no paint
-  device; the off-screen show window above is a suspected contributor, not a
-  proven cause.
 - **The mpv video host turned the whole show window native, which is very
   likely the long-running crash.** Qt promotes every *ancestor* of a
   `WA_NativeWindow` widget to native unless `WA_DontCreateNativeAncestors` is
@@ -76,6 +97,30 @@ written up here ships as 0.4.3.9.
   not Quick. All four now set `WA_DontCreateNativeAncestors`.
 
 ### Changed
+- **The animated ticker, show transitions and rotation rail are ON by default
+  on Intel Macs.** `quick_gpu_surfaces: "auto"` now resolves to on for every
+  architecture; 0.4.3.8 made it an operator choice but left "auto" meaning off
+  on Intel, so the animation stayed unreachable and both "Animated ticker
+  lighting" checkboxes stayed greyed out. The 2026-08-09 04:11:44 crash settled
+  the question: it is the same `QBackingStore::flush` signature the 2026-08-01
+  exclusion was created to stop, in a session where Qt Quick was **off** — no
+  window containers, no scene graph, mpv's core never created. Quick cannot
+  cause a crash it is absent for. "Off" stays available, `SINGWS_QUICK_SURFACES`
+  still wins for a one-off test, and all four QQuickView call sites already fall
+  back to their painter/widget equivalents if the view fails to construct, so a
+  machine that genuinely cannot run Quick degrades instead of failing.
+- **Turning GPU surfaces on greyed out the checkbox it had just enabled.** The
+  ticker-effects controls asked the *live* ticker, which is still the painter
+  one until the next launch — so the operator enabled the feature and watched
+  the control go dead. A pending on-at-next-launch state now counts as
+  supported, with a tooltip saying the lighting appears after a restart. The
+  three `on Intel macOS` diagnostics now name the real reason ("GPU surfaces
+  set to off").
+
+  Nothing extra is needed for macOS 12: the QML in this app imports only
+  `QtQuick` (no Controls/Effects/Shapes), and the shipped Intel bundle's
+  QtQuick, QtQml and the 31 binaries under `qml/QtQuick` are all verified at
+  macOS 12.0 or lower, same as the rest of the app.
 - **The animated ticker and show transitions can be turned back on.** Qt Quick
   child surfaces were disabled outright on Intel macOS on 2026-08-01 ("Fix
   Intel crashes and playback stalls"). The attribution looks wrong: across 126

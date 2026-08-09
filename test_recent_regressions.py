@@ -67,6 +67,8 @@ class RecentRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.singws = load_main_module()
+        with open("0.2.18.1.py", "r", encoding="utf-8") as fh:
+            cls.singws_source = fh.read()
 
     def test_defaults_keep_simple_audio_and_ticker_speed(self):
         self.assertTrue(self.singws.DEFAULTS["simple_audio_mode"])
@@ -78,17 +80,142 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("lyrics_background_video_opacity", self.singws.DEFAULTS)
         self.assertIn("crash_log_email_to", self.singws.DEFAULTS)
 
-    def test_intel_macos_avoids_native_quick_child_surfaces(self):
-        with mock.patch.object(self.singws.sys, "platform", "darwin"), \
-             mock.patch.object(self.singws.platform, "machine", return_value="x86_64"), \
-             mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": ""}):
-            self.assertFalse(self.singws._native_quick_child_surfaces_supported())
-            self.assertFalse(self.singws._rotation_quick_surfaces_supported())
+    def test_widget_surfaces_are_single_buffered_on_macos(self):
+        """Disable the swap chain the QBackingStore::flush crash lives in.
+
+        Qt 6.9's QCALayerBackingStore::finalizeBackBuffer only calls blitBuffer
+        -- whose `painter.device()->devicePixelRatio()` is the faulting line --
+        when back and front are different buffers. m_buffers starts at 1 and
+        only ensureBackBuffer() grows it, and that returns immediately for
+        SingleBuffer, so the crashing call site becomes unreachable.
+        """
+        from PyQt6.QtGui import QSurfaceFormat
+
+        original = QSurfaceFormat.defaultFormat()
+        try:
+            with mock.patch.object(self.singws.sys, "platform", "darwin"), \
+                 mock.patch.dict(os.environ, {"SINGWS_WIDGET_SWAP": ""}):
+                self.assertTrue(self.singws._install_single_buffered_widget_surfaces())
+                self.assertEqual(
+                    QSurfaceFormat.defaultFormat().swapBehavior(),
+                    QSurfaceFormat.SwapBehavior.SingleBuffer,
+                )
+
+            # An operator escape hatch that needs no rebuild.
+            QSurfaceFormat.setDefaultFormat(original)
+            with mock.patch.object(self.singws.sys, "platform", "darwin"), \
+                 mock.patch.dict(os.environ, {"SINGWS_WIDGET_SWAP": "double"}):
+                self.assertFalse(self.singws._install_single_buffered_widget_surfaces())
+                self.assertNotEqual(
+                    QSurfaceFormat.defaultFormat().swapBehavior(),
+                    QSurfaceFormat.SwapBehavior.SingleBuffer,
+                )
+        finally:
+            QSurfaceFormat.setDefaultFormat(original)
+
+        # Applied before the QApplication: the format is read when each platform
+        # window is created, and the first ones exist during construction.
+        main = self.singws_source
+        self.assertLess(
+            main.index("_install_single_buffered_widget_surfaces()\n\n    app = QApplication(["),
+            main.index("app.setApplicationName(\"SingWS\")"),
+        )
+
+    def test_quick_views_keep_double_buffering(self):
+        """The scene graph is the one surface where single buffering would show."""
+        from PyQt6.QtGui import QSurfaceFormat
+
+        class FakeView:
+            def __init__(self):
+                self._fmt = QSurfaceFormat()
+
+            def format(self):
+                return QSurfaceFormat(self._fmt)
+
+            def setFormat(self, fmt):
+                self._fmt = fmt
+
+        view = FakeView()
+        self.singws._apply_double_buffered_quick_format(view)
+        self.assertEqual(view._fmt.swapBehavior(), QSurfaceFormat.SwapBehavior.DoubleBuffer)
+
+        # Every QQuickView must get it, and before it is shown.
+        main = self.singws_source
+        self.assertEqual(main.count("self._view = QQuickView()"), 4)
+        self.assertEqual(
+            main.count("self._view = QQuickView()\n        _apply_double_buffered_quick_format(self._view)"),
+            4,
+        )
+
+    def test_quick_child_surfaces_follow_the_setting_not_the_architecture(self):
+        """Intel Macs get the animated ticker and transitions again.
+
+        The 2026-08-01 Intel exclusion was a misattribution: the crash it was
+        meant to stop happened again on 2026-08-09 in a session with no Quick
+        surfaces running at all. "auto" now means on everywhere; only an
+        explicit Off (setting or env) turns the Quick surfaces back off.
+        """
+        intel = lambda: (  # noqa: E731 - three patches, used twice below
+            mock.patch.object(self.singws.sys, "platform", "darwin"),
+            mock.patch.object(self.singws.platform, "machine", return_value="x86_64"),
+            mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": "", "SINGWS_QUICK_SURFACES": ""}),
+        )
+        try:
+            for mode in ("auto", "on"):
+                self.singws.set_quick_surfaces_override(mode)
+                with intel()[0], intel()[1], intel()[2]:
+                    self.assertTrue(
+                        self.singws._native_quick_child_surfaces_supported(), mode
+                    )
+                    self.assertTrue(self.singws._rotation_quick_surfaces_supported(), mode)
+
+            self.singws.set_quick_surfaces_override("off")
+            with intel()[0], intel()[1], intel()[2]:
+                self.assertFalse(self.singws._native_quick_child_surfaces_supported())
+                self.assertFalse(self.singws._rotation_quick_surfaces_supported())
+
+            # The env override still wins over the setting, for a one-off test.
+            self.singws.set_quick_surfaces_override("on")
+            with mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": "", "SINGWS_QUICK_SURFACES": "0"}):
+                self.assertFalse(self.singws._native_quick_child_surfaces_supported())
+        finally:
+            self.singws.set_quick_surfaces_override("auto")
 
         video_init = inspect.getsource(self.singws.VideoWindow.__init__)
         show_vfx = inspect.getsource(self.singws.VideoWindow._attach_show_vfx)
         self.assertIn("_native_quick_child_surfaces_supported()", video_init)
         self.assertIn("_native_quick_child_surfaces_supported()", show_vfx)
+
+    def test_ticker_effects_checkbox_is_live_after_switching_surfaces_on(self):
+        """A pending on-at-next-launch state must not grey the control out.
+
+        Otherwise turning GPU surfaces on disables the very checkbox it just
+        enabled, which reads as the animated ticker being broken.
+        """
+        app = SimpleNamespace(video_window=None)
+        supported = self.singws.KaraokeApp._ticker_effects_supported
+        pending = self.singws.KaraokeApp._ticker_effects_pending_relaunch
+        try:
+            self.singws.set_quick_surfaces_override("on")
+            with mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": "", "SINGWS_QUICK_SURFACES": ""}):
+                self.assertTrue(supported(app))
+                self.assertTrue(pending(app))
+
+            self.singws.set_quick_surfaces_override("off")
+            with mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": "", "SINGWS_QUICK_SURFACES": ""}):
+                self.assertFalse(supported(app))
+                self.assertFalse(pending(app))
+        finally:
+            self.singws.set_quick_surfaces_override("auto")
+
+        # A live Quick ticker is authoritative and needs no relaunch note.
+        live = SimpleNamespace(
+            video_window=SimpleNamespace(
+                ticker=SimpleNamespace(set_effects_enabled=lambda _enabled: None)
+            )
+        )
+        self.assertTrue(supported(live))
+        self.assertFalse(pending(live))
 
     def test_rotation_summary_uses_index_instead_of_full_library_scan(self):
         source = inspect.getsource(self.singws.KaraokeApp._update_rotation_summary_card)

@@ -18,7 +18,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.3.8"
+APP_VERSION = "0.4.3.9"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -1088,7 +1088,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QSpinBox,
     QTextEdit, QPlainTextEdit
 )
-from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor
+from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery
 
@@ -6324,6 +6324,79 @@ def _scaled_karaoke_image(
     return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
 
 
+def _install_single_buffered_widget_surfaces() -> bool:
+    """Remove the macOS backing-store swap chain that the flush crash lives in.
+
+    The crash SingWS has been chasing since 0.4.3.4 -- EXC_BAD_ACCESS at 0x0 in
+    QPaintDevice::devicePixelRatio(), under QWidgetRepaintManager::flush ->
+    QBackingStore::flush -- was traced by disassembling the shipped
+    libqcocoa.dylib and matching it against Qt 6.9's qcocoabackingstore.mm. The
+    faulting frame is inside ``blitBuffer``:
+
+        QPainter painter(destinationBuffer->asImage());
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        ... painter.device()->devicePixelRatio()      <-- device() is null
+
+    ``QPainter::device()`` is null only when the painter never began, i.e. the
+    destination buffer's QImage was unusable (empty, or its IOSurface lock
+    failed). Nothing above it checks. And blitBuffer is reached from exactly one
+    place:
+
+        void QCALayerBackingStore::finalizeBackBuffer() {
+            if (!m_buffers.back()->isDirty()) return;
+            if (m_buffers.back() != m_buffers.front()) {
+                m_buffers.back()->lock(SWWriteAccess);
+                blitBuffer(m_buffers.front().get(), ..., m_buffers.back().get());
+
+    -- the branch that only exists because the CALayer backing store keeps a
+    multi-buffer swap chain. With ``SwapBehavior::SingleBuffer``,
+    ``ensureBackBuffer()`` returns immediately, the chain never grows past one
+    buffer, front and back are the same buffer, and that branch is dead code:
+    the crashing call site becomes unreachable rather than merely less likely.
+
+    Scope and cost: this is the *raster widget* backing store only. Qt Quick
+    (ticker, transitions, rotation rail) renders through its own scene graph and
+    keeps its double buffering -- see _apply_double_buffered_quick_format -- and
+    mpv draws into its own NSView, so neither animated surface is affected. What
+    is left single-buffered is ordinary widget painting, where the window server
+    may read the surface mid-paint; on static operator chrome that is not
+    visible, but SINGWS_WIDGET_SWAP=double restores Qt's default without a
+    rebuild if it ever is.
+    """
+    if sys.platform != "darwin":
+        return False
+    if os.environ.get("SINGWS_WIDGET_SWAP", "").strip().lower() == "double":
+        _diag("[SURFACE] widget backing store left double-buffered by SINGWS_WIDGET_SWAP")
+        return False
+    try:
+        fmt = QSurfaceFormat.defaultFormat()
+        fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.SingleBuffer)
+        QSurfaceFormat.setDefaultFormat(fmt)
+        _diag("[SURFACE] widget backing store single-buffered (QCALayerBackingStore blit path disabled)")
+        return True
+    except Exception as exc:
+        _diag(f"[SURFACE] could not set single-buffered widget surfaces: {exc}")
+        return False
+
+
+def _apply_double_buffered_quick_format(view) -> None:
+    """Keep Qt Quick views on Qt's normal double buffering.
+
+    _install_single_buffered_widget_surfaces changes the *default* surface
+    format, which every window created afterwards inherits -- including these.
+    The scene graph animates continuously, so it is the one place where a
+    single-buffered surface could actually be seen tearing, and it does not use
+    the QWidget backing store the crash lives in. Must run before the view is
+    shown: the format is read when the platform window is created.
+    """
+    try:
+        fmt = view.format()
+        fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+        view.setFormat(fmt)
+    except Exception as exc:
+        _diag(f"[SURFACE] Quick view kept default swap behaviour: {exc}")
+
+
 def _rect_on_attached_screen(rect: QRect) -> QRect:
     """Keep a restored window rect on a screen that actually exists now.
 
@@ -7635,6 +7708,7 @@ class RenderThreadShowScreenVfx(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setStyleSheet("background: transparent;")
         self._view = QQuickView()
+        _apply_double_buffered_quick_format(self._view)
         self._view.setColor(QColor(0, 0, 0, 0))
         self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
 
@@ -13259,35 +13333,33 @@ def set_quick_surfaces_override(mode: str) -> None:
 def _native_quick_child_surfaces_supported() -> bool:
     """Return whether QWidget-hosted QQuickView children are safe here.
 
+    "auto" now means ON everywhere, Intel Macs included.
+
     The Intel-macOS exclusion was added on 2026-08-01 ("Fix Intel crashes and
-    playback stalls") and it looks like a misattribution. Across 126 crash
-    reports on this machine, Qt Quick and the scene graph appear in the faulting
-    thread exactly **zero** times; and the crash the gate was meant to stop --
+    playback stalls") and it was a misattribution. Across 126 crash reports on
+    this machine, Qt Quick and the scene graph appear in the faulting thread
+    exactly **zero** times; the crash the gate was meant to stop --
     QPaintDevice::devicePixelRatio() inside QBackingStore::flush, which is the
-    QWidget painter path -- kept happening with the gate in place, in 13 of the
-    15 packaged-app crashes and twice during the 2026-08-08 show. The real
-    common factor was native ancestor promotion from the mpv host; see
-    MpvVideoHost. So this is now an operator choice rather than a hard rule.
+    QWidget painter path -- kept happening with the gate in place. The decisive
+    evidence arrived on 2026-08-09: the 04:11:44 crash is that exact signature
+    in a session with **no Quick surfaces at all** (`quick surfaces …
+    resolved=off`, legacy painter ticker, native-widget rotation renderer, mpv's
+    core never created because nothing had played). Quick cannot cause a crash
+    it is absent for, so keeping the ticker and transitions switched off on
+    Intel bought nothing and cost the animation.
+
+    "off" remains available for an operator who wants the plain painter path,
+    and SINGWS_QUICK_SURFACES=1/0 still wins for a one-off test.
     """
-    # Tests need the real Quick implementations even when they run on an Intel
-    # host. The offscreen platform does not use Cocoa's backing-store flush
-    # path, which is the path implicated in the native crashes.
+    # Tests need the real Quick implementations even when they run headless.
     if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
         return True
     env = os.environ.get("SINGWS_QUICK_SURFACES", "").strip()
     if env in {"0", "1"}:
         return env == "1"
-    if _QUICK_SURFACES_OVERRIDE == "on":
-        return True
     if _QUICK_SURFACES_OVERRIDE == "off":
         return False
-    try:
-        return not (
-            sys.platform == "darwin"
-            and platform.machine().lower() in {"x86_64", "amd64"}
-        )
-    except Exception:
-        return True
+    return True
 
 
 def parse_filename_stem(stem: str, fmt: str = DEFAULT_FILENAME_FORMAT) -> tuple[str, str, str]:
@@ -13387,7 +13459,7 @@ class VideoWindow(QWidget):
             except Exception as e:
                 _diag(f"[TICKER] Qt Quick unavailable, using legacy painter ticker: {e}")
         else:
-            _diag("[TICKER] using legacy painter ticker on Intel macOS")
+            _diag("[TICKER] using legacy painter ticker (GPU surfaces set to off)")
         if self.ticker is None:
             self.ticker = Ticker(
                 get_singer_list_callback,
@@ -13440,7 +13512,7 @@ class VideoWindow(QWidget):
                 area.set_show_vfx_enabled(bool(settings.get("show_screen_vfx_enabled", True)))
             except Exception:
                 pass
-            _diag("[SHOW-VFX] using painter transition on Intel macOS")
+            _diag("[SHOW-VFX] using painter transition (GPU surfaces set to off)")
             return False
         try:
             overlay = RenderThreadShowScreenVfx(area)
@@ -17182,6 +17254,7 @@ class RenderThreadNowSingingCard(QFrame):
         self.setMinimumHeight(142)
         self.setMaximumHeight(166)
         self._view = QQuickView()
+        _apply_double_buffered_quick_format(self._view)
         self._view.setColor(QColor("transparent"))
         self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
 
@@ -17680,6 +17753,7 @@ class RenderThreadRotationRail(QFrame):
 
         self._active_json = "[]"
         self._view = QQuickView()
+        _apply_double_buffered_quick_format(self._view)
         self._view.setColor(QColor("transparent"))
         self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
 
@@ -17730,12 +17804,12 @@ class RenderThreadRotationRail(QFrame):
 
 
 def _rotation_quick_surfaces_supported() -> bool:
-    """Avoid native child QQuickViews on Intel macOS.
+    """Whether the rotation window may use its QQuickView children.
 
-    Qt's Cocoa backing-store path can dereference a released paint device when
-    a top-level widget containing multiple createWindowContainer() children is
-    hidden. The QWidget rotation fallback is visually complete and avoids both
-    that crash and the scene-graph activation spike during live playback.
+    Follows the one operator setting; there is no longer a per-architecture
+    rule. The QWidget rotation fallback stays visually complete for anyone who
+    turns GPU surfaces off, and for a machine where the QQuickView constructor
+    itself fails (both call sites catch and fall back).
     """
     return _native_quick_child_surfaces_supported()
 
@@ -17925,7 +17999,7 @@ class RotationView(QMainWindow):
                 _diag(f"[ROTATION] animated now-singing card unavailable; using Qt fallback: {exc}")
                 self.now_singing_surface = None
         else:
-            _diag("[ROTATION] using native-widget renderer on Intel macOS")
+            _diag("[ROTATION] using native-widget renderer (GPU surfaces set to off)")
 
         self.list_widget = AutoResizingListWidget(self)
         self.list_widget.setItemDelegate(self.SingerItemDelegate(self.list_widget))
@@ -25058,9 +25132,11 @@ class KaraokeApp(QWidget):
 
         ticker_vfx_cb = QCheckBox("Animated ticker lighting and accents (more GPU)")
         _ticker_fx_ok = self._ticker_effects_supported()
+        _ticker_fx_pending = self._ticker_effects_pending_relaunch()
         ticker_vfx_cb.setToolTip(
             "Turn off for the plain render-thread ticker; scrolling remains equally smooth."
-            + ("" if _ticker_fx_ok else self._TICKER_FX_UNAVAILABLE_NOTE)
+            + (self._TICKER_FX_PENDING_NOTE if _ticker_fx_pending
+               else ("" if _ticker_fx_ok else self._TICKER_FX_UNAVAILABLE_NOTE))
         )
         ticker_vfx_cb.setChecked(bool(self.settings.get("ticker_vfx_enabled", True)))
         # Do not offer a control that cannot do anything here: the setting was
@@ -26839,15 +26915,17 @@ class KaraokeApp(QWidget):
         _quick_row = QHBoxLayout()
         _quick_row.addWidget(QLabel("Animated GPU ticker / transitions:"))
         quick_combo = QComboBox(dlg)
-        quick_combo.addItem("Automatic (off on Intel Macs)", "auto")
+        quick_combo.addItem("Automatic (on, Intel Macs included)", "auto")
         quick_combo.addItem("On — animated ticker and transitions", "on")
         quick_combo.addItem("Off — plain painter ticker", "off")
         quick_combo.setToolTip(
             "The animated ticker lighting and the between-singer transitions run on "
             "Qt Quick. They were disabled on Intel Macs on 2026-08-01 to stop a "
             "crash, but Qt Quick has never appeared in a crash on this machine and "
-            "the crash continued regardless — its real cause was elsewhere. Set this "
-            "to On to get them back.\n\nTakes effect at the next launch."
+            "the crash kept happening without it — including one on 2026-08-09 in a "
+            "session with no Quick surfaces running at all. Automatic now means on "
+            "everywhere; choose Off if you prefer the plain painter ticker."
+            "\n\nTakes effect at the next launch."
         )
         _quick_cur = str(self.settings.get("quick_gpu_surfaces", "auto") or "auto")
         _qi = quick_combo.findData(_quick_cur)
@@ -26868,7 +26946,8 @@ class KaraokeApp(QWidget):
         ticker_vfx_cb.setToolTip(
             "Ambient lighting, queue-change accents, countdown pulse, and edge glow. "
             "The smooth ticker scroll stays enabled when this is off."
-            + ("" if _ticker_fx_ok else self._TICKER_FX_UNAVAILABLE_NOTE)
+            + (self._TICKER_FX_PENDING_NOTE if self._ticker_effects_pending_relaunch()
+               else ("" if _ticker_fx_ok else self._TICKER_FX_UNAVAILABLE_NOTE))
         )
         ticker_vfx_cb.setChecked(bool(self.settings.get("ticker_vfx_enabled", True)))
         ticker_vfx_cb.setEnabled(_ticker_fx_ok)
@@ -45116,29 +45195,43 @@ class KaraokeApp(QWidget):
             pass
 
     def _ticker_effects_supported(self) -> bool:
-        """Whether the live ticker backend can render the animated lighting.
+        """Whether the animated ticker lighting can be used at all here.
 
-        Only RenderThreadTicker implements effects, and Qt Quick child surfaces
-        are refused on Intel macOS by _native_quick_child_surfaces_supported --
-        that is the Cocoa backing-store flush path implicated in the native
-        crashes (two SIGSEGVs in QBackingStore::flush on 2026-08-08 alone). So
-        on an Intel Mac the ticker is always the legacy painter one, which has
-        no effects at all. Ask the live ticker rather than re-deriving the rule,
-        so the answer always matches what is actually on screen.
+        Only RenderThreadTicker implements effects. The live ticker is the
+        authority when it already has them, but "the ticker running right now
+        cannot" is not the same as "this Mac cannot": switching GPU surfaces
+        back on applies at the next launch, and greying the checkbox out until
+        then hides the very control the operator just enabled. So a pending
+        on-at-next-launch state counts as supported -- see
+        _ticker_effects_pending_relaunch for the wording that says so.
         """
         try:
             ticker = getattr(getattr(self, "video_window", None), "ticker", None)
-            if ticker is not None:
-                return hasattr(ticker, "set_effects_enabled")
+            if ticker is not None and hasattr(ticker, "set_effects_enabled"):
+                return True
         except Exception:
             pass
         return _native_quick_child_surfaces_supported()
 
+    def _ticker_effects_pending_relaunch(self) -> bool:
+        """Effects are configured on, but this session's ticker cannot do them."""
+        try:
+            ticker = getattr(getattr(self, "video_window", None), "ticker", None)
+            if ticker is not None and hasattr(ticker, "set_effects_enabled"):
+                return False
+        except Exception:
+            return False
+        return _native_quick_child_surfaces_supported()
+
     _TICKER_FX_UNAVAILABLE_NOTE = (
-        "\n\nUnavailable on this Mac: the animated ticker runs on Qt Quick, which "
-        "is not used on Intel macOS because its native child surfaces are the "
-        "cause of the video-window crashes. The ticker still scrolls -- it is the "
-        "legacy painter ticker, which has no lighting effects."
+        "\n\nUnavailable while 'Animated GPU ticker / transitions' is set to Off: "
+        "the animated ticker runs on Qt Quick, so this session uses the legacy "
+        "painter ticker, which has no lighting effects. The ticker still scrolls."
+    )
+
+    _TICKER_FX_PENDING_NOTE = (
+        "\n\nThis session started with the plain painter ticker, so the lighting "
+        "appears after the next launch. The setting is saved now."
     )
 
     def _simple_audio_mode(self) -> bool:
@@ -55557,6 +55650,7 @@ class RenderThreadTicker(QFrame):
         self._right_text = ""
 
         self._view = QQuickView()
+        _apply_double_buffered_quick_format(self._view)
         self._view.setColor(QColor("black"))
         self._view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
 
@@ -56435,6 +56529,10 @@ if __name__ == "__main__":
         gc.set_threshold(50000, 50, 50)
     except Exception:
         pass
+
+    # Before the QApplication: the default surface format is read when each
+    # platform window is created, and the first ones appear during construction.
+    _install_single_buffered_widget_surfaces()
 
     app = QApplication([])
     app.setApplicationName("SingWS")
