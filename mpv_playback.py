@@ -118,6 +118,22 @@ CDG_OUTPUT_SIDEFILL_FILTER = (
     "]"
 )
 
+# The visible-everywhere variant of the same idea: instead of the disc's border
+# colour (black on most discs, so the bars stay black), widen a heavily blurred
+# copy of the picture behind the untouched centre image.
+CDG_OUTPUT_BLURFILL_FILTER = (
+    "lavfi=["
+    "split=2[bg][fg];"
+    "[bg]crop=288:192:6:12,scale=340:192,"
+    "boxblur=luma_radius=14:luma_power=2:chroma_radius=14:chroma_power=2,"
+    # Dimmed to match the in-process bridge's shader: ambience beside the
+    # lyrics, not a second picture competing with them.
+    "eq=brightness=-0.05:saturation=0.9[bgb];"
+    "[fg]crop=288:192:6:12[center];"
+    "[bgb][center]overlay=(W-w)/2:0,setsar=1"
+    "]"
+)
+
 # --------------------------------------------------------------------------- objc trampoline
 _objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
 _objc.objc_getClass.restype = ctypes.c_void_p
@@ -1155,7 +1171,7 @@ class MpvPlaybackPlugin:
         self._prev = None
         self._is_cdg = False
         self._audio_only = False
-        self._cdg_output_sidefill = False
+        self._cdg_output_sidefill = 0
         self._tempo = 1.0
         self._volume = 1.0
         self._loaded = False
@@ -1600,10 +1616,9 @@ class MpvPlaybackPlugin:
             # Always establish the filter before loadfile so a new MP4 cannot
             # inherit CDG side-fill, and a new CDG never exposes one 4:3 frame
             # before the filter graph is active.
-            sidefill = bool(
-                cdg_audio
-                and follower is self._out
-                and self._cdg_output_sidefill
+            sidefill = (
+                self._cdg_output_sidefill
+                if (cdg_audio and follower is self._out) else 0
             )
             self._set_follower_cdg_sidefill(follower, sidefill)
             self._set_follower_scaler(follower, is_cdg=bool(cdg_audio))
@@ -2047,14 +2062,16 @@ class MpvPlaybackPlugin:
                 "no" if stretch else "yes",
             )
 
-    def _set_follower_cdg_sidefill(self, follower, enabled) -> None:
+    def _set_follower_cdg_sidefill(self, follower, mode) -> None:
+        mode = int(mode or 0)
         follower.player["vf"] = (
-            CDG_OUTPUT_SIDEFILL_FILTER if enabled else ""
+            CDG_OUTPUT_BLURFILL_FILTER if mode == 2
+            else (CDG_OUTPUT_SIDEFILL_FILTER if mode == 1 else "")
         )
         if follower is self._out:
+            labels = {0: "disabled", 1: "background colour", 2: "blurred image"}
             self.log(
-                f"[MPV-VIDEO] CDG output side-fill "
-                f"{'enabled' if enabled else 'disabled'}"
+                f"[MPV-VIDEO] CDG output side-fill {labels.get(mode, 'disabled')}"
             )
 
     def _set_follower_scaler(self, follower, *, is_cdg: bool) -> None:
@@ -2087,7 +2104,12 @@ class MpvPlaybackPlugin:
             )
 
     def setCdgOutputSidefill(self, enabled) -> None:
-        enabled = bool(enabled)
+        # 0 off, 1 the disc's own background colour, 2 an ambient blur of the
+        # picture. Bools still work: True is the colour fill it always meant.
+        try:
+            enabled = max(0, min(2, int(enabled)))
+        except (TypeError, ValueError):
+            enabled = 1 if enabled else 0
         changed = enabled != self._cdg_output_sidefill
         self._cdg_output_sidefill = enabled
         # The normal load path applies this before the next file opens. Also

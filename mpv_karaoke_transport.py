@@ -12,6 +12,20 @@ class MpvVideoHost(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        # Qt promotes every ANCESTOR of a native widget to native as well
+        # unless this is set. Without it, creating this host silently turned
+        # video_area and the whole VideoWindow into native Cocoa windows --
+        # exactly the nested native backing stores the video-window code already
+        # names as "the common factor in the Intel macOS
+        # QPaintDevice::devicePixelRatio() crashes", and why it is careful never
+        # to call video_area.winId(). It then promoted them through here anyway.
+        #
+        # 13 of the 15 packaged-app crash reports on this machine are that one
+        # null dereference inside QBackingStore::flush, spanning v0.4.3.4
+        # through v0.4.3.7, and the promotion is permanent for the session --
+        # which is why one of them happened while the app sat idle between
+        # singers with nothing playing at all.
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.setStyleSheet("background: black;")
 
 
@@ -110,6 +124,20 @@ class MpvKaraokeTransport(QObject):
             duration * 1_000_000 if duration > 0 else None,
             position * 1_000_000 if position >= 0 else None,
         )
+
+    def engine_at_end(self):
+        """mpv's own eof-reached, for the host's end-of-song fallbacks.
+
+        Those fallbacks otherwise gate on an audio level tap this engine does
+        not have, so they treated "no metering" as "silent" and could stop a
+        song whose audio was still playing. Returns None if the plugin cannot
+        answer, which the host reads as "unknown, use the old behaviour".
+        """
+        try:
+            fn = getattr(self.plugin, "atEnd", None)
+            return bool(fn()) if callable(fn) else None
+        except Exception:
+            return None
 
     def set_modifiers(self, tempo_ratio: float, semitones: float):
         self._tempo_ratio = max(0.5, min(2.0, float(tempo_ratio or 1.0)))

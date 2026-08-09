@@ -111,6 +111,40 @@ class ChainStructureTests(unittest.TestCase):
         self.assertEqual(off.count("alimiter="), 1)
         self.assertIn("alimiter=limit=-0.1dB", off)
 
+    def test_limiter_never_auto_levels(self):
+        # alimiter's "auto level" defaults to ON and divides the output by the
+        # limit, normalizing back to 0 dBFS. Measured against the NumPy limiter
+        # it added exactly +1.00 dB at every level below the ceiling, so the
+        # ceiling did nothing at all. Regression guard: it must stay disabled
+        # on both the limiter and the clip-guard branch.
+        for limiter in (True, False):
+            chain = ",".join(M.master_bus_filters(
+                _host_master_params(limiter=limiter)))
+            self.assertIn("level=disabled", chain)
+
+    def test_compressor_threshold_carries_the_detector_offset(self):
+        # acompressor detects on smoothed RMS, MasterAudioProcessor on smoothed
+        # mean-of-|x|. Passing the threshold through unchanged started
+        # compression ~3 dB early. With the offset the two static transfer
+        # curves agree within 0.02 dB from -40 to -3 dBFS.
+        params = _host_master_params(comp=True)
+        params["comp_threshold_db"] = -20.0
+        chain = ",".join(M.master_bus_filters(params))
+        self.assertIn(f"threshold={-20.0 + M._COMP_DETECTOR_OFFSET_DB:g}dB", chain)
+        self.assertAlmostEqual(M._COMP_DETECTOR_OFFSET_DB, 3.0, places=6)
+
+    def test_compressor_knee_is_a_factor_not_decibels(self):
+        # lavfi's knee spans threshold/sqrt(k) .. threshold*sqrt(k), so the
+        # width in dB is 20*log10(k). Passing 6 dB through as "6" produced a
+        # 15.6 dB knee.
+        self.assertAlmostEqual(M._knee_factor(6.0), 10 ** (6.0 / 20.0), places=6)
+        self.assertAlmostEqual(M._knee_factor(0.0), 1.0, places=6)
+        # ffmpeg clamps the factor to 1..8; anything wider must not be emitted.
+        self.assertAlmostEqual(M._knee_factor(60.0), 8.0, places=6)
+        params = _host_master_params(comp=True)
+        params["comp_knee_db"] = 6.0
+        self.assertIn("knee=1.995262", ",".join(M.master_bus_filters(params)))
+
     def test_exciter_frequency_is_clamped_to_the_filter_range(self):
         params = _host_master_params(exciter=100, exciter_on=True)
         params["exciter_hz"] = 500.0  # below aexciter's 2000 Hz floor
@@ -293,5 +327,13 @@ class IinaBackendContractTests(unittest.TestCase):
         setter = setter[:setter.index("- (void)setDspChain:(const char *)chain {")]
         self.assertNotIn('mpv_set_property_string(_mpv,"af"', setter)
         self.assertIn("applyAudioFilters", setter)
-        # And the DSP half must be re-applied after each file load.
-        self.assertIn("[self setSemitones:semitones];", bridge)
+        # And the DSP half must be re-applied after each file load. The
+        # FILE_LOADED handler used to route through setSemitones:; it now calls
+        # applyAudioFilters directly because the setters dispatch onto the
+        # control queue and it is already running there.
+        # Anchor on drainEvents: the standalone silence scanner has its own
+        # FILE_LOADED branch earlier in the file.
+        drain = bridge[bridge.index("- (void)drainEvents {"):]
+        loaded = drain[drain.index("MPV_EVENT_FILE_LOADED"):]
+        loaded = loaded[:loaded.index("MPV_EVENT_END_FILE")]
+        self.assertIn("[self applyAudioFilters];", loaded)

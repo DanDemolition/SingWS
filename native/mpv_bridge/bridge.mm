@@ -68,7 +68,7 @@ static void bridgeLog(const char *fmt, ...) {
 - (void)setSemitones:(int)semitones;
 - (void)setDspChain:(const char *)chain;
 - (void)setAudioDelaySeconds:(double)seconds;
-- (void)setCdgSidefill:(BOOL)enabled;
+- (void)setCdgSidefill:(int)mode;
 - (void)beginWindowTransition:(int)durationMs;
 @end
 
@@ -271,17 +271,47 @@ static GLuint makeProgram(void) {
         "gl_Position=vec4(p[gl_VertexID]*scale,0,1); uv=t[gl_VertexID]*uvScale+uvOffset; }\n";
     const char *fs =
         "#version 150 core\n"
-        "uniform sampler2D frameTexture; uniform int cdgSidefill; in vec2 uv; out vec4 color;"
+        "uniform sampler2D frameTexture; uniform int cdgSidefill;"
+        "uniform vec2 cdgPanel; in vec2 uv; out vec4 color;"
+        // cdgSidefill: 0 off, 1 the CDG's own background colour, 2 an ambient
+        // blur of the picture itself. Mode 2 exists because 12 of 14 sampled
+        // discs in a real library have a pure black background, on which mode 1
+        // is correctly -- but invisibly -- a no-op.
+        "vec4 cdgBlurFill(vec2 p, float panel, float right){"
+        "float span=right-panel;"
+        // Mirror the bar back into the picture: the pixel touching the picture
+        // samples its edge, and the screen edge samples ~20% in. Sampling the
+        // picture (rather than extending its edge row) keeps artwork that
+        // touches the frame from becoming a horizontal streak.
+        "float t=(p.x<panel)?(p.x/max(panel,1e-4)):((1.0-p.x)/max(1.0-right,1e-4));"
+        "float depth=0.20*(1.0-clamp(t,0.0,1.0));"
+        "float sx=(p.x<panel)?(panel+span*depth):(right-span*depth);"
+        // Dense taps: a sparse box kernel over this much magnification banded
+        // the bars into visible blocks.
+        "vec4 acc=vec4(0.0); float wsum=0.0;"
+        "for(int i=-5;i<=5;i++){ for(int j=-5;j<=5;j++){"
+        "vec2 o=vec2(float(i)*span*0.012,float(j)*0.018);"
+        "vec2 c=vec2(clamp(sx+o.x,panel+span*0.005,right-span*0.005),clamp(p.y+o.y,0.0,1.0));"
+        "float w=1.0/(1.0+0.06*float(i*i+j*j));"
+        "acc+=texture(frameTexture,c)*w; wsum+=w; }}"
+        // Slightly dimmed so the bars read as ambience beside the lyrics
+        // rather than competing with them.
+        "return vec4((acc.rgb/wsum)*0.88,1.0);"
+        "}"
         "void main(){"
         "if(cdgSidefill!=0){"
-        // Preserve the complete 4:3 CDG image that libmpv placed between
-        // x=.125 and x=.875. For the side panels, infer the current CDG border
-        // color from four points safely inside its 6px/12px protected border.
-        // Choosing the medoid makes one stray logo/title corner harmless and,
-        // unlike extending the visible edge row-by-row, cannot turn artwork
-        // touching that edge into a horizontal streak.
-        "float panel=0.125; float right=0.875;"
+        // Preserve the complete CDG image that libmpv pillarboxed into the
+        // shared 16:9 texture. cdgPanel carries its measured left/right edges:
+        // CDG is 300x216 (DAR 1.389), not 4:3, so the edges sit at .109/.891
+        // and the previous hardcoded .125/.875 painted over ~6 real CDG columns
+        // on each side. For the side panels, infer the current CDG border color
+        // from four points safely inside its 6px/12px protected border. Choosing
+        // the medoid makes one stray logo/title corner harmless and, unlike
+        // extending the visible edge row-by-row, cannot turn artwork touching
+        // that edge into a horizontal streak.
+        "float panel=cdgPanel.x; float right=cdgPanel.y;"
         "if(uv.x<panel||uv.x>right){"
+        "if(cdgSidefill==2){ color=cdgBlurFill(uv,panel,right); return; }"
         "float lx=panel+(right-panel)*(3.0/300.0);"
         "float rx=panel+(right-panel)*(297.0/300.0);"
         "float ty=6.0/216.0; float by=210.0/216.0;"
@@ -314,11 +344,22 @@ static GLuint makeProgram(void) {
     BridgeVideoView *_outputView, *_previewView;
     GLuint _texture, _fbo, _program, _outVao, _prevVao;
     GLint _scaleUniform, _uvScaleUniform, _uvOffsetUniform, _textureUniform, _sidefillUniform;
+    GLint _panelUniform;
     int _width, _height;
-    BOOL _hasFrame, _isCdg, _cdgSidefill;
+    BOOL _hasFrame, _isCdg;
+    // 0 off, 1 background colour, 2 ambient blur. Read on the GUI thread while
+    // Python writes it from Qt's, same as the other display switches.
+    std::atomic<int> _cdgSidefill;
+    // Fraction of the shared texture's width that the pillarboxed picture
+    // actually occupies, measured from mpv's dwidth/dheight at FILE_LOADED.
+    // 0.78125 is the CDG default (300x216 in 16:9) and stands in until the
+    // first measurement lands.
+    std::atomic<double> _pictureSpanX;
     // Last presentView skip reason per view; -1 so the first pass always logs.
     int _lastOutputSkip, _lastPreviewSkip;
-    BOOL _loading, _playWhenLoaded;
+    // Atomic since the control queue moved off the GUI thread: the getters and
+    // setPaused: read these from Qt's thread while the load runs.
+    std::atomic_bool _loading, _playWhenLoaded;
     int _desiredTempoPercent, _desiredSemitones;
     // SingWS DSP stages (normalize/EQ/master bus) as an mpv filter string,
     // composed with key into "af" by applyAudioFilters.
@@ -332,16 +373,26 @@ static GLuint makeProgram(void) {
     mpv_handle *_mpv;
     mpv_render_context *_render;
     std::atomic_bool _renderQueued, _eventQueued, _stopping;
+    // Every mpv command/property write runs here instead of on the GUI thread.
+    // mpv can hold its core lock for several hundred milliseconds while an
+    // external MP3 and a CDG are opening, and the 2026-08-08 show logged a GUI
+    // stall in 40% of the seconds containing a song change against a 7% base
+    // rate. Serial, so the ordering the load path depends on (stop completes
+    // before the replacement is configured) still holds.
+    dispatch_queue_t _controlQueue;
 }
 
 - (instancetype)initWithOutput:(NSView *)output preview:(NSView *)preview {
     if ((self=[super init])) {
         _width=1920; _height=1080; _renderQueued=false; _eventQueued=false; _stopping=false;
         _lastOutputSkip=-1; _lastPreviewSkip=-1;
-        _loading=NO; _playWhenLoaded=NO;
+        _loading=false; _playWhenLoaded=false;
         _desiredTempoPercent=100; _desiredSemitones=0; _loadSerial=0;
         _desiredAudioDelay=0.0;
         _outputTransitioning=false; _transitionSerial=0;
+        _pictureSpanX=(300.0/216.0)/((double)_width/_height); // CDG default
+        _controlQueue=dispatch_queue_create("com.singws.mpv.control",
+                                            DISPATCH_QUEUE_SERIAL);
         NSOpenGLPixelFormatAttribute attrs[]={NSOpenGLPFAOpenGLProfile,NSOpenGLProfileVersion3_2Core,
             NSOpenGLPFAAccelerated,NSOpenGLPFADoubleBuffer,NSOpenGLPFAColorSize,24,NSOpenGLPFAAlphaSize,8,0};
         _format=[[NSOpenGLPixelFormat alloc] initWithAttributes:attrs];
@@ -363,6 +414,7 @@ static GLuint makeProgram(void) {
         _uvOffsetUniform=glGetUniformLocation(_program,"uvOffset");
         _textureUniform=glGetUniformLocation(_program,"frameTexture");
         _sidefillUniform=glGetUniformLocation(_program,"cdgSidefill");
+        _panelUniform=glGetUniformLocation(_program,"cdgPanel");
         CGLUnlockContext(_master.CGLContextObj);
         if (status!=GL_FRAMEBUFFER_COMPLETE || !_program) return nil;
         _outputView=[self attachTo:output]; _previewView=[self attachTo:preview];
@@ -387,7 +439,39 @@ static GLuint makeProgram(void) {
     return r>=0;
 }
 
+// The GUI-thread half: view/render state only, no mpv call that can block on
+// the core lock. Runs on the caller's thread (Qt's) so the surface is cleared
+// and the CDG geometry is known before the first frame of the new song.
+- (void)prepareForLoad:(NSString *)video {
+    _loading=true;
+    _playWhenLoaded=false;
+    _hasFrame=NO;
+    _isCdg=[[video.pathExtension lowercaseString] isEqualToString:@"cdg"];
+    // Until FILE_LOADED reports the real dwidth/dheight, assume the format's
+    // nominal geometry rather than carrying the previous song's over.
+    _pictureSpanX=(_isCdg?(300.0/216.0):((double)_width/_height))
+                  /((double)_width/_height);
+    [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES];
+}
+
 - (BOOL)loadVideo:(NSString *)video audio:(NSString *)audio {
+    // Creating the core touches the master GL context, which is thread-affine,
+    // so the first load of a session stays inline. Every later song change --
+    // the path that actually stalls the show -- goes to the control queue.
+    if (!_mpv) {
+        [self prepareForLoad:video];
+        return [self runLoad:video audio:audio];
+    }
+    [self prepareForLoad:video];
+    if (getenv("SINGWS_MPV_SYNC_LOAD"))
+        return [self runLoad:video audio:audio];
+    dispatch_async(_controlQueue,^{ [self runLoad:video audio:audio]; });
+    // Real load failures still surface: mpv reports them as END_FILE/ERROR in
+    // drainEvents, and runLoad logs anything it rejects synchronously.
+    return YES;
+}
+
+- (BOOL)runLoad:(NSString *)video audio:(NSString *)audio {
     if (!_mpv) {
         _mpv=mpv_create(); if (!_mpv) return NO;
         [self setOption:"config" value:"no"]; [self setOption:"vo" value:"libmpv"];
@@ -424,16 +508,11 @@ static GLuint makeProgram(void) {
             bridgeLog("[bridge] pre-load stop failed: %s",mpv_error_string(stopResult));
     }
 
-    // Reuse the one initialized mpv core and its two child views. Clear the
-    // previous texture before replacing media so a stopped song cannot flash
-    // during the next decoder's startup.
-    _loading=YES;
-    _playWhenLoaded=NO;
+    // Reuse the one initialized mpv core and its two child views. The surface
+    // was already cleared by prepareForLoad: on the GUI thread, so a stopped
+    // song cannot flash during the next decoder's startup.
     int paused=1;
     mpv_set_property(_mpv,"pause",MPV_FORMAT_FLAG,&paused);
-    _hasFrame=NO;
-    _isCdg=[[video.pathExtension lowercaseString] isEqualToString:@"cdg"];
-    [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES];
     // The IINA-bundled FFmpeg gives a few valid CDG files a very low probe
     // score. Lower the acceptance threshold for CDG loads, while retaining
     // automatic format detection for both the CDG and its external MP3. This
@@ -452,6 +531,7 @@ static GLuint makeProgram(void) {
     }
     if (r<0) {
         bridgeLog("[bridge] audio-files failed: %s",mpv_error_string(r));
+        _loading=false;
         return NO;
     }
     const uint64_t serial=++_loadSerial;
@@ -460,26 +540,47 @@ static GLuint makeProgram(void) {
             audio.length?audio.fileSystemRepresentation:"(internal)");
     const char *cmd[]={"loadfile",video.fileSystemRepresentation,"replace",nullptr};
     int loadResult=mpv_command_async(_mpv,serial,cmd);
-    if(loadResult<0)_loading=NO;
+    if(loadResult<0){
+        _loading=false;
+        bridgeLog("[bridge] loadfile rejected: %s",mpv_error_string(loadResult));
+    }
     return loadResult>=0;
 }
 
+// Fire-and-forget mpv work from Qt's thread. Serial, so ordering against a
+// pending load is preserved; async, so the GUI thread never waits on the core.
+- (void)onControl:(dispatch_block_t)block {
+    if(_stopping.load())return;
+    if(getenv("SINGWS_MPV_SYNC_LOAD")){ block(); return; }
+    dispatch_async(_controlQueue,block);
+}
 - (void)setPaused:(BOOL)paused {
     if(!_mpv)return;
     _playWhenLoaded=!paused;
-    if(_loading && !paused)return;
-    int flag=paused?1:0;
-    mpv_set_property(_mpv,"pause",MPV_FORMAT_FLAG,&flag);
+    if(_loading.load() && !paused)return;
+    [self onControl:^{
+        if(!self->_mpv)return;
+        int flag=paused?1:0;
+        mpv_set_property(self->_mpv,"pause",MPV_FORMAT_FLAG,&flag);
+    }];
 }
 - (void)stopPlayback {
     if(!_mpv)return;
-    _loading=NO; _playWhenLoaded=NO;
-    const char *cmd[]={"stop",nullptr}; mpv_command_async(_mpv,3,cmd);
+    _loading=false; _playWhenLoaded=false;
+    [self onControl:^{
+        if(!self->_mpv)return;
+        const char *cmd[]={"stop",nullptr}; mpv_command_async(self->_mpv,3,cmd);
+    }];
     _hasFrame=NO; [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES];
 }
 - (void)seekMilliseconds:(int64_t)milliseconds {
-    if(!_mpv)return; char value[64]; snprintf(value,sizeof(value),"%.3f",MAX(0LL,milliseconds)/1000.0);
-    const char *cmd[]={"seek",value,"absolute+exact",nullptr}; mpv_command_async(_mpv,4,cmd);
+    if(!_mpv)return;
+    [self onControl:^{
+        if(!self->_mpv)return;
+        char value[64]; snprintf(value,sizeof(value),"%.3f",MAX(0LL,milliseconds)/1000.0);
+        const char *cmd[]={"seek",value,"absolute+exact",nullptr};
+        mpv_command_async(self->_mpv,4,cmd);
+    }];
 }
 - (double)doubleProperty:(const char *)name fallback:(double)fallback {
     if(!_mpv)return fallback; double value=fallback;
@@ -519,16 +620,30 @@ static GLuint makeProgram(void) {
 - (BOOL)visualReady { return _hasFrame; }
 - (void)setVolumePercent:(double)value {
     if(!_mpv)return; double volume=MAX(0.0,MIN(100.0,value));
-    mpv_set_property(_mpv,"volume",MPV_FORMAT_DOUBLE,&volume);
+    [self onControl:^{
+        if(!self->_mpv)return; double v=volume;
+        mpv_set_property(self->_mpv,"volume",MPV_FORMAT_DOUBLE,&v);
+    }];
 }
 - (void)setAudioDeviceName:(NSString *)name {
-    if(!_mpv)return; mpv_set_property_string(_mpv,"audio-device",(name.length?name:@"auto").UTF8String);
+    if(!_mpv)return; NSString *device=name.length?name:@"auto";
+    [self onControl:^{
+        if(!self->_mpv)return;
+        mpv_set_property_string(self->_mpv,"audio-device",device.UTF8String);
+    }];
 }
 - (void)setTempoPercent:(int)percent {
-    _desiredTempoPercent=MAX(25,MIN(400,percent));
-    if(!_mpv||_loading)return;
-    double speed=_desiredTempoPercent/100.0;
-    mpv_set_property(_mpv,"speed",MPV_FORMAT_DOUBLE,&speed);
+    if(!_mpv)return; int wanted=MAX(25,MIN(400,percent));
+    [self onControl:^{
+        int previous=self->_desiredTempoPercent;
+        self->_desiredTempoPercent=wanted;
+        if(!self->_mpv||self->_loading.load())return;
+        double speed=wanted/100.0;
+        mpv_set_property(self->_mpv,"speed",MPV_FORMAT_DOUBLE,&speed);
+        // Crossing to or from 100% adds or removes rubberband from the chain
+        // (see applyAudioFilters), so the chain has to be recomposed.
+        if((previous==100)!=(wanted==100))[self applyAudioFilters];
+    }];
 }
 // Key and the SingWS DSP chain (normalize -> EQ -> master bus) share mpv's
 // single "af" property, so neither may write it directly: an earlier version
@@ -536,10 +651,22 @@ static GLuint makeProgram(void) {
 // master bus every time the host changed key. Both inputs are stored and this
 // composes them, matching mpv_audio_filters.build_af_chain's order (key first,
 // then the DSP stages).
+// Callers must already be on the control queue: it owns _dspChain and
+// _desiredSemitones now that the setters no longer run on the GUI thread.
 - (void)applyAudioFilters {
-    if(!_mpv||_loading)return;
+    if(!_mpv||_loading.load())return;
     std::string chain;
-    if(_desiredSemitones!=0){
+    // Rubberband is inserted for a tempo change as well as a key change, not
+    // just when the key moves. mpv applies `speed` with whichever filter in the
+    // chain can stretch time; with no rubberband present that is scaletempo2, a
+    // time-domain WSOLA. The FFmpeg engine used Signalsmith Stretch, a phase
+    // vocoder, so tempo-only changes were switching algorithm class and audibly
+    // losing quality. Rubberband R3 (the shipped libmpv's default engine, and
+    // it also defaults to formant preservation -- both verified against the
+    // bundled dylib) is the phase vocoder available here, so route tempo
+    // through it too. pitch-scale=1 is a no-op for pitch and leaves R3 doing
+    // only the stretch.
+    if(_desiredSemitones!=0 || _desiredTempoPercent!=100){
         char pitch[64];
         snprintf(pitch,sizeof(pitch),"rubberband=pitch-scale=%.6f",
                  pow(2.0,_desiredSemitones/12.0));
@@ -557,12 +684,18 @@ static GLuint makeProgram(void) {
                  chain.empty()?"(passthrough)":chain.c_str());
 }
 - (void)setSemitones:(int)semitones {
-    _desiredSemitones=semitones;
-    [self applyAudioFilters];
+    [self onControl:^{
+        self->_desiredSemitones=semitones;
+        [self applyAudioFilters];
+    }];
 }
 - (void)setDspChain:(const char *)chain {
-    _dspChain=chain?chain:"";
-    [self applyAudioFilters];
+    // Copied here: the caller's buffer is Python-owned and the block outlives it.
+    std::string copy(chain?chain:"");
+    [self onControl:^{
+        self->_dspChain=copy;
+        [self applyAudioFilters];
+    }];
 }
 // SingWS's CDG calibration is a VISUAL LEAD: display_position =
 // audible_position + offset, so a positive offset shows lyrics earlier. mpv's
@@ -574,15 +707,20 @@ static GLuint makeProgram(void) {
 // nowhere to apply a visual offset, so CDG ran ~750ms out with the Settings
 // slider doing nothing.
 - (void)setAudioDelaySeconds:(double)seconds {
-    _desiredAudioDelay=std::max(-3.0,std::min(3.0,seconds));
-    if(!_mpv||_loading)return;
-    double value=_desiredAudioDelay;
-    int r=mpv_set_property(_mpv,"audio-delay",MPV_FORMAT_DOUBLE,&value);
-    if(r<0)bridgeLog("[bridge] audio-delay rejected: %s",mpv_error_string(r));
-    else bridgeLog("[bridge] audio-delay=%.3fs (CDG visual lead)",value);
+    double wanted=std::max(-3.0,std::min(3.0,seconds));
+    [self onControl:^{
+        self->_desiredAudioDelay=wanted;
+        if(!self->_mpv||self->_loading.load())return;
+        double value=wanted;
+        int r=mpv_set_property(self->_mpv,"audio-delay",MPV_FORMAT_DOUBLE,&value);
+        if(r<0)bridgeLog("[bridge] audio-delay rejected: %s",mpv_error_string(r));
+        else bridgeLog("[bridge] audio-delay=%.3fs (CDG visual lead)",value);
+    }];
 }
-- (void)setCdgSidefill:(BOOL)enabled {
-    _cdgSidefill=enabled;
+- (void)setCdgSidefill:(int)mode {
+    _cdgSidefill=(mode<0?0:(mode>2?2:mode));
+    bridgeLog("[bridge] cdg fill mode=%d (0 off, 1 background colour, 2 blur)",
+            (int)_cdgSidefill.load());
     [_outputView setNeedsDisplay:YES];
 }
 
@@ -617,32 +755,86 @@ static GLuint makeProgram(void) {
     if (!_eventQueued.compare_exchange_strong(expected,true)) return;
     dispatch_async(dispatch_get_main_queue(),^{ self->_eventQueued=false; if(!self->_stopping.load())[self drainEvents]; });
 }
+// Measure where libmpv pillarboxed the picture inside the shared texture, from
+// its own dwidth/dheight. CDG is 300x216 (DAR 1.389), so a 4:3 assumption puts
+// the side-fill seam ~6 CDG columns inside the image.
+//
+// FILE_LOADED alone was not enough: mpv publishes dwidth/dheight when the video
+// chain reconfigures, which for a CDG demuxed at probescore=1 lands *after*
+// FILE_LOADED -- across two full shows the measurement never once succeeded, so
+// the fill silently ran on the nominal fallback. VIDEO_RECONFIG is the event
+// that actually carries the geometry; keeping FILE_LOADED costs nothing and
+// wins whenever the values are already up.
+- (void)measurePillarbox:(const char *)reason {
+    if(!_mpv)return;
+    int64_t dw=0,dh=0;
+    int rw=mpv_get_property(_mpv,"dwidth",MPV_FORMAT_INT64,&dw);
+    int rh=mpv_get_property(_mpv,"dheight",MPV_FORMAT_INT64,&dh);
+    if(rw<0||rh<0||dw<=0||dh<=0){
+        // Silence here is what made "side fill does nothing" untriagable.
+        bridgeLog("[bridge] picture geometry unavailable at %s (%s/%s) span kept=%.5f",
+                reason,mpv_error_string(rw),mpv_error_string(rh),_pictureSpanX.load());
+        return;
+    }
+    double target=(double)_width/_height;
+    double span=std::max(0.05,std::min(1.0,((double)dw/(double)dh)/target));
+    double previous=_pictureSpanX.exchange(span);
+    if(std::fabs(previous-span)>1e-4){
+        // FILE_LOADED measures from the control queue, so the redraw request
+        // has to hop to the thread AppKit allows it on.
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(self->_stopping.load())return;
+            [self->_outputView setNeedsDisplay:YES];
+            [self->_previewView setNeedsDisplay:YES];
+        });
+    }
+    bridgeLog("[bridge] picture %lldx%lld span=%.5f panel=%.5f at %s",
+            (long long)dw,(long long)dh,span,(1.0-span)/2.0,reason);
+}
+
 - (void)drainEvents {
     while (_mpv) { mpv_event *e=mpv_wait_event(_mpv,0); if(!e||e->event_id==MPV_EVENT_NONE)break;
         if(e->event_id==MPV_EVENT_LOG_MESSAGE){mpv_event_log_message*m=(mpv_event_log_message*)e->data;
             bridgeLog("[mpv/%s] %s",m->level,m->text);}
         else if(e->event_id==MPV_EVENT_FILE_LOADED){
-            _loading=NO;
+            _loading=false;
             // Apply file-local tuning only after the replacement file owns the
             // playback state, then honor the Play request Python made while
-            // loadfile was pending.
-            int tempo=_desiredTempoPercent, semitones=_desiredSemitones;
-            [self setTempoPercent:tempo];
-            // Re-composes key AND the DSP chain. Without the DSP half here the
-            // EQ/master bus would survive only until the next song.
-            [self setSemitones:semitones];
-            // loadfile resets audio-delay, so the CDG calibration has to be
-            // re-asserted or it would apply only to the first song.
-            [self setAudioDelaySeconds:_desiredAudioDelay];
-            BOOL shouldPlay=_playWhenLoaded;
-            int paused=shouldPlay?0:1;
-            mpv_set_property(_mpv,"pause",MPV_FORMAT_FLAG,&paused);
-            bridgeLog("[bridge] media loaded serial=%llu play=%d tempo=%d key=%d",
-                    (unsigned long long)_loadSerial,shouldPlay?1:0,tempo,semitones);
-        }else if(e->event_id==MPV_EVENT_END_FILE && _loading){
+            // loadfile was pending. All of it on the control queue: these are
+            // the property writes that used to block the GUI thread at exactly
+            // the moment the show is between singers.
+            [self onControl:^{
+                if(!self->_mpv)return;
+                [self measurePillarbox:"file_loaded"];
+                int tempo=self->_desiredTempoPercent, semitones=self->_desiredSemitones;
+                if(!self->_loading.load()){
+                    double speed=tempo/100.0;
+                    mpv_set_property(self->_mpv,"speed",MPV_FORMAT_DOUBLE,&speed);
+                }
+                // Re-composes key AND the DSP chain. Without the DSP half here
+                // the EQ/master bus would survive only until the next song.
+                [self applyAudioFilters];
+                // loadfile resets audio-delay, so the CDG calibration has to be
+                // re-asserted or it would apply only to the first song.
+                if(!self->_loading.load()){
+                    double delay=self->_desiredAudioDelay;
+                    mpv_set_property(self->_mpv,"audio-delay",MPV_FORMAT_DOUBLE,&delay);
+                    bridgeLog("[bridge] audio-delay=%.3fs (CDG visual lead)",delay);
+                }
+                BOOL shouldPlay=self->_playWhenLoaded.load();
+                int paused=shouldPlay?0:1;
+                mpv_set_property(self->_mpv,"pause",MPV_FORMAT_FLAG,&paused);
+                bridgeLog("[bridge] media loaded serial=%llu play=%d tempo=%d key=%d",
+                        (unsigned long long)self->_loadSerial,shouldPlay?1:0,tempo,semitones);
+            }];
+        }else if(e->event_id==MPV_EVENT_VIDEO_RECONFIG){
+            // The event that actually carries dwidth/dheight for a CDG. Cheap
+            // (two property reads), and it fires once per video reconfigure.
+            [self onControl:^{ [self measurePillarbox:"video_reconfig"]; }];
+        }else if(e->event_id==MPV_EVENT_END_FILE && _loading.load()){
             mpv_event_end_file *end=(mpv_event_end_file *)e->data;
             if(end && end->reason==MPV_END_FILE_REASON_ERROR){
-                _loading=NO;
+                _loading=false;
                 bridgeLog("[bridge] load ended with error: %s",mpv_error_string(end->error));
             }
         } }
@@ -659,7 +851,18 @@ static GLuint makeProgram(void) {
         // The following presentView drawing is ordered against this work by the
         // shared context, and each flushBuffer syncs before it swaps.
         mpv_render_context_render(_render,p); glBindFramebuffer(GL_FRAMEBUFFER,0); glFlush();
-        CGLUnlockContext(_master.CGLContextObj); _hasFrame=YES; }
+        CGLUnlockContext(_master.CGLContextObj);
+        // A frame produced while a load is pending belongs to the OUTGOING
+        // song. loadfile is asynchronous, so mpv keeps rendering the previous
+        // file into this shared texture until the replacement takes over, and
+        // marking those frames as "we have a frame" is what let the previous
+        // singer's video play on over the next singer's audio (2026-08-09
+        // 01:10:59: FrankieRod's Slow An' Easy showing Nikki's Since U Been
+        // Gone). prepareForLoad: already cleared _hasFrame; this keeps it clear
+        // until the new file actually produces a picture, so presentView paints
+        // black and visualReady -- which is what the host gates the surface
+        // reveal on -- stays false across the switch.
+        if(!_loading.load()) _hasFrame=YES; }
     [self presentView:_outputView]; [self presentView:_previewView];
 }
 - (void)presentView:(BridgeVideoView *)view {
@@ -699,30 +902,42 @@ static GLuint makeProgram(void) {
     if(_hasFrame){ double sa=(double)_width/_height,va=(double)w/h; GLfloat sx=1,sy=1;
         if(va>sa)sx=sa/va; else sy=va/sa;
         GLfloat uvx=1,uvy=1,uox=0,uoy=0;
+        // Where libmpv actually pillarboxed the picture inside the shared 16:9
+        // texture, measured from dwidth/dheight at FILE_LOADED. This was
+        // hardcoded to a 4:3 assumption (.125/.875); CDG is 300x216, so the
+        // real edges are .109/.891 and both the preview crop below and the
+        // side-fill seam were off by ~6 CDG columns on each side.
+        const double span=std::max(0.05,std::min(1.0,_pictureSpanX.load()));
+        const GLfloat panelL=(GLfloat)((1.0-span)/2.0);
+        const GLfloat panelR=(GLfloat)(panelL+span);
         if(view==_previewView && _isCdg){
-            // libmpv presents CDG as 4:3 inside the shared 16:9 texture, so the
-            // picture lives between x=.125 and x=.875. Discard those generated
-            // pillar bars, then letterbox what is left against the host's real
-            // aspect. This used to draw the cropped region edge-to-edge on the
-            // assumption that the preview host was a fixed 300x216 (25:18)
-            // panel; it is a freely resizable window whose sole child fills it,
-            // so the picture was stretched by whatever the mismatch happened to
-            // be -- 4% at the default size, 33% once resized to 16:9.
-            uvx=0.75f; uox=0.125f;
-            const double ca=4.0/3.0;
+            // Discard those generated pillar bars, then letterbox what is left
+            // against the host's real aspect. This used to draw the cropped
+            // region edge-to-edge on the assumption that the preview host was a
+            // fixed 300x216 (25:18) panel; it is a freely resizable window whose
+            // sole child fills it, so the picture was stretched by whatever the
+            // mismatch happened to be -- 4% at the default size, 33% once
+            // resized to 16:9.
+            uvx=(GLfloat)span; uox=panelL;
+            const double ca=sa*span;  // the picture's own aspect
             if(va>ca)sx=(GLfloat)(ca/va); else sy=(GLfloat)(va/ca);
         }
-        int sidefill=(view==_outputView && _isCdg && _cdgSidefill)?1:0;
+        int sidefill=(view==_outputView && _isCdg)?_cdgSidefill.load():0;
         glUseProgram(_program); GLuint*vao=(view==_outputView)?&_outVao:&_prevVao;
         if(!*vao)glGenVertexArrays(1,vao); glBindVertexArray(*vao);
         glUniform2f(_scaleUniform,sx,sy); glUniform2f(_uvScaleUniform,uvx,uvy);
         glUniform2f(_uvOffsetUniform,uox,uoy); glUniform1i(_sidefillUniform,sidefill);
+        glUniform2f(_panelUniform,panelL,panelR);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,_texture); glUniform1i(_textureUniform,0);
         glDrawArrays(GL_TRIANGLE_STRIP,0,4); glBindTexture(GL_TEXTURE_2D,0); glBindVertexArray(0); glUseProgram(0); }
     [ctx flushBuffer]; CGLUnlockContext(ctx.CGLContextObj);
 }
 - (void)shutdown {
     if(_stopping.exchange(true))return;
+    // Let any in-flight load/property block finish before _mpv is freed under
+    // it. onControl: already refuses new work once _stopping is set, so this
+    // drains rather than waits on a growing queue.
+    if(_controlQueue)dispatch_sync(_controlQueue,^{});
     if(_render)mpv_render_context_set_update_callback(_render,nullptr,nullptr);
     if(_mpv)mpv_set_wakeup_callback(_mpv,nullptr,nullptr);
     if(_render){[_master makeCurrentContext];mpv_render_context_free(_render);_render=nullptr;}
@@ -777,7 +992,7 @@ void singws_bridge_set_tempo(void *h,int p){if(h)[(__bridge BridgeRenderer *)h s
 void singws_bridge_set_key(void *h,int n){if(h)[(__bridge BridgeRenderer *)h setSemitones:n];}
 void singws_bridge_set_dsp_chain(void *h,const char*c){if(h)[(__bridge BridgeRenderer *)h setDspChain:c];}
 void singws_bridge_set_audio_delay(void *h,double s){if(h)[(__bridge BridgeRenderer *)h setAudioDelaySeconds:s];}
-void singws_bridge_set_sidefill(void *h,int e){if(h)[(__bridge BridgeRenderer *)h setCdgSidefill:e!=0];}
+void singws_bridge_set_sidefill(void *h,int e){if(h)[(__bridge BridgeRenderer *)h setCdgSidefill:e];}
 void singws_bridge_begin_transition(void *h,int ms){if(h)[(__bridge BridgeRenderer *)h beginWindowTransition:ms];}
 int singws_bridge_scan_silence(const char *path,double noiseDb,double leadMinimum,
                                double trailMinimum,double *lead,double *trail,

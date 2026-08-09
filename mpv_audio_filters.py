@@ -22,10 +22,24 @@ Two stages port exactly:
 The master bus does **not**. ``singws_master_audio.MasterAudioProcessor``
 implements its own soft-knee compressor, downward expander, peak limiter and
 exciter; ``acompressor`` / ``agate`` / ``alimiter`` / ``aexciter`` are different
-implementations of the same *categories*. Knob values are carried across
-unchanged by deliberate choice, so a given setting lands in the same ballpark
-but will not sound identical to the FFmpeg path. :func:`chain_fidelity_notes`
-reports which stages are approximate so callers can say so in a log.
+implementations of the same *categories*. :func:`chain_fidelity_notes` reports
+which stages are approximate so callers can say so in a log.
+
+Knob values are **not** carried across unchanged, because three of them mean
+different things on each side and passing them through was measurably wrong
+(2026-08-09, against the NumPy chain on the same audio):
+
+* ``acompressor`` detects on a smoothed RMS where MasterAudioProcessor uses a
+  smoothed mean-of-|x|, so its threshold needs :data:`_COMP_DETECTOR_OFFSET_DB`.
+* ``acompressor``/``agate`` express the knee as a linear factor, not dB.
+* ``alimiter`` auto-levels to 0 dBFS unless told not to, which cancelled the
+  ceiling entirely.
+
+With those three corrected the compressor's static transfer curve matches
+MasterAudioProcessor within 0.02 dB from -40 to -3 dBFS and the limiter matches
+exactly below its ceiling; the gate and exciter were already within measurement
+noise. What remains approximate is dynamic behaviour (detector topology under
+programme material), not level.
 
 The filter order mirrors the SingWS signal path exactly:
 
@@ -54,6 +68,28 @@ _EPSILON_DB = 0.05
 # aexciter clamps freq to this range; singws_master_audio allows lower values.
 _EXCITER_FREQ_MIN = 2000.0
 _EXCITER_FREQ_MAX = 12000.0
+
+# MasterAudioProcessor's compressor detects on a smoothed mean-of-|x|;
+# acompressor detects on a smoothed RMS, which reads higher for the same
+# programme. Passing the SingWS threshold through unchanged therefore started
+# compression early and cost ~1.4 dB of extra gain reduction at normal levels.
+# 3.0 dB is measured, not derived: with it, the two static transfer curves agree
+# within 0.02 dB from -40 to -3 dBFS (scratch: dsp_curve.py). Without it they
+# diverge by up to 1.45 dB.
+_COMP_DETECTOR_OFFSET_DB = 3.0
+
+# acompressor/agate express knee as a linear factor spanning the knee, not dB:
+# the transition runs from threshold/sqrt(knee) to threshold*sqrt(knee), so the
+# width in dB is 20*log10(knee). Passing comp_knee_db straight in made a 6 dB
+# knee 15.6 dB wide. ffmpeg clamps the factor to 1..8 (0 .. 18 dB).
+_KNEE_FACTOR_MIN = 1.0
+_KNEE_FACTOR_MAX = 8.0
+
+
+def _knee_factor(knee_db) -> float:
+    """Knee width in dB -> the linear factor lavfi wants."""
+    db = max(0.0, _as_float(knee_db, 6.0))
+    return max(_KNEE_FACTOR_MIN, min(_KNEE_FACTOR_MAX, 10.0 ** (db / 20.0)))
 
 # Stages whose lavfi equivalent is a different implementation, not a port.
 _APPROXIMATE_STAGES = ("gate", "exciter", "compressor", "limiter")
@@ -177,11 +213,14 @@ def master_bus_filters(params: dict | None) -> list[str]:
         )
 
     if _enabled(p, "comp_enabled", default=True):
+        threshold_db = (
+            _as_float(p.get("comp_threshold_db"), -20.0) + _COMP_DETECTOR_OFFSET_DB
+        )
         out.append(
             "acompressor="
-            f"threshold={_f(_as_float(p.get('comp_threshold_db'), -20.0))}dB:"
+            f"threshold={_f(min(0.0, threshold_db))}dB:"
             f"ratio={_f(max(1.0, _as_float(p.get('comp_ratio'), 2.0)))}:"
-            f"knee={_f(max(1.0, _as_float(p.get('comp_knee_db'), 6.0)))}:"
+            f"knee={_f(_knee_factor(p.get('comp_knee_db', 6.0)))}:"
             f"attack={_f(max(0.01, _as_float(p.get('comp_attack_ms'), 18.0)))}:"
             f"release={_f(max(0.01, _as_float(p.get('comp_release_ms'), 180.0)))}:"
             f"makeup={_f(max(1.0, _db_to_linear(_as_float(p.get('comp_makeup_db'), 4.0))))}"
@@ -195,10 +234,17 @@ def master_bus_filters(params: dict | None) -> list[str]:
         ceiling = _as_float(p.get("limiter_ceiling_db"), -1.0)
     else:
         ceiling = _as_float(p.get("output_ceiling_db"), -0.1)
+    # level=disabled is not optional. alimiter's "auto level" defaults to ON and
+    # divides the output by the limit, i.e. normalizes straight back to 0 dBFS.
+    # That silently cancelled the ceiling: a -1 dB setting produced +1.00 dB of
+    # blanket gain at every level below the ceiling (measured exactly, scratch:
+    # dsp_gate_lim.py), so the headroom the ceiling exists to protect was gone
+    # and the whole master bus ran a decibel hot.
     out.append(
         f"alimiter=limit={_f(min(0.0, ceiling))}dB:"
         f"attack={_f(max(0.1, _as_float(p.get('limiter_detector_ms'), 1.2)))}:"
-        f"release={_f(max(1.0, _as_float(p.get('limiter_release_ms'), 80.0)))}"
+        f"release={_f(max(1.0, _as_float(p.get('limiter_release_ms'), 80.0)))}:"
+        "level=disabled"
     )
     return out
 

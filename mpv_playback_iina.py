@@ -323,7 +323,8 @@ class MpvPlaybackPlugin:
         if self._handle:
             self.api.lib.singws_bridge_set_audio_delay(
                 self._handle, self._video_offset_ms / 1000.0)
-        self.log(f"[MPV-NATIVE] cdg visual offset = {self._video_offset_ms:+d}ms")
+        # Not "cdg": the host now trims MP4 through this same property too.
+        self.log(f"[MPV-NATIVE] visual offset = {self._video_offset_ms:+d}ms")
 
     def setExternalAudioMaster(self, master) -> None:
         """Not supported on this backend.
@@ -356,7 +357,13 @@ class MpvPlaybackPlugin:
         # so there is nothing to toggle. See supportsVideoStretch().
         self._stretch = False
     def setCdgOutputSidefill(self, enabled) -> None:
-        self._sidefill = bool(enabled)
+        # 0 off, 1 the disc's own background colour, 2 an ambient blur of the
+        # picture. Bools still work: the colour fill is what True used to mean.
+        try:
+            mode = int(enabled)
+        except (TypeError, ValueError):
+            mode = 1 if enabled else 0
+        self._sidefill = max(0, min(2, mode))
         if self._handle:
             self.api.lib.singws_bridge_set_sidefill(
                 self._handle, int(self._sidefill))

@@ -665,5 +665,48 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         self.assertNotIn("if self._is_waitlist_enabled_cached():\n                self._sync_waitlist_state_from_server_async", source)
 
 
+    def test_show_window_geometry_is_not_restored_onto_a_detached_screen(self):
+        """A show saved with a projector attached must not restore off-desktop.
+
+        2026-08-09 04:10 restored the show window at x=1680 with one 1680x1050
+        display: entirely off-screen, unreachable, and with no valid screen for
+        macOS to composite against.
+        """
+        from PyQt6.QtCore import QRect
+
+        class FakeScreen:
+            def __init__(self, rect):
+                self._rect = rect
+
+            def availableGeometry(self):
+                return self._rect
+
+        laptop = FakeScreen(QRect(0, 0, 1680, 1050))
+        projector = FakeScreen(QRect(1680, 0, 1920, 1080))
+        on_projector = QRect(1680, 53, 1920, 1027)
+
+        fake_qapp = mock.Mock()
+        fake_qapp.screens.return_value = [laptop, projector]
+        fake_qapp.primaryScreen.return_value = laptop
+        with mock.patch.object(self.singws, "QApplication", fake_qapp):
+            # Projector still attached: leave the operator's placement alone.
+            self.assertEqual(
+                self.singws._rect_on_attached_screen(on_projector), on_projector
+            )
+
+            fake_qapp.screens.return_value = [laptop]
+            moved = self.singws._rect_on_attached_screen(on_projector)
+
+        self.assertNotEqual(moved, on_projector)
+        self.assertTrue(laptop.availableGeometry().intersects(moved))
+        # Size is preserved where it fits; only the position moves.
+        self.assertEqual(moved.height(), 1027)
+
+    def test_show_window_restore_uses_the_attached_screen_guard(self):
+        source = inspect.getsource(self.singws.KaraokeApp.__init__)
+        self.assertIn("karaoke_window_pos", source)
+        self.assertIn("_rect_on_attached_screen(rect)", source)
+
+
 if __name__ == "__main__":
     unittest.main()

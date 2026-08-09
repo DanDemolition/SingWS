@@ -18,7 +18,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.3.7"
+APP_VERSION = "0.4.3.8"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -3118,6 +3118,63 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
         threshold = max(0.05, float(threshold_ms) / 1000.0)
 
+        # Attribute stalls that land inside Qt's C++ (paint/layout/style), where
+        # the Python stack is only app.exec() and names nothing. A filter for
+        # this already lived on the tooltip gate, but across the whole
+        # 2026-08-08 show not one [STALL] line carried a last_event= -- it never
+        # recorded anything, and its install failure was swallowed by a bare
+        # except. Own it here, keep a strong reference so PyQt cannot collect
+        # the filter, and say out loud whether it is live.
+        try:
+            from PyQt6.QtCore import QEvent as _StallEvent
+
+            class _StallAttribution(QObject):
+                _COSTLY = frozenset(int(t) for t in (
+                    _StallEvent.Type.Paint,
+                    _StallEvent.Type.UpdateRequest,
+                    _StallEvent.Type.LayoutRequest,
+                    _StallEvent.Type.Resize,
+                    _StallEvent.Type.Show,
+                    _StallEvent.Type.Polish,
+                    _StallEvent.Type.StyleChange,
+                    _StallEvent.Type.FontChange,
+                    _StallEvent.Type.Timer,
+                    _StallEvent.Type.DeferredDelete,
+                ))
+
+                def __init__(self, target):
+                    super().__init__(target)
+                    self._target = target
+                    self._announced = False
+
+                def eventFilter(self, obj, event):
+                    try:
+                        kind = event.type()
+                        if int(kind) in self._COSTLY:
+                            try:
+                                name = obj.objectName() or ""
+                            except Exception:
+                                name = ""  # C++ side already gone
+                            self._target._last_costly_event = (
+                                kind.name, obj.__class__.__name__, name,
+                                time.monotonic(),
+                            )
+                            if not self._announced:
+                                self._announced = True
+                                _diag("[STALL] event attribution live")
+                    except Exception:
+                        pass
+                    return False
+
+            _stall_app = QApplication.instance()
+            if _stall_app is None:
+                _diag("[STALL] event attribution unavailable: no QApplication")
+            else:
+                owner._stall_attribution = _StallAttribution(owner)
+                _stall_app.installEventFilter(owner._stall_attribution)
+        except Exception as _attr_exc:
+            _diag(f"[STALL] event attribution install failed: {_attr_exc}")
+
         def _watch():
             stall_logged = False
             peak = 0.0
@@ -3199,6 +3256,10 @@ DEFAULTS = {
     "ticker_speed_px_per_sec": 78.0, # persisted ticker scroll speed; do not overwrite saved values
     "ticker_color": TICKER_COLOR_DEFAULT, # scrolling queue + duration text; remains user-pickable
     "ticker_vfx_enabled": True,      # decorative render-thread ticker lighting; core marquee remains when off
+    # "auto" keeps the 2026-08-01 Intel-macOS exclusion; "on" restores the Qt
+    # Quick ticker and show VFX there; "off" forces the painter fallback
+    # everywhere. Applied at launch, before the video window is built.
+    "quick_gpu_surfaces": "auto",
     "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
@@ -3210,7 +3271,7 @@ DEFAULTS = {
     "auto_update_download_dir": "",     # blank = ~/Downloads/SingWS Updates
     "auto_update_last_check": 0,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
-    "cdg_display_mode": "fit",       # fit | sidefill | stretch; cdg_stretch_fill kept for migration
+    "cdg_display_mode": "fit",       # fit | sidefill | blur | stretch; cdg_stretch_fill kept for migration
     "cdg_near_black_cleanup": True,  # Clamp near-black CDG backgrounds to true black
     "cdg_near_black_threshold": 10,  # RGB values <= this are treated as black for CDG only
     "lyrics_background_video_opacity": 0, # 0..100; shows the background (video/idle/slideshow) through near-black CDG only
@@ -3236,7 +3297,8 @@ DEFAULTS = {
     "ffmpeg_cdg_timing_migrated": True,
     "ffmpeg_cdg_750_baseline_migrated": False,
     "cdg_timing_engine_split_migrated": False,
-    "mp4_timing_offset_ms": 0,       # MP4/video timing stays neutral unless explicitly changed later
+    "mp4_timing_offset_ms": 0,       # MP4/video trim, FFmpeg/painter engine
+    "mp4_timing_offset_mpv_ms": 0,   # MP4/video trim, mpv engine (different display latency)
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "next_up_overlay_enabled": False, # legacy Next Up panel retired; QR remains visible between singers
     "next_up_overlay_duration_sec": 10, # retained only for backward-compatible settings loading
@@ -6262,6 +6324,41 @@ def _scaled_karaoke_image(
     return image.scaled(size, aspect_mode, Qt.TransformationMode.FastTransformation)
 
 
+def _rect_on_attached_screen(rect: QRect) -> QRect:
+    """Keep a restored window rect on a screen that actually exists now.
+
+    Saved show-window geometry outlives the monitor it was saved on. When the
+    rect no longer touches any attached screen, move it onto the primary one at
+    the same size instead of restoring it into empty space -- an unreachable
+    window that macOS also never assigns a valid screen.
+    """
+    try:
+        screens = QApplication.screens() or []
+        for screen in screens:
+            if screen.availableGeometry().intersects(rect):
+                return rect
+        target = QApplication.primaryScreen()
+        if target is None:
+            return rect
+        avail = target.availableGeometry()
+        width = min(rect.width(), avail.width())
+        height = min(rect.height(), avail.height())
+        moved = QRect(
+            avail.x() + max(0, (avail.width() - width) // 2),
+            avail.y() + max(0, (avail.height() - height) // 2),
+            max(1, width),
+            max(1, height),
+        )
+        _diag(
+            f"[VIDWIN] saved geometry {rect.x()},{rect.y()} {rect.width()}x{rect.height()} "
+            f"is off every attached screen; restoring at "
+            f"{moved.x()},{moved.y()} {moved.width()}x{moved.height()}"
+        )
+        return moved
+    except Exception:
+        return rect
+
+
 def _cdg_side_fill_color(image) -> QColor:
     """Choose the dominant CDG border color for widescreen side bars."""
     try:
@@ -7558,6 +7655,14 @@ class RenderThreadShowScreenVfx(QFrame):
         except Exception:
             pass
         self._container = QWidget.createWindowContainer(self._view, self)
+        # A window container is native, and Qt promotes every ancestor of a
+        # native widget unless this is set. Several of these in one top-level
+        # is precisely the state described in _rotation_quick_surfaces_supported
+        # -- Cocoa dereferencing a released paint device on hide -- which is
+        # what got Qt Quick banned on Intel macOS rather than any fault of
+        # Quick's. Keep the container native and leave the ancestors alone.
+        self._container.setAttribute(
+            Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self._container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QVBoxLayout(self)
@@ -7604,7 +7709,10 @@ class VideoAreaWidget(QWidget):
         self.karaoke_frame = QImage()
         self.karaoke_stretch_fill = False
         self.karaoke_side_fill = False
+        self.karaoke_blur_fill = False
         self._karaoke_side_fill_color = QColor("black")
+        self._karaoke_blur_fill_pixmap = QPixmap()
+        self._karaoke_blur_fill_key = None
         self.karaoke_frame_is_cdg = False
         self._karaoke_scaled_pixmap = QPixmap()
         self._karaoke_scaled_key = None
@@ -8004,6 +8112,7 @@ class VideoAreaWidget(QWidget):
         stretch_fill: bool = False,
         is_cdg: bool = False,
         side_fill: bool = False,
+        blur_fill: bool = False,
     ):
         # QImage is implicitly shared; avoid copying here. Scaling is cached per
         # frame/size/display mode so fullscreen paints only blit an already-scaled
@@ -8012,6 +8121,7 @@ class VideoAreaWidget(QWidget):
         self.karaoke_stretch_fill = bool(stretch_fill)
         self.karaoke_frame_is_cdg = bool(is_cdg)
         self.karaoke_side_fill = bool(side_fill and is_cdg and not stretch_fill)
+        self.karaoke_blur_fill = bool(blur_fill and is_cdg and not stretch_fill)
         self._karaoke_side_fill_color = (
             _cdg_side_fill_color(self.karaoke_frame)
             if self.karaoke_side_fill else QColor("black")
@@ -8149,16 +8259,22 @@ class VideoAreaWidget(QWidget):
         return 1.0
 
     def _draw_background_pixmap(self, painter: QPainter, pixmap: QPixmap):
+        """Stretch the show image over the whole video area.
+
+        The video area is already the window minus the ticker (they are
+        siblings in the show window's vertical layout), so filling this
+        widget's rect is exactly "window minus ticker space". Aspect ratio is
+        deliberately ignored: letterboxing show art left black bars that read
+        as a broken background on stage.
+        """
         if pixmap.isNull():
             return
         pm = pixmap.scaled(
             self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
-        x = (self.width() - pm.width()) // 2
-        y = (self.height() - pm.height()) // 2
-        painter.drawPixmap(x, y, pm)
+        painter.drawPixmap(0, 0, pm)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -8244,6 +8360,47 @@ class VideoAreaWidget(QWidget):
                 _perf_log_if_slow("cdg_frame_render", avg)
             except Exception:
                 pass
+
+    def _ensure_karaoke_blur_fill_pixmap(self):
+        """Widescreen bars filled with an ambient blur of the CDG picture.
+
+        The colour side fill draws the disc's own background, which is black on
+        most discs and therefore invisible. This mode is the visible-everywhere
+        alternative: downscale the frame to a handful of pixels and let the
+        smooth upscale be the blur, which costs one small scale per frame
+        instead of a real convolution.
+        """
+        if self.karaoke_frame.isNull() or self.width() <= 0 or self.height() <= 0:
+            self._karaoke_blur_fill_pixmap = QPixmap()
+            self._karaoke_blur_fill_key = None
+            return
+        try:
+            image_key = int(self.karaoke_frame.cacheKey())
+        except Exception:
+            image_key = id(self.karaoke_frame)
+        key = (image_key, int(self.width()), int(self.height()))
+        if key == self._karaoke_blur_fill_key and not self._karaoke_blur_fill_pixmap.isNull():
+            return
+        tiny = self.karaoke_frame.scaled(
+            24, 18,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        blurred = tiny.scaled(
+            self.size(),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        pixmap = QPixmap(self.size())
+        pixmap.fill(QColor("black"))
+        p = QPainter(pixmap)
+        # Dimmed so the bars read as ambience beside the lyrics, matching the
+        # mpv shader's fill.
+        p.setOpacity(0.88)
+        p.drawPixmap(0, 0, QPixmap.fromImage(blurred))
+        p.end()
+        self._karaoke_blur_fill_pixmap = pixmap
+        self._karaoke_blur_fill_key = key
 
     def set_audio_level(self, level: float):
         try:
@@ -8576,6 +8733,10 @@ class VideoAreaWidget(QWidget):
         if not self.karaoke_frame.isNull():
             if bool(self.karaoke_side_fill and self.karaoke_frame_is_cdg):
                 painter.fillRect(self.rect(), self._karaoke_side_fill_color)
+            elif bool(self.karaoke_blur_fill and self.karaoke_frame_is_cdg):
+                self._ensure_karaoke_blur_fill_pixmap()
+                if not self._karaoke_blur_fill_pixmap.isNull():
+                    painter.drawPixmap(0, 0, self._karaoke_blur_fill_pixmap)
             bg_opacity = self._lyrics_background_opacity() if bool(self.karaoke_frame_is_cdg) else 0.0
             if bg_opacity > 0.0:
                 # Live MP4 background video wins; otherwise the normal
@@ -13083,13 +13244,43 @@ FILENAME_FORMATS: dict[str, str] = {
 DEFAULT_FILENAME_FORMAT = "disc-artist-title"
 
 
+# Operator override for the Intel-macOS Qt Quick exclusion below. Set from
+# settings at startup ("auto" | "on" | "off"); SINGWS_QUICK_SURFACES=1/0 wins
+# over both for a one-off test.
+_QUICK_SURFACES_OVERRIDE = "auto"
+
+
+def set_quick_surfaces_override(mode: str) -> None:
+    global _QUICK_SURFACES_OVERRIDE
+    mode = str(mode or "auto").strip().lower()
+    _QUICK_SURFACES_OVERRIDE = mode if mode in {"auto", "on", "off"} else "auto"
+
+
 def _native_quick_child_surfaces_supported() -> bool:
-    """Return whether QWidget-hosted QQuickView children are safe here."""
+    """Return whether QWidget-hosted QQuickView children are safe here.
+
+    The Intel-macOS exclusion was added on 2026-08-01 ("Fix Intel crashes and
+    playback stalls") and it looks like a misattribution. Across 126 crash
+    reports on this machine, Qt Quick and the scene graph appear in the faulting
+    thread exactly **zero** times; and the crash the gate was meant to stop --
+    QPaintDevice::devicePixelRatio() inside QBackingStore::flush, which is the
+    QWidget painter path -- kept happening with the gate in place, in 13 of the
+    15 packaged-app crashes and twice during the 2026-08-08 show. The real
+    common factor was native ancestor promotion from the mpv host; see
+    MpvVideoHost. So this is now an operator choice rather than a hard rule.
+    """
     # Tests need the real Quick implementations even when they run on an Intel
     # host. The offscreen platform does not use Cocoa's backing-store flush
     # path, which is the path implicated in the native crashes.
     if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
         return True
+    env = os.environ.get("SINGWS_QUICK_SURFACES", "").strip()
+    if env in {"0", "1"}:
+        return env == "1"
+    if _QUICK_SURFACES_OVERRIDE == "on":
+        return True
+    if _QUICK_SURFACES_OVERRIDE == "off":
+        return False
     try:
         return not (
             sys.platform == "darwin"
@@ -13221,7 +13412,14 @@ class VideoWindow(QWidget):
         # The FFmpeg/QImage renderer needs no native child handle, and nested
         # native backing stores are the common factor in the Intel macOS
         # QPaintDevice::devicePixelRatio() crashes seen during MP4 playback.
-        _diag(f"[TICKER] init title={title} backend={self.ticker_backend}")
+        # Name the effects capability, not just the backend. "backend=
+        # legacy-painter" did not say that the animated lighting is absent
+        # entirely on that path, so a show log could not distinguish "effects
+        # turned off" from "effects impossible here".
+        _diag(
+            f"[TICKER] init title={title} backend={self.ticker_backend} "
+            f"effects={'available' if hasattr(self.ticker, 'set_effects_enabled') else 'unavailable'}"
+        )
 
         # Keep idle BG overlay repainting even when this window is not focused.
         self._idle_overlay_visible_last = False
@@ -13421,6 +13619,7 @@ class VideoWindow(QWidget):
                     new_area.karaoke_frame = QImage(old.karaoke_frame)
                     new_area.karaoke_stretch_fill = bool(getattr(old, "karaoke_stretch_fill", False))
                     new_area.karaoke_side_fill = bool(getattr(old, "karaoke_side_fill", False))
+                    new_area.karaoke_blur_fill = bool(getattr(old, "karaoke_blur_fill", False))
                     new_area._karaoke_side_fill_color = QColor(
                         getattr(old, "_karaoke_side_fill_color", QColor("black"))
                     )
@@ -14464,6 +14663,7 @@ class PreviewWindow(QWidget):
                     stretch_fill=bool(getattr(old, "karaoke_stretch_fill", False)),
                     is_cdg=bool(getattr(old, "karaoke_frame_is_cdg", False)),
                     side_fill=bool(getattr(old, "karaoke_side_fill", False)),
+                    blur_fill=bool(getattr(old, "karaoke_blur_fill", False)),
                 )
             payload = getattr(old, "_next_up_overlay_payload", {}) or {}
             if isinstance(payload, dict) and payload:
@@ -16998,6 +17198,14 @@ class RenderThreadNowSingingCard(QFrame):
         if self._root is None:
             raise RuntimeError("QML now-singing card has no root object")
         self._container = QWidget.createWindowContainer(self._view, self)
+        # A window container is native, and Qt promotes every ancestor of a
+        # native widget unless this is set. Several of these in one top-level
+        # is precisely the state described in _rotation_quick_surfaces_supported
+        # -- Cocoa dereferencing a released paint device on hide -- which is
+        # what got Qt Quick banned on Intel macOS rather than any fault of
+        # Quick's. Keep the container native and leave the ancestors alone.
+        self._container.setAttribute(
+            Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -17489,6 +17697,14 @@ class RenderThreadRotationRail(QFrame):
             raise RuntimeError("QML rotation rail has no root object")
 
         self._container = QWidget.createWindowContainer(self._view, self)
+        # A window container is native, and Qt promotes every ancestor of a
+        # native widget unless this is set. Several of these in one top-level
+        # is precisely the state described in _rotation_quick_surfaces_supported
+        # -- Cocoa dereferencing a released paint device on hide -- which is
+        # what got Qt Quick banned on Intel macOS rather than any fault of
+        # Quick's. Keep the container native and leave the ancestors alone.
+        self._container.setAttribute(
+            Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -18787,6 +19003,14 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
+        # Must land before VideoWindow is built: the ticker and show-VFX
+        # backends are chosen once, at construction. Like the playback engine,
+        # a change here takes effect on the next launch, never mid-show.
+        set_quick_surfaces_override(self.settings.get("quick_gpu_surfaces", "auto"))
+        _diag(
+            f"[SHOW-VFX] quick surfaces setting={self.settings.get('quick_gpu_surfaces', 'auto')} "
+            f"resolved={'on' if _native_quick_child_surfaces_supported() else 'off'}"
+        )
         # Playback-engine changes made in Settings are deliberately applied on
         # the next application launch, never halfway through a show/session.
         self._karaoke_engine_session_pref = str(
@@ -18846,38 +19070,13 @@ class KaraokeApp(QWidget):
                 super().__init__(owner)
                 self._owner = owner
 
-            # Event kinds that can block the GUI thread for a long time. A stall
-            # is almost always inside Qt's C++ (paint, layout, style), where the
-            # Python stack is just `<module>` in app.exec() and says nothing --
-            # 814 of 1630 stalls in one show had exactly that useless stack.
-            # Recording which of these was last dispatched gives the watchdog
-            # something to name. Restricted to this set on purpose: the filter
-            # runs for every event, including mouse moves.
-            _COSTLY_EVENTS = frozenset(int(t) for t in (
-                _QEvent.Type.Paint,
-                _QEvent.Type.UpdateRequest,
-                _QEvent.Type.LayoutRequest,
-                _QEvent.Type.Resize,
-                _QEvent.Type.Show,
-                _QEvent.Type.Polish,
-                _QEvent.Type.StyleChange,
-                _QEvent.Type.FontChange,
-                _QEvent.Type.Timer,
-                _QEvent.Type.DeferredDelete,
-            ))
+            # Stall attribution used to be recorded here too. It produced
+            # nothing across a whole show, so it now lives in
+            # _install_main_thread_watchdog, which owns the reader and reports
+            # whether its filter is actually live.
 
             def eventFilter(self, obj, event):
                 event_type = event.type()
-                if int(event_type) in self._COSTLY_EVENTS:
-                    try:
-                        self._owner._last_costly_event = (
-                            event_type.name,
-                            obj.__class__.__name__,
-                            getattr(obj, "objectName", lambda: "")() or "",
-                            time.monotonic(),
-                        )
-                    except Exception:
-                        pass
                 if event_type == _QEvent.Type.ToolTip:
                     if not bool(self._owner.settings.get("show_tooltips", False)):
                         # On macOS, swallowing the event isn't always enough
@@ -20387,15 +20586,24 @@ class KaraokeApp(QWidget):
         # Keep static label; behavior is "show/bring-to-front".
         self.show_karaoke_button.setText("Show Karaoke")
 
-        # Restore saved window position if available
+        # Restore saved window position if available, but never onto a screen
+        # that is no longer attached. A show saved with the projector plugged in
+        # restores the show window at that screen's coordinates; back on the
+        # laptop alone it lands entirely off the desktop, where the operator
+        # cannot reach it and macOS never gives it a valid screen. The 2026-08-09
+        # 04:10 launch restored x=1680 with one 1680x1050 display -- fully
+        # off-screen -- and the process died in Qt's backing-store flush 90s
+        # later. The rotation window has always had this guard; the show window
+        # never did.
         saved_pos = self.settings.get("karaoke_window_pos")
         if saved_pos:
-            self.video_window.setGeometry(
-                saved_pos.get("x", 100),
-                saved_pos.get("y", 100),
-                saved_pos.get("width", 640),
-                saved_pos.get("height", 520)
+            rect = QRect(
+                int(saved_pos.get("x", 100)),
+                int(saved_pos.get("y", 100)),
+                int(saved_pos.get("width", 640)),
+                int(saved_pos.get("height", 520)),
             )
+            self.video_window.setGeometry(_rect_on_attached_screen(rect))
 
         self.network_button = QPushButton("Network")
         self.network_button.clicked.connect(self.configure_network)
@@ -22725,10 +22933,12 @@ class KaraokeApp(QWidget):
             cdg_display_mode = self._effective_cdg_display_mode() if is_cdg else "fit"
             stretch = bool(is_cdg and cdg_display_mode == "stretch")
             side_fill = bool(is_cdg and cdg_display_mode == "sidefill")
+            blur_fill = bool(is_cdg and cdg_display_mode == "blur")
             try:
                 if self.video_window.isVisible() and not self.video_window.isMinimized():
                     self.video_window.video_area.set_karaoke_frame(
-                        image, stretch_fill=stretch, is_cdg=is_cdg, side_fill=side_fill
+                        image, stretch_fill=stretch, is_cdg=is_cdg,
+                        side_fill=side_fill, blur_fill=blur_fill,
                     )
                     self.video_window.force_black = False
             except Exception:
@@ -22736,7 +22946,8 @@ class KaraokeApp(QWidget):
             try:
                 if self.preview_window.isVisible() and not self.preview_window.isMinimized():
                     self.preview_window.video_area.set_karaoke_frame(
-                        image, stretch_fill=stretch, is_cdg=is_cdg, side_fill=side_fill
+                        image, stretch_fill=stretch, is_cdg=is_cdg,
+                        side_fill=side_fill, blur_fill=blur_fill,
                     )
                     self.preview_window.force_black = False
             except Exception:
@@ -22967,7 +23178,19 @@ class KaraokeApp(QWidget):
                 "rendering as 'fit'"
             )
         plugin.setVideoStretch(mode == "stretch")
-        plugin.setCdgOutputSidefill(mode == "sidefill")
+        # 0 off, 1 the disc's background colour, 2 an ambient blur of the
+        # picture. The colour fill is a deliberate no-op on the many discs whose
+        # background is black; the blur fill is the visible-everywhere option.
+        plugin.setCdgOutputSidefill(
+            2 if mode == "blur" else (1 if mode == "sidefill" else 0)
+        )
+        # Whether the mode reached the backend at all was previously invisible
+        # in the log, which made "side fill does nothing" impossible to triage
+        # from a show log.
+        _diag(
+            f"[MPV] display mode applied mode={mode} "
+            f"fill={2 if mode == 'blur' else (1 if mode == 'sidefill' else 0)}"
+        )
 
     def _start_mpv_karaoke_transport(
         self, *, audio_path, video_path, mode, semitones,
@@ -23027,11 +23250,19 @@ class KaraokeApp(QWidget):
         # song uncalibrated and only picked it up if the operator happened to
         # nudge the Display slider mid-song.
         try:
-            if str(mode or "").lower() == "cdg":
+            mode_l = str(mode or "").lower()
+            # MP4 was omitted here, so mp4_timing_offset_ms was read only by the
+            # painter path and the mpv engine had no video trim at all: an MP4
+            # running late could not be corrected from anywhere in the UI.
+            if mode_l == "cdg":
                 off = self._effective_cdg_timing_offset_ms()
-                if hasattr(transport, "set_video_offset_ms"):
-                    transport.set_video_offset_ms(off)
-                    _diag(f"[VIDEO-OFFSET] applying {off:+d}ms visual offset mode={mode} engine=mpv")
+            elif mode_l == "mp4":
+                off = self._effective_mp4_timing_offset_ms()
+            else:
+                off = 0
+            if hasattr(transport, "set_video_offset_ms"):
+                transport.set_video_offset_ms(off)
+                _diag(f"[VIDEO-OFFSET] applying {off:+d}ms visual offset mode={mode} engine=mpv")
         except Exception as exc:
             _diag(f"[VIDEO-OFFSET] mpv offset apply failed: {exc}")
         self._setup_end_silence_state(mode, None)
@@ -23266,7 +23497,7 @@ class KaraokeApp(QWidget):
             if mode_l == "cdg":
                 off = self._effective_cdg_timing_offset_ms()
             elif mode_l == "mp4":
-                off = int(self.settings.get("mp4_timing_offset_ms", 0) or 0)
+                off = self._effective_mp4_timing_offset_ms()
             else:
                 off = 0
             if hasattr(transport, "set_video_offset_ms"):
@@ -24826,8 +25057,16 @@ class KaraokeApp(QWidget):
         vbox.addWidget(ticker_bold_cb)
 
         ticker_vfx_cb = QCheckBox("Animated ticker lighting and accents (more GPU)")
-        ticker_vfx_cb.setToolTip("Turn off for the plain render-thread ticker; scrolling remains equally smooth.")
+        _ticker_fx_ok = self._ticker_effects_supported()
+        ticker_vfx_cb.setToolTip(
+            "Turn off for the plain render-thread ticker; scrolling remains equally smooth."
+            + ("" if _ticker_fx_ok else self._TICKER_FX_UNAVAILABLE_NOTE)
+        )
         ticker_vfx_cb.setChecked(bool(self.settings.get("ticker_vfx_enabled", True)))
+        # Do not offer a control that cannot do anything here: the setting was
+        # saved and then silently dropped, which reads as the animated ticker
+        # being broken rather than absent.
+        ticker_vfx_cb.setEnabled(_ticker_fx_ok)
         vbox.addWidget(ticker_vfx_cb)
 
         # --- Custom message (optional) ---
@@ -26451,7 +26690,8 @@ class KaraokeApp(QWidget):
         cdg_display_row.addWidget(QLabel("CDG Display:"))
         cdg_display_combo = QComboBox(dlg)
         cdg_display_combo.addItem("Fit original lyrics", "fit")
-        cdg_display_combo.addItem("Widescreen side fill", "sidefill")
+        cdg_display_combo.addItem("Widescreen side fill (background color)", "sidefill")
+        cdg_display_combo.addItem("Widescreen side fill (blurred image)", "blur")
         # Offered only where it actually renders. The in-process mpv backend
         # always preserves aspect, so listing it there was a control that
         # silently did nothing.
@@ -26459,8 +26699,11 @@ class KaraokeApp(QWidget):
         if _stretch_ok:
             cdg_display_combo.addItem("Stretch to fill", "stretch")
         cdg_display_combo.setToolTip(
-            "Side fill keeps lyrics unstretched and fills widescreen side bars "
-            "from the CDG background/border color."
+            "Side fill keeps lyrics unstretched and fills widescreen side bars.\n"
+            "Background color uses the disc's own background/border color, so on "
+            "the many discs with a black background the bars stay black.\n"
+            "Blurred image fills the bars with a soft blur of the lyrics picture "
+            "itself, which is visible on every disc."
             + ("" if _stretch_ok else
                "\n\nStretch to fill is unavailable on the current mpv backend, "
                "which always preserves aspect.")
@@ -26593,12 +26836,42 @@ class KaraokeApp(QWidget):
         rotation_vfx_cb.setChecked(bool(self.settings.get("rotation_vfx_enabled", True)))
         v.addWidget(rotation_vfx_cb)
 
+        _quick_row = QHBoxLayout()
+        _quick_row.addWidget(QLabel("Animated GPU ticker / transitions:"))
+        quick_combo = QComboBox(dlg)
+        quick_combo.addItem("Automatic (off on Intel Macs)", "auto")
+        quick_combo.addItem("On — animated ticker and transitions", "on")
+        quick_combo.addItem("Off — plain painter ticker", "off")
+        quick_combo.setToolTip(
+            "The animated ticker lighting and the between-singer transitions run on "
+            "Qt Quick. They were disabled on Intel Macs on 2026-08-01 to stop a "
+            "crash, but Qt Quick has never appeared in a crash on this machine and "
+            "the crash continued regardless — its real cause was elsewhere. Set this "
+            "to On to get them back.\n\nTakes effect at the next launch."
+        )
+        _quick_cur = str(self.settings.get("quick_gpu_surfaces", "auto") or "auto")
+        _qi = quick_combo.findData(_quick_cur)
+        quick_combo.setCurrentIndex(_qi if _qi >= 0 else 0)
+        _quick_row.addWidget(quick_combo)
+        _quick_row.addStretch(1)
+        v.addLayout(_quick_row)
+
+        def on_quick_surfaces_changed(_idx: int):
+            mode = str(quick_combo.currentData() or "auto")
+            self.settings["quick_gpu_surfaces"] = mode
+            self.save_settings()
+            _diag(f"[SHOW-VFX] quick surfaces set to {mode}; applies at next launch")
+        quick_combo.currentIndexChanged.connect(on_quick_surfaces_changed)
+
         ticker_vfx_cb = QCheckBox("Ticker")
+        _ticker_fx_ok = self._ticker_effects_supported()
         ticker_vfx_cb.setToolTip(
             "Ambient lighting, queue-change accents, countdown pulse, and edge glow. "
             "The smooth ticker scroll stays enabled when this is off."
+            + ("" if _ticker_fx_ok else self._TICKER_FX_UNAVAILABLE_NOTE)
         )
         ticker_vfx_cb.setChecked(bool(self.settings.get("ticker_vfx_enabled", True)))
+        ticker_vfx_cb.setEnabled(_ticker_fx_ok)
         v.addWidget(ticker_vfx_cb)
 
         # --- CDG lyric timing offset (visual-only calibration backup) ---
@@ -26629,6 +26902,35 @@ class KaraokeApp(QWidget):
             self.set_cdg_timing_offset_ms(int(val))
         video_offset_spin.valueChanged.connect(on_video_offset_changed)
         video_offset_reset_btn.clicked.connect(lambda: video_offset_spin.setValue(0))
+
+        # --- MP4 video timing offset ---
+        # There was no control for this at all: mp4_timing_offset_ms existed in
+        # the defaults, was read only by the painter path, and the mpv engine
+        # ignored it outright -- so an MP4 running late could not be corrected
+        # from anywhere in the UI. Per engine for the same reason CDG is.
+        v = _section_card(tab_display, "MP4 Video Timing Offset",
+                          f"Trim for MP4/video tracks on the {_cdg_engine} engine, for when the "
+                          "picture leads or lags the vocal. Separate from CDG and calibrated per "
+                          "engine. Audio timing is unaffected. Positive = picture earlier.")
+        mp4to_row = QHBoxLayout()
+        mp4to_row.addWidget(QLabel("Offset (ms):"))
+        mp4_offset_spin = QSpinBox(dlg)
+        mp4_offset_spin.setRange(-3000, 3000)
+        mp4_offset_spin.setSingleStep(10)
+        try:
+            mp4_offset_spin.setValue(self._effective_mp4_timing_offset_ms())
+        except Exception:
+            mp4_offset_spin.setValue(0)
+        mp4to_row.addWidget(mp4_offset_spin)
+        mp4_offset_reset_btn = QPushButton("Reset to 0")
+        mp4to_row.addWidget(mp4_offset_reset_btn)
+        mp4to_row.addStretch(1)
+        v.addLayout(mp4to_row)
+
+        def on_mp4_offset_changed(val: int):
+            self.set_mp4_timing_offset_ms(int(val))
+        mp4_offset_spin.valueChanged.connect(on_mp4_offset_changed)
+        mp4_offset_reset_btn.clicked.connect(lambda: mp4_offset_spin.setValue(0))
 
         # ---- Venues ----
         v = _section_card(
@@ -27334,14 +27636,22 @@ class KaraokeApp(QWidget):
 
         def on_cdg_display_mode_changed(_idx: int):
             mode = str(cdg_display_combo.currentData() or "fit")
-            if mode not in {"fit", "sidefill", "stretch"}:
+            if mode not in {"fit", "sidefill", "blur", "stretch"}:
                 mode = "fit"
             self.settings["cdg_display_mode"] = mode
             self.settings["cdg_stretch_fill"] = bool(mode == "stretch")
             self.save_settings()
+            # mpv draws CDG in its own surface, so nothing in the painter path
+            # picks this up. Without pushing it to the live plugin the new mode
+            # only took effect at the next song load, which read as the setting
+            # doing nothing at all.
+            try:
+                self._apply_mpv_display_mode()
+            except Exception:
+                pass
             try:
                 if str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg" and bool(getattr(self, "karaoke_playing", False)):
-                    _diag(f"[CDG-RENDER] display_mode_changed mode={mode} applies_next_cdg=1")
+                    _diag(f"[CDG-RENDER] display_mode_changed mode={mode} applies_now=1")
             except Exception:
                 pass
 
@@ -36443,6 +36753,11 @@ class KaraokeApp(QWidget):
         this, never earlier.
         """
         self._karaoke_audio_end_s = None
+        # The scan is also the only place that knows how long the AUDIO is. For
+        # MP3+G that is not the same as how long the engine says the media is --
+        # see _effective_karaoke_duration_ns.
+        self._karaoke_audio_duration_s = None
+        self._karaoke_duration_floor_logged = False
         self._karaoke_audio_end_path = str(audio_path or "")
         if not audio_path:
             return
@@ -36511,6 +36826,8 @@ class KaraokeApp(QWidget):
             duration = float(duration)
         except Exception:
             return
+        if duration > 0.0:
+            self._karaoke_audio_duration_s = duration
         if trailing <= 0.0:
             self._karaoke_audio_end_s = None
             _diag(
@@ -36524,6 +36841,54 @@ class KaraokeApp(QWidget):
             f"(trailing_silence={trailing:.2f}s duration={duration:.2f}s source={source}) "
             f"file={os.path.basename(scan_path)}"
         )
+
+    def _effective_karaoke_duration_ns(self, dur_ns):
+        """Media duration floored by the real AUDIO duration.
+
+        MP3+G is two files. mpv loads the .cdg as the media and the .mp3 as an
+        external audio track, and its `duration` property reports the *graphics*
+        stream. Plenty of discs run the graphics short: on 2026-08-08, CC's
+        Starman carried 234.25s of graphics against 256.76s of audio and Livin'
+        On A Prayer 248.25s against 262.36s. Every end-of-song rule here keys off
+        `duration`, so both songs had the background music faded in over them and
+        were then force-stopped with 22s and 14s of vocal still to sing.
+
+        The trailing-silence prescan already probes the mp3 and knows its true
+        length, so take whichever is longer. Never shorter: this may only ever
+        let a song run to its real end, never cut one earlier.
+        """
+        try:
+            audio_s = float(getattr(self, "_karaoke_audio_duration_s", None) or 0.0)
+        except Exception:
+            audio_s = 0.0
+        if audio_s <= 0.0 or dur_ns is None:
+            return dur_ns
+        audio_ns = int(audio_s * NS_PER_SECOND)
+        if audio_ns <= dur_ns:
+            return dur_ns
+        if not bool(getattr(self, "_karaoke_duration_floor_logged", False)):
+            self._karaoke_duration_floor_logged = True
+            _diag(
+                f"[END-AUDIO] engine duration {dur_ns / NS_PER_SECOND:.2f}s is short of the "
+                f"scanned audio {audio_s:.2f}s; using the audio length "
+                "(MP3+G graphics stream ends early)"
+            )
+        return audio_ns
+
+    def _karaoke_engine_at_end(self):
+        """Does the playback engine itself say it has reached EOS?
+
+        None when the engine cannot answer, which is how the FFmpeg path behaves
+        and why the fallbacks below exist at all.
+        """
+        try:
+            t = getattr(self, "karaoke_transport", None)
+            fn = getattr(t, "engine_at_end", None)
+            if callable(fn):
+                return fn()
+        except Exception:
+            pass
+        return None
 
     def _setup_end_silence_state(self, mode: str, level_elem=None):
         self._karaoke_level_elem = level_elem
@@ -36769,12 +37134,29 @@ class KaraokeApp(QWidget):
             db = None
         if db is None:
             db = self._read_level_db()
-        if db is None:
+        # mpv decodes in its own process and offers no metering tap, so db is
+        # None for every tick of every song on that engine and this returned
+        # early each time -- the whole trailing-silence handoff never ran there.
+        # That is why songs sat through their entire silent tail (up to 13s on
+        # some discs) before the background music came back: the [END-SILENCE]
+        # "no level data yet" line appeared once per song, all night, and was
+        # the feature declining to work rather than a transient.
+        #
+        # The meter was never the authority anyway. The file prescan below is:
+        # it is described here as the only trustworthy authorization for an
+        # early handoff, and the meter only ever delays past it. With no meter,
+        # run on the scan alone and count time past the verified audio end
+        # instead of counting metered silence.
+        meterless = db is None
+        if meterless:
             if not bool(getattr(self, "_end_silence_no_level_logged", False)):
-                _diag("[END-SILENCE] near end but no level data yet")
+                _diag(
+                    "[END-SILENCE] no level tap on this engine; using the file "
+                    "scan's verified audio endpoint alone"
+                )
                 self._end_silence_no_level_logged = True
-            return False
-        self._end_silence_no_level_logged = False
+        else:
+            self._end_silence_no_level_logged = False
 
         now = time.monotonic()
         last = float(getattr(self, "_end_silence_last_tick", 0.0) or 0.0)
@@ -36795,7 +37177,8 @@ class KaraokeApp(QWidget):
                 self._end_audio_unknown_log_ts = now
                 _diag(
                     f"[END-AUDIO] trim suppressed; verified audio endpoint unavailable "
-                    f"(pos={elapsed:.2f}s remain={remain:.2f}s db={db:.1f})"
+                    f"(pos={elapsed:.2f}s remain={remain:.2f}s "
+                    f"db={'n/a' if meterless else f'{db:.1f}'})"
                 )
             return False
         if elapsed < float(audio_end):
@@ -36805,11 +37188,13 @@ class KaraokeApp(QWidget):
                 self._end_audio_hold_log_ts = now
                 _diag(
                     f"[END-AUDIO] holding; audio continues to {float(audio_end):.2f}s "
-                    f"(pos={elapsed:.2f}s db={db:.1f})"
+                    f"(pos={elapsed:.2f}s db={'n/a' if meterless else f'{db:.1f}'})"
                 )
             return False
 
-        if db <= float(self._end_silence_db_threshold):
+        # Past the scanned audio end. With a meter, confirm it really is quiet;
+        # without one, time past the verified endpoint IS the silence.
+        if meterless or db <= float(self._end_silence_db_threshold):
             self._end_silence_accum_s += dt
         else:
             self._end_silence_accum_s = 0.0
@@ -36851,7 +37236,7 @@ class KaraokeApp(QWidget):
         if (now - float(getattr(self, "_end_silence_debug_ts", 0.0) or 0.0)) >= 30.0:
             self._end_silence_debug_ts = now
             _diag(
-                f"[END-SILENCE] db={db:.1f} remain={remain:.2f}s "
+                f"[END-SILENCE] db={'n/a' if meterless else f'{db:.1f}'} remain={remain:.2f}s "
                 f"silent={self._end_silence_accum_s:.2f}/{threshold_s:.2f}s "
                 f"confident_end={int(confident_end)} "
                 f"cdg_done={cdg_done} cdg_stale={cdg_stale_for:.2f}s"
@@ -36923,7 +37308,7 @@ class KaraokeApp(QWidget):
             self._end_silence_tail_handoff_started = True
             _diag(
                 f"[END-SILENCE] verified tail handoff reason={reason}; karaoke continues to EOS "
-                f"(db={db:.1f}, silent={self._end_silence_accum_s:.2f}s, "
+                f"(db={'n/a' if meterless else f'{db:.1f}'}, silent={self._end_silence_accum_s:.2f}s, "
                 f"remain={remain:.2f}s, cdg_done={cdg_done}, cdg_stale={cdg_stale_for:.2f}s)"
             )
             if (
@@ -36953,6 +37338,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         dur, pos = self._gst_query_times()
+        dur = self._effective_karaoke_duration_ns(dur)
         if dur is not None and pos is not None and dur > 0:
             self._update_karaoke_seek_ui(pos / NS_PER_SECOND, dur / NS_PER_SECOND)
             crossfade_enabled = self._karaoke_bgm_crossfade_enabled()
@@ -37001,6 +37387,17 @@ class KaraokeApp(QWidget):
             except Exception:
                 audio_db = None
             audio_is_live = (audio_db is not None) and (audio_db > -45.0)
+            # The level gate above is dead on mpv: it has no metering tap, so
+            # _read_level_db() always returns None and audio_is_live is always
+            # False -- the "never force-end a song that is still producing
+            # sound" protection was permanently disabled on that engine, which
+            # is why a short graphics stream could stop a song mid-vocal. mpv
+            # can answer the question directly, so ask it: eof-reached is a
+            # first-hand EOS signal that needs no metering. None = the engine
+            # cannot answer (the FFmpeg path), and behaviour there is unchanged.
+            engine_at_end = self._karaoke_engine_at_end()
+            if engine_at_end is False:
+                audio_is_live = True
 
             # --- Fallback EOS detector: if we're at (or within 200ms of) the end for 2 ticks, auto-stop ---
             # Skip while audio is still audible: the real end-of-stream signal
@@ -44697,6 +45094,53 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def set_mp4_timing_offset_ms(self, ms: int):
+        """Save MP4 video trim for the active engine and apply it live."""
+        try:
+            ms = max(-3000, min(3000, int(ms)))
+        except Exception:
+            ms = 0
+        engine = self._cdg_timing_engine()
+        self.settings[self._mp4_timing_offset_key()] = ms
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        try:
+            if str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "mp4":
+                t = getattr(self, "karaoke_transport", None)
+                if t is not None and hasattr(t, "set_video_offset_ms"):
+                    t.set_video_offset_ms(ms)
+                    _diag(f"[VIDEO-OFFSET] live MP4 offset engine={engine} total={ms:+d}ms")
+        except Exception:
+            pass
+
+    def _ticker_effects_supported(self) -> bool:
+        """Whether the live ticker backend can render the animated lighting.
+
+        Only RenderThreadTicker implements effects, and Qt Quick child surfaces
+        are refused on Intel macOS by _native_quick_child_surfaces_supported --
+        that is the Cocoa backing-store flush path implicated in the native
+        crashes (two SIGSEGVs in QBackingStore::flush on 2026-08-08 alone). So
+        on an Intel Mac the ticker is always the legacy painter one, which has
+        no effects at all. Ask the live ticker rather than re-deriving the rule,
+        so the answer always matches what is actually on screen.
+        """
+        try:
+            ticker = getattr(getattr(self, "video_window", None), "ticker", None)
+            if ticker is not None:
+                return hasattr(ticker, "set_effects_enabled")
+        except Exception:
+            pass
+        return _native_quick_child_surfaces_supported()
+
+    _TICKER_FX_UNAVAILABLE_NOTE = (
+        "\n\nUnavailable on this Mac: the animated ticker runs on Qt Quick, which "
+        "is not used on Intel macOS because its native child surfaces are the "
+        "cause of the video-window crashes. The ticker still scrolls -- it is the "
+        "legacy painter ticker, which has no lighting effects."
+    )
+
     def _simple_audio_mode(self) -> bool:
         """Simple Audio Mode (default ON): no normalization and no graphic EQ.
 
@@ -44939,7 +45383,7 @@ class KaraokeApp(QWidget):
 
     def _effective_cdg_display_mode(self) -> str:
         mode = str(self.settings.get("cdg_display_mode", "") or "").strip().lower()
-        if mode in {"fit", "sidefill", "stretch"}:
+        if mode in {"fit", "sidefill", "blur", "stretch"}:
             return mode
         # Migration fallback for older settings files.
         try:
@@ -44991,6 +45435,27 @@ class KaraokeApp(QWidget):
         except Exception:
             fine_ms = 0
         return max(-3000, min(3000, self._cdg_timing_base_offset_ms() + fine_ms))
+
+    def _mp4_timing_offset_key(self) -> str:
+        """Per engine, for the same reason CDG is: mpv composites the picture
+        through its own GL surface and the painter path blits into a widget, so
+        the display latency each carries is different and one shared value would
+        de-calibrate whichever engine was not used to dial it in."""
+        return (
+            "mp4_timing_offset_mpv_ms"
+            if self._cdg_timing_engine() == "mpv"
+            else "mp4_timing_offset_ms"
+        )
+
+    def _effective_mp4_timing_offset_ms(self) -> int:
+        """MP4 visual offset for the active engine. No baseline: unlike CDG,
+        neither engine has a systematic decoder offset to compensate, so this is
+        operator trim only."""
+        try:
+            return max(-3000, min(3000, int(
+                self.settings.get(self._mp4_timing_offset_key(), 0) or 0)))
+        except Exception:
+            return 0
 
     def _effective_visual_timer_interval_ms(self) -> int:
         """Throttle visual polling only. Audio timing remains authoritative."""
@@ -47897,6 +48362,13 @@ class KaraokeApp(QWidget):
             # window KaraFun had open became the search target and the route
             # button was genuinely absent from it.
             'set routeButton to missing value',
+            # KaraFun does not put the output picker in its window at all: the
+            # 2026-08-08 show logged the full candidate list and the only audio
+            # control present was [AXButton: button Audio Settings], which opens
+            # a panel that holds the picker. Remembered separately so a real
+            # picker still wins when one is on screen (e.g. the panel is already
+            # open) and this is only the fallback route in.
+            'set audioSettingsButton to missing value',
             'set seenButtons to ""',
             'repeat with candidateWindow in windows',
             'try',
@@ -47919,6 +48391,7 @@ class KaraokeApp(QWidget):
             'if labelText is not "" then set seenButtons to seenButtons & "[" & elemRole & ":" & labelText & "]"',
             'ignoring case',
             'if routeButton is missing value and (labelText contains "choose an audio output" or labelText contains "audio output" or labelText contains "output device") then set routeButton to elem',
+            'if audioSettingsButton is missing value and (labelText contains "audio settings" or labelText contains "sound settings") then set audioSettingsButton to elem',
             'end ignoring',
             'end if',
             'end try',
@@ -47926,17 +48399,32 @@ class KaraokeApp(QWidget):
             'end if',
             'end try',
             'end repeat',
+            # Fall back to the Audio Settings panel when no picker is on screen.
+            'set openedPanel to false',
+            'if routeButton is missing value and audioSettingsButton is not missing value then',
+            'set routeButton to audioSettingsButton',
+            'set openedPanel to true',
+            'end if',
             # Report what WAS found. The old message named only what was
             # missing, which made every failure undiagnosable from the log.
             'if routeButton is missing value then return "ERROR|KaraFun Audio output button was not found; candidates=" & seenButtons',
+            # Only a real picker carries the current device in its own label;
+            # the Audio Settings button never does, so do not short-circuit on it.
+            'if openedPanel is false then',
             'try',
             'set currentLabel to (name of routeButton as text) & " " & (description of routeButton as text) & " " & (help of routeButton as text) & " " & (value of routeButton as text)',
             'ignoring case',
             f'if currentLabel contains {target_literal} then return "READY|" & {target_literal}',
             'end ignoring',
             'end try',
+            'end if',
             'perform action "AXPress" of routeButton',
-            'delay 0.35',
+            # A popup menu appears in one tick; a settings panel animates in and
+            # populates its device list afterwards. Re-scan instead of betting
+            # the whole song on a single fixed delay.
+            'repeat with attempt from 1 to 4',
+            'delay 0.4',
+            'try',
             'set allElems to entire contents',
             'repeat with elem in allElems',
             'try',
@@ -47948,16 +48436,24 @@ class KaraokeApp(QWidget):
             'on error',
             'click elem',
             'end try',
+            # Leave KaraFun's UI as it was found, or the panel stays over the
+            # audience screen through the fullscreen handoff.
+            'if openedPanel then key code 53',
             f'return "SET|" & {target_literal}',
             'end if',
             'end ignoring',
             'end try',
             'end repeat',
+            'end try',
+            'end repeat',
+            'if openedPanel then key code 53',
             f'return "ERROR|KaraFun output device not available: " & {target_literal}',
             'end tell',
             'end tell',
         ]
-        ok, stdout, stderr = self._run_karafun_applescript_sync(script, timeout=10)
+        # Was 10s: too short once the panel path can re-scan `entire contents`
+        # up to four times on an app this size.
+        ok, stdout, stderr = self._run_karafun_applescript_sync(script, timeout=25)
         result = str(stdout or stderr or "").strip()
         if ok and result.startswith(("READY|", "SET|")):
             self._karafun_audio_route_cache = cache_key
@@ -55088,6 +55584,14 @@ class RenderThreadTicker(QFrame):
             pass
 
         self._container = QWidget.createWindowContainer(self._view, self)
+        # A window container is native, and Qt promotes every ancestor of a
+        # native widget unless this is set. Several of these in one top-level
+        # is precisely the state described in _rotation_quick_surfaces_supported
+        # -- Cocoa dereferencing a released paint device on hide -- which is
+        # what got Qt Quick banned on Intel macOS rather than any fault of
+        # Quick's. Keep the container native and leave the ancestors alone.
+        self._container.setAttribute(
+            Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)

@@ -711,7 +711,11 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("def _cdg_side_fill_color(image)", MAIN_SOURCE)
         frame_handler = function_source("_on_python_karaoke_frame")
         self.assertIn('cdg_display_mode == "sidefill"', frame_handler)
+        self.assertIn('cdg_display_mode == "blur"', frame_handler)
         self.assertEqual(frame_handler.count("side_fill=side_fill"), 2)
+        # Both widescreen fills have to reach the operator preview as well, or
+        # the preview stops mirroring what the audience sees.
+        self.assertEqual(frame_handler.count("blur_fill=blur_fill"), 2)
         preview_start = MAIN_SOURCE.index("class PreviewWindow(QWidget):")
         preview_end = MAIN_SOURCE.index("class PerformanceWaveformWidget", preview_start)
         preview = MAIN_SOURCE[preview_start:preview_end]
