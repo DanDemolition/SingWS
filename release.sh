@@ -5,7 +5,7 @@
 #   ./release.sh 0.3.0    # release a specific version
 #
 # Steps: run tests -> bump version (APP_VERSION + spec CFBundle) -> build the
-# three native DMGs (arm64, Intel, Intel legacy) -> regenerate
+# two native DMGs (arm64, Intel) -> regenerate
 # docs/release.json with real
 # size+sha256 -> commit + tag, push tag -> draft GitHub release, upload + verify
 # the DMGs, publish -> push main. Auto-update clients pick the release up from
@@ -76,28 +76,33 @@ fi
 # native DMG on its matching Mac and copy it into this directory.
 echo ">>> [3/7] building native installer for $(uname -m)"
 ./build_all.sh
-if [[ "$(uname -m)" == "x86_64" ]]; then
-  echo ">>> [3/7] building Intel legacy installer for macOS 12/13"
-  ./build_singws_mac_intel_legacy.sh
-  # Both venvs are universal2, so an Intel host cross-builds the arm64 app.
-  # It ships without the mpv engine -- Homebrew has no arm64 mpv to bundle --
-  # which is what every arm64 DMG has contained to date. Build on an Apple
-  # Silicon Mac and copy the DMG in here to ship arm64 WITH mpv.
-  echo ">>> [3/7] cross-building arm64 installer (no mpv engine)"
-  ./build_singws_mac_arm64.sh
-fi
+# The Intel legacy (macOS 12/13) edition is no longer shipped: Apple Silicon and
+# Intel are the two supported targets. The spec and build script stay in the tree
+# for manual use, but the pipeline does not build, upload, or advertise it.
+#
+# arm64 is NOT cross-built here. That used to work because every venv was
+# universal2, but numpy and scipy publish no universal2 wheels for CPython 3.14,
+# and PyInstaller must import them under this x86_64 interpreter -- an arm64-only
+# .so cannot be loaded. Build arm64 natively on an Apple Silicon Mac (which also
+# bundles the mpv engine, unlike the old cross-build) and copy the DMG into this
+# directory; it is picked up automatically below.
 
 DMG_ARM="SingWS-$NEW_VER-arm64-installer.dmg"
 DMG_X86="SingWS-$NEW_VER-x86_64-installer.dmg"
-DMG_X86_LEGACY="SingWS-$NEW_VER-intel-legacy-installer.dmg"
-for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY"; do
-  [ -f "$d" ] || {
-    echo "!! expected DMG not found: $d"
-    echo "   Build the missing native installer on its matching Mac, copy it"
-    echo "   into $(pwd), then resume the release workflow."
-    exit 1
-  }
-done
+# Intel is built right here, so its absence means the build failed -- fatal.
+[ -f "$DMG_X86" ] || {
+  echo "!! expected DMG not found: $DMG_X86"
+  echo "   The Intel build did not produce an installer; check the output above."
+  exit 1
+}
+RELEASE_DMGS=("$DMG_X86")
+if [ -f "$DMG_ARM" ]; then
+  RELEASE_DMGS+=("$DMG_ARM")
+  echo ">>> releasing both Intel and Apple Silicon installers"
+else
+  echo ">>> note: $DMG_ARM is not present -- releasing Intel-only."
+  echo "    Build it on an Apple Silicon Mac and copy it here to include arm64."
+fi
 
 # 4) Regenerate the auto-update manifest from the freshly built DMGs.
 echo ">>> [4/7] writing docs/release.json"
@@ -133,7 +138,7 @@ gh release create "$TAG" \
   --title "SingWS $NEW_VER" \
   --notes "Automated release $TAG."
 
-for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY"; do
+for d in "${RELEASE_DMGS[@]}"; do
   uploaded=""
   for attempt in 1 2 3; do
     if gh release upload "$TAG" "$d" --clobber; then uploaded=1; break; fi
@@ -144,14 +149,14 @@ for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY"; do
     echo "!! could not upload $d after 3 attempts."
     echo "   The release is still an UNPUBLISHED DRAFT and main was not pushed, so"
     echo "   auto-update clients are unaffected. To finish by hand:"
-    echo "     gh release upload $TAG $DMG_ARM $DMG_X86 $DMG_X86_LEGACY --clobber"
+    echo "     gh release upload $TAG ${RELEASE_DMGS[*]} --clobber"
     echo "     gh release edit $TAG --draft=false --latest"
     echo "     git push origin main"
     exit 1
   fi
 done
 
-for d in "$DMG_ARM" "$DMG_X86" "$DMG_X86_LEGACY"; do
+for d in "${RELEASE_DMGS[@]}"; do
   local_size="$(stat -f%z "$d")"
   remote_size="$(gh release view "$TAG" --json assets --jq ".assets[] | select(.name == \"$d\") | .size")"
   if [ "$local_size" != "$remote_size" ]; then
@@ -174,9 +179,9 @@ git push origin main || {
 }
 
 http_code="$(curl -sIL -o /dev/null -w '%{http_code}' \
-  "https://github.com/DanDemolition/SingWS/releases/download/$TAG/$DMG_ARM")"
+  "https://github.com/DanDemolition/SingWS/releases/download/$TAG/$DMG_X86")"
 if [ "$http_code" != "200" ]; then
-  echo "!! warning: download check for $DMG_ARM returned HTTP $http_code —"
+  echo "!! warning: download check for $DMG_X86 returned HTTP $http_code —"
   echo "   verify the release assets manually before trusting auto-update."
 fi
 

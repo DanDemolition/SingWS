@@ -561,13 +561,163 @@ class PerformanceSafetyTests(unittest.TestCase):
         init_source = init_source[:init_source.index("self.header_location_label")]
         self.assertIn("Requests Open", init_source)
         self.assertIn("Waitlist On", init_source)
-        refresh = function_source("_refresh_header_status")
+        # The label/tooltip build lives in the _now variant; _refresh_header_status
+        # is the coalescing scheduler in front of it.
+        refresh = function_source("_refresh_header_status_now")
         self.assertIn("Requests Open", refresh)
         self.assertIn("Waitlist On", refresh)
         self.assertIn("Waitlist mode:", refresh)
         self.assertIn('self.settings.get("location_name")', refresh)
         self.assertIn('or self.settings.get("venue_name")', refresh)
         self.assertIn('or self.settings.get("tenant")\n                    or self.settings.get("user")', refresh)
+
+    def test_header_status_refresh_is_coalesced(self):
+        # Relay reconcile calls this once per request row; a synchronous
+        # rebuild per row blocked the GUI thread for seconds.
+        scheduler = function_source("_refresh_header_status")
+        self.assertIn("_header_status_refresh_timer", scheduler)
+        self.assertIn("timer.start(0)", scheduler)
+        self.assertIn("_run_on_ui_thread", scheduler)
+        self.assertIn("self._header_status_refresh_timer.setSingleShot(True)", MAIN_SOURCE)
+        self.assertIn(
+            "self._header_status_refresh_timer.timeout.connect(self._refresh_header_status_now)",
+            MAIN_SOURCE,
+        )
+
+    def test_tracks_json_is_parsed_off_the_gui_thread(self):
+        # ~134k rows is ~800ms of JSON parse, and it ran inside __init__ before
+        # the window could paint. Nothing in startup needs it.
+        # There are two load_data methods; this is KaraokeApp's.
+        app_start = MAIN_SOURCE.index("class KaraokeApp(QWidget):")
+        load_start = MAIN_SOURCE.index("    def load_data(self):", app_start)
+        load = MAIN_SOURCE[load_start:MAIN_SOURCE.index("\n    def ", load_start + 10)]
+        self.assertIn("self._start_tracks_prefetch()", load)
+        self.assertNotIn("_load_json_file(TRACKS_PATH", load)
+        prefetch = function_source("_start_tracks_prefetch")
+        self.assertIn('name="singws-tracks-load"', prefetch)
+        self.assertIn("daemon=True", prefetch)
+        self.assertIn("_load_json_file(TRACKS_PATH", prefetch)
+        # An explicit reassignment during the load must win over the worker.
+        self.assertIn('if not state["ready"]:', prefetch)
+        # The property must join, so nothing can observe a half-loaded library.
+        getter = function_source("tracks")
+        self.assertIn("thread.join()", getter)
+        # Startup diagnostics read self.tracks; they must not drag the parse back.
+        startup = MAIN_SOURCE[
+            MAIN_SOURCE.index("# DIAGNOSTIC: Freeze detector"):
+            MAIN_SOURCE.index("self.setup_selection_behavior()", MAIN_SOURCE.index("# DIAGNOSTIC: Freeze detector"))
+        ]
+        self.assertIn("QTimer.singleShot(STARTUP_DIAGNOSTICS_DELAY_MS, _log_startup_diagnostics)", startup)
+
+    def test_empty_library_tripwire_reads_the_tracks_property_state(self):
+        # tracks is a property now, so it no longer lands in __dict__; the
+        # catastrophic-config warning must not silently stop firing.
+        intake = function_source("process_external_request")
+        self.assertIn('_state.get("_tracks_state_data")', intake)
+        self.assertIn('_tracks_state.get("ready")', intake)
+        self.assertIn('_tracks_known and not _tracks_state.get("value")', intake)
+        self.assertNotIn('if "tracks" in _state and not _state.get("tracks"):', MAIN_SOURCE)
+
+    def test_settings_dialog_styles_cards_once(self):
+        # 19 cards x (card + title + hint) setStyleSheet calls forced ~57 style
+        # recomputations on open, logged as "Polish on QFrame#settingsCard".
+        # _section_card / _settings_card_css are nested inside configure_settings.
+        settings_dlg = function_source("configure_settings")
+        card_start = settings_dlg.index("def _section_card(")
+        card = settings_dlg[card_start:settings_dlg.index("def _settings_card_css(")]
+        self.assertNotIn("setStyleSheet", card)
+        self.assertIn('card.setObjectName("settingsCard")', card)
+        self.assertIn('_t.setObjectName("settingsCardTitle")', card)
+        self.assertIn('_h.setObjectName("settingsCardHint")', card)
+        sheet_start = settings_dlg.index("def _settings_card_css(")
+        sheet = settings_dlg[sheet_start:sheet_start + 700]
+        self.assertIn('content_card_css("settingsCard", radius=12)', sheet)
+        self.assertIn("QLabel#settingsCardTitle", sheet)
+        self.assertIn("QLabel#settingsCardHint", sheet)
+        # Must be applied even if the palette-derived sheet above throws.
+        self.assertIn('dlg.setStyleSheet((dlg.styleSheet() or "") + _settings_card_css())', settings_dlg)
+
+    def test_location_detection_does_not_freeze_the_ui(self):
+        # NSRunLoop.runUntilDate_ pumps native events but not Qt's, so the app
+        # froze for up to the full timeout while CoreLocation worked.
+        detect = function_source("_detect_current_device_location")
+        self.assertIn("qt_app.processEvents(", detect)
+        self.assertIn("QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents", detect)
+        self.assertIn(
+            "from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop",
+            MAIN_SOURCE,
+        )
+        # Saving the Network dialog must not wait as long as an explicit detect.
+        self.assertIn("SAVE_LOCATION_DETECT_TIMEOUT_SEC = 4.0", MAIN_SOURCE)
+        network = function_source("configure_network")
+        self.assertIn(
+            "detect_location_now(show_result=False, timeout_sec=SAVE_LOCATION_DETECT_TIMEOUT_SEC)",
+            network,
+        )
+
+    def test_remote_reconcile_never_saves_synchronously(self):
+        # Reconcile ends by persisting queue + singer history + singer prefs.
+        # Doing that inline blocked the GUI thread on every pass that accepted
+        # nothing, which is most of them.
+        reconcile = function_source("_reconcile_remote_requests")
+        tail = reconcile[reconcile.index("_queue_display_batch_dirty = False"):]
+        self.assertIn("self._schedule_save_data(1500)", tail)
+        self.assertNotIn("self.save_data()", tail)
+
+    def test_perf_diagnostics_reach_the_log_file(self):
+        # print() goes nowhere in the packaged .app, so these measurements
+        # were invisible in ~/SingWS/logs exactly when they were needed.
+        perf = MAIN_SOURCE[
+            MAIN_SOURCE.index("def _perf_log_if_slow"):MAIN_SOURCE.index("def _fit_dialog_to_screen")
+        ]
+        self.assertIn('_diag(f"[PERF-DIAG] {name} took', perf)
+        self.assertNotIn('print(f"[PERF-DIAG]', perf)
+
+    def test_startup_warmup_is_staggered_past_first_paint(self):
+        # singleShot(0) still runs in the first event-loop turn, before the
+        # window paints, so zero-delay warm-up was part of the launch freeze.
+        self.assertIn("STARTUP_BG_PRELOAD_DELAY_MS = 400", MAIN_SOURCE)
+        self.assertIn("STARTUP_SHOW_VFX_ATTACH_DELAY_MS = 700", MAIN_SOURCE)
+        self.assertIn(
+            "QTimer.singleShot(STARTUP_BG_PRELOAD_DELAY_MS, self.bg_music.preload_current_track_paused)",
+            MAIN_SOURCE,
+        )
+        self.assertNotIn(
+            "QTimer.singleShot(0, self.bg_music.preload_current_track_paused)",
+            MAIN_SOURCE,
+        )
+        scheduler = function_source("_schedule_show_vfx_attach")
+        self.assertIn("QTimer.singleShot(STARTUP_SHOW_VFX_ATTACH_DELAY_MS, _attach_later)", scheduler)
+        # The overlay must not be built inside the constructor any more.
+        video_init = MAIN_SOURCE[
+            MAIN_SOURCE.index("class VideoWindow(QWidget):"):
+            MAIN_SOURCE.index("def _schedule_show_vfx_attach")
+        ]
+        self.assertIn("self._schedule_show_vfx_attach(self.video_area)", video_init)
+        self.assertNotIn("self._attach_show_vfx(self.video_area)", video_init)
+
+    def test_diagnostic_logging_is_asynchronous(self):
+        # Every _diag line used to be written three times synchronously
+        # (stdout, stderr, file) on the GUI thread.
+        setup = MAIN_SOURCE[
+            MAIN_SOURCE.index("def setup_logging"):MAIN_SOURCE.index("# Initialize logging")
+        ]
+        self.assertIn("logging.handlers.QueueHandler", setup)
+        self.assertIn("logging.handlers.QueueListener", setup)
+        self.assertIn("listener.start()", setup)
+        diag = MAIN_SOURCE[
+            MAIN_SOURCE.index("def _diag(msg: str):"):MAIN_SOURCE.index("def _diag_rate_limited")
+        ]
+        self.assertIn("logging.info(msg)", diag)
+        # print must only be the fallback when logging itself fails.
+        self.assertLess(diag.index("logging.info(msg)"), diag.index("print(msg)"))
+        # The tail of the log must survive a crash / shutdown.
+        self.assertIn("flush_log_queue()", function_source("log_crash"))
+        self.assertIn("flush_log_queue()", function_source("_on_app_about_to_quit"))
+        package = MAIN_SOURCE[
+            MAIN_SOURCE.index("def prepare_log_email_package"):MAIN_SOURCE.index("def send_log_package_via_smtp")
+        ]
+        self.assertIn("flush_log_queue()", package)
 
     def test_singer_history_song_list_uses_model_backed_view(self):
         self.assertIn("class SingerHistorySongListModel(QAbstractListModel)", MAIN_SOURCE)

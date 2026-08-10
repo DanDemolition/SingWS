@@ -1,5 +1,7 @@
+import atexit
 import math
 import os
+import queue
 import re
 import sys
 import logging
@@ -18,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.3.9"
+APP_VERSION = "0.4.4.0"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -1090,7 +1092,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
-from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery
+from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop
 
 # WebSocket request relay (wskar.com). Optional: older PyQt6 installs may lack
 # QtWebSockets — the app then falls back to request polling.
@@ -2435,6 +2437,9 @@ def prepare_log_email_package(days: int = 3, *, crash_log: str | Path | None = N
     """
     import zipfile
 
+    # Asynchronous log writes mean the most recent lines may still be queued;
+    # a bundle that stops short of the problem is not worth sending.
+    flush_log_queue()
     files = _recent_log_files(days)
     if crash_log:
         try:
@@ -2541,25 +2546,66 @@ def maybe_auto_send_crash_logs(crash_log: str | Path | None):
         logging.error(f"[LOG-EMAIL] auto crash send setup failed: {exc}")
 
 # --- Logging Setup ---
+_LOG_QUEUE_LISTENER = None
+
+
+def flush_log_queue(timeout_sec: float = 2.0) -> None:
+    """Drain queued log records to disk.
+
+    Log I/O runs on a listener thread so the GUI thread never blocks on a
+    write.  Anything that may be the last code to run (crash handler, clean
+    shutdown, log e-mail packaging) must drain first or the tail of the log —
+    exactly the part worth reading — never reaches the file.
+    """
+    listener = _LOG_QUEUE_LISTENER
+    if listener is None:
+        return
+    try:
+        log_queue = listener.queue
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        while time.monotonic() < deadline:
+            try:
+                if log_queue.empty():
+                    break
+            except Exception:
+                break
+            time.sleep(0.01)
+        for handler in getattr(listener, "handlers", ()) or ():
+            try:
+                handler.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def setup_logging():
     """Setup comprehensive logging system"""
     # Create log filename with today's date
     log_filename = LOGS_DIR / f"singws_{datetime.now().strftime('%Y-%m-%d')}.log"
-    
+
     # Create rotating file handler (keeps last 7 days)
     # Format: [HH:MM:SS] [LEVEL] message
     formatter = logging.Formatter(
         '[%(asctime)s] [%(levelname)s] %(message)s',
         datefmt='%H:%M:%S'
     )
-    
+
     # Also log to console for development
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
-    
+
     # Setup root logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
+
+    # Sinks hang off a QueueListener thread rather than the root logger, so a
+    # burst of diagnostics (relay reconcile logs one line per request row)
+    # costs the GUI thread an enqueue instead of a file write plus a console
+    # write per line.  The queue handler carries both marker attributes so the
+    # idempotency guards below still see an installed file/console sink.
+    global _LOG_QUEUE_LISTENER
+    sinks = []
     if not any(bool(getattr(h, "_singws_file_handler", False)) for h in logger.handlers):
         try:
             file_handler = logging.handlers.TimedRotatingFileHandler(
@@ -2571,13 +2617,41 @@ def setup_logging():
             )
             file_handler.setFormatter(formatter)
             file_handler._singws_file_handler = True
-            logger.addHandler(file_handler)
+            sinks.append(file_handler)
         except Exception as e:
             print(f"SingWS log file unavailable ({log_filename}): {e}")
     if not any(bool(getattr(h, "_singws_console_handler", False)) for h in logger.handlers):
         console_handler._singws_console_handler = True
-        logger.addHandler(console_handler)
-    
+        sinks.append(console_handler)
+
+    if sinks:
+        try:
+            log_queue = queue.SimpleQueue()
+            queue_handler = logging.handlers.QueueHandler(log_queue)
+            queue_handler._singws_queue_handler = True
+            queue_handler._singws_file_handler = any(
+                bool(getattr(h, "_singws_file_handler", False)) for h in sinks
+            )
+            queue_handler._singws_console_handler = any(
+                bool(getattr(h, "_singws_console_handler", False)) for h in sinks
+            )
+            listener = logging.handlers.QueueListener(log_queue, *sinks, respect_handler_level=True)
+            listener.start()
+            _LOG_QUEUE_LISTENER = listener
+            atexit.register(flush_log_queue)
+            atexit.register(listener.stop)
+            logger.addHandler(queue_handler)
+        except Exception as e:
+            # Never lose logging because the async path failed: fall back to
+            # the original synchronous handlers.
+            print(f"SingWS async logging unavailable, using direct handlers: {e}")
+            _LOG_QUEUE_LISTENER = None
+            for handler in sinks:
+                if bool(getattr(handler, "_singws_file_handler", False)):
+                    logger.addHandler(file_handler)
+                else:
+                    logger.addHandler(console_handler)
+
     return logger
 
 # Initialize logging
@@ -2587,15 +2661,20 @@ _MAC_LOCATION_DELEGATE_CLASS = None
 _DIAG_RATE_LIMIT_LAST = {}
 
 def _diag(msg: str):
-    """Write diagnostic messages to both terminal and SingWS log."""
-    try:
-        print(msg)
-    except Exception:
-        pass
+    """Write diagnostic messages to both terminal and SingWS log.
+
+    The console output comes from the root logger's stream handler, so this
+    deliberately does not also ``print``: that wrote every diagnostic line
+    three times (stdout, stderr, file) and the duplicate synchronous writes
+    showed up as GUI-thread stalls during relay reconcile bursts.
+    """
     try:
         logging.info(msg)
     except Exception:
-        pass
+        try:
+            print(msg)
+        except Exception:
+            pass
 
 def _diag_rate_limited(key: str, msg: str, interval_sec: float = 60.0):
     """Log routine diagnostics at most once per key/interval."""
@@ -2994,7 +3073,10 @@ def _perf_log_if_slow(name: str, ms: float):
             if now - last < repeat_sec:
                 return
             _PERF_LAST_PRINT[key] = now
-            print(f"[PERF-DIAG] {name} took {float(ms):.0f}ms")
+            # _diag, not print: in the packaged .app stdout goes nowhere, so
+            # these measurements never reached ~/SingWS/logs and the slow paths
+            # they were added to catch stayed invisible.
+            _diag(f"[PERF-DIAG] {name} took {float(ms):.0f}ms")
     except Exception:
         pass
 
@@ -3421,6 +3503,20 @@ TICKER_SIZE_PRESETS = [
     (84, 60, 60, 46, 26, 12),
 ]
 TICKER_SIZE_DEFAULT_INDEX = 2
+
+# Startup warm-up work that the operator cannot possibly need in the first
+# moments of a launch. A zero-delay timer still runs in the first event-loop
+# turn -- i.e. before the window paints -- so these are spaced out far enough
+# that the UI is up and interactive first, then the expensive bits fill in.
+# Both are latency-tolerant: BGM cannot start until the operator acts, and the
+# show-screen VFX layer has a supported painter fallback until it attaches.
+STARTUP_BG_PRELOAD_DELAY_MS = 400
+STARTUP_SHOW_VFX_ATTACH_DELAY_MS = 700
+STARTUP_DIAGNOSTICS_DELAY_MS = 2000
+
+# CoreLocation wait when auto-detect runs as a side effect of saving Network
+# settings. _detect_current_device_location clamps to a 2s floor.
+SAVE_LOCATION_DETECT_TIMEOUT_SEC = 4.0
 
 # Marquee scroll speed (pixels/second). Operator-adjustable so the ticker can be
 # sped up live when it reads too slowly for a room.
@@ -11762,7 +11858,10 @@ class SingWSLogger:
         
         logging.critical(f"CRASH DETECTED - Report saved to: {crash_log}")
         logging.critical(f"Exception: {exc_type.__name__}: {exc_value}")
-        
+        # Log writes are asynchronous; force the tail out before the process
+        # can die, otherwise the lines leading up to the crash are lost.
+        flush_log_queue()
+
         return crash_log
 
 
@@ -13438,7 +13537,7 @@ class VideoWindow(QWidget):
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
         self.show_vfx = None
-        self._attach_show_vfx(self.video_area)
+        self._schedule_show_vfx_attach(self.video_area)
 
         # Bottom ticker. Preferred backend is the Qt Quick render-thread ticker
         # (RenderThreadTicker): the scroll animation runs on the scene-graph
@@ -13501,6 +13600,48 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer = QTimer(self)
         self._idle_overlay_timer.timeout.connect(self._tick_idle_overlay)
         self._idle_overlay_timer.start(50)
+
+    def _schedule_show_vfx_attach(self, area):
+        """Build the Qt Quick VFX overlay after the window exists, not during it.
+
+        RenderThreadShowScreenVfx constructs a QQuickView and compiles QML from
+        a temp file.  Doing that inline meant the whole app window could not
+        paint until it finished, which showed up as a multi-second freeze at
+        launch.  The painter transition is a supported fallback, so start
+        without the overlay and swap it in shortly after -- by which point
+        _external_owner is also set, so the real saved setting is read instead
+        of the default.
+
+        The delay is deliberate rather than singleShot(0): a zero-delay timer
+        still fires in the first event-loop turn, before the window has
+        painted, which is exactly the freeze this is meant to avoid.
+        """
+        self.show_vfx = None
+        try:
+            area.set_show_vfx_overlay(None)
+            owner = getattr(self, "_external_owner", None)
+            settings = getattr(owner, "settings", {}) if owner is not None else {}
+            area.set_show_vfx_enabled(bool(settings.get("show_screen_vfx_enabled", True)))
+        except Exception:
+            pass
+
+        def _attach_later():
+            try:
+                if self.show_vfx is not None:
+                    return
+                # Touching a deleted C++ object raises; a fast quit can get
+                # here after the window is torn down.
+                area.objectName()
+            except RuntimeError:
+                return
+            except Exception:
+                pass
+            try:
+                self._attach_show_vfx(area)
+            except Exception as exc:
+                _diag(f"[SHOW-VFX] deferred attach failed; using painter transition: {exc}")
+
+        QTimer.singleShot(STARTUP_SHOW_VFX_ATTACH_DELAY_MS, _attach_later)
 
     def _attach_show_vfx(self, area):
         if not _native_quick_child_surfaces_supported():
@@ -21022,6 +21163,12 @@ class KaraokeApp(QWidget):
         self._save_settings_timer = QTimer(self)
         self._save_settings_timer.setSingleShot(True)
         self._save_settings_timer.timeout.connect(self.save_settings)
+        # Header status is cheap once but rebuilds rich text + a multi-line
+        # tooltip.  Reconcile passes call it once per relay row, so coalesce
+        # the bursts into a single repaint instead of ~100 synchronous ones.
+        self._header_status_refresh_timer = QTimer(self)
+        self._header_status_refresh_timer.setSingleShot(True)
+        self._header_status_refresh_timer.timeout.connect(self._refresh_header_status_now)
         self._set_bottom_nav_active("main")
         self._update_deferred_remote_add_status()
 
@@ -21172,15 +21319,22 @@ class KaraokeApp(QWidget):
         # Log session start with system info
         SingWSLogger.log_session_start(self)
         if bool(self.settings.get("performance_debug_enabled", False)):
-            SingWSLogger.log_gstreamer_runtime_diagnostics()
+            # Deferred: log_library_stats reads self.tracks, which would join
+            # the tracks.json worker and put the parse straight back onto
+            # startup. These are diagnostics -- writing them a couple of
+            # seconds later costs nothing and keeps launch responsive.
+            def _log_startup_diagnostics():
+                SingWSLogger.log_gstreamer_runtime_diagnostics()
 
-            # Log library statistics
-            try:
-                import song_index
-                db_file = song_index.db_path()
-                SingWSLogger.log_library_stats(self.tracks, db_path=db_file)
-            except Exception as e:
-                logging.warning(f"Could not log library stats: {e}")
+                # Log library statistics
+                try:
+                    import song_index
+                    db_file = song_index.db_path()
+                    SingWSLogger.log_library_stats(self.tracks, db_path=db_file)
+                except Exception as e:
+                    logging.warning(f"Could not log library stats: {e}")
+
+            QTimer.singleShot(STARTUP_DIAGNOSTICS_DELAY_MS, _log_startup_diagnostics)
 
         self.setup_selection_behavior()
 
@@ -24998,6 +25152,10 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._shutdown_network_transports()
+        try:
+            flush_log_queue()
+        except Exception:
+            pass
 
     def restart_request_polling(self):
         """Stop and restart request polling when network settings are present.
@@ -26648,33 +26806,40 @@ class KaraokeApp(QWidget):
         # Group related controls into titled "cards" so each tab reads as a set of
         # clean sections — reuses the same card styling as the library/rotation
         # panels for a consistent, polished look.
+        # Styling is applied once on the dialog (see _settings_card_css below)
+        # rather than per widget here. This dialog builds 19 cards, each with a
+        # title and hint label, and a setStyleSheet() call on every one of them
+        # forced ~57 separate style recomputations -- which is what the stall
+        # watchdog kept catching as "Polish on QFrame#settingsCard" when the
+        # dialog opened. Object names let one dialog-level sheet cover them all.
         def _section_card(tab_layout, title=None, hint=None):
             card = QFrame()
             card.setObjectName("settingsCard")
-            try:
-                card.setStyleSheet(content_card_css("settingsCard", radius=12))
-            except Exception:
-                pass
             cl = QVBoxLayout(card)
             cl.setContentsMargins(16, 13, 16, 14)
             cl.setSpacing(9)
             if title:
                 _t = QLabel(title)
-                try:
-                    _t.setStyleSheet(section_title_css())
-                except Exception:
-                    pass
+                _t.setObjectName("settingsCardTitle")
                 cl.addWidget(_t)
             if hint:
                 _h = QLabel(hint)
-                try:
-                    _h.setStyleSheet(section_meta_css())
-                except Exception:
-                    pass
+                _h.setObjectName("settingsCardHint")
                 _h.setWordWrap(True)
                 cl.addWidget(_h)
             tab_layout.addWidget(card)
             return cl
+
+        def _settings_card_css() -> str:
+            """Card/title/hint styling for the whole dialog in one sheet."""
+            try:
+                return (
+                    content_card_css("settingsCard", radius=12)
+                    + f" QLabel#settingsCardTitle {{ {section_title_css()} }}"
+                    + f" QLabel#settingsCardHint {{ {section_meta_css()} }}"
+                )
+            except Exception:
+                return ""
 
         # Polished tab bar + primary Save button, themed to match the rest of the app.
         def _settings_dialog_extra_css():
@@ -26739,6 +26904,14 @@ class KaraokeApp(QWidget):
             focus_border = border.lighter(120)
 
             dlg.setStyleSheet(dialog_stylesheet(win, base, txtc) + _settings_dialog_extra_css())
+        except Exception:
+            pass
+
+        # Applied unconditionally: the palette-derived sheet above is wrapped in
+        # a try, and the cards must still be styled if it fails. Appending keeps
+        # this to one extra style pass instead of one per card.
+        try:
+            dlg.setStyleSheet((dlg.styleSheet() or "") + _settings_card_css())
         except Exception:
             pass
 
@@ -34233,6 +34406,35 @@ class KaraokeApp(QWidget):
         self._update_header_qr_widget()
 
     def _refresh_header_status(self):
+        """Coalesce header refreshes onto the next event-loop turn.
+
+        Callers fire this from tight loops (relay reconcile logs one line and
+        one refresh per request row).  Repainting per row blocked the GUI
+        thread for seconds; one repaint per burst is indistinguishable to the
+        operator and costs nothing.
+        """
+        try:
+            # Attribute access itself can raise on a partially constructed
+            # instance (Qt raises if the super __init__ never ran), so keep the
+            # whole scheduling path inside the guard and degrade to a direct
+            # refresh -- which carries its own guard -- on any failure.
+            timer = getattr(self, "_header_status_refresh_timer", None)
+            if timer is None:
+                # Called during __init__ before the timer exists.
+                self._refresh_header_status_now()
+                return
+            app = QApplication.instance()
+            owner_thread = self.thread() if app is not None else None
+            if app is not None and owner_thread is not None and QThread.currentThread() != owner_thread:
+                # Worker threads must not touch the timer or the labels.
+                self._run_on_ui_thread(self._refresh_header_status)
+                return
+            if not timer.isActive():
+                timer.start(0)
+        except Exception:
+            self._refresh_header_status_now()
+
+    def _refresh_header_status_now(self):
         try:
             accepting = bool(self.settings.get("requests_accepting", True))
             waitlist_enabled = bool(self.settings.get("use_waiting_for_add", False))
@@ -35295,9 +35497,9 @@ class KaraokeApp(QWidget):
                 else:
                     loc_status_label.setText("No active venue coordinates saved yet.")
 
-            def detect_location_now(show_result=True):
+            def detect_location_now(show_result=True, timeout_sec=12.0):
                 update_location_status("Detecting current device location...")
-                loc, err = self._detect_current_device_location(timeout_sec=12.0)
+                loc, err = self._detect_current_device_location(timeout_sec=timeout_sec)
                 if loc:
                     lat_val = f"{float(loc['latitude']):.6f}"
                     lng_val = f"{float(loc['longitude']):.6f}"
@@ -35850,7 +36052,12 @@ class KaraokeApp(QWidget):
                     self.settings["session_location_accuracy_meters"] = ""
                     self.settings["session_location_detected_at"] = 0
                 if self.settings["session_location_auto_detect"]:
-                    detect_location_now(show_result=False)
+                    # Shorter than the explicit "Detect now" button: that is a
+                    # deliberate request where waiting is understood, whereas
+                    # this fires as a side effect of pressing Save and should
+                    # not hold the dialog for twelve seconds on a bad fix.
+                    # Manual coordinates already act as the fallback below.
+                    detect_location_now(show_result=False, timeout_sec=SAVE_LOCATION_DETECT_TIMEOUT_SEC)
                     if (not self.settings.get("session_location_latitude")) or (not self.settings.get("session_location_longitude")):
                         self.settings["session_location_source"] = "manual_fallback" if (lat_edit.text().strip() and lng_edit.text().strip()) else ""
                 if not str(self.settings.get("session_location_session_id", "") or "").strip():
@@ -36024,8 +36231,22 @@ class KaraokeApp(QWidget):
 
             run_loop = NSRunLoop.currentRunLoop()
             deadline = time.time() + max(2.0, float(timeout_sec))
+            # Spinning only the native run loop leaves Qt's event loop stalled,
+            # so the whole app froze for up to timeout_sec while CoreLocation
+            # worked -- menus dead, nothing repainting. Pump Qt each tick too.
+            # User input is deliberately excluded: this runs inside the Network
+            # dialog's Save handler, and delivering clicks here would let the
+            # operator re-enter Save while it is still running.
+            qt_app = QApplication.instance()
             while time.time() < deadline and not event.is_set():
                 run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+                if qt_app is not None:
+                    try:
+                        qt_app.processEvents(
+                            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents, 20
+                        )
+                    except Exception:
+                        pass
 
             manager.stopUpdatingLocation()
 
@@ -43920,12 +44141,83 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+    def _tracks_state(self) -> dict:
+        """Backing store for the ``tracks`` property.
+
+        Created on demand so it does not depend on __init__ ordering: the
+        property is used before the point where instance attributes are
+        normally set up.
+        """
+        # Key must not be "_tracks_state": an entry in the instance __dict__
+        # shadows the method of the same name, so the second call would try to
+        # invoke the dict.
+        state = self.__dict__.get("_tracks_state_data")
+        if state is None:
+            state = {"lock": threading.Lock(), "value": [], "ready": False, "thread": None}
+            self.__dict__["_tracks_state_data"] = state
+        return state
+
+    def _start_tracks_prefetch(self) -> None:
+        """Parse tracks.json on a worker instead of blocking startup.
+
+        This library is ~134k rows, which is ~800ms of JSON parse on the GUI
+        thread, and it ran inside __init__ -- before the window could paint.
+        Nothing during startup needs it: song search goes through the SQLite
+        index, and the remaining consumers (songbook export/upload, rescan,
+        duration scan, display-name lookup) are all operator-initiated. The
+        ``tracks`` property joins this worker if anything asks early, so the
+        deferral cannot produce a half-loaded library.
+        """
+        state = self._tracks_state()
+        started = time.perf_counter()
+
+        def _work():
+            data = _load_json_file(TRACKS_PATH, [], expected_type=list, label="Tracks")
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            with state["lock"]:
+                # An explicit assignment (rescan, library removal) that landed
+                # while this was in flight wins; do not clobber it.
+                if not state["ready"]:
+                    state["value"] = data
+                    state["ready"] = True
+                    loaded = len(data)
+                else:
+                    loaded = -1
+            if loaded >= 0:
+                _perf_log_if_slow("library_startup_load", elapsed_ms)
+                _diag(f"[LIBRARY-LOAD] tracks={loaded:,} elapsed_ms={elapsed_ms:.1f} thread=worker")
+            else:
+                _diag("[LIBRARY-LOAD] worker result discarded; tracks were reassigned during load")
+
+        with state["lock"]:
+            state["ready"] = False
+            state["value"] = []
+        thread = threading.Thread(target=_work, daemon=True, name="singws-tracks-load")
+        state["thread"] = thread
+        thread.start()
+
+    @property
+    def tracks(self):
+        state = self._tracks_state()
+        thread = state.get("thread")
+        if thread is not None and thread.is_alive():
+            blocked_at = time.perf_counter()
+            thread.join()
+            waited_ms = (time.perf_counter() - blocked_at) * 1000.0
+            if waited_ms >= 1.0:
+                _diag(f"[LIBRARY-LOAD] caller waited {waited_ms:.0f}ms for tracks.json")
+        with state["lock"]:
+            return state["value"]
+
+    @tracks.setter
+    def tracks(self, value):
+        state = self._tracks_state()
+        with state["lock"]:
+            state["value"] = value if isinstance(value, list) else list(value or [])
+            state["ready"] = True
+
     def load_data(self):
-        library_load_started = time.perf_counter()
-        self.tracks = _load_json_file(TRACKS_PATH, [], expected_type=list, label="Tracks")
-        library_load_ms = (time.perf_counter() - library_load_started) * 1000.0
-        _perf_log_if_slow("library_startup_load", library_load_ms)
-        _diag(f"[LIBRARY-LOAD] tracks={len(self.tracks):,} elapsed_ms={library_load_ms:.1f}")
+        self._start_tracks_prefetch()
         # Old in-memory index removed - now using DB lookups
         self.singer_history = {"singers": {}}
         try:
@@ -44039,8 +44331,12 @@ class KaraokeApp(QWidget):
             self.bg_music.current_index = 0
             print(f"[BG] Startup loaded playlist with {len(paths)} track(s)")
             # Warm audio path once on startup to reduce first-play hiccup.
+            # This decodes and loudness-scans a track, so it must not land in
+            # the first event-loop turn: at singleShot(0) it ran before the
+            # window had painted and became part of the launch freeze.  Nothing
+            # can start BGM this early, so let the UI come up first.
             try:
-                QTimer.singleShot(0, self.bg_music.preload_current_track_paused)
+                QTimer.singleShot(STARTUP_BG_PRELOAD_DELAY_MS, self.bg_music.preload_current_track_paused)
             except Exception:
                 pass
         except Exception as e:
@@ -53869,10 +54165,13 @@ class KaraokeApp(QWidget):
             self._mark_server_queue_mutation(reason="reconcile_remote_requests")
         self._request_queue_display_refresh()
         try:
-            if accepted_remote_add or bool(getattr(self, "karaoke_playing", False)):
-                self._schedule_save_data(1500)
-            else:
-                self.save_data()
+            # Always debounce. The old else-branch wrote queue + singer history
+            # + singer prefs synchronously on the GUI thread at the end of every
+            # reconcile pass that accepted nothing -- which is most of them,
+            # including the big one right after the relay connects at launch.
+            # The debounced path snapshots on the UI thread and encodes/writes
+            # on a worker, and shutdown still forces a final synchronous save.
+            self._schedule_save_data(1500)
         except Exception:
             pass
         _perf_log_if_slow("remote_request_reconcile_total", (time.perf_counter() - _perf_t0) * 1000.0)
@@ -54376,7 +54675,14 @@ class KaraokeApp(QWidget):
         # AttributeError, for unset attributes on partially built objects.)
         try:
             _state = object.__getattribute__(self, "__dict__")
-            if "tracks" in _state and not _state.get("tracks"):
+            # ``tracks`` is a property backed by _tracks_state_data, so it no
+            # longer appears in __dict__. "ready" is the equivalent of the old
+            # "has the attribute been assigned at all" test: it is False while
+            # the startup parse is still in flight, which is correctly not the
+            # same as a confirmed-empty library.
+            _tracks_state = _state.get("_tracks_state_data")
+            _tracks_known = isinstance(_tracks_state, dict) and bool(_tracks_state.get("ready"))
+            if _tracks_known and not _tracks_state.get("value"):
                 if not bool(_state.get("_empty_library_request_warned", False)):
                     self._empty_library_request_warned = True
                     _diag(

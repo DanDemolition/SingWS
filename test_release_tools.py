@@ -51,9 +51,9 @@ class BumpTests(unittest.TestCase):
 
 class ManifestTests(unittest.TestCase):
     def _fake_dmgs(self, d: Path, version: str):
+        # Apple Silicon + Intel only; the intel-legacy edition is no longer shipped.
         for arch, content in (("arm64", b"A" * 1000),
-                              ("x86_64", b"B" * 2000),
-                              ("intel-legacy", b"L" * 2500)):
+                              ("x86_64", b"B" * 2000)):
             (d / f"SingWS-{version}-{arch}-installer.dmg").write_bytes(content)
 
     def test_build_manifest_structure_and_hashes(self):
@@ -65,9 +65,9 @@ class ManifestTests(unittest.TestCase):
             man = wm.build_manifest("v0.3.0", d, release_date="2026-06-07")
             self.assertEqual(man["version"], "0.3.0")  # 'v' stripped
             self.assertEqual(man["release_date"], "2026-06-07")
-            self.assertEqual(set(man["downloads"]), {
-                "mac_arm64", "mac_x86_64", "mac_intel_legacy"
-            })
+            self.assertEqual(set(man["downloads"]), {"mac_arm64", "mac_x86_64"})
+            # The retired legacy edition must not creep back into the manifest.
+            self.assertNotIn("mac_intel_legacy", man["downloads"])
             arm = man["downloads"]["mac_arm64"]
             self.assertEqual(arm["filename"], "SingWS-0.3.0-arm64-installer.dmg")
             self.assertIn("releases/latest/download/SingWS-0.3.0-arm64-installer.dmg", arm["url"])
@@ -80,6 +80,26 @@ class ManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit):
                 wm.build_manifest("0.9.9", Path(tmp))
+
+    def test_build_manifest_allows_intel_only_release(self):
+        # arm64 cannot be cross-built on an Intel host (no universal2
+        # numpy/scipy for py3.14), so a release may ship Intel-only.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "SingWS-0.3.0-x86_64-installer.dmg").write_bytes(b"B" * 2000)
+            man = wm.build_manifest("0.3.0", d)
+            self.assertEqual(set(man["downloads"]), {"mac_x86_64"})
+
+    def test_build_manifest_still_requires_intel(self):
+        # A missing Intel DMG means the local build failed; that must be fatal
+        # rather than quietly publishing an arm64-only manifest.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "SingWS-0.3.0-arm64-installer.dmg").write_bytes(b"A" * 1000)
+            with self.assertRaises(SystemExit):
+                wm.build_manifest("0.3.0", d)
 
 
 class UpdateManifestDefaultsTests(unittest.TestCase):

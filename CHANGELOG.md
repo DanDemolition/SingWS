@@ -1,3 +1,86 @@
+## 0.4.4.0
+
+### Packaging
+- **The Intel legacy (macOS 12/13) edition is retired.** Apple Silicon and Intel
+  are the two supported targets. `release.sh` no longer builds, uploads or
+  verifies it and `tools/write_manifest.py` no longer advertises
+  `mac_intel_legacy`; the spec and build script stay in the tree so one can still
+  be produced by hand. The single published legacy asset
+  (`SingWS-0.4.3.6-intel-legacy-installer.dmg`) was removed from GitHub.
+- **arm64 is no longer cross-built from an Intel host.** The pipeline assumed
+  "both venvs are universal2", which stopped being true on CPython 3.14: numpy
+  and scipy publish no universal2 wheels for it (checked back to numpy 2.0.0),
+  and PyInstaller has to import them under the x86_64 interpreter, which cannot
+  load an arm64-only `.so`. arm64 must now be built natively on an Apple Silicon
+  Mac — which also bundles the mpv engine that every cross-built arm64 DMG has
+  lacked — and copied in. A release ships Intel-only when no arm64 DMG is
+  present; a missing *Intel* DMG is still fatal, and the manifest never
+  advertises a file that is not there.
+
+### Fixed
+- **The GUI thread froze for ~5 seconds on every launch and ~2 seconds
+  whenever the relay reconnected.** The 2026-08-09 log has the app's own stall
+  watchdog recording it plainly: three launches (14:22:08, 14:25:55, 14:28:06)
+  each blocked for ~2.9s during construction and again for ~2.0s the moment
+  the relay delivered its first 100-row snapshot, plus 18.2s of stalls across
+  21 events in that hour alone. Menus not dropping and clicks doing nothing
+  were these windows, not a hang — the watchdog logged a recovery every time.
+  Four separate causes, all on the GUI thread:
+  - *Reconcile persisted synchronously.* `_reconcile_remote_requests` ended by
+    writing queue + singer history + singer prefs inline on every pass that
+    accepted nothing — which is most passes, including the big one right after
+    the relay connects at launch. It now always uses the existing debounced
+    save (snapshot on the UI thread, encode and write on a worker); shutdown
+    still forces a final synchronous save.
+  - *Header status rebuilt per relay row.* Every `[REQUEST-DIAG]` line called
+    `_refresh_header_status`, which rebuilds a rich-text label and a nine-line
+    tooltip. A 100-row snapshot did that 100 times. Refreshes now coalesce onto
+    the next event-loop turn, so a burst costs one repaint.
+  - *Every diagnostic line was written three times, synchronously.* `_diag`
+    called `print` on top of a root logger that already had a stream handler,
+    so each line hit stdout, stderr and the file. Sinks now sit behind a
+    `QueueListener`, so the GUI thread only enqueues; the duplicate `print` is
+    gone. Crash, shutdown and log-e-mail paths drain the queue first, so the
+    tail of the log still reaches disk.
+  - *Startup warm-up ran before the first paint.* `singleShot(0)` still fires
+    in the first event-loop turn, so the BGM preload (decode + loudness scan)
+    was part of the freeze, and the Qt Quick VFX overlay was built inline in
+    `VideoWindow.__init__` (QQuickView + QML compile). Both are now staggered
+    past first paint — 400ms and 700ms — and both are latency-tolerant: BGM
+    cannot start until the operator acts, and the show screen has a supported
+    painter fallback until the overlay attaches.
+- **tracks.json was parsed on the GUI thread during startup.** ~134k rows is
+  ~820ms of blocking JSON parse (`[LIBRARY-LOAD] elapsed_ms=815.8`), and it ran
+  inside `__init__` before the window could paint. Nothing in startup needs it —
+  song search goes through the SQLite index, and the remaining consumers
+  (songbook export/upload, rescan, duration scan, display-name lookup) are all
+  operator-initiated. It now parses on a worker; `tracks` became a property that
+  joins that worker if anything asks early, so a half-loaded library is not
+  observable, and an explicit reassignment (rescan, library removal) landing
+  mid-load wins over the worker's result. The perf-debug startup diagnostics,
+  which read `self.tracks`, moved onto a 2s timer so they do not drag the parse
+  straight back onto launch. The empty-library tripwire in
+  `process_external_request` was reading `__dict__["tracks"]` directly and was
+  updated to read the property's state — it distinguishes "still loading" from
+  "confirmed empty" rather than warning on the former.
+- **Opening Settings restyled every card individually.** The dialog builds 19
+  cards, each with a title and hint label, and called `setStyleSheet` on all of
+  them — ~57 style recomputations, which is what the watchdog logged as
+  `Polish on QFrame#settingsCard` (~309ms). Cards, titles and hints now carry
+  object names and are styled by one sheet on the dialog.
+- **Location auto-detect froze the whole app for up to 12 seconds.**
+  `_detect_current_device_location` waits by spinning `NSRunLoop.runUntilDate_`,
+  which pumps native events but not Qt's, so the UI was dead for the entire
+  timeout — and it runs as a side effect of pressing Save in Network settings.
+  The wait now also pumps Qt (excluding user input, so Save cannot be re-entered
+  from inside its own handler), and the save-triggered detect uses a 4s timeout
+  instead of the 12s used for an explicit "Detect now" click.
+- **`[PERF-DIAG]` measurements never reached the log.** `_perf_log_if_slow`
+  reported via `print`, which goes nowhere in the packaged .app, so the
+  instrumentation added to catch exactly these slow paths — including
+  `remote_request_reconcile_total` and `json_save_data` — was invisible in
+  `~/SingWS/logs`. It now logs through `_diag`.
+
 ## 0.4.3.9
 
 0.4.3.8 was built and run locally but never tagged or released, so everything
