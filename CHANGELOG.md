@@ -1,5 +1,20 @@
 ## 0.4.4.0
 
+### Added
+- **Venue profiles now carry the EQ.** `eq_karaoke`, `eq_bgm` and their enable
+  flags are venue-scoped, so a room's curve is banked when you leave it and
+  restored when you come back — a carpeted bar and a tiled hall no longer need
+  the same rig dialled in by ear at the start of every night. Switching applies
+  the curve to the **live** audio path rather than only writing settings: the
+  karaoke `af` chain is rebuilt (mpv has no EQ object to re-point) and the BGM
+  EQ is re-attached to the BASS engine, still respecting Simple Audio Mode.
+  Switching venues deliberately does not build the EQ engines if they do not
+  exist yet, so operators who never open the EQ still avoid the scipy/numpy
+  import.
+- **`ticker_vfx_enabled` is venue-scoped.** The other seven ticker settings
+  already followed the venue; this one was missed, so ticker effects did not
+  survive a switch.
+
 ### Packaging
 - **The Intel legacy (macOS 12/13) edition is retired.** Apple Silicon and Intel
   are the two supported targets. `release.sh` no longer builds, uploads or
@@ -18,6 +33,21 @@
   advertises a file that is not there.
 
 ### Fixed
+- **The freeze detector was causing the freezing.** The stall watchdog's
+  `last_event=` attribution, added 2026-08-09, installs an *application-wide* Qt
+  event filter written in Python, with `Paint`, `Timer` and `UpdateRequest` among
+  the types it watches — the highest-frequency events Qt has. Every one then
+  crossed the C++/Python boundary, and sip had to resolve the concrete QObject
+  subclass for each. A `sample` of the running app shows the cost plainly:
+  `sendThroughApplicationEventFilters -> sipQObject::eventFilter ->
+  sip_api_call_method -> buildObject -> convertSubClass`. The effect on the logs
+  is unambiguous — every day from 2026-08-01 to 08-08 recorded 34–184 `[STALL]`
+  lines and zero attribution; 08-09, the first day it ran, recorded 422,
+  dominated by paint events with no Python frame at all. Attribution now has its
+  own `stall_event_attribution` setting, default off, so ordinary runtime
+  diagnostics give stall stacks without taxing every event; when deliberately
+  enabled it says so in the log and warns that it slows the app.
+
 - **The GUI thread froze for ~5 seconds on every launch and ~2 seconds
   whenever the relay reconnected.** The 2026-08-09 log has the app's own stall
   watchdog recording it plainly: three launches (14:22:08, 14:25:55, 14:28:06)

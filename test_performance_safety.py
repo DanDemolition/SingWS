@@ -584,6 +584,25 @@ class PerformanceSafetyTests(unittest.TestCase):
             MAIN_SOURCE,
         )
 
+    def test_stall_event_attribution_is_separately_opt_in(self):
+        # An application-wide Python event filter makes every Paint/Timer in the
+        # app cross the C++/Python boundary. Enabling it alongside ordinary
+        # runtime diagnostics turned the freeze detector into the freeze.
+        self.assertIn('"stall_event_attribution": False', MAIN_SOURCE)
+        start = MAIN_SOURCE.index("def _install_main_thread_watchdog")
+        end = MAIN_SOURCE.index("# Settings defaults", start)
+        watchdog = MAIN_SOURCE[start:end]
+        self.assertIn('get("stall_event_attribution", False)', watchdog)
+        self.assertIn("raise _StallAttributionDisabled", watchdog)
+        self.assertIn("except _StallAttributionDisabled:", watchdog)
+        # The gate must come before the filter is installed on the application.
+        self.assertLess(
+            watchdog.index('get("stall_event_attribution", False)'),
+            watchdog.index("installEventFilter"),
+        )
+        # Stall stacks themselves must survive with attribution off.
+        self.assertIn("sys._current_frames()", watchdog)
+
     def test_tracks_json_is_parsed_off_the_gui_thread(self):
         # ~134k rows is ~800ms of JSON parse, and it ran inside __init__ before
         # the window could paint. Nothing in startup needs it.

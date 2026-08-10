@@ -265,6 +265,7 @@ class RecentRegressionTests(unittest.TestCase):
             _refresh_show_screen_qr=lambda *args, **kwargs: calls.append(("show_qr", args, kwargs)),
             restart_request_polling=lambda: calls.append("polling"),
             _sync_session_location_for_venue=lambda: calls.append("location"),
+            _apply_eq_settings_live=lambda reason: calls.append(("eq", reason)),
         )
 
         self.singws.KaraokeApp._apply_venue_settings_live(app, "Downtown")
@@ -272,6 +273,115 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn(("background", {"force": False, "advance_slideshow": False}), calls)
         self.assertIn("polling", calls)
         self.assertIn(("show_qr", ("venue_switch",), {"force": True}), calls)
+        self.assertIn(("eq", "venue_switch"), calls)
+
+    def test_venue_profiles_scope_eq_and_ticker_settings(self):
+        # A room's EQ curve and its ticker branding both belong to the venue,
+        # not the laptop.
+        scoped = set(self.singws.KaraokeApp.VENUE_SCOPED_SETTINGS)
+        for key in ("eq_karaoke", "eq_karaoke_enabled", "eq_bgm", "eq_bgm_enabled"):
+            self.assertIn(key, scoped, f"{key} must follow the venue")
+        for key in ("ticker_enabled", "ticker_custom_enabled", "ticker_custom_message",
+                    "ticker_color", "ticker_speed_px_per_sec", "ticker_size_index",
+                    "ticker_bold", "ticker_vfx_enabled"):
+            self.assertIn(key, scoped, f"{key} must follow the venue")
+
+        # Round-trip: capture under one venue, change, switch back, get it back.
+        app = SimpleNamespace(settings={
+            "eq_karaoke": [3.0, -2.0, 0.0],
+            "eq_karaoke_enabled": True,
+            "eq_bgm": [1.5, 1.5],
+            "eq_bgm_enabled": False,
+            "ticker_custom_message": "Downtown Bar",
+            "ticker_vfx_enabled": True,
+        })
+        app.VENUE_SCOPED_SETTINGS = self.singws.KaraokeApp.VENUE_SCOPED_SETTINGS
+        captured = self.singws.KaraokeApp._capture_venue_settings(app)
+        self.assertEqual(captured["eq_karaoke"], [3.0, -2.0, 0.0])
+        self.assertEqual(captured["eq_karaoke_enabled"], True)
+        self.assertEqual(captured["ticker_custom_message"], "Downtown Bar")
+        self.assertEqual(captured["ticker_vfx_enabled"], True)
+
+    def test_venue_eq_switch_moves_the_live_audio_path(self):
+        # Writing the settings is not enough: the previous room's curve would
+        # keep playing until the next restart.
+        pushed = []
+
+        class _EQ:
+            def __init__(self):
+                self.gains = None
+                self.enabled = None
+
+            def set_all_gains_db(self, g):
+                self.gains = list(g)
+
+            def set_enabled(self, on):
+                self.enabled = bool(on)
+
+        karaoke_eq, bgm_eq = _EQ(), _EQ()
+        bass = SimpleNamespace(set_eq=lambda eq: pushed.append(("bass_eq", eq is bgm_eq)))
+        app = SimpleNamespace(
+            settings={
+                "eq_karaoke": [4.0, 0.0, -1.0],
+                "eq_karaoke_enabled": True,
+                "eq_bgm": [2.0, -2.0],
+                "eq_bgm_enabled": True,
+            },
+            karaoke_eq=karaoke_eq,
+            bgm_eq=bgm_eq,
+            bg_music=SimpleNamespace(_bass_engine=bass),
+            _simple_audio_mode=lambda: False,
+            _push_mpv_audio_processing=lambda reason: pushed.append(("mpv", reason)),
+            _log_bgm_eq_route=lambda reason: pushed.append(("bgm_route", reason)),
+        )
+
+        self.singws.KaraokeApp._apply_eq_settings_live(app, "venue_switch")
+
+        self.assertEqual(karaoke_eq.gains, [4.0, 0.0, -1.0])
+        self.assertTrue(karaoke_eq.enabled)
+        self.assertEqual(bgm_eq.gains, [2.0, -2.0])
+        self.assertTrue(bgm_eq.enabled)
+        # The karaoke chain must be rebuilt; mpv has no EQ object to re-point.
+        self.assertIn(("mpv", "venue_eq:venue_switch"), pushed)
+        self.assertIn(("bass_eq", True), pushed)
+
+    def test_venue_eq_switch_does_not_build_engines(self):
+        # _ensure_eq_engines imports scipy/numpy; a venue switch must not drag
+        # that in for operators who never open the EQ.
+        app = SimpleNamespace(
+            settings={"eq_karaoke": [1.0], "eq_karaoke_enabled": True},
+            karaoke_eq=None,
+            bgm_eq=None,
+            _ensure_eq_engines=lambda: self.fail("venue switch must not build EQ engines"),
+        )
+        self.singws.KaraokeApp._apply_eq_settings_live(app, "venue_switch")
+        self.assertIsNone(app.karaoke_eq)
+
+    def test_venue_eq_respects_simple_audio_mode(self):
+        # Same rule as the EQ dialog: Simple Audio Mode keeps BGM EQ out of the
+        # chain entirely.
+        pushed = []
+
+        class _EQ:
+            def set_all_gains_db(self, g):
+                pass
+
+            def set_enabled(self, on):
+                pass
+
+        bgm_eq = _EQ()
+        app = SimpleNamespace(
+            settings={"eq_bgm": [1.0], "eq_bgm_enabled": True},
+            karaoke_eq=None,
+            bgm_eq=bgm_eq,
+            bg_music=SimpleNamespace(
+                _bass_engine=SimpleNamespace(set_eq=lambda eq: pushed.append(eq))
+            ),
+            _simple_audio_mode=lambda: True,
+            _log_bgm_eq_route=lambda reason: None,
+        )
+        self.singws.KaraokeApp._apply_eq_settings_live(app, "venue_switch")
+        self.assertEqual(pushed, [None], "Simple Audio Mode must detach the BGM EQ")
 
     def test_filesystem_probe_timeout_keeps_gui_path_bounded(self):
         started = time.monotonic()

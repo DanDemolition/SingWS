@@ -3155,6 +3155,10 @@ def _describe_window_topology() -> str:
         return ""
 
 
+class _StallAttributionDisabled(Exception):
+    """Control-flow marker: skip installing the app-wide attribution filter."""
+
+
 def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
     """Log the GUI-thread stack when the event loop stalls.
 
@@ -3208,6 +3212,12 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         # except. Own it here, keep a strong reference so PyQt cannot collect
         # the filter, and say out loud whether it is live.
         try:
+            if not bool(getattr(owner, "settings", {}).get("stall_event_attribution", False)):
+                # Default path: no application-wide filter, so ordinary events
+                # never cross into Python. [STALL] still reports the GUI-thread
+                # stack, which names the culprit whenever it is Python code.
+                raise _StallAttributionDisabled
+
             from PyQt6.QtCore import QEvent as _StallEvent
 
             class _StallAttribution(QObject):
@@ -3254,6 +3264,13 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
             else:
                 owner._stall_attribution = _StallAttribution(owner)
                 _stall_app.installEventFilter(owner._stall_attribution)
+                _diag(
+                    "[STALL] event attribution ENABLED — this taxes every Qt event "
+                    "and will itself slow the app; clear stall_event_attribution "
+                    "once the stall is identified"
+                )
+        except _StallAttributionDisabled:
+            _diag("[STALL] event attribution off (stall_event_attribution=0)")
         except Exception as _attr_exc:
             _diag(f"[STALL] event attribution install failed: {_attr_exc}")
 
@@ -3343,6 +3360,15 @@ DEFAULTS = {
     # everywhere. Applied at launch, before the video window is built.
     "quick_gpu_surfaces": "auto",
     "performance_debug_enabled": False, # opt-in runtime diagnostics; keep normal launches quiet
+    # Adds last_event= to [STALL] lines by installing an APPLICATION-WIDE Qt
+    # event filter written in Python. Every Paint/Timer/UpdateRequest in the app
+    # then crosses the C++/Python boundary, and sip has to resolve the concrete
+    # QObject subclass for each one. On 2026-08-09 that turned a diagnostic into
+    # the fault it was meant to diagnose: stall count went from 34-184/day to
+    # 422, dominated by paint events with no Python frame at all. Separate from
+    # performance_debug_enabled precisely so stall stacks stay usable without
+    # paying this. Turn on only to identify a specific stall, then turn back off.
+    "stall_event_attribution": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
     "auto_update_enabled": True,        # check GitHub Releases in the background at startup
@@ -33658,6 +33684,15 @@ class KaraokeApp(QWidget):
         "ticker_speed_px_per_sec",
         "ticker_size_index",
         "ticker_bold",
+        "ticker_vfx_enabled",
+        # EQ is a property of the room, not of the laptop: the same rig needs a
+        # different curve in a carpeted bar than in a tiled hall, and re-dialling
+        # it by ear at the start of every night was the alternative. Stored per
+        # venue and pushed into the live audio path on switch, not just saved.
+        "eq_karaoke",
+        "eq_karaoke_enabled",
+        "eq_bgm",
+        "eq_bgm_enabled",
         # Window placement follows the room's screen layout.
         "main_window_geometry",
         "karaoke_window_pos",
@@ -33752,12 +33787,69 @@ class KaraokeApp(QWidget):
         _diag(f"[VENUE] deleted profile {name!r}")
         return True
 
+    def _apply_eq_settings_live(self, reason: str = "venue_switch") -> None:
+        """Re-point the running EQ engines at the current settings.
+
+        Venue profiles carry their own EQ curves, so a switch has to move the
+        bands in the audio path -- writing the settings alone would leave the
+        previous room's curve playing until the next restart.
+
+        Deliberately does NOT call _ensure_eq_engines(): that imports
+        scipy/numpy, and forcing it here would pull them in on every venue
+        switch even for operators who never open the EQ. When the engines do
+        not exist yet there is nothing live to correct, and _ensure_eq_engines
+        reads these same settings when it eventually builds them.
+        """
+        karaoke_eq = getattr(self, "karaoke_eq", None)
+        bgm_eq = getattr(self, "bgm_eq", None)
+        if karaoke_eq is None and bgm_eq is None:
+            _diag(f"[VENUE-EQ] engines not built yet; saved curve applies on first use reason={reason}")
+            return
+
+        applied = []
+        if karaoke_eq is not None:
+            gains = self.settings.get("eq_karaoke", [])
+            if isinstance(gains, list) and gains:
+                karaoke_eq.set_all_gains_db(gains)
+            karaoke_eq.set_enabled(bool(self.settings.get("eq_karaoke_enabled", False)))
+            # mpv has no Python EQ object to re-point -- its bands live in the
+            # `af` chain, so the chain itself has to be rebuilt.
+            try:
+                self._push_mpv_audio_processing(f"venue_eq:{reason}")
+            except Exception as e:
+                _diag(f"[VENUE-EQ] karaoke chain rebuild failed: {e}")
+            applied.append("karaoke")
+
+        if bgm_eq is not None:
+            gains = self.settings.get("eq_bgm", [])
+            if isinstance(gains, list) and gains:
+                bgm_eq.set_all_gains_db(gains)
+            bgm_eq.set_enabled(bool(self.settings.get("eq_bgm_enabled", False)))
+            try:
+                bg = getattr(self, "bg_music", None)
+                bass = getattr(bg, "_bass_engine", None) if bg is not None else None
+                if bass is not None and hasattr(bass, "set_eq"):
+                    # Same rule as the EQ dialog: Simple Audio Mode keeps the
+                    # BGM EQ out of the chain entirely.
+                    bass.set_eq(None if self._simple_audio_mode() else bgm_eq)
+                self._log_bgm_eq_route(f"venue_eq:{reason}")
+            except Exception as e:
+                _diag(f"[VENUE-EQ] bgm chain reattach failed: {e}")
+            applied.append("bgm")
+
+        _diag(
+            f"[VENUE-EQ] applied reason={reason} engines={','.join(applied) or 'none'} "
+            f"karaoke_enabled={int(bool(self.settings.get('eq_karaoke_enabled', False)))} "
+            f"bgm_enabled={int(bool(self.settings.get('eq_bgm_enabled', False)))}"
+        )
+
     def _apply_venue_settings_live(self, name: str):
         """Push the newly loaded settings into the running app."""
         for label, call in (
             ("runtime media", lambda: self._apply_runtime_media_settings()),
             ("audio output", lambda: self._update_audio_output_button()),
             ("ticker", lambda: self.schedule_ticker_update()),
+            ("EQ", lambda: self._apply_eq_settings_live("venue_switch")),
             # Do not replace the surface underneath an active karaoke frame and
             # do not force a second fade-from-black.  When idle, the normal
             # image-to-image crossfade is enough; when playing, the new venue's
