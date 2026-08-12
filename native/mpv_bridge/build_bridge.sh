@@ -14,7 +14,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ARCH="x86_64"
-FRAMEWORKS="${SINGWS_MPV_FRAMEWORKS:-$HOME/Downloads/native_dual_view/Frameworks}"
+# Default matches build_singws_mac_intel.sh and SingWS-x86_64.spec: the stack
+# lives at native_dual_view/Frameworks in the repo root (gitignored, see
+# README.md). This used to default to ~/Downloads, where the stack first
+# arrived, which no longer exists and no other consumer looks at.
+FRAMEWORKS="${SINGWS_MPV_FRAMEWORKS:-$(cd ../.. && pwd)/native_dual_view/Frameworks}"
 OUT="libsingws_mpv_bridge.dylib"
 DEPLOYMENT_TARGET="12.0"
 

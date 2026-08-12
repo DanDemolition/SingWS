@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.4.0"
+APP_VERSION = "0.4.4.1"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -1357,14 +1357,7 @@ def _preferred_update_asset(assets: list) -> dict | None:
         if machine in {"arm64", "aarch64"}:
             preferred_terms = ["arm64", "universal"]
         elif machine in {"x86_64", "amd64", "i386", "i686"}:
-            try:
-                mac_major = int((platform.mac_ver()[0] or "0").split(".")[0])
-            except Exception:
-                mac_major = 0
-            if 0 < mac_major < 14:
-                preferred_terms = ["intel-legacy", "x86_64", "universal"]
-            else:
-                preferred_terms = ["x86_64", "intel", "universal"]
+            preferred_terms = ["x86_64", "intel", "universal"]
     for term in preferred_terms:
         for asset in dmg_assets:
             if term in str(asset.get("name", "")).lower():
@@ -1450,15 +1443,7 @@ class GitHubUpdateWorker(QThread):
             if machine in {"arm64", "aarch64"}:
                 keys = ["mac_arm64", "mac_universal"]
             elif machine in {"x86_64", "amd64", "i386", "i686"}:
-                try:
-                    mac_major = int((platform.mac_ver()[0] or "0").split(".")[0])
-                except Exception:
-                    mac_major = 0
-                keys = (
-                    ["mac_intel_legacy", "mac_x86_64", "mac_universal"]
-                    if 0 < mac_major < 14
-                    else ["mac_x86_64", "mac_universal"]
-                )
+                keys = ["mac_x86_64", "mac_universal"]
         keys.append("mac_universal")
         for key in keys:
             item = downloads.get(key)
@@ -2017,8 +2002,14 @@ def fast_mp3_duration_from_zip(zip_path):
 
 print("🎤 SingWS (GStreamer) starting…")
 
-APP_USER_DIR = Path.home() / "SingWS"
-APP_USER_DIR.mkdir(exist_ok=True)
+# SINGWS_HOME redirects the whole user-data root: logs, settings.json, the
+# queue, singer history. Importing this module for a test otherwise writes into
+# the live show's files -- on 2026-08-09 test runs added thousands of lines to
+# the very log being used to diagnose a fault, and anything reaching
+# save_settings() or save_data() would overwrite the operator's real settings
+# and queue mid-show. tools/run_tests.sh sets this; the app itself never does.
+APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / "SingWS"))
+APP_USER_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Logs directory ---
 LOGS_DIR = APP_USER_DIR / "logs"
@@ -2027,8 +2018,8 @@ LOGS_DIR.mkdir(exist_ok=True)
 DEFAULT_BG_IMAGE = "background_default.png"
 
 # --- APP USER DATA DIR ---
-APP_USER_DIR = Path.home() / "SingWS"
-APP_USER_DIR.mkdir(exist_ok=True)
+APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / "SingWS"))
+APP_USER_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_PATH = APP_USER_DIR / "settings.json"
 QUEUE_PATH = APP_USER_DIR / "queue.json"
 TRACKS_PATH = APP_USER_DIR / "tracks.json"
@@ -2059,7 +2050,7 @@ def _configured_karaoke_engine_label() -> str:
     override = str(os.environ.get("SINGWS_KARAOKE_ENGINE", "") or "").strip().lower()
     if override:
         pref = override
-    if os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1" or sys.platform != "darwin":
+    if sys.platform != "darwin":
         return "FFmpeg/Qt (mpv unavailable on this build)"
     if pref == "mpv":
         return "mpv (audio and video)"
@@ -2661,20 +2652,15 @@ _MAC_LOCATION_DELEGATE_CLASS = None
 _DIAG_RATE_LIMIT_LAST = {}
 
 def _diag(msg: str):
-    """Write diagnostic messages to both terminal and SingWS log.
-
-    The console output comes from the root logger's stream handler, so this
-    deliberately does not also ``print``: that wrote every diagnostic line
-    three times (stdout, stderr, file) and the duplicate synchronous writes
-    showed up as GUI-thread stalls during relay reconcile bursts.
-    """
+    """Write diagnostic messages to both terminal and SingWS log."""
+    try:
+        print(msg)
+    except Exception:
+        pass
     try:
         logging.info(msg)
     except Exception:
-        try:
-            print(msg)
-        except Exception:
-            pass
+        pass
 
 def _diag_rate_limited(key: str, msg: str, interval_sec: float = 60.0):
     """Log routine diagnostics at most once per key/interval."""
@@ -3274,6 +3260,12 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         except Exception as _attr_exc:
             _diag(f"[STALL] event attribution install failed: {_attr_exc}")
 
+        def _stack_capture_enabled() -> bool:
+            try:
+                return bool(getattr(owner, "settings", {}).get("stall_stack_capture", False))
+            except Exception:
+                return False
+
         def _watch():
             stall_logged = False
             peak = 0.0
@@ -3286,8 +3278,26 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                 if gap >= threshold:
                     peak = max(peak, gap)
                     if not stall_logged:
-                        frame = sys._current_frames().get(main_ident)
-                        stack = "".join(_traceback.format_stack(frame, limit=14)) if frame is not None else "(main-thread frame unavailable)"
+                        # Walking the main thread's frame chain from here is a
+                        # use-after-free: sys._current_frames() hands back live
+                        # frames, and format_stack() follows f_back while the
+                        # main thread is still executing and freeing them. It
+                        # segfaulted this app on 2026-08-09 23:15:41 --
+                        # EXC_BAD_ACCESS at 0x0 on thread
+                        # "singws-main-thread-watchdog", inside frame_back_get.
+                        # Detecting the stall only reads a float and is safe, so
+                        # timing stays on and the stack is opt-in.
+                        stack = "(stack capture off; set stall_stack_capture to enable)"
+                        if _stack_capture_enabled():
+                            try:
+                                frame = sys._current_frames().get(main_ident)
+                                stack = (
+                                    "".join(_traceback.format_stack(frame, limit=14))
+                                    if frame is not None
+                                    else "(main-thread frame unavailable)"
+                                )
+                            except Exception as exc:
+                                stack = f"(stack capture failed: {exc})"
                         # When the block is inside Qt's C++ the Python stack is
                         # just app.exec() and names nothing, so fall back to the
                         # last expensive event the filter saw dispatched.
@@ -3369,6 +3379,12 @@ DEFAULTS = {
     # performance_debug_enabled precisely so stall stacks stay usable without
     # paying this. Turn on only to identify a specific stall, then turn back off.
     "stall_event_attribution": False,
+    # Capture the GUI thread's Python stack when a stall is detected. The
+    # watchdog thread has to walk live frames belonging to the running main
+    # thread to do it, which is a use-after-free -- it segfaulted the app on
+    # 2026-08-09. Stall timing does not need this and stays on; enable only to
+    # chase a specific stall, on a machine that is not running a show.
+    "stall_stack_capture": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
     "auto_update_enabled": True,        # check GitHub Releases in the background at startup
@@ -3530,19 +3546,7 @@ TICKER_SIZE_PRESETS = [
 ]
 TICKER_SIZE_DEFAULT_INDEX = 2
 
-# Startup warm-up work that the operator cannot possibly need in the first
-# moments of a launch. A zero-delay timer still runs in the first event-loop
-# turn -- i.e. before the window paints -- so these are spaced out far enough
-# that the UI is up and interactive first, then the expensive bits fill in.
-# Both are latency-tolerant: BGM cannot start until the operator acts, and the
-# show-screen VFX layer has a supported painter fallback until it attaches.
-STARTUP_BG_PRELOAD_DELAY_MS = 400
-STARTUP_SHOW_VFX_ATTACH_DELAY_MS = 700
-STARTUP_DIAGNOSTICS_DELAY_MS = 2000
 
-# CoreLocation wait when auto-detect runs as a side effect of saving Network
-# settings. _detect_current_device_location clamps to a 2s floor.
-SAVE_LOCATION_DETECT_TIMEOUT_SEC = 4.0
 
 # Marquee scroll speed (pixels/second). Operator-adjustable so the ticker can be
 # sped up live when it reads too slowly for a room.
@@ -6487,8 +6491,18 @@ def _install_single_buffered_widget_surfaces() -> bool:
     """
     if sys.platform != "darwin":
         return False
-    if os.environ.get("SINGWS_WIDGET_SWAP", "").strip().lower() == "double":
-        _diag("[SURFACE] widget backing store left double-buffered by SINGWS_WIDGET_SWAP")
+    # NOW OPT-IN. The paragraph above predicted the cost -- "the window server
+    # may read the surface mid-paint" -- and assumed it would not show on
+    # "static operator chrome". The operator window is not static: the queue,
+    # rotation rail, level meters and BGM progress all repaint continuously,
+    # and on 2026-08-09 the result was visibly torn and stale widgets on every
+    # build carrying this (0.4.3.9, 0.4.4.0) and on none without it (0.4.3.6).
+    # A rare intermittent crash is a worse trade than corrupted chrome every
+    # night, so Qt's default double buffering wins until the real fix (a Qt
+    # upgrade, or not reaching blitBuffer at all) is in place.
+    # SINGWS_WIDGET_SWAP=single restores the workaround without a rebuild.
+    if os.environ.get("SINGWS_WIDGET_SWAP", "").strip().lower() != "single":
+        _diag("[SURFACE] widget backing store double-buffered (Qt default; set SINGWS_WIDGET_SWAP=single for the blitBuffer workaround)")
         return False
     try:
         fmt = QSurfaceFormat.defaultFormat()
@@ -8461,7 +8475,9 @@ class VideoAreaWidget(QWidget):
         siblings in the show window's vertical layout), so filling this
         widget's rect is exactly "window minus ticker space". Aspect ratio is
         deliberately ignored: letterboxing show art left black bars that read
-        as a broken background on stage.
+        as a broken background on stage, and the operator wants the artwork
+        edge to edge. The slides are authored for this, so the small vertical
+        compression from the ticker's height is accepted.
         """
         if pixmap.isNull():
             return
@@ -9442,7 +9458,6 @@ class ClickableImageLabel(QLabel):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, event):
         try:
@@ -13563,7 +13578,14 @@ class VideoWindow(QWidget):
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
         self.show_vfx = None
-        self._schedule_show_vfx_attach(self.video_area)
+        # Built inline, BEFORE the ticker, and it must stay that way. Both this
+        # overlay and the Qt Quick ticker are native child surfaces, and native
+        # surfaces stack by creation order rather than by Qt's widget
+        # hierarchy. Deferring this to a timer (0.4.4.0, to save ~200ms of
+        # startup) meant the ticker was created first and the overlay landed on
+        # top of it -- the ticker kept updating but was invisible for the whole
+        # show. Any future attempt to defer this has to re-raise the ticker.
+        self._attach_show_vfx(self.video_area)
 
         # Bottom ticker. Preferred backend is the Qt Quick render-thread ticker
         # (RenderThreadTicker): the scroll animation runs on the scene-graph
@@ -13626,48 +13648,6 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer = QTimer(self)
         self._idle_overlay_timer.timeout.connect(self._tick_idle_overlay)
         self._idle_overlay_timer.start(50)
-
-    def _schedule_show_vfx_attach(self, area):
-        """Build the Qt Quick VFX overlay after the window exists, not during it.
-
-        RenderThreadShowScreenVfx constructs a QQuickView and compiles QML from
-        a temp file.  Doing that inline meant the whole app window could not
-        paint until it finished, which showed up as a multi-second freeze at
-        launch.  The painter transition is a supported fallback, so start
-        without the overlay and swap it in shortly after -- by which point
-        _external_owner is also set, so the real saved setting is read instead
-        of the default.
-
-        The delay is deliberate rather than singleShot(0): a zero-delay timer
-        still fires in the first event-loop turn, before the window has
-        painted, which is exactly the freeze this is meant to avoid.
-        """
-        self.show_vfx = None
-        try:
-            area.set_show_vfx_overlay(None)
-            owner = getattr(self, "_external_owner", None)
-            settings = getattr(owner, "settings", {}) if owner is not None else {}
-            area.set_show_vfx_enabled(bool(settings.get("show_screen_vfx_enabled", True)))
-        except Exception:
-            pass
-
-        def _attach_later():
-            try:
-                if self.show_vfx is not None:
-                    return
-                # Touching a deleted C++ object raises; a fast quit can get
-                # here after the window is torn down.
-                area.objectName()
-            except RuntimeError:
-                return
-            except Exception:
-                pass
-            try:
-                self._attach_show_vfx(area)
-            except Exception as exc:
-                _diag(f"[SHOW-VFX] deferred attach failed; using painter transition: {exc}")
-
-        QTimer.singleShot(STARTUP_SHOW_VFX_ATTACH_DELAY_MS, _attach_later)
 
     def _attach_show_vfx(self, area):
         if not _native_quick_child_surfaces_supported():
@@ -14263,7 +14243,6 @@ class PhraseWaveformWidget(QWidget):
         self._markers = []          # [{seconds,label,kind}]
         self._playhead = None
         self._on_click = None
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_peaks(self, peaks):
         self._peaks = peaks
@@ -18610,7 +18589,6 @@ class SoundboardPad(QPushButton):
         self._label: str = ""
         self._volume: float = 1.0
         self.setAcceptDrops(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # Square-ish pads: fixed height (caller-tunable so the deck can shrink on
         # short displays), expanding width (the grid's column stretch keeps them
@@ -19704,7 +19682,6 @@ class KaraokeApp(QWidget):
             b.setFixedSize(48, 38)
             b.setMinimumWidth(0)
             b.setMaximumWidth(48)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.audio_output_button.setIconSize(QSize(30, 30))
@@ -19823,7 +19800,6 @@ class KaraokeApp(QWidget):
             self.karaoke_key_up_button,
         ):
             b.setFixedSize(40, 29)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.karaoke_tempo_value_label.setFixedSize(62, 29)
@@ -19836,7 +19812,6 @@ class KaraokeApp(QWidget):
         value_css = SINGWS_THEME.value_chip_css() if SINGWS_THEME is not None else f"QLabel {{ color:{_v('text_bright')}; background-color:rgba(255,255,255,0.055); border:1px solid rgba(255,255,255,0.048); border-radius:8px; font-size:13px; font-weight:800; }}"
         self.karaoke_tempo_value_label.setStyleSheet(value_css)
         self.karaoke_tempo_global_cb.setFixedSize(82, 30)
-        self.karaoke_tempo_global_cb.setCursor(Qt.CursorShape.PointingHandCursor)
         self.karaoke_tempo_global_cb.setStyleSheet(
             f"""
             QPushButton {{
@@ -20277,11 +20252,6 @@ class KaraokeApp(QWidget):
         # Rotation Lock — only visible/usable in Rotation mode (see _update_rotation_lock_button).
         self.rotation_lock_button = QPushButton("Lock")
         self.rotation_lock_button.setToolTip("Lock rotation")
-        self.move_up_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.move_down_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.remove_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clear_queue_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.rotation_lock_button.setCursor(Qt.CursorShape.PointingHandCursor)
         # Move buttons share equal width; Remove is slightly narrower and sits apart.
         btn_row1.addWidget(self.move_up_button, 1)
         btn_row1.addWidget(self.move_down_button, 1)
@@ -20753,7 +20723,6 @@ class KaraokeApp(QWidget):
         self.bg_main_stop_button = QPushButton("■")
         for b in (self.bg_main_prev_button, self.bg_main_play_button, self.bg_main_next_button, self.bg_main_stop_button):
             b.setFixedSize(36, 30)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         if sys.platform == "win32":
             _transport_font = QFont("Segoe UI Symbol")
@@ -21023,7 +20992,6 @@ class KaraokeApp(QWidget):
         self.left_workspace_history_button = QPushButton("Singer History")
         for b in (self.left_workspace_main_button, self.left_workspace_bg_button, self.left_workspace_history_button):
             b.setMinimumHeight(30)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.left_workspace_main_button.clicked.connect(lambda: self._set_left_workspace_view("main"))
         self.left_workspace_bg_button.clicked.connect(lambda: self._set_left_workspace_view("bg"))
@@ -21098,7 +21066,6 @@ class KaraokeApp(QWidget):
             btn = QPushButton()
             btn.setMinimumHeight(52)
             btn.setMinimumWidth(0)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             cell = QVBoxLayout(btn)
@@ -21189,12 +21156,6 @@ class KaraokeApp(QWidget):
         self._save_settings_timer = QTimer(self)
         self._save_settings_timer.setSingleShot(True)
         self._save_settings_timer.timeout.connect(self.save_settings)
-        # Header status is cheap once but rebuilds rich text + a multi-line
-        # tooltip.  Reconcile passes call it once per relay row, so coalesce
-        # the bursts into a single repaint instead of ~100 synchronous ones.
-        self._header_status_refresh_timer = QTimer(self)
-        self._header_status_refresh_timer.setSingleShot(True)
-        self._header_status_refresh_timer.timeout.connect(self._refresh_header_status_now)
         self._set_bottom_nav_active("main")
         self._update_deferred_remote_add_status()
 
@@ -21345,22 +21306,15 @@ class KaraokeApp(QWidget):
         # Log session start with system info
         SingWSLogger.log_session_start(self)
         if bool(self.settings.get("performance_debug_enabled", False)):
-            # Deferred: log_library_stats reads self.tracks, which would join
-            # the tracks.json worker and put the parse straight back onto
-            # startup. These are diagnostics -- writing them a couple of
-            # seconds later costs nothing and keeps launch responsive.
-            def _log_startup_diagnostics():
-                SingWSLogger.log_gstreamer_runtime_diagnostics()
+            SingWSLogger.log_gstreamer_runtime_diagnostics()
 
-                # Log library statistics
-                try:
-                    import song_index
-                    db_file = song_index.db_path()
-                    SingWSLogger.log_library_stats(self.tracks, db_path=db_file)
-                except Exception as e:
-                    logging.warning(f"Could not log library stats: {e}")
-
-            QTimer.singleShot(STARTUP_DIAGNOSTICS_DELAY_MS, _log_startup_diagnostics)
+            # Log library statistics
+            try:
+                import song_index
+                db_file = song_index.db_path()
+                SingWSLogger.log_library_stats(self.tracks, db_path=db_file)
+            except Exception as e:
+                logging.warning(f"Could not log library stats: {e}")
 
         self.setup_selection_behavior()
 
@@ -22923,12 +22877,16 @@ class KaraokeApp(QWidget):
             saved_pos = (self.settings or {}).get("karaoke_window_pos", {}) if hasattr(self, "settings") else {}
             if isinstance(saved_pos, dict) and int(saved_pos.get("width", 0) or 0) > 0 and int(saved_pos.get("height", 0) or 0) > 0:
                 try:
-                    self.video_window.setGeometry(
+                    # Guarded like the other two restore paths: saved geometry
+                    # outlives the monitor it was saved on, and restoring onto a
+                    # detached screen leaves a window macOS never gives a valid
+                    # backing store -- the 2026-08-09 23:15 segfault.
+                    self.video_window.setGeometry(_rect_on_attached_screen(QRect(
                         int(saved_pos.get("x", 100) or 100),
                         int(saved_pos.get("y", 100) or 100),
                         int(saved_pos.get("width", 640) or 640),
                         int(saved_pos.get("height", 520) or 520),
-                    )
+                    )))
                 except Exception:
                     pass
 
@@ -23256,8 +23214,6 @@ class KaraokeApp(QWidget):
                 or self.settings.get("karaoke_engine", "ffmpeg")
                 or "ffmpeg"
             ).strip().lower()
-            if os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1":
-                pref = "ffmpeg"
         except Exception:
             pref = "ffmpeg"
         if pref in ("gstreamer", "gst", "auto"):
@@ -26832,40 +26788,33 @@ class KaraokeApp(QWidget):
         # Group related controls into titled "cards" so each tab reads as a set of
         # clean sections — reuses the same card styling as the library/rotation
         # panels for a consistent, polished look.
-        # Styling is applied once on the dialog (see _settings_card_css below)
-        # rather than per widget here. This dialog builds 19 cards, each with a
-        # title and hint label, and a setStyleSheet() call on every one of them
-        # forced ~57 separate style recomputations -- which is what the stall
-        # watchdog kept catching as "Polish on QFrame#settingsCard" when the
-        # dialog opened. Object names let one dialog-level sheet cover them all.
         def _section_card(tab_layout, title=None, hint=None):
             card = QFrame()
             card.setObjectName("settingsCard")
+            try:
+                card.setStyleSheet(content_card_css("settingsCard", radius=12))
+            except Exception:
+                pass
             cl = QVBoxLayout(card)
             cl.setContentsMargins(16, 13, 16, 14)
             cl.setSpacing(9)
             if title:
                 _t = QLabel(title)
-                _t.setObjectName("settingsCardTitle")
+                try:
+                    _t.setStyleSheet(section_title_css())
+                except Exception:
+                    pass
                 cl.addWidget(_t)
             if hint:
                 _h = QLabel(hint)
-                _h.setObjectName("settingsCardHint")
+                try:
+                    _h.setStyleSheet(section_meta_css())
+                except Exception:
+                    pass
                 _h.setWordWrap(True)
                 cl.addWidget(_h)
             tab_layout.addWidget(card)
             return cl
-
-        def _settings_card_css() -> str:
-            """Card/title/hint styling for the whole dialog in one sheet."""
-            try:
-                return (
-                    content_card_css("settingsCard", radius=12)
-                    + f" QLabel#settingsCardTitle {{ {section_title_css()} }}"
-                    + f" QLabel#settingsCardHint {{ {section_meta_css()} }}"
-                )
-            except Exception:
-                return ""
 
         # Polished tab bar + primary Save button, themed to match the rest of the app.
         def _settings_dialog_extra_css():
@@ -26930,14 +26879,6 @@ class KaraokeApp(QWidget):
             focus_border = border.lighter(120)
 
             dlg.setStyleSheet(dialog_stylesheet(win, base, txtc) + _settings_dialog_extra_css())
-        except Exception:
-            pass
-
-        # Applied unconditionally: the palette-derived sheet above is wrapped in
-        # a try, and the cards must still be styled if it fails. Appending keeps
-        # this to one extra style pass instead of one per card.
-        try:
-            dlg.setStyleSheet((dlg.styleSheet() or "") + _settings_card_css())
         except Exception:
             pass
 
@@ -27459,8 +27400,7 @@ class KaraokeApp(QWidget):
         v.addLayout(pad_row)
 
         v = _section_card(tab_audio, "Playback")  # ---- Audio ----
-        legacy_intel_build = os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1"
-        mpv_available = sys.platform == "darwin" and not legacy_intel_build
+        mpv_available = sys.platform == "darwin"
 
         # Engine chooser. FFmpeg/SignalSmith is the default and the automatic
         # fallback; mpv is opt-in per machine. Both boxes read the saved engine
@@ -27496,10 +27436,7 @@ class KaraokeApp(QWidget):
         v.addWidget(mpv_keep_audio_cb)
 
         mpv_engine_note = QLabel(
-            "This macOS 12/13 Intel edition uses the compatible "
-            "FFmpeg/SignalSmith engine."
-            if legacy_intel_build
-            else "CDG timing calibration applies on the in-process (IINA) build; "
+            "CDG timing calibration applies on the in-process (IINA) build; "
                  "the follower-based build cannot apply it. Restart SingWS after "
                  "changing this; the current session keeps its existing engine."
             if sys.platform == "darwin"
@@ -29012,6 +28949,21 @@ class KaraokeApp(QWidget):
                     image = frame.copy()
             except Exception:
                 pass
+            # mpv renders into a native NSView, so there is no karaoke_frame to
+            # copy and QWidget.grab() below cannot see a native child surface --
+            # the DAW preview was blank for the entire mpv/IINA path. Ask the
+            # engine for the picture instead; it goes through libmpv's
+            # screenshot-raw and never touches the render path.
+            if image.isNull() and playing:
+                try:
+                    plugin = getattr(self, "_mpv_playback", None)
+                    grab = getattr(plugin, "grabFrame", None) if plugin is not None else None
+                    if callable(grab):
+                        grabbed = grab()
+                        if grabbed is not None and not grabbed.isNull():
+                            image = grabbed
+                except Exception as exc:
+                    self._daw_preview_log(f"capture engine grab failed reason={reason}: {exc}")
             if image.isNull() and va is not None:
                 try:
                     image = va.grab().toImage()
@@ -34498,35 +34450,6 @@ class KaraokeApp(QWidget):
         self._update_header_qr_widget()
 
     def _refresh_header_status(self):
-        """Coalesce header refreshes onto the next event-loop turn.
-
-        Callers fire this from tight loops (relay reconcile logs one line and
-        one refresh per request row).  Repainting per row blocked the GUI
-        thread for seconds; one repaint per burst is indistinguishable to the
-        operator and costs nothing.
-        """
-        try:
-            # Attribute access itself can raise on a partially constructed
-            # instance (Qt raises if the super __init__ never ran), so keep the
-            # whole scheduling path inside the guard and degrade to a direct
-            # refresh -- which carries its own guard -- on any failure.
-            timer = getattr(self, "_header_status_refresh_timer", None)
-            if timer is None:
-                # Called during __init__ before the timer exists.
-                self._refresh_header_status_now()
-                return
-            app = QApplication.instance()
-            owner_thread = self.thread() if app is not None else None
-            if app is not None and owner_thread is not None and QThread.currentThread() != owner_thread:
-                # Worker threads must not touch the timer or the labels.
-                self._run_on_ui_thread(self._refresh_header_status)
-                return
-            if not timer.isActive():
-                timer.start(0)
-        except Exception:
-            self._refresh_header_status_now()
-
-    def _refresh_header_status_now(self):
         try:
             accepting = bool(self.settings.get("requests_accepting", True))
             waitlist_enabled = bool(self.settings.get("use_waiting_for_add", False))
@@ -36144,12 +36067,7 @@ class KaraokeApp(QWidget):
                     self.settings["session_location_accuracy_meters"] = ""
                     self.settings["session_location_detected_at"] = 0
                 if self.settings["session_location_auto_detect"]:
-                    # Shorter than the explicit "Detect now" button: that is a
-                    # deliberate request where waiting is understood, whereas
-                    # this fires as a side effect of pressing Save and should
-                    # not hold the dialog for twelve seconds on a bad fix.
-                    # Manual coordinates already act as the fallback below.
-                    detect_location_now(show_result=False, timeout_sec=SAVE_LOCATION_DETECT_TIMEOUT_SEC)
+                    detect_location_now(show_result=False)
                     if (not self.settings.get("session_location_latitude")) or (not self.settings.get("session_location_longitude")):
                         self.settings["session_location_source"] = "manual_fallback" if (lat_edit.text().strip() and lng_edit.text().strip()) else ""
                 if not str(self.settings.get("session_location_session_id", "") or "").strip():
@@ -44423,12 +44341,8 @@ class KaraokeApp(QWidget):
             self.bg_music.current_index = 0
             print(f"[BG] Startup loaded playlist with {len(paths)} track(s)")
             # Warm audio path once on startup to reduce first-play hiccup.
-            # This decodes and loudness-scans a track, so it must not land in
-            # the first event-loop turn: at singleShot(0) it ran before the
-            # window had painted and became part of the launch freeze.  Nothing
-            # can start BGM this early, so let the UI come up first.
             try:
-                QTimer.singleShot(STARTUP_BG_PRELOAD_DELAY_MS, self.bg_music.preload_current_track_paused)
+                QTimer.singleShot(0, self.bg_music.preload_current_track_paused)
             except Exception:
                 pass
         except Exception as e:
@@ -45890,8 +45804,6 @@ class KaraokeApp(QWidget):
                 or "ffmpeg"
             ).strip().lower()
         except Exception:
-            return "ffmpeg"
-        if os.environ.get("SINGWS_INTEL_LEGACY_BUILD", "") == "1":
             return "ffmpeg"
         return "mpv" if (pref == "mpv" and sys.platform == "darwin") else "ffmpeg"
 
@@ -51014,7 +50926,6 @@ class KaraokeApp(QWidget):
         copy_btn = QPushButton("Copy Info")
         return_btn = QPushButton("Return to Queue")
         for btn in (complete_btn, open_btn, copy_btn, return_btn):
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setMinimumHeight(34)
         complete_btn.setStyleSheet(button_css(padding="7px 10px", radius=8))
         open_btn.setStyleSheet(subtle_button_css(padding="7px 10px", radius=8))
@@ -55560,12 +55471,17 @@ class KaraokeApp(QWidget):
             if not vw.isVisible():
                 saved_pos = self.settings.get("karaoke_window_pos")
                 if saved_pos:
-                    vw.setGeometry(
-                        saved_pos.get("x", 100),
-                        saved_pos.get("y", 100),
-                        saved_pos.get("width", 640),
-                        saved_pos.get("height", 520)
-                    )
+                    # Same guard as the startup restore. This path was missed:
+                    # hiding the show window and re-showing it after the
+                    # projector was unplugged put it straight back onto the
+                    # missing screen's coordinates, which is how the process
+                    # died in Qt's backing-store flush on 2026-08-09 23:15.
+                    vw.setGeometry(_rect_on_attached_screen(QRect(
+                        int(saved_pos.get("x", 100)),
+                        int(saved_pos.get("y", 100)),
+                        int(saved_pos.get("width", 640)),
+                        int(saved_pos.get("height", 520)),
+                    )))
                 vw.show()
 
             # Restore from minimized state (macOS + Windows) without changing normal/fullscreen state.

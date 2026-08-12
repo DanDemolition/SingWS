@@ -1,8 +1,10 @@
 # Verified pin set for a SINGLE Intel build that runs on macOS 12 and above.
 #
-# Purpose: retire the separate legacy build (setup_intel_legacy_env.sh) by
-# making the normal x86_64 build macOS 12-compatible, rather than maintaining a
-# second environment.
+# Purpose: retire the separate legacy build by making the normal x86_64 build
+# macOS 12-compatible, rather than maintaining a second environment. That is
+# now done — setup_intel_legacy_env.sh and its spec, build script, runtime shim
+# and .venv-intel-legacy are all gone, and these pins are what keep the single
+# Intel build on the macOS 12 floor.
 #
 # Verified 2026-08-07 on this repo's tools/verify_macos_min_version.py, by
 # downloading each wheel for --platform macosx_12_0_x86_64 --python-version

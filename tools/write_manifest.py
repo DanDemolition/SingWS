@@ -21,12 +21,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "DanDemolition/SingWS"
 
-# Apple Silicon and Intel are the two supported targets. The Intel legacy
-# (macOS 12/13) edition is no longer built or advertised; adding it back means
-# restoring the build step in release.sh as well.
 ARCHES = [
     ("mac_arm64", "Apple Silicon Mac", "arm64"),
-    ("mac_x86_64", "Intel Mac", "x86_64"),
+    ("mac_x86_64", "Intel Mac (macOS 12+)", "x86_64"),
 ]
 
 

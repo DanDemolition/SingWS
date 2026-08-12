@@ -66,7 +66,7 @@ class KaraFunIntelRegressionTests(unittest.TestCase):
     def test_all_macos_packages_declare_and_entitle_apple_events(self):
         entitlement = Path("SingWS.entitlements").read_text(encoding="utf-8")
         self.assertIn("com.apple.security.automation.apple-events", entitlement)
-        for spec_name in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
+        for spec_name in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             with self.subTest(spec=spec_name):
                 source = Path(spec_name).read_text(encoding="utf-8")
                 self.assertIn("NSAppleEventsUsageDescription", source)

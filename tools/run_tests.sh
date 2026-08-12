@@ -54,6 +54,18 @@ fi
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/singws-test-pycache}"
 
+# Never touch the operator's live data. Importing the main module opens
+# ~/SingWS/logs/singws_<today>.log, and anything reaching save_settings() or
+# save_data() rewrites the real settings.json and queue. On 2026-08-09 test runs
+# put thousands of lines into the log being used to diagnose a live fault.
+# A per-run scratch home keeps the suite hermetic.
+if [[ -z "${SINGWS_HOME:-}" ]]; then
+    SINGWS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/singws-test-home.XXXXXX")"
+    export SINGWS_HOME
+    trap 'rm -rf "$SINGWS_HOME"' EXIT
+fi
+echo "test data root: $SINGWS_HOME"
+
 PYTEST_EXTRA=()
 if ! "$PYTHON" -c 'from PyQt6.QtWidgets import QApplication; app = QApplication([])' \
         >/dev/null 2>&1; then

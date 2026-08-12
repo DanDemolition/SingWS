@@ -22,7 +22,6 @@ ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "0.2.18.1.py"
 SPECS = [
     ROOT / "SingWS-x86_64.spec",
-    ROOT / "SingWS-intel-legacy.spec",
     ROOT / "SingWS-arm64.spec",
 ]
 

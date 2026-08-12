@@ -14,21 +14,15 @@ venv/
 .venv-test/
 .venv-test-brew/
 .venv-universal/
-.venv-intel-legacy/
-.legacy-intel-wheelhouse/
 
 # Build outputs and packaged artifacts
 build/
 dist/
-build-intel-legacy-input/
-build-intel-legacy/
-dist-intel-legacy/
 *.app
 *.dmg
 *.pkg
 *.zip
 *.log
-signalsmith_audio_native.cpython-312-darwin.so
 
 # Large local media/tooling artifacts
 bin/
@@ -51,11 +45,11 @@ tmp_live_test_backup/
 !SingWS-universal.spec
 !SingWS-x86_64.spec
 !SingWS-arm64.spec
-!SingWS-intel-legacy.spec
 
 # IINA-derived media stack (GPL, ~117 MB of prebuilt dylibs). Not vendored into
 # the repo: point SINGWS_MPV_FRAMEWORKS at a local copy, or see
 # native/mpv_bridge/README.md.
 vendor/mpv-iina-Frameworks/
+native_dual_view/
 # Built native bridge; produced by native/mpv_bridge/build_bridge.sh
 native/mpv_bridge/libsingws_mpv_bridge.dylib

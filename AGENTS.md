@@ -229,6 +229,172 @@ Be explicit about assumptions and blockers.
 
 ---
 
+## This is live show software
+
+SingWS runs paying shows in front of rooms of people. A regression here is not a
+failed test, it is a KJ standing in front of an audience with a black screen.
+The rules below were written after 2026-08-09, when a night of changes shipped
+without ever being launched broke a live show.
+
+### 1. Find out what is actually running before diagnosing anything
+
+The source tree is not what the operator is using. Check the installed bundle
+first, every time:
+
+    defaults read /Applications/SingWS.app/Contents/Info.plist CFBundleShortVersionString
+    ls -ld /Applications/SingWS.app          # when it was installed
+
+The version string is not enough — several builds share one version. Confirm
+which *code* is in the bundle. PyInstaller zlib-compresses the frozen bytecode,
+so grep finds nothing; decompress and search for a marker unique to the change
+(try all four zlib headers: `\x78\x01`, `\x78\x5e`, `\x78\x9c`, `\x78\xda`).
+For a bundled dylib, compare the code section, which codesigning does not alter:
+
+    otool -s __TEXT __text <dylib> | tail -n +3 | shasum -a256
+
+On 2026-08-09 a fix was diagnosed, blamed, and reverted while the operator was
+running a build that never contained it.
+
+### 2. A build that is not installed proves nothing
+
+Never reason about tree code while the operator tests an older binary. Either
+install it or say plainly that it is not installed. Building and then discussing
+the fix as though it were live is how an evening gets lost.
+
+### 3. Never hand an unlaunched build to a live show
+
+Run it first. Tests passing is not the same as the app working: none of the
+regressions on 2026-08-09 — squashed artwork, a buried ticker, a black video
+area — were reachable by any test in the suite.
+
+If it cannot be launched (mid-show, no hardware), say so explicitly and let the
+operator decide, rather than implying it was validated.
+
+### 4. Rendering and layout changes cannot be validated by tests
+
+Aspect ratio, stacking, cursors, shaders, window geometry: look at them. Take a
+screenshot (`screencapture -x -D <display>`). Never change shader geometry or
+surface ordering during a show.
+
+### 5. Do not change deliberate behaviour on inference
+
+A comment saying "aspect ratio is deliberately ignored" is a decision, not a
+bug. "It looks wrong to me" is not evidence. Ask. On 2026-08-09 a deliberate
+edge-to-edge fill was reverted to letterboxing because a vague report was read
+as confirmation.
+
+### 6. Native child surfaces stack by creation order
+
+Qt Quick overlays, the ticker, and mpv views are native NSViews on macOS. Their
+z-order follows creation order, NOT the Qt widget hierarchy, and nothing in the
+widget tree clips them. Deferring the creation of one past another silently puts
+it on top — this hid the ticker on one launch and the whole video area on the
+next. Anything that reorders surface creation must re-raise what it displaced,
+and must be verified on screen.
+
+### 7. Tests must never touch live show data
+
+`~/SingWS` holds the log, settings.json, the queue and singer history. Importing
+the main module opens the live log; anything reaching `save_settings()` or
+`save_data()` overwrites the operator's real state. Always run the suite with a
+scratch root:
+
+    SINGWS_HOME=$(mktemp -d) ...
+
+`tools/run_tests.sh` does this. Confirm afterwards that the live log line count
+did not move.
+
+### 8. Native crashes are not in the app log
+
+`SingWS/logs/*.log` only catches Python exceptions. Real segfaults land in
+`~/Library/Logs/DiagnosticReports/SingWS-*.ips`. Read the faulting thread's
+stack there before concluding there have been no crashes.
+
+### 9. Diagnostics must not cost more than the fault
+
+An application-wide Qt event filter in Python taxes every paint and timer in the
+app; walking the main thread's live frames from a watchdog thread is a
+use-after-free. Both shipped as stall diagnostics on 2026-08-09; one tripled the
+stall count and the other segfaulted the app. Keep this class of instrumentation
+opt-in and default off (`stall_event_attribution`, `stall_stack_capture`).
+
+### 10. Prefer the smallest change that fixes the reported fault
+
+Speculative performance work caused every regression that night, while the
+actual faults were three pre-existing bugs. When a change is not demanded by the
+report in hand, leave it out.
+
+---
+
+## This machine
+
+Facts about the development Mac that are not visible from the source tree, and
+that have each cost a session's worth of wrong reasoning at least once.
+
+### The dev Mac is Intel (x86_64)
+
+arm64 binaries cannot execute here at all — `lipo`-thinning an arm64 python and
+running it gives "bad CPU type in executable". `SingWS-*-arm64-installer.dmg` can
+be produced (PyInstaller `target_arch='arm64'`) but never smoke-tested locally;
+only the x86_64 flavour actually launches. Since 0.4.4.0 arm64 is expected to be
+built natively on an Apple Silicon Mac and copied in.
+
+`build_all.sh` reads as though the host were Apple Silicon — it calls the arm64
+flavour "(dev)" and labels Intel "the Intel test machine". Those comments are
+wrong about this machine. Nor does `verify_macos_arch.py --require arm64
+--require x86_64` passing say anything about the host: it checks which slices a
+binary contains, not which one can run.
+
+### Running the tests
+
+    ./.venv-universal/bin/python -m unittest <module>
+
+from `/Users/Daniel/Documents/SingWS/SingWS`. The system `python3` has no PyQt6
+and no `mpv`, so anything importing the app fails with ModuleNotFoundError.
+There is no pytest; the suites are plain `unittest`. Of the three venvs
+(`.venv`, `.venv-universal`, `.venv-test`), `.venv-universal` is the one the
+build scripts use as `$PYTHON`. (`.venv-intel-legacy` went with the retired
+legacy edition.)
+
+**No existing venv can construct a QApplication.** Each has a PyQt6 /
+PyQt6-Qt6 split (`.venv-universal` = bindings 6.9.0, frameworks 6.9.2), so Qt
+finds zero platform plugins and aborts — cocoa, minimal and offscreen alike.
+That silently skips the ~10 modules that build a QApplication, and one of them
+aborts `unittest discover` outright, so a plain discover run reports nothing.
+Matching versions is *not* sufficient (`.venv-test` is matched at 6.10.0 and
+still fails); build a genuinely fresh venv:
+
+    python3 -m venv qtvenv
+    ./qtvenv/bin/pip install PyQt6==6.9.1 PyQt6-Qt6==6.9.1 psutil requests \
+        numpy qrcode pillow scipy
+
+That runs 792 tests green. It cannot run `test_karaoke_engine_selection` (needs
+`mpv`) or `test_mac_keep_awake` (needs pyobjc) — run those two in
+`.venv-universal`, where they pass. Between the two venvs the suite is fully
+coverable. The shipped .app is unaffected; it bundles its own Qt.
+
+Always run with a scratch `SINGWS_HOME` (see live-show rule 7);
+`tools/run_tests.sh` now creates and cleans one automatically.
+
+### mpv still discards the CDG timing offset
+
+`MpvKaraokeTransport.set_video_offset_ms()` in `mpv_karaoke_transport.py` is a
+deliberate no-op, so the calibrated `FFMPEG_CDG_BASE_OFFSET_MS` (+750ms after
+the baseline migration) never reaches mpv's renderer. Under `mpv-video` the
+offset lands on the audio-only Python transport, which draws nothing — same
+result. Symptom: CDG lyrics run ~750ms out and the Display tab's fine tuning
+does nothing.
+
+Therefore `karaoke_engine` must stay defaulted to `ffmpeg`, saved settings must
+not be migrated onto mpv, and the Settings engine checkbox must stay — removing
+it left no way back to the working engine, and making mpv the default forced a
+version rollback mid-use on 2026-08-07. The fix belongs in
+`MpvPlaybackPlugin._sync_loop` (`mpv_playback.py`), where `delta = master - t`
+becomes `delta = (master + offset_seconds) - t`, plus wiring the setter through
+the plugin. It needs live calibration — do not ship it unverified.
+
+---
+
 ## Reporting format
 
 Use this output structure for substantial tasks:

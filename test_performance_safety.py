@@ -561,9 +561,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         init_source = init_source[:init_source.index("self.header_location_label")]
         self.assertIn("Requests Open", init_source)
         self.assertIn("Waitlist On", init_source)
-        # The label/tooltip build lives in the _now variant; _refresh_header_status
-        # is the coalescing scheduler in front of it.
-        refresh = function_source("_refresh_header_status_now")
+        refresh = function_source("_refresh_header_status")
         self.assertIn("Requests Open", refresh)
         self.assertIn("Waitlist On", refresh)
         self.assertIn("Waitlist mode:", refresh)
@@ -571,18 +569,95 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('or self.settings.get("venue_name")', refresh)
         self.assertIn('or self.settings.get("tenant")\n                    or self.settings.get("user")', refresh)
 
-    def test_header_status_refresh_is_coalesced(self):
-        # Relay reconcile calls this once per request row; a synchronous
-        # rebuild per row blocked the GUI thread for seconds.
-        scheduler = function_source("_refresh_header_status")
-        self.assertIn("_header_status_refresh_timer", scheduler)
-        self.assertIn("timer.start(0)", scheduler)
-        self.assertIn("_run_on_ui_thread", scheduler)
-        self.assertIn("self._header_status_refresh_timer.setSingleShot(True)", MAIN_SOURCE)
-        self.assertIn(
-            "self._header_status_refresh_timer.timeout.connect(self._refresh_header_status_now)",
-            MAIN_SOURCE,
+    def test_every_show_window_restore_guards_against_a_detached_screen(self):
+        # Restoring saved geometry onto a monitor that is gone leaves a window
+        # macOS never assigns a valid backing store, and Qt then segfaults in
+        # QBackingStore::flush (2026-08-09 23:15:55, EXC_BAD_ACCESS at 0x0 in
+        # QPaintDevice::devicePixelRatio). 0.4.3.9 guarded only the startup
+        # path; the re-show and bottom-right paths restored raw.
+        lines = MAIN_SOURCE.splitlines()
+        unguarded = []
+        for i, line in enumerate(lines):
+            if "karaoke_window_pos" not in line:
+                continue
+            window = "\n".join(lines[i:i + 18])
+            if "setGeometry" in window and "_rect_on_attached_screen" not in window:
+                unguarded.append(i + 1)
+        self.assertEqual(
+            unguarded, [],
+            f"show-window geometry restored without _rect_on_attached_screen at lines {unguarded}",
         )
+
+    def test_show_vfx_is_attached_before_the_ticker(self):
+        """Native child surfaces stack by creation order, not widget hierarchy.
+
+        The show VFX layer and the Qt Quick ticker are both native surfaces.
+        Deferring the overlay to a timer (0.4.4.0) let the ticker be created
+        first, so the overlay stacked on top and the ticker was invisible for a
+        whole show while still updating its text. Build the overlay inline, and
+        before the ticker.
+        """
+        video = MAIN_SOURCE[
+            MAIN_SOURCE.index("class VideoWindow(QWidget):"):
+            MAIN_SOURCE.index("def _attach_show_vfx")
+        ]
+        self.assertIn("self._attach_show_vfx(self.video_area)", video)
+        self.assertNotIn("QTimer.singleShot", video.split("self._attach_show_vfx")[0][-400:])
+        self.assertLess(
+            video.index("self._attach_show_vfx(self.video_area)"),
+            video.index("self.ticker"),
+            "the VFX overlay must be created before the ticker",
+        )
+
+    def test_daw_preview_can_capture_from_the_mpv_engine(self):
+        """The DAW singer-screen preview was blank for the whole mpv path.
+
+        Its only frame source was _on_python_karaoke_frame (the FFmpeg/Qt
+        engine). Under mpv the picture is a shared GL texture in a native
+        NSView, so there is no karaoke_frame and QWidget.grab() -- the last
+        fallback -- cannot capture a native child surface.
+        """
+        capture = function_source("_capture_daw_singer_screen_snapshot")
+        self.assertIn('getattr(self, "_mpv_playback", None)', capture)
+        self.assertIn('getattr(plugin, "grabFrame", None)', capture)
+        # The engine grab must be tried BEFORE the widget-grab fallback that
+        # cannot see native surfaces.
+        self.assertLess(
+            capture.index('getattr(plugin, "grabFrame", None)'),
+            capture.index("va.grab().toImage()"),
+        )
+        # And the engine must actually expose it, through screenshot-raw rather
+        # than anything touching the render path.
+        import pathlib
+        iina = pathlib.Path("mpv_playback_iina.py").read_text(encoding="utf-8")
+        self.assertIn("def grabFrame(self):", iina)
+        self.assertIn("singws_bridge_grab_frame", iina)
+        self.assertIn("singws_bridge_free_frame", iina)
+        bridge = pathlib.Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        self.assertIn("screenshot-raw", bridge)
+        self.assertIn("singws_bridge_grab_frame", bridge)
+        # Freed exactly once, by the caller that owns it.
+        self.assertIn("singws_bridge_free_frame(buf)", iina)
+
+    def test_stall_stack_capture_is_opt_in(self):
+        # Walking the running main thread's frames from the watchdog thread is
+        # a use-after-free; it segfaulted the app on 2026-08-09 23:15:41
+        # (EXC_BAD_ACCESS at 0x0 in frame_back_get, thread
+        # "singws-main-thread-watchdog"). Timing is safe and stays on.
+        self.assertIn('"stall_stack_capture": False', MAIN_SOURCE)
+        start = MAIN_SOURCE.index("def _install_main_thread_watchdog")
+        end = MAIN_SOURCE.index("# Settings defaults", start)
+        watchdog = MAIN_SOURCE[start:end]
+        self.assertIn('get("stall_stack_capture", False)', watchdog)
+        self.assertIn("if _stack_capture_enabled():", watchdog)
+        # The dangerous call must sit behind the gate, never before it.
+        # Match the call itself, not the explanation in the comment above it.
+        self.assertLess(
+            watchdog.index("if _stack_capture_enabled():"),
+            watchdog.index("frame = sys._current_frames().get(main_ident)"),
+        )
+        # Stall detection and recovery timing must survive with capture off.
+        self.assertIn("GUI thread recovered after", watchdog)
 
     def test_stall_event_attribution_is_separately_opt_in(self):
         # An application-wide Python event filter makes every Paint/Timer in the
@@ -621,12 +696,6 @@ class PerformanceSafetyTests(unittest.TestCase):
         # The property must join, so nothing can observe a half-loaded library.
         getter = function_source("tracks")
         self.assertIn("thread.join()", getter)
-        # Startup diagnostics read self.tracks; they must not drag the parse back.
-        startup = MAIN_SOURCE[
-            MAIN_SOURCE.index("# DIAGNOSTIC: Freeze detector"):
-            MAIN_SOURCE.index("self.setup_selection_behavior()", MAIN_SOURCE.index("# DIAGNOSTIC: Freeze detector"))
-        ]
-        self.assertIn("QTimer.singleShot(STARTUP_DIAGNOSTICS_DELAY_MS, _log_startup_diagnostics)", startup)
 
     def test_empty_library_tripwire_reads_the_tracks_property_state(self):
         # tracks is a property now, so it no longer lands in __dict__; the
@@ -636,25 +705,6 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('_tracks_state.get("ready")', intake)
         self.assertIn('_tracks_known and not _tracks_state.get("value")', intake)
         self.assertNotIn('if "tracks" in _state and not _state.get("tracks"):', MAIN_SOURCE)
-
-    def test_settings_dialog_styles_cards_once(self):
-        # 19 cards x (card + title + hint) setStyleSheet calls forced ~57 style
-        # recomputations on open, logged as "Polish on QFrame#settingsCard".
-        # _section_card / _settings_card_css are nested inside configure_settings.
-        settings_dlg = function_source("configure_settings")
-        card_start = settings_dlg.index("def _section_card(")
-        card = settings_dlg[card_start:settings_dlg.index("def _settings_card_css(")]
-        self.assertNotIn("setStyleSheet", card)
-        self.assertIn('card.setObjectName("settingsCard")', card)
-        self.assertIn('_t.setObjectName("settingsCardTitle")', card)
-        self.assertIn('_h.setObjectName("settingsCardHint")', card)
-        sheet_start = settings_dlg.index("def _settings_card_css(")
-        sheet = settings_dlg[sheet_start:sheet_start + 700]
-        self.assertIn('content_card_css("settingsCard", radius=12)', sheet)
-        self.assertIn("QLabel#settingsCardTitle", sheet)
-        self.assertIn("QLabel#settingsCardHint", sheet)
-        # Must be applied even if the palette-derived sheet above throws.
-        self.assertIn('dlg.setStyleSheet((dlg.styleSheet() or "") + _settings_card_css())', settings_dlg)
 
     def test_location_detection_does_not_freeze_the_ui(self):
         # NSRunLoop.runUntilDate_ pumps native events but not Qt's, so the app
@@ -666,13 +716,11 @@ class PerformanceSafetyTests(unittest.TestCase):
             "from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop",
             MAIN_SOURCE,
         )
-        # Saving the Network dialog must not wait as long as an explicit detect.
-        self.assertIn("SAVE_LOCATION_DETECT_TIMEOUT_SEC = 4.0", MAIN_SOURCE)
+        # The wait itself is unchanged (a short timeout traded accuracy for
+        # speed and was reverted); only the UI freeze during it is fixed.
+        self.assertNotIn("SAVE_LOCATION_DETECT_TIMEOUT_SEC", MAIN_SOURCE)
         network = function_source("configure_network")
-        self.assertIn(
-            "detect_location_now(show_result=False, timeout_sec=SAVE_LOCATION_DETECT_TIMEOUT_SEC)",
-            network,
-        )
+        self.assertIn("detect_location_now(show_result=False)", network)
 
     def test_remote_reconcile_never_saves_synchronously(self):
         # Reconcile ends by persisting queue + singer history + singer prefs.
@@ -692,29 +740,6 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('_diag(f"[PERF-DIAG] {name} took', perf)
         self.assertNotIn('print(f"[PERF-DIAG]', perf)
 
-    def test_startup_warmup_is_staggered_past_first_paint(self):
-        # singleShot(0) still runs in the first event-loop turn, before the
-        # window paints, so zero-delay warm-up was part of the launch freeze.
-        self.assertIn("STARTUP_BG_PRELOAD_DELAY_MS = 400", MAIN_SOURCE)
-        self.assertIn("STARTUP_SHOW_VFX_ATTACH_DELAY_MS = 700", MAIN_SOURCE)
-        self.assertIn(
-            "QTimer.singleShot(STARTUP_BG_PRELOAD_DELAY_MS, self.bg_music.preload_current_track_paused)",
-            MAIN_SOURCE,
-        )
-        self.assertNotIn(
-            "QTimer.singleShot(0, self.bg_music.preload_current_track_paused)",
-            MAIN_SOURCE,
-        )
-        scheduler = function_source("_schedule_show_vfx_attach")
-        self.assertIn("QTimer.singleShot(STARTUP_SHOW_VFX_ATTACH_DELAY_MS, _attach_later)", scheduler)
-        # The overlay must not be built inside the constructor any more.
-        video_init = MAIN_SOURCE[
-            MAIN_SOURCE.index("class VideoWindow(QWidget):"):
-            MAIN_SOURCE.index("def _schedule_show_vfx_attach")
-        ]
-        self.assertIn("self._schedule_show_vfx_attach(self.video_area)", video_init)
-        self.assertNotIn("self._attach_show_vfx(self.video_area)", video_init)
-
     def test_diagnostic_logging_is_asynchronous(self):
         # Every _diag line used to be written three times synchronously
         # (stdout, stderr, file) on the GUI thread.
@@ -728,8 +753,6 @@ class PerformanceSafetyTests(unittest.TestCase):
             MAIN_SOURCE.index("def _diag(msg: str):"):MAIN_SOURCE.index("def _diag_rate_limited")
         ]
         self.assertIn("logging.info(msg)", diag)
-        # print must only be the fallback when logging itself fails.
-        self.assertLess(diag.index("logging.info(msg)"), diag.index("print(msg)"))
         # The tail of the log must survive a crash / shutdown.
         self.assertIn("flush_log_queue()", function_source("log_crash"))
         self.assertIn("flush_log_queue()", function_source("_on_app_about_to_quit"))

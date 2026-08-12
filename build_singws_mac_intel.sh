@@ -9,6 +9,12 @@ ENTRY="0.2.18.1.py"
 SPEC="SingWS-x86_64.spec"
 PYTHON=".venv-universal/bin/python"
 DMGBUILD=".venv/bin/dmgbuild"
+MEDIA_STACK="${SINGWS_MEDIA_STACK:-iina}"
+export SINGWS_MEDIA_STACK="$MEDIA_STACK"
+if [[ "$MEDIA_STACK" != "iina" && "$MEDIA_STACK" != "homebrew" ]]; then
+    echo "Unsupported SINGWS_MEDIA_STACK: $MEDIA_STACK"
+    exit 1
+fi
 
 if [[ "$(uname -m)" != "x86_64" ]]; then
     echo "This dedicated build must run natively on an Intel Mac."
@@ -17,8 +23,9 @@ fi
 
 for required in \
     "$ENTRY" "$SPEC" "$PYTHON" "$DMGBUILD" \
-    mpv_playback.py mpv_karaoke_transport.py MoltenVK_icd.json \
-    SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py; do
+    mpv_karaoke_transport.py MoltenVK_icd.json constraints-macos12.txt \
+    SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py \
+    tools/verify_macos_min_version.py; do
     [[ -e "$required" ]] || { echo "Missing required file: $required"; exit 1; }
 done
 
@@ -26,20 +33,35 @@ for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
 
-for required in \
-    /usr/local/bin/mpv \
-    /usr/local/lib/libmpv.2.dylib \
-    /usr/local/bin/ffmpeg \
-    /usr/local/lib/libMoltenVK.dylib; do
+if [[ "$MEDIA_STACK" == "iina" ]]; then
+    : "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
+    export SINGWS_MPV_FRAMEWORKS
+    STACK_INPUTS=(
+        mpv_playback_iina.py
+        native/mpv_bridge/libsingws_mpv_bridge.dylib
+        "$SINGWS_MPV_FRAMEWORKS/singws_libmpv.2.dylib"
+    )
+else
+    STACK_INPUTS=(
+        mpv_playback.py
+        /usr/local/bin/mpv
+        /usr/local/lib/libmpv.2.dylib
+        /usr/local/lib/libMoltenVK.dylib
+    )
+fi
+for required in "${STACK_INPUTS[@]}"; do
     [[ -e "$required" ]] || { echo "Missing Intel playback dependency: $required"; exit 1; }
-    file "$required" | grep -q "x86_64" || {
+    if file "$required" | grep -q "Mach-O" && ! file "$required" | grep -q "x86_64"; then
         echo "Playback dependency is not Intel x86_64: $required"
         exit 1
-    }
+    fi
 done
 
 "$PYTHON" tools/verify_macos_arch.py --runtime --require x86_64
-"$PYTHON" -c "import mpv; import PyQt6; import signalsmith_audio_native"
+"$PYTHON" -c "import PyQt6; import signalsmith_audio_native"
+if [[ "$MEDIA_STACK" == "homebrew" ]]; then
+    "$PYTHON" -c "import mpv"
+fi
 
 # This build is intended to cover macOS 12 and above, retiring the separate
 # legacy edition. PyQt6/Qt6 6.10+ raise the floor to macOS 13 while carrying a
@@ -91,7 +113,6 @@ APP_PATH="dist/$APP_NAME.app"
 # The two media stacks bundle different files under different names: Homebrew
 # ships libmpv.2.dylib driven by python-mpv, the IINA stack ships
 # singws_libmpv.2.dylib driven by the native bridge.
-MEDIA_STACK="${SINGWS_MEDIA_STACK:-homebrew}"
 if [[ "$MEDIA_STACK" == "iina" ]]; then
     REQUIRED_BUNDLED=(
         "$APP_PATH/Contents/Frameworks/singws_libmpv.2.dylib"

@@ -21,7 +21,7 @@ binaries = []
 for helper in (
     "python_karaoke_transport.py",
     "mpv_playback.py" if os.environ.get(
-        "SINGWS_MEDIA_STACK", "homebrew").strip().lower() != "iina"
+        "SINGWS_MEDIA_STACK", "iina").strip().lower() != "iina"
     else "mpv_playback_iina.py",
     "mpv_karaoke_transport.py",
     "bass_background_engine.py",
@@ -44,7 +44,7 @@ moltenvk_icd = project_root / "MoltenVK_icd.json"
 # neither the out-of-process `mpv` binary nor MoltenVK. Bundling them anyway
 # would drag Homebrew's whole macOS-14 dependency closure back in and defeat
 # the point of the swap.
-_media_stack_early = os.environ.get("SINGWS_MEDIA_STACK", "homebrew").strip().lower()
+_media_stack_early = os.environ.get("SINGWS_MEDIA_STACK", "iina").strip().lower()
 if _media_stack_early == "iina":
     for required in (moltenvk_icd,):
         if not required.exists():
@@ -66,17 +66,20 @@ from mpv_bundle_deps import libmpv_binaries  # noqa: E402
 # SINGWS_MEDIA_STACK=iina swaps Homebrew's libmpv closure for the IINA-derived
 # one, which is built against macOS 10.15 rather than Homebrew's 14/15. That is
 # what allows a single Intel build to run on macOS 12 (see
-# constraints-macos12.txt). Opt-in: the default build is unchanged.
+# constraints-macos12.txt). This is the default Intel release stack; set
+# SINGWS_MEDIA_STACK=homebrew only for a newer-mac development build.
 #
 # The two stacks are NOT interchangeable consumers. Homebrew's libmpv is driven
 # by python-mpv/ctypes and the out-of-process `mpv` binary; the IINA stack is
 # driven by libsingws_mpv_bridge.dylib + mpv_playback_iina.py. Selecting `iina`
 # therefore also requires the bridge dylib.
-media_stack = os.environ.get("SINGWS_MEDIA_STACK", "homebrew").strip().lower()
+media_stack = os.environ.get("SINGWS_MEDIA_STACK", "iina").strip().lower()
+if media_stack not in {"iina", "homebrew"}:
+    raise SystemExit(f"Unsupported SINGWS_MEDIA_STACK: {media_stack!r}")
 if media_stack == "iina":
     iina_frameworks = Path(
         os.environ.get("SINGWS_MPV_FRAMEWORKS", "")
-        or (Path.home() / "Downloads" / "native_dual_view" / "Frameworks")
+        or (project_root / "native_dual_view" / "Frameworks")
     )
     bridge_dylib = project_root / "native" / "mpv_bridge" / "libsingws_mpv_bridge.dylib"
     if not iina_frameworks.is_dir():
@@ -317,8 +320,9 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.4.0',
-        'CFBundleVersion': '0.4.4.0',
+        'CFBundleShortVersionString': '0.4.4.1',
+        'CFBundleVersion': '0.4.4.1',
+        'LSMinimumSystemVersion': '12.0',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
             "SingWS uses System Events to find, queue, and control songs in the KaraFun application."

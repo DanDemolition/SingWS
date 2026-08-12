@@ -32,7 +32,6 @@ class EngineSelectionTests(unittest.TestCase):
     def setUp(self):
         self._orig_python = self.singws.PythonKaraokeTransport
         self._orig_engine_override = os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
-        self._orig_legacy_build = os.environ.pop("SINGWS_INTEL_LEGACY_BUILD", None)
         self.addCleanup(self._restore)
         self.singws.PythonKaraokeTransport = _FfmpegSentinel
 
@@ -41,9 +40,6 @@ class EngineSelectionTests(unittest.TestCase):
         os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
         if self._orig_engine_override is not None:
             os.environ["SINGWS_KARAOKE_ENGINE"] = self._orig_engine_override
-        os.environ.pop("SINGWS_INTEL_LEGACY_BUILD", None)
-        if self._orig_legacy_build is not None:
-            os.environ["SINGWS_INTEL_LEGACY_BUILD"] = self._orig_legacy_build
 
     def _app(self, pref):
         app = self.singws.KaraokeApp.__new__(self.singws.KaraokeApp)
@@ -85,13 +81,6 @@ class EngineSelectionTests(unittest.TestCase):
         resolved, cls = self._app("ffmpeg")._select_karaoke_transport_cls()
         expected = "mpv" if sys.platform == "darwin" else "ffmpeg"
         self.assertEqual(resolved, expected)
-        self.assertIs(cls, _FfmpegSentinel)
-
-    def test_legacy_intel_build_always_uses_ffmpeg_signalsmith(self):
-        os.environ["SINGWS_KARAOKE_ENGINE"] = "mpv"
-        os.environ["SINGWS_INTEL_LEGACY_BUILD"] = "1"
-        resolved, cls = self._app("mpv")._select_karaoke_transport_cls()
-        self.assertEqual(resolved, "ffmpeg")
         self.assertIs(cls, _FfmpegSentinel)
 
     def test_engine_missing_returns_none_cls(self):
@@ -282,16 +271,12 @@ class CdgTimingBaselinePerEngineTests(unittest.TestCase):
 
     def setUp(self):
         self._orig_override = os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
-        self._orig_legacy = os.environ.pop("SINGWS_INTEL_LEGACY_BUILD", None)
         self.addCleanup(self._restore)
 
     def _restore(self):
         os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
         if self._orig_override is not None:
             os.environ["SINGWS_KARAOKE_ENGINE"] = self._orig_override
-        os.environ.pop("SINGWS_INTEL_LEGACY_BUILD", None)
-        if self._orig_legacy is not None:
-            os.environ["SINGWS_INTEL_LEGACY_BUILD"] = self._orig_legacy
 
     def _host(self, **settings):
         """Minimal stand-in: these resolvers only touch settings + the pref."""
@@ -375,11 +360,6 @@ class CdgTimingBaselinePerEngineTests(unittest.TestCase):
             "FFMPEG_CDG_BASE_OFFSET_MS + saved_fine", block,
             "the split migration must not read the live FFmpeg baseline",
         )
-
-    def test_legacy_intel_build_pins_the_ffmpeg_baseline(self):
-        os.environ["SINGWS_INTEL_LEGACY_BUILD"] = "1"
-        host = self._host(karaoke_engine="mpv")
-        self.assertEqual(host._cdg_timing_engine(), "ffmpeg")
 
 
 class PaintedOverlayVsMpvSurfaceTests(unittest.TestCase):

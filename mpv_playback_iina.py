@@ -89,6 +89,12 @@ class _BridgeApi:
         L.singws_bridge_set_audio_delay.argtypes = [ctypes.c_void_p, ctypes.c_double]
         L.singws_bridge_set_sidefill.argtypes = [ctypes.c_void_p, ctypes.c_int]
         L.singws_bridge_begin_transition.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        L.singws_bridge_grab_frame.restype = ctypes.c_void_p
+        L.singws_bridge_grab_frame.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+        ]
+        L.singws_bridge_free_frame.argtypes = [ctypes.c_void_p]
         L.singws_bridge_scan_silence.restype = ctypes.c_int
         L.singws_bridge_scan_silence.argtypes = [
             ctypes.c_char_p, ctypes.c_double, ctypes.c_double, ctypes.c_double,
@@ -367,6 +373,44 @@ class MpvPlaybackPlugin:
         if self._handle:
             self.api.lib.singws_bridge_set_sidefill(
                 self._handle, int(self._sidefill))
+    def grabFrame(self):
+        """Current picture as a QImage, or None.
+
+        The DAW singer-screen preview's only frame source was the FFmpeg/Qt
+        path (_on_python_karaoke_frame). Under mpv the picture is a shared GL
+        texture in a native NSView: there is no QImage, and the host's
+        QWidget.grab() fallback cannot capture a native child surface, so the
+        preview was blank for the whole mpv path. This goes through libmpv's
+        screenshot-raw, which never touches the render path.
+        """
+        if not self._handle:
+            return None
+        try:
+            from PyQt6.QtGui import QImage
+        except Exception:
+            return None
+        w = ctypes.c_int(0); h = ctypes.c_int(0); stride = ctypes.c_int(0)
+        buf = None
+        try:
+            buf = self.api.lib.singws_bridge_grab_frame(
+                self._handle, ctypes.byref(w), ctypes.byref(h), ctypes.byref(stride))
+            if not buf or w.value <= 0 or h.value <= 0 or stride.value <= 0:
+                return None
+            raw = ctypes.string_at(buf, stride.value * h.value)
+            # screenshot-raw hands back BGRA premultiplied; copy() detaches the
+            # QImage from `raw` before the buffer is freed below.
+            image = QImage(raw, w.value, h.value, stride.value,
+                           QImage.Format.Format_ARGB32_Premultiplied).copy()
+            return None if image.isNull() else image
+        except Exception:
+            return None
+        finally:
+            if buf:
+                try:
+                    self.api.lib.singws_bridge_free_frame(buf)
+                except Exception:
+                    pass
+
     def beginWindowTransition(self, duration_ms=1100):
         if self._handle:
             self.api.lib.singws_bridge_begin_transition(

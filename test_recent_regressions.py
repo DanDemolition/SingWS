@@ -80,14 +80,14 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("lyrics_background_video_opacity", self.singws.DEFAULTS)
         self.assertIn("crash_log_email_to", self.singws.DEFAULTS)
 
-    def test_widget_surfaces_are_single_buffered_on_macos(self):
-        """Disable the swap chain the QBackingStore::flush crash lives in.
+    def test_widget_surfaces_are_double_buffered_by_default_on_macos(self):
+        """Single buffering is opt-in; it corrupted the operator window.
 
-        Qt 6.9's QCALayerBackingStore::finalizeBackBuffer only calls blitBuffer
-        -- whose `painter.device()->devicePixelRatio()` is the faulting line --
-        when back and front are different buffers. m_buffers starts at 1 and
-        only ensureBackBuffer() grows it, and that returns immediately for
-        SingleBuffer, so the crashing call site becomes unreachable.
+        Forcing SwapBehavior::SingleBuffer made the crashing blitBuffer call
+        site unreachable, but it also lets the window server read the raster
+        surface mid-paint. On 2026-08-09 that showed as torn and stale widgets
+        on every build carrying it (0.4.3.9, 0.4.4.0) and on none without it
+        (0.4.3.6). Qt's default now wins unless SINGWS_WIDGET_SWAP=single.
         """
         from PyQt6.QtGui import QSurfaceFormat
 
@@ -95,18 +95,19 @@ class RecentRegressionTests(unittest.TestCase):
         try:
             with mock.patch.object(self.singws.sys, "platform", "darwin"), \
                  mock.patch.dict(os.environ, {"SINGWS_WIDGET_SWAP": ""}):
-                self.assertTrue(self.singws._install_single_buffered_widget_surfaces())
-                self.assertEqual(
+                # Default: Qt keeps its swap chain, so widgets paint cleanly.
+                self.assertFalse(self.singws._install_single_buffered_widget_surfaces())
+                self.assertNotEqual(
                     QSurfaceFormat.defaultFormat().swapBehavior(),
                     QSurfaceFormat.SwapBehavior.SingleBuffer,
                 )
 
-            # An operator escape hatch that needs no rebuild.
+            # The crash workaround is still reachable without a rebuild.
             QSurfaceFormat.setDefaultFormat(original)
             with mock.patch.object(self.singws.sys, "platform", "darwin"), \
-                 mock.patch.dict(os.environ, {"SINGWS_WIDGET_SWAP": "double"}):
-                self.assertFalse(self.singws._install_single_buffered_widget_surfaces())
-                self.assertNotEqual(
+                 mock.patch.dict(os.environ, {"SINGWS_WIDGET_SWAP": "single"}):
+                self.assertTrue(self.singws._install_single_buffered_widget_surfaces())
+                self.assertEqual(
                     QSurfaceFormat.defaultFormat().swapBehavior(),
                     QSurfaceFormat.SwapBehavior.SingleBuffer,
                 )
@@ -274,6 +275,15 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("polling", calls)
         self.assertIn(("show_qr", ("venue_switch",), {"force": True}), calls)
         self.assertIn(("eq", "venue_switch"), calls)
+
+    def test_ui_uses_the_system_arrow_cursor(self):
+        """No web-style hand cursors: macOS reserves the pointing hand for links.
+
+        Native controls keep the arrow, and Qt cursors inherit to children with
+        nothing in this file ever resetting one, so a single stray call spreads
+        further than its widget.
+        """
+        self.assertNotIn("PointingHandCursor", self.singws_source)
 
     def test_venue_profiles_scope_eq_and_ticker_settings(self):
         # A room's EQ curve and its ticker branding both belong to the venue,

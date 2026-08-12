@@ -67,7 +67,7 @@ echo ">>> [2/7] version: $CUR_VER -> $NEW_VER (tag $TAG)"
 if git rev-parse "$TAG" >/dev/null 2>&1 || gh release view "$TAG" >/dev/null 2>&1; then
   echo "!! $TAG already exists — bump to a new version or delete the old release/tag first."
   echo "   (reverting the version bump)"
-  git checkout -- 0.2.18.1.py SingWS-x86_64.spec SingWS-arm64.spec SingWS-intel-legacy.spec 2>/dev/null || true
+  git checkout -- 0.2.18.1.py SingWS-x86_64.spec SingWS-arm64.spec 2>/dev/null || true
   exit 1
 fi
 
@@ -76,10 +76,6 @@ fi
 # native DMG on its matching Mac and copy it into this directory.
 echo ">>> [3/7] building native installer for $(uname -m)"
 ./build_all.sh
-# The Intel legacy (macOS 12/13) edition is no longer shipped: Apple Silicon and
-# Intel are the two supported targets. The spec and build script stay in the tree
-# for manual use, but the pipeline does not build, upload, or advertise it.
-#
 # arm64 is NOT cross-built here. That used to work because every venv was
 # universal2, but numpy and scipy publish no universal2 wheels for CPython 3.14,
 # and PyInstaller must import them under this x86_64 interpreter -- an arm64-only
@@ -118,9 +114,7 @@ git add \
   0.2.18.1.py \
   mpv_playback.py mpv_karaoke_transport.py MoltenVK_icd.json \
   SingWS-x86_64.spec SingWS-arm64.spec \
-  SingWS-intel-legacy.spec singws_intel_legacy_runtime.py \
   build_all.sh build_singws_mac_intel.sh build_singws_mac_arm64.sh \
-  build_singws_mac_intel_legacy.sh setup_intel_legacy_env.sh \
   test_mpv_karaoke_transport.py test_karaoke_engine_selection.py \
   tools/mpv_smoke_test.py tools/verify_macos_min_version.py \
   tools/write_manifest.py tools/release_version.py \

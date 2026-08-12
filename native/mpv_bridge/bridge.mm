@@ -70,6 +70,7 @@ static void bridgeLog(const char *fmt, ...) {
 - (void)setAudioDelaySeconds:(double)seconds;
 - (void)setCdgSidefill:(int)mode;
 - (void)beginWindowTransition:(int)durationMs;
+- (void *)grabFrameWidth:(int *)width height:(int *)height stride:(int *)stride;
 @end
 
 @implementation BridgeVideoView
@@ -717,6 +718,62 @@ static GLuint makeProgram(void) {
         else bridgeLog("[bridge] audio-delay=%.3fs (CDG visual lead)",value);
     }];
 }
+// Hand the current picture back to Python as BGRA bytes.
+//
+// The DAW singer-screen preview only ever had one frame source:
+// _on_python_karaoke_frame, i.e. the FFmpeg/Qt engine. Under mpv the picture is
+// a shared GL texture drawn into a native NSView, so there is no QImage and
+// QWidget.grab() -- which is the host's last-resort fallback -- cannot see a
+// native child surface. The DAW preview was therefore blank for the whole mpv
+// path.
+//
+// screenshot-raw is used rather than glReadPixels on purpose: it runs through
+// libmpv's own command queue and never touches the render path or the GL
+// context the views present from, so a bad capture cannot disturb what the room
+// is watching. Caller owns the returned buffer and must pass it to
+// singws_bridge_free_frame.
+- (void *)grabFrameWidth:(int *)width height:(int *)height stride:(int *)stride {
+    if(!_mpv||_stopping.load())return nullptr;
+    mpv_node result; memset(&result,0,sizeof(result));
+    // "window" would include mpv's own OSD/letterboxing; "video" is the picture
+    // as decoded, which is what the host scales for the preview.
+    const char *cmd[]={"screenshot-raw","video",nullptr};
+    int r=mpv_command_ret(_mpv,cmd,&result);
+    if(r<0){
+        bridgeLog("[bridge] screenshot-raw failed: %s",mpv_error_string(r));
+        return nullptr;
+    }
+    void *out=nullptr;
+    if(result.format==MPV_FORMAT_NODE_MAP&&result.u.list){
+        int64_t w=0,h=0,st=0; void *data=nullptr; size_t bytes=0;
+        for(int i=0;i<result.u.list->num;i++){
+            const char *key=result.u.list->keys[i];
+            mpv_node *v=&result.u.list->values[i];
+            if(!key)continue;
+            if(!strcmp(key,"w")&&v->format==MPV_FORMAT_INT64)w=v->u.int64;
+            else if(!strcmp(key,"h")&&v->format==MPV_FORMAT_INT64)h=v->u.int64;
+            else if(!strcmp(key,"stride")&&v->format==MPV_FORMAT_INT64)st=v->u.int64;
+            else if(!strcmp(key,"data")&&v->format==MPV_FORMAT_BYTE_ARRAY&&v->u.ba){
+                data=v->u.ba->data; bytes=v->u.ba->size;
+            }
+        }
+        if(w>0&&h>0&&st>0&&data&&bytes>=(size_t)(st*h)){
+            out=malloc((size_t)(st*h));
+            if(out){
+                memcpy(out,data,(size_t)(st*h));
+                if(width)*width=(int)w;
+                if(height)*height=(int)h;
+                if(stride)*stride=(int)st;
+            }
+        }else{
+            bridgeLog("[bridge] screenshot-raw gave no usable image (%lldx%lld stride=%lld)",
+                    (long long)w,(long long)h,(long long)st);
+        }
+    }
+    mpv_free_node_contents(&result);
+    return out;
+}
+
 - (void)setCdgSidefill:(int)mode {
     _cdgSidefill=(mode<0?0:(mode>2?2:mode));
     bridgeLog("[bridge] cdg fill mode=%d (0 off, 1 background colour, 2 blur)",
@@ -994,6 +1051,9 @@ void singws_bridge_set_dsp_chain(void *h,const char*c){if(h)[(__bridge BridgeRen
 void singws_bridge_set_audio_delay(void *h,double s){if(h)[(__bridge BridgeRenderer *)h setAudioDelaySeconds:s];}
 void singws_bridge_set_sidefill(void *h,int e){if(h)[(__bridge BridgeRenderer *)h setCdgSidefill:e];}
 void singws_bridge_begin_transition(void *h,int ms){if(h)[(__bridge BridgeRenderer *)h beginWindowTransition:ms];}
+void *singws_bridge_grab_frame(void *h,int *w,int *ht,int *stride){
+    return h?[(__bridge BridgeRenderer *)h grabFrameWidth:w height:ht stride:stride]:nullptr;}
+void singws_bridge_free_frame(void *buf){ if(buf)free(buf); }
 int singws_bridge_scan_silence(const char *path,double noiseDb,double leadMinimum,
                                double trailMinimum,double *lead,double *trail,
                                double *duration){

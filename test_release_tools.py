@@ -51,7 +51,6 @@ class BumpTests(unittest.TestCase):
 
 class ManifestTests(unittest.TestCase):
     def _fake_dmgs(self, d: Path, version: str):
-        # Apple Silicon + Intel only; the intel-legacy edition is no longer shipped.
         for arch, content in (("arm64", b"A" * 1000),
                               ("x86_64", b"B" * 2000)):
             (d / f"SingWS-{version}-{arch}-installer.dmg").write_bytes(content)
@@ -66,8 +65,6 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(man["version"], "0.3.0")  # 'v' stripped
             self.assertEqual(man["release_date"], "2026-06-07")
             self.assertEqual(set(man["downloads"]), {"mac_arm64", "mac_x86_64"})
-            # The retired legacy edition must not creep back into the manifest.
-            self.assertNotIn("mac_intel_legacy", man["downloads"])
             arm = man["downloads"]["mac_arm64"]
             self.assertEqual(arm["filename"], "SingWS-0.3.0-arm64-installer.dmg")
             self.assertIn("releases/latest/download/SingWS-0.3.0-arm64-installer.dmg", arm["url"])
@@ -112,11 +109,20 @@ class UpdateManifestDefaultsTests(unittest.TestCase):
 
 
 class PackagingSpecTests(unittest.TestCase):
+    def test_intel_release_defaults_to_macos12_iina_stack(self):
+        spec = Path("SingWS-x86_64.spec").read_text(encoding="utf-8")
+        build = Path("build_singws_mac_intel.sh").read_text(encoding="utf-8")
+        self.assertNotIn('SINGWS_MEDIA_STACK", "homebrew"', spec)
+        self.assertIn('SINGWS_MEDIA_STACK", "iina"', spec)
+        self.assertIn('MEDIA_STACK="${SINGWS_MEDIA_STACK:-iina}"', build)
+        self.assertIn("'LSMinimumSystemVersion': '12.0'", spec)
+        self.assertIn("--maximum 12.0", build)
+
     def test_specs_bundle_no_gstreamer_and_exclude_gi(self):
         # GStreamer removal: specs must not set up a GST_REGISTRY, bundle the
         # plugin scanner/typelibs/framework, and must exclude gi so PyInstaller
         # cannot pull GStreamer back in transitively.
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 # Matched on the list contents, not the whole assignment: the
@@ -139,14 +145,14 @@ class PackagingSpecTests(unittest.TestCase):
     def test_release_specs_include_karafun_apple_events_authorization(self):
         entitlements = Path("SingWS.entitlements").read_text(encoding="utf-8")
         self.assertIn("com.apple.security.automation.apple-events", entitlements)
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn("NSAppleEventsUsageDescription", source)
                 self.assertIn("entitlements_file=str(project_root / 'SingWS.entitlements')", source)
 
     def test_release_specs_bundle_requests_tls_support(self):
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn("project_root = Path(SPECPATH)", source)
@@ -163,7 +169,7 @@ class PackagingSpecTests(unittest.TestCase):
             '"networkinformation"',
             '"tls"',
         )
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec", "SingWS-intel-legacy.spec"):
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn('qt_plugins_root = (', source)

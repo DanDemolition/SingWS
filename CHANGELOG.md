@@ -1,3 +1,13 @@
+## 0.4.4.1
+
+### Packaging
+- Published the unified Intel build for macOS 12 Monterey and newer. It uses
+  the IINA/libmpv media stack by default; the separate legacy Intel edition has
+  been retired.
+- The Apple Silicon installer is intentionally omitted from this release. It
+  must be built and verified natively on an Apple Silicon Mac before the
+  download page or update manifest advertises it.
+
 ## 0.4.4.0
 
 ### Added
@@ -15,13 +25,19 @@
   already followed the venue; this one was missed, so ticker effects did not
   survive a switch.
 
+### Changed
+- **The pointer is the system arrow everywhere again.** Fifteen widgets set
+  `PointingHandCursor` — a web convention. macOS reserves the pointing hand for
+  links and keeps the arrow over native controls, so buttons, soundboard pads
+  and the header QR all read as browser chrome rather than a Mac app. Qt cursors
+  also inherit to children and nothing in the file ever reset one, so each call
+  reached further than its own widget. All removed; a test keeps them out.
+
 ### Packaging
-- **The Intel legacy (macOS 12/13) edition is retired.** Apple Silicon and Intel
-  are the two supported targets. `release.sh` no longer builds, uploads or
-  verifies it and `tools/write_manifest.py` no longer advertises
-  `mac_intel_legacy`; the spec and build script stay in the tree so one can still
-  be produced by hand. The single published legacy asset
-  (`SingWS-0.4.3.6-intel-legacy-installer.dmg`) was removed from GitHub.
+- **The normal Intel build now defaults to the macOS 12-compatible IINA/libmpv
+  stack.** `SINGWS_MEDIA_STACK=homebrew` remains available as an explicit
+  development override; release builds no longer require an opt-in flag to
+  cover macOS 12 and newer Intel Macs.
 - **arm64 is no longer cross-built from an Intel host.** The pipeline assumed
   "both venvs are universal2", which stopped being true on CPython 3.14: numpy
   and scipy publish no universal2 wheels for it (checked back to numpy 2.0.0),
@@ -455,7 +471,9 @@ written up here ships as 0.4.3.9.
 ## Unreleased
 
 ### Added
-- **A single Intel build that runs on macOS 12+ (opt-in, `SINGWS_MEDIA_STACK=iina`).**
+- **A single Intel build that runs on macOS 12+.** The IINA stack is now the
+  normal Intel release default; `SINGWS_MEDIA_STACK=homebrew` is only an
+  explicit newer-mac development override.
   Aimed at retiring the separate legacy edition. Two independent floors had to
   come down, and neither was where it looked:
   - **The Python stack was never the hard limit.** numpy/scipy publish several
@@ -653,7 +671,7 @@ written up here ships as 0.4.3.9.
     `- Karaoke engine: FFmpeg/Qt (GStreamer removed)` regardless of the real
     engine, so logs from mpv sessions "confirmed" the false revert. It now
     reports the configured engine via `_configured_karaoke_engine_label()`,
-    honouring `SINGWS_KARAOKE_ENGINE` and the legacy Intel build.
+    honouring `SINGWS_KARAOKE_ENGINE`.
 
 - **Analyze Library progress window** — opens on top of the main window (was
   hidden behind it); clicking Analyze again while a pass runs resurfaces the

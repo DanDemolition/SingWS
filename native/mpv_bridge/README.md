@@ -5,9 +5,34 @@
 shared texture presented by two native NSViews (output + preview). No
 mpv-owned windows, no `wid`, no follower synchronization.
 
+## Where the frameworks come from
+
+The IINA-derived media libraries are **not** in this repo (see Licensing) and
+never will be: 71 prebuilt GPL dylibs, ~62 MB, x86_64 only. They are extracted
+from an IINA.app bundle and renamed with the `singws_` prefix.
+
+The tree expects them at **`native_dual_view/Frameworks/`** (repo root), which
+is gitignored — so a fresh checkout does not have them and cannot build Intel
+until they are put back by hand. Copy the directory in, or point
+`SINGWS_MPV_FRAMEWORKS` at wherever you keep it; every consumer honours that
+variable first:
+
+| Consumer | Default if `SINGWS_MPV_FRAMEWORKS` is unset |
+| --- | --- |
+| `build_singws_mac_intel.sh` | `$(pwd)/native_dual_view/Frameworks` |
+| `SingWS-x86_64.spec` | `<repo root>/native_dual_view/Frameworks` |
+| `build_bridge.sh` | `$HOME/Downloads/native_dual_view/Frameworks` |
+
+Note the third row disagrees with the other two — the bridge builder still
+defaults to the download location the stack first arrived in. Pass
+`--frameworks` explicitly, or export `SINGWS_MPV_FRAMEWORKS`, rather than
+relying on any of these defaults.
+
+This is the same arrangement as `vendor/mpv-iina-Frameworks/`: a local artifact
+the build depends on, deliberately kept out of git.
+
 ## Building
 
-The IINA-derived media libraries are **not** in this repo (see Licensing).
 Point the build at the directory containing `singws_libmpv.2.dylib`:
 
 ```bash
