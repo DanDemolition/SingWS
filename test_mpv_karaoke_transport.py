@@ -101,6 +101,27 @@ class MpvTransportTests(unittest.TestCase):
         transport._poll()
         self.assertEqual(plugin.seeks[-1], 10000)
 
+    def test_audible_start_eventually_commits_when_visual_is_late(self):
+        plugin, transport = self.make_transport("cdg")
+        plugin.visualsReady = lambda: False
+        transport.start()
+        plugin.position = 100
+        starts = []
+        transport.started.connect(lambda: starts.append(True))
+        required = max(4, int(round(1000 / transport._timer.interval())))
+        for _ in range(required):
+            transport._poll()
+        self.assertEqual(starts, [True])
+
+    def test_visual_readiness_still_commits_without_delay(self):
+        plugin, transport = self.make_transport("cdg")
+        transport.start()
+        plugin.position = 100
+        starts = []
+        transport.started.connect(lambda: starts.append(True))
+        transport._poll()
+        self.assertEqual(starts, [True])
+
 
 class _FakeEngine:
     """Stands in for the out-of-process audio master."""

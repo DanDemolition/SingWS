@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.4.1"
+APP_VERSION = "0.4.4.10"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -1654,27 +1654,20 @@ class SongbookUploadThread(QThread):
 
 # ----- GStreamer (with runtime guard + macOS guidance) -----
 
-# GStreamer has been removed from SingWS. The FFmpeg/Qt PythonKaraokeTransport
-# is the sole live karaoke engine. Gst/GstVideo/GstKaraokeTransport stay
-# defined as None so any residual guarded reference degrades to "unavailable"
-# instead of raising, and so old settings pinning karaoke_engine=gstreamer
-# fall through to the FFmpeg engine.
+# GStreamer and the FFmpeg karaoke transport have been removed from live
+# playback. Shared helpers remain for non-playback analysis only.
 Gst = None
 GstVideo = None
 
 try:
     from python_karaoke_transport import (
         NS_PER_SECOND,
-        FfmpegVideoReader,
-        PythonKaraokeTransport,
         preload_cdg_packets,
         match_qt_audio_device,
     )
     PYTHON_KARAOKE_IMPORT_ERROR = None
 except Exception as e:
     NS_PER_SECOND = 1_000_000_000
-    FfmpegVideoReader = None
-    PythonKaraokeTransport = None
     preload_cdg_packets = None
     match_qt_audio_device = None
     PYTHON_KARAOKE_IMPORT_ERROR = e
@@ -2033,30 +2026,8 @@ IMAGES_DIR.mkdir(exist_ok=True)
 
 
 def _configured_karaoke_engine_label() -> str:
-    """Human-readable engine for the startup banner.
-
-    The banner used to be a hardcoded string, so it reported FFmpeg even on
-    sessions that were really running mpv -- which made a correctly saved
-    setting look like it had reverted.  Read the settings file directly: this
-    runs during startup logging, before the app object exists.
-    """
-    try:
-        raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8") or "{}")
-        pref = str((raw or {}).get("karaoke_engine", "") or "").strip().lower()
-    except Exception:
-        pref = ""
-    if not pref:
-        pref = "ffmpeg"
-    override = str(os.environ.get("SINGWS_KARAOKE_ENGINE", "") or "").strip().lower()
-    if override:
-        pref = override
-    if sys.platform != "darwin":
-        return "FFmpeg/Qt (mpv unavailable on this build)"
-    if pref == "mpv":
-        return "mpv (audio and video)"
-    if pref == "mpv-video":
-        return "mpv video + SingWS audio engine"
-    return "FFmpeg/Qt (GStreamer removed)"
+    """Human-readable engine for the startup banner."""
+    return "mpv (audio and video)"
 
 # --- Background Music JSON index ---
 BG_MUSIC_INDEX_PATH = APP_USER_DIR / "bgmusic.json"
@@ -3402,17 +3373,12 @@ DEFAULTS = {
     "bg_video_enabled": False,        # play MP4 background videos behind CDG lyrics
     "bg_video_folder": "",            # folder of MP4 background videos
     "bg_video_shuffle": True,         # shuffle-bag order; False = alphabetical loop
-    "bg_video_quality": "auto",       # auto | 1080 | 720 | 540 | off; decorative layer only
-    "bg_video_auto_transcode_720p": False, # cache optimized playback copies for transparent CDG backgrounds
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "rotation_request_qr_enabled": True, # show the request QR + call to action on the rotation window; gated by requests_accepting
     "rotation_request_qr_caption": "JOIN THE QUEUE!", # call-to-action printed beside the rotation QR
-    # FFmpeg/Qt remains the default until mpv is proven in a live show. The CDG
-    # timing offset now works on the in-process (IINA) backend, which maps it
-    # onto mpv's audio-delay; the follower-based backend still cannot apply it
-    # and says so in the log. mpv stays opt-in per machine.
-    # Stale gstreamer/auto values map to ffmpeg.
-    "karaoke_engine": "ffmpeg",
+    # Retained only so old settings files deserialize cleanly. Karaoke playback
+    # is permanently owned by the bundled native mpv engine.
+    "karaoke_engine": "mpv",
     "cdg_timing_offset_ms": 0,       # Fine tuning added to the calibrated FFmpeg CDG +750ms baseline
     # Fine tuning for the mpv baseline. Kept separate from the FFmpeg key on
     # purpose: the two engines need opposite-signed baselines, so one shared
@@ -6791,6 +6757,66 @@ class BackgroundVideoShuffleBag:
         pick = self._queue.pop(0)
         self._last = pick
         return pick
+
+
+class NativeLyricsBackgroundVideoPlayer(QObject):
+    """Muted decorative MP4 playlist decoded inside the native mpv bridge."""
+
+    def __init__(self, plugin, parent=None, *, opacity: float = 1.0):
+        super().__init__(parent)
+        self.plugin = plugin
+        self.opacity = max(0.0, min(1.0, float(opacity)))
+        self._bag = None
+        self._current = ""
+        self._poll_count = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._poll_end)
+
+    def start(self, files: list[str], shuffle: bool = True) -> bool:
+        if not files or not callable(getattr(self.plugin, "loadBackgroundVideo", None)):
+            return False
+        self._bag = BackgroundVideoShuffleBag(files, shuffle=shuffle)
+        if not self._advance("start"):
+            return False
+        self._timer.start()
+        return True
+
+    def _advance(self, reason: str) -> bool:
+        path = self._bag.next() if self._bag is not None else None
+        if not path:
+            return False
+        if not self.plugin.loadBackgroundVideo(path, self.opacity):
+            _diag(f"[BG-VIDEO] native load failed file={os.path.basename(path)!r}")
+            return False
+        self._current = path
+        _diag(f"[BG-VIDEO] native playing file={os.path.basename(path)!r} reason={reason}")
+        return True
+
+    def _poll_end(self):
+        try:
+            self._poll_count += 1
+            if self._poll_count % 16 == 0:
+                position = int(getattr(self.plugin, "backgroundVideoPositionMs", lambda: 0)())
+                paused = bool(getattr(self.plugin, "backgroundVideoPaused", lambda: False)())
+                _diag(f"[BG-VIDEO] clock position_ms={position} paused={int(paused)}")
+            if self.plugin.backgroundVideoAtEnd():
+                self._advance("eos")
+        except Exception as exc:
+            _diag(f"[BG-VIDEO] native end poll failed: {exc}")
+
+    def stop(self, reason: str = "stop"):
+        self._timer.stop()
+        try:
+            self.plugin.stopBackgroundVideo()
+        except Exception:
+            pass
+        _diag(f"[BG-VIDEO] native stopped reason={reason}")
+        self._current = ""
+
+    def diagnostics(self) -> dict:
+        return {"running": bool(self._current), "current": os.path.basename(self._current),
+                "decoder": "native-libmpv", "renderer": "shared-gpu-texture"}
 
 
 class _LyricsBackgroundVideoWorker(QObject):
@@ -13649,6 +13675,13 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer.timeout.connect(self._tick_idle_overlay)
         self._idle_overlay_timer.start(50)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        owner = getattr(self, "_external_owner", None)
+        refresh = getattr(owner, "_refresh_mpv_video_views", None) if owner is not None else None
+        if callable(refresh):
+            refresh("show_event")
+
     def _attach_show_vfx(self, area):
         if not _native_quick_child_surfaces_supported():
             self.show_vfx = None
@@ -19230,11 +19263,10 @@ class KaraokeApp(QWidget):
             f"[SHOW-VFX] quick surfaces setting={self.settings.get('quick_gpu_surfaces', 'auto')} "
             f"resolved={'on' if _native_quick_child_surfaces_supported() else 'off'}"
         )
-        # Playback-engine changes made in Settings are deliberately applied on
-        # the next application launch, never halfway through a show/session.
-        self._karaoke_engine_session_pref = str(
-            self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg"
-        ).strip().lower()
+        # Migrate obsolete engine preferences. There is now one karaoke clock
+        # and renderer: the bundled native mpv core.
+        self.settings["karaoke_engine"] = "mpv"
+        self._karaoke_engine_session_pref = "mpv"
         _, library_settings_changed = _migrate_library_locations(self.settings)
         if library_settings_changed:
             self.save_settings()
@@ -23074,42 +23106,29 @@ class KaraokeApp(QWidget):
             folder = str(self.settings.get("bg_video_folder", "") or "")
             shuffle = bool(self.settings.get("bg_video_shuffle", True))
             opacity = int(float(self.settings.get("lyrics_background_video_opacity", 0) or 0))
-            quality = background_video_quality_profile(self.settings.get("bg_video_quality", "auto"))
-            auto_transcode = bool(self.settings.get("bg_video_auto_transcode_720p", False))
         except Exception:
             return
         if not enabled:
             return
-        if quality.get("key") == "off":
-            _diag("[BG-VIDEO] not started reason=quality_off")
-            return
         if opacity <= 0:
             _diag("[BG-VIDEO] not started reason=opacity_zero (set Background Video Opacity > 0)")
             return
-        if FfmpegVideoReader is None:
-            _diag("[BG-VIDEO] not started reason=video_reader_unavailable")
+        plugin = getattr(self, "_mpv_playback", None)
+        if plugin is None or not callable(getattr(plugin, "loadBackgroundVideo", None)):
+            _diag("[BG-VIDEO] not started reason=native_background_unavailable")
             return
         files = scan_background_video_folder(folder)
         if not files:
             _diag(f"[BG-VIDEO] fallback to normal CDG background reason=no_videos folder={folder!r}")
             return
-        files = prepare_background_video_playback_files(files, auto_transcode_720p=auto_transcode)
         try:
-            player = LyricsBackgroundVideoPlayer(
-                self,
-                on_frame=self._on_lyrics_bg_video_frame,
-                max_width=int(quality.get("max_width") or 1280),
-                max_height=int(quality.get("max_height") or 720),
-                max_fps=int(quality.get("max_fps") or 30),
-                quality_label=str(quality.get("key") or "auto"),
-            )
+            player = NativeLyricsBackgroundVideoPlayer(
+                plugin, self, opacity=opacity / 100.0)
             if player.start(files, shuffle=shuffle):
                 self._lyrics_bg_video_player = player
                 _diag(
                     f"[BG-VIDEO] started files={len(files)} shuffle={int(shuffle)} "
-                    f"opacity={opacity}% quality={quality.get('key')} "
-                    f"auto_transcode_720p={int(auto_transcode)} "
-                    f"work_cap={quality.get('max_width')}x{quality.get('max_height')}@{quality.get('max_fps')}fps "
+                    f"opacity={opacity}% decoder=native-libmpv renderer=shared-gpu-texture "
                     f"folder={folder!r}"
                 )
             else:
@@ -23195,70 +23214,17 @@ class KaraokeApp(QWidget):
 
 
     def _select_karaoke_transport_cls(self):
-        """Resolve the live karaoke engine.
-
-        mpv is an opt-in macOS path. FFmpeg/Qt remains the default and
-        automatic fallback until mpv is proven in a live show. The CDG timing
-        offset now applies on the in-process (IINA) backend via mpv's
-        audio-delay; the follower-based backend still cannot honour it. A stale
-        ``karaoke_engine`` setting of gstreamer/auto is accepted and simply
-        maps to the FFmpeg engine. Returns
-        (normalized_pref, transport_cls_or_None).
-        """
-        try:
-            override = str(os.environ.get("SINGWS_KARAOKE_ENGINE", "") or "").strip()
-            session_pref = getattr(self, "_karaoke_engine_session_pref", None)
-            pref = str(
-                override
-                or session_pref
-                or self.settings.get("karaoke_engine", "ffmpeg")
-                or "ffmpeg"
-            ).strip().lower()
-        except Exception:
-            pref = "ffmpeg"
-        if pref in ("gstreamer", "gst", "auto"):
-            _diag(f"[KARAOKE-ENGINE] preference {pref!r} obsolete (GStreamer removed); using FFmpeg engine")
-            pref = "ffmpeg"
-        # "mpv"       -> mpv owns audio AND video (its own audio engine; the
-        #                SingWS EQ/normalization/master bus is bypassed).
-        # "mpv-video" -> mpv renders video only and follows SingWS's audio
-        #                engine, keeping the full karaoke DSP chain.
-        if pref in ("mpv", "mpv-video") and sys.platform == "darwin":
-            return pref, PythonKaraokeTransport
-        return "ffmpeg", PythonKaraokeTransport
+        """The bundled native mpv core is the permanent karaoke engine."""
+        return "mpv", None
 
     @staticmethod
     def _load_mpv_playback_backend():
-        """Return (MpvPlaybackPlugin, backend_name) for whichever stack shipped.
-
-        Two backends satisfy the same plugin contract:
-
-        * ``mpv_playback_iina`` -- one in-process libmpv core behind a native
-          bridge, built against macOS 10.15, which is what lets a single Intel
-          build run on macOS 12.
-        * ``mpv_playback`` -- the out-of-process Homebrew mpv driven over JSON
-          IPC, which needs macOS 14.
-
-        A build ships exactly one (SingWS-x86_64.spec excludes the other), so
-        prefer IINA and fall back rather than hard-coding either. Without this
-        the IINA build raised ImportError here and silently fell back to the
-        FFmpeg engine, leaving its whole bundled media stack unused.
-        """
-        try:
-            import mpv_playback_iina
-            # Importing is not enough: the module only fails when it dlopens
-            # libsingws_mpv_bridge.dylib, which sits beside it in a packaged
-            # IINA build but lives under native/mpv_bridge/ in a source tree.
-            # Checking here keeps a dev checkout (where BOTH modules exist) on
-            # the Homebrew backend it can actually run.
-            bridge = mpv_playback_iina._runtime_root() / "libsingws_mpv_bridge.dylib"
-            if bridge.is_file():
-                return mpv_playback_iina.MpvPlaybackPlugin, "iina"
-            _diag(f"[MPV] IINA backend present but bridge missing at {bridge}; using Homebrew backend")
-        except ImportError:
-            pass
-        from mpv_playback import MpvPlaybackPlugin
-        return MpvPlaybackPlugin, "homebrew"
+        """Return the one supported bundled native mpv backend."""
+        import mpv_playback_iina
+        bridge = mpv_playback_iina._runtime_root() / "libsingws_mpv_bridge.dylib"
+        if not bridge.is_file():
+            raise RuntimeError(f"bundled native mpv bridge missing: {bridge}")
+        return mpv_playback_iina.MpvPlaybackPlugin, "native"
 
     def _ensure_mpv_karaoke_core(self):
         """Lazily attach mpv's two Metal windows to the existing video areas."""
@@ -23311,10 +23277,46 @@ class KaraokeApp(QWidget):
                 if visible:
                     host.raise_()
 
-    def _reveal_mpv_hosts_if_allowed(self):
+    def _refresh_mpv_video_views(self, reason: str = ""):
+        """Re-present libmpv's retained texture after the show window returns."""
+        plugin = getattr(self, "_mpv_playback", None)
+        refresh = getattr(plugin, "refreshVideoViews", None) if plugin is not None else None
+        if not callable(refresh):
+            return
+
+        def apply():
+            try:
+                refresh()
+                _diag(f"[MPV] video views refreshed reason={reason}")
+            except Exception as exc:
+                _diag(f"[MPV] video views refresh failed reason={reason}: {exc}")
+
+        # AppKit may reconnect native children just after Qt emits showEvent.
+        # One immediate pass handles ordinary restores; one bounded retry
+        # handles that macOS ordering without reloading playback.
+        QTimer.singleShot(0, apply)
+        QTimer.singleShot(80, apply)
+        QTimer.singleShot(250, apply)
+
+    def _reveal_mpv_hosts_if_allowed(self, attempt: int = 0):
         """Readiness-gated reveal that yields to a running painted overlay."""
         if getattr(self, "_mpv_host_overlay_suppressions", None):
             return  # the overlay restores the surface when it clears
+        plugin = getattr(self, "_mpv_playback", None)
+        try:
+            ready = bool(plugin is not None and plugin.visualsReady())
+        except Exception:
+            ready = False
+        if not ready:
+            # The transport's audible-start fail-safe may commit queue state
+            # before a delayed AppKit/libmpv drawable is ready. Never reveal a
+            # black native child over the painted show surface; keep checking
+            # for a bounded five seconds instead.
+            if attempt < 25 and getattr(self, "karaoke_transport", None) is not None:
+                QTimer.singleShot(200, lambda: self._reveal_mpv_hosts_if_allowed(attempt + 1))
+            else:
+                _diag("[MPV] video reveal timed out waiting for native frame")
+            return
         self._set_mpv_hosts_visible(True)
 
     def _mpv_hosts_should_show(self) -> bool:
@@ -23545,22 +23547,22 @@ class KaraokeApp(QWidget):
         loop_seconds=None,
         duration_seconds: float | None = None,
     ):
-        engine_pref, transport_cls = self._select_karaoke_transport_cls()
-        if engine_pref == "mpv":
-            try:
-                return self._start_mpv_karaoke_transport(
-                    audio_path=audio_path,
-                    video_path=video_path,
-                    mode=mode,
-                    semitones=semitones,
-                    start_seconds=start_seconds,
-                    loop_seconds=loop_seconds,
-                    duration_seconds=duration_seconds,
-                )
-            except Exception as exc:
-                _diag(f"[MPV] experimental engine failed; falling back to FFmpeg: {exc}")
-                self._set_mpv_hosts_visible(False)
-                engine_pref = "ffmpeg-fallback"
+        # One authoritative playback path. A native-core failure is surfaced
+        # by _start_mpv_karaoke_transport; silently changing clocks/renderers
+        # in the middle of a live show is no longer permitted.
+        return self._start_mpv_karaoke_transport(
+            audio_path=audio_path,
+            video_path=video_path,
+            mode=mode,
+            semitones=semitones,
+            start_seconds=start_seconds,
+            loop_seconds=loop_seconds,
+            duration_seconds=duration_seconds,
+        )
+
+        # Legacy FFmpeg/follower implementation below is removed in the next
+        # mechanical milestone after call-site coverage is verified.
+        engine_pref, transport_cls = "ffmpeg", None
         # "mpv-video" keeps this Python transport as the audible engine and
         # hands only the picture to mpv, so it runs the whole block below with
         # the transport in audio-only mode and attaches mpv after the start.
@@ -23723,10 +23725,7 @@ class KaraokeApp(QWidget):
             if off and mode_l == "cdg" and mpv_video:
                 _diag(
                     f"[VIDEO-OFFSET] WARNING mpv-video cannot apply the {off:+d}ms CDG "
-                    "offset — mpv renders the picture while SingWS owns the clock, so "
-                    "the Display tab fine tuning has no effect. Use the full mpv engine "
-                    "(untick 'Keep the SingWS audio engine') or FFmpeg for calibrated "
-                    "CDG timing."
+                    "offset — this obsolete follower path cannot move the lyrics."
                 )
         except Exception:
             pass
@@ -26978,27 +26977,6 @@ class KaraokeApp(QWidget):
         bg_video_shuffle_cb.setChecked(bool(self.settings.get("bg_video_shuffle", True)))
         v.addWidget(bg_video_shuffle_cb)
 
-        bg_video_transcode_cb = QCheckBox("Transcode transparent videos to 720p")
-        bg_video_transcode_cb.setToolTip("Creates cached H.264 720p copies in the SingWS cache folder. Originals are never modified; uncached videos play normally while the copy is prepared for next time.")
-        bg_video_transcode_cb.setChecked(bool(self.settings.get("bg_video_auto_transcode_720p", False)))
-        v.addWidget(bg_video_transcode_cb)
-
-        bg_video_quality_row = QHBoxLayout()
-        bg_video_quality_row.addWidget(QLabel("Background video quality:"))
-        bg_video_quality_combo = QComboBox(dlg)
-        bg_video_quality_combo.addItem("Auto (720p, 60 FPS target)", "auto")
-        bg_video_quality_combo.addItem("1080p", "1080")
-        bg_video_quality_combo.addItem("720p", "720")
-        bg_video_quality_combo.addItem("540p", "540")
-        bg_video_quality_combo.addItem("Off", "off")
-        bg_video_quality_combo.setToolTip("Limits only the decorative video layer behind transparent CDG lyrics. CDG lyrics still render at full show-screen resolution.")
-        bg_video_quality = background_video_quality_profile(self.settings.get("bg_video_quality", "auto"))
-        bg_video_quality_idx = bg_video_quality_combo.findData(bg_video_quality.get("key", "auto"))
-        bg_video_quality_combo.setCurrentIndex(bg_video_quality_idx if bg_video_quality_idx >= 0 else 0)
-        bg_video_quality_row.addWidget(bg_video_quality_combo)
-        bg_video_quality_row.addStretch(1)
-        v.addLayout(bg_video_quality_row)
-
         bg_video_folder_row = QHBoxLayout()
         bg_video_folder_btn = QPushButton("Choose Background Video Folder…")
         bg_video_folder_row.addWidget(bg_video_folder_btn)
@@ -27400,48 +27378,9 @@ class KaraokeApp(QWidget):
         v.addLayout(pad_row)
 
         v = _section_card(tab_audio, "Playback")  # ---- Audio ----
-        mpv_available = sys.platform == "darwin"
-
-        # Engine chooser. FFmpeg/SignalSmith is the default and the automatic
-        # fallback; mpv is opt-in per machine. Both boxes read the saved engine
-        # by testing for their OWN value -- an earlier version rendered the mpv
-        # box with `== "mpv"` while the save wrote "mpv-video", so it came back
-        # unticked on every reopen and looked like the setting would not save.
-        saved_engine = str(self.settings.get("karaoke_engine", "ffmpeg") or "ffmpeg").strip().lower()
-        mpv_engine_cb = QCheckBox("Use the mpv video engine")
-        mpv_engine_cb.setChecked(saved_engine in ("mpv", "mpv-video"))
-        mpv_engine_cb.setEnabled(mpv_available)
-        mpv_engine_cb.setToolTip(
-            "Uses mpv to render CDG/MP4 video. FFmpeg/SignalSmith stays the "
-            "automatic fallback.\n\n"
-            "CDG timing: the in-process (IINA) build applies the Display tab's "
-            "offset via mpv's audio-delay. The follower-based build cannot, so "
-            "CDG runs about 750ms out there. MP4 playback is unaffected."
-        )
-        v.addWidget(mpv_engine_cb)
-
-        # mpv's own audio engine bypasses the karaoke chain entirely (EQ,
-        # loudness normalization and the master bus all live on the SingWS
-        # audio path). This keeps that chain and uses mpv for the picture only.
-        mpv_keep_audio_cb = QCheckBox(
-            "Keep the SingWS audio engine (mpv renders video only)"
-        )
-        mpv_keep_audio_cb.setChecked(saved_engine == "mpv-video")
-        mpv_keep_audio_cb.setEnabled(mpv_available and mpv_engine_cb.isChecked())
-        mpv_keep_audio_cb.setToolTip(
-            "On: mpv draws the CDG/MP4 and follows SingWS's audio clock, so the "
-            "EQ, loudness normalization and master bus stay in the signal path.\n"
-            "Off: mpv plays the audio itself and that whole chain is bypassed."
-        )
-        v.addWidget(mpv_keep_audio_cb)
-
         mpv_engine_note = QLabel(
-            "CDG timing calibration applies on the in-process (IINA) build; "
-                 "the follower-based build cannot apply it. Restart SingWS after "
-                 "changing this; the current session keeps its existing engine."
-            if sys.platform == "darwin"
-            else "mpv is currently available on macOS only; this build uses the "
-                 "FFmpeg/SignalSmith engine."
+            "The bundled native mpv engine permanently owns karaoke audio and "
+            "video, including live seek, tempo, key, EQ and master processing."
         )
         mpv_engine_note.setWordWrap(True)
         v.addWidget(mpv_engine_note)
@@ -27900,8 +27839,6 @@ class KaraokeApp(QWidget):
         def on_bg_video_settings_changed(_checked=None):
             self.settings["bg_video_enabled"] = bool(bg_video_enable_cb.isChecked())
             self.settings["bg_video_shuffle"] = bool(bg_video_shuffle_cb.isChecked())
-            self.settings["bg_video_auto_transcode_720p"] = bool(bg_video_transcode_cb.isChecked())
-            self.settings["bg_video_quality"] = str(bg_video_quality_combo.currentData() or "auto")
             self.save_settings()
             # Apply live: (re)start or stop the background loop for the
             # currently playing CDG song instead of waiting for the next one.
@@ -27916,8 +27853,6 @@ class KaraokeApp(QWidget):
 
         bg_video_enable_cb.toggled.connect(on_bg_video_settings_changed)
         bg_video_shuffle_cb.toggled.connect(on_bg_video_settings_changed)
-        bg_video_transcode_cb.toggled.connect(on_bg_video_settings_changed)
-        bg_video_quality_combo.currentIndexChanged.connect(on_bg_video_settings_changed)
 
         def on_perf_debug_toggled(checked: bool):
             self.settings["performance_debug_enabled"] = bool(checked)
@@ -28071,35 +28006,6 @@ class KaraokeApp(QWidget):
             # re-evaluate on the next song start.
             self._apply_simple_audio_mode_live(checked)
 
-        def _save_karaoke_engine_choice():
-            if not mpv_engine_cb.isChecked():
-                engine = "ffmpeg"
-                summary = "the FFmpeg/SignalSmith engine"
-            elif mpv_keep_audio_cb.isChecked():
-                engine = "mpv-video"
-                summary = "mpv video with the SingWS audio engine"
-            else:
-                engine = "mpv"
-                summary = "the mpv engine (audio and video)"
-            self.settings["karaoke_engine"] = engine
-            self.save_settings()
-            note = f"Saved. Restart SingWS to use {summary}. The current session is unchanged."
-            if engine != "ffmpeg":
-                note += (" CDG timing calibration applies on the in-process"
-                         " (IINA) build; the follower-based build cannot"
-                         " apply it.")
-            mpv_engine_note.setText(note)
-
-        def on_mpv_engine_toggled(checked: bool):
-            mpv_keep_audio_cb.setEnabled(mpv_available and bool(checked))
-            _save_karaoke_engine_choice()
-
-        def on_mpv_keep_audio_toggled(_checked: bool):
-            _save_karaoke_engine_choice()
-
-        mpv_engine_cb.toggled.connect(on_mpv_engine_toggled)
-        mpv_keep_audio_cb.toggled.connect(on_mpv_keep_audio_toggled)
-
         def on_normalize_toggled(checked: bool):
             self.settings["karaoke_normalize_enabled"] = bool(checked)
             self.save_settings()
@@ -28206,7 +28112,6 @@ class KaraokeApp(QWidget):
             cdg_black_cleanup_cb.setChecked(True)
             cdg_black_threshold_spin.setValue(10)
             lyric_bg_opacity_spin.setValue(0)
-            bg_video_quality_combo.setCurrentIndex(bg_video_quality_combo.findData("auto"))
             show_screen_vfx_cb.setChecked(True)
             rotation_vfx_cb.setChecked(True)
             ticker_vfx_cb.setChecked(True)
@@ -28220,7 +28125,6 @@ class KaraokeApp(QWidget):
                 filename_fmt_combo.findData(DEFAULT_FILENAME_FORMAT)
             )
             bg_gap_spin.setValue(0.0)
-            mpv_engine_cb.setChecked(False)
             end_silence_cb.setChecked(True)
             end_threshold_spin.setValue(2.5)
             bg_end_silence_cb.setChecked(False)
@@ -36229,8 +36133,12 @@ class KaraokeApp(QWidget):
             if (
                 status == 0
                 and hasattr(manager, "requestWhenInUseAuthorization")
-                and not bool(self.settings.get("session_location_permission_requested", False))
             ):
+                # The saved bookkeeping flag can outlive macOS's TCC identity
+                # (notably after an app update/re-sign).  Authorization status
+                # is authoritative: while it remains not-determined, ask
+                # CoreLocation again and let macOS decide whether to show the
+                # prompt. Otherwise Detect Now can only wait and time out.
                 self.settings["session_location_permission_requested"] = True
                 try:
                     self.save_settings()
@@ -36262,6 +36170,10 @@ class KaraokeApp(QWidget):
 
             loc = holder.get("location")
             if loc is None:
+                _diag(
+                    "[SESSION-LOCATION] detection failed "
+                    f"authorization_status={status} error={holder.get('error') or 'timeout'}"
+                )
                 return None, self._friendly_location_detection_error(
                     holder.get("error") or "Timed out waiting for device location."
                 )
@@ -45789,23 +45701,8 @@ class KaraokeApp(QWidget):
         return "fit"
 
     def _cdg_timing_engine(self) -> str:
-        """Which CDG timing baseline applies: "mpv" or "ffmpeg".
-
-        Resolved the same way as _select_karaoke_transport_cls, minus the
-        transport lookup and its one-shot diagnostics, because this runs on
-        every offset read. "mpv-video" resolves to "ffmpeg": that path cannot
-        apply an offset at all, so the FFmpeg key is the one the operator sees.
-        """
-        try:
-            pref = str(
-                os.environ.get("SINGWS_KARAOKE_ENGINE", "")
-                or getattr(self, "_karaoke_engine_session_pref", None)
-                or self.settings.get("karaoke_engine", "ffmpeg")
-                or "ffmpeg"
-            ).strip().lower()
-        except Exception:
-            return "ffmpeg"
-        return "mpv" if (pref == "mpv" and sys.platform == "darwin") else "ffmpeg"
+        """The permanent native mpv timing baseline."""
+        return "mpv"
 
     def _cdg_timing_offset_key(self) -> str:
         return (
@@ -52054,6 +51951,14 @@ class KaraokeApp(QWidget):
 
     def _finish_manual_stop_teardown(self):
         self._log_manual_stop_timeline("teardown")
+        pending_rollback = getattr(self, "_pending_play_start_rollback", None)
+        if callable(pending_rollback):
+            try:
+                pending_rollback("manual_stop_before_start_commit")
+            except Exception:
+                pass
+        self._next_in_progress = False
+        self._set_play_control_starting(False)
         self._gst_teardown_async()  # ← Use the non-blocking version
         self.clear_now_singing()
         

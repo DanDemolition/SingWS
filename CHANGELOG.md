@@ -1,3 +1,74 @@
+## 0.4.4.10
+
+- Fix macOS Detect Now getting stuck after an app update/re-sign when the saved
+  permission-request marker outlives Core Location's authorization state.
+- Keep native decorative-video loops advancing at EOF and composite them in
+  both karaoke views with a CDG palette matte that removes scaled blue/cyan
+  background fringes while preserving foreground artwork.
+
+## 0.4.4.9
+
+- Keep embedded animation audio as a muted null-output timing master so short
+  VJ loops advance instead of remaining frozen on their first frame.
+- Key the measured CDG border/background colour rather than assuming every
+  disc background is black, allowing animations behind beige and colored CDGs.
+- Log the decorative mpv core's position and pause state every four seconds.
+
+## 0.4.4.8
+
+- Prevent a late native video frame from leaving an audibly playing song and
+  the Play control permanently stuck in the pending-start state.
+- Keep the native show surface hidden until a real frame is ready and make
+  manual Stop clear any interrupted pending-start transaction.
+- Use reliable software decoding for muted Intel background animations when
+  VideoToolbox cannot export an older H.264 loop to the secondary GL context.
+
+## 0.4.4.7
+
+- Decode decorative videos behind CDG lyrics with a second muted libmpv core
+  and composite its GPU texture directly in the native show-screen renderer.
+  This removes the active FFmpeg/QImage frame-copy path while preserving the
+  folder playlist, no-repeat shuffle and opacity controls.
+- Remove obsolete background-video transcode and decode-resolution controls;
+  libmpv now selects the native decode path and keeps the source quality.
+
+## 0.4.4.6
+
+- Reparent retained native mpv views to Qt's current output/preview hosts after
+  Settings replaces a show-window native host, fixing black video after live
+  Blur/Side Fill changes.
+- Make bundled native mpv the permanent karaoke audio/video engine and remove
+  both obsolete engine switches. Old saved engine choices migrate to mpv and
+  native-engine failures no longer silently change playback clocks.
+
+## 0.4.4.5
+
+- Feather the full-screen CDG fill into the foreground across only the disc's
+  protected six-pixel border, removing the visible join while leaving lyrics
+  sharp, complete, and unstretched.
+
+## 0.4.4.4
+
+- Reattach the native mpv drawable from AppKit's actual window-attachment
+  lifecycle event, fixing blank output when Settings hides the show window and
+  the operator changes between Blur and Side Fill before reopening it.
+
+## 0.4.4.3
+
+- Reconnect the retained native mpv drawable after every Show Karaoke window
+  reopen, including a bounded AppKit settle retry.
+- Render CDG widescreen fill as a full-output background layer using the real
+  display aspect, then fit the complete unstretched lyrics picture above it.
+  This removes the 16:9 edge gap and the old fill-boundary seam.
+
+## 0.4.4.2
+
+### Fixed
+- Restored the retained native mpv picture when the Show Karaoke window is
+  hidden and shown again. Previously the mpv NSView could remain detached from
+  its window while the separately-owned ticker continued drawing, leaving a
+  black show screen after changing CDG display modes.
+
 ## 0.4.4.1
 
 ### Packaging

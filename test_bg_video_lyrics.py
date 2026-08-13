@@ -1,10 +1,9 @@
-"""Tests for the shuffled MP4 background-video-behind-CDG-lyrics feature.
+"""Tests for the native-mpv MP4-background-behind-CDG-lyrics feature.
 
 Covers the folder scan (graceful fallback), the no-repeat shuffle bag, and
 the app-level start/stop gating (enabled flag, opacity, folder contents,
-settings persistence keys). The GStreamer decode itself is exercised
-manually / by the player's own diagnostics; everything here runs without
-GStreamer (SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS)."""
+settings persistence keys). The native bridge is covered by source-contract
+tests here and exercised visually in an installed macOS build."""
 
 import importlib.util
 import os
@@ -106,15 +105,30 @@ class FakeVideoWindow:
         return False
 
 
+class FakeNativePlugin:
+    def __init__(self):
+        self.loads = []
+        self.at_end = False
+        self.stops = 0
+
+    def loadBackgroundVideo(self, path, opacity):
+        self.loads.append((path, opacity))
+        self.at_end = False
+        return True
+
+    def backgroundVideoAtEnd(self):
+        return self.at_end
+
+    def stopBackgroundVideo(self):
+        self.stops += 1
+
+
 class FakePlayer:
     instances = []
 
-    def __init__(self, parent=None, *, on_frame=None, max_width=1280, max_height=720, max_fps=60, quality_label="auto"):
-        self.on_frame = on_frame
-        self.max_width = max_width
-        self.max_height = max_height
-        self.max_fps = max_fps
-        self.quality_label = quality_label
+    def __init__(self, plugin, parent=None, *, opacity=1.0):
+        self.plugin = plugin
+        self.opacity = opacity
         self.started_with = None
         self.stopped = None
         FakePlayer.instances.append(self)
@@ -147,19 +161,18 @@ class StartStopGatingTests(unittest.TestCase):
             "bg_video_enabled": True,
             "bg_video_folder": self.tmp.name,
             "bg_video_shuffle": True,
-            "bg_video_quality": "auto",
             "lyrics_background_video_opacity": 40,
         }
         app.settings.update(settings)
         app.video_window = FakeVideoWindow()
+        app._mpv_playback = FakeNativePlugin()
         # bare __new__ QObject: preset attrs that getattr() would otherwise
         # turn into Qt "super-class __init__ never called" RuntimeErrors.
         app._lyrics_bg_video_player = None
         return app
 
     def start(self, app):
-        with mock.patch.object(self.singws, "Gst", object()), \
-             mock.patch.object(self.singws, "LyricsBackgroundVideoPlayer", FakePlayer):
+        with mock.patch.object(self.singws, "NativeLyricsBackgroundVideoPlayer", FakePlayer):
             app._start_lyrics_background_video()
 
     def test_starts_with_folder_files_and_shuffle(self):
@@ -170,10 +183,8 @@ class StartStopGatingTests(unittest.TestCase):
         files, shuffle = player.started_with
         self.assertEqual(sorted(os.path.basename(f) for f in files), ["one.mp4", "two.mp4"])
         self.assertTrue(shuffle)
-        self.assertEqual(player.max_width, 1280)
-        self.assertEqual(player.max_height, 720)
-        self.assertEqual(player.max_fps, 60)
-        self.assertEqual(player.quality_label, "auto")
+        self.assertIs(player.plugin, app._mpv_playback)
+        self.assertAlmostEqual(player.opacity, 0.40)
 
     def test_disabled_does_not_start(self):
         app = self.make_app(bg_video_enabled=False)
@@ -184,21 +195,6 @@ class StartStopGatingTests(unittest.TestCase):
         app = self.make_app(lyrics_background_video_opacity=0)
         self.start(app)
         self.assertIsNone(getattr(app, "_lyrics_bg_video_player", None))
-
-    def test_quality_off_does_not_start(self):
-        app = self.make_app(bg_video_quality="off")
-        self.start(app)
-        self.assertIsNone(getattr(app, "_lyrics_bg_video_player", None))
-
-    def test_540p_quality_uses_lower_decorative_layer_cap(self):
-        app = self.make_app(bg_video_quality="540")
-        self.start(app)
-        player = getattr(app, "_lyrics_bg_video_player", None)
-        self.assertIsNotNone(player)
-        self.assertEqual(player.max_width, 960)
-        self.assertEqual(player.max_height, 540)
-        self.assertEqual(player.max_fps, 30)
-        self.assertEqual(player.quality_label, "540")
 
     def test_missing_folder_falls_back(self):
         app = self.make_app(bg_video_folder="/does/not/exist")
@@ -233,91 +229,62 @@ class StartStopGatingTests(unittest.TestCase):
         self.assertIn("bg_video_enabled", defaults)
         self.assertIn("bg_video_folder", defaults)
         self.assertIn("bg_video_shuffle", defaults)
-        self.assertIn("bg_video_quality", defaults)
-        self.assertIn("bg_video_auto_transcode_720p", defaults)
         self.assertFalse(defaults["bg_video_enabled"])
         self.assertTrue(defaults["bg_video_shuffle"])
-        self.assertEqual(defaults["bg_video_quality"], "auto")
-        self.assertFalse(defaults["bg_video_auto_transcode_720p"])
-
-    def test_quality_profile_aliases(self):
-        self.assertEqual(self.singws.background_video_quality_profile("720p")["max_width"], 1280)
-        self.assertEqual(self.singws.background_video_quality_profile("960x540")["key"], "540")
-        self.assertEqual(self.singws.background_video_quality_profile("surprise")["key"], "auto")
 
 
-class FfmpegDecodeWorkerTests(unittest.TestCase):
-    """The decorative video worker decodes via FfmpegVideoReader, not GStreamer."""
+class NativeMpvDecodeTests(unittest.TestCase):
+    """Decorative video stays inside the existing native GPU compositor."""
 
     @classmethod
     def setUpClass(cls):
         cls.singws = load_main_module()
 
-    def test_worker_and_player_have_no_gstreamer_references(self):
+    def test_player_loads_muted_native_playlist_and_advances_at_end(self):
+        plugin = FakeNativePlugin()
+        player = self.singws.NativeLyricsBackgroundVideoPlayer(plugin, opacity=0.35)
+        self.assertTrue(player.start(["/v/a.mp4", "/v/b.mp4"], shuffle=False))
+        self.assertEqual(plugin.loads, [("/v/a.mp4", 0.35)])
+        plugin.at_end = True
+        player._poll_end()
+        self.assertEqual(plugin.loads[-1], ("/v/b.mp4", 0.35))
+        player.stop("test")
+        self.assertEqual(plugin.stops, 1)
+        self.assertEqual(player.diagnostics()["decoder"], "native-libmpv")
+
+    def test_active_start_path_has_no_frame_copy_or_transcode(self):
         import inspect
+        source = inspect.getsource(self.singws.KaraokeApp._start_lyrics_background_video)
+        self.assertIn("NativeLyricsBackgroundVideoPlayer", source)
+        self.assertNotIn("FfmpegVideoReader", source)
+        self.assertNotIn("prepare_background_video_playback_files", source)
+        self.assertNotIn("set_background_video_frame", source)
 
-        for cls_ in (
-            self.singws._LyricsBackgroundVideoWorker,
-            self.singws.LyricsBackgroundVideoPlayer,
-        ):
-            source = inspect.getsource(cls_)
-            self.assertNotIn("Gst.", source)
-            self.assertNotIn("uridecodebin", source)
-            self.assertNotIn("appsink", source)
-        self.assertIn(
-            "FfmpegVideoReader",
-            inspect.getsource(self.singws._LyricsBackgroundVideoWorker),
-        )
-
-    def test_worker_decodes_generated_mp4_and_loops(self):
-        import shutil
-        import subprocess
-        import time as _time
-
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            self.skipTest("ffmpeg is required for the decode test")
-        from PyQt6.QtWidgets import QApplication
-
-        app = QApplication.instance() or QApplication(["test"])
-        with tempfile.TemporaryDirectory() as tmp:
-            clip = Path(tmp) / "clip.mp4"
-            subprocess.run(
-                [
-                    ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-                    "-f", "lavfi", "-i", "testsrc=duration=0.6:size=64x48:rate=10",
-                    "-pix_fmt", "yuv420p", str(clip),
-                ],
-                check=True, timeout=30,
-            )
-            worker = self.singws._LyricsBackgroundVideoWorker(
-                None, max_width=64, max_height=48, max_fps=10, quality_label="test",
-            )
-            frames = []
-
-            def collect(image):
-                if image is not None:
-                    frames.append(image)
-                    worker.acknowledge_frame()
-
-            worker.frame_ready.connect(collect)
-            stops = []
-            worker.stopped.connect(lambda reason: stops.append(reason))
-            self.assertTrue(worker.start([str(clip)], shuffle=False))
-            # 0.6s clip at 10fps: collecting past 6 frames proves the shuffle
-            # bag advanced through EOF and restarted the (single) clip.
-            deadline = _time.monotonic() + 15.0
-            while len(frames) < 8 and _time.monotonic() < deadline:
-                app.processEvents()
-                _time.sleep(0.005)
-            worker.stop("test_done")
-            app.processEvents()
-        self.assertGreaterEqual(len(frames), 8, "worker did not deliver frames")
-        image = frames[0]
-        self.assertEqual((image.width(), image.height()), (64, 48))
-        diag = worker.diagnostics()
-        self.assertEqual(diag["working_size"], "64x48")
-        self.assertIn("test_done", stops)
+    def test_native_bridge_contract_is_muted_and_uses_a_separate_texture(self):
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text()
+        compact = bridge.replace(" ", "")
+        self.assertIn('mpv_set_option_string(_backgroundMpv,"ao","null")', compact)
+        self.assertNotIn('mpv_set_option_string(_backgroundMpv,"audio","no")', compact)
+        self.assertIn('mpv_set_option_string(_backgroundMpv,"mute","yes")', compact)
+        self.assertIn('mpv_set_option_string(_backgroundMpv,"ao","null")', compact)
+        self.assertIn('mpv_set_option_string(_backgroundMpv,"hwdec","no")', compact)
+        self.assertIn('mpv_set_option_string(_backgroundMpv,"keep-open","no")', compact)
+        self.assertIn('mpv_set_option_string(_backgroundMpv,"idle","yes")', compact)
+        self.assertIn('mpv_set_property(_backgroundMpv,"pause",MPV_FORMAT_FLAG,&paused)', compact)
+        self.assertIn("_backgroundTexture", bridge)
+        self.assertIn("_backgroundFbo", bridge)
+        self.assertIn("singws_bridge_load_background", bridge)
+        self.assertIn("singws_bridge_background_at_end", bridge)
+        self.assertIn("singws_bridge_background_position", bridge)
+        self.assertIn("singws_bridge_background_paused", bridge)
+        self.assertIn("vec3 borderBg", bridge)
+        self.assertIn("vec3 tileBg", bridge)
+        self.assertIn("vec3 panelBg", bridge)
+        self.assertIn("distance(fg.rgb,panelBg)", bridge)
+        self.assertIn("fg.r<0.20&&delta<0.75", bridge)
+        self.assertIn('mpv_get_property(_backgroundMpv,"eof-reached"', compact)
+        self.assertIn("[self presentView:self->_previewView]", bridge)
+        self.assertIn("const bool backgroundActive=(_isCdg", bridge)
 
 
 if __name__ == "__main__":

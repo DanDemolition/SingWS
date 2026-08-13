@@ -29,126 +29,57 @@ class EngineSelectionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.singws = load_main_module()
 
-    def setUp(self):
-        self._orig_python = self.singws.PythonKaraokeTransport
-        self._orig_engine_override = os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
-        self.addCleanup(self._restore)
-        self.singws.PythonKaraokeTransport = _FfmpegSentinel
-
-    def _restore(self):
-        self.singws.PythonKaraokeTransport = self._orig_python
-        os.environ.pop("SINGWS_KARAOKE_ENGINE", None)
-        if self._orig_engine_override is not None:
-            os.environ["SINGWS_KARAOKE_ENGINE"] = self._orig_engine_override
-
     def _app(self, pref):
         app = self.singws.KaraokeApp.__new__(self.singws.KaraokeApp)
         app.settings = {"karaoke_engine": pref} if pref is not None else {}
         app._karaoke_engine_session_pref = pref or ""
         return app
 
-    def test_default_setting_is_ffmpeg(self):
-        self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "ffmpeg")
+    def test_default_setting_is_mpv(self):
+        self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "mpv")
 
     def test_gstreamer_symbol_is_gone(self):
         # The removal leaves GstKaraokeTransport defined-but-None so stale refs
         # degrade gracefully; it must never be a real class again.
         self.assertIsNone(self.singws.GstKaraokeTransport)
 
-    def test_missing_setting_selects_ffmpeg(self):
+    def test_all_saved_preferences_select_permanent_mpv(self):
         pref, cls = self._app(None)._select_karaoke_transport_cls()
-        self.assertEqual(pref, "ffmpeg")
-        self.assertIs(cls, _FfmpegSentinel)
-
-    def test_explicit_and_obsolete_preferences_resolve_to_ffmpeg(self):
-        # An explicit FFmpeg pick, its aliases, obsolete gstreamer/auto and
-        # garbage all land on the default path.
-        for pref in ("ffmpeg", "python", "qt", "FFMPEG", " ffmpeg ",
-                     "gstreamer", "gst", "auto", "laserdisc", ""):
-            resolved, cls = self._app(pref)._select_karaoke_transport_cls()
-            self.assertEqual(resolved, "ffmpeg", pref)
-            self.assertIs(cls, _FfmpegSentinel, pref)
-
-    def test_mpv_modes_are_macos_only(self):
-        for pref in ("mpv", "mpv-video"):
-            resolved, cls = self._app(pref)._select_karaoke_transport_cls()
-            expected = pref if sys.platform == "darwin" else "ffmpeg"
-            self.assertEqual(resolved, expected, pref)
-            self.assertIs(cls, _FfmpegSentinel, pref)
-
-    def test_environment_override_enables_source_smoke_without_saving(self):
-        os.environ["SINGWS_KARAOKE_ENGINE"] = "mpv"
-        resolved, cls = self._app("ffmpeg")._select_karaoke_transport_cls()
-        expected = "mpv" if sys.platform == "darwin" else "ffmpeg"
-        self.assertEqual(resolved, expected)
-        self.assertIs(cls, _FfmpegSentinel)
-
-    def test_engine_missing_returns_none_cls(self):
-        self.singws.PythonKaraokeTransport = None
-        pref, cls = self._app("ffmpeg")._select_karaoke_transport_cls()
-        self.assertEqual(pref, "ffmpeg")
+        self.assertEqual(pref, "mpv")
         self.assertIsNone(cls)
+        for pref in ("ffmpeg", "python", "qt", "FFMPEG", " ffmpeg ",
+                     "gstreamer", "gst", "auto", "laserdisc", "",
+                     "mpv", "mpv-video"):
+            resolved, cls = self._app(pref)._select_karaoke_transport_cls()
+            self.assertEqual(resolved, "mpv", pref)
+            self.assertIsNone(cls, pref)
 
     def test_startup_banner_reports_the_real_engine(self):
         # The banner was a hardcoded "FFmpeg/Qt" string, so a session actually
         # running mpv logged FFmpeg and looked like the setting had reverted.
         self.assertNotIn('logging.info("- Karaoke engine: FFmpeg/Qt', MAIN_SOURCE)
         self.assertNotIn('logging.info("- engine: FFmpeg/Qt', MAIN_SOURCE)
-        if sys.platform != "darwin":
-            self.skipTest("mpv labels are macOS-only")
-        import json
-        import pathlib
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "settings.json"
-            for pref, expected in (
-                ("mpv-video", "mpv video + SingWS audio engine"),
-                ("mpv", "mpv (audio and video)"),
-                ("ffmpeg", "FFmpeg/Qt (GStreamer removed)"),
-                ("", "FFmpeg/Qt (GStreamer removed)"),
-            ):
-                path.write_text(json.dumps({"karaoke_engine": pref}), encoding="utf-8")
-                with mock.patch.object(self.singws, "SETTINGS_PATH", path):
-                    self.assertEqual(
-                        self.singws._configured_karaoke_engine_label(), expected, pref
-                    )
+        self.assertEqual(self.singws._configured_karaoke_engine_label(), "mpv (audio and video)")
 
-    def test_mpv_stays_opt_in(self):
-        # The offset does now reach the in-process backend (see
-        # test_iina_plugin_maps_the_offset_onto_audio_delay), but the
-        # follower-based backend still cannot apply it, and mpv has not yet run
-        # a full show. Until it has, nothing may make mpv the default or
-        # migrate saved settings onto it.
-        self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "ffmpeg")
-        self.assertNotIn("mpv_default_engine_migrated", MAIN_SOURCE)
-        self.assertNotIn('self.settings["karaoke_engine"] = "mpv-video"', MAIN_SOURCE)
-        with open("mpv_karaoke_transport.py", "r", encoding="utf-8") as fh:
-            transport_source = fh.read()
-        self.assertIn("def set_video_offset_ms", transport_source)
-
-    def test_engine_chooser_stays_in_settings(self):
-        # Removing the chooser once left a bad show with no way back to the
-        # proven engine. The escape hatch must exist, and each checkbox must
-        # read the saved value by testing for its own engine string.
-        self.assertIn('mpv_engine_cb = QCheckBox("Use the mpv video engine")', MAIN_SOURCE)
-        self.assertIn(
-            'mpv_engine_cb.setChecked(saved_engine in ("mpv", "mpv-video"))', MAIN_SOURCE
-        )
-        self.assertIn('mpv_keep_audio_cb.setChecked(saved_engine == "mpv-video")', MAIN_SOURCE)
-        self.assertIn('engine = "ffmpeg"', MAIN_SOURCE)
+    def test_engine_switches_are_removed(self):
+        self.assertNotIn("mpv_engine_cb", MAIN_SOURCE)
+        self.assertNotIn("mpv_keep_audio_cb", MAIN_SOURCE)
+        self.assertNotIn("SINGWS_KARAOKE_ENGINE", MAIN_SOURCE)
+        start = MAIN_SOURCE.index("def _start_python_karaoke_transport")
+        body = MAIN_SOURCE[start:MAIN_SOURCE.index("def _prepare_python_karaoke_start", start)]
+        self.assertIn("return self._start_mpv_karaoke_transport", body)
+        self.assertNotIn("falling back to FFmpeg", body)
 
 
 
 class MpvBackendSelectionTests(unittest.TestCase):
-    """A build ships exactly one mpv backend. Picking the wrong one -- or
-    hard-coding either -- makes mpv unavailable and silently drops every song
-    onto the FFmpeg engine with the bundled media stack unused."""
+    """The bundled native backend is required; no follower fallback remains."""
 
     @classmethod
     def setUpClass(cls):
         cls.singws = load_main_module()
 
-    def test_prefers_iina_only_when_its_bridge_is_present(self):
+    def test_native_backend_requires_its_bridge(self):
         import pathlib
         import tempfile
         import types
@@ -161,17 +92,16 @@ class MpvBackendSelectionTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             fake._runtime_root = lambda: root
             with mock.patch.dict(sys.modules, {"mpv_playback_iina": fake}):
-                # No bridge beside the module -> must fall back.
-                _, name = self.singws.KaraokeApp._load_mpv_playback_backend()
-                self.assertEqual(name, "homebrew")
+                with self.assertRaisesRegex(RuntimeError, "native mpv bridge missing"):
+                    self.singws.KaraokeApp._load_mpv_playback_backend()
 
                 # Bridge present -> IINA is the shipped stack.
                 (root / "libsingws_mpv_bridge.dylib").write_bytes(b"")
                 cls_, name = self.singws.KaraokeApp._load_mpv_playback_backend()
-                self.assertEqual(name, "iina")
+                self.assertEqual(name, "native")
                 self.assertIs(cls_, fake.MpvPlaybackPlugin)
 
-    def test_falls_back_when_iina_module_is_absent(self):
+    def test_missing_native_module_is_not_silently_replaced(self):
         from unittest import mock
         real_import = __import__
 
@@ -181,14 +111,17 @@ class MpvBackendSelectionTests(unittest.TestCase):
             return real_import(name, *args, **kwargs)
 
         with mock.patch("builtins.__import__", side_effect=no_iina):
-            _, name = self.singws.KaraokeApp._load_mpv_playback_backend()
-        self.assertEqual(name, "homebrew")
+            with self.assertRaises(ImportError):
+                self.singws.KaraokeApp._load_mpv_playback_backend()
 
-    def test_backend_is_not_hard_coded_at_the_call_site(self):
+    def test_follower_backend_is_not_imported(self):
         self.assertIn("self._load_mpv_playback_backend()", MAIN_SOURCE)
         core = MAIN_SOURCE[MAIN_SOURCE.index("def _ensure_mpv_karaoke_core"):]
         core = core[:core.index("def _attach_mpv_video_follower")]
         self.assertNotIn("from mpv_playback import", core)
+        loader = MAIN_SOURCE[MAIN_SOURCE.index("def _load_mpv_playback_backend"):]
+        loader = loader[:loader.index("def _ensure_mpv_karaoke_core")]
+        self.assertNotIn("mpv_playback import", loader)
 
 
 class CdgVisualOffsetTests(unittest.TestCase):
@@ -299,13 +232,16 @@ class CdgTimingBaselinePerEngineTests(unittest.TestCase):
             self.singws.MPV_CDG_BASE_OFFSET_MS,
         )
 
-    def test_ffmpeg_keeps_its_own_baseline_and_key(self):
-        host = self._host(karaoke_engine="ffmpeg", cdg_timing_offset_ms=25)
-        self.assertEqual(host._cdg_timing_engine(), "ffmpeg")
-        self.assertEqual(host._cdg_timing_offset_key(), "cdg_timing_offset_ms")
+    def test_obsolete_preferences_still_use_mpv_timing(self):
+        host = self._host(
+            karaoke_engine="ffmpeg", cdg_timing_offset_ms=25,
+            cdg_timing_offset_mpv_ms=25,
+        )
+        self.assertEqual(host._cdg_timing_engine(), "mpv")
+        self.assertEqual(host._cdg_timing_offset_key(), "cdg_timing_offset_mpv_ms")
         self.assertEqual(
             host._effective_cdg_timing_offset_ms(),
-            self.singws.FFMPEG_CDG_BASE_OFFSET_MS + 25,
+            self.singws.MPV_CDG_BASE_OFFSET_MS + 25,
         )
 
     @mock.patch("sys.platform", "darwin")
@@ -318,32 +254,9 @@ class CdgTimingBaselinePerEngineTests(unittest.TestCase):
             self.singws.MPV_CDG_BASE_OFFSET_MS + 25,
         )
 
-    @mock.patch("sys.platform", "darwin")
-    def test_calibrating_one_engine_cannot_move_the_other(self):
-        # The regression this split exists to prevent.
-        settings = {"cdg_timing_offset_ms": 0, "cdg_timing_offset_mpv_ms": -750}
-        mpv = self._host(karaoke_engine="mpv", **settings)
-        ffmpeg = self._host(karaoke_engine="ffmpeg", **settings)
-        self.assertEqual(
-            ffmpeg._effective_cdg_timing_offset_ms(),
-            self.singws.FFMPEG_CDG_BASE_OFFSET_MS,
-        )
-        self.assertNotEqual(
-            mpv._effective_cdg_timing_offset_ms(),
-            ffmpeg._effective_cdg_timing_offset_ms(),
-        )
-
-    @mock.patch("sys.platform", "darwin")
-    def test_mpv_video_follower_reads_the_ffmpeg_key(self):
-        # That path cannot apply an offset at all, so it must not get a
-        # second, separately-calibrated value the operator never sees.
+    def test_follower_preference_cannot_select_the_old_timing_key(self):
         host = self._host(karaoke_engine="mpv-video")
-        self.assertEqual(host._cdg_timing_offset_key(), "cdg_timing_offset_ms")
-
-    @mock.patch("sys.platform", "linux")
-    def test_mpv_is_macos_only(self):
-        host = self._host(karaoke_engine="mpv")
-        self.assertEqual(host._cdg_timing_engine(), "ffmpeg")
+        self.assertEqual(host._cdg_timing_offset_key(), "cdg_timing_offset_mpv_ms")
 
     def test_split_migration_uses_the_historical_baseline_not_the_live_one(self):
         # The migration reconstructs an effective offset that was dialled in

@@ -639,6 +639,47 @@ class PerformanceSafetyTests(unittest.TestCase):
         # Freed exactly once, by the caller that owns it.
         self.assertIn("singws_bridge_free_frame(buf)", iina)
 
+    def test_show_window_restore_refreshes_retained_mpv_views(self):
+        """A hidden native mpv child must repaint when Show Karaoke returns."""
+        start = MAIN_SOURCE.index("class VideoWindow(QWidget):")
+        video = MAIN_SOURCE[start:MAIN_SOURCE.index("class AddToQueueDialog", start)]
+        self.assertIn('refresh("show_event")', video)
+        refresh = function_source("_refresh_mpv_video_views")
+        self.assertIn('getattr(plugin, "refreshVideoViews", None)', refresh)
+        self.assertIn("QTimer.singleShot(0, apply)", refresh)
+        self.assertIn("QTimer.singleShot(80, apply)", refresh)
+        self.assertIn("QTimer.singleShot(250, apply)", refresh)
+        bridge = pathlib.Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        self.assertIn("- (void)refreshViewsOutput:", bridge)
+        self.assertIn("output view reparented to current host", bridge)
+        self.assertIn("preview view reparented to current host", bridge)
+        self.assertIn("[ctx clearDrawable]", bridge)
+        self.assertIn("[ctx setView:view]", bridge)
+        self.assertIn("- (void)viewDidMoveToWindow", bridge)
+        self.assertIn("nativeViewDidAttach:view", bridge)
+        self.assertIn("drawable reattached to window", bridge)
+        self.assertIn("[self presentView:_outputView]", bridge)
+        self.assertIn("singws_bridge_refresh_views", bridge)
+
+    def test_cdg_fill_covers_real_host_without_stretching_lyrics(self):
+        """The decorative layer covers any display; CDG remains aspect-fit."""
+        bridge = pathlib.Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        present_start = bridge.index("- (void)presentView:(BridgeVideoView *)view {")
+        present = bridge[present_start:bridge.index("- (void)shutdown", present_start)]
+        self.assertIn("if(va>ca)", present)
+        self.assertIn("glUniform2f(_scaleUniform,1,1)", present)
+        self.assertIn("glUniform1i(_sidefillUniform,sidefill)", present)
+        self.assertIn("uvx=(GLfloat)span; uox=panelL", present)
+        self.assertIn("if(va>ca)sx=(GLfloat)(ca/va)", present)
+        self.assertIn("glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA)", present)
+        self.assertIn("glUniform1i(_sidefillUniform,3)", present)
+        self.assertIn("6.0/300.0", bridge)
+        layer = present[present.index("if(sidefill){"):]
+        self.assertLess(
+            layer.index("glUniform1i(_sidefillUniform,sidefill)"),
+            layer.index("if(va>ca)sx=(GLfloat)(ca/va)"),
+        )
+
     def test_stall_stack_capture_is_opt_in(self):
         # Walking the running main thread's frames from the watchdog thread is
         # a use-after-free; it segfaulted the app on 2026-08-09 23:15:41
@@ -719,6 +760,14 @@ class PerformanceSafetyTests(unittest.TestCase):
         # The wait itself is unchanged (a short timeout traded accuracy for
         # speed and was reverted); only the UI freeze during it is fixed.
         self.assertNotIn("SAVE_LOCATION_DETECT_TIMEOUT_SEC", MAIN_SOURCE)
+        # A persisted request marker may outlive the app's macOS TCC identity
+        # after an update/re-sign. CoreLocation status, not that marker, decides
+        # whether authorization should be requested again.
+        self.assertNotIn(
+            'and not bool(self.settings.get("session_location_permission_requested", False))',
+            detect,
+        )
+        self.assertIn("manager.requestWhenInUseAuthorization()", detect)
         network = function_source("configure_network")
         self.assertIn("detect_location_now(show_result=False)", network)
 

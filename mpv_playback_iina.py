@@ -19,7 +19,11 @@ VERSION = "native-libmpv-shared-frame 0.1"
 def _runtime_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-    return Path(__file__).resolve().parent
+    source_root = Path(__file__).resolve().parent
+    native_root = source_root / "native" / "mpv_bridge"
+    if (native_root / "libsingws_mpv_bridge.dylib").is_file():
+        return native_root
+    return source_root
 
 
 _BRIDGE_LOG_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
@@ -88,6 +92,18 @@ class _BridgeApi:
         L.singws_bridge_set_dsp_chain.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         L.singws_bridge_set_audio_delay.argtypes = [ctypes.c_void_p, ctypes.c_double]
         L.singws_bridge_set_sidefill.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        L.singws_bridge_load_background.restype = ctypes.c_int
+        L.singws_bridge_load_background.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_double]
+        L.singws_bridge_stop_background.argtypes = [ctypes.c_void_p]
+        L.singws_bridge_background_at_end.argtypes = [ctypes.c_void_p]
+        L.singws_bridge_background_at_end.restype = ctypes.c_int
+        L.singws_bridge_background_position.argtypes = [ctypes.c_void_p]
+        L.singws_bridge_background_position.restype = ctypes.c_int64
+        L.singws_bridge_background_paused.argtypes = [ctypes.c_void_p]
+        L.singws_bridge_background_paused.restype = ctypes.c_int
+        L.singws_bridge_refresh_views.argtypes = [
+            ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t,
+        ]
         L.singws_bridge_begin_transition.argtypes = [ctypes.c_void_p, ctypes.c_int]
         L.singws_bridge_grab_frame.restype = ctypes.c_void_p
         L.singws_bridge_grab_frame.argtypes = [
@@ -153,6 +169,8 @@ class MpvPlaybackPlugin:
         self._handle = None
         self._preview_id = 0
         self._output_id = 0
+        self._preview_widget = None
+        self._output_widget = None
         self._error = ""
         self._volume = 1.0
         self._device = "auto"
@@ -172,6 +190,8 @@ class MpvPlaybackPlugin:
 
     def attach(self, preview_widget, output_widget) -> bool:
         try:
+            self._preview_widget = preview_widget
+            self._output_widget = output_widget
             self._preview_id = int(preview_widget.winId())
             self._output_id = int(output_widget.winId())
             if not self._preview_id or not self._output_id:
@@ -373,6 +393,30 @@ class MpvPlaybackPlugin:
         if self._handle:
             self.api.lib.singws_bridge_set_sidefill(
                 self._handle, int(self._sidefill))
+    def refreshVideoViews(self) -> None:
+        """Reparent and present after Qt recreates a native show-window host."""
+        if self._handle:
+            preview_id = int(self._preview_widget.winId())
+            output_id = int(self._output_widget.winId())
+            self._preview_id = preview_id
+            self._output_id = output_id
+            self.api.lib.singws_bridge_refresh_views(
+                self._handle, output_id, preview_id)
+    def loadBackgroundVideo(self, path, opacity=1.0) -> bool:
+        if not self._handle:
+            return False
+        return bool(self.api.lib.singws_bridge_load_background(
+            self._handle, os.fsencode(str(path)), max(0.0, min(1.0, float(opacity)))
+        ))
+    def stopBackgroundVideo(self) -> None:
+        if self._handle:
+            self.api.lib.singws_bridge_stop_background(self._handle)
+    def backgroundVideoAtEnd(self) -> bool:
+        return bool(self._handle and self.api.lib.singws_bridge_background_at_end(self._handle))
+    def backgroundVideoPositionMs(self) -> int:
+        return int(self.api.lib.singws_bridge_background_position(self._handle)) if self._handle else 0
+    def backgroundVideoPaused(self) -> bool:
+        return bool(self._handle and self.api.lib.singws_bridge_background_paused(self._handle))
     def grabFrame(self):
         """Current picture as a QImage, or None.
 
