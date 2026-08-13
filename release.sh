@@ -112,7 +112,9 @@ git add \
   .gitignore .gitmodules \
   vendor/pybind11 vendor/signalsmith-linear vendor/signalsmith-stretch \
   0.2.18.1.py \
-  mpv_playback.py mpv_karaoke_transport.py MoltenVK_icd.json \
+  mpv_playback_iina.py mpv_karaoke_transport.py libmpv_media_jobs.py \
+  media_helpers.py libmpv_background_engine.py bass_soundboard_engine.py \
+  MoltenVK_icd.json \
   SingWS-x86_64.spec SingWS-arm64.spec \
   build_all.sh build_singws_mac_intel.sh build_singws_mac_arm64.sh \
   test_mpv_karaoke_transport.py test_karaoke_engine_selection.py \

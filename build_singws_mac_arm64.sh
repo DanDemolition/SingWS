@@ -10,21 +10,16 @@ SPEC="SingWS-arm64.spec"
 PYTHON=".venv/bin/python"
 DMGBUILD=".venv/bin/dmgbuild"
 
-# A native Apple Silicon build bundles the mpv engine. An Intel host can still
-# cross-build this arm64 app (both venvs are universal2), it just cannot supply
-# arm64 libmpv -- Homebrew publishes no arm64 bottle for mpv -- so that build
-# ships without the mpv engine, as every arm64 DMG has to date.
-CROSS_BUILD=0
 if [[ "$(uname -m)" != "arm64" ]]; then
-    CROSS_BUILD=1
-    echo "Cross-building the arm64 app from $(uname -m): the mpv engine will be"
-    echo "omitted. Build on an Apple Silicon Mac to include it."
+    echo "This dedicated build must run natively on an Apple Silicon Mac."
+    exit 1
 fi
 
 for required in \
     "$ENTRY" "$SPEC" "$PYTHON" "$DMGBUILD" \
-    mpv_playback.py mpv_karaoke_transport.py MoltenVK_icd.json \
-    SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py; do
+    mpv_karaoke_transport.py MoltenVK_icd.json constraints-macos12.txt \
+    SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py \
+    tools/verify_macos_min_version.py; do
     [[ -e "$required" ]] || { echo "Missing required file: $required"; exit 1; }
 done
 
@@ -32,29 +27,63 @@ for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
 
-if [[ "$CROSS_BUILD" == "0" ]]; then
-    for required in \
-        /opt/homebrew/bin/mpv \
-        /opt/homebrew/lib/libmpv.2.dylib \
-        /opt/homebrew/bin/ffmpeg \
-        /opt/homebrew/lib/libMoltenVK.dylib; do
-        [[ -e "$required" ]] || { echo "Missing Apple Silicon playback dependency: $required"; exit 1; }
-        file "$required" | grep -q "arm64" || {
-            echo "Playback dependency is not Apple Silicon arm64: $required"
-            exit 1
-        }
-    done
-fi
+: "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
+export SINGWS_MPV_FRAMEWORKS
+STACK_INPUTS=(
+    mpv_playback_iina.py
+    native/mpv_bridge/libsingws_mpv_bridge.dylib
+    "$SINGWS_MPV_FRAMEWORKS/singws_libmpv.2.dylib"
+)
+for required in "${STACK_INPUTS[@]}"; do
+    [[ -e "$required" ]] || { echo "Missing Apple Silicon playback dependency: $required"; exit 1; }
+    if file "$required" | grep -q "Mach-O" && ! file "$required" | grep -q "arm64"; then
+        echo "Playback dependency is not Apple Silicon arm64: $required"
+        exit 1
+    fi
+done
 
 "$PYTHON" tools/verify_macos_arch.py --runtime --require arm64
-"$PYTHON" -c "import mpv; import PyQt6; import signalsmith_audio_native"
+"$PYTHON" -c "import PyQt6"
+
+# This build is intended to cover macOS 12 and above, retiring the separate
+# legacy edition. PyQt6/Qt6 6.10+ raise the floor to macOS 13 while carrying a
+# "macosx_10_14" wheel tag, so the tag cannot be trusted -- check the installed
+# versions against the verified pin set instead.
+"$PYTHON" - <<'PYPINS'
+import re, sys
+from importlib.metadata import PackageNotFoundError, version
+wanted = {}
+for line in open("constraints-macos12.txt", encoding="utf-8"):
+    line = line.split("#", 1)[0].strip()
+    if not line:
+        continue
+    name, _, pin = line.partition("==")
+    wanted[name.strip()] = pin.strip()
+bad = []
+for name, pin in wanted.items():
+    try:
+        found = version(name)
+    except PackageNotFoundError:
+        bad.append(f"{name}: not installed (need {pin})")
+        continue
+    if found != pin:
+        bad.append(f"{name}: {found} installed, macOS 12 build needs {pin}")
+if bad:
+    print("Dependency versions break macOS 12 support:")
+    for line in bad:
+        print(f"  {line}")
+    sys.exit("Install the pinned set: pip install -c constraints-macos12.txt "
+             + " ".join(wanted))
+print(f"macOS 12 dependency pins verified: "
+      + ", ".join(f"{n}=={v}" for n, v in sorted(wanted.items())))
+PYPINS
 
 APP_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$ENTRY" | head -1)"
 [[ -n "$APP_VERSION" ]] || { echo "APP_VERSION is missing from $ENTRY"; exit 1; }
 DMG_NAME="SingWS-${APP_VERSION}-arm64-installer.dmg"
 
 echo "Building $APP_NAME $APP_VERSION for Apple Silicon..."
-"$PYTHON" tools/make_dmg_assets.py --style-only
+.venv/bin/python tools/make_dmg_assets.py --style-only
 
 rm -rf build dist
 "$PYTHON" -m PyInstaller --noconfirm "$SPEC"
@@ -63,19 +92,21 @@ APP_PATH="dist/$APP_NAME.app"
 [[ -d "$APP_PATH" ]] || { echo "Build failed: $APP_PATH was not created"; exit 1; }
 "$PYTHON" tools/verify_macos_arch.py --bundle "$APP_PATH" --require arm64
 
-if [[ "$CROSS_BUILD" == "0" ]]; then
-    for bundled in \
-        "$APP_PATH/Contents/Frameworks/mpv" \
-        "$APP_PATH/Contents/Frameworks/libmpv.2.dylib" \
-        "$APP_PATH/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"; do
-        [[ -e "$bundled" ]] || { echo "Bundled mpv dependency is missing: $bundled"; exit 1; }
-    done
-    # A bundled libmpv that cannot dlopen sends every song to the FFmpeg
-    # fallback, silently. Prove it loads before shipping.
-    "$PYTHON" - "$APP_PATH" <<'PYCHECK'
+REQUIRED_BUNDLED=(
+    "$APP_PATH/Contents/Frameworks/singws_libmpv.2.dylib"
+    "$APP_PATH/Contents/Frameworks/libsingws_mpv_bridge.dylib"
+)
+LIBMPV_NAMES=(libsingws_mpv_bridge.dylib singws_libmpv.2.dylib)
+for bundled in "${REQUIRED_BUNDLED[@]}"; do
+    [[ -e "$bundled" ]] || { echo "Bundled mpv dependency is missing: $bundled"; exit 1; }
+done
+
+# Prove the permanent bundled media core loads before this bundle goes any
+# further; there is no alternate karaoke engine to mask a broken runtime.
+"$PYTHON" - "$APP_PATH" "${LIBMPV_NAMES[@]}" <<'PYCHECK'
 import ctypes, pathlib, sys
 frameworks = pathlib.Path(sys.argv[1]) / "Contents" / "Frameworks"
-for name in ("libmpv.dylib", "libmpv.2.dylib"):
+for name in sys.argv[2:]:
     target = frameworks / name
     if not target.exists():
         sys.exit(f"Bundled {name} is missing")
@@ -83,27 +114,23 @@ for name in ("libmpv.dylib", "libmpv.2.dylib"):
         ctypes.CDLL(str(target))
     except OSError as exc:
         sys.exit(f"Bundled {name} cannot be loaded:\n{exc}")
-print("Bundled libmpv loads cleanly (both names)")
+print(f"Bundled media core loads cleanly: {', '.join(sys.argv[2:])}")
 PYCHECK
-else
-    for unexpected in \
-        "$APP_PATH/Contents/Frameworks/mpv" \
-        "$APP_PATH/Contents/Frameworks/libmpv.2.dylib"; do
-        [[ -e "$unexpected" ]] && {
-            echo "Cross-build unexpectedly bundled an mpv runtime: $unexpected"
-            exit 1
-        }
-    done
-    echo "Cross-build verified: no mpv runtime bundled (FFmpeg engine only)"
-fi
 
-# Stage the bundle BEFORE signing, and sign the staged copy -- same reason as
-# the Intel script. This project lives under ~/Documents, which is
-# file-provider (iCloud) managed: every file carries com.apple.FinderInfo and
-# com.apple.fileprovider xattrs, and codesign refuses them with "resource fork,
-# Finder information, or similar detritus not allowed". They cannot be stripped
-# in place; the file provider restores them immediately. A
+# The whole point of the pin set: nothing in the shipped bundle may require a
+# newer macOS than 12.0, or this build cannot replace the legacy edition.
+# Checks the real Mach-O load commands, not wheel tags or filenames.
+"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch arm64 --maximum 12.0
+
+# Stage the bundle BEFORE signing, and sign the staged copy.
+#
+# This project lives under ~/Documents, which is file-provider (iCloud)
+# managed: every file carries com.apple.FinderInfo and com.apple.fileprovider
+# xattrs, and codesign refuses them with "resource fork, Finder information, or
+# similar detritus not allowed". They cannot be stripped in place -- xattr -cr
+# runs, and the file provider puts them straight back. A
 # `ditto --norsrc --noextattr` copy outside that tree has none of them.
+# build_all.sh always signed such a copy, which is why it never hit this.
 STAGING="$(mktemp -d "${TMPDIR:-/tmp}/singws-arm64-dmg.XXXXXX")"
 cleanup() {
     rm -rf "$STAGING"

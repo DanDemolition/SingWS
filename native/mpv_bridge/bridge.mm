@@ -53,6 +53,13 @@ static void bridgeLog(const char *fmt, ...) {
 - (void)presentView:(BridgeVideoView *)view;
 - (void)scheduleRender;
 - (void)scheduleEvents;
+- (void)scheduleBackgroundRender;
+- (void)scheduleBackgroundEvents;
+- (BOOL)loadBackgroundVideo:(NSString *)path opacity:(double)opacity;
+- (void)stopBackgroundVideo;
+- (BOOL)backgroundAtEnd;
+- (int64_t)backgroundPositionMilliseconds;
+- (BOOL)backgroundPaused;
 - (void)shutdown;
 - (void)setPaused:(BOOL)paused;
 - (void)stopPlayback;
@@ -69,12 +76,27 @@ static void bridgeLog(const char *fmt, ...) {
 - (void)setDspChain:(const char *)chain;
 - (void)setAudioDelaySeconds:(double)seconds;
 - (void)setCdgSidefill:(int)mode;
+- (void)nativeViewDidAttach:(BridgeVideoView *)view;
+- (void)refreshViewsOutput:(NSView *)output preview:(NSView *)preview;
 - (void)beginWindowTransition:(int)durationMs;
 - (void *)grabFrameWidth:(int *)width height:(int *)height stride:(int *)stride;
 @end
 
 @implementation BridgeVideoView
 - (void)drawRect:(NSRect)dirty { (void)dirty; [self.renderer presentView:self]; }
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    // Qt may reconnect this native child long after QWidget::showEvent and its
+    // bounded retries. AppKit is authoritative about when a drawable really
+    // exists, so present at this lifecycle edge instead of guessing a delay.
+    if(self.window && self.renderer){
+        __weak BridgeVideoView *weakSelf=self;
+        dispatch_async(dispatch_get_main_queue(),^{
+            BridgeVideoView *view=weakSelf;
+            if(view.window && view.renderer)[view.renderer nativeViewDidAttach:view];
+        });
+    }
+}
 - (void)mouseDown:(NSEvent *)event {
     // The Qt app owns a same-Space borderless presentation mode. Calling
     // AppKit toggleFullScreen here entered a different native Space and could
@@ -94,6 +116,12 @@ static void renderWake(void *ctx) {
 }
 static void eventWake(void *ctx) {
     @autoreleasepool { [(__bridge BridgeRenderer *)ctx scheduleEvents]; }
+}
+static void backgroundRenderWake(void *ctx) {
+    @autoreleasepool { [(__bridge BridgeRenderer *)ctx scheduleBackgroundRender]; }
+}
+static void backgroundEventWake(void *ctx) {
+    @autoreleasepool { [(__bridge BridgeRenderer *)ctx scheduleBackgroundEvents]; }
 }
 
 // Reusable scan-only libmpv core. It has no window and no audio device: the
@@ -272,7 +300,8 @@ static GLuint makeProgram(void) {
         "gl_Position=vec4(p[gl_VertexID]*scale,0,1); uv=t[gl_VertexID]*uvScale+uvOffset; }\n";
     const char *fs =
         "#version 150 core\n"
-        "uniform sampler2D frameTexture; uniform int cdgSidefill;"
+        "uniform sampler2D frameTexture; uniform sampler2D backgroundTexture;"
+        "uniform int cdgSidefill; uniform float backgroundOpacity;"
         "uniform vec2 cdgPanel; in vec2 uv; out vec4 color;"
         // cdgSidefill: 0 off, 1 the CDG's own background colour, 2 an ambient
         // blur of the picture itself. Mode 2 exists because 12 of 14 sampled
@@ -280,19 +309,13 @@ static GLuint makeProgram(void) {
         // is correctly -- but invisibly -- a no-op.
         "vec4 cdgBlurFill(vec2 p, float panel, float right){"
         "float span=right-panel;"
-        // Mirror the bar back into the picture: the pixel touching the picture
-        // samples its edge, and the screen edge samples ~20% in. Sampling the
-        // picture (rather than extending its edge row) keeps artwork that
-        // touches the frame from becoming a horizontal streak.
-        "float t=(p.x<panel)?(p.x/max(panel,1e-4)):((1.0-p.x)/max(1.0-right,1e-4));"
-        "float depth=0.20*(1.0-clamp(t,0.0,1.0));"
-        "float sx=(p.x<panel)?(panel+span*depth):(right-span*depth);"
-        // Dense taps: a sparse box kernel over this much magnification banded
-        // the bars into visible blocks.
+        // This pass already uses cover-cropped coordinates from the real host
+        // aspect. Blur that enlarged background everywhere; the untouched CDG
+        // picture is drawn over it in a second pass.
         "vec4 acc=vec4(0.0); float wsum=0.0;"
-        "for(int i=-5;i<=5;i++){ for(int j=-5;j<=5;j++){"
-        "vec2 o=vec2(float(i)*span*0.012,float(j)*0.018);"
-        "vec2 c=vec2(clamp(sx+o.x,panel+span*0.005,right-span*0.005),clamp(p.y+o.y,0.0,1.0));"
+        "for(int i=-2;i<=2;i++){ for(int j=-2;j<=2;j++){"
+        "vec2 o=vec2(float(i)*span*0.025,float(j)*0.035);"
+        "vec2 c=vec2(clamp(p.x+o.x,panel+span*0.005,right-span*0.005),clamp(p.y+o.y,0.0,1.0));"
         "float w=1.0/(1.0+0.06*float(i*i+j*j));"
         "acc+=texture(frameTexture,c)*w; wsum+=w; }}"
         // Slightly dimmed so the bars read as ambience beside the lyrics
@@ -300,6 +323,63 @@ static GLuint makeProgram(void) {
         "return vec4((acc.rgb/wsum)*0.88,1.0);"
         "}"
         "void main(){"
+        "if(cdgSidefill==4){vec4 bg=texture(backgroundTexture,uv);color=vec4(bg.rgb*backgroundOpacity,1.0);return;}"
+        "if(cdgSidefill==5){"
+        // CDG has two independent background colours: the border preset and
+        // the tile-area background. Sample each region separately and key
+        // either match; otherwise discs with (for example) a black border and
+        // blue tile background leave a tacky solid rectangle over the video.
+        "float panel=cdgPanel.x;float right=cdgPanel.y;float span=right-panel;"
+        "float lx=panel+span*(3.0/300.0);float rx=panel+span*(297.0/300.0);"
+        "float ty=6.0/216.0;float by=210.0/216.0;"
+        "vec4 c0=texture(frameTexture,vec2(lx,ty));vec4 c1=texture(frameTexture,vec2(rx,ty));"
+        "vec4 c2=texture(frameTexture,vec2(lx,by));vec4 c3=texture(frameTexture,vec2(rx,by));"
+        "float s0=distance(c0.rgb,c1.rgb)+distance(c0.rgb,c2.rgb)+distance(c0.rgb,c3.rgb);"
+        "float s1=distance(c1.rgb,c0.rgb)+distance(c1.rgb,c2.rgb)+distance(c1.rgb,c3.rgb);"
+        "float s2=distance(c2.rgb,c0.rgb)+distance(c2.rgb,c1.rgb)+distance(c2.rgb,c3.rgb);"
+        "float s3=distance(c3.rgb,c0.rgb)+distance(c3.rgb,c1.rgb)+distance(c3.rgb,c2.rgb);"
+        "vec3 borderBg=c0.rgb;float best=s0;if(s1<best){borderBg=c1.rgb;best=s1;}"
+        "if(s2<best){borderBg=c2.rgb;best=s2;}if(s3<best){borderBg=c3.rgb;}"
+        "lx=panel+span*(12.0/300.0);rx=panel+span*(288.0/300.0);"
+        "ty=18.0/216.0;by=198.0/216.0;"
+        "c0=texture(frameTexture,vec2(lx,ty));c1=texture(frameTexture,vec2(rx,ty));"
+        "c2=texture(frameTexture,vec2(lx,by));c3=texture(frameTexture,vec2(rx,by));"
+        "s0=distance(c0.rgb,c1.rgb)+distance(c0.rgb,c2.rgb)+distance(c0.rgb,c3.rgb);"
+        "s1=distance(c1.rgb,c0.rgb)+distance(c1.rgb,c2.rgb)+distance(c1.rgb,c3.rgb);"
+        "s2=distance(c2.rgb,c0.rgb)+distance(c2.rgb,c1.rgb)+distance(c2.rgb,c3.rgb);"
+        "s3=distance(c3.rgb,c0.rgb)+distance(c3.rgb,c1.rgb)+distance(c3.rgb,c2.rgb);"
+        "vec3 tileBg=c0.rgb;best=s0;if(s1<best){tileBg=c1.rgb;best=s1;}"
+        "if(s2<best){tileBg=c2.rgb;best=s2;}if(s3<best){tileBg=c3.rgb;}"
+        // Title/credit cards commonly put a second flat panel across both
+        // lower corners. Key it only when those two samples corroborate one
+        // another, avoiding removal of a lone piece of foreground artwork.
+        "vec3 panelBg=tileBg;"
+        "if(distance(c2.rgb,c3.rgb)<0.10)panelBg=c2.rgb;"
+        "vec4 fg=texture(frameTexture,uv);"
+        "float delta=min(distance(fg.rgb,borderBg),min(distance(fg.rgb,tileBg),distance(fg.rgb,panelBg)));"
+        // CDG pixels are palette graphics. Discard matching background
+        // fragments outright so the already-rendered animation remains in
+        // the framebuffer; relying on source alpha left an opaque palette
+        // rectangle on some Intel OpenGL child surfaces.
+        // libmpv has already scaled the 300x216 CDG into this texture, so
+        // edge texels around glyphs contain a substantial blend of the palette
+        // background. Key that full fringe, not only exact/near-exact blue.
+        // CDG foreground and outline palette colours remain well outside this
+        // distance on the tested blue, black, white and yellow combination.
+        // Title-card outlines can be a much darker interpolation of a blue or
+        // cyan background. Extend the key only along that low-red colour
+        // family; this removes the cyan tracing without swallowing the purple
+        // logo (r=.6), green artwork, white/yellow text, or black outlines.
+        "if(delta<0.42||(fg.r<0.20&&delta<0.75))discard;"
+        "color=vec4(fg.rgb,1.0);return;}"
+        // Foreground composite mode. Feather only the CDG protected border
+        // (6 of 300 columns); lyrics begin inside it and remain fully opaque.
+        "if(cdgSidefill==3){"
+        "float span=cdgPanel.y-cdgPanel.x;"
+        "float x=(uv.x-cdgPanel.x)/max(span,1e-4);"
+        "float a=smoothstep(0.0,6.0/300.0,x)*smoothstep(0.0,6.0/300.0,1.0-x);"
+        "vec4 fg=texture(frameTexture,uv); color=vec4(fg.rgb,a); return;"
+        "}"
         "if(cdgSidefill!=0){"
         // Preserve the complete CDG image that libmpv pillarboxed into the
         // shared 16:9 texture. cdgPanel carries its measured left/right edges:
@@ -311,7 +391,6 @@ static GLuint makeProgram(void) {
         // extending the visible edge row-by-row, cannot turn artwork touching
         // that edge into a horizontal streak.
         "float panel=cdgPanel.x; float right=cdgPanel.y;"
-        "if(uv.x<panel||uv.x>right){"
         "if(cdgSidefill==2){ color=cdgBlurFill(uv,panel,right); return; }"
         "float lx=panel+(right-panel)*(3.0/300.0);"
         "float rx=panel+(right-panel)*(297.0/300.0);"
@@ -327,7 +406,6 @@ static GLuint makeProgram(void) {
         "vec4 bg=c0; float best=s0;"
         "if(s1<best){bg=c1;best=s1;} if(s2<best){bg=c2;best=s2;} if(s3<best){bg=c3;}"
         "color=bg; return;"
-        "}"
         "} color=texture(frameTexture,uv); }\n";
     GLuint v=compileShader(GL_VERTEX_SHADER,vs), f=compileShader(GL_FRAGMENT_SHADER,fs);
     if (!v || !f) return 0;
@@ -343,9 +421,9 @@ static GLuint makeProgram(void) {
     NSOpenGLPixelFormat *_format;
     NSOpenGLContext *_master;
     BridgeVideoView *_outputView, *_previewView;
-    GLuint _texture, _fbo, _program, _outVao, _prevVao;
+    GLuint _texture, _fbo, _cdgTexture, _cdgFbo, _backgroundTexture, _backgroundFbo, _program, _outVao, _prevVao;
     GLint _scaleUniform, _uvScaleUniform, _uvOffsetUniform, _textureUniform, _sidefillUniform;
-    GLint _panelUniform;
+    GLint _panelUniform, _backgroundTextureUniform, _backgroundOpacityUniform;
     int _width, _height;
     BOOL _hasFrame, _isCdg;
     // 0 off, 1 background colour, 2 ambient blur. Read on the GUI thread while
@@ -373,6 +451,12 @@ static GLuint makeProgram(void) {
     std::atomic<uint64_t> _transitionSerial;
     mpv_handle *_mpv;
     mpv_render_context *_render;
+    mpv_handle *_backgroundMpv;
+    mpv_render_context *_backgroundRender;
+    std::atomic_bool _backgroundRenderQueued, _backgroundEventQueued;
+    std::atomic_bool _backgroundHasFrame;
+    std::atomic_bool _backgroundAtEnd;
+    std::atomic<double> _backgroundOpacity;
     std::atomic_bool _renderQueued, _eventQueued, _stopping;
     // Every mpv command/property write runs here instead of on the GUI thread.
     // mpv can hold its core lock for several hundred milliseconds while an
@@ -386,6 +470,9 @@ static GLuint makeProgram(void) {
 - (instancetype)initWithOutput:(NSView *)output preview:(NSView *)preview {
     if ((self=[super init])) {
         _width=1920; _height=1080; _renderQueued=false; _eventQueued=false; _stopping=false;
+        _backgroundMpv=nullptr; _backgroundRender=nullptr;
+        _backgroundRenderQueued=false; _backgroundEventQueued=false;
+        _backgroundHasFrame=false; _backgroundAtEnd=false; _backgroundOpacity=0.0;
         _lastOutputSkip=-1; _lastPreviewSkip=-1;
         _loading=false; _playWhenLoaded=false;
         _desiredTempoPercent=100; _desiredSemitones=0; _loadSerial=0;
@@ -409,6 +496,27 @@ static GLuint makeProgram(void) {
         glGenFramebuffers(1,&_fbo); glBindFramebuffer(GL_FRAMEBUFFER,_fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,_texture,0);
         GLenum status=glCheckFramebufferStatus(GL_FRAMEBUFFER); glBindFramebuffer(GL_FRAMEBUFFER,0);
+        // CDG is natively 300x216. Render it at that exact size so libmpv
+        // cannot soften the palette pixels while scaling into the 1080p video
+        // surface. presentView performs the one and only enlargement.
+        glGenTextures(1,&_cdgTexture); glBindTexture(GL_TEXTURE_2D,_cdgTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,300,216,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+        glGenFramebuffers(1,&_cdgFbo); glBindFramebuffer(GL_FRAMEBUFFER,_cdgFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,_cdgTexture,0);
+        GLenum cdgStatus=glCheckFramebufferStatus(GL_FRAMEBUFFER); glBindFramebuffer(GL_FRAMEBUFFER,0);
+        glGenTextures(1,&_backgroundTexture); glBindTexture(GL_TEXTURE_2D,_backgroundTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,_width,_height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+        glGenFramebuffers(1,&_backgroundFbo); glBindFramebuffer(GL_FRAMEBUFFER,_backgroundFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,_backgroundTexture,0);
+        GLenum backgroundStatus=glCheckFramebufferStatus(GL_FRAMEBUFFER); glBindFramebuffer(GL_FRAMEBUFFER,0);
         _program=makeProgram();
         _scaleUniform=glGetUniformLocation(_program,"scale");
         _uvScaleUniform=glGetUniformLocation(_program,"uvScale");
@@ -416,8 +524,11 @@ static GLuint makeProgram(void) {
         _textureUniform=glGetUniformLocation(_program,"frameTexture");
         _sidefillUniform=glGetUniformLocation(_program,"cdgSidefill");
         _panelUniform=glGetUniformLocation(_program,"cdgPanel");
+        _backgroundTextureUniform=glGetUniformLocation(_program,"backgroundTexture");
+        _backgroundOpacityUniform=glGetUniformLocation(_program,"backgroundOpacity");
         CGLUnlockContext(_master.CGLContextObj);
-        if (status!=GL_FRAMEBUFFER_COMPLETE || !_program) return nil;
+        if (status!=GL_FRAMEBUFFER_COMPLETE || cdgStatus!=GL_FRAMEBUFFER_COMPLETE ||
+            backgroundStatus!=GL_FRAMEBUFFER_COMPLETE || !_program) return nil;
         _outputView=[self attachTo:output]; _previewView=[self attachTo:preview];
         if (!_outputView || !_previewView) return nil;
     }
@@ -781,6 +892,60 @@ static GLuint makeProgram(void) {
     [_outputView setNeedsDisplay:YES];
 }
 
+- (void)nativeViewDidAttach:(BridgeVideoView *)view {
+    if(!view || !view.window || _stopping.load())return;
+    NSOpenGLContext *ctx=view.openGLContext;
+    if(!ctx)return;
+    [ctx clearDrawable];
+    [ctx setView:view];
+    [ctx update];
+    [view setNeedsDisplay:YES];
+    [self presentView:view];
+    bridgeLog("[bridge] %s drawable reattached to window",
+            view==_outputView?"output":"preview");
+}
+
+- (void)refreshViewsOutput:(NSView *)output preview:(NSView *)preview {
+    // Ordering a Qt top-level window out detaches its child NSViews from an
+    // NSWindow. mpv can keep producing frames while hidden, but its last frame
+    // callback may precede AppKit reconnecting this view. Re-present the
+    // retained texture without recreating mpv or changing playback/surface
+    // order; the ticker is a separate sibling and remains untouched.
+    // Qt can replace a WA_NativeWindow host when its top-level is hidden. Move
+    // the retained mpv views from the retired hosts to the current winId views
+    // before reconnecting their drawables.
+    if(output && _outputView.superview!=output){
+        [_outputView removeFromSuperview];
+        _outputView.frame=output.bounds;
+        [output addSubview:_outputView positioned:NSWindowBelow relativeTo:nil];
+        bridgeLog("[bridge] output view reparented to current host");
+    }
+    if(preview && _previewView.superview!=preview){
+        [_previewView removeFromSuperview];
+        _previewView.frame=preview.bounds;
+        [preview addSubview:_previewView positioned:NSWindowBelow relativeTo:nil];
+        bridgeLog("[bridge] preview view reparented to current host");
+    }
+    // Re-showing a Qt top-level can give its native children a new Cocoa
+    // drawable even though the NSView objects survive. update alone leaves the
+    // context bound to the retired drawable after a few hide/show cycles.
+    // Explicitly reconnect each visible view before presenting the retained
+    // texture. This changes no mpv state and is safe while playback continues.
+    for(BridgeVideoView *view in @[_outputView,_previewView]){
+        NSOpenGLContext *ctx=view.openGLContext;
+        if(!ctx || !view.window)continue;
+        [ctx clearDrawable];
+        [ctx setView:view];
+        [ctx update];
+    }
+    [_outputView setNeedsDisplay:YES];
+    [_previewView setNeedsDisplay:YES];
+    [self presentView:_outputView];
+    [self presentView:_previewView];
+    bridgeLog("[bridge] retained views refresh requested output_window=%d preview_window=%d",
+            _outputView.window?1:0,_previewView.window?1:0);
+}
+
 - (void)beginWindowTransition:(int)durationMs {
     if(_stopping.load())return;
     const uint64_t serial=++_transitionSerial;
@@ -796,6 +961,7 @@ static GLuint makeProgram(void) {
         // present the latest shared texture at settled geometry rather than
         // waiting for another mpv render callback.
         [self presentView:self->_outputView];
+        [self presentView:self->_previewView];
         [self->_outputView setNeedsDisplay:YES];
         bridgeLog("[bridge] output transition released serial=%llu",
                 (unsigned long long)serial);
@@ -811,6 +977,107 @@ static GLuint makeProgram(void) {
     if (_stopping.load()) return; bool expected=false;
     if (!_eventQueued.compare_exchange_strong(expected,true)) return;
     dispatch_async(dispatch_get_main_queue(),^{ self->_eventQueued=false; if(!self->_stopping.load())[self drainEvents]; });
+}
+- (void)scheduleBackgroundRender {
+    if(_stopping.load())return; bool expected=false;
+    if(!_backgroundRenderQueued.compare_exchange_strong(expected,true))return;
+    dispatch_async(dispatch_get_main_queue(),^{
+        self->_backgroundRenderQueued=false;
+        if(self->_stopping.load()||!self->_backgroundRender)return;
+        uint64_t flags=mpv_render_context_update(self->_backgroundRender);
+        if(flags&MPV_RENDER_UPDATE_FRAME){
+            [self->_master makeCurrentContext]; CGLLockContext(self->_master.CGLContextObj);
+            glBindFramebuffer(GL_FRAMEBUFFER,self->_backgroundFbo);
+            glViewport(0,0,self->_width,self->_height);
+            mpv_opengl_fbo target={(int)self->_backgroundFbo,self->_width,self->_height,GL_RGBA8};
+            int flip=1;
+            mpv_render_param p[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
+            mpv_render_context_render(self->_backgroundRender,p);
+            glBindFramebuffer(GL_FRAMEBUFFER,0); glFlush();
+            CGLUnlockContext(self->_master.CGLContextObj);
+            self->_backgroundHasFrame=true;
+        }
+        [self presentView:self->_outputView];
+    });
+}
+- (void)scheduleBackgroundEvents {
+    if(_stopping.load())return; bool expected=false;
+    if(!_backgroundEventQueued.compare_exchange_strong(expected,true))return;
+    dispatch_async(dispatch_get_main_queue(),^{
+        self->_backgroundEventQueued=false;
+        if(!self->_backgroundMpv)return;
+        while(true){
+            mpv_event *e=mpv_wait_event(self->_backgroundMpv,0);
+            if(!e||e->event_id==MPV_EVENT_NONE)break;
+            if(e->event_id==MPV_EVENT_FILE_LOADED)
+                bridgeLog("[background] native animation loaded");
+            else if(e->event_id==MPV_EVENT_END_FILE){
+                self->_backgroundAtEnd=true;
+                bridgeLog("[background] native animation ended");
+            }
+        }
+    });
+}
+- (BOOL)loadBackgroundVideo:(NSString *)path opacity:(double)opacity {
+    if(!path.length||_stopping.load())return NO;
+    _backgroundOpacity=std::max(0.0,std::min(1.0,opacity));
+    _backgroundHasFrame=false; _backgroundAtEnd=false;
+    if(!_backgroundMpv){
+        _backgroundMpv=mpv_create(); if(!_backgroundMpv)return NO;
+        mpv_set_option_string(_backgroundMpv,"config","no");
+        mpv_set_option_string(_backgroundMpv,"vo","libmpv");
+        mpv_set_option_string(_backgroundMpv,"ao","null");
+        mpv_set_option_string(_backgroundMpv,"mute","yes");
+        // Keep an embedded audio stream as mpv's timing master, but route it
+        // into the null device and mute it. Disabling audio entirely left some
+        // short AAC-backed VJ loops parked on their first rendered frame.
+        // VideoToolbox cannot export several older H.264 VJ-loop formats into
+        // this secondary OpenGL render context on Intel (hwaccel setup fails
+        // before a frame is produced). These clips are decorative and muted;
+        // reliable software decode is preferable to a permanently black layer.
+        mpv_set_option_string(_backgroundMpv,"hwdec","no");
+        mpv_set_option_string(_backgroundMpv,"pause","no");
+        // Do not let keep-open park a completed loop on its final frame with
+        // pause=yes.  END_FILE/eof-reached must remain observable so Python's
+        // shuffle bag can advance, while idle keeps this embedded core alive.
+        mpv_set_option_string(_backgroundMpv,"keep-open","no");
+        mpv_set_option_string(_backgroundMpv,"idle","yes");
+        mpv_set_wakeup_callback(_backgroundMpv,backgroundEventWake,(__bridge void *)self);
+        if(mpv_initialize(_backgroundMpv)<0)return NO;
+        [_master makeCurrentContext];
+        mpv_opengl_init_params init={.get_proc_address=getProc,.get_proc_address_ctx=nullptr};
+        mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,(void *)MPV_RENDER_API_TYPE_OPENGL},{MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,&init},{MPV_RENDER_PARAM_INVALID,nullptr}};
+        if(mpv_render_context_create(&_backgroundRender,_backgroundMpv,params)<0)return NO;
+        mpv_render_context_set_update_callback(_backgroundRender,backgroundRenderWake,(__bridge void *)self);
+    }
+    // An EOF may leave pause asserted.  Every replacement animation must
+    // explicitly resume without touching the karaoke/audio master core.
+    int paused=0;
+    mpv_set_property(_backgroundMpv,"pause",MPV_FORMAT_FLAG,&paused);
+    const char *cmd[]={"loadfile",path.fileSystemRepresentation,"replace",nullptr};
+    int r=mpv_command_async(_backgroundMpv,90,cmd);
+    bridgeLog("[background] native animation queued file=%s opacity=%.2f",path.fileSystemRepresentation,(double)_backgroundOpacity.load());
+    return r>=0;
+}
+- (void)stopBackgroundVideo {
+    _backgroundOpacity=0.0; _backgroundHasFrame=false; _backgroundAtEnd=false;
+    if(_backgroundMpv){const char *cmd[]={"stop",nullptr};mpv_command_async(_backgroundMpv,92,cmd);}
+    [_outputView setNeedsDisplay:YES];
+}
+- (BOOL)backgroundAtEnd {
+    if(_backgroundAtEnd.load())return YES;
+    if(!_backgroundMpv)return NO;
+    int eof=0;
+    return mpv_get_property(_backgroundMpv,"eof-reached",MPV_FORMAT_FLAG,&eof)>=0 && eof;
+}
+- (int64_t)backgroundPositionMilliseconds {
+    if(!_backgroundMpv)return 0; double seconds=0.0;
+    return mpv_get_property(_backgroundMpv,"time-pos",MPV_FORMAT_DOUBLE,&seconds)>=0
+        ? (int64_t)llround(seconds*1000.0) : 0;
+}
+- (BOOL)backgroundPaused {
+    if(!_backgroundMpv)return NO; int paused=0;
+    return mpv_get_property(_backgroundMpv,"pause",MPV_FORMAT_FLAG,&paused)>=0 && paused;
 }
 // Measure where libmpv pillarboxed the picture inside the shared texture, from
 // its own dwidth/dheight. CDG is 300x216 (DAR 1.389), so a 4:3 assumption puts
@@ -899,8 +1166,10 @@ static GLuint makeProgram(void) {
 - (void)renderFrame {
     if(!_render)return; uint64_t flags=mpv_render_context_update(_render);
     if(flags&MPV_RENDER_UPDATE_FRAME){ [_master makeCurrentContext]; CGLLockContext(_master.CGLContextObj);
-        glBindFramebuffer(GL_FRAMEBUFFER,_fbo); glViewport(0,0,_width,_height);
-        mpv_opengl_fbo target={(int)_fbo,_width,_height,GL_RGBA8}; int flip=1;
+        const GLuint renderFbo=_isCdg?_cdgFbo:_fbo;
+        const int renderWidth=_isCdg?300:_width, renderHeight=_isCdg?216:_height;
+        glBindFramebuffer(GL_FRAMEBUFFER,renderFbo); glViewport(0,0,renderWidth,renderHeight);
+        mpv_opengl_fbo target={(int)renderFbo,renderWidth,renderHeight,GL_RGBA8}; int flip=1;
         mpv_render_param p[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
         // glFlush, not glFinish: this runs on the Qt GUI thread (see
         // queueRender), so blocking until the GPU drains stalls the whole UI
@@ -956,7 +1225,10 @@ static GLuint makeProgram(void) {
     [ctx makeCurrentContext]; [ctx update]; CGLLockContext(ctx.CGLContextObj);
     NSSize s=[view convertSizeToBacking:view.bounds.size]; int w=MAX(1,(int)s.width),h=MAX(1,(int)s.height);
     glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
-    if(_hasFrame){ double sa=(double)_width/_height,va=(double)w/h; GLfloat sx=1,sy=1;
+    if(_hasFrame){
+        const GLuint frameTexture=_isCdg?_cdgTexture:_texture;
+        const double sa=_isCdg?(300.0/216.0):((double)_width/_height);
+        double va=(double)w/h; GLfloat sx=1,sy=1;
         if(va>sa)sx=sa/va; else sy=va/sa;
         GLfloat uvx=1,uvy=1,uox=0,uoy=0;
         // Where libmpv actually pillarboxed the picture inside the shared 16:9
@@ -964,7 +1236,7 @@ static GLuint makeProgram(void) {
         // hardcoded to a 4:3 assumption (.125/.875); CDG is 300x216, so the
         // real edges are .109/.891 and both the preview crop below and the
         // side-fill seam were off by ~6 CDG columns on each side.
-        const double span=std::max(0.05,std::min(1.0,_pictureSpanX.load()));
+        const double span=_isCdg?1.0:std::max(0.05,std::min(1.0,_pictureSpanX.load()));
         const GLfloat panelL=(GLfloat)((1.0-span)/2.0);
         const GLfloat panelR=(GLfloat)(panelL+span);
         if(view==_previewView && _isCdg){
@@ -982,11 +1254,79 @@ static GLuint makeProgram(void) {
         int sidefill=(view==_outputView && _isCdg)?_cdgSidefill.load():0;
         glUseProgram(_program); GLuint*vao=(view==_outputView)?&_outVao:&_prevVao;
         if(!*vao)glGenVertexArrays(1,vao); glBindVertexArray(*vao);
-        glUniform2f(_scaleUniform,sx,sy); glUniform2f(_uvScaleUniform,uvx,uvy);
-        glUniform2f(_uvOffsetUniform,uox,uoy); glUniform1i(_sidefillUniform,sidefill);
         glUniform2f(_panelUniform,panelL,panelR);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,_texture); glUniform1i(_textureUniform,0);
-        glDrawArrays(GL_TRIANGLE_STRIP,0,4); glBindTexture(GL_TEXTURE_2D,0); glBindVertexArray(0); glUseProgram(0); }
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,frameTexture); glUniform1i(_textureUniform,0);
+        // Each CDG foreground pass leaves this texture in nearest mode. Reset
+        // it before any decorative cover/blur sampling, which must remain
+        // smooth. The final visible CDG pass selects nearest again below.
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,_backgroundTexture); glUniform1i(_backgroundTextureUniform,1);
+        glUniform1f(_backgroundOpacityUniform,(GLfloat)_backgroundOpacity.load());
+        // Preview must represent what the room sees. Previously this was
+        // output-only, so the preview retained the raw blue CDG rectangle even
+        // while the show window used the animation composite.
+        const bool backgroundActive=(_isCdg&&_backgroundHasFrame.load()&&_backgroundOpacity.load()>0.0);
+        if(backgroundActive){
+            const double backgroundAspect=(double)_width/_height;
+            GLfloat buvx=1,buvy=1,buox=0,buoy=0;
+            if(va>backgroundAspect){buvy=(GLfloat)(backgroundAspect/va);buoy=(1-buvy)*0.5f;}
+            else {buvx=(GLfloat)(va/backgroundAspect);buox=(1-buvx)*0.5f;}
+            glUniform2f(_scaleUniform,1,1);glUniform2f(_uvScaleUniform,buvx,buvy);
+            glUniform2f(_uvOffsetUniform,buox,buoy);glUniform1i(_sidefillUniform,4);
+            glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+            uvx=(GLfloat)span;uox=panelL;uvy=1;uoy=0;sx=1;sy=1;
+            const double ca=sa*span;
+            if(va>ca)sx=(GLfloat)(ca/va);else sy=(GLfloat)(va/ca);
+            glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+            sidefill=0;
+        } else if(sidefill){
+            // Background pass: cover the *actual* host, not the bridge's fixed
+            // 16:9 render texture. Crop only this decorative copy; never
+            // stretch or crop the lyrics layer that follows.
+            const double ca=sa*span;
+            GLfloat buvx=(GLfloat)span,buvy=1,buox=panelL,buoy=0;
+            if(va>ca){
+                buvy=(GLfloat)(ca/va); buoy=(1-buvy)*0.5f;
+            }else{
+                buvx=(GLfloat)(span*(va/ca)); buox=panelL+((GLfloat)span-buvx)*0.5f;
+            }
+            glUniform2f(_scaleUniform,1,1);
+            glUniform2f(_uvScaleUniform,buvx,buvy);
+            glUniform2f(_uvOffsetUniform,buox,buoy);
+            glUniform1i(_sidefillUniform,sidefill);
+            glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+
+            // Foreground pass: fit the complete native-aspect CDG picture over
+            // the full-bleed background. Sampling only the measured picture
+            // span removes mpv's generated 16:9 bars without touching lyrics.
+            uvx=(GLfloat)span; uox=panelL; uvy=1; uoy=0;
+            sx=1; sy=1;
+            if(va>ca)sx=(GLfloat)(ca/va); else sy=(GLfloat)(va/ca);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+            glUniform1i(_sidefillUniform,3);
+        }
+        glUniform2f(_scaleUniform,sx,sy); glUniform2f(_uvScaleUniform,uvx,uvy);
+        glUniform2f(_uvOffsetUniform,uox,uoy);
+        glUniform1i(_sidefillUniform,backgroundActive?5:0);
+        if(sidefill)glUniform1i(_sidefillUniform,3);
+        // CDG is 300x216 palette artwork, not photographic video. A second
+        // bilinear resize here blends lyric/outline pixels that libmpv has
+        // already placed in the shared texture and makes the result visibly
+        // softer than the old OpenKJ-style renderer. Keep linear filtering for
+        // MP4 and for the decorative cover/blur pass above, but sample the
+        // final CDG layer with nearest-neighbour in both output and preview.
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,frameTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,
+                        _isCdg?GL_NEAREST:GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,
+                        _isCdg?GL_NEAREST:GL_LINEAR);
+        glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+        if(sidefill||backgroundActive)glDisable(GL_BLEND);
+        glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,0);
+        glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,0); glBindVertexArray(0); glUseProgram(0); }
     [ctx flushBuffer]; CGLUnlockContext(ctx.CGLContextObj);
 }
 - (void)shutdown {
@@ -997,8 +1337,12 @@ static GLuint makeProgram(void) {
     if(_controlQueue)dispatch_sync(_controlQueue,^{});
     if(_render)mpv_render_context_set_update_callback(_render,nullptr,nullptr);
     if(_mpv)mpv_set_wakeup_callback(_mpv,nullptr,nullptr);
+    if(_backgroundRender)mpv_render_context_set_update_callback(_backgroundRender,nullptr,nullptr);
+    if(_backgroundMpv)mpv_set_wakeup_callback(_backgroundMpv,nullptr,nullptr);
     if(_render){[_master makeCurrentContext];mpv_render_context_free(_render);_render=nullptr;}
+    if(_backgroundRender){[_master makeCurrentContext];mpv_render_context_free(_backgroundRender);_backgroundRender=nullptr;}
     if(_mpv){mpv_terminate_destroy(_mpv);_mpv=nullptr;}
+    if(_backgroundMpv){mpv_terminate_destroy(_backgroundMpv);_backgroundMpv=nullptr;}
     [_outputView removeFromSuperview]; [_previewView removeFromSuperview];
     bridgeLog("[bridge] clean shutdown");
 }
@@ -1050,6 +1394,27 @@ void singws_bridge_set_key(void *h,int n){if(h)[(__bridge BridgeRenderer *)h set
 void singws_bridge_set_dsp_chain(void *h,const char*c){if(h)[(__bridge BridgeRenderer *)h setDspChain:c];}
 void singws_bridge_set_audio_delay(void *h,double s){if(h)[(__bridge BridgeRenderer *)h setAudioDelaySeconds:s];}
 void singws_bridge_set_sidefill(void *h,int e){if(h)[(__bridge BridgeRenderer *)h setCdgSidefill:e];}
+int singws_bridge_load_background(void *h,const char *path,double opacity){
+    if(!h||!path||!*path)return 0;
+    NSString *value=[NSString stringWithUTF8String:path];
+    return [(__bridge BridgeRenderer *)h loadBackgroundVideo:value opacity:opacity]?1:0;
+}
+int singws_bridge_background_at_end(void *h){
+    return h&&[(__bridge BridgeRenderer *)h backgroundAtEnd];
+}
+int64_t singws_bridge_background_position(void *h){
+    return h?[(__bridge BridgeRenderer *)h backgroundPositionMilliseconds]:0;
+}
+int singws_bridge_background_paused(void *h){
+    return h&&[(__bridge BridgeRenderer *)h backgroundPaused];
+}
+void singws_bridge_stop_background(void *h){if(h)[(__bridge BridgeRenderer *)h stopBackgroundVideo];}
+void singws_bridge_refresh_views(void *h,uintptr_t outputView,uintptr_t previewView){
+    if(!h)return;
+    NSView *out=(__bridge NSView *)(void *)outputView;
+    NSView *prev=(__bridge NSView *)(void *)previewView;
+    [(__bridge BridgeRenderer *)h refreshViewsOutput:out preview:prev];
+}
 void singws_bridge_begin_transition(void *h,int ms){if(h)[(__bridge BridgeRenderer *)h beginWindowTransition:ms];}
 void *singws_bridge_grab_frame(void *h,int *w,int *ht,int *stride){
     return h?[(__bridge BridgeRenderer *)h grabFrameWidth:w height:ht stride:stride]:nullptr;}

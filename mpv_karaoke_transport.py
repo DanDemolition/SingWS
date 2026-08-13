@@ -63,6 +63,7 @@ class MpvKaraokeTransport(QObject):
         self._stopped = False
         self._started_emitted = False
         self._ended_emitted = False
+        self._playing_polls_without_visual = 0
         self._loop = None
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -88,6 +89,7 @@ class MpvKaraokeTransport(QObject):
         self._stopped = False
         self._started_emitted = False
         self._ended_emitted = False
+        self._playing_polls_without_visual = 0
         self._timer.start()
 
     def stop(self):
@@ -238,11 +240,24 @@ class MpvKaraokeTransport(QObject):
                 visuals_ready = bool(self.plugin.visualsReady())
             except Exception:
                 pass
-            if self.plugin.isPlaying() and self.plugin.positionMs() >= 40 and visuals_ready:
+            playing = bool(self.plugin.isPlaying() and self.plugin.positionMs() >= 40)
+            if playing and not visuals_ready:
+                self._playing_polls_without_visual += 1
+            else:
+                self._playing_polls_without_visual = 0
+            # Playback identity and queue state follow the audible clock. A
+            # native drawable that is late (or temporarily detached while the
+            # show window opens) must not leave Play locked in "starting"
+            # forever after sound has begun. At the normal 50ms interval this
+            # bounded fallback commits after one second; the host still keeps
+            # the video surface hidden until its independent readiness path.
+            visual_timeout = self._playing_polls_without_visual >= max(
+                4, int(round(1000 / max(1, self._timer.interval())))
+            )
+            if playing and (visuals_ready or visual_timeout):
                 self._started_emitted = True
                 self.started.emit()
         if not self._ended_emitted and self.plugin.atEnd():
             self._ended_emitted = True
             self._timer.stop()
             self.ended.emit()
-

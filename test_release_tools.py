@@ -112,9 +112,9 @@ class PackagingSpecTests(unittest.TestCase):
     def test_intel_release_defaults_to_macos12_iina_stack(self):
         spec = Path("SingWS-x86_64.spec").read_text(encoding="utf-8")
         build = Path("build_singws_mac_intel.sh").read_text(encoding="utf-8")
-        self.assertNotIn('SINGWS_MEDIA_STACK", "homebrew"', spec)
-        self.assertIn('SINGWS_MEDIA_STACK", "iina"', spec)
-        self.assertIn('MEDIA_STACK="${SINGWS_MEDIA_STACK:-iina}"', build)
+        self.assertIn("Required bundled native mpv bridge/runtime is missing", spec)
+        self.assertIn("native/mpv_bridge/libsingws_mpv_bridge.dylib", build)
+        self.assertNotIn("SINGWS_MEDIA_STACK", spec + build)
         self.assertIn("'LSMinimumSystemVersion': '12.0'", spec)
         self.assertIn("--maximum 12.0", build)
 
@@ -137,10 +137,25 @@ class PackagingSpecTests(unittest.TestCase):
                 self.assertNotIn("gi_typelibs", source)
                 self.assertNotIn('binaries.append((str(plug), "gst_plugins"))', source)
 
-    def test_runtime_hook_has_no_gstreamer_setup(self):
-        runtime = Path("singws_pyinstaller_runtime.py").read_text(encoding="utf-8")
-        for token in ("GST_REGISTRY", "GI_TYPELIB_PATH", "gst-plugin-scanner", "gst_plugins", "import gi"):
-            self.assertNotIn(token, runtime)
+    def test_specs_do_not_bundle_legacy_media_executables(self):
+        self.assertFalse(Path("singws_pyinstaller_runtime.py").exists())
+        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
+            source = Path(spec).read_text(encoding="utf-8")
+            self.assertNotIn('for ff_binary in ("ffmpeg", "ffprobe")', source)
+            self.assertIn("'libmpv_media_jobs'", source)
+            self.assertIn('"libmpv_background_engine.py"', source)
+
+    def test_apple_silicon_package_matches_permanent_native_stack(self):
+        spec = Path("SingWS-arm64.spec").read_text(encoding="utf-8")
+        build = Path("build_singws_mac_arm64.sh").read_text(encoding="utf-8")
+        self.assertIn("target_arch='arm64'", spec)
+        self.assertIn('"arm64" in result.stdout.split()', spec)
+        self.assertIn("--runtime --require arm64", build)
+        self.assertIn("--bundle \"$APP_PATH\" --require arm64", build)
+        self.assertIn("libsingws_mpv_bridge.dylib", spec + build)
+        self.assertIn("singws_libmpv.2.dylib", spec + build)
+        self.assertNotIn("mpv_playback.py", spec + build)
+        self.assertNotIn("python_karaoke_transport", spec + build)
 
     def test_release_specs_include_karafun_apple_events_authorization(self):
         entitlements = Path("SingWS.entitlements").read_text(encoding="utf-8")
@@ -160,7 +175,6 @@ class PackagingSpecTests(unittest.TestCase):
                     self.assertIn(module, source)
                 for dylib in ('"libssl.3.dylib"', '"libcrypto.3.dylib"'):
                     self.assertIn(dylib, source)
-                self.assertIn('"openssl@3"', source)
 
     def test_release_specs_bundle_required_qt_plugins(self):
         required_groups = (
