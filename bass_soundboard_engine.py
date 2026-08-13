@@ -4,9 +4,6 @@ import ctypes
 import hashlib
 import os
 from pathlib import Path
-import shutil
-import subprocess
-import sys
 import tempfile
 from collections.abc import Callable
 
@@ -109,22 +106,6 @@ class BassSoundboardChannel:
             bass.BASS_StreamCreateFile(0, os.fsencode(path), 0, 0, flags) or 0
         )
 
-    @staticmethod
-    def _ffmpeg_path() -> str:
-        candidates = []
-        bundle_root = getattr(sys, "_MEIPASS", None)
-        if bundle_root:
-            candidates.append(Path(bundle_root) / "ffmpeg")
-        if getattr(sys, "frozen", False):
-            candidates.append(Path(sys.executable).resolve().parent / "ffmpeg")
-        found = shutil.which("ffmpeg")
-        if found:
-            candidates.append(Path(found))
-        for candidate in candidates:
-            if candidate.exists() and os.access(candidate, os.X_OK):
-                return str(candidate)
-        raise BassSoundboardError("FFmpeg is unavailable for this soundboard format")
-
     @classmethod
     def _pcm_cache_path(cls, source_path: str) -> str:
         source = Path(source_path).resolve()
@@ -139,38 +120,24 @@ class BassSoundboardChannel:
         output = cache_dir / f"{digest}.wav"
         if output.exists() and output.stat().st_size > 44:
             return str(output)
-        partial = output.with_suffix(".partial.wav")
+        rendered = None
         try:
-            result = subprocess.run(
-                [
-                    cls._ffmpeg_path(),
-                    "-hide_banner",
-                    "-loglevel", "error",
-                    "-nostdin",
-                    "-y",
-                    "-i", str(source),
-                    "-vn",
-                    "-acodec", "pcm_s16le",
-                    "-ar", "48000",
-                    "-ac", "2",
-                    str(partial),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-            if result.returncode != 0 or not partial.exists() or partial.stat().st_size <= 44:
-                detail = (result.stderr or "conversion failed").strip().splitlines()[-1]
-                raise BassSoundboardError(f"Unable to decode soundboard clip: {detail}")
-            os.replace(partial, output)
+            from libmpv_media_jobs import decode_audio_wav
+            rendered = decode_audio_wav(
+                str(source), sample_rate=48000, channels=2, timeout=120)
+            if Path(rendered).stat().st_size <= 44:
+                raise BassSoundboardError("Unable to decode soundboard clip")
+            os.replace(rendered, output)
+            rendered = None
             return str(output)
-        except subprocess.TimeoutExpired as exc:
-            raise BassSoundboardError("Soundboard clip conversion timed out") from exc
+        except BassSoundboardError:
+            raise
+        except Exception as exc:
+            raise BassSoundboardError(f"Unable to decode soundboard clip: {exc}") from exc
         finally:
             try:
-                if partial.exists():
-                    partial.unlink()
+                if rendered and Path(rendered).exists():
+                    Path(rendered).unlink()
             except OSError:
                 pass
 

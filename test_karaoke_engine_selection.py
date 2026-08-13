@@ -20,20 +20,12 @@ def load_main_module():
     return module
 
 
-class _FfmpegSentinel:
-    pass
-
 
 class EngineSelectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.singws = load_main_module()
 
-    def _app(self, pref):
-        app = self.singws.KaraokeApp.__new__(self.singws.KaraokeApp)
-        app.settings = {"karaoke_engine": pref} if pref is not None else {}
-        app._karaoke_engine_session_pref = pref or ""
-        return app
 
     def test_default_setting_is_mpv(self):
         self.assertEqual(self.singws.DEFAULTS.get("karaoke_engine"), "mpv")
@@ -43,16 +35,6 @@ class EngineSelectionTests(unittest.TestCase):
         # degrade gracefully; it must never be a real class again.
         self.assertIsNone(self.singws.GstKaraokeTransport)
 
-    def test_all_saved_preferences_select_permanent_mpv(self):
-        pref, cls = self._app(None)._select_karaoke_transport_cls()
-        self.assertEqual(pref, "mpv")
-        self.assertIsNone(cls)
-        for pref in ("ffmpeg", "python", "qt", "FFMPEG", " ffmpeg ",
-                     "gstreamer", "gst", "auto", "laserdisc", "",
-                     "mpv", "mpv-video"):
-            resolved, cls = self._app(pref)._select_karaoke_transport_cls()
-            self.assertEqual(resolved, "mpv", pref)
-            self.assertIsNone(cls, pref)
 
     def test_startup_banner_reports_the_real_engine(self):
         # The banner was a hardcoded "FFmpeg/Qt" string, so a session actually
@@ -65,8 +47,8 @@ class EngineSelectionTests(unittest.TestCase):
         self.assertNotIn("mpv_engine_cb", MAIN_SOURCE)
         self.assertNotIn("mpv_keep_audio_cb", MAIN_SOURCE)
         self.assertNotIn("SINGWS_KARAOKE_ENGINE", MAIN_SOURCE)
-        start = MAIN_SOURCE.index("def _start_python_karaoke_transport")
-        body = MAIN_SOURCE[start:MAIN_SOURCE.index("def _prepare_python_karaoke_start", start)]
+        start = MAIN_SOURCE.index("def _start_karaoke_transport")
+        body = MAIN_SOURCE[start:MAIN_SOURCE.index("def _prepare_karaoke_start", start)]
         self.assertIn("return self._start_mpv_karaoke_transport", body)
         self.assertNotIn("falling back to FFmpeg", body)
 
@@ -117,7 +99,7 @@ class MpvBackendSelectionTests(unittest.TestCase):
     def test_follower_backend_is_not_imported(self):
         self.assertIn("self._load_mpv_playback_backend()", MAIN_SOURCE)
         core = MAIN_SOURCE[MAIN_SOURCE.index("def _ensure_mpv_karaoke_core"):]
-        core = core[:core.index("def _attach_mpv_video_follower")]
+        core = core[:core.index("def _start_karaoke_transport")]
         self.assertNotIn("from mpv_playback import", core)
         loader = MAIN_SOURCE[MAIN_SOURCE.index("def _load_mpv_playback_backend"):]
         loader = loader[:loader.index("def _ensure_mpv_karaoke_core")]
@@ -175,7 +157,7 @@ class CdgVisualOffsetTests(unittest.TestCase):
     def test_full_mpv_path_applies_the_offset_at_song_start(self):
         # Separate from the Python-transport path; it previously applied none.
         start = MAIN_SOURCE.index("def _start_mpv_karaoke_transport")
-        end = MAIN_SOURCE.index("def _attach_mpv_video_follower")
+        end = MAIN_SOURCE.index("def _start_karaoke_transport")
         block = MAIN_SOURCE[start:end]
         self.assertIn("_effective_cdg_timing_offset_ms()", block)
         self.assertIn("transport.set_video_offset_ms(off)", block)
@@ -352,7 +334,7 @@ class PaintedOverlayVsMpvSurfaceTests(unittest.TestCase):
     def test_started_signal_is_routed_through_the_gate(self):
         # A direct _set_mpv_hosts_visible(True) here would bypass suppression.
         start = MAIN_SOURCE.index("def _start_mpv_karaoke_transport")
-        end = MAIN_SOURCE.index("def _attach_mpv_video_follower")
+        end = MAIN_SOURCE.index("def _start_karaoke_transport")
         block = MAIN_SOURCE[start:end]
         self.assertIn("transport.started.connect(self._reveal_mpv_hosts_if_allowed)", block)
         self.assertNotIn("lambda: self._set_mpv_hosts_visible(True)", block)

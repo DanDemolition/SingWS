@@ -260,6 +260,20 @@ class NativeMpvDecodeTests(unittest.TestCase):
         self.assertNotIn("prepare_background_video_playback_files", source)
         self.assertNotIn("set_background_video_frame", source)
 
+    def test_cdg_foreground_uses_nearest_without_changing_video_filtering(self):
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        self.assertIn("_isCdg?GL_NEAREST:GL_LINEAR", bridge)
+        self.assertIn("Keep linear filtering for", bridge)
+        self.assertIn("_cdgTexture", bridge)
+        self.assertIn("_cdgFbo", bridge)
+        self.assertIn("_isCdg?300:_width", bridge)
+        self.assertIn("_isCdg?216:_height", bridge)
+        self.assertIn("_isCdg?_cdgTexture:_texture", bridge)
+        self.assertIn("_isCdg?1.0:", bridge)
+        # Do not revive the mpv scale=nearest setting that previously stopped
+        # valid CDGs from reaching visual readiness.
+        self.assertNotIn('[self setOption:"scale" value:"nearest"]', bridge)
+
     def test_native_bridge_contract_is_muted_and_uses_a_separate_texture(self):
         bridge = Path("native/mpv_bridge/bridge.mm").read_text()
         compact = bridge.replace(" ", "")

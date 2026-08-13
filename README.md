@@ -85,7 +85,9 @@ python 0.2.18.1.py
 ./build_all.sh
 ```
 
-The build scripts use PyInstaller under the hood. The resulting `.app` bundles ffmpeg and all Python dependencies — no external installs needed for end users.
+The build scripts use PyInstaller under the hood. The resulting `.app` bundles
+the native libmpv stack and all Python dependencies—no external media tools are
+needed for end users.
 
 ---
 
@@ -94,7 +96,8 @@ The build scripts use PyInstaller under the hood. The resulting `.app` bundles f
 ```
 SingWS/
 ├── 0.2.18.1.py               # Main application entry point & UI bridge
-├── python_karaoke_transport.py  # FFmpeg/Qt playback engine (CDG/MP4/audio)
+├── mpv_karaoke_transport.py     # Permanent native playback adapter
+├── libmpv_media_jobs.py         # Offline decode and loudness analysis
 ├── bass_background_engine.py    # BGM playback (BASS library)
 ├── qml/
 │   └── AppShell.qml          # Main QML UI shell

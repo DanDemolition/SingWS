@@ -9,8 +9,6 @@ from PyQt6.QtWidgets import QApplication
 
 
 MAIN_SOURCE = pathlib.Path("0.2.18.1.py").read_text(encoding="utf-8")
-TRANSPORT_SOURCE = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
-
 
 def function_source(name: str) -> str:
     pattern = rf"(?ms)^    def {re.escape(name)}\(.*?^    def "
@@ -22,14 +20,6 @@ def function_source(name: str) -> str:
     if match:
         return match.group(0).rsplit("\nclass ", 1)[0]
     raise AssertionError(f"Could not find function {name}")
-
-
-def transport_function_source(name: str) -> str:
-    pattern = rf"(?ms)^    def {re.escape(name)}\(.*?^    def "
-    match = re.search(pattern, TRANSPORT_SOURCE)
-    if match:
-        return match.group(0).rsplit("\n    def ", 1)[0]
-    raise AssertionError(f"Could not find transport function {name}")
 
 
 class PerformanceSafetyTests(unittest.TestCase):
@@ -211,19 +201,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         # for anyone who does not deliberately lower it.
         self.assertIn('"end_silence_trim_threshold_sec": 2.5', MAIN_SOURCE)
 
-    def test_memory_telemetry_reports_live_reader_pool(self):
-        # The 2026-07-25 show grew 790MB -> 2148MB while every instrumented
-        # cache stayed tiny, so telemetry must also expose the frame pipeline:
-        # one 720p reader holds ~36MB of RGB, and ~38 retained readers would
-        # account for the whole climb.
-        self.assertIn("def reader_pool_stats", TRANSPORT_SOURCE)
-        self.assertIn("_LIVE_READERS", TRANSPORT_SOURCE)
-        # A WeakSet is required: a strong container would itself retain readers
-        # and manufacture the leak it is meant to detect.
-        self.assertIn("weakref.WeakSet", TRANSPORT_SOURCE)
+    def test_memory_telemetry_reports_no_legacy_frame_readers(self):
         telemetry = function_source("_log_memory_telemetry")
-        self.assertIn("reader_pool_stats", telemetry)
-        self.assertIn("frames_mb=", telemetry)
+        self.assertIn("readers=0 running=0 frames=0 frames_mb=0.0", telemetry)
+        self.assertNotIn("reader_pool_stats", telemetry)
 
     def test_high_frequency_diagnostics_are_rate_limited(self):
         helper_start = MAIN_SOURCE.index("def _diag_rate_limited")
@@ -379,47 +360,18 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("songs_worker_finished_during_playback", history_songs_apply)
         self.assertIn('if bool(getattr(self, "_app_closing", False)):', function_source("_dispatch_ui_call"))
 
-    def test_karaoke_start_does_not_predecode_entire_track(self):
-        source = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        delayed_start = ""
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_finish_delayed_start":
-                delayed_start = ast.get_source_segment(source, node) or ""
-                break
-        self.assertTrue(delayed_start)
-        self.assertNotIn("_start_full_decode", delayed_start)
 
-    def test_mp4_reader_does_not_reemit_duplicate_frames(self):
-        source = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
-        reader_start = source.index("class FfmpegVideoReader")
-        reader_end = source.index("class _PcmFeeder")
-        reader = source[reader_start:reader_end]
-        self.assertIn("return self.latest_image if selected is not None else None", reader)
-        self.assertIn("self.timer.setTimerType(Qt.TimerType.PreciseTimer)", source)
 
-    def test_cdg_file_io_is_warmed_off_the_gui_thread(self):
-        source = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
-        decoder_start = source.index("class CdgDecoder")
-        decoder_end = source.index("class FfmpegVideoReader")
-        decoder = source[decoder_start:decoder_end]
-        init_start = decoder.index("    def __init__")
-        load_start = decoder.index("    def _load_packets")
-        init = decoder[init_start:load_start]
-        self.assertNotIn("open(", init)
-        self.assertIn("singws-cdg-late-preload", init)
-
-        schedule = function_source("_schedule_next_up_prescan")
-        self.assertIn("_preload_next_up_cdg", schedule)
+    def test_native_cdg_path_has_no_python_packet_preload(self):
         preload = function_source("_preload_next_up_cdg")
-        self.assertIn("threading.Thread", preload)
-        self.assertIn("singws-next-cdg-preload", preload)
+        self.assertNotIn("threading.Thread", preload)
+        self.assertNotIn("preload_cdg_packets", MAIN_SOURCE)
         legacy_add = function_source("add_song_to_singer")
         self.assertIn("_enqueue_cdg_pair_async", legacy_add)
         self.assertNotIn("os.path.exists(mp3_path)", legacy_add)
         pair_check = function_source("_enqueue_cdg_pair_async")
         self.assertIn("threading.Thread", pair_check)
-        self.assertIn("preload_cdg_packets(cdg_path)", pair_check)
+        self.assertNotIn("preload_cdg_packets", pair_check)
 
     def test_library_path_lookup_uses_an_index(self):
         lookup = function_source("_get_track_obj")
@@ -445,51 +397,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("cache.get(request_id) == diag_signature", request_diag)
         self.assertIn("len(cache) > 2048", request_diag)
 
-    def test_karaoke_level_meter_tracks_output_not_decoder_lookahead(self):
-        transport = pathlib.Path("python_karaoke_transport.py").read_text(encoding="utf-8")
-        feeder_start = transport.index("class _PcmFeeder")
-        feeder_end = transport.index("class PythonKaraokeTransport")
-        feeder = transport[feeder_start:feeder_end]
-        self.assertIn("t._accept_level(bytes(out))", feeder)
-        accept_start = transport.index("    def _accept_level")
-        accept_end = transport.index("    def _mark_decoder_done", accept_start)
-        accept = transport[accept_start:accept_end]
-        self.assertIn("if worker is not None:", accept)
-        self.assertIn("return", accept)
 
-    def test_ffmpeg_cdg_timing_restores_legacy_baseline(self):
-        # 750, matching what ffmpeg_cdg_750_baseline_migrated already assumes:
-        # it zeroes a saved +150 fine on the basis that the baseline carries it.
-        # The constant sat at 600 for several releases, so installs calibrated
-        # to +750 silently ran 150ms early.
-        self.assertIn("FFMPEG_CDG_BASE_OFFSET_MS = 750", MAIN_SOURCE)
-        # The baseline is now chosen per engine (mpv needs a different one and
-        # was wrongly getting FFmpeg's), so the constant is applied in
-        # _cdg_timing_base_offset_ms rather than inline. That selection is
-        # covered behaviourally by CdgTimingBaselinePerEngineTests in
-        # test_karaoke_engine_selection.
-        effective = function_source("_effective_cdg_timing_offset_ms")
-        self.assertIn("self._cdg_timing_base_offset_ms() + fine_ms", effective)
-        self.assertIn(
-            "FFMPEG_CDG_BASE_OFFSET_MS", function_source("_cdg_timing_base_offset_ms")
-        )
-        start = function_source("_start_python_karaoke_transport")
-        self.assertIn("off = self._effective_cdg_timing_offset_ms()", start)
-        self.assertIn("ffmpeg_cdg_timing_migrated", MAIN_SOURCE)
-        self.assertIn('saved_fine == 150', MAIN_SOURCE)
-        self.assertIn('self.settings["cdg_timing_offset_ms"] = 0', MAIN_SOURCE)
-        self.assertIn("ffmpeg_cdg_750_baseline_migrated", MAIN_SOURCE)
-
-    def test_mp4_timing_anchors_on_real_audio(self):
-        feeder = TRANSPORT_SOURCE[
-            TRANSPORT_SOURCE.index("class _PcmFeeder"):TRANSPORT_SOURCE.index("class PythonKaraokeTransport")
-        ]
-        self.assertIn("if not t._clock_has_real_audio_anchor:", feeder)
-        self.assertIn("anchor_processed_us = t._processed_us()", feeder)
-        self.assertIn("t._clock_processed_us = anchor_processed_us", feeder)
-        self.assertIn("t._clock_has_real_audio_anchor = True", feeder)
-        position = transport_function_source("position_seconds")
-        self.assertIn("if not self._clock_has_real_audio_anchor:", position)
 
     def test_deferred_remote_adds_save_off_thread_during_playback(self):
         source = function_source("_save_deferred_remote_adds")
@@ -612,7 +520,7 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_daw_preview_can_capture_from_the_mpv_engine(self):
         """The DAW singer-screen preview was blank for the whole mpv path.
 
-        Its only frame source was _on_python_karaoke_frame (the FFmpeg/Qt
+        Its only frame source was the retired Python painter transport (the
         engine). Under mpv the picture is a shared GL texture in a native
         NSView, so there is no karaoke_frame and QWidget.grab() -- the last
         fallback -- cannot capture a native child surface.
@@ -948,28 +856,6 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("painter.setOpacity(fade_alpha)", paint)
         self.assertIn("_draw_background_pixmap(painter, previous)", paint)
 
-    def test_operator_preview_mirrors_audience_rendering_state(self):
-        self.assertIn("def _cdg_side_fill_color(image)", MAIN_SOURCE)
-        frame_handler = function_source("_on_python_karaoke_frame")
-        self.assertIn('cdg_display_mode == "sidefill"', frame_handler)
-        self.assertIn('cdg_display_mode == "blur"', frame_handler)
-        self.assertEqual(frame_handler.count("side_fill=side_fill"), 2)
-        # Both widescreen fills have to reach the operator preview as well, or
-        # the preview stops mirroring what the audience sees.
-        self.assertEqual(frame_handler.count("blur_fill=blur_fill"), 2)
-        preview_start = MAIN_SOURCE.index("class PreviewWindow(QWidget):")
-        preview_end = MAIN_SOURCE.index("class PerformanceWaveformWidget", preview_start)
-        preview = MAIN_SOURCE[preview_start:preview_end]
-        self.assertIn("self.video_area = VideoAreaWidget(self)", preview)
-        self.assertIn("def recreate_video_surface", preview)
-        idle = function_source("_show_idle_background_after_karaoke")
-        self.assertIn("self.preview_window.force_black = False", idle)
-        qr = function_source("_refresh_show_screen_qr")
-        self.assertIn("preview_area", qr)
-        self.assertIn("preview_area.set_request_qr(None)", qr)
-        self.assertIn("for candidate in (area,)", qr)
-        overlay = function_source("_show_next_up_transition_overlay")
-        self.assertIn("preview_area.show_next_up_overlay", overlay)
 
     def test_volume_analysis_dialog_is_resurfaced_frontmost(self):
         analyze = function_source("analyze_library")
@@ -1104,11 +990,6 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("self.video_area.update()", tick)
         self.assertNotIn("self.video_area.repaint()", tick)
 
-    def test_seek_retires_old_video_reader_and_caps_intel_recovery_rate(self):
-        seek = transport_function_source("seek")
-        self.assertIn("old_video_reader.stop()", seek)
-        self.assertIn('platform.machine() == "x86_64"', seek)
-        self.assertIn("fps=reader_fps", seek)
 
     def test_intel_qimage_outputs_are_not_promoted_native_for_diagnostics(self):
         video_init = MAIN_SOURCE[MAIN_SOURCE.index("class VideoWindow(QWidget):"):MAIN_SOURCE.index("def _attach_show_vfx", MAIN_SOURCE.index("class VideoWindow(QWidget):"))]
@@ -1187,22 +1068,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("_handle_media_end_safe", trim)
         self.assertNotIn("_end_silence_triggered = True", trim)
 
-    def test_slow_high_frame_rate_1080p_uses_bounded_decode_profile(self):
-        self.assertIn("self.src_height >= 1080", TRANSPORT_SOURCE)
-        self.assertIn("self.source_fps > 45.0", TRANSPORT_SOURCE)
-        self.assertIn("24.0 if is_hevc else 30.0", TRANSPORT_SOURCE)
-        self.assertIn("540 if is_hevc else 720", TRANSPORT_SOURCE)
-        self.assertIn('command.extend(["-threads", "2"])', TRANSPORT_SOURCE)
 
-    def test_karaoke_dsp_does_not_run_in_qt_audio_pull_callback(self):
-        feeder_start = TRANSPORT_SOURCE.index("class _PcmFeeder")
-        feeder_end = TRANSPORT_SOURCE.index("class PythonKaraokeTransport")
-        feeder = TRANSPORT_SOURCE[feeder_start:feeder_end]
-        self.assertNotIn("_process_output_dsp", feeder)
-        worker = TRANSPORT_SOURCE[TRANSPORT_SOURCE.index("def _run_output_dsp"):]
-        worker = worker[:worker.index("\n    def ", 4)]
-        self.assertIn("self._process_output_dsp(raw)", worker)
-        self.assertIn("byte_rate * 0.17", worker)
 
     def test_large_tracks_json_save_runs_off_the_gui_thread(self):
         persist = function_source("_persist_tracks_json")
@@ -1218,44 +1084,9 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("QTimer.singleShot(75, finish_confirmed_stop)", stop)
         self.assertIn("skip_confirmation=True", stop)
 
-    def test_videotoolbox_probe_rejects_silent_software_fallback(self):
-        self.assertIn('"hwaccel initialisation returned error"', TRANSPORT_SOURCE)
-        self.assertIn('"failed setup for format videotoolbox"', TRANSPORT_SOURCE)
-        self.assertIn(
-            "if use_hwaccel and any(marker in errors for marker in fallback_markers)",
-            TRANSPORT_SOURCE,
-        )
 
-    def test_decode_path_is_chosen_by_measured_throughput(self):
-        # VideoToolbox can initialize and still be several times slower than
-        # software decode, because rgb24 output forces a GPU->CPU roundtrip.
-        # Choosing on availability alone put playback on the slow path.
-        self.assertIn("def _measure_decode_speed", TRANSPORT_SOURCE)
-        self.assertIn("media_seconds / elapsed", TRANSPORT_SOURCE)
-        choose = TRANSPORT_SOURCE[TRANSPORT_SOURCE.index("def _choose_decode_path"):]
-        choose = choose[:choose.index("\n    def ")]
-        self.assertIn("software = self._measure_decode_speed(False)", choose)
-        self.assertIn("self.use_hwaccel = hardware > software", choose)
-        # The decision must be cached; probing twice per song is expensive.
-        self.assertIn("_DECODE_PATH_CACHE", choose)
 
-    def test_expensive_source_downshift_uses_measured_headroom(self):
-        # Previously gated on "not self.use_hwaccel", so a slow-but-working
-        # hardware path skipped the mitigation entirely.
-        self.assertIn(
-            "self.decode_speed_ratio < self.MIN_COMFORTABLE_SPEED",
-            TRANSPORT_SOURCE,
-        )
-        self.assertNotIn(
-            "not self.use_hwaccel\n            and self.codec_name",
-            TRANSPORT_SOURCE,
-        )
 
-    def test_decode_diagnostics_reach_the_log_file(self):
-        # Bare print() never reaches ~/SingWS/logs, which hid the decode path.
-        self.assertIn("def _log(message: str)", TRANSPORT_SOURCE)
-        self.assertIn("logging.info(message)", TRANSPORT_SOURCE)
-        self.assertIn("_log(\n                f\"[FFMPEG] video_decode start", TRANSPORT_SOURCE)
 
     def test_singer_history_render_is_capped_harder_during_playback(self):
         refresh = function_source("_refresh_singer_history_view")

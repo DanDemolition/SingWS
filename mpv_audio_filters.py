@@ -46,7 +46,7 @@ The filter order mirrors the SingWS signal path exactly:
     key -> normalize -> graphic EQ -> gate -> tilt EQ -> exciter -> comp -> limiter
 
 Tempo is deliberately absent: mpv applies it with the ``speed`` property, not a
-filter, exactly as ``python_karaoke_transport`` keeps tempo out of its DSP.
+filter, keeping tempo independent from the remaining audio DSP.
 """
 
 from __future__ import annotations

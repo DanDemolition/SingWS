@@ -421,7 +421,7 @@ static GLuint makeProgram(void) {
     NSOpenGLPixelFormat *_format;
     NSOpenGLContext *_master;
     BridgeVideoView *_outputView, *_previewView;
-    GLuint _texture, _fbo, _backgroundTexture, _backgroundFbo, _program, _outVao, _prevVao;
+    GLuint _texture, _fbo, _cdgTexture, _cdgFbo, _backgroundTexture, _backgroundFbo, _program, _outVao, _prevVao;
     GLint _scaleUniform, _uvScaleUniform, _uvOffsetUniform, _textureUniform, _sidefillUniform;
     GLint _panelUniform, _backgroundTextureUniform, _backgroundOpacityUniform;
     int _width, _height;
@@ -496,6 +496,18 @@ static GLuint makeProgram(void) {
         glGenFramebuffers(1,&_fbo); glBindFramebuffer(GL_FRAMEBUFFER,_fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,_texture,0);
         GLenum status=glCheckFramebufferStatus(GL_FRAMEBUFFER); glBindFramebuffer(GL_FRAMEBUFFER,0);
+        // CDG is natively 300x216. Render it at that exact size so libmpv
+        // cannot soften the palette pixels while scaling into the 1080p video
+        // surface. presentView performs the one and only enlargement.
+        glGenTextures(1,&_cdgTexture); glBindTexture(GL_TEXTURE_2D,_cdgTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,300,216,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+        glGenFramebuffers(1,&_cdgFbo); glBindFramebuffer(GL_FRAMEBUFFER,_cdgFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,_cdgTexture,0);
+        GLenum cdgStatus=glCheckFramebufferStatus(GL_FRAMEBUFFER); glBindFramebuffer(GL_FRAMEBUFFER,0);
         glGenTextures(1,&_backgroundTexture); glBindTexture(GL_TEXTURE_2D,_backgroundTexture);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
@@ -515,7 +527,8 @@ static GLuint makeProgram(void) {
         _backgroundTextureUniform=glGetUniformLocation(_program,"backgroundTexture");
         _backgroundOpacityUniform=glGetUniformLocation(_program,"backgroundOpacity");
         CGLUnlockContext(_master.CGLContextObj);
-        if (status!=GL_FRAMEBUFFER_COMPLETE || backgroundStatus!=GL_FRAMEBUFFER_COMPLETE || !_program) return nil;
+        if (status!=GL_FRAMEBUFFER_COMPLETE || cdgStatus!=GL_FRAMEBUFFER_COMPLETE ||
+            backgroundStatus!=GL_FRAMEBUFFER_COMPLETE || !_program) return nil;
         _outputView=[self attachTo:output]; _previewView=[self attachTo:preview];
         if (!_outputView || !_previewView) return nil;
     }
@@ -1153,8 +1166,10 @@ static GLuint makeProgram(void) {
 - (void)renderFrame {
     if(!_render)return; uint64_t flags=mpv_render_context_update(_render);
     if(flags&MPV_RENDER_UPDATE_FRAME){ [_master makeCurrentContext]; CGLLockContext(_master.CGLContextObj);
-        glBindFramebuffer(GL_FRAMEBUFFER,_fbo); glViewport(0,0,_width,_height);
-        mpv_opengl_fbo target={(int)_fbo,_width,_height,GL_RGBA8}; int flip=1;
+        const GLuint renderFbo=_isCdg?_cdgFbo:_fbo;
+        const int renderWidth=_isCdg?300:_width, renderHeight=_isCdg?216:_height;
+        glBindFramebuffer(GL_FRAMEBUFFER,renderFbo); glViewport(0,0,renderWidth,renderHeight);
+        mpv_opengl_fbo target={(int)renderFbo,renderWidth,renderHeight,GL_RGBA8}; int flip=1;
         mpv_render_param p[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
         // glFlush, not glFinish: this runs on the Qt GUI thread (see
         // queueRender), so blocking until the GPU drains stalls the whole UI
@@ -1210,7 +1225,10 @@ static GLuint makeProgram(void) {
     [ctx makeCurrentContext]; [ctx update]; CGLLockContext(ctx.CGLContextObj);
     NSSize s=[view convertSizeToBacking:view.bounds.size]; int w=MAX(1,(int)s.width),h=MAX(1,(int)s.height);
     glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
-    if(_hasFrame){ double sa=(double)_width/_height,va=(double)w/h; GLfloat sx=1,sy=1;
+    if(_hasFrame){
+        const GLuint frameTexture=_isCdg?_cdgTexture:_texture;
+        const double sa=_isCdg?(300.0/216.0):((double)_width/_height);
+        double va=(double)w/h; GLfloat sx=1,sy=1;
         if(va>sa)sx=sa/va; else sy=va/sa;
         GLfloat uvx=1,uvy=1,uox=0,uoy=0;
         // Where libmpv actually pillarboxed the picture inside the shared 16:9
@@ -1218,7 +1236,7 @@ static GLuint makeProgram(void) {
         // hardcoded to a 4:3 assumption (.125/.875); CDG is 300x216, so the
         // real edges are .109/.891 and both the preview crop below and the
         // side-fill seam were off by ~6 CDG columns on each side.
-        const double span=std::max(0.05,std::min(1.0,_pictureSpanX.load()));
+        const double span=_isCdg?1.0:std::max(0.05,std::min(1.0,_pictureSpanX.load()));
         const GLfloat panelL=(GLfloat)((1.0-span)/2.0);
         const GLfloat panelR=(GLfloat)(panelL+span);
         if(view==_previewView && _isCdg){
@@ -1237,7 +1255,12 @@ static GLuint makeProgram(void) {
         glUseProgram(_program); GLuint*vao=(view==_outputView)?&_outVao:&_prevVao;
         if(!*vao)glGenVertexArrays(1,vao); glBindVertexArray(*vao);
         glUniform2f(_panelUniform,panelL,panelR);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,_texture); glUniform1i(_textureUniform,0);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,frameTexture); glUniform1i(_textureUniform,0);
+        // Each CDG foreground pass leaves this texture in nearest mode. Reset
+        // it before any decorative cover/blur sampling, which must remain
+        // smooth. The final visible CDG pass selects nearest again below.
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,_backgroundTexture); glUniform1i(_backgroundTextureUniform,1);
         glUniform1f(_backgroundOpacityUniform,(GLfloat)_backgroundOpacity.load());
         // Preview must represent what the room sees. Previously this was
@@ -1245,9 +1268,10 @@ static GLuint makeProgram(void) {
         // while the show window used the animation composite.
         const bool backgroundActive=(_isCdg&&_backgroundHasFrame.load()&&_backgroundOpacity.load()>0.0);
         if(backgroundActive){
+            const double backgroundAspect=(double)_width/_height;
             GLfloat buvx=1,buvy=1,buox=0,buoy=0;
-            if(va>sa){buvy=(GLfloat)(sa/va);buoy=(1-buvy)*0.5f;}
-            else {buvx=(GLfloat)(va/sa);buox=(1-buvx)*0.5f;}
+            if(va>backgroundAspect){buvy=(GLfloat)(backgroundAspect/va);buoy=(1-buvy)*0.5f;}
+            else {buvx=(GLfloat)(va/backgroundAspect);buox=(1-buvx)*0.5f;}
             glUniform2f(_scaleUniform,1,1);glUniform2f(_uvScaleUniform,buvx,buvy);
             glUniform2f(_uvOffsetUniform,buox,buoy);glUniform1i(_sidefillUniform,4);
             glDrawArrays(GL_TRIANGLE_STRIP,0,4);
@@ -1287,6 +1311,18 @@ static GLuint makeProgram(void) {
         glUniform2f(_uvOffsetUniform,uox,uoy);
         glUniform1i(_sidefillUniform,backgroundActive?5:0);
         if(sidefill)glUniform1i(_sidefillUniform,3);
+        // CDG is 300x216 palette artwork, not photographic video. A second
+        // bilinear resize here blends lyric/outline pixels that libmpv has
+        // already placed in the shared texture and makes the result visibly
+        // softer than the old OpenKJ-style renderer. Keep linear filtering for
+        // MP4 and for the decorative cover/blur pass above, but sample the
+        // final CDG layer with nearest-neighbour in both output and preview.
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,frameTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,
+                        _isCdg?GL_NEAREST:GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,
+                        _isCdg?GL_NEAREST:GL_LINEAR);
         glDrawArrays(GL_TRIANGLE_STRIP,0,4);
         if(sidefill||backgroundActive)glDisable(GL_BLEND);
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,0);

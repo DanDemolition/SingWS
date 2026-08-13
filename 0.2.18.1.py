@@ -120,200 +120,6 @@ except ImportError:
 # - find_by_path() for display name lookups
 # ============================================================================
 
-def _setup_gstreamer_runtime_paths():
-    def _darwin_prefix_paths():
-        import platform as _platform
-        machine = _platform.machine().lower()
-        prefix = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("/usr/local")
-        return {
-            "prefix": prefix,
-            "lib": prefix / "lib",
-            "plugins": prefix / "lib" / "gstreamer-1.0",
-            "typelibs": prefix / "lib" / "girepository-1.0",
-            "scanner": prefix / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner",
-        }
-
-    # Windows: use bundled gstreamer next to the EXE
-    if sys.platform == "win32":
-        if getattr(sys, "frozen", False):
-            base = Path(sys.executable).resolve().parent   # dist\SingWS\
-        else:
-            base = Path(__file__).resolve().parent
-
-        gst_root    = base / "gstreamer"
-        gst_bin     = gst_root / "bin"
-        gst_plugins = gst_root / "lib" / "gstreamer-1.0"
-        gst_scanner = gst_root / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner.exe"
-        gi_typelib  = gst_root / "lib" / "girepository-1.0"
-
-        # Ensure our DLLs load first
-        if gst_bin.exists():
-            os.environ["PATH"] = str(gst_bin) + os.pathsep + os.environ.get("PATH", "")
-            try:
-                os.add_dll_directory(str(gst_bin))
-            except Exception:
-                pass
-
-        # This fixes: "Namespace Gst not available"
-        if gi_typelib.exists():
-            os.environ["GI_TYPELIB_PATH"] = str(gi_typelib)
-
-        # Point GStreamer at our plugin tree
-        if gst_plugins.exists():
-            os.environ["GST_PLUGIN_PATH"] = str(gst_plugins)
-            os.environ["GST_PLUGIN_SYSTEM_PATH"] = str(gst_plugins)
-
-        if gst_scanner.exists():
-            os.environ["GST_PLUGIN_SCANNER"] = str(gst_scanner)
-
-        # Keep registry local
-        os.environ["GST_REGISTRY"] = str(base / "gst-registry.bin")
-        os.environ["GST_REGISTRY_REUSE_PLUGIN_SCANNER"] = "0"
-        try:
-            _GST_RUNTIME_DEBUG.update({
-                "platform": "win32",
-                "frozen": bool(getattr(sys, "frozen", False)),
-                "exe": str(getattr(sys, "executable", "")),
-                "gst_root": str(gst_root),
-                "gst_bin": str(gst_bin),
-                "gst_plugins": str(gst_plugins),
-                "gst_scanner": str(gst_scanner),
-                "gi_typelib": str(gi_typelib),
-            })
-        except Exception:
-            pass
-
-    # macOS: prefer bundled GStreamer.framework (if present) to avoid requiring system installs
-    elif sys.platform == "darwin":
-        try:
-            host_paths = _darwin_prefix_paths()
-            registry_cache = Path.home() / "Library" / "Caches" / "SingWS" / "gstreamer-registry.bin"
-            registry_cache.parent.mkdir(parents=True, exist_ok=True)
-            # In a frozen .app: sys.executable -> .../SingWS.app/Contents/MacOS/SingWS
-            exe_path = Path(sys.executable).resolve()
-            contents = exe_path.parents[1]  # Contents/
-            resources = contents / "Resources"
-            frameworks = contents / "Frameworks"
-            # We bundle the framework under Resources/GStreamer.framework via the spec
-            fw = resources / "GStreamer.framework" / "Versions" / "Current"
-
-            if fw.exists():
-                libdir      = fw / "lib"
-                plugins     = libdir / "gstreamer-1.0"
-                typelibs    = libdir / "girepository-1.0"
-                scanner     = fw / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"
-                bindir      = fw / "bin"
-
-                # Ensure framework libs/plugins are discoverable
-                if bindir.exists():
-                    os.environ["PATH"] = str(bindir) + os.pathsep + os.environ.get("PATH", "")
-
-                if typelibs.exists():
-                    os.environ["GI_TYPELIB_PATH"] = str(typelibs)
-                elif host_paths["typelibs"].exists():
-                    os.environ["GI_TYPELIB_PATH"] = str(host_paths["typelibs"])
-
-                if plugins.exists():
-                    os.environ["GST_PLUGIN_PATH"] = str(plugins)
-                    os.environ["GST_PLUGIN_SYSTEM_PATH"] = str(plugins)
-                elif host_paths["plugins"].exists():
-                    os.environ["GST_PLUGIN_PATH"] = str(host_paths["plugins"])
-                    os.environ["GST_PLUGIN_SYSTEM_PATH"] = str(host_paths["plugins"])
-
-                if scanner.exists():
-                    os.environ["GST_PLUGIN_SCANNER"] = str(scanner)
-                elif host_paths["scanner"].exists():
-                    os.environ["GST_PLUGIN_SCANNER"] = str(host_paths["scanner"])
-
-                # Prefer loading dylibs from the bundled framework first.
-                # DYLD_LIBRARY_PATH may be ignored under SIP in some contexts; FALLBACK is safer.
-                fallback_parts = [str(libdir)]
-                if host_paths["lib"].exists():
-                    fallback_parts.append(str(host_paths["lib"]))
-                existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
-                if existing:
-                    fallback_parts.append(existing)
-                os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = os.pathsep.join(fallback_parts)
-
-                # The signed app bundle is read-only. Keep the mutable plugin
-                # registry in the per-user cache so startup never invalidates
-                # the bundle seal.
-                os.environ["GST_REGISTRY"] = str(registry_cache)
-                os.environ["GST_REGISTRY_REUSE_PLUGIN_SCANNER"] = "0"
-                try:
-                    _GST_RUNTIME_DEBUG.update({
-                        "platform": "darwin",
-                        "frozen": bool(getattr(sys, "frozen", False)),
-                        "exe": str(getattr(sys, "executable", "")),
-                        "contents": str(contents),
-                        "resources": str(resources),
-                        "framework_root": str(fw),
-                        "framework_lib": str(libdir),
-                        "framework_plugins": str(plugins),
-                        "framework_scanner": str(scanner),
-                        "framework_typelibs": str(typelibs),
-                        "framework_bin": str(bindir),
-                    })
-                except Exception:
-                    pass
-            elif bool(getattr(sys, "frozen", False)):
-                # PyInstaller bundle layout used by the current SingWS macOS build:
-                #   Contents/Resources/gi_typelibs
-                #   Contents/Frameworks/gst_plugins
-                #   Contents/Frameworks/*.dylib (and sometimes Resources/*.dylib too)
-                typelibs = resources / "gi_typelibs"
-                plugins = frameworks / "gst_plugins"
-                scanner = resources / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner"
-                libdirs = [frameworks, resources]
-
-                if typelibs.exists():
-                    os.environ["GI_TYPELIB_PATH"] = str(typelibs)
-                elif host_paths["typelibs"].exists():
-                    os.environ["GI_TYPELIB_PATH"] = str(host_paths["typelibs"])
-
-                if plugins.exists():
-                    os.environ["GST_PLUGIN_PATH"] = str(plugins)
-                    os.environ["GST_PLUGIN_SYSTEM_PATH"] = str(plugins)
-                elif host_paths["plugins"].exists():
-                    os.environ["GST_PLUGIN_PATH"] = str(host_paths["plugins"])
-                    os.environ["GST_PLUGIN_SYSTEM_PATH"] = str(host_paths["plugins"])
-
-                if scanner.exists():
-                    os.environ["GST_PLUGIN_SCANNER"] = str(scanner)
-                elif host_paths["scanner"].exists():
-                    os.environ["GST_PLUGIN_SCANNER"] = str(host_paths["scanner"])
-
-                fallback_parts = [str(p) for p in libdirs if p.exists()]
-                if host_paths["lib"].exists():
-                    fallback_parts.append(str(host_paths["lib"]))
-                existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
-                if existing:
-                    fallback_parts.append(existing)
-                if fallback_parts:
-                    os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = os.pathsep.join(fallback_parts)
-
-                os.environ["GST_REGISTRY"] = str(registry_cache)
-                os.environ["GST_REGISTRY_REUSE_PLUGIN_SCANNER"] = "0"
-                try:
-                    _GST_RUNTIME_DEBUG.update({
-                        "platform": "darwin",
-                        "frozen": True,
-                        "exe": str(getattr(sys, "executable", "")),
-                        "contents": str(contents),
-                        "resources": str(resources),
-                        "frameworks": str(frameworks),
-                        "pyinstaller_typelibs": str(typelibs),
-                        "pyinstaller_plugins": str(plugins),
-                        "pyinstaller_scanner": str(scanner),
-                        "pyinstaller_libdirs": [str(p) for p in libdirs],
-                    })
-                except Exception:
-                    pass
-        except Exception:
-            # If anything goes wrong, fall back to system-installed GStreamer
-            pass
-_setup_gstreamer_runtime_paths()
-
 import hashlib
 import song_index  # local module (~/SingWS/singws.db)
 import phrase_markers  # local module (~/SingWS/phrase_markers.db) — Phrase-Aligned Song Start
@@ -1659,24 +1465,13 @@ class SongbookUploadThread(QThread):
 Gst = None
 GstVideo = None
 
-try:
-    from python_karaoke_transport import (
-        NS_PER_SECOND,
-        preload_cdg_packets,
-        match_qt_audio_device,
-    )
-    PYTHON_KARAOKE_IMPORT_ERROR = None
-except Exception as e:
-    NS_PER_SECOND = 1_000_000_000
-    preload_cdg_packets = None
-    match_qt_audio_device = None
-    PYTHON_KARAOKE_IMPORT_ERROR = e
+from media_helpers import NS_PER_SECOND, match_qt_audio_device
 
 GstKaraokeTransport = None
 GST_KARAOKE_IMPORT_ERROR = None
 
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError
-from ffmpeg_background_engine import FfmpegBackgroundEngine
+from libmpv_background_engine import LibmpvBackgroundEngine
 from bass_soundboard_engine import BassSoundboardChannel, BassSoundboardError
 
 # ===== RESOURCE MANAGEMENT FOR PYINSTALLER =====
@@ -1993,7 +1788,7 @@ def fast_mp3_duration_from_zip(zip_path):
         print(f"zip fast duration failed: {zip_path} :: {e}")
         return None, None
 
-print("🎤 SingWS (GStreamer) starting…")
+print("🎤 SingWS starting…")
 
 # SINGWS_HOME redirects the whole user-data root: logs, settings.json, the
 # queue, singer history. Importing this module for a test otherwise writes into
@@ -2047,10 +1842,8 @@ _loudness_cache_loaded = False
 _loudness_lock = threading.Lock()
 _loudness_inflight = set()
 _loudness_cancel_event = threading.Event()
-# Serialize loudness analysis so at most one ffmpeg ebur128 pass runs at a
-# time.  Combined with single-threaded + niced ffmpeg below, this keeps the
-# background analysis from starving the audio decode/stretch thread and
-# causing choppy playback on weaker CPUs (e.g. Intel Macs).
+# Serialize loudness analysis so only one short-lived libmpv PCM decode runs
+# at a time and cannot starve live playback on weaker Intel Macs.
 _loudness_sem = threading.Semaphore(1)
 
 
@@ -2200,95 +1993,32 @@ def loudness_gain_db_cached(audio_path: str):
 
 
 def _measure_loudness_lufs(audio_path: str, cancel_check=None):
-    """Measure integrated loudness (LUFS) and sample peak via ffmpeg.
+    """Measure integrated loudness (LUFS) and sample peak via bundled libmpv.
 
     Returns (integrated_lufs, max_peak_db) or (None, None).  The measured peak
     is cached and used only to cap static gain; no live compressor/limiter is added.
     """
-    try:
-        from python_karaoke_transport import _ffmpeg_path
-        ffmpeg = _ffmpeg_path("ffmpeg")
-    except Exception:
-        ffmpeg = "ffmpeg"
-    def _cancelled():
-        if cancel_check is None:
-            return False
+    if cancel_check is not None:
         try:
-            return bool(cancel_check())
+            if cancel_check():
+                return None, None
         except Exception:
-            return False
-
-    def _run_ffmpeg(cmd):
-        proc = None
+            pass
+    try:
+        from libmpv_media_jobs import measure_loudness_lufs
+        result = measure_loudness_lufs(audio_path, timeout=120.0)
+    except Exception as exc:
+        _diag(f"[LOUDNESS] bundled libmpv analysis failed: {exc}")
+        return None, None
+    if cancel_check is not None:
         try:
-            proc = subprocess.Popen(
-                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            if hasattr(os, "setpriority"):
-                _loudness_lower_priority(proc.pid)
-            deadline = time.monotonic() + 120.0
-            while True:
-                if _cancelled():
-                    try:
-                        proc.terminate()
-                        proc.communicate(timeout=2)
-                    except Exception:
-                        try:
-                            proc.kill()
-                            proc.communicate(timeout=2)
-                        except Exception:
-                            pass
-                    return None
-                timeout = min(0.25, max(0.0, deadline - time.monotonic()))
-                try:
-                    _out, err = proc.communicate(timeout=timeout)
-                    return (err or b"").decode("utf-8", errors="ignore")
-                except subprocess.TimeoutExpired:
-                    if time.monotonic() >= deadline:
-                        try:
-                            proc.kill()
-                            proc.communicate(timeout=5)
-                        except Exception:
-                            pass
-                        return None
+            if cancel_check():
+                return None, None
         except Exception:
-            if proc is not None:
-                try:
-                    proc.kill()
-                    proc.communicate(timeout=5)
-                except Exception:
-                    pass
-            return None
-
-    cmd = [
-        ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-threads", "1",
-        "-i", audio_path, "-map", "0:a:0", "-af", "ebur128=peak=true", "-f", "null", "-",
-    ]
-    text = _run_ffmpeg(cmd)
-    if text is None:
+            pass
+    if not result or result[0] is None:
         return None, None
-    matches = re.findall(r"\bI:\s*(-?\d+(?:\.\d+)?)\s*LUFS", text)
-    if not matches:
-        return None, None
-    try:
-        val = float(matches[-1])
-    except Exception:
-        return None, None
-    # Guard against pathological/silent results.
-    if not (-70.0 <= val <= 0.0):
-        return None, None
-
-    peak_db = None
-    try:
-        peak_match = re.findall(r"\bPeak:\s*(-?\d+(?:\.\d+)?)\s*dBFS", text)
-        if not peak_match:
-            peak_match = re.findall(r"\bTPK:\s*(-?\d+(?:\.\d+)?)\s*dBFS", text)
-        if peak_match:
-            peak_db = float(peak_match[-1])
-    except Exception:
-        peak_db = None
-    return val, peak_db
+    return float(result[0]), None if result[1] is None else float(result[1])
 
 
 def analyze_loudness_async(audio_path: str):
@@ -4195,11 +3925,11 @@ class BackgroundMusicPlayer(QObject):
             try:
                 self._bass_engine = BassBackgroundEngine(output_name=output_name)
             except BassBackgroundError as bass_err:
-                # BASS failure recovery: fall back to the FFmpeg/Qt background
+                # BASS failure recovery: fall back to the libmpv/Qt background
                 # engine (same deck/crossfade API) before ever considering the
                 # legacy GStreamer pipeline.
-                _diag(f"[BG-BASS] unavailable ({bass_err}); trying FFmpeg/Qt background engine")
-                self._bass_engine = FfmpegBackgroundEngine(output_name=output_name)
+                _diag(f"[BG-BASS] unavailable ({bass_err}); trying libmpv/Qt background engine")
+                self._bass_engine = LibmpvBackgroundEngine(output_name=output_name)
             backend = getattr(self._bass_engine, "backend_name", "BASS")
             _diag(f"[BG-BASS] {backend} background engine ready platform={self._platform_audio_label()}")
             # Attach the BGM 10-band graphic EQ ONLY in advanced mode. Simple
@@ -4231,7 +3961,7 @@ class BackgroundMusicPlayer(QObject):
             return True
         except Exception as e:
             self._bass_engine = None
-            _diag(f"[BG-BASS] no BASS/FFmpeg engine; GStreamer BG fallback remains active ({e})")
+            _diag(f"[BG-BASS] no BASS/libmpv background engine available ({e})")
             return False
 
     def _bass_ready(self) -> bool:
@@ -6569,30 +6299,6 @@ def _cdg_side_fill_color(image) -> QColor:
 
 
 BG_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov"}
-BG_VIDEO_QUALITY_PROFILES = {
-    "auto": {"label": "Auto", "max_width": 1280, "max_height": 720, "max_fps": 60},
-    "1080": {"label": "1080p", "max_width": 1920, "max_height": 1080, "max_fps": 60},
-    "720": {"label": "720p", "max_width": 1280, "max_height": 720, "max_fps": 60},
-    "540": {"label": "540p", "max_width": 960, "max_height": 540, "max_fps": 30},
-    "off": {"label": "Off", "max_width": 0, "max_height": 0, "max_fps": 0},
-}
-
-
-def background_video_quality_profile(value) -> dict:
-    key = str(value or "auto").strip().lower()
-    if key in {"1080p", "1920x1080"}:
-        key = "1080"
-    elif key in {"720p", "1280x720"}:
-        key = "720"
-    elif key in {"540p", "960x540"}:
-        key = "540"
-    elif key in {"false", "disabled", "none"}:
-        key = "off"
-    if key not in BG_VIDEO_QUALITY_PROFILES:
-        key = "auto"
-    profile = dict(BG_VIDEO_QUALITY_PROFILES[key])
-    profile["key"] = key
-    return profile
 
 
 def scan_background_video_folder(folder: str) -> list[str]:
@@ -6618,124 +6324,8 @@ def scan_background_video_folder(folder: str) -> list[str]:
     ) or [])
 
 
-_BG_VIDEO_TRANSCODE_INFLIGHT = set()
-_BG_VIDEO_TRANSCODE_LOCK = threading.Lock()
-
-
-def _background_video_cache_dir() -> Path:
-    try:
-        if sys.platform == "darwin":
-            base = Path.home() / "Library" / "Caches" / "SingWS"
-        else:
-            base = Path.home() / ".cache" / "SingWS"
-        return base / "transparent-bg-video-720p-v1"
-    except Exception:
-        return Path(tempfile.gettempdir()) / "singws-transparent-bg-video-720p-v1"
-
-
-def _background_video_cache_path(source: str) -> Path | None:
-    try:
-        p = Path(source).expanduser().resolve()
-        st = p.stat()
-        sig = f"{p}|{int(st.st_size)}|{int(st.st_mtime_ns)}"
-        digest = hashlib.sha1(sig.encode("utf-8", "replace")).hexdigest()[:24]
-        stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in p.stem)[:42] or "video"
-        return _background_video_cache_dir() / f"{stem}-{digest}.mp4"
-    except Exception:
-        return None
-
-
-def _transcode_background_video_copy(source: str, dest: Path):
-    tmp = dest.with_name(dest.stem + ".tmp.mp4")
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            from python_karaoke_transport import _ffmpeg_path
-            ffmpeg = _ffmpeg_path("ffmpeg")
-        except Exception:
-            ffmpeg = "ffmpeg"
-        cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-nostdin",
-            "-i",
-            str(source),
-            "-map",
-            "0:v:0",
-            "-an",
-            "-sn",
-            "-dn",
-            "-vf",
-            "scale=w=1280:h=720:force_original_aspect_ratio=decrease",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-tune",
-            "fastdecode",
-            "-crf",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            str(tmp),
-        ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.replace(str(tmp), str(dest))
-        _diag(f"[BG-VIDEO] optimized cache ready source={Path(source).name!r} cache={dest.name!r}")
-    except Exception as e:
-        try:
-            if tmp.exists():
-                tmp.unlink()
-        except Exception:
-            pass
-        _diag(f"[BG-VIDEO] optimized cache failed source={Path(source).name!r}: {e}")
-    finally:
-        with _BG_VIDEO_TRANSCODE_LOCK:
-            _BG_VIDEO_TRANSCODE_INFLIGHT.discard(str(dest))
-
-
-def prepare_background_video_playback_files(files: list[str], auto_transcode_720p: bool = False) -> list[str]:
-    """Return cached 720p copies when available and enqueue missing copies.
-
-    First playback never waits for transcoding: uncached originals are used for
-    the current run while a single background job creates the optimized copy for
-    future songs/sessions. Originals are never modified.
-    """
-    if not auto_transcode_720p:
-        return list(files or [])
-    prepared = []
-    for src in list(files or []):
-        cache = _background_video_cache_path(src)
-        if cache is not None and cache.exists() and cache.stat().st_size > 0:
-            prepared.append(str(cache))
-            continue
-        prepared.append(src)
-        if cache is None:
-            continue
-        key = str(cache)
-        with _BG_VIDEO_TRANSCODE_LOCK:
-            if key in _BG_VIDEO_TRANSCODE_INFLIGHT:
-                continue
-            _BG_VIDEO_TRANSCODE_INFLIGHT.add(key)
-        t = threading.Thread(
-            target=_transcode_background_video_copy,
-            args=(src, cache),
-            name="SingWS-bg-video-transcode",
-            daemon=True,
-        )
-        t.start()
-    return prepared
-
-
 class BackgroundVideoShuffleBag:
-    """No-repeat shuffle for background videos: every file plays once before
-    any repeats, and a refill never starts with the video that just ended
-    (when more than one exists). shuffle=False plays the alphabetical loop."""
+    """Play every decorative video once per cycle without edge repeats."""
 
     def __init__(self, files, shuffle: bool = True, rng=None):
         self._files = list(files)
@@ -6817,383 +6407,6 @@ class NativeLyricsBackgroundVideoPlayer(QObject):
     def diagnostics(self) -> dict:
         return {"running": bool(self._current), "current": os.path.basename(self._current),
                 "decoder": "native-libmpv", "renderer": "shared-gpu-texture"}
-
-
-class _LyricsBackgroundVideoWorker(QObject):
-    frame_ready = pyqtSignal(object)
-    stats_ready = pyqtSignal(dict)
-    stopped = pyqtSignal(str)
-
-    def __init__(self, parent=None, *, on_frame=None, max_width: int = 1280, max_height: int = 720, max_fps: int = 30, quality_label: str = "auto"):
-        super().__init__(parent)
-        self.max_width = int(max_width or 0)
-        self.max_height = int(max_height or 0)
-        self.max_fps = int(max_fps or 0)
-        self.quality_label = str(quality_label or "auto")
-        self._bag = None
-        self._reader = None
-        self._clip_started_ts = 0.0
-        self._clip_first_frame_pending = False
-        self._reader_delivered_seen = 0
-        self._current_path = ""
-        self._source_size = ""
-        self._source_fps = 0.0
-        self._working_size = ""
-        self._frames_delivered = 0
-        self._frames_decoded = 0
-        self._frames_dropped = 0
-        self._decode_copy_time_ms = 0.0
-        self._frame_handoff_time_ms = 0.0
-        self._last_stats_log = 0.0
-        self._last_frame_pts_ns = None
-        self._advance_failures = 0
-        self._frames_inflight = 0
-        self._frames_inflight_lock = threading.Lock()
-        self._timer = None
-        self._running = False
-
-    @pyqtSlot(list, bool)
-    def start(self, files: list[str], shuffle: bool = True) -> bool:
-        if not files:
-            self.stopped.emit("unavailable")
-            return False
-        self._bag = BackgroundVideoShuffleBag(files, shuffle=shuffle)
-        self._advance_failures = 0
-        if not self._advance("start"):
-            self.stopped.emit("start_failed")
-            return False
-        self._running = True
-        if self._timer is None:
-            self._timer = QTimer(self)
-            self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-            self._timer.setInterval(max(5, min(16, int(500 / max(1, self.max_fps or 60)))))
-            self._timer.timeout.connect(self._tick)
-        self._timer.start()
-        return True
-
-    @pyqtSlot(str)
-    def stop(self, reason: str = "stop"):
-        try:
-            if self._timer is not None:
-                self._timer.stop()
-        except Exception:
-            pass
-        self._running = False
-        self._teardown_reader()
-        if self._current_path:
-            _diag(f"[BG-VIDEO] stopped reason={reason} frames_delivered={self._frames_delivered}")
-        self._current_path = ""
-        self.frame_ready.emit(None)
-        self.stopped.emit(str(reason or "stop"))
-
-    @pyqtSlot()
-    def acknowledge_frame(self):
-        try:
-            with self._frames_inflight_lock:
-                self._frames_inflight = max(0, int(self._frames_inflight) - 1)
-        except Exception:
-            self._frames_inflight = 0
-
-    def _teardown_reader(self):
-        reader = self._reader
-        if reader is None:
-            return
-        try:
-            # Log while the reader is still attached so the final stats line
-            # carries its decoded/dropped counters.
-            self._maybe_log_stats(force=True)
-        except Exception:
-            pass
-        self._reader = None
-        try:
-            reader.stop()
-        except Exception:
-            pass
-
-    def _advance(self, reason: str) -> bool:
-        self._teardown_reader()
-        if self._bag is None:
-            return False
-        path = self._bag.next()
-        if not path or not os.path.exists(path):
-            self._advance_failures += 1
-            if path and self._advance_failures <= 3:
-                _diag(f"[BG-VIDEO] file missing, skipping file={os.path.basename(path)!r}")
-                return self._advance("missing_file")
-            return False
-        try:
-            # FfmpegVideoReader probes and decodes on its own daemon thread
-            # (rawvideo rgb24 with the VideoToolbox hwaccel probe); this
-            # worker paces delivery against a wall clock. The clip's
-            # soundtrack is never decoded (-an), so it cannot reach the
-            # speakers or influence karaoke audio timing.
-            if FfmpegVideoReader is None:
-                raise RuntimeError("python_karaoke_transport unavailable")
-            self._reader = FfmpegVideoReader(
-                path,
-                0.0,
-                max_height=self.max_height or 720,
-                fps=float(self.max_fps) if self.max_fps > 0 else None,
-            )
-        except Exception as e:
-            _diag(f"[BG-VIDEO] reader start failed file={os.path.basename(path)!r}: {e}")
-            self._advance_failures += 1
-            if self._advance_failures <= 3:
-                return self._advance("reader_error")
-            return False
-        self._clip_started_ts = time.monotonic()
-        # The reader probes (and runs the one-time hwaccel check) before the
-        # first frame lands; keep re-anchoring the clip clock until frames
-        # exist so that startup latency never fast-forwards the clip.
-        self._clip_first_frame_pending = True
-        self._reader_delivered_seen = 0
-        self._current_path = path
-        self._source_size = ""
-        self._source_fps = 0.0
-        self._working_size = ""
-        self._last_stats_log = time.monotonic()
-        _diag(
-            f"[BG-VIDEO] playing file={os.path.basename(path)!r} reason={reason} "
-            f"quality={self.quality_label} work_cap={self.max_width}x{self.max_height}@{self.max_fps}fps "
-            f"decoder=ffmpeg_rawvideo renderer=qt_qimage_widget queue=bounded_latest_only"
-        )
-        return True
-
-    def _capture_reader_geometry(self):
-        """Source/working size become known once the reader's probe finishes."""
-        reader = self._reader
-        if reader is None:
-            return
-        try:
-            if not self._source_size and reader.src_width and reader.src_height:
-                self._source_size = f"{reader.src_width}x{reader.src_height}"
-                self._source_fps = float(reader.fps or 0.0)
-            if not self._working_size and reader.width and reader.height:
-                self._working_size = f"{reader.width}x{reader.height}"
-        except Exception:
-            pass
-
-    def _queue_depth(self) -> int:
-        reader = self._reader
-        if reader is None:
-            return 0
-        try:
-            return int(reader.queue_size())
-        except Exception:
-            return 0
-
-    def _refresh_reader_stats(self):
-        reader = self._reader
-        if reader is None:
-            return
-        try:
-            self._frames_decoded = max(self._frames_decoded, int(reader.frames_decoded))
-            self._frames_dropped = max(self._frames_dropped, int(reader.dropped_frames))
-        except Exception:
-            pass
-
-    def _maybe_log_stats(self, *, force: bool = False):
-        now = time.monotonic()
-        if not force and (now - float(self._last_stats_log or 0.0)) < 15.0:
-            return
-        self._last_stats_log = now
-        self._capture_reader_geometry()
-        self._refresh_reader_stats()
-        decoded = max(1, int(self._frames_decoded))
-        delivered = max(1, int(self._frames_delivered))
-        _diag(
-            f"[BG-VIDEO] stats file={os.path.basename(self._current_path)!r} quality={self.quality_label} "
-            f"source={self._source_size or 'unknown'} source_fps={self._source_fps:.2f} "
-            f"working={self._working_size or 'unknown'} cap={self.max_width}x{self.max_height}@{self.max_fps}fps "
-            f"decoded={self._frames_decoded} rendered={self._frames_delivered} dropped={self._frames_dropped} "
-            f"queue={self._queue_depth()} avg_decode_copy_ms={self._decode_copy_time_ms / decoded:.3f} "
-            f"avg_handoff_ms={self._frame_handoff_time_ms / delivered:.3f} "
-            f"last_pts_ns={self._last_frame_pts_ns} decoder=ffmpeg_rawvideo renderer=qt_qimage_widget"
-        )
-        self.stats_ready.emit(self.diagnostics())
-
-    def _reader_finished(self) -> bool:
-        """True once the decode thread has exited and every frame was consumed."""
-        reader = self._reader
-        if reader is None:
-            return True
-        try:
-            return (not reader.thread.is_alive()) and reader.queue_size() <= 0
-        except Exception:
-            return True
-
-    def _tick(self):
-        reader = self._reader
-        if reader is None:
-            return
-        if self._reader_finished():
-            self._refresh_reader_stats()
-            failed = int(getattr(reader, "frames_decoded", 0) or 0) <= 0
-            if failed:
-                _diag(f"[BG-VIDEO] decode produced no frames file={os.path.basename(self._current_path)!r}")
-                self._advance_failures += 1
-                if self._advance_failures > 3:
-                    self.stop("repeated_decode_errors")
-                    return
-            # Continuous shuffle: next video on EOS (or on a bad file).
-            if not self._advance("error" if failed else "eos"):
-                self.stop("no_playable_files")
-            return
-        t0 = time.perf_counter()
-        if self._clip_first_frame_pending and reader.queue_size() <= 0:
-            self._clip_started_ts = time.monotonic()
-            return
-        position = max(0.0, time.monotonic() - float(self._clip_started_ts or 0.0))
-        try:
-            image = reader.image_at(position)
-        except Exception:
-            image = None
-        if image is None:
-            return
-        # image_at returns the retained newest-due frame; only a fresh
-        # delivery (the reader's per-clip counter moved) is emitted again.
-        delivered_total = int(getattr(reader, "frames_delivered", 0) or 0)
-        if delivered_total <= self._reader_delivered_seen:
-            return
-        self._reader_delivered_seen = delivered_total
-        self._clip_first_frame_pending = False
-        self._capture_reader_geometry()
-        self._advance_failures = 0
-        self._decode_copy_time_ms += (time.perf_counter() - t0) * 1000.0
-        with self._frames_inflight_lock:
-            if self._frames_inflight >= 2:
-                self._frames_dropped += 1
-                return
-            self._frames_inflight += 1
-        self._frames_delivered += 1
-        self._last_frame_pts_ns = int(position * 1_000_000_000)
-        h0 = time.perf_counter()
-        self.frame_ready.emit(image)
-        self._frame_handoff_time_ms += (time.perf_counter() - h0) * 1000.0
-        self._maybe_log_stats()
-
-    def diagnostics(self) -> dict:
-        return {
-            "current": os.path.basename(self._current_path) if self._current_path else "",
-            "frames_delivered": int(self._frames_delivered),
-            "frames_decoded": int(self._frames_decoded),
-            "frames_dropped": int(self._frames_dropped),
-            "source_size": self._source_size,
-            "source_fps": float(self._source_fps or 0.0),
-            "working_size": self._working_size,
-            "queue_size": self._queue_depth(),
-            "quality": self.quality_label,
-            "max_width": int(self.max_width or 0),
-            "max_height": int(self.max_height or 0),
-            "max_fps": int(self.max_fps or 0),
-            "running": bool(self._reader is not None),
-        }
-
-
-class LyricsBackgroundVideoPlayer(QObject):
-    """Shuffled, muted MP4 loop rendered behind CDG lyrics.
-
-    The FFmpeg rawvideo reader (with VideoToolbox hwaccel probe), frame pacing,
-    and QImage conversion run on a dedicated worker thread. The GUI thread
-    receives the newest immutable QImage, uploads it to a QPixmap, and
-    composites it in paintEvent only. This keeps host UI actions and CDG frame
-    generation from starving video decode."""
-
-    _worker_start_requested = pyqtSignal(list, bool)
-    _worker_stop_requested = pyqtSignal(str)
-    _worker_frame_ack_requested = pyqtSignal()
-
-    def __init__(self, parent=None, *, on_frame=None, max_width: int = 1280, max_height: int = 720, max_fps: int = 60, quality_label: str = "auto"):
-        super().__init__(parent)
-        self.on_frame = on_frame
-        self.max_width = int(max_width or 0)
-        self.max_height = int(max_height or 0)
-        self.max_fps = int(max_fps or 0)
-        self.quality_label = str(quality_label or "auto")
-        self._last_stats = {
-            "running": False,
-            "quality": self.quality_label,
-            "max_width": self.max_width,
-            "max_height": self.max_height,
-            "max_fps": self.max_fps,
-        }
-        self._thread = QThread(self)
-        self._worker = _LyricsBackgroundVideoWorker(
-            None,
-            max_width=self.max_width,
-            max_height=self.max_height,
-            max_fps=self.max_fps,
-            quality_label=self.quality_label,
-        )
-        self._worker.moveToThread(self._thread)
-        self._worker_start_requested.connect(self._worker.start, Qt.ConnectionType.QueuedConnection)
-        self._worker_stop_requested.connect(self._worker.stop, Qt.ConnectionType.QueuedConnection)
-        self._worker_frame_ack_requested.connect(self._worker.acknowledge_frame, Qt.ConnectionType.QueuedConnection)
-        self._worker.frame_ready.connect(self._on_worker_frame, Qt.ConnectionType.QueuedConnection)
-        self._worker.stats_ready.connect(self._on_worker_stats, Qt.ConnectionType.QueuedConnection)
-        self._worker.stopped.connect(self._on_worker_stopped, Qt.ConnectionType.QueuedConnection)
-        self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.start()
-
-    def start(self, files: list[str], shuffle: bool = True) -> bool:
-        if FfmpegVideoReader is None or not files:
-            return False
-        self._last_stats["running"] = True
-        self._worker_start_requested.emit(list(files), bool(shuffle))
-        return True
-
-    def stop(self, reason: str = "stop"):
-        try:
-            self._worker_stop_requested.emit(str(reason or "stop"))
-        except Exception:
-            pass
-        deadline = time.monotonic() + 1.5
-        while self._thread.isRunning() and bool(self._last_stats.get("running", False)) and time.monotonic() < deadline:
-            try:
-                QApplication.processEvents()
-            except Exception:
-                pass
-            time.sleep(0.01)
-        try:
-            self._thread.quit()
-            self._thread.wait(1500)
-        except Exception:
-            pass
-        if self._thread.isRunning():
-            try:
-                self._thread.terminate()
-                self._thread.wait(500)
-            except Exception:
-                pass
-        if self.on_frame is not None:
-            try:
-                self.on_frame(None)
-            except Exception:
-                pass
-        self._last_stats["running"] = False
-
-    def _on_worker_frame(self, image):
-        try:
-            if self.on_frame is not None:
-                self.on_frame(image)
-        except Exception:
-            pass
-        finally:
-            if image is not None:
-                try:
-                    self._worker_frame_ack_requested.emit()
-                except Exception:
-                    pass
-
-    def _on_worker_stats(self, stats: dict):
-        if isinstance(stats, dict):
-            self._last_stats.update(stats)
-
-    def _on_worker_stopped(self, _reason: str):
-        self._last_stats["running"] = False
-
-    def diagnostics(self) -> dict:
-        return dict(self._last_stats)
 
 
 QML_SHOW_SCREEN_VFX_SOURCE = r"""
@@ -21551,7 +20764,7 @@ class KaraokeApp(QWidget):
         mpv runs out of process, so the NumPy processors in singws_eq /
         singws_master_audio cannot sit in the sample path. mpv_audio_filters
         turns this spec into an `af` chain instead. Gating mirrors the Python
-        transport exactly (see _start_python_karaoke_transport): Simple Audio
+        transport exactly (see _start_karaoke_transport): Simple Audio
         Mode bypasses EQ and normalization, master processing is an independent
         opt-in, and master processing forces normalization on so the
         compressor sees a consistent input level.
@@ -23083,7 +22296,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         return False
-    def _stop_python_karaoke_transport(self):
+    def _stop_karaoke_transport(self):
         transport = getattr(self, "karaoke_transport", None)
         self.karaoke_transport = None
         if transport is not None:
@@ -23091,7 +22304,6 @@ class KaraokeApp(QWidget):
                 transport.stop()
             except Exception as e:
                 _diag(f"[PY-KARAOKE] stop failed: {e}")
-        self._detach_mpv_video_follower()
         self._set_mpv_hosts_visible(False)
         self._stop_lyrics_background_video("karaoke_stopped")
 
@@ -23149,73 +22361,11 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _on_lyrics_bg_video_frame(self, image):
-        try:
-            if self.video_window.isVisible() and not self.video_window.isMinimized():
-                self.video_window.video_area.set_background_video_frame(image)
-        except Exception:
-            pass
-
-    def _on_python_karaoke_frame(self, image):
-        _perf_t0 = time.perf_counter()
-        try:
-            self._maybe_send_daw_snapshot_from_frame(image, reason="frame")
-            is_cdg = str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "cdg"
-            cdg_display_mode = self._effective_cdg_display_mode() if is_cdg else "fit"
-            stretch = bool(is_cdg and cdg_display_mode == "stretch")
-            side_fill = bool(is_cdg and cdg_display_mode == "sidefill")
-            blur_fill = bool(is_cdg and cdg_display_mode == "blur")
-            try:
-                if self.video_window.isVisible() and not self.video_window.isMinimized():
-                    self.video_window.video_area.set_karaoke_frame(
-                        image, stretch_fill=stretch, is_cdg=is_cdg,
-                        side_fill=side_fill, blur_fill=blur_fill,
-                    )
-                    self.video_window.force_black = False
-            except Exception:
-                pass
-            try:
-                if self.preview_window.isVisible() and not self.preview_window.isMinimized():
-                    self.preview_window.video_area.set_karaoke_frame(
-                        image, stretch_fill=stretch, is_cdg=is_cdg,
-                        side_fill=side_fill, blur_fill=blur_fill,
-                    )
-                    self.preview_window.force_black = False
-            except Exception:
-                pass
-        except Exception as e:
-            _diag(f"[PY-KARAOKE] frame paint failed: {e}")
-        finally:
-            _perf_log_if_slow("frame_render", (time.perf_counter() - _perf_t0) * 1000.0)
-
-    def _on_python_karaoke_ended(self):
+    def _on_karaoke_ended(self):
         if getattr(self, "karaoke_transport", None) is None:
             return
         _diag("[PY-KARAOKE] decoder reached end of stream")
         QTimer.singleShot(0, self._handle_media_end_safe)
-
-    def _on_python_karaoke_hung(self):
-        """Stalled-playback watchdog fired (pipeline PLAYING but the clock
-        frozen ~5s). Recover like a song ending so the rotation moves on and
-        background music comes back instead of leaving dead air."""
-        if getattr(self, "karaoke_transport", None) is None:
-            return
-        pending_rollback = getattr(self, "_pending_play_start_rollback", None)
-        if callable(pending_rollback):
-            try:
-                if pending_rollback("async_preroll_failed"):
-                    self.karaoke_transport = None
-                    self._recover_idle_output("async_preroll_failed", ensure_bg=True)
-                    return
-            except Exception:
-                pass
-        _diag("[PY-KARAOKE] playback hung — recovering via media-end path")
-        QTimer.singleShot(0, self._handle_media_end_safe)
-
-
-    def _select_karaoke_transport_cls(self):
-        """The bundled native mpv core is the permanent karaoke engine."""
-        return "mpv", None
 
     @staticmethod
     def _load_mpv_playback_backend():
@@ -23356,19 +22506,8 @@ class KaraokeApp(QWidget):
         self._set_mpv_hosts_visible(not reasons and self._mpv_hosts_should_show())
 
     def _video_stretch_supported(self) -> bool:
-        """Whether "Stretch to fill" does anything on the engine in use.
-
-        The FFmpeg/painter path scales the frame itself and always can. On mpv
-        it depends which backend shipped: the follower maps it to mpv's
-        keepaspect, the in-process bridge composites from a fixed shared texture
-        and cannot. Ask a live plugin when there is one; otherwise resolve the
-        backend the same way _ensure_mpv_karaoke_core will.
-        """
+        """Whether the permanent native backend supports stretch-to-fill."""
         try:
-            if self._cdg_timing_engine() != "mpv" and str(
-                self.settings.get("karaoke_engine", "ffmpeg") or ""
-            ).strip().lower() != "mpv-video":
-                return True  # FFmpeg/painter path
             plugin = getattr(self, "_mpv_playback", None)
             if plugin is None:
                 plugin, _name = self._load_mpv_playback_backend()
@@ -23411,7 +22550,7 @@ class KaraokeApp(QWidget):
         from mpv_karaoke_transport import MpvKaraokeTransport
 
         plugin = self._ensure_mpv_karaoke_core()
-        self._stop_python_karaoke_transport()
+        self._stop_karaoke_transport()
         transport = MpvKaraokeTransport(
             plugin,
             audio_path=audio_path,
@@ -23426,7 +22565,7 @@ class KaraokeApp(QWidget):
             # normally already on screen by the time this fires, and revealing
             # the native surface would paint over it.
             transport.started.connect(self._reveal_mpv_hosts_if_allowed)
-        transport.ended.connect(self._on_python_karaoke_ended)
+        transport.ended.connect(self._on_karaoke_ended)
         transport.set_modifiers(
             float(self._clamp_karaoke_tempo(self._karaoke_tempo_percent)) / 100.0,
             float(self._clamp_karaoke_key(semitones)),
@@ -23487,56 +22626,7 @@ class KaraokeApp(QWidget):
         )
         return True
 
-    def _attach_mpv_video_follower(self, transport, *, audio_path, video_path, mode,
-                                   start_seconds=0.0):
-        """Best of both: mpv's Metal video, SingWS's audio engine.
-
-        The Python transport keeps the audible clock, so the karaoke chain
-        (tempo/key -> loudness normalization -> EQ -> master bus) is untouched,
-        and mpv's followers render the CDG/MP4 against that clock. mpv never
-        opens the audio for playback — for CDG its followers still load the MP3
-        as their main file (muted) because a bare .cdg has no usable clock.
-        """
-        plugin = self._ensure_mpv_karaoke_core()
-        plugin.setExternalAudioMaster(transport)
-        self._set_mpv_hosts_visible(False)
-        follower_audio = audio_path if str(mode).lower() == "cdg" else None
-        # The followers must open at the song's CURRENT tempo. Starting them at
-        # 100% while the audio runs at, say, 115% desyncs immediately and
-        # permanently: _sync_loop can only skew +/-6%, and the tempo control
-        # goes to 150%. Key is deliberately not forwarded — the followers are
-        # muted, so pitch is the audio engine's business alone.
-        tempo_percent = float(self._clamp_karaoke_tempo(self._karaoke_tempo_percent))
-        if not plugin.loadSingWSMedia(
-            video_path, follower_audio, autoplay=True, semitones=0,
-            tempo_percent=tempo_percent,
-        ):
-            plugin.setExternalAudioMaster(None)
-            raise RuntimeError(plugin.errorString() or "mpv video load failed")
-        if float(start_seconds or 0.0) > 0.0:
-            plugin.seekMedia(int(float(start_seconds) * 1000.0))
-        self._mpv_video_follower_active = True
-        self._set_mpv_hosts_visible(True)
-        _diag(
-            f"[KARAOKE-ENGINE] engine=mpv-video mode={mode} "
-            f"video={os.path.basename(str(video_path))} "
-            "audio=SingWS (EQ/normalize/master bus retained)"
-        )
-
-    def _detach_mpv_video_follower(self):
-        if not getattr(self, "_mpv_video_follower_active", False):
-            return
-        self._mpv_video_follower_active = False
-        plugin = getattr(self, "_mpv_playback", None)
-        if plugin is None:
-            return
-        try:
-            plugin.stopMedia()
-            plugin.setExternalAudioMaster(None)
-        except Exception as exc:
-            _diag(f"[MPV] video follower detach failed: {exc}")
-
-    def _start_python_karaoke_transport(
+    def _start_karaoke_transport(
         self,
         *,
         audio_path: str,
@@ -23560,248 +22650,7 @@ class KaraokeApp(QWidget):
             duration_seconds=duration_seconds,
         )
 
-        # Legacy FFmpeg/follower implementation below is removed in the next
-        # mechanical milestone after call-site coverage is verified.
-        engine_pref, transport_cls = "ffmpeg", None
-        # "mpv-video" keeps this Python transport as the audible engine and
-        # hands only the picture to mpv, so it runs the whole block below with
-        # the transport in audio-only mode and attaches mpv after the start.
-        mpv_video = bool(
-            engine_pref == "mpv-video"
-            and sys.platform == "darwin"
-            and str(mode).lower() in {"cdg", "mp4"}
-            and video_path
-        )
-        transport_mode = "audio" if mpv_video else mode
-        transport_video_path = None if mpv_video else video_path
-        if transport_cls is None:
-            detail = str(
-                PYTHON_KARAOKE_IMPORT_ERROR
-                or "Karaoke playback engine is unavailable"
-            )
-            _diag(f"[PY-KARAOKE] unavailable: {detail}")
-            try:
-                QMessageBox.warning(
-                    self,
-                    "Playback Engine Unavailable",
-                    "The Python karaoke playback engine could not be loaded.\n\n"
-                    f"{detail}\n\n"
-                    "Background music and the rest of SingWS can continue running.",
-                )
-            except Exception:
-                pass
-            self.karaoke_playing = False
-            try:
-                self._apply_idle_background(force=True, advance_slideshow=True)
-            except Exception:
-                pass
-            return False
-        self._gst_teardown_async()
-        try:
-            duration = float(duration_seconds or self._get_duration_secs(audio_path) or 0.0)
-        except Exception:
-            duration = 0.0
-
-        device, device_name = self._qt_audio_device_for_selected_output()
-        transport = transport_cls(
-            audio_path,
-            video_path=transport_video_path,
-            mode=transport_mode,
-            duration_seconds=duration,
-            probe_duration_on_init=False,
-            audio_device=device,
-            audio_device_name=device_name,
-            parent=self,
-        )
-        self._last_karaoke_engine = "mpv-video" if mpv_video else "ffmpeg"
-        _diag(
-            f"[KARAOKE-ENGINE] engine={'mpv-video' if mpv_video else 'ffmpeg'} "
-            f"pref={engine_pref} mode={mode} file={os.path.basename(audio_path)}"
-        )
-        try:
-            transport.set_volume(float(getattr(self, "_host_karaoke_live_volume", 1.0) or 0.0))
-        except Exception:
-            pass
-        try:
-            transport.start_delay_ms = max(0, int(getattr(self, "_playback_start_countdown_ms", 0) or 0))
-        except Exception:
-            pass
-        try:
-            transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
-        except Exception:
-            pass
-        transport.frame_ready.connect(self._on_python_karaoke_frame)
-        transport.ended.connect(self._on_python_karaoke_ended)
-        # OpenKJ-style stalled-playback watchdog (GStreamer engine): treat a
-        # frozen pipeline like the song ending so the rotation/BGM recover
-        # instead of leaving dead air.
-        if hasattr(transport, "playback_hung"):
-            try:
-                transport.playback_hung.connect(self._on_python_karaoke_hung)
-            except Exception:
-                pass
-        transport.set_modifiers(
-            float(self._clamp_karaoke_tempo(self._karaoke_tempo_percent)) / 100.0,
-            float(self._clamp_karaoke_key(semitones)),
-        )
-        simple_audio = self._simple_audio_mode()
-        # Attach the karaoke 10-band graphic EQ ONLY in advanced mode. Simple
-        # Audio Mode (default) leaves transport.eq = None, which truly removes
-        # the EQ from the processing chain (no DSP), not just hides the UI.
-        try:
-            if not simple_audio:
-                self._ensure_eq_engines()
-            transport.eq = None if simple_audio else getattr(self, "karaoke_eq", None)
-        except Exception:
-            pass
-        try:
-            eq_obj = getattr(transport, "eq", None)
-            _diag(
-                f"[EQ-ROUTE] path=karaoke mode={mode} routed={int(eq_obj is not None)} "
-                f"reason={'simple_audio_mode' if simple_audio else ('attached' if eq_obj is not None else 'eq_engines_unavailable')} "
-                f"enabled={int(bool(eq_obj is not None and eq_obj.enabled()))} "
-                f"flat={int(bool(eq_obj is None or eq_obj.is_flat()))}"
-            )
-        except Exception:
-            pass
-        # Master "mix bus" processing is an independent opt-in; it is fully
-        # bypassed when disabled.
-        try:
-            transport.master = self._ensure_master_processor()
-        except Exception:
-            transport.master = None
-        master_active = getattr(transport, "master", None) is not None
-        # Gain staging. Simple Audio Mode normally uses ONLY the host's clean
-        # per-track trim (a plain volume offset, no DSP). Measured loudness
-        # normalization is applied in Advanced mode, OR whenever Master Audio
-        # Processing is on — the compressor/limiter want a consistent input
-        # level, so master processing and normalization work together.
-        trim_db = self._track_trim_db(audio_path)
-        want_normalize = self._karaoke_normalize_active(master_active=master_active)
-        try:
-            if not want_normalize:
-                transport.normalize_gain_db = trim_db
-                reason = self._karaoke_normalize_bypass_reason(master_active=master_active)
-                _diag(f"[LOUDNESS] gain_bypassed reason={reason} clean_gain={trim_db:+.1f}dB master={int(master_active)} file={os.path.basename(audio_path)}")
-            else:
-                gain = loudness_gain_db_cached(audio_path)
-                if gain is None:
-                    analyze_loudness_async(audio_path)
-                    transport.normalize_gain_db = trim_db
-                    _diag(f"[LOUDNESS] song_start_gain pending using_trim={trim_db:+.1f}dB file={os.path.basename(audio_path)}")
-                else:
-                    transport.normalize_gain_db = float(gain) + trim_db
-                    _diag(f"[LOUDNESS] song_start_gain gain={float(gain):+.1f}dB trim={trim_db:+.1f}dB total={transport.normalize_gain_db:+.1f}dB file={os.path.basename(audio_path)}")
-        except Exception:
-            transport.normalize_gain_db = 0.0
-        self._log_karaoke_audio_chain(
-            audio_path=audio_path,
-            mode=mode,
-            transport=transport,
-            simple_audio=simple_audio,
-            normalize_active=want_normalize,
-        )
-        # Visual-only timing calibration (audio stays the master clock). CDG
-        # lyrics are calibrated separately because MP4 timing does not show the
-        # same display latency.
-        try:
-            mode_l = str(mode or "").lower()
-            if mode_l == "cdg":
-                off = self._effective_cdg_timing_offset_ms()
-            elif mode_l == "mp4":
-                off = self._effective_mp4_timing_offset_ms()
-            else:
-                off = 0
-            if hasattr(transport, "set_video_offset_ms"):
-                transport.set_video_offset_ms(off)
-            if off:
-                _diag(f"[VIDEO-OFFSET] applying {off:+d}ms visual offset mode={mode}")
-            # mpv renders the picture itself and chases the audio clock with no
-            # In mpv-video mode the offset lands on an audio-only transport that
-            # draws nothing, so it cannot move the lyrics. (Full-mpv mode is a
-            # different path and applies the offset via audio-delay on the
-            # in-process backend.) Say so rather than letting a host chase a
-            # slider that does nothing.
-            if off and mode_l == "cdg" and mpv_video:
-                _diag(
-                    f"[VIDEO-OFFSET] WARNING mpv-video cannot apply the {off:+d}ms CDG "
-                    "offset — this obsolete follower path cannot move the lyrics."
-                )
-        except Exception:
-            pass
-        self._current_karaoke_audio_path = str(audio_path or "")
-        self.karaoke_transport = transport
-        self.karaoke_volume = None
-        try:
-            transport.start(start_seconds)
-            if loop_seconds and len(loop_seconds) == 2:
-                try:
-                    transport.set_loop(float(loop_seconds[0]), float(loop_seconds[1]))
-                except Exception as e:
-                    _diag(f"[INTRO-LOOP] set_loop failed: {e}")
-        except Exception as e:
-            self.karaoke_transport = None
-            try:
-                transport.stop()
-            except Exception:
-                pass
-            self.karaoke_playing = False
-            detail = str(e or "Unable to start karaoke playback")
-            _diag(f"[PY-KARAOKE] start failed: {detail}")
-            try:
-                QMessageBox.warning(
-                    self,
-                    "Playback Failed",
-                    "SingWS could not start karaoke playback.\n\n"
-                    f"{detail}\n\n"
-                    "Check the selected audio output device and media file.",
-                )
-            except Exception:
-                pass
-            try:
-                self._apply_idle_background(force=True, advance_slideshow=True)
-            except Exception:
-                pass
-            return False
-        if mpv_video:
-            # Attach on the NEXT Qt turn, never inline. _ensure_mpv_karaoke_core
-            # calls QApplication.processEvents(), which runs the transport's
-            # queued _finish_delayed_start and fires started() before
-            # play_next_file has connected its confirmation slot. The pending
-            # start token then never clears: the console sits at "starting"
-            # forever and every later Play press is refused with "keeping
-            # current song". Deferring keeps that reentrancy out of the window
-            # between transport.start() and the caller's connect.
-            def _attach_mpv_video_when_settled(expected=transport):
-                if getattr(self, "karaoke_transport", None) is not expected:
-                    return  # song already replaced or stopped
-                # A failure here costs the video, not the song — fall back to
-                # this transport's own renderer rather than dropping playback.
-                try:
-                    self._attach_mpv_video_follower(
-                        expected,
-                        audio_path=audio_path,
-                        video_path=video_path,
-                        mode=mode,
-                        start_seconds=start_seconds,
-                    )
-                except Exception as exc:
-                    _diag(f"[MPV] video follower unavailable; audio continues: {exc}")
-                    self._detach_mpv_video_follower()
-                    self._set_mpv_hosts_visible(False)
-                    self._last_karaoke_engine = "ffmpeg"
-
-            QTimer.singleShot(0, _attach_mpv_video_when_settled)
-        self._setup_end_silence_state(mode, None)
-        self._arm_audio_end_floor(audio_path)
-        self._update_karaoke_key_ui()
-        _diag(
-            f"[PY-KARAOKE] started mode={mode} start={float(start_seconds):.3f}s "
-            f"tempo={float(self._karaoke_tempo_percent):.0f}% key={int(semitones)}"
-        )
-        return True
-
-    def _prepare_python_karaoke_start(self, media_path: str):
+    def _prepare_karaoke_start(self, media_path: str):
         self.karaoke_playing = True
         try:
             self._mark_daw_preview_playback_started(media_path)
@@ -23818,9 +22667,9 @@ class KaraokeApp(QWidget):
         self.preview_window.force_black = False
         self.preview_window.update()
 
-    def _play_python_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
+    def _play_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
-        self._prepare_python_karaoke_start(song_path)
+        self._prepare_karaoke_start(song_path)
         self._current_karaoke_mode = "mp4"
         self._current_karaoke_semitones = int(semitones or 0)
         try:
@@ -23837,7 +22686,7 @@ class KaraokeApp(QWidget):
             )
         except Exception:
             pass
-        return self._start_python_karaoke_transport(
+        return self._start_karaoke_transport(
             audio_path=song_path,
             video_path=song_path,
             mode="mp4",
@@ -23846,8 +22695,8 @@ class KaraokeApp(QWidget):
             loop_seconds=loop_seconds,
         )
 
-    def _play_python_cdg(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, loop_seconds=None, duration_seconds=None):
-        self._prepare_python_karaoke_start(mp3_path)
+    def _play_cdg(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, loop_seconds=None, duration_seconds=None):
+        self._prepare_karaoke_start(mp3_path)
         self._current_karaoke_mode = "cdg"
         self._current_karaoke_cdg_path = str(cdg_path or "")
         self._current_karaoke_mp3_path = str(mp3_path or "")
@@ -23859,7 +22708,7 @@ class KaraokeApp(QWidget):
             SingWSLogger.log_playback_start("CDG", cdg_path, semitones, current_singer, duration)
         except Exception:
             pass
-        started = self._start_python_karaoke_transport(
+        started = self._start_karaoke_transport(
             audio_path=mp3_path,
             video_path=cdg_path,
             mode="cdg",
@@ -23881,12 +22730,12 @@ class KaraokeApp(QWidget):
                 _diag(f"[BG-VIDEO] start hook failed: {e}")
         return bool(started)
 
-    def _play_python_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
+    def _play_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
-        self._prepare_python_karaoke_start(song_path)
+        self._prepare_karaoke_start(song_path)
         self._current_karaoke_mode = "mp3"
         self._current_karaoke_semitones = int(semitones or 0)
-        return self._start_python_karaoke_transport(
+        return self._start_karaoke_transport(
             audio_path=song_path,
             video_path=None,
             mode="audio",
@@ -23900,7 +22749,7 @@ class KaraokeApp(QWidget):
         The legacy GStreamer pipeline objects this used to tear down were
         removed long ago (gst_pipeline & co. were always None), so the
         transport stop is the whole job now."""
-        self._stop_python_karaoke_transport()
+        self._stop_karaoke_transport()
         self._karaoke_transport_tempo_ratio = 1.0
 
     def _gst_teardown_async(self):
@@ -23909,7 +22758,7 @@ class KaraokeApp(QWidget):
         Kept as a separate entry point for call sites that used to need a
         worker-thread teardown of legacy pipelines; the transport stops
         in-place and there is nothing left to defer."""
-        self._stop_python_karaoke_transport()
+        self._stop_karaoke_transport()
         self._karaoke_transport_tempo_ratio = 1.0
 
     def _recover_idle_output(self, reason: str, ensure_bg: bool = True):
@@ -24213,17 +23062,7 @@ class KaraokeApp(QWidget):
             # entries total), so the frame pipeline is the remaining suspect:
             # each reader can retain MAX_BUFFERED_FRAMES of full-size RGB. A
             # readers count that climbs across a show means they outlive songs.
-            readers = "n/a"
-            try:
-                from python_karaoke_transport import reader_pool_stats
-
-                pool = reader_pool_stats()
-                readers = (
-                    f"readers={pool['readers']} running={pool['readers_running']} "
-                    f"frames={pool['buffered_frames']} frames_mb={pool['buffered_mb']}"
-                )
-            except Exception:
-                pass
+            readers = "readers=0 running=0 frames=0 frames_mb=0.0"
             _diag(
                 "[MEMORY] "
                 f"rss_mb={rss_mb:.0f} growth_mb={growth_mb:+.0f} "
@@ -25431,18 +24270,6 @@ class KaraokeApp(QWidget):
         transport = getattr(self, "karaoke_transport", None)
         if transport is None:
             return False
-        # Same reasoning as pause: seeking the audio transport on its own would
-        # strand the picture, and a CDG follower is never re-seeked by the sync
-        # loop. plugin.seekMedia holds the audio, seeks both followers, then
-        # realigns the audio to where the video actually landed.
-        if getattr(self, "_mpv_video_follower_active", False):
-            plugin = getattr(self, "_mpv_playback", None)
-            if plugin is not None:
-                try:
-                    plugin.seekMedia(int(max(0.0, float(seconds)) * 1000.0))
-                    return True
-                except Exception as e:
-                    _diag(f"[MPV] coordinated seek failed: {e}")
         try:
             transport.seek(seconds)
             return True
@@ -25478,23 +24305,7 @@ class KaraokeApp(QWidget):
             ):
                 return
         transport = getattr(self, "karaoke_transport", None)
-        # With mpv rendering video against this transport, route pause through
-        # the plugin: it pauses the audio master AND both followers together.
-        # Pausing the transport alone would leave the picture running on.
-        mpv_video_plugin = (
-            getattr(self, "_mpv_playback", None)
-            if getattr(self, "_mpv_video_follower_active", False)
-            else None
-        )
-        if mpv_video_plugin is not None:
-            try:
-                if paused:
-                    mpv_video_plugin.playMedia()
-                else:
-                    mpv_video_plugin.pauseMedia()
-            except Exception as e:
-                _diag(f"[MPV] pause/resume failed: {e}")
-        elif transport is not None:
+        if transport is not None:
             try:
                 if paused:
                     transport.resume()
@@ -26256,7 +25067,7 @@ class KaraokeApp(QWidget):
             "kind": "speaker",
         }]
         seen_names = set()
-        # Primary: Qt enumeration. Engine-agnostic (works for the FFmpeg/Qt
+        # Primary: Qt enumeration. Engine-agnostic (works for the libmpv/Qt
         # karaoke transport and, by name, for the BASS BGM engine) and its ids
         # are keyed on the display name ALONE, so a selection survives
         # reboots, driver churn, and AirPlay devices coming and going —
@@ -36831,16 +35642,6 @@ class KaraokeApp(QWidget):
             )
         except Exception as e:
             _diag(f"[PY-KARAOKE] modifier update failed: {e}")
-        # With mpv rendering video against this transport's clock, a tempo
-        # change has to reach the followers too. Audio alone would run away
-        # from the picture by far more than the +/-6% the sync loop can skew.
-        if getattr(self, "_mpv_video_follower_active", False):
-            plugin = getattr(self, "_mpv_playback", None)
-            if plugin is not None:
-                try:
-                    plugin.setTempoRatio(max(0.5, min(2.0, float(tempo_ratio or 1.0))))
-                except Exception as e:
-                    _diag(f"[MPV] follower tempo update failed: {e}")
 
     def _apply_karaoke_key_live(self):
         self._apply_karaoke_key_live_value(float(self._clamp_karaoke_key(self._current_karaoke_semitones)))
@@ -46593,9 +45394,6 @@ class KaraokeApp(QWidget):
 
         def worker():
             exists = os.path.exists(mp3_path)
-            if exists and callable(preload_cdg_packets):
-                preload_cdg_packets(cdg_path)
-
             def finish():
                 try:
                     self._clear_processing_text_if_matches(
@@ -47999,26 +46797,8 @@ class KaraokeApp(QWidget):
         return ""
 
     def _preload_next_up_cdg(self, path: str):
-        """Warm next-up graphics on a daemon thread before Play is pressed."""
-        path = str(path or "")
-        if not path or not callable(preload_cdg_packets):
-            self._next_cdg_preload_path = ""
-            return
-        if path == str(getattr(self, "_next_cdg_preload_path", "") or ""):
-            return
-        self._next_cdg_preload_path = path
-
-        def worker(expected_path: str):
-            ok = preload_cdg_packets(expected_path)
-            if not ok and str(getattr(self, "_next_cdg_preload_path", "") or "") == expected_path:
-                self._next_cdg_preload_path = ""
-
-        threading.Thread(
-            target=worker,
-            args=(path,),
-            name="singws-next-cdg-preload",
-            daemon=True,
-        ).start()
+        """Native mpv opens CDG media directly; no Python packet cache needed."""
+        self._next_cdg_preload_path = ""
 
     def _apply_prescan_result(self, scan_key: str, token: int, offset: float, resolved_path: str | None = None):
         """Apply async scan result only if still current (stale-safe)."""
@@ -48094,8 +46874,6 @@ class KaraokeApp(QWidget):
                 if low.endswith('.zip'):
                     # Pre-extract next-up ZIP in background so silence scan can run on MP3.
                     cdg_p, mp3_p = self.zip_cache.get_extracted_paths(scan_path)
-                    if cdg_p and callable(preload_cdg_packets):
-                        preload_cdg_packets(str(cdg_p))
                     if mp3_p:
                         resolved = str(mp3_p)
                         print(f"[SILENCE] zip next-up extracted for prescan: {Path(resolved).name}")
@@ -52039,11 +50817,11 @@ class KaraokeApp(QWidget):
             _diag(f"[BG] Manual-stop recovery failed: {e}")
     
     def play_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
-        return self._play_python_mp4(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
+        return self._play_mp4(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
     def play_cdg_mp3_dual(self, cdg_path, mp3_path, semitones=0, start_seconds=0.0, fast_restart=False, loop_seconds=None, duration_seconds=None):
-        return self._play_python_cdg(
+        return self._play_cdg(
             cdg_path,
             mp3_path,
             semitones,
@@ -52058,7 +50836,7 @@ class KaraokeApp(QWidget):
             QTimer.singleShot(0, self._handle_media_end_safe)
                 
     def play_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
-        return self._play_python_mp3(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
+        return self._play_mp3(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
 
 
     def get_singer_index_by_row(self, row):

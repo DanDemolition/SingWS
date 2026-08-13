@@ -23,7 +23,7 @@ Design notes
   makeup → brickwall-safety limiter → hard clip guard.
 
 The chain is intended to sit *after* per-track loudness normalization (which
-SingWS bakes in upstream via ffmpeg ``volume``). It therefore complements
+SingWS applies upstream in the playback core). It therefore complements
 normalization — the per-track gain gets levels into the right area, and the
 compressor/limiter shave the remaining peaks and even out the ride.
 """

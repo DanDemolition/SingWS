@@ -421,7 +421,7 @@ class MpvPlaybackPlugin:
         """Current picture as a QImage, or None.
 
         The DAW singer-screen preview's only frame source was the FFmpeg/Qt
-        path (_on_python_karaoke_frame). Under mpv the picture is a shared GL
+        path used by the retired painter transport. Under mpv the picture is a shared GL
         texture in a native NSView: there is no QImage, and the host's
         QWidget.grab() fallback cannot capture a native child surface, so the
         preview was blank for the whole mpv path. This goes through libmpv's

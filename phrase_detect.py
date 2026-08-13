@@ -13,43 +13,34 @@ CPU and bundle stability. The result is a single generic "Suggested" point.
 
 from __future__ import annotations
 
-import subprocess
+import os
+import wave
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 
-def _ffmpeg() -> str:
+def _decode_pcm(path: str, *, sr: int, channels: int, start_seconds=None,
+                duration_seconds=None, timeout=60.0) -> np.ndarray:
+    from libmpv_media_jobs import decode_audio_wav
+    rendered = decode_audio_wav(
+        path, sample_rate=sr, channels=channels, start_seconds=start_seconds,
+        duration_seconds=duration_seconds, timeout=timeout)
     try:
-        from python_karaoke_transport import _ffmpeg_path
-        return _ffmpeg_path("ffmpeg")
-    except Exception:
-        import shutil
-        path = shutil.which("ffmpeg")
-        if path:
-            return path
-        raise RuntimeError("ffmpeg is required to decode audio for the waveform")
+        with wave.open(rendered, "rb") as handle:
+            raw = handle.readframes(handle.getnframes())
+        return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    finally:
+        try:
+            os.unlink(rendered)
+        except OSError:
+            pass
 
 
 def decode_pcm_mono(path: str, sr: int = 8000, max_seconds: float = 720.0) -> np.ndarray:
-    """Decode `path` to mono float32 PCM at `sr` Hz via ffmpeg. Low rate keeps it
-    cheap (a 4-min song ≈ 2M samples). Returns a 1-D float32 array in [-1, 1]."""
-    cmd = [
-        _ffmpeg(), "-v", "quiet", "-nostdin",
-        "-t", str(float(max_seconds)),
-        "-i", str(path),
-        "-ac", "1", "-ar", str(int(sr)), "-f", "f32le", "-",
-    ]
-    # Hard timeout so a single corrupt/locked file can't hang a whole
-    # Analyze-Library batch — the caller treats this as a skipped song.
-    try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              check=False, timeout=60)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"ffmpeg decode timed out for {path}")
-    if proc.returncode != 0 or not proc.stdout:
-        raise RuntimeError(f"ffmpeg decode failed for {path}")
-    return np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32, copy=False)
+    """Decode to mono float32 PCM through the bundled offline libmpv core."""
+    return _decode_pcm(path, sr=int(sr), channels=1,
+                       duration_seconds=float(max_seconds), timeout=60)
 
 
 def detect_lead_silence(
@@ -77,22 +68,9 @@ def detect_lead_silence(
         noise_db = float(noise_db)
         min_silence = max(0.0, float(min_silence))
         sr = max(1000, int(sr))
-        cmd = [
-            _ffmpeg(), "-v", "quiet", "-nostdin",
-            "-t", str(max(0.1, float(max_scan_seconds))),
-            "-i", str(path),
-            "-vn", "-ac", "2", "-ar", str(sr), "-f", "f32le", "-",
-        ]
-        try:
-            proc = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                check=False, timeout=15,
-            )
-        except subprocess.TimeoutExpired:
-            return 0.0
-        if proc.returncode != 0 or not proc.stdout:
-            return 0.0
-        samples = np.frombuffer(proc.stdout, dtype="<f4")
+        samples = _decode_pcm(
+            path, sr=sr, channels=2,
+            duration_seconds=max(0.1, float(max_scan_seconds)), timeout=15)
         frames = samples.size // 2
         if frames <= 0:
             return 0.0
@@ -118,7 +96,7 @@ def detect_lead_silence(
 
 
 def probe_duration_seconds(path: str) -> float:
-    """Duration of `path` straight from the file, via ffprobe. 0.0 if unknown.
+    """Duration of `path` from its metadata. 0.0 if unknown.
 
     Needed because the library database is keyed on the *zip* path for MP3+G
     tracks, while playback hands round the extracted mp3 -- so a DB lookup
@@ -126,29 +104,12 @@ def probe_duration_seconds(path: str) -> float:
     """
     try:
         import os
-        import subprocess as _sp
-
         if not path or not os.path.exists(str(path)):
             return 0.0
-        proc = _sp.run(
-            [_ffmpeg_path_probe(), "-v", "error", "-show_entries",
-             "format=duration", "-of", "default=nw=1:nk=1", str(path)],
-            capture_output=True, text=True, timeout=15, check=False,
-        )
-        if proc.returncode != 0:
-            return 0.0
-        return max(0.0, float((proc.stdout or "0").strip() or 0.0))
+        from media_helpers import probe_duration_seconds as probe
+        return probe(path)
     except Exception:
         return 0.0
-
-
-def _ffmpeg_path_probe() -> str:
-    try:
-        from python_karaoke_transport import _ffmpeg_path
-        return _ffmpeg_path("ffprobe")
-    except Exception:
-        import shutil
-        return shutil.which("ffprobe") or "ffprobe"
 
 
 def detect_trailing_silence(
@@ -166,7 +127,7 @@ def detect_trailing_silence(
     -- 100 ms windows, RMS per channel, a window is silent when its louder
     channel sits at or below `noise_db` dBFS.
 
-    Only the last `max_scan_seconds` are decoded (ffmpeg ``-sseof``), so cost
+    Only the last `max_scan_seconds` are decoded by libmpv, so cost
     does not grow with song length.
 
     Returns 0.0 on any decode error, on a fully silent scan, and -- crucially
@@ -182,22 +143,12 @@ def detect_trailing_silence(
         noise_db = float(noise_db)
         sr = max(1000, int(sr))
         scan = max(1.0, float(max_scan_seconds))
-        cmd = [
-            _ffmpeg(), "-v", "quiet", "-nostdin",
-            "-sseof", f"-{scan:g}",
-            "-i", str(path),
-            "-vn", "-ac", "2", "-ar", str(sr), "-f", "f32le", "-",
-        ]
-        try:
-            proc = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                check=False, timeout=20,
-            )
-        except subprocess.TimeoutExpired:
+        duration = probe_duration_seconds(path)
+        if duration <= 0:
             return 0.0
-        if proc.returncode != 0 or not proc.stdout:
-            return 0.0
-        samples = np.frombuffer(proc.stdout, dtype="<f4")
+        samples = _decode_pcm(
+            path, sr=sr, channels=2,
+            start_seconds=max(0.0, duration - scan), timeout=20)
         frames = samples.size // 2
         if frames <= 0:
             return 0.0

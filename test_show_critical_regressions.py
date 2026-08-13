@@ -14,18 +14,10 @@ def load_main_module():
     return module
 
 
-def load_legacy_transport_module():
-    spec = importlib.util.spec_from_file_location("singws_legacy_show_critical", "python_karaoke_transport.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 class ShowCriticalRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.singws = load_main_module()
-        cls.legacy_transport = load_legacy_transport_module()
 
     def bare_app(self):
         app = self.singws.KaraokeApp.__new__(self.singws.KaraokeApp)
@@ -155,13 +147,6 @@ class ShowCriticalRegressionTests(unittest.TestCase):
             }],
         }
 
-    def test_legacy_transport_obeys_same_countdown_gate(self):
-        start = inspect.getsource(self.legacy_transport.PythonKaraokeTransport.start)
-        delayed = inspect.getsource(self.legacy_transport.PythonKaraokeTransport._finish_delayed_start)
-        self.assertIn("QTimer.singleShot", start)
-        self.assertNotIn("self.seek(start_seconds)", start)
-        self.assertIn("self.seek(start_seconds)", delayed)
-        self.assertIn("self.started.emit()", delayed)
 
     def test_distinct_request_ids_survive_identical_metadata(self):
         app = self.bare_app()
@@ -574,7 +559,7 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         self.assertLess(active_identity, animation)
         self.assertIn("generation=start_generation", source[animation:])
 
-        prepared_start = inspect.getsource(self.singws.KaraokeApp._start_python_karaoke_transport)
+        prepared_start = inspect.getsource(self.singws.KaraokeApp._start_mpv_karaoke_transport)
         transport_start = prepared_start.index("transport.start(start_seconds)")
         self.assertNotIn("_trigger_show_screen_singer_start_vfx", prepared_start[:transport_start])
         self.assertNotIn('reason="playback_started"', prepared_start[transport_start:])
