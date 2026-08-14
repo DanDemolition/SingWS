@@ -122,6 +122,41 @@ class MpvTransportTests(unittest.TestCase):
         transport._poll()
         self.assertEqual(starts, [True])
 
+    def test_cdg_watchdog_reports_once_after_five_seconds_without_frame(self):
+        plugin, transport = self.make_transport("cdg")
+        plugin.visualsReady = lambda: False
+        transport.start()
+        stalls = []
+        transport.visual_stalled.connect(lambda path, ms: stalls.append((path, ms)))
+        plugin.position = 4999
+        transport._poll()
+        self.assertEqual(stalls, [])
+        plugin.position = 5000
+        transport._poll()
+        transport._poll()
+        self.assertEqual(stalls, [("song.cdg", 5000)])
+
+    def test_mp4_does_not_use_cdg_visual_watchdog(self):
+        plugin, transport = self.make_transport("mp4")
+        plugin.visualsReady = lambda: False
+        transport.start()
+        stalls = []
+        transport.visual_stalled.connect(lambda path, ms: stalls.append((path, ms)))
+        plugin.position = 6000
+        transport._poll()
+        self.assertEqual(stalls, [])
+
+    def test_native_bridge_forces_cdg_demuxer_and_resets_it_for_other_media(self):
+        """Low-score auto detection misclassified valid LG/Sunfly CDG files."""
+        from pathlib import Path
+
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        self.assertIn(
+            '_mpv,"demuxer-lavf-format",_isCdg?"cdg":""',
+            bridge,
+        )
+        self.assertIn('"[bridge] detected media format=%s"', bridge)
+
 
 class _FakeEngine:
     """Stands in for the out-of-process audio master."""

@@ -101,6 +101,7 @@ class _BridgeApi:
         L.singws_bridge_background_position.restype = ctypes.c_int64
         L.singws_bridge_background_paused.argtypes = [ctypes.c_void_p]
         L.singws_bridge_background_paused.restype = ctypes.c_int
+        L.singws_bridge_set_background_opacity.argtypes = [ctypes.c_void_p, ctypes.c_double]
         L.singws_bridge_refresh_views.argtypes = [
             ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t,
         ]
@@ -417,6 +418,10 @@ class MpvPlaybackPlugin:
         return int(self.api.lib.singws_bridge_background_position(self._handle)) if self._handle else 0
     def backgroundVideoPaused(self) -> bool:
         return bool(self._handle and self.api.lib.singws_bridge_background_paused(self._handle))
+    def setBackgroundVideoOpacity(self, opacity) -> None:
+        if self._handle:
+            self.api.lib.singws_bridge_set_background_opacity(
+                self._handle, max(0.0, min(1.0, float(opacity))))
     def grabFrame(self):
         """Current picture as a QImage, or None.
 

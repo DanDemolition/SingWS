@@ -3106,6 +3106,8 @@ DEFAULTS = {
     "show_request_qr": True,          # paint the request QR on the show screen (bottom-right, by the countdown timer); gated by requests_accepting
     "rotation_request_qr_enabled": True, # show the request QR + call to action on the rotation window; gated by requests_accepting
     "rotation_request_qr_caption": "JOIN THE QUEUE!", # call-to-action printed beside the rotation QR
+    "rotation_announcement_enabled": False, # rotation-screen-only marquee for venue specials/announcements
+    "rotation_announcement_message": "", # operator text for the rotation-screen announcement marquee
     # Retained only so old settings files deserialize cleanly. Karaoke playback
     # is permanently owned by the bundled native mpv engine.
     "karaoke_engine": "mpv",
@@ -3970,14 +3972,7 @@ class BackgroundMusicPlayer(QObject):
     def _bass_selected_output_name(self) -> str | None:
         try:
             parent = self.parent()
-            selected = parent._get_selected_audio_output_id()
-            if selected == "default":
-                return None
-            for output in parent._refresh_audio_output_cache():
-                if output.get("id") == selected:
-                    return str(output.get("name") or "").strip() or None
-            # Cache miss: the persisted display name is the durable identity.
-            return str(parent.settings.get("audio_output_name", "") or "").strip() or None
+            return parent._safe_local_audio_output_name()
         except Exception:
             pass
         return None
@@ -6352,6 +6347,8 @@ class BackgroundVideoShuffleBag:
 class NativeLyricsBackgroundVideoPlayer(QObject):
     """Muted decorative MP4 playlist decoded inside the native mpv bridge."""
 
+    _FADE_STEPS = 12
+
     def __init__(self, plugin, parent=None, *, opacity: float = 1.0):
         super().__init__(parent)
         self.plugin = plugin
@@ -6359,8 +6356,12 @@ class NativeLyricsBackgroundVideoPlayer(QObject):
         self._bag = None
         self._current = ""
         self._poll_count = 0
+        self._transition = ""
+        self._fade_step = 0
         self._timer = QTimer(self)
-        self._timer.setInterval(250)
+        # A cheap opacity-only GPU fade. End-state polling remains at roughly
+        # 4 Hz; the faster tick is active Python work only during transitions.
+        self._timer.setInterval(33)
         self._timer.timeout.connect(self._poll_end)
 
     def start(self, files: list[str], shuffle: bool = True) -> bool:
@@ -6372,11 +6373,12 @@ class NativeLyricsBackgroundVideoPlayer(QObject):
         self._timer.start()
         return True
 
-    def _advance(self, reason: str) -> bool:
+    def _advance(self, reason: str, *, opacity=None) -> bool:
         path = self._bag.next() if self._bag is not None else None
         if not path:
             return False
-        if not self.plugin.loadBackgroundVideo(path, self.opacity):
+        load_opacity = self.opacity if opacity is None else max(0.0, min(1.0, float(opacity)))
+        if not self.plugin.loadBackgroundVideo(path, load_opacity):
             _diag(f"[BG-VIDEO] native load failed file={os.path.basename(path)!r}")
             return False
         self._current = path
@@ -6386,17 +6388,38 @@ class NativeLyricsBackgroundVideoPlayer(QObject):
     def _poll_end(self):
         try:
             self._poll_count += 1
-            if self._poll_count % 16 == 0:
+            if self._transition == "wait_frame":
+                position = int(getattr(self.plugin, "backgroundVideoPositionMs", lambda: 0)())
+                if position > 0:
+                    self._transition = "fade_in"
+                    self._fade_step = 0
+                return
+            if self._transition == "fade_in":
+                self._fade_step += 1
+                value = self.opacity * min(1.0, self._fade_step / self._FADE_STEPS)
+                self.plugin.setBackgroundVideoOpacity(value)
+                if self._fade_step >= self._FADE_STEPS:
+                    self._transition = ""
+                return
+
+            if self._poll_count % 8 == 0:
                 position = int(getattr(self.plugin, "backgroundVideoPositionMs", lambda: 0)())
                 paused = bool(getattr(self.plugin, "backgroundVideoPaused", lambda: False)())
                 _diag(f"[BG-VIDEO] clock position_ms={position} paused={int(paused)}")
-            if self.plugin.backgroundVideoAtEnd():
-                self._advance("eos")
+                if self.plugin.backgroundVideoAtEnd():
+                    # The bridge snapshots the outgoing final frame before this
+                    # one decoder loads its replacement. Keep that frame fully
+                    # visible while the incoming stream reaches its first real
+                    # frame, then dissolve directly into it—no black/stale gap
+                    # and no second decoder competing with karaoke on Intel.
+                    if self._advance("eos_crossfade", opacity=0.0):
+                        self._transition = "wait_frame"
         except Exception as exc:
             _diag(f"[BG-VIDEO] native end poll failed: {exc}")
 
     def stop(self, reason: str = "stop"):
         self._timer.stop()
+        self._transition = ""
         try:
             self.plugin.stopBackgroundVideo()
         except Exception:
@@ -7458,29 +7481,15 @@ class VideoAreaWidget(QWidget):
         self.update()
 
     def _draw_background_video_pixmap(self, painter: QPainter, pixmap: QPixmap):
-        """Fill the widget (crop-to-fill) without allocating a scaled pixmap.
+        """Stretch the decorative video edge-to-edge without an allocation.
 
         The background layer is decorative and already decoded to a small
-        working size.  Let QPainter scale from a cropped source rect during the
-        draw instead of materializing a new Full HD pixmap every video frame.
+        working size. Let QPainter stretch it during the draw instead of
+        materializing a new Full HD pixmap every video frame.
         """
         if pixmap.isNull():
             return
-        pw = max(1, int(pixmap.width()))
-        ph = max(1, int(pixmap.height()))
-        tw = max(1, int(self.width()))
-        th = max(1, int(self.height()))
-        src_w = pw
-        src_h = ph
-        target_ratio = tw / float(th)
-        pix_ratio = pw / float(ph)
-        if pix_ratio > target_ratio:
-            src_w = max(1, int(ph * target_ratio))
-        elif pix_ratio < target_ratio:
-            src_h = max(1, int(pw / target_ratio))
-        src_x = max(0, (pw - src_w) // 2)
-        src_y = max(0, (ph - src_h) // 2)
-        painter.drawPixmap(self.rect(), pixmap, QRect(src_x, src_y, src_w, src_h))
+        painter.drawPixmap(self.rect(), pixmap, pixmap.rect())
 
     def set_background_image(self, image_path):
         old_pixmap = QPixmap(self.background_pixmap) if not self.background_pixmap.isNull() else QPixmap()
@@ -17206,6 +17215,106 @@ def _rotation_quick_surfaces_supported() -> bool:
     return _native_quick_child_surfaces_supported()
 
 
+class RotationAnnouncementTicker(QWidget):
+    """Lightweight, rotation-screen-only announcement marquee."""
+
+    SPEED_PX_PER_SEC = 72.0
+    GAP_PX = 90
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._message = ""
+        self._enabled = False
+        self._offset = 0.0
+        self._last_tick = None
+        self.setMinimumHeight(68)
+        self.setMaximumHeight(68)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(self._advance)
+        self.hide()
+
+    def set_announcement(self, enabled: bool, message: str):
+        self._enabled = bool(enabled)
+        self._message = " • ".join(str(message or "").splitlines()).strip()
+        self._offset = 0.0
+        self._last_tick = None
+        should_show = self._enabled and bool(self._message)
+        self.setVisible(should_show)
+        if should_show and self.isVisible():
+            self._timer.start(33)
+        else:
+            self._timer.stop()
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._enabled and self._message:
+            self._last_tick = None
+            self._timer.start(33)
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        self._last_tick = None
+        super().hideEvent(event)
+
+    def _advance(self):
+        if not self.isVisible() or not self._message:
+            return
+        now = time.monotonic()
+        if self._last_tick is None:
+            self._last_tick = now
+            return
+        dt = min(0.1, max(0.0, now - self._last_tick))
+        self._last_tick = now
+        self._offset += self.SPEED_PX_PER_SEC * dt
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._message:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        outer = QRectF(1, 1, max(0, self.width() - 2), max(0, self.height() - 2))
+        painter.setPen(QPen(QColor(246, 201, 69, 118), 1.5))
+        painter.setBrush(QColor(38, 29, 65, 245))
+        painter.drawRoundedRect(outer, 18, 18)
+
+        badge = QRectF(12, 11, 118, self.height() - 22)
+        painter.setPen(QPen(QColor(246, 201, 69, 180), 1))
+        painter.setBrush(QColor(246, 201, 69, 30))
+        painter.drawRoundedRect(badge, 12, 12)
+        badge_font = QFont()
+        badge_font.setPixelSize(12)
+        badge_font.setBold(True)
+        badge_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
+        painter.setFont(badge_font)
+        painter.setPen(QColor(246, 201, 69))
+        painter.drawText(badge.toRect(), Qt.AlignmentFlag.AlignCenter, "TONIGHT")
+
+        scroll_left = 148
+        scroll_width = max(0, self.width() - scroll_left - 18)
+        if scroll_width <= 0:
+            return
+        painter.save()
+        painter.setClipRect(QRect(scroll_left, 0, scroll_width, self.height()))
+        message_font = QFont()
+        message_font.setPixelSize(22)
+        message_font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(message_font)
+        painter.setPen(QColor(245, 242, 252))
+        metrics = QFontMetrics(message_font)
+        text_width = max(1, metrics.horizontalAdvance(self._message))
+        cycle = text_width + self.GAP_PX
+        self._offset %= cycle
+        first_x = scroll_left + scroll_width - int(self._offset)
+        baseline = (self.height() + metrics.ascent() - metrics.descent()) // 2
+        painter.drawText(first_x, baseline, self._message)
+        painter.drawText(first_x + cycle, baseline, self._message)
+        painter.restore()
+
+
 class RotationView(QMainWindow):
     class SingerItemDelegate(QStyledItemDelegate):
         def paint(self, painter, option, index):
@@ -17439,6 +17548,8 @@ class RotationView(QMainWindow):
         qr_layout.addLayout(qr_text_column, 1)
         self.qr_card.hide()
 
+        self.announcement_ticker = RotationAnnouncementTicker(self)
+
         self.queue_title_label = QLabel("SINGER ROTATION", self)
         self.queue_title_label.setObjectName("rotationQueueTitle")
         self.queue_count_label = QLabel("0 SINGERS", self)
@@ -17472,6 +17583,7 @@ class RotationView(QMainWindow):
         else:
             shell_layout.addWidget(self.list_widget, 1)
         shell_layout.addWidget(self.qr_card)
+        shell_layout.addWidget(self.announcement_ticker)
 
         safe_layout.addWidget(shell)
 
@@ -17495,6 +17607,10 @@ class RotationView(QMainWindow):
         self.last_scroll_percent = 0.0
         settings = getattr(parent, "settings", {}) if parent is not None else {}
         self.set_effects_enabled(bool(settings.get("rotation_vfx_enabled", True)))
+        self.set_announcement_ticker(
+            bool(settings.get("rotation_announcement_enabled", False)),
+            settings.get("rotation_announcement_message", ""),
+        )
 
     def set_effects_enabled(self, enabled):
         enabled = bool(enabled)
@@ -17504,6 +17620,9 @@ class RotationView(QMainWindow):
             self.rotation_rail.set_effects_enabled(enabled)
 
     ROTATION_QR_SIZE = 180
+
+    def set_announcement_ticker(self, enabled: bool, message: str):
+        self.announcement_ticker.set_announcement(enabled, message)
 
     def set_request_qr(self, pixmap, caption: str = ""):
         """Show (or hide with None) the request QR card at the bottom of the
@@ -22419,6 +22538,15 @@ class KaraokeApp(QWidget):
         _diag(f"[MPV] initialized plugin={plugin.version()} audio={plugin.audioDescription()}")
         return plugin
 
+    def _mpv_selected_audio_output_name(self) -> str:
+        """Return the safe local SingWS output label for libmpv.
+
+        SingWS persists a stable, UI-owned device id while libmpv requires its
+        own backend-specific id.  The native bridge resolves this display label
+        through mpv's audio-device-list immediately before applying it.
+        """
+        return self._safe_local_audio_output_name() or "__singws_no_safe_output__"
+
     def _set_mpv_hosts_visible(self, visible: bool):
         for name in ("_mpv_output_host", "_mpv_preview_host"):
             host = getattr(self, name, None)
@@ -22469,6 +22597,24 @@ class KaraokeApp(QWidget):
             return
         self._set_mpv_hosts_visible(True)
 
+    def _handle_mpv_visual_stall(self, path: str, position_ms: int):
+        """Fail visibly and safely when CDG audio runs without a decoded frame."""
+        self._set_mpv_hosts_visible(False)
+        name = os.path.basename(str(path or "")) or "unknown CDG"
+        _diag(
+            f"[CDG-WATCHDOG] no visual frame after {int(position_ms)}ms "
+            f"file={name!r}; native hosts remain hidden, audio left uninterrupted"
+        )
+        try:
+            self._show_processing_notification(
+                f"CDG lyrics did not load for {name}. Audio is still playing; "
+                "the black video surface was hidden.",
+                level="warning",
+                persistent=True,
+            )
+        except Exception:
+            pass
+
     def _mpv_hosts_should_show(self) -> bool:
         """Whether the mpv surfaces belong on screen right now.
 
@@ -22481,6 +22627,97 @@ class KaraokeApp(QWidget):
         if getattr(self, "karaoke_transport", None) is None:
             return False
         return str(getattr(self, "_current_karaoke_mode", "") or "").lower() in {"cdg", "mp4"}
+
+    def _collect_pre_show_diagnostics(self) -> list[tuple[bool, str, str]]:
+        """Read-only checks for the failure points that matter during a show."""
+        checks = []
+
+        local_name = self._safe_local_audio_output_name()
+        checks.append((
+            bool(local_name),
+            "Local audio output",
+            str(local_name or "No safe local output is selected"),
+        ))
+
+        try:
+            screen_count = len(QApplication.screens())
+        except Exception:
+            screen_count = 0
+        airplay_video_only = bool(local_name) and screen_count >= 2
+        checks.append((
+            airplay_video_only,
+            "AirPlay video-only routing",
+            f"{screen_count} displays; audio pinned to {local_name}"
+            if local_name else f"{screen_count} displays; local audio pin missing",
+        ))
+
+        karafun_enabled = bool(self.settings.get("karafun_provider_enabled", True))
+        try:
+            karafun_path = self._karafun_application_path() if karafun_enabled else None
+        except Exception:
+            karafun_path = None
+        checks.append((
+            bool(karafun_enabled and karafun_path),
+            "KaraFun",
+            str(karafun_path) if karafun_path else (
+                "Disabled in settings" if not karafun_enabled else "Application not found"
+            ),
+        ))
+
+        output_host = getattr(self, "_mpv_output_host", None)
+        preview_host = getattr(self, "_mpv_preview_host", None)
+        checks.append((
+            output_host is not None and preview_host is not None,
+            "Native video surfaces",
+            "show + host preview ready" if output_host is not None and preview_host is not None
+            else "show or host preview surface is missing",
+        ))
+
+        ticker_enabled = bool(self.settings.get("ticker_enabled", True))
+        show_ticker = getattr(getattr(self, "video_window", None), "ticker", None)
+        checks.append((
+            ticker_enabled and show_ticker is not None,
+            "Show ticker",
+            "enabled and constructed" if ticker_enabled and show_ticker is not None
+            else "disabled or not constructed",
+        ))
+
+        qr_url = self._header_qr_url()
+        checks.append((
+            bool(qr_url),
+            "Signup QR URL",
+            str(qr_url or "No request URL is configured/detectable"),
+        ))
+
+        bg_folder = str(self.settings.get("bg_video_folder", "") or "").strip()
+        bg_files = scan_background_video_folder(bg_folder)
+        bg_enabled = bool(self.settings.get("bg_video_enabled", False))
+        checks.append((
+            (not bg_enabled) or bool(bg_files),
+            "Background videos",
+            (f"{len(bg_files)} playable files in {bg_folder}" if bg_files else
+             ("disabled" if not bg_enabled else f"No playable files in {bg_folder or '(unset)'}")),
+        ))
+        return checks
+
+    def run_pre_show_diagnostics(self):
+        checks = self._collect_pre_show_diagnostics()
+        passed = sum(1 for ok, _label, _detail in checks if ok)
+        lines = [
+            f"{'PASS' if ok else 'CHECK'}  {label}: {detail}"
+            for ok, label, detail in checks
+        ]
+        _diag(f"[PRE-SHOW] result={passed}/{len(checks)} " + " | ".join(lines))
+        box = QMessageBox(self)
+        box.setWindowTitle("Pre-Show Diagnostics")
+        box.setIcon(
+            QMessageBox.Icon.Information
+            if passed == len(checks) else QMessageBox.Icon.Warning
+        )
+        box.setText(f"{passed} of {len(checks)} checks passed")
+        box.setDetailedText("\n".join(lines))
+        box.setInformativeText("Open Details to review every show-critical check.")
+        box.exec()
 
     def _suppress_mpv_hosts_for_overlay(self, reason: str, active: bool):
         """Hide the mpv surfaces while a painter-drawn show overlay is running.
@@ -22550,6 +22787,9 @@ class KaraokeApp(QWidget):
         from mpv_karaoke_transport import MpvKaraokeTransport
 
         plugin = self._ensure_mpv_karaoke_core()
+        output_name = self._mpv_selected_audio_output_name()
+        plugin.setAudioDevice(output_name)
+        _diag(f"[AUDIO] karaoke output requested={output_name!r} engine=mpv")
         self._stop_karaoke_transport()
         transport = MpvKaraokeTransport(
             plugin,
@@ -22560,6 +22800,7 @@ class KaraokeApp(QWidget):
         )
         transport.duration_seconds = float(duration_seconds or 0.0)
         transport.started.connect(lambda: _diag("[MPV] audible playback started"))
+        transport.visual_stalled.connect(self._handle_mpv_visual_stall)
         if str(mode).lower() != "audio":
             # Not _set_mpv_hosts_visible directly: a singer-start transition is
             # normally already on screen by the time this fires, and revealing
@@ -24136,6 +24377,18 @@ class KaraokeApp(QWidget):
         msg_row.addWidget(msg_edit)
         vbox.addLayout(msg_row)
 
+        rotation_msg_cb = QCheckBox("Show announcement ticker on Singer Rotation screen")
+        rotation_msg_cb.setChecked(bool(self.settings.get("rotation_announcement_enabled", False)))
+        vbox.addWidget(rotation_msg_cb)
+
+        rotation_msg_row = QHBoxLayout()
+        rotation_msg_row.addWidget(QLabel("Rotation message:"))
+        rotation_msg_edit = QLineEdit(dlg)
+        rotation_msg_edit.setPlaceholderText("Tonight's drink specials, venue announcements, etc.")
+        rotation_msg_edit.setText(str(self.settings.get("rotation_announcement_message", "") or ""))
+        rotation_msg_row.addWidget(rotation_msg_edit)
+        vbox.addLayout(rotation_msg_row)
+
         vars_label = QLabel("Codes: %m_curSinger  %curSong  %m_curArtist  %m_curTitle  %nextSinger")
         vars_label.setWordWrap(True)
         try:
@@ -24190,6 +24443,8 @@ class KaraokeApp(QWidget):
             self.settings["ticker_bold"] = bool(ticker_bold_cb.isChecked())
             self.settings["ticker_speed_px_per_sec"] = float(speed_slider.value())
             self.settings["ticker_vfx_enabled"] = bool(ticker_vfx_cb.isChecked())
+            self.settings["rotation_announcement_enabled"] = bool(rotation_msg_cb.isChecked())
+            self.settings["rotation_announcement_message"] = rotation_msg_edit.text().strip()
 
             # Persist and apply immediately
             self.save_settings()
@@ -24223,6 +24478,15 @@ class KaraokeApp(QWidget):
             try:
                 # Apply visibility/space
                 self.video_window.set_ticker_enabled(new_enabled)
+            except Exception:
+                pass
+
+            try:
+                if self.rotation_view is not None:
+                    self.rotation_view.set_announcement_ticker(
+                        bool(rotation_msg_cb.isChecked()),
+                        rotation_msg_edit.text().strip(),
+                    )
             except Exception:
                 pass
 
@@ -25047,6 +25311,71 @@ class KaraokeApp(QWidget):
         if any(k in n for k in ("headphone", "headset", "earbud", "airpods")):
             return "headphones"
         return "speaker"
+
+    @staticmethod
+    def _local_audio_output_priority(item) -> tuple:
+        """Prefer the Mac's live headphone jack, then its built-in speakers."""
+        name = str((item or {}).get("name") or "").casefold()
+        kind = str((item or {}).get("kind") or "").casefold()
+        if kind == "display" or any(
+            token in name for token in ("airplay", "apple tv", "bravia", "television", "hdmi")
+        ):
+            return (99, name)
+        if any(token in name for token in ("external headphones", "headphone", "headset")):
+            return (0, name)
+        if any(token in name for token in ("macbook", "built-in", "built in", "internal speakers")):
+            return (1, name)
+        return (2, name)
+
+    def _safe_local_audio_output_name(self) -> str | None:
+        """Resolve playback output without ever following an AirPlay display.
+
+        macOS changes its system default when a TV is added through AirPlay.
+        SingWS treats Default as the current local Mac output instead: the
+        headphone jack when present, then built-in speakers. A valid explicit
+        non-display pin still wins (USB interfaces included).
+        """
+        selected = self._get_selected_audio_output_id()
+        outputs = list(getattr(self, "_audio_output_cache", []) or [])
+        if not outputs:
+            outputs = self._refresh_audio_output_cache()
+
+        if selected != "default":
+            item = next(
+                (entry for entry in outputs if str(entry.get("id") or "") == selected),
+                None,
+            )
+            if item is not None and self._local_audio_output_priority(item)[0] < 99:
+                return str(item.get("name") or "").strip() or None
+
+        try:
+            from PyQt6.QtMultimedia import QMediaDevices
+            default_name = str(QMediaDevices.defaultAudioOutput().description() or "").strip()
+            default_item = {
+                "name": default_name,
+                "kind": self._classify_audio_output_name(default_name),
+            }
+            if default_name and self._local_audio_output_priority(default_item)[0] < 99:
+                return default_name
+        except Exception:
+            pass
+
+        candidates = [
+            item for item in outputs
+            if str(item.get("id") or "") != "default"
+            and self._local_audio_output_priority(item)[0] < 99
+        ]
+        if candidates:
+            chosen = min(candidates, key=self._local_audio_output_priority)
+            name = str(chosen.get("name") or "").strip()
+            _diag(
+                f"[AUDIO] AirPlay-safe local fallback selected={name!r} "
+                f"saved={str(self.settings.get('audio_output_name', '') or 'Default')!r}"
+            )
+            return name or None
+
+        _diag("[AUDIO] no safe local output available; refusing AirPlay/display audio")
+        return None
 
     def _audio_icon_for_kind(self, kind: str) -> str:
         k = str(kind or "").lower()
@@ -26457,6 +26786,8 @@ class KaraokeApp(QWidget):
         export_csv_btn = QPushButton("Export CSV")
         ticker_settings_btn = QPushButton("Ticker Settings")
         set_background_btn = QPushButton("Set Background")
+        pre_show_btn = QPushButton("Run Pre-Show Check")
+        pre_show_btn.setToolTip("Checks audio routing, displays, KaraFun, ticker, QR and background videos without starting playback.")
         logs_btn = QPushButton("Logs")
         logs_btn.setToolTip(f"Open logs folder: {LOGS_DIR}")
 
@@ -26483,6 +26814,7 @@ class KaraokeApp(QWidget):
         _display_actions = QHBoxLayout()
         _display_actions.addWidget(ticker_settings_btn)
         _display_actions.addWidget(set_background_btn)
+        _display_actions.addWidget(pre_show_btn)
         _display_actions.addStretch(1)
         _display_actions_card.addLayout(_display_actions)
 
@@ -27039,6 +27371,7 @@ class KaraokeApp(QWidget):
         export_csv_btn.clicked.connect(self.export_songbook_csv)
         ticker_settings_btn.clicked.connect(self.configure_ticker)
         set_background_btn.clicked.connect(self.pick_background_image)
+        pre_show_btn.clicked.connect(self.run_pre_show_diagnostics)
         def on_open_logs():
             import subprocess
             try:
@@ -32330,6 +32663,8 @@ class KaraokeApp(QWidget):
         "show_request_qr",
         "rotation_request_qr_enabled",
         "rotation_request_qr_caption",
+        "rotation_announcement_enabled",
+        "rotation_announcement_message",
         # The rig: which output, and how far the room's display lags.
         "audio_output_id",
         "audio_output_name",
@@ -36130,7 +36465,7 @@ class KaraokeApp(QWidget):
         return silent_for >= window and stale_for >= window
 
     def _maybe_trim_end_silence(self, dur_ns: int, pos_ns: int) -> bool:
-        """Detect a verified silent tail without terminating karaoke playback."""
+        """End karaoke once the scanned audio and visible lyrics are finished."""
         if not self._karaoke_early_silence_trim_enabled():
             return False
         if getattr(self, "_end_silence_mode", "") not in ("cdg", "mp4"):
@@ -36322,19 +36657,26 @@ class KaraokeApp(QWidget):
             if not reason:
                 return False
 
-            # A verified silent tail is useful for starting background music,
-            # but it is never permission to stop karaoke. CDG graphics can pause
-            # well before a quiet fade has truly finished, and even a file scan
-            # uses an audibility threshold rather than a perfect semantic end.
-            # Keep the decoder alive until its real EOS; at most, begin the
-            # explicitly enabled background crossfade underneath the silent tail.
+            # The file scan is the hard audio floor and the CDG final-frame gate
+            # above is the hard lyrics floor. Once both are satisfied, keeping
+            # mpv alive serves only the file's verified dead tail. Complete the
+            # song now instead of waiting as much as 10-15 seconds for decoder
+            # EOS. This is intentionally NOT the manual-stop path: the request
+            # is completed and singer history is recorded as a normal ending.
             self._end_silence_tail_handoff_started = True
+            self._end_silence_triggered = True
+            self._end_silence_last_reason = reason
+            self._end_silence_auto_advance_next = bool(
+                self.settings.get("karaoke_auto_advance", False)
+            )
             _diag(
-                f"[END-SILENCE] verified tail handoff reason={reason}; karaoke continues to EOS "
+                f"[END-SILENCE] verified tail complete reason={reason}; ending karaoke before EOS "
                 f"(db={'n/a' if meterless else f'{db:.1f}'}, silent={self._end_silence_accum_s:.2f}s, "
                 f"remain={remain:.2f}s, cdg_done={cdg_done}, cdg_stale={cdg_stale_for:.2f}s)"
             )
             if (
+                not self._end_silence_auto_advance_next
+                and
                 self._karaoke_bgm_crossfade_enabled()
                 and not bool(getattr(self, "_bg_crossfade_prefired", False))
                 and hasattr(self, "bg_music")
@@ -36350,7 +36692,11 @@ class KaraokeApp(QWidget):
                     _diag("[CROSSFADE] BG fade started under verified silent karaoke tail")
                 except Exception as exc:
                     _diag(f"[CROSSFADE] verified-tail BG fade failed: {exc}")
-            return False
+            QTimer.singleShot(
+                0,
+                lambda: self._handle_media_end_safe("verified_silent_tail"),
+            )
+            return True
         return False
 
     def update_time_left(self):
@@ -36565,11 +36911,32 @@ class KaraokeApp(QWidget):
             self.rotation_view.raise_()
             self.rotation_view.activateWindow()
             self._rotation_view_user_opened = True
+            # Showing the rotation QQuick window can cause macOS to restack
+            # native child surfaces in the already-visible audience window.
+            # Reassert only that window's ticker; the rotation window remains
+            # ticker-free and keeps keyboard focus.
+            QTimer.singleShot(0, self._reassert_show_ticker_after_rotation_open)
+            QTimer.singleShot(120, self._reassert_show_ticker_after_rotation_open)
         except Exception as e:
             try:
                 QMessageBox.warning(self, "Show Rotation", f"Unable to open rotation window:\n{e}")
             except Exception:
                 pass
+
+    def _reassert_show_ticker_after_rotation_open(self):
+        try:
+            if not bool(self.settings.get("ticker_enabled", True)):
+                return
+            video_window = getattr(self, "video_window", None)
+            ticker = getattr(video_window, "ticker", None) if video_window is not None else None
+            if ticker is None:
+                return
+            video_window.set_ticker_enabled(True)
+            ticker.raise_()
+            ticker.update()
+            _diag("[TICKER] show-screen surface reasserted after rotation open")
+        except Exception as exc:
+            _diag(f"[TICKER] rotation-open reassert failed: {exc}")
 
     def update_rotation_view(self):
         _perf_t0 = time.perf_counter()
@@ -47399,161 +47766,37 @@ class KaraokeApp(QWidget):
         if explicit:
             return explicit
         if bool(self.settings.get("karafun_audio_output_follow_singws", True)):
-            return str(self.settings.get("audio_output_name", "") or "").strip()
+            # A saved headphone name can disappear when it is unplugged; use
+            # the same live local fallback as native karaoke and BGM.
+            return self._safe_local_audio_output_name() or ""
         return ""
 
     def _ensure_karafun_audio_output(self) -> tuple[bool, str]:
-        """Pin KaraFun's own route picker to the saved physical show output."""
+        """Validate the intended route without opening KaraFun's settings UI.
+
+        KaraFun persists its own output choice. Trying to re-select that choice
+        before every song opened Audio Settings, walked the entire Accessibility
+        tree for as long as 25 seconds, and could leave popovers over the app.
+        The 2026-08-13 show then aborted a valid song merely because KaraFun's
+        label did not exactly match SingWS's ``External Headphones`` label.
+        Keep the AirPlay/display guard, but trust the already-configured KaraFun
+        route and let the normal playback monitor detect a genuine failure.
+        """
         target = self._karafun_target_audio_output_name()
         if not target:
-            return False, "Choose a named SingWS audio output before playing KaraFun (System Default is unsafe with AirPlay)."
+            _diag(
+                "[KARAFUN-AUDIO] using KaraFun's saved output; "
+                "SingWS has no named local route to compare"
+            )
+            return True, "KaraFun saved output"
         target_key = self._normalized_audio_output_name(target)
         if any(word in target_key for word in ("airplay", "apple tv", "bravia", "television", "display")):
             return False, f"KaraFun audio output {target!r} looks like a display/AirPlay route. Choose headphones or a USB interface."
-        cache_key = (int(getattr(self, "_karafun_process_id", 0) or 0), target_key)
-        if getattr(self, "_karafun_audio_route_cache", None) == cache_key:
-            _diag(f"[KARAFUN-AUDIO] cached route verified device={target!r} pid={cache_key[0]}")
-            return True, target
-
-        target_literal = self._karafun_applescript_literal(target)
-        script = [
-            'tell application "System Events"',
-            'set matches to every application process whose name contains "KaraFun"',
-            'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
-            'set kf to item 1 of matches',
-            'set frontmost of kf to true',
-            'tell kf',
-            'if (count of windows) is 0 then return "ERROR|KaraFun window not found"',
-            # Search EVERY non-renderer window rather than committing to one.
-            # The old loop assigned mainWindow on each match, so the LAST
-            # non-"Dual Renderer" window won -- any popover, sheet or utility
-            # window KaraFun had open became the search target and the route
-            # button was genuinely absent from it.
-            'set routeButton to missing value',
-            # KaraFun does not put the output picker in its window at all: the
-            # 2026-08-08 show logged the full candidate list and the only audio
-            # control present was [AXButton: button Audio Settings], which opens
-            # a panel that holds the picker. Remembered separately so a real
-            # picker still wins when one is on screen (e.g. the panel is already
-            # open) and this is only the fallback route in.
-            'set audioSettingsButton to missing value',
-            'set seenButtons to ""',
-            'repeat with candidateWindow in windows',
-            'try',
-            'if name of candidateWindow is not "Dual Renderer" then',
-            'try',
-            'set elems to entire contents of candidateWindow',
-            'on error',
-            'set elems to UI elements of candidateWindow',
-            'end try',
-            'repeat with elem in elems',
-            'try',
-            # A route picker is commonly an AXPopUpButton or AXMenuButton, not
-            # a plain AXButton. Restricting to AXButton skipped it outright.
-            'set elemRole to (role of elem as text)',
-            'if elemRole is "AXButton" or elemRole is "AXPopUpButton" or elemRole is "AXMenuButton" then',
-            'set labelText to ""',
-            'try',
-            'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
-            'end try',
-            'if labelText is not "" then set seenButtons to seenButtons & "[" & elemRole & ":" & labelText & "]"',
-            'ignoring case',
-            'if routeButton is missing value and (labelText contains "choose an audio output" or labelText contains "audio output" or labelText contains "output device") then set routeButton to elem',
-            'if audioSettingsButton is missing value and (labelText contains "audio settings" or labelText contains "sound settings") then set audioSettingsButton to elem',
-            'end ignoring',
-            'end if',
-            'end try',
-            'end repeat',
-            'end if',
-            'end try',
-            'end repeat',
-            # Fall back to the Audio Settings panel when no picker is on screen.
-            'set openedPanel to false',
-            'if routeButton is missing value and audioSettingsButton is not missing value then',
-            'set routeButton to audioSettingsButton',
-            'set openedPanel to true',
-            'end if',
-            # Report what WAS found. The old message named only what was
-            # missing, which made every failure undiagnosable from the log.
-            'if routeButton is missing value then return "ERROR|KaraFun Audio output button was not found; candidates=" & seenButtons',
-            # Only a real picker carries the current device in its own label;
-            # the Audio Settings button never does, so do not short-circuit on it.
-            'if openedPanel is false then',
-            'try',
-            'set currentLabel to (name of routeButton as text) & " " & (description of routeButton as text) & " " & (help of routeButton as text) & " " & (value of routeButton as text)',
-            'ignoring case',
-            f'if currentLabel contains {target_literal} then return "READY|" & {target_literal}',
-            'end ignoring',
-            'end try',
-            'end if',
-            'perform action "AXPress" of routeButton',
-            # A popup menu appears in one tick; a settings panel animates in and
-            # populates its device list afterwards. Re-scan instead of betting
-            # the whole song on a single fixed delay.
-            'repeat with attempt from 1 to 4',
-            'delay 0.4',
-            'try',
-            'set allElems to entire contents',
-            'repeat with elem in allElems',
-            'try',
-            'set labelText to (name of elem as text) & " " & (description of elem as text) & " " & (help of elem as text) & " " & (value of elem as text)',
-            'ignoring case',
-            f'if labelText contains {target_literal} then',
-            'try',
-            'perform action "AXPress" of elem',
-            'on error',
-            'click elem',
-            'end try',
-            # Leave KaraFun's UI as it was found, or the panel stays over the
-            # audience screen through the fullscreen handoff.
-            'if openedPanel then key code 53',
-            f'return "SET|" & {target_literal}',
-            'end if',
-            'end ignoring',
-            'end try',
-            'end repeat',
-            'end try',
-            'end repeat',
-            'if openedPanel then key code 53',
-            f'return "ERROR|KaraFun output device not available: " & {target_literal}',
-            'end tell',
-            'end tell',
-        ]
-        # Was 10s: too short once the panel path can re-scan `entire contents`
-        # up to four times on an app this size.
-        ok, stdout, stderr = self._run_karafun_applescript_sync(script, timeout=25)
-        result = str(stdout or stderr or "").strip()
-        if ok and result.startswith(("READY|", "SET|")):
-            self._karafun_audio_route_cache = cache_key
-            _diag(f"[KARAFUN-AUDIO] route verified result={result!r} pid={cache_key[0]}")
-            return True, target
-        _diag(f"[KARAFUN-AUDIO] route verification failed result={result!r}")
-        # Distinguish "the route is wrong" from "the control could not be read".
-        #
-        # The first is the danger this check exists for -- audio escaping to
-        # AirPlay/a TV -- and still hard-blocks the song. The second is a
-        # SingWS/KaraFun accessibility mismatch, and blocking on it killed
-        # every KaraFun song on 2026-08-06 (five attempts, zero successes)
-        # before anything was ever sent to KaraFun to play. An unreadable UI
-        # is not evidence of an unsafe route, so it warns and proceeds.
-        if not self._karafun_audio_route_block_on_unreadable() and (
-            "was not found" in result or "window not found" in result or not result
-        ):
-            _diag(
-                "[KARAFUN-AUDIO] WARNING proceeding without route verification — "
-                f"could not read KaraFun's output control (target={target!r}). "
-                "Check KaraFun's own audio output manually if sound is missing. "
-                "Set karafun_audio_route_strict=true to block instead."
-            )
-            return True, target
-        return False, result.split("|", 1)[-1] or f"Could not select KaraFun output {target!r}"
-
-    def _karafun_audio_route_block_on_unreadable(self) -> bool:
-        """Whether an unreadable route control should abort the song."""
-        try:
-            return bool(self.settings.get("karafun_audio_route_strict", False))
-        except Exception:
-            return False
+        _diag(
+            f"[KARAFUN-AUDIO] trusting saved KaraFun route; expected local output={target!r} "
+            "settings_ui_opened=0"
+        )
+        return True, target
 
     def _show_karafun_accessibility_setup(self, *, notify: bool = True):
         message = (
@@ -49132,17 +49375,10 @@ class KaraokeApp(QWidget):
                         'on error',
                         'set elems to UI elements of mainWindow',
                         'end try',
-                        'repeat with elem in elems',
-                        'try',
-                        'if (role of elem is "AXButton") and (help of elem is "Audio Settings") then click elem',
-                        'end try',
-                        'end repeat',
-                        'delay 0.5',
-                        'try',
-                        'set elems to entire contents of mainWindow',
-                        'on error',
-                        'set elems to UI elements of mainWindow',
-                        'end try',
+                        # Never open KaraFun's Audio Settings popover. It is
+                        # already configured by the host and opening it here
+                        # was the slow/freeze-prone part of every launch. Only
+                        # adjust named controls already exposed by the player.
                         'set keySet to false',
                         'set tempoSet to false',
                         'repeat with elem in elems',

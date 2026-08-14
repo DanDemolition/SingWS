@@ -120,6 +120,11 @@ def decode_audio_wav(
     """
     fd, output = tempfile.mkstemp(prefix="singws-mpv-audio-", suffix=".wav")
     os.close(fd)
+    # mkstemp safely reserves a unique name, but mpv's ao=pcm driver refuses
+    # to overwrite an existing file. Leaving the zero-byte placeholder here
+    # made every loudness job finish with "libmpv produced no PCM audio".
+    # Remove only this exact reserved file so the PCM driver can create it.
+    os.unlink(output)
     job = OfflineMpvJob()
     try:
         job.option("config", "no")

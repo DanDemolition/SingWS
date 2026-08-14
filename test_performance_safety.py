@@ -1038,8 +1038,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         trim = function_source("_maybe_trim_end_silence")
         self.assertIn("self._karaoke_early_silence_trim_enabled()", trim)
         self.assertIn("self._karaoke_bgm_crossfade_enabled()", trim)
-        self.assertIn("karaoke continues to EOS", trim)
-        self.assertNotIn("QTimer.singleShot(0, self._handle_media_end_safe)", trim)
+        self.assertIn("ending karaoke before EOS", trim)
+        self.assertIn('_handle_media_end_safe("verified_silent_tail")', trim)
         self.assertIn("and (not end_silence_triggered)", end_handler)
         fade = function_source("_start_bg_with_fade")
         self.assertIn('resume_reason == "karaoke_end_overlap" and self._karaoke_bgm_crossfade_enabled()', fade)
@@ -1061,12 +1061,14 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("trim suppressed; verified audio endpoint unavailable", trim)
         self.assertIn("return False", trim[unknown_guard:handoff])
 
-    def test_verified_silent_tail_never_terminates_karaoke(self):
+    def test_verified_silent_tail_completes_karaoke_before_decoder_eos(self):
         trim = function_source("_maybe_trim_end_silence")
-        self.assertIn("verified tail handoff", trim)
+        self.assertIn("verified tail complete", trim)
         self.assertIn("bg_music.fade_in", trim)
-        self.assertNotIn("_handle_media_end_safe", trim)
-        self.assertNotIn("_end_silence_triggered = True", trim)
+        self.assertIn('_handle_media_end_safe("verified_silent_tail")', trim)
+        self.assertIn("_end_silence_triggered = True", trim)
+        self.assertIn('_end_silence_auto_advance_next = bool(', trim)
+        self.assertIn('self.settings.get("karaoke_auto_advance", False)', trim)
 
 
 
@@ -1106,6 +1108,32 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_scroll_speed_px_per_sec", step)
         self.assertIn("* dt", step)
         self.assertNotIn("sb.value() + 1", step)
+
+    def test_rotation_open_reasserts_only_the_show_screen_ticker(self):
+        opened = function_source("open_rotation_view")
+        reassert = function_source("_reassert_show_ticker_after_rotation_open")
+        self.assertIn("_reassert_show_ticker_after_rotation_open", opened)
+        self.assertIn("video_window.set_ticker_enabled(True)", reassert)
+        self.assertIn("ticker.raise_()", reassert)
+        self.assertNotIn("rotation_view.ticker", opened + reassert)
+        self.assertNotIn("video_window.activateWindow", reassert)
+
+    def test_rotation_announcement_is_separate_and_venue_scoped(self):
+        ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")
+        view_start = MAIN_SOURCE.index("class RotationView(QMainWindow)", ticker_start)
+        view_end = MAIN_SOURCE.index("class SoundboardPad", view_start)
+        ticker = MAIN_SOURCE[ticker_start:view_start]
+        view = MAIN_SOURCE[view_start:view_end]
+        configure = function_source("configure_ticker")
+        venue_start = MAIN_SOURCE.index("VENUE_SCOPED_SETTINGS = (")
+        venue_end = MAIN_SOURCE.index("\n    )", venue_start)
+        venue_settings = MAIN_SOURCE[venue_start:venue_end]
+        self.assertIn("time.monotonic()", ticker)
+        self.assertIn("self.announcement_ticker = RotationAnnouncementTicker(self)", view)
+        self.assertIn("Show announcement ticker on Singer Rotation screen", configure)
+        self.assertIn('"rotation_announcement_enabled"', venue_settings)
+        self.assertIn('"rotation_announcement_message"', venue_settings)
+        self.assertNotIn("video_window.ticker", ticker)
 
     def test_singer_history_edits_use_debounced_save_path(self):
         source = function_source("_commit_singer_history_change")
