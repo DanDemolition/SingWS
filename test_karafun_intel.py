@@ -75,7 +75,7 @@ class KaraFunIntelRegressionTests(unittest.TestCase):
     def test_intel_spec_rejects_arm_only_dependencies(self):
         source = Path("SingWS-x86_64.spec").read_text(encoding="utf-8")
         self.assertIn("target_arch='x86_64'", source)
-        self.assertIn("def _keep_intel_binary", source)
+        self.assertIn("def _keep_target_binary", source)
         self.assertIn('"x86_64" in result.stdout.split()', source)
 
 

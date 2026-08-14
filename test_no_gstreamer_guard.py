@@ -1,6 +1,6 @@
 """Regression guards proving GStreamer has been fully removed from SingWS.
 
-GStreamer is gone: the FFmpeg/Qt PythonKaraokeTransport is the sole engine.
+GStreamer is gone: the native mpv transport is the sole karaoke engine.
 These tests fail clearly if any GStreamer dependency is reintroduced — a
 resurrected module, an ``import gi`` in the app, or a build spec that starts
 bundling gstreamer plugins again.
@@ -86,7 +86,7 @@ spec.loader.exec_module(module)
 assert module.Gst is None, "GStreamer unexpectedly initialized"
 assert module.GstVideo is None, "GstVideo unexpectedly initialized"
 assert module.GstKaraokeTransport is None, "GStreamer transport unexpectedly available"
-assert module.PythonKaraokeTransport is not None, "FFmpeg/QAudio fallback unavailable"
+assert not hasattr(module, "PythonKaraokeTransport"), "retired Python transport returned"
 
 # Lead-silence analysis must work with gi blocked (FFmpeg scan, not the old
 # GStreamer level pipeline).

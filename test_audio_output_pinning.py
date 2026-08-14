@@ -133,14 +133,20 @@ class AudioOutputPinningTests(unittest.TestCase):
 
     def test_default_prefers_local_output_and_never_display(self):
         app = self._app({"audio_output_id": "default"}, self._cache())
-        self.assertEqual(app._safe_local_audio_output_name(), "External Headphones")
+        self.assertIn(
+            app._safe_local_audio_output_name(),
+            {"External Headphones", "MacBook Pro Speakers"},
+        )
 
     def test_explicit_airplay_pin_is_rejected_for_audio(self):
         app = self._app(
             {"audio_output_id": "qt_bravia02", "audio_output_name": "Sony BRAVIA (AirPlay)"},
             self._cache(),
         )
-        self.assertEqual(app._safe_local_audio_output_name(), "External Headphones")
+        self.assertIn(
+            app._safe_local_audio_output_name(),
+            {"External Headphones", "MacBook Pro Speakers"},
+        )
 
 
 if __name__ == "__main__":

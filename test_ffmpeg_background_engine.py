@@ -261,11 +261,11 @@ class HostRecoverySelectionTests(unittest.TestCase):
         spec.loader.exec_module(module)
         cls.singws = module
 
-    def test_bass_failure_selects_ffmpeg_engine_not_gstreamer(self):
+    def test_bass_failure_selects_libmpv_engine_not_gstreamer(self):
         module = self.singws
 
-        class _StubFfmpegEngine:
-            backend_name = "FFmpeg-Qt"
+        class _StubLibmpvEngine:
+            backend_name = "libmpv-Qt"
 
             def __init__(self, output_name=None):
                 self.output_name = output_name
@@ -285,16 +285,16 @@ class HostRecoverySelectionTests(unittest.TestCase):
         player = module.BackgroundMusicPlayer.__new__(module.BackgroundMusicPlayer)
         player._bass_engine = None
         original_bass = module.BassBackgroundEngine
-        original_ffmpeg = module.FfmpegBackgroundEngine
+        original_libmpv = module.LibmpvBackgroundEngine
         module.BassBackgroundEngine = _bass_raises
-        module.FfmpegBackgroundEngine = _StubFfmpegEngine
+        module.LibmpvBackgroundEngine = _StubLibmpvEngine
         try:
             ok = module.BackgroundMusicPlayer._init_bass_engine(player)
         finally:
             module.BassBackgroundEngine = original_bass
-            module.FfmpegBackgroundEngine = original_ffmpeg
+            module.LibmpvBackgroundEngine = original_libmpv
         self.assertTrue(ok)
-        self.assertIsInstance(player._bass_engine, _StubFfmpegEngine)
+        self.assertIsInstance(player._bass_engine, _StubLibmpvEngine)
         self.assertTrue(player._bass_ready())
 
     def test_both_engines_failing_reports_false(self):
@@ -303,20 +303,20 @@ class HostRecoverySelectionTests(unittest.TestCase):
         def _bass_raises(output_name=None):
             raise module.BassBackgroundError("simulated BASS init failure")
 
-        def _ffmpeg_raises(output_name=None):
-            raise RuntimeError("simulated FFmpeg engine failure")
+        def _libmpv_raises(output_name=None):
+            raise RuntimeError("simulated libmpv engine failure")
 
         player = module.BackgroundMusicPlayer.__new__(module.BackgroundMusicPlayer)
         player._bass_engine = None
         original_bass = module.BassBackgroundEngine
-        original_ffmpeg = module.FfmpegBackgroundEngine
+        original_libmpv = module.LibmpvBackgroundEngine
         module.BassBackgroundEngine = _bass_raises
-        module.FfmpegBackgroundEngine = _ffmpeg_raises
+        module.LibmpvBackgroundEngine = _libmpv_raises
         try:
             ok = module.BackgroundMusicPlayer._init_bass_engine(player)
         finally:
             module.BassBackgroundEngine = original_bass
-            module.FfmpegBackgroundEngine = original_ffmpeg
+            module.LibmpvBackgroundEngine = original_libmpv
         self.assertFalse(ok)
         self.assertIsNone(player._bass_engine)
 

@@ -218,7 +218,8 @@ class KaraFunProviderTests(unittest.TestCase):
     def test_location_permission_is_once_and_karafun_restore_has_fallback(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"session_location_permission_requested": False', source)
-        self.assertIn('not bool(self.settings.get("session_location_permission_requested", False))', source)
+        self.assertIn("Authorization status", source)
+        self.assertIn("manager.requestWhenInUseAuthorization()", source)
         self.assertNotIn('lat_raw == "" or lng_raw == "" or source == "auto_detected"', source)
         restore = source[source.index("def _restore_show_screen_from_karafun"):]
         restore = restore[:restore.index("def _copy_karafun_lookup_text")]

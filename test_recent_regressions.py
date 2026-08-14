@@ -780,34 +780,16 @@ class RecentRegressionTests(unittest.TestCase):
             self.assertNotIn(str(mp3), [item[1] for item in incremental])
             self.assertIn(str(mp3), [item[1] for item in forced])
 
-    def test_loudness_measurement_uses_single_ebur128_peak_pass(self):
-        calls = []
-        stderr = b"""
-            [Parsed_ebur128_0] Summary:
-              Integrated loudness:
-                I:         -20.5 LUFS
-              True peak:
-                Peak:       -1.2 dBFS
-        """
-
-        class FakeProc:
-            pid = 12345
-
-            def communicate(self, timeout=None):
-                return b"", stderr
-
-        def fake_popen(cmd, **kwargs):
-            calls.append(cmd)
-            return FakeProc()
-
-        with mock.patch.object(self.singws.subprocess, "Popen", side_effect=fake_popen):
+    def test_loudness_measurement_uses_bundled_libmpv_job(self):
+        with mock.patch(
+            "libmpv_media_jobs.measure_loudness_lufs",
+            return_value=(-20.5, -1.2),
+        ) as measure:
             lufs, peak_db = self.singws._measure_loudness_lufs("/tmp/song.mp3")
 
         self.assertEqual(lufs, -20.5)
         self.assertEqual(peak_db, -1.2)
-        self.assertEqual(len(calls), 1)
-        self.assertIn("ebur128=peak=true", calls[0])
-        self.assertFalse(any("volumedetect" in " ".join(cmd) for cmd in calls))
+        measure.assert_called_once_with("/tmp/song.mp3", timeout=120.0)
 
     def test_libmpv_pcm_output_does_not_precreate_destination(self):
         source = Path("libmpv_media_jobs.py").read_text(encoding="utf-8")
