@@ -712,16 +712,12 @@ static GLuint makeProgram(void) {
     // though: ordinary CDG packet bytes can false-positive as another raw
     // format. LG126-03 and SF113-03 then reported bogus 34s/31s durations and
     // produced no video frame while their external MP3s kept playing. Force
-    // only the graphics input to the CDG demuxer, and explicitly clear the
-    // file-local override for MP4/audio so a preceding CDG cannot poison the
-    // next load.
-    int probeResult=mpv_set_property_string(_mpv,"demuxer-lavf-probescore",_isCdg?"1":"26");
-    if(probeResult<0)
-        bridgeLog("[bridge] demuxer probe threshold failed: %s",mpv_error_string(probeResult));
-    int formatResult=mpv_set_property_string(
-        _mpv,"demuxer-lavf-format",_isCdg?"cdg":"");
-    if(formatResult<0)
-        bridgeLog("[bridge] demuxer format failed: %s",mpv_error_string(formatResult));
+    // only the graphics input to the CDG demuxer.
+    // Scope the forced CDG demuxer to the main graphics file. Setting these as
+    // core properties also applies them to --audio-files, which makes mpv try
+    // to demux the companion MP3 as CDG ("No audio streams in file"). It can
+    // also leak the forced format into the following MP4 while an async load is
+    // replacing the previous file. Per-load options avoid both failures.
     // Ordinary MP4 karaoke is deliberately stretched to the 16:9 shared
     // texture. CDG keeps its native 300x216 aspect and separate fit geometry.
     int aspectResult=mpv_set_property_string(
@@ -746,7 +742,10 @@ static GLuint makeProgram(void) {
     bridgeLog("[bridge] load queued serial=%llu video=%s audio=%s",
             (unsigned long long)serial,video.fileSystemRepresentation,
             audio.length?audio.fileSystemRepresentation:"(internal)");
-    const char *cmd[]={"loadfile",video.fileSystemRepresentation,"replace",nullptr};
+    const char *loadOptions=_isCdg
+        ? "demuxer-lavf-format=cdg,demuxer-lavf-probescore=1"
+        : "demuxer-lavf-probescore=26";
+    const char *cmd[]={"loadfile",video.fileSystemRepresentation,"replace",loadOptions,nullptr};
     int loadResult=mpv_command_async(_mpv,serial,cmd);
     if(loadResult<0){
         _loading=false;

@@ -146,12 +146,16 @@ class MpvTransportTests(unittest.TestCase):
         transport._poll()
         self.assertEqual(stalls, [])
 
-    def test_native_bridge_forces_cdg_demuxer_and_resets_it_for_other_media(self):
-        """Low-score auto detection misclassified valid LG/Sunfly CDG files."""
+    def test_native_bridge_scopes_forced_cdg_demuxer_to_graphics_file(self):
+        """The forced CDG demuxer must not be applied to the companion MP3."""
         from pathlib import Path
 
         bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
         self.assertIn(
+            '"demuxer-lavf-format=cdg,demuxer-lavf-probescore=1"',
+            bridge,
+        )
+        self.assertNotIn(
             '_mpv,"demuxer-lavf-format",_isCdg?"cdg":""',
             bridge,
         )
