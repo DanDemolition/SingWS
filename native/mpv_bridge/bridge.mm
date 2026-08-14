@@ -511,6 +511,7 @@ static GLuint makeProgram(void) {
     // CDG visual-timing calibration, in seconds. Held here and re-applied on
     // every load like tempo/key, because loadfile resets it.
     double _desiredAudioDelay;
+    NSString *_pendingExternalAudio;
     uint64_t _loadSerial;
     std::atomic_bool _outputTransitioning;
     std::atomic<uint64_t> _transitionSerial;
@@ -713,26 +714,28 @@ static GLuint makeProgram(void) {
     // format. LG126-03 and SF113-03 then reported bogus 34s/31s durations and
     // produced no video frame while their external MP3s kept playing. Force
     // only the graphics input to the CDG demuxer.
-    // Scope the forced CDG demuxer to the main graphics file. Setting these as
-    // core properties also applies them to --audio-files, which makes mpv try
-    // to demux the companion MP3 as CDG ("No audio streams in file"). It can
-    // also leak the forced format into the following MP4 while an async load is
-    // replacing the previous file. Per-load options avoid both failures.
+    // Force the main input to its known container. For CDG, attach its audio
+    // only after FILE_LOADED, when the graphics demuxer has finished opening;
+    // otherwise the forced CDG demuxer is also applied to --audio-files.
+    NSString *mainFormat=_isCdg?@"cdg":[video.pathExtension lowercaseString];
+    int probeResult=mpv_set_property_string(_mpv,"demuxer-lavf-probescore",_isCdg?"1":"26");
+    if(probeResult<0)
+        bridgeLog("[bridge] demuxer probe threshold failed: %s",mpv_error_string(probeResult));
+    int formatResult=mpv_set_property_string(
+        _mpv,"demuxer-lavf-format",mainFormat.UTF8String);
+    if(formatResult<0)
+        bridgeLog("[bridge] demuxer format failed: %s",mpv_error_string(formatResult));
     // Ordinary MP4 karaoke is deliberately stretched to the 16:9 shared
     // texture. CDG keeps its native 300x216 aspect and separate fit geometry.
     int aspectResult=mpv_set_property_string(
         _mpv,"video-aspect-override",_isCdg?"no":"16:9");
     if(aspectResult<0)
         bridgeLog("[bridge] video aspect override failed: %s",mpv_error_string(aspectResult));
-    int r=0;
-    if (audio.length) {
-        r=mpv_set_property_string(_mpv,"audio-files",audio.fileSystemRepresentation);
-    } else {
-        mpv_node_list emptyList={.num=0,.values=nullptr,.keys=nullptr};
-        mpv_node emptyNode={}; emptyNode.format=MPV_FORMAT_NODE_ARRAY;
-        emptyNode.u.list=&emptyList;
-        r=mpv_set_property(_mpv,"audio-files",MPV_FORMAT_NODE,&emptyNode);
-    }
+    _pendingExternalAudio=[audio copy];
+    mpv_node_list emptyList={.num=0,.values=nullptr,.keys=nullptr};
+    mpv_node emptyNode={}; emptyNode.format=MPV_FORMAT_NODE_ARRAY;
+    emptyNode.u.list=&emptyList;
+    int r=mpv_set_property(_mpv,"audio-files",MPV_FORMAT_NODE,&emptyNode);
     if (r<0) {
         bridgeLog("[bridge] audio-files failed: %s",mpv_error_string(r));
         _loading=false;
@@ -742,10 +745,7 @@ static GLuint makeProgram(void) {
     bridgeLog("[bridge] load queued serial=%llu video=%s audio=%s",
             (unsigned long long)serial,video.fileSystemRepresentation,
             audio.length?audio.fileSystemRepresentation:"(internal)");
-    const char *loadOptions=_isCdg
-        ? "demuxer-lavf-format=cdg,demuxer-lavf-probescore=1"
-        : "demuxer-lavf-probescore=26";
-    const char *cmd[]={"loadfile",video.fileSystemRepresentation,"replace",loadOptions,nullptr};
+    const char *cmd[]={"loadfile",video.fileSystemRepresentation,"replace",nullptr};
     int loadResult=mpv_command_async(_mpv,serial,cmd);
     if(loadResult<0){
         _loading=false;
@@ -1285,6 +1285,20 @@ static GLuint makeProgram(void) {
             // the moment the show is between singers.
             [self onControl:^{
                 if(!self->_mpv)return;
+                NSString *externalAudio=self->_pendingExternalAudio;
+                self->_pendingExternalAudio=nil;
+                if(self->_isCdg && externalAudio.length){
+                    NSString *audioFormat=[externalAudio.pathExtension lowercaseString];
+                    int formatResult=mpv_set_property_string(
+                        self->_mpv,"demuxer-lavf-format",audioFormat.UTF8String);
+                    const char *audioAdd[]={"audio-add",externalAudio.fileSystemRepresentation,"select",nullptr};
+                    int audioResult=formatResult<0?formatResult:mpv_command(self->_mpv,audioAdd);
+                    if(audioResult<0)
+                        bridgeLog("[bridge] external audio attach failed: %s",mpv_error_string(audioResult));
+                    else
+                        bridgeLog("[bridge] external audio attached format=%s file=%s",
+                                audioFormat.UTF8String,externalAudio.fileSystemRepresentation);
+                }
                 [self measurePillarbox:"file_loaded"];
                 int tempo=self->_desiredTempoPercent, semitones=self->_desiredSemitones;
                 if(!self->_loading.load()){

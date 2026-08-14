@@ -152,11 +152,15 @@ class MpvTransportTests(unittest.TestCase):
 
         bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
         self.assertIn(
-            '"demuxer-lavf-format=cdg,demuxer-lavf-probescore=1"',
+            'NSString *mainFormat=_isCdg?@"cdg":[video.pathExtension lowercaseString]',
             bridge,
         )
-        self.assertNotIn(
-            '_mpv,"demuxer-lavf-format",_isCdg?"cdg":""',
+        self.assertIn(
+            'const char *audioAdd[]={"audio-add",externalAudio.fileSystemRepresentation,"select",nullptr}',
+            bridge,
+        )
+        self.assertIn(
+            '"loadfile",video.fileSystemRepresentation,"replace",nullptr',
             bridge,
         )
         self.assertIn('"[bridge] detected media format=%s"', bridge)
