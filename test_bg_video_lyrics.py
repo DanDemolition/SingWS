@@ -6,6 +6,7 @@ settings persistence keys). The native bridge is covered by source-contract
 tests here and exercised visually in an installed macOS build."""
 
 import importlib.util
+import inspect
 import os
 import random
 import tempfile
@@ -110,6 +111,8 @@ class FakeNativePlugin:
         self.loads = []
         self.at_end = False
         self.stops = 0
+        self.opacity_values = []
+        self.position = 1
 
     def loadBackgroundVideo(self, path, opacity):
         self.loads.append((path, opacity))
@@ -118,6 +121,15 @@ class FakeNativePlugin:
 
     def backgroundVideoAtEnd(self):
         return self.at_end
+
+    def backgroundVideoPositionMs(self):
+        return self.position
+
+    def backgroundVideoPaused(self):
+        return False
+
+    def setBackgroundVideoOpacity(self, value):
+        self.opacity_values.append(value)
 
     def stopBackgroundVideo(self):
         self.stops += 1
@@ -246,8 +258,18 @@ class NativeMpvDecodeTests(unittest.TestCase):
         self.assertTrue(player.start(["/v/a.mp4", "/v/b.mp4"], shuffle=False))
         self.assertEqual(plugin.loads, [("/v/a.mp4", 0.35)])
         plugin.at_end = True
+        player._poll_count = 7
         player._poll_end()
-        self.assertEqual(plugin.loads[-1], ("/v/b.mp4", 0.35))
+        self.assertEqual(plugin.loads[-1], ("/v/b.mp4", 0.0))
+        self.assertEqual(player._transition, "wait_frame")
+        # The outgoing texture is frozen by the native compositor while the
+        # replacement decoder produces its first frame.
+        player._poll_end()
+        self.assertEqual(player._transition, "fade_in")
+        for _ in range(player._FADE_STEPS):
+            player._poll_end()
+        self.assertAlmostEqual(plugin.opacity_values[0], 0.35 / 12)
+        self.assertAlmostEqual(plugin.opacity_values[-1], 0.35)
         player.stop("test")
         self.assertEqual(plugin.stops, 1)
         self.assertEqual(player.diagnostics()["decoder"], "native-libmpv")
@@ -259,6 +281,19 @@ class NativeMpvDecodeTests(unittest.TestCase):
         self.assertNotIn("FfmpegVideoReader", source)
         self.assertNotIn("prepare_background_video_playback_files", source)
         self.assertNotIn("set_background_video_frame", source)
+
+    def test_native_compositor_freezes_outgoing_frame_for_crossfade(self):
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        self.assertIn("previousBackgroundTexture", bridge)
+        self.assertIn("backgroundCrossfadeMix", bridge)
+        self.assertIn("glCopyTexSubImage2D", bridge)
+        self.assertIn("_previousBackgroundHasFrame", bridge)
+
+        poll_source = inspect.getsource(
+            self.singws.NativeLyricsBackgroundVideoPlayer._poll_end
+        )
+        self.assertNotIn('"fade_out"', poll_source)
+        self.assertIn('self._advance("eos_crossfade", opacity=0.0)', poll_source)
 
     def test_cdg_foreground_uses_nearest_without_changing_video_filtering(self):
         bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
@@ -278,8 +313,17 @@ class NativeMpvDecodeTests(unittest.TestCase):
         bridge = Path("native/mpv_bridge/bridge.mm").read_text()
         compact = bridge.replace(" ", "")
         self.assertIn('mpv_set_option_string(_backgroundMpv,"ao","null")', compact)
+
+    def test_background_frames_present_to_output_and_preview_without_cdg_activity(self):
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        compact = bridge.replace(" ", "")
+        callback = bridge[bridge.index("- (void)scheduleBackgroundRender {"):]
+        callback = callback[:callback.index("- (void)scheduleBackgroundEvents")]
+        self.assertIn("[self presentView:self->_outputView]", callback)
+        self.assertIn("[self presentView:self->_previewView]", callback)
         self.assertNotIn('mpv_set_option_string(_backgroundMpv,"audio","no")', compact)
         self.assertIn('mpv_set_option_string(_backgroundMpv,"mute","yes")', compact)
+        self.assertIn('mpv_set_option_string(_backgroundMpv,"video-aspect-override","16:9")', compact)
         self.assertIn('mpv_set_option_string(_backgroundMpv,"ao","null")', compact)
         self.assertIn('mpv_set_option_string(_backgroundMpv,"hwdec","no")', compact)
         self.assertIn('mpv_set_option_string(_backgroundMpv,"keep-open","no")', compact)
@@ -299,6 +343,18 @@ class NativeMpvDecodeTests(unittest.TestCase):
         self.assertIn('mpv_get_property(_backgroundMpv,"eof-reached"', compact)
         self.assertIn("[self presentView:self->_previewView]", bridge)
         self.assertIn("const bool backgroundActive=(_isCdg", bridge)
+        active = bridge[bridge.index("if(backgroundActive){"):]
+        active = active[:active.index("} else if(sidefill)")]
+        self.assertIn("glUniform2f(_uvScaleUniform,1,1)", active)
+        self.assertNotIn("backgroundAspect", active)
+        self.assertIn('\"video-aspect-override\",_isCdg?\"no\":\"16:9\"', bridge)
+        self.assertIn("if(!_isCdg){sx=1;sy=1;}", bridge)
+        self.assertIn("singws_bridge_set_background_opacity", bridge)
+
+    def test_painted_background_fallback_stretches_without_scaled_pixmap(self):
+        source = inspect.getsource(self.singws.VideoAreaWidget._draw_background_video_pixmap)
+        self.assertIn("painter.drawPixmap(self.rect(), pixmap, pixmap.rect())", source)
+        self.assertNotIn("pixmap.scaled", source)
 
 
 if __name__ == "__main__":

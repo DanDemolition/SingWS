@@ -43,6 +43,7 @@ class AudioOutputPinningTests(unittest.TestCase):
         return [
             {"id": "default", "name": "Default (System)", "kind": "speaker"},
             {"id": "qt_headphones01", "name": "External Headphones", "kind": "headphones"},
+            {"id": "qt_speakers03", "name": "MacBook Pro Speakers", "kind": "speaker"},
             {"id": "qt_bravia02", "name": "Sony BRAVIA (AirPlay)", "kind": "display"},
         ]
 
@@ -121,6 +122,25 @@ class AudioOutputPinningTests(unittest.TestCase):
         expected = "qt_" + hashlib.sha1(key.encode()).hexdigest()[:16]
         self.assertEqual(key, "externalheadphones")
         self.assertEqual(expected, "qt_" + hashlib.sha1(b"externalheadphones").hexdigest()[:16])
+
+    def test_missing_headphones_fall_back_to_macbook_not_airplay(self):
+        cache = self._cache()
+        app = self._app(
+            {"audio_output_id": "dev_stale", "audio_output_name": "External Headphones"},
+            [cache[0], cache[2], cache[3]],
+        )
+        self.assertEqual(app._safe_local_audio_output_name(), "MacBook Pro Speakers")
+
+    def test_default_prefers_local_output_and_never_display(self):
+        app = self._app({"audio_output_id": "default"}, self._cache())
+        self.assertEqual(app._safe_local_audio_output_name(), "External Headphones")
+
+    def test_explicit_airplay_pin_is_rejected_for_audio(self):
+        app = self._app(
+            {"audio_output_id": "qt_bravia02", "audio_output_name": "Sony BRAVIA (AirPlay)"},
+            self._cache(),
+        )
+        self.assertEqual(app._safe_local_audio_output_name(), "External Headphones")
 
 
 if __name__ == "__main__":

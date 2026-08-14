@@ -293,7 +293,8 @@ class RecentRegressionTests(unittest.TestCase):
             self.assertIn(key, scoped, f"{key} must follow the venue")
         for key in ("ticker_enabled", "ticker_custom_enabled", "ticker_custom_message",
                     "ticker_color", "ticker_speed_px_per_sec", "ticker_size_index",
-                    "ticker_bold", "ticker_vfx_enabled"):
+                    "ticker_bold", "ticker_vfx_enabled", "rotation_announcement_enabled",
+                    "rotation_announcement_message"):
             self.assertIn(key, scoped, f"{key} must follow the venue")
 
         # Round-trip: capture under one venue, change, switch back, get it back.
@@ -304,6 +305,8 @@ class RecentRegressionTests(unittest.TestCase):
             "eq_bgm_enabled": False,
             "ticker_custom_message": "Downtown Bar",
             "ticker_vfx_enabled": True,
+            "rotation_announcement_enabled": True,
+            "rotation_announcement_message": "$5 margaritas until 10 PM",
         })
         app.VENUE_SCOPED_SETTINGS = self.singws.KaraokeApp.VENUE_SCOPED_SETTINGS
         captured = self.singws.KaraokeApp._capture_venue_settings(app)
@@ -311,6 +314,8 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(captured["eq_karaoke_enabled"], True)
         self.assertEqual(captured["ticker_custom_message"], "Downtown Bar")
         self.assertEqual(captured["ticker_vfx_enabled"], True)
+        self.assertEqual(captured["rotation_announcement_enabled"], True)
+        self.assertEqual(captured["rotation_announcement_message"], "$5 margaritas until 10 PM")
 
     def test_venue_eq_switch_moves_the_live_audio_path(self):
         # Writing the settings is not enough: the previous room's curve would
@@ -803,6 +808,13 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("ebur128=peak=true", calls[0])
         self.assertFalse(any("volumedetect" in " ".join(cmd) for cmd in calls))
+
+    def test_libmpv_pcm_output_does_not_precreate_destination(self):
+        source = Path("libmpv_media_jobs.py").read_text(encoding="utf-8")
+        decode = source[source.index("def decode_audio_wav("):]
+        decode = decode[:decode.index("def measure_loudness_lufs")]
+        self.assertLess(decode.index("os.unlink(output)"), decode.index("job = OfflineMpvJob()"))
+        self.assertLess(decode.index("job = OfflineMpvJob()"), decode.index('job.option("ao", "pcm")'))
 
     def test_library_volume_worker_cancel_stops_before_next_track(self):
         worker = self.singws.AnalyzeLibraryWorker([

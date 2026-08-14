@@ -200,16 +200,20 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("def _ensure_karafun_audio_output", source)
         route = source[source.index("def _ensure_karafun_audio_output"):]
         route = route[:route.index("def _show_karafun_accessibility_setup")]
-        self.assertIn('contains "choose an audio output"', route)
-        self.assertIn('perform action "AXPress" of routeButton', route)
-        self.assertIn("KaraFun output device not available", route)
-        self.assertIn("_karafun_audio_route_cache", route)
+        self.assertIn("trusting saved KaraFun route", route)
+        self.assertIn("settings_ui_opened=0", route)
+        self.assertNotIn('perform action "AXPress"', route)
+        self.assertNotIn("audioSettingsButton", route)
+        self.assertNotIn("_run_karafun_applescript_sync", route)
         worker = source[source.index("def _automate_karafun_search_and_play"):]
         worker = worker[:worker.index("def _karafun_clock_seconds")]
         self.assertLess(worker.index("_ensure_karafun_audio_output()"), worker.index("search attempt="))
         self.assertIn("fast start skipped unreliable transparent renderer preflight", worker)
         self.assertIn("background monitor will verify playback", worker)
         self.assertIn("KaraFun audio safety check failed", worker)
+        target = source[source.index("def _karafun_target_audio_output_name"):]
+        target = target[:target.index("def _ensure_karafun_audio_output")]
+        self.assertIn("self._safe_local_audio_output_name()", target)
 
     def test_location_permission_is_once_and_karafun_restore_has_fallback(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
@@ -308,7 +312,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("adjustment skipped default key/tempo", worker)
         self.assertIn('labelText contains "key"', worker)
         self.assertIn('labelText contains "tempo"', worker)
-        self.assertIn('if (role of elem is "AXButton") and (help of elem is "Audio Settings") then click elem', worker)
+        self.assertNotIn('help of elem is "Audio Settings"', worker)
         self.assertIn("self._run_karafun_applescript_sync(search_script", worker)
         self.assertIn("self._run_karafun_applescript_sync(play_script", worker)
         self.assertIn('entry["karafun_play_started_at"] = time.time()', worker)

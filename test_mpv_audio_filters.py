@@ -301,6 +301,7 @@ class IinaBackendContractTests(unittest.TestCase):
             "loadSingWSMedia", "pauseMedia", "playMedia", "seekMedia",
             "setAudioProcessing", "setCdgOutputSidefill", "setExternalAudioMaster",
             "setTempoRatio", "setVideoStretch", "shutdown", "stopMedia", "version",
+            "setBackgroundVideoOpacity",
             # transport -> plugin
             "setPitchSemitones", "positionMs", "durationMs", "isPlaying",
             "atEnd", "visualsReady", "setVolume", "setAudioDevice",

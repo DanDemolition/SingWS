@@ -105,6 +105,23 @@ class MpvBackendSelectionTests(unittest.TestCase):
         loader = loader[:loader.index("def _ensure_mpv_karaoke_core")]
         self.assertNotIn("mpv_playback import", loader)
 
+    def test_selected_audio_output_is_pushed_before_karaoke_starts(self):
+        start = MAIN_SOURCE.index("def _start_mpv_karaoke_transport")
+        block = MAIN_SOURCE[start:MAIN_SOURCE.index("def _start_karaoke_transport", start)]
+        select_at = block.index("self._mpv_selected_audio_output_name()")
+        push_at = block.index("plugin.setAudioDevice(output_name)")
+        start_at = block.index("transport.start(start_seconds)")
+        self.assertLess(select_at, push_at)
+        self.assertLess(push_at, start_at)
+
+    def test_native_bridge_resolves_display_label_to_mpv_device_name(self):
+        with open("native/mpv_bridge/bridge.mm", "r", encoding="utf-8") as fh:
+            bridge = fh.read()
+        setter = bridge[bridge.index("- (void)setAudioDeviceName:(NSString *)name {"):]
+        setter = setter[:setter.index("- (void)setTempoPercent:")]
+        self.assertIn('mpvAudioDeviceForLabel(self->_mpv,requested)', setter)
+        self.assertIn('device=@"singws/no-safe-local-output"', setter)
+
 
 class CdgVisualOffsetTests(unittest.TestCase):
     """The CDG calibration was a silent no-op on mpv: the host pushed it on

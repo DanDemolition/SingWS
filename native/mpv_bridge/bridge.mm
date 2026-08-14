@@ -60,6 +60,7 @@ static void bridgeLog(const char *fmt, ...) {
 - (BOOL)backgroundAtEnd;
 - (int64_t)backgroundPositionMilliseconds;
 - (BOOL)backgroundPaused;
+- (void)setBackgroundOpacity:(double)opacity;
 - (void)shutdown;
 - (void)setPaused:(BOOL)paused;
 - (void)stopPlayback;
@@ -122,6 +123,63 @@ static void backgroundRenderWake(void *ctx) {
 }
 static void backgroundEventWake(void *ctx) {
     @autoreleasepool { [(__bridge BridgeRenderer *)ctx scheduleBackgroundEvents]; }
+}
+
+static NSString *normalizedAudioDeviceLabel(NSString *value) {
+    if (!value.length) return @"";
+    NSString *folded = [value stringByFoldingWithOptions:
+        (NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch)
+        locale:[NSLocale currentLocale]];
+    NSMutableString *result = [NSMutableString stringWithCapacity:folded.length];
+    NSCharacterSet *allowed = [NSCharacterSet alphanumericCharacterSet];
+    for (NSUInteger i=0; i<folded.length; ++i) {
+        unichar c=[folded characterAtIndex:i];
+        if ([allowed characterIsMember:c]) [result appendFormat:@"%C", c];
+    }
+    return result;
+}
+
+static NSString *mpvAudioDeviceForLabel(mpv_handle *mpv, NSString *requested) {
+    if (!requested.length || [requested caseInsensitiveCompare:@"auto"]==NSOrderedSame)
+        return @"auto";
+    mpv_node devices={};
+    if (mpv_get_property(mpv,"audio-device-list",MPV_FORMAT_NODE,&devices)<0)
+        return nil;
+    NSString *wanted=normalizedAudioDeviceLabel(requested);
+    NSString *exact=nil;
+    NSMutableArray<NSString *> *partial=[NSMutableArray array];
+    if (devices.format==MPV_FORMAT_NODE_ARRAY && devices.u.list) {
+        mpv_node_list *list=devices.u.list;
+        for (int i=0; i<list->num; ++i) {
+            mpv_node *entry=&list->values[i];
+            if (entry->format!=MPV_FORMAT_NODE_MAP || !entry->u.list) continue;
+            NSString *name=nil, *description=nil;
+            mpv_node_list *map=entry->u.list;
+            for (int j=0; j<map->num; ++j) {
+                if (map->values[j].format!=MPV_FORMAT_STRING) continue;
+                NSString *value=[NSString stringWithUTF8String:map->values[j].u.string ?: ""];
+                if (!strcmp(map->keys[j],"name")) name=value;
+                else if (!strcmp(map->keys[j],"description")) description=value;
+            }
+            if (!name.length) continue;
+            NSString *nameKey=normalizedAudioDeviceLabel(name);
+            NSString *descriptionKey=normalizedAudioDeviceLabel(description);
+            if ([name caseInsensitiveCompare:requested]==NSOrderedSame ||
+                [description caseInsensitiveCompare:requested]==NSOrderedSame ||
+                [nameKey isEqualToString:wanted] || [descriptionKey isEqualToString:wanted]) {
+                exact=name; break;
+            }
+            if (wanted.length &&
+                ((descriptionKey.length && ([descriptionKey containsString:wanted] ||
+                  [wanted containsString:descriptionKey])) ||
+                 (nameKey.length && ([nameKey containsString:wanted] ||
+                  [wanted containsString:nameKey]))))
+                [partial addObject:name];
+        }
+    }
+    mpv_free_node_contents(&devices);
+    if (exact.length) return exact;
+    return partial.count==1 ? partial.firstObject : nil;
 }
 
 // Reusable scan-only libmpv core. It has no window and no audio device: the
@@ -301,7 +359,9 @@ static GLuint makeProgram(void) {
     const char *fs =
         "#version 150 core\n"
         "uniform sampler2D frameTexture; uniform sampler2D backgroundTexture;"
+        "uniform sampler2D previousBackgroundTexture;"
         "uniform int cdgSidefill; uniform float backgroundOpacity;"
+        "uniform float previousBackgroundOpacity; uniform float backgroundCrossfadeMix;"
         "uniform vec2 cdgPanel; in vec2 uv; out vec4 color;"
         // cdgSidefill: 0 off, 1 the CDG's own background colour, 2 an ambient
         // blur of the picture itself. Mode 2 exists because 12 of 14 sampled
@@ -323,7 +383,10 @@ static GLuint makeProgram(void) {
         "return vec4((acc.rgb/wsum)*0.88,1.0);"
         "}"
         "void main(){"
-        "if(cdgSidefill==4){vec4 bg=texture(backgroundTexture,uv);color=vec4(bg.rgb*backgroundOpacity,1.0);return;}"
+        "if(cdgSidefill==4){vec4 bg=texture(backgroundTexture,uv);"
+        "vec4 oldBg=texture(previousBackgroundTexture,uv);"
+        "vec3 rgb=oldBg.rgb*previousBackgroundOpacity*(1.0-backgroundCrossfadeMix)+bg.rgb*backgroundOpacity;"
+        "color=vec4(rgb,1.0);return;}"
         "if(cdgSidefill==5){"
         // CDG has two independent background colours: the border preset and
         // the tile-area background. Sample each region separately and key
@@ -421,9 +484,11 @@ static GLuint makeProgram(void) {
     NSOpenGLPixelFormat *_format;
     NSOpenGLContext *_master;
     BridgeVideoView *_outputView, *_previewView;
-    GLuint _texture, _fbo, _cdgTexture, _cdgFbo, _backgroundTexture, _backgroundFbo, _program, _outVao, _prevVao;
+    GLuint _texture, _fbo, _cdgTexture, _cdgFbo, _backgroundTexture, _backgroundFbo;
+    GLuint _previousBackgroundTexture, _program, _outVao, _prevVao;
     GLint _scaleUniform, _uvScaleUniform, _uvOffsetUniform, _textureUniform, _sidefillUniform;
     GLint _panelUniform, _backgroundTextureUniform, _backgroundOpacityUniform;
+    GLint _previousBackgroundTextureUniform, _previousBackgroundOpacityUniform, _backgroundCrossfadeMixUniform;
     int _width, _height;
     BOOL _hasFrame, _isCdg;
     // 0 off, 1 background colour, 2 ambient blur. Read on the GUI thread while
@@ -455,8 +520,11 @@ static GLuint makeProgram(void) {
     mpv_render_context *_backgroundRender;
     std::atomic_bool _backgroundRenderQueued, _backgroundEventQueued;
     std::atomic_bool _backgroundHasFrame;
+    std::atomic_bool _previousBackgroundHasFrame;
     std::atomic_bool _backgroundAtEnd;
     std::atomic<double> _backgroundOpacity;
+    std::atomic<double> _previousBackgroundOpacity;
+    std::atomic<double> _backgroundCrossfadeMix;
     std::atomic_bool _renderQueued, _eventQueued, _stopping;
     // Every mpv command/property write runs here instead of on the GUI thread.
     // mpv can hold its core lock for several hundred milliseconds while an
@@ -472,7 +540,9 @@ static GLuint makeProgram(void) {
         _width=1920; _height=1080; _renderQueued=false; _eventQueued=false; _stopping=false;
         _backgroundMpv=nullptr; _backgroundRender=nullptr;
         _backgroundRenderQueued=false; _backgroundEventQueued=false;
-        _backgroundHasFrame=false; _backgroundAtEnd=false; _backgroundOpacity=0.0;
+        _backgroundHasFrame=false; _previousBackgroundHasFrame=false;
+        _backgroundAtEnd=false; _backgroundOpacity=0.0;
+        _previousBackgroundOpacity=0.0; _backgroundCrossfadeMix=1.0;
         _lastOutputSkip=-1; _lastPreviewSkip=-1;
         _loading=false; _playWhenLoaded=false;
         _desiredTempoPercent=100; _desiredSemitones=0; _loadSerial=0;
@@ -517,6 +587,15 @@ static GLuint makeProgram(void) {
         glGenFramebuffers(1,&_backgroundFbo); glBindFramebuffer(GL_FRAMEBUFFER,_backgroundFbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,_backgroundTexture,0);
         GLenum backgroundStatus=glCheckFramebufferStatus(GL_FRAMEBUFFER); glBindFramebuffer(GL_FRAMEBUFFER,0);
+        // One retained outgoing frame enables a true dissolve without a
+        // second decoder. The incoming MP4 overwrites _backgroundTexture while
+        // this snapshot remains stable for the short crossfade.
+        glGenTextures(1,&_previousBackgroundTexture); glBindTexture(GL_TEXTURE_2D,_previousBackgroundTexture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,_width,_height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
         _program=makeProgram();
         _scaleUniform=glGetUniformLocation(_program,"scale");
         _uvScaleUniform=glGetUniformLocation(_program,"uvScale");
@@ -526,6 +605,9 @@ static GLuint makeProgram(void) {
         _panelUniform=glGetUniformLocation(_program,"cdgPanel");
         _backgroundTextureUniform=glGetUniformLocation(_program,"backgroundTexture");
         _backgroundOpacityUniform=glGetUniformLocation(_program,"backgroundOpacity");
+        _previousBackgroundTextureUniform=glGetUniformLocation(_program,"previousBackgroundTexture");
+        _previousBackgroundOpacityUniform=glGetUniformLocation(_program,"previousBackgroundOpacity");
+        _backgroundCrossfadeMixUniform=glGetUniformLocation(_program,"backgroundCrossfadeMix");
         CGLUnlockContext(_master.CGLContextObj);
         if (status!=GL_FRAMEBUFFER_COMPLETE || cdgStatus!=GL_FRAMEBUFFER_COMPLETE ||
             backgroundStatus!=GL_FRAMEBUFFER_COMPLETE || !_program) return nil;
@@ -626,12 +708,26 @@ static GLuint makeProgram(void) {
     int paused=1;
     mpv_set_property(_mpv,"pause",MPV_FORMAT_FLAG,&paused);
     // The IINA-bundled FFmpeg gives a few valid CDG files a very low probe
-    // score. Lower the acceptance threshold for CDG loads, while retaining
-    // automatic format detection for both the CDG and its external MP3. This
-    // preserves the audio clock and resets the normal threshold for MP4/audio.
+    // score. A threshold of 1 with automatic format detection is unsafe,
+    // though: ordinary CDG packet bytes can false-positive as another raw
+    // format. LG126-03 and SF113-03 then reported bogus 34s/31s durations and
+    // produced no video frame while their external MP3s kept playing. Force
+    // only the graphics input to the CDG demuxer, and explicitly clear the
+    // file-local override for MP4/audio so a preceding CDG cannot poison the
+    // next load.
     int probeResult=mpv_set_property_string(_mpv,"demuxer-lavf-probescore",_isCdg?"1":"26");
     if(probeResult<0)
         bridgeLog("[bridge] demuxer probe threshold failed: %s",mpv_error_string(probeResult));
+    int formatResult=mpv_set_property_string(
+        _mpv,"demuxer-lavf-format",_isCdg?"cdg":"");
+    if(formatResult<0)
+        bridgeLog("[bridge] demuxer format failed: %s",mpv_error_string(formatResult));
+    // Ordinary MP4 karaoke is deliberately stretched to the 16:9 shared
+    // texture. CDG keeps its native 300x216 aspect and separate fit geometry.
+    int aspectResult=mpv_set_property_string(
+        _mpv,"video-aspect-override",_isCdg?"no":"16:9");
+    if(aspectResult<0)
+        bridgeLog("[bridge] video aspect override failed: %s",mpv_error_string(aspectResult));
     int r=0;
     if (audio.length) {
         r=mpv_set_property_string(_mpv,"audio-files",audio.fileSystemRepresentation);
@@ -738,9 +834,20 @@ static GLuint makeProgram(void) {
     }];
 }
 - (void)setAudioDeviceName:(NSString *)name {
-    if(!_mpv)return; NSString *device=name.length?name:@"auto";
+    if(!_mpv)return; NSString *requested=name.length?name:@"auto";
     [self onControl:^{
         if(!self->_mpv)return;
+        NSString *device=mpvAudioDeviceForLabel(self->_mpv,requested);
+        if(!device.length){
+            bridgeLog("[audio] requested output unavailable: %s; refusing system default",
+                      requested.UTF8String);
+            // An implicit default can be the AirPlay TV. A deliberately invalid
+            // device fails silent instead of sending show audio to the display.
+            device=@"singws/no-safe-local-output";
+        }else{
+            bridgeLog("[audio] output requested=%s resolved=%s",
+                      requested.UTF8String,device.UTF8String);
+        }
         mpv_set_property_string(self->_mpv,"audio-device",device.UTF8String);
     }];
 }
@@ -997,7 +1104,12 @@ static GLuint makeProgram(void) {
             CGLUnlockContext(self->_master.CGLContextObj);
             self->_backgroundHasFrame=true;
         }
+        // The decorative decoder has its own continuous clock. Present every
+        // background frame to BOTH surfaces here; waiting for renderFrame's
+        // CDG callback made the host preview update only when a lyric packet
+        // changed, so its MP4 appeared to pause throughout static CDG spans.
         [self presentView:self->_outputView];
+        [self presentView:self->_previewView];
     });
 }
 - (void)scheduleBackgroundEvents {
@@ -1020,6 +1132,25 @@ static GLuint makeProgram(void) {
 }
 - (BOOL)loadBackgroundVideo:(NSString *)path opacity:(double)opacity {
     if(!path.length||_stopping.load())return NO;
+    if(_backgroundHasFrame.load() && _backgroundOpacity.load()>0.0){
+        [_master makeCurrentContext]; CGLLockContext(_master.CGLContextObj);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,_backgroundFbo);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D,_previousBackgroundTexture);
+        glCopyTexSubImage2D(GL_TEXTURE_2D,0,0,0,0,0,_width,_height);
+        glBindTexture(GL_TEXTURE_2D,0);
+        glActiveTexture(GL_TEXTURE0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,0);
+        glFlush(); CGLUnlockContext(_master.CGLContextObj);
+        _previousBackgroundHasFrame=true;
+        _previousBackgroundOpacity=_backgroundOpacity.load();
+        _backgroundCrossfadeMix=0.0;
+        bridgeLog("[background] outgoing frame retained for single-decoder crossfade");
+    }else{
+        _previousBackgroundHasFrame=false;
+        _previousBackgroundOpacity=0.0;
+        _backgroundCrossfadeMix=1.0;
+    }
     _backgroundOpacity=std::max(0.0,std::min(1.0,opacity));
     _backgroundHasFrame=false; _backgroundAtEnd=false;
     if(!_backgroundMpv){
@@ -1028,6 +1159,10 @@ static GLuint makeProgram(void) {
         mpv_set_option_string(_backgroundMpv,"vo","libmpv");
         mpv_set_option_string(_backgroundMpv,"ao","null");
         mpv_set_option_string(_backgroundMpv,"mute","yes");
+        // Decorative MP4s deliberately fill the 16:9 shared texture. Their
+        // aspect may distort, but no edge is cropped or letterboxed; the CDG
+        // foreground remains independently aspect-correct.
+        mpv_set_option_string(_backgroundMpv,"video-aspect-override","16:9");
         // Keep an embedded audio stream as mpv's timing master, but route it
         // into the null device and mute it. Disabling audio entirely left some
         // short AAC-backed VJ loops parked on their first rendered frame.
@@ -1061,6 +1196,8 @@ static GLuint makeProgram(void) {
 }
 - (void)stopBackgroundVideo {
     _backgroundOpacity=0.0; _backgroundHasFrame=false; _backgroundAtEnd=false;
+    _previousBackgroundHasFrame=false; _previousBackgroundOpacity=0.0;
+    _backgroundCrossfadeMix=1.0;
     if(_backgroundMpv){const char *cmd[]={"stop",nullptr};mpv_command_async(_backgroundMpv,92,cmd);}
     [_outputView setNeedsDisplay:YES];
 }
@@ -1078,6 +1215,21 @@ static GLuint makeProgram(void) {
 - (BOOL)backgroundPaused {
     if(!_backgroundMpv)return NO; int paused=0;
     return mpv_get_property(_backgroundMpv,"pause",MPV_FORMAT_FLAG,&paused)>=0 && paused;
+}
+- (void)setBackgroundOpacity:(double)opacity {
+    const double value=std::max(0.0,std::min(1.0,opacity));
+    _backgroundOpacity=value;
+    if(_previousBackgroundHasFrame.load()){
+        const double oldOpacity=std::max(0.001,_previousBackgroundOpacity.load());
+        const double mix=std::max(0.0,std::min(1.0,value/oldOpacity));
+        _backgroundCrossfadeMix=mix;
+        if(mix>=0.999){
+            _previousBackgroundHasFrame=false;
+            _previousBackgroundOpacity=0.0;
+            _backgroundCrossfadeMix=1.0;
+        }
+    }
+    [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES];
 }
 // Measure where libmpv pillarboxed the picture inside the shared texture, from
 // its own dwidth/dheight. CDG is 300x216 (DAR 1.389), so a 4:3 assumption puts
@@ -1122,6 +1274,11 @@ static GLuint makeProgram(void) {
             bridgeLog("[mpv/%s] %s",m->level,m->text);}
         else if(e->event_id==MPV_EVENT_FILE_LOADED){
             _loading=false;
+            char *format=nullptr;
+            if(mpv_get_property(_mpv,"file-format",MPV_FORMAT_STRING,&format)>=0){
+                bridgeLog("[bridge] detected media format=%s",format ?: "");
+                mpv_free(format);
+            }
             // Apply file-local tuning only after the replacement file owns the
             // playback state, then honor the Play request Python made while
             // loadfile was pending. All of it on the control queue: these are
@@ -1230,6 +1387,10 @@ static GLuint makeProgram(void) {
         const double sa=_isCdg?(300.0/216.0):((double)_width/_height);
         double va=(double)w/h; GLfloat sx=1,sy=1;
         if(va>sa)sx=sa/va; else sy=va/sa;
+        // MP4 karaoke deliberately fills every display edge. The core has
+        // already stretched it into the shared 16:9 texture, so this remains
+        // one retained-texture draw with no per-frame CPU scaling.
+        if(!_isCdg){sx=1;sy=1;}
         GLfloat uvx=1,uvy=1,uox=0,uoy=0;
         // Where libmpv actually pillarboxed the picture inside the shared 16:9
         // texture, measured from dwidth/dheight at FILE_LOADED. This was
@@ -1263,17 +1424,22 @@ static GLuint makeProgram(void) {
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D,_backgroundTexture); glUniform1i(_backgroundTextureUniform,1);
         glUniform1f(_backgroundOpacityUniform,(GLfloat)_backgroundOpacity.load());
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D,_previousBackgroundTexture);
+        glUniform1i(_previousBackgroundTextureUniform,2);
+        glUniform1f(_previousBackgroundOpacityUniform,
+                    _previousBackgroundHasFrame.load()?(GLfloat)_previousBackgroundOpacity.load():0.0f);
+        glUniform1f(_backgroundCrossfadeMixUniform,(GLfloat)_backgroundCrossfadeMix.load());
         // Preview must represent what the room sees. Previously this was
         // output-only, so the preview retained the raw blue CDG rectangle even
         // while the show window used the animation composite.
-        const bool backgroundActive=(_isCdg&&_backgroundHasFrame.load()&&_backgroundOpacity.load()>0.0);
+        const bool backgroundActive=(_isCdg&&(
+            (_backgroundHasFrame.load()&&_backgroundOpacity.load()>0.0) ||
+            (_previousBackgroundHasFrame.load()&&_previousBackgroundOpacity.load()>0.0)));
         if(backgroundActive){
-            const double backgroundAspect=(double)_width/_height;
-            GLfloat buvx=1,buvy=1,buox=0,buoy=0;
-            if(va>backgroundAspect){buvy=(GLfloat)(backgroundAspect/va);buoy=(1-buvy)*0.5f;}
-            else {buvx=(GLfloat)(va/backgroundAspect);buox=(1-buvx)*0.5f;}
-            glUniform2f(_scaleUniform,1,1);glUniform2f(_uvScaleUniform,buvx,buvy);
-            glUniform2f(_uvOffsetUniform,buox,buoy);glUniform1i(_sidefillUniform,4);
+            // One full-texture GPU draw: stretch to every host edge without a
+            // crop, intermediate pixmap, decoder change, or playback-clock cost.
+            glUniform2f(_scaleUniform,1,1);glUniform2f(_uvScaleUniform,1,1);
+            glUniform2f(_uvOffsetUniform,0,0);glUniform1i(_sidefillUniform,4);
             glDrawArrays(GL_TRIANGLE_STRIP,0,4);
             uvx=(GLfloat)span;uox=panelL;uvy=1;uoy=0;sx=1;sy=1;
             const double ca=sa*span;
@@ -1310,7 +1476,7 @@ static GLuint makeProgram(void) {
         glUniform2f(_scaleUniform,sx,sy); glUniform2f(_uvScaleUniform,uvx,uvy);
         glUniform2f(_uvOffsetUniform,uox,uoy);
         glUniform1i(_sidefillUniform,backgroundActive?5:0);
-        if(sidefill)glUniform1i(_sidefillUniform,3);
+        if(sidefill&&!backgroundActive)glUniform1i(_sidefillUniform,3);
         // CDG is 300x216 palette artwork, not photographic video. A second
         // bilinear resize here blends lyric/outline pixels that libmpv has
         // already placed in the shared texture and makes the result visibly
@@ -1325,6 +1491,7 @@ static GLuint makeProgram(void) {
                         _isCdg?GL_NEAREST:GL_LINEAR);
         glDrawArrays(GL_TRIANGLE_STRIP,0,4);
         if(sidefill||backgroundActive)glDisable(GL_BLEND);
+        glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,0);
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,0);
         glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,0); glBindVertexArray(0); glUseProgram(0); }
     [ctx flushBuffer]; CGLUnlockContext(ctx.CGLContextObj);
@@ -1407,6 +1574,9 @@ int64_t singws_bridge_background_position(void *h){
 }
 int singws_bridge_background_paused(void *h){
     return h&&[(__bridge BridgeRenderer *)h backgroundPaused];
+}
+void singws_bridge_set_background_opacity(void *h,double opacity){
+    if(h)[(__bridge BridgeRenderer *)h setBackgroundOpacity:opacity];
 }
 void singws_bridge_stop_background(void *h){if(h)[(__bridge BridgeRenderer *)h stopBackgroundVideo];}
 void singws_bridge_refresh_views(void *h,uintptr_t outputView,uintptr_t previewView){

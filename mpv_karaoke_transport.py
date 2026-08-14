@@ -35,6 +35,7 @@ class MpvKaraokeTransport(QObject):
     started = pyqtSignal()
     ended = pyqtSignal()
     playback_hung = pyqtSignal()
+    visual_stalled = pyqtSignal(str, int)
 
     def __init__(
         self,
@@ -64,6 +65,7 @@ class MpvKaraokeTransport(QObject):
         self._started_emitted = False
         self._ended_emitted = False
         self._playing_polls_without_visual = 0
+        self._visual_stall_emitted = False
         self._loop = None
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -90,6 +92,7 @@ class MpvKaraokeTransport(QObject):
         self._started_emitted = False
         self._ended_emitted = False
         self._playing_polls_without_visual = 0
+        self._visual_stall_emitted = False
         self._timer.start()
 
     def stop(self):
@@ -234,13 +237,13 @@ class MpvKaraokeTransport(QObject):
             return
         if self._loop is not None and self.position_seconds() >= self._loop[1]:
             self.seek(self._loop[0])
+        visuals_ready = True
+        try:
+            visuals_ready = bool(self.plugin.visualsReady())
+        except Exception:
+            pass
+        playing = bool(self.plugin.isPlaying() and self.plugin.positionMs() >= 40)
         if not self._started_emitted:
-            visuals_ready = True
-            try:
-                visuals_ready = bool(self.plugin.visualsReady())
-            except Exception:
-                pass
-            playing = bool(self.plugin.isPlaying() and self.plugin.positionMs() >= 40)
             if playing and not visuals_ready:
                 self._playing_polls_without_visual += 1
             else:
@@ -257,6 +260,21 @@ class MpvKaraokeTransport(QObject):
             if playing and (visuals_ready or visual_timeout):
                 self._started_emitted = True
                 self.started.emit()
+        # A CDG can have healthy audio while the graphics demux/render path has
+        # failed.  Detect that independently of the one-second audible-start
+        # fallback so the host never reveals a permanently black native child.
+        # This is deliberately report-only: reloading the shared mpv core here
+        # would interrupt the singer's audio.  The host keeps the last safe
+        # painted/background surface visible and gives the operator a warning.
+        if (
+            self.mode == "cdg"
+            and playing
+            and not visuals_ready
+            and not self._visual_stall_emitted
+            and int(self.plugin.positionMs()) >= 5000
+        ):
+            self._visual_stall_emitted = True
+            self.visual_stalled.emit(self.video_path, int(self.plugin.positionMs()))
         if not self._ended_emitted and self.plugin.atEnd():
             self._ended_emitted = True
             self._timer.stop()
