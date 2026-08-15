@@ -22554,6 +22554,36 @@ class KaraokeApp(QWidget):
                 host.setVisible(bool(visible))
                 if visible:
                     host.raise_()
+        if visible:
+            # The mpv hosts and the Qt Quick ticker are native child surfaces
+            # on macOS. Raising the newly revealed output host can cover a
+            # ticker which is still running normally. Reopening the Rotation
+            # window used to repair this accidentally by raising the ticker.
+            # Do the same after every native-video reveal, including bounded
+            # retries while AppKit finishes reconnecting the retained view.
+            for delay in (0, 80, 250):
+                QTimer.singleShot(
+                    delay,
+                    lambda phase=f"{delay}ms": self._reassert_show_ticker_surface(
+                        "mpv_host_reveal", phase
+                    ),
+                )
+
+    def _reassert_show_ticker_surface(self, reason: str, phase: str = ""):
+        try:
+            if not bool(self.settings.get("ticker_enabled", True)):
+                return
+            video_window = getattr(self, "video_window", None)
+            ticker = getattr(video_window, "ticker", None) if video_window is not None else None
+            if ticker is None:
+                return
+            video_window.set_ticker_enabled(True)
+            ticker.raise_()
+            ticker.update()
+            suffix = f" phase={phase}" if phase else ""
+            _diag(f"[TICKER] show-screen surface reasserted reason={reason}{suffix}")
+        except Exception as exc:
+            _diag(f"[TICKER] surface reassert failed reason={reason}: {exc}")
 
     def _refresh_mpv_video_views(self, reason: str = ""):
         """Re-present libmpv's retained texture after the show window returns."""
@@ -36924,19 +36954,7 @@ class KaraokeApp(QWidget):
                 pass
 
     def _reassert_show_ticker_after_rotation_open(self):
-        try:
-            if not bool(self.settings.get("ticker_enabled", True)):
-                return
-            video_window = getattr(self, "video_window", None)
-            ticker = getattr(video_window, "ticker", None) if video_window is not None else None
-            if ticker is None:
-                return
-            video_window.set_ticker_enabled(True)
-            ticker.raise_()
-            ticker.update()
-            _diag("[TICKER] show-screen surface reasserted after rotation open")
-        except Exception as exc:
-            _diag(f"[TICKER] rotation-open reassert failed: {exc}")
+        self._reassert_show_ticker_surface("rotation_open")
 
     def update_rotation_view(self):
         _perf_t0 = time.perf_counter()

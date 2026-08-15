@@ -1112,11 +1112,20 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_rotation_open_reasserts_only_the_show_screen_ticker(self):
         opened = function_source("open_rotation_view")
         reassert = function_source("_reassert_show_ticker_after_rotation_open")
+        shared = function_source("_reassert_show_ticker_surface")
         self.assertIn("_reassert_show_ticker_after_rotation_open", opened)
-        self.assertIn("video_window.set_ticker_enabled(True)", reassert)
-        self.assertIn("ticker.raise_()", reassert)
-        self.assertNotIn("rotation_view.ticker", opened + reassert)
-        self.assertNotIn("video_window.activateWindow", reassert)
+        self.assertIn('_reassert_show_ticker_surface("rotation_open")', reassert)
+        self.assertIn("video_window.set_ticker_enabled(True)", shared)
+        self.assertIn("ticker.raise_()", shared)
+        self.assertNotIn("rotation_view.ticker", opened + reassert + shared)
+        self.assertNotIn("video_window.activateWindow", shared)
+
+    def test_mpv_reveal_reasserts_ticker_after_native_surface_settles(self):
+        reveal = function_source("_set_mpv_hosts_visible")
+        self.assertIn("host.raise_()", reveal)
+        self.assertIn("for delay in (0, 80, 250)", reveal)
+        self.assertIn("_reassert_show_ticker_surface", reveal)
+        self.assertIn('"mpv_host_reveal"', reveal)
 
     def test_rotation_announcement_is_separate_and_venue_scoped(self):
         ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")
