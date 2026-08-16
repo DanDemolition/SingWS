@@ -45,6 +45,35 @@ class LibraryScanWorkerTests(unittest.TestCase):
             self.assertEqual(result["cdg_count"], 1)
             self.assertTrue(result["reindex_needed"])
 
+    def test_scan_ignores_all_hidden_dotfiles_and_purges_old_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            visible = root / "Artist - Song - D001.zip"
+            hidden = root / ". Artist - Phantom - D002.mp4"
+            visible.write_bytes(b"zip")
+            hidden.write_bytes(b"AppleDouble")
+            settings = {"filename_format": "artist-title-disc"}
+
+            full = self.singws._build_library_scan_result(
+                [str(root)], False, [], settings)
+            self.assertEqual(
+                [pathlib.Path(t["path"]).name for t in full["tracks"]],
+                [visible.name],
+            )
+
+            quick = self.singws._build_library_scan_result(
+                [str(root)], True,
+                full["tracks"] + [{"path": str(hidden), "title": "Phantom"}],
+                {
+                    "filename_format": "artist-title-disc",
+                    "karaoke_scan_dir_sigs": full["dir_sigs"],
+                },
+            )
+            self.assertEqual(
+                [pathlib.Path(t["path"]).name for t in quick["tracks"]],
+                [visible.name],
+            )
+
     def test_quick_update_reuses_unchanged_directory_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

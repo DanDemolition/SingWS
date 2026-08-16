@@ -1,11 +1,14 @@
 import importlib.util
 import inspect
+import math
 import os
 from pathlib import Path
+import struct
 from types import SimpleNamespace
 import tempfile
 import time
 import unittest
+import wave
 import zipfile
 from unittest import mock
 
@@ -745,11 +748,18 @@ class RecentRegressionTests(unittest.TestCase):
             cdg = root / "karaoke.cdg"
             mp3 = root / "karaoke.mp3"
             bgm = root / "bgm.mp3"
+            package = root / "zipped-karaoke.zip"
             cdg.write_text("", encoding="utf-8")
             mp3.write_text("audio", encoding="utf-8")
             bgm.write_text("audio", encoding="utf-8")
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("inside/song.cdg", b"cdg")
+                archive.writestr("inside/song.mp3", b"mp3")
 
-            app.tracks = [{"path": str(cdg), "display": "Karaoke Song"}]
+            app.tracks = [
+                {"path": str(cdg), "display": "Karaoke Song"},
+                {"path": str(package), "display": "Zipped Song"},
+            ]
             app.bg_music = SimpleNamespace(playlist=[str(bgm)])
             app.bg_manager = SimpleNamespace(current_playlist=[{"path": str(bgm)}])
             app.settings = {
@@ -766,6 +776,7 @@ class RecentRegressionTests(unittest.TestCase):
                 paths = [item[1] for item in items]
                 self.assertEqual(paths.count(str(mp3)), 1)
                 self.assertEqual(paths.count(str(bgm)), 1)
+                self.assertEqual(paths.count(str(package)), 1)
                 self.assertTrue(any(item[0] == "Karaoke" for item in items))
                 self.assertTrue(any(item[0] == "BGM" for item in items))
 
@@ -791,12 +802,173 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(peak_db, -1.2)
         measure.assert_called_once_with("/tmp/song.mp3", timeout=120.0)
 
+    def test_fast_loudness_measurement_uses_spread_sections(self):
+        import libmpv_media_jobs
+
+        with mock.patch.object(
+            libmpv_media_jobs,
+            "measure_loudness_lufs",
+            return_value=(-17.0, -1.0),
+        ) as measure:
+            result = libmpv_media_jobs.measure_loudness_fast_lufs(
+                "/tmp/song.mp3", timeout=25.0)
+
+        self.assertEqual(result, (-17.0, -1.0))
+        timeline = measure.call_args.args[0]
+        self.assertTrue(timeline.startswith("edl://"))
+        self.assertEqual(timeline.count("length=12"), 5)
+        for start in (0, 45, 90, 135, 180):
+            self.assertIn(f"start={start}", timeline)
+        self.assertEqual(measure.call_args.kwargs, {"timeout": 25.0})
+
     def test_libmpv_pcm_output_does_not_precreate_destination(self):
         source = Path("libmpv_media_jobs.py").read_text(encoding="utf-8")
         decode = source[source.index("def decode_audio_wav("):]
         decode = decode[:decode.index("def measure_loudness_lufs")]
         self.assertLess(decode.index("os.unlink(output)"), decode.index("job = OfflineMpvJob()"))
         self.assertLess(decode.index("job = OfflineMpvJob()"), decode.index('job.option("ao", "pcm")'))
+
+    def test_loudness_measurement_prefers_native_lavfi_without_wav(self):
+        import libmpv_media_jobs
+
+        with mock.patch.object(
+            libmpv_media_jobs,
+            "_measure_loudness_lavfi",
+            return_value=(-16.4, -0.7),
+        ) as native, mock.patch.object(
+            libmpv_media_jobs,
+            "decode_audio_wav",
+            side_effect=AssertionError("native measurement should avoid WAV rendering"),
+        ):
+            result = libmpv_media_jobs.measure_loudness_lufs(
+                "/tmp/song.mp3", timeout=37.0)
+
+        self.assertEqual(result, (-16.4, -0.7))
+        native.assert_called_once_with(
+            "/tmp/song.mp3", timeout=37.0,
+            start_seconds=None, duration_seconds=None)
+
+    def test_loudness_measurement_falls_back_when_native_filter_unavailable(self):
+        import libmpv_media_jobs
+
+        with mock.patch.object(
+            libmpv_media_jobs,
+            "_measure_loudness_lavfi",
+            side_effect=RuntimeError("filter unavailable"),
+        ), mock.patch.object(
+            libmpv_media_jobs,
+            "decode_audio_wav",
+            return_value="/tmp/rendered.wav",
+        ) as decode, mock.patch.object(
+            libmpv_media_jobs,
+            "_measure_wav_lufs",
+            return_value=(-18.2, -1.1),
+        ), mock.patch.object(libmpv_media_jobs.os, "unlink") as unlink:
+            result = libmpv_media_jobs.measure_loudness_lufs(
+                "/tmp/song.mp3", timeout=44.0)
+
+        self.assertEqual(result, (-18.2, -1.1))
+        decode.assert_called_once_with(
+            "/tmp/song.mp3", sample_rate=48000, channels=2,
+            start_seconds=None, duration_seconds=None, timeout=44.0)
+        unlink.assert_called_once_with("/tmp/rendered.wav")
+
+    def test_loudness_failure_reports_no_decodable_audio_and_both_causes(self):
+        import libmpv_media_jobs
+
+        with mock.patch.object(
+            libmpv_media_jobs, "_measure_loudness_lavfi",
+            side_effect=RuntimeError("no integrated loudness"),
+        ), mock.patch.object(
+            libmpv_media_jobs, "decode_audio_wav",
+            side_effect=RuntimeError("no PCM audio"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "no decodable audio.*no integrated loudness.*no PCM audio",
+            ):
+                libmpv_media_jobs.measure_loudness_lufs("/tmp/video-only.mp4")
+
+    def test_libmpv_loudness_measurement_streams_wav_in_bounded_chunks(self):
+        import libmpv_media_jobs
+
+        with tempfile.TemporaryDirectory() as td:
+            wav_path = Path(td) / "tone.wav"
+            with wave.open(str(wav_path), "wb") as output:
+                output.setnchannels(2)
+                output.setsampwidth(2)
+                output.setframerate(48000)
+                frames = bytearray()
+                for index in range(48000):
+                    sample = int(16384 * math.sin(2.0 * math.pi * 1000.0 * index / 48000.0))
+                    frames.extend(struct.pack("<hh", sample, sample))
+                output.writeframes(frames)
+
+            real_open = libmpv_media_jobs.wave.open
+            requests = []
+
+            class TrackingWave:
+                def __init__(self, wrapped):
+                    self.wrapped = wrapped
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.wrapped.close()
+
+                def __getattr__(self, name):
+                    return getattr(self.wrapped, name)
+
+                def readframes(self, count):
+                    requests.append(count)
+                    return self.wrapped.readframes(count)
+
+            with mock.patch.object(
+                libmpv_media_jobs.wave,
+                "open",
+                side_effect=lambda path, mode: TrackingWave(real_open(path, mode)),
+            ):
+                lufs, peak_db = libmpv_media_jobs._measure_wav_lufs(str(wav_path))
+
+        self.assertTrue(requests)
+        self.assertLessEqual(max(requests), 65536)
+        self.assertIsNotNone(lufs)
+        self.assertAlmostEqual(peak_db, -6.02, places=1)
+
+    def test_session_location_failure_backs_off_and_uses_saved_coordinates(self):
+        app = make_app(self.singws)
+        app.settings.update({
+            "base_url": "https://example.test",
+            "user": "venue",
+            "api_key": "secret",
+            "session_location_latitude": "47.6000",
+            "session_location_longitude": "-122.3000",
+            "session_location_auto_detect": True,
+            "session_location_detected_at": 0,
+        })
+        app.save_settings = lambda: None
+
+        with mock.patch.object(
+            app,
+            "_detect_current_device_location",
+            return_value=(None, "temporary failure"),
+        ) as detect:
+            first = app._session_location_payload(allow_auto_detect=True)
+            second = app._session_location_payload(allow_auto_detect=True)
+
+        self.assertEqual(detect.call_count, 1)
+        self.assertEqual(first["location_source"], "manual_fallback")
+        self.assertEqual(second["latitude"], 47.6)
+        self.assertGreater(app.__dict__["_session_location_retry_after"], time.monotonic())
+
+    def test_background_clock_logging_is_sampled_without_delaying_eos_poll(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        poll = source[source.index("    def _poll_end(self):"):]
+        poll = poll[:poll.index("    def stop(self, reason")]
+        self.assertIn("if self._poll_count % 8 == 0:", poll)
+        self.assertIn("if self._poll_count % 240 == 0:", poll)
+        self.assertLess(poll.index("if self._poll_count % 240 == 0:"), poll.index("if self.plugin.backgroundVideoAtEnd():"))
 
     def test_library_volume_worker_cancel_stops_before_next_track(self):
         worker = self.singws.AnalyzeLibraryWorker([
@@ -805,7 +977,7 @@ class RecentRegressionTests(unittest.TestCase):
         ])
         measured = []
 
-        def fake_measure(path, cancel_check=None):
+        def fake_measure(path, cancel_check=None, mode="full"):
             measured.append(path)
             worker.cancel()
             self.assertTrue(cancel_check())
@@ -817,6 +989,66 @@ class RecentRegressionTests(unittest.TestCase):
             worker.run()
 
         self.assertEqual(measured, ["/tmp/one.mp3"])
+
+    def test_library_volume_worker_extracts_zip_mp3_and_caches_by_archive(self):
+        with tempfile.TemporaryDirectory() as td:
+            package = Path(td) / "song.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("nested/song.cdg", b"cdg")
+                archive.writestr("nested/song.mp3", b"mp3 audio")
+            worker = self.singws.AnalyzeLibraryWorker([
+                ("Karaoke", str(package), "Zipped Song", str(package)),
+            ])
+            measured = []
+
+            def fake_measure(path, cancel_check=None, mode="full"):
+                measured.append(path)
+                self.assertTrue(Path(path).is_file())
+                self.assertTrue(str(path).endswith(".mp3"))
+                return -18.0, -2.0
+
+            with mock.patch.object(self.singws, "_measure_loudness_lufs", side_effect=fake_measure), \
+                 mock.patch.object(self.singws, "_loudness_save_cache"), \
+                 mock.patch.dict(self.singws._loudness_cache, {}, clear=True):
+                worker.run()
+                cached = dict(self.singws._loudness_cache[str(package)])
+
+            self.assertEqual(len(measured), 1)
+            self.assertFalse(Path(measured[0]).exists())
+            self.assertEqual(cached["size"], package.stat().st_size)
+            self.assertEqual(cached["mode"], "full")
+
+    def test_fast_loudness_result_never_applies_positive_gain(self):
+        path = "/tmp/fast-song.mp3"
+        with mock.patch.object(self.singws, "_loudness_file_sig", return_value=(1, 2)), \
+             mock.patch.dict(self.singws._loudness_cache, {
+                 path: {"i": -24.0, "peak_db": -12.0, "mtime": 1, "size": 2, "mode": "fast"},
+             }, clear=True):
+            gain = self.singws.loudness_gain_db_cached(path)
+
+        self.assertEqual(gain, 0.0)
+
+    def test_full_scan_upgrades_fast_cache_but_skips_full_cache(self):
+        app = make_app(self.singws)
+        app.tracks = [{"path": "/tmp/song.mp3", "display": "Song"}]
+        app._karaoke_normalize_active = lambda: True
+        app._bg_normalize_setting_active = lambda: False
+        app._any_loudness_normalization_active = lambda: True
+        app._karaoke_normalize_bypass_reason = lambda: ""
+
+        with mock.patch.object(os.path, "exists", return_value=True), \
+             mock.patch.object(self.singws, "loudness_gain_db_cached", return_value=0.0), \
+             mock.patch.object(self.singws, "loudness_info_cached", return_value={"mode": "fast"}):
+            fast_items = app._library_loudness_analysis_items(mode="fast")
+            full_items = app._library_loudness_analysis_items(mode="full")
+        with mock.patch.object(os.path, "exists", return_value=True), \
+             mock.patch.object(self.singws, "loudness_gain_db_cached", return_value=0.0), \
+             mock.patch.object(self.singws, "loudness_info_cached", return_value={"mode": "full"}):
+            completed_items = app._library_loudness_analysis_items(mode="full")
+
+        self.assertEqual(fast_items, [])
+        self.assertEqual(len(full_items), 1)
+        self.assertEqual(completed_items, [])
 
     def test_processing_text_auto_dismisses_by_default(self):
         app = make_app(self.singws)

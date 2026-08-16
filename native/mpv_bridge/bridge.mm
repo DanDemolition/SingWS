@@ -513,6 +513,8 @@ static GLuint makeProgram(void) {
     double _desiredAudioDelay;
     NSString *_pendingExternalAudio;
     uint64_t _loadSerial;
+    std::string _lastMpvLogMessage;
+    unsigned int _repeatedMpvLogCount;
     std::atomic_bool _outputTransitioning;
     std::atomic<uint64_t> _transitionSerial;
     mpv_handle *_mpv;
@@ -547,6 +549,7 @@ static GLuint makeProgram(void) {
         _lastOutputSkip=-1; _lastPreviewSkip=-1;
         _loading=false; _playWhenLoaded=false;
         _desiredTempoPercent=100; _desiredSemitones=0; _loadSerial=0;
+        _repeatedMpvLogCount=0;
         _desiredAudioDelay=0.0;
         _outputTransitioning=false; _transitionSerial=0;
         _pictureSpanX=(300.0/216.0)/((double)_width/_height); // CDG default
@@ -867,13 +870,13 @@ static GLuint makeProgram(void) {
 // single "af" property, so neither may write it directly: an earlier version
 // had setSemitones: overwrite "af" outright, which silently wiped the EQ and
 // master bus every time the host changed key. Both inputs are stored and this
-// composes them, matching mpv_audio_filters.build_af_chain's order (key first,
-// then the DSP stages).
+// composes them. The DSP stages must precede rubberband: libmpv warns that a
+// speed-changing filter before libavfilter stages can desynchronize audio.
 // Callers must already be on the control queue: it owns _dspChain and
 // _desiredSemitones now that the setters no longer run on the GUI thread.
 - (void)applyAudioFilters {
     if(!_mpv||_loading.load())return;
-    std::string chain;
+    std::string chain=_dspChain;
     // Rubberband is inserted for a tempo change as well as a key change, not
     // just when the key moves. mpv applies `speed` with whichever filter in the
     // chain can stretch time; with no rubberband present that is scaletempo2, a
@@ -888,11 +891,8 @@ static GLuint makeProgram(void) {
         char pitch[64];
         snprintf(pitch,sizeof(pitch),"rubberband=pitch-scale=%.6f",
                  pow(2.0,_desiredSemitones/12.0));
-        chain=pitch;
-    }
-    if(!_dspChain.empty()){
         if(!chain.empty())chain+=",";
-        chain+=_dspChain;
+        chain+=pitch;
     }
     int r=mpv_set_property_string(_mpv,"af",chain.c_str());
     if(r<0)bridgeLog("[bridge] af chain rejected (%s): %s",
@@ -1270,7 +1270,24 @@ static GLuint makeProgram(void) {
 - (void)drainEvents {
     while (_mpv) { mpv_event *e=mpv_wait_event(_mpv,0); if(!e||e->event_id==MPV_EVENT_NONE)break;
         if(e->event_id==MPV_EVENT_LOG_MESSAGE){mpv_event_log_message*m=(mpv_event_log_message*)e->data;
-            bridgeLog("[mpv/%s] %s",m->level,m->text);}
+            std::string current=(m&&m->level?m->level:"");
+            current.push_back('\n');
+            current.append(m&&m->text?m->text:"");
+            if(current==_lastMpvLogMessage){
+                ++_repeatedMpvLogCount;
+            }else{
+                if(_repeatedMpvLogCount>3)
+                    bridgeLog("[mpv] previous message repeated %u times total",
+                              _repeatedMpvLogCount);
+                _lastMpvLogMessage=current;
+                _repeatedMpvLogCount=1;
+            }
+            // Preserve enough immediate context for diagnosis, then emit only
+            // logarithmic progress for a decoder that floods the same fault.
+            if(_repeatedMpvLogCount<=3 || _repeatedMpvLogCount==10 ||
+               _repeatedMpvLogCount==100 || _repeatedMpvLogCount==1000)
+                bridgeLog("[mpv/%s] %s%s",m->level,m->text,
+                          _repeatedMpvLogCount>3?" (repeated)":"");}
         else if(e->event_id==MPV_EVENT_FILE_LOADED){
             _loading=false;
             char *format=nullptr;

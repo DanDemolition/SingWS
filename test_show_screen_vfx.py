@@ -115,6 +115,21 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(int(overlay._root.property("startCountdownValue") or 0), 0)
         self.assertEqual(int(overlay._root.property("burstSerial") or 0), before + 1)
 
+    def test_immediate_hide_cancels_active_singer_animation(self):
+        overlay = mod.RenderThreadShowScreenVfx()
+        self.addCleanup(overlay.close)
+        overlay.resize(960, 540)
+        overlay.show()
+        overlay.show_singer_start("FrankieRod", "Beyond the Realms of Death", "Judas Priest")
+        QTest.qWait(900)
+        self.assertTrue(overlay._root.property("active"))
+
+        overlay.hide_transition(immediate=True)
+        QTest.qWait(1500)
+
+        self.assertFalse(overlay._root.property("active"))
+        self.assertFalse(overlay._root.property("startCountdownActive"))
+
     def test_song_outro_fires_double_burst_and_clears_quickly(self):
         overlay = mod.RenderThreadShowScreenVfx()
         self.addCleanup(overlay.close)
@@ -163,8 +178,8 @@ class ShowScreenVfxTests(unittest.TestCase):
             def show_song_outro(self, singer, title, artist):
                 calls.append(("outro", singer, title, artist))
 
-            def hide_transition(self):
-                calls.append(("hide",))
+            def hide_transition(self, immediate=False):
+                calls.append(("hide", bool(immediate)))
 
         area = mod.VideoAreaWidget()
         self.addCleanup(area.close)
@@ -176,7 +191,7 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "next")
         self.assertEqual(calls[1], ("start", "Maya", "Halo", "Beyoncé"))
         self.assertEqual(calls[2], ("outro", "Maya", "Halo", "Beyoncé"))
-        self.assertEqual(calls[3], ("hide",))
+        self.assertEqual(calls[3], ("hide", True))
 
     def test_disabled_show_vfx_retains_basic_countdown_but_suppresses_other_events(self):
         calls = []
@@ -189,7 +204,7 @@ class ShowScreenVfxTests(unittest.TestCase):
             def show_next_up(self, *_args): calls.append(("next",))
             def show_singer_start(self, *_args): calls.append(("start",))
             def show_song_outro(self, *_args): calls.append(("outro",))
-            def hide_transition(self): pass
+            def hide_transition(self, immediate=False): pass
 
         area = mod.VideoAreaWidget()
         self.addCleanup(area.close)

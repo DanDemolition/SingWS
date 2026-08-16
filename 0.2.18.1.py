@@ -1814,6 +1814,7 @@ TRACKS_PATH = APP_USER_DIR / "tracks.json"
 SINGER_PREFS_PATH = APP_USER_DIR / "singer_preferences.json"
 SINGER_HISTORY_PATH = APP_USER_DIR / "singer_history.json"
 REMOTE_REQUEST_TOMBSTONES_PATH = APP_USER_DIR / "remote_request_tombstones.json"
+WAITLIST_REMOVED_TONIGHT_PATH = APP_USER_DIR / "waitlist_removed_tonight.json"
 DEFERRED_REMOTE_ADDS_PATH = APP_USER_DIR / "deferred_remote_adds.json"
 HOST_REQUEST_SYNC_PATH = APP_USER_DIR / "host_request_sync.json"
 IMAGES_DIR = APP_USER_DIR / "images"
@@ -1963,12 +1964,16 @@ def loudness_info_cached(audio_path: str):
             peak_db = float(entry.get("peak_db"))
     except Exception:
         peak_db = None
+    mode = "fast" if entry.get("mode") == "fast" else "full"
     gain_db = _loudness_gain_from_lufs(lufs, peak_db)
+    if mode == "fast":
+        gain_db = min(0.0, gain_db)
     return {
         "lufs": lufs,
         "peak_db": peak_db,
         "gain_db": gain_db,
         "gain_linear": 10.0 ** (float(gain_db) / 20.0),
+        "mode": mode,
     }
 
 
@@ -1987,12 +1992,15 @@ def loudness_gain_db_cached(audio_path: str):
     try:
         peak_db = entry.get("peak_db")
         peak = float(peak_db) if peak_db is not None else None
-        return _loudness_gain_from_lufs(float(entry["i"]), peak)
+        gain = _loudness_gain_from_lufs(float(entry["i"]), peak)
+        # A representative sample cannot prove that a positive boost is safe
+        # across the unmeasured parts of the song.
+        return min(0.0, gain) if entry.get("mode") == "fast" else gain
     except Exception:
         return None
 
 
-def _measure_loudness_lufs(audio_path: str, cancel_check=None):
+def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full"):
     """Measure integrated loudness (LUFS) and sample peak via bundled libmpv.
 
     Returns (integrated_lufs, max_peak_db) or (None, None).  The measured peak
@@ -2005,10 +2013,18 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None):
         except Exception:
             pass
     try:
-        from libmpv_media_jobs import measure_loudness_lufs
-        result = measure_loudness_lufs(audio_path, timeout=120.0)
+        from libmpv_media_jobs import measure_loudness_fast_lufs, measure_loudness_lufs
+        if mode == "fast":
+            # Five sections avoid basing the estimate on one unusually quiet
+            # intro/verse while still decoding only one minute in total.
+            result = measure_loudness_fast_lufs(audio_path, timeout=120.0)
+        else:
+            result = measure_loudness_lufs(audio_path, timeout=120.0)
     except Exception as exc:
-        _diag(f"[LOUDNESS] bundled libmpv analysis failed: {exc}")
+        _diag(
+            f"[LOUDNESS] analysis failed file={os.path.basename(str(audio_path))!r} "
+            f"reason={exc}"
+        )
         return None, None
     if cancel_check is not None:
         try:
@@ -6405,7 +6421,11 @@ class NativeLyricsBackgroundVideoPlayer(QObject):
             if self._poll_count % 8 == 0:
                 position = int(getattr(self.plugin, "backgroundVideoPositionMs", lambda: 0)())
                 paused = bool(getattr(self.plugin, "backgroundVideoPaused", lambda: False)())
-                _diag(f"[BG-VIDEO] clock position_ms={position} paused={int(paused)}")
+                # Keep the frequent EOS check, but sample the healthy clock.
+                # Logging it every poll group produced tens of thousands of
+                # lines per show and hid the faults this diagnostic exists for.
+                if self._poll_count % 240 == 0:
+                    _diag(f"[BG-VIDEO] clock position_ms={position} paused={int(paused)}")
                 if self.plugin.backgroundVideoAtEnd():
                     # The bridge snapshots the outgoing final frame before this
                     # one decoder loads its replacement. Keep that frame fully
@@ -6518,11 +6538,35 @@ Rectangle {
         songOutroSequence.restart()
     }
 
-    function hideTransition() {
+    function hideTransition(immediate) {
         countdownTimer.stop()
         singerCountdownTimer.stop()
+        // Every transition below writes to one or more of the shared layers.
+        // Stopping only the timers lets an in-flight singer/outro animation
+        // restore opacity after the exit has hidden it, leaving a name card
+        // stuck until the Quick surface is recreated.
+        nextUpEntrance.stop()
+        countdownHit.stop()
+        startCountdownEntrance.stop()
+        countdownNumberHit.stop()
+        singerStartSequence.stop()
+        songOutroSequence.stop()
+        overlayExit.stop()
         startCountdownActive = false
-        if (active) overlayExit.restart()
+        if (immediate) {
+            nextPanel.opacity = 0
+            nowPanel.opacity = 0
+            outroPanel.opacity = 0
+            startCountdownStage.opacity = 0
+            countdownNumber.opacity = 0
+            countdownRing.opacity = 0
+            backdrop.opacity = 0
+            flash.opacity = 0
+            shockwave.opacity = 0
+            active = false
+        } else if (active) {
+            overlayExit.restart()
+        }
     }
 
     Timer {
@@ -7088,6 +7132,12 @@ Rectangle {
             OpacityAnimator { target: nextPanel; from: nextPanel.opacity; to: 0.0; duration: 200; easing.type: Easing.InCubic }
             ScaleAnimator { target: nextPanel; from: nextPanel.scale; to: 1.06; duration: 200; easing.type: Easing.InCubic }
             OpacityAnimator { target: nowPanel; from: nowPanel.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
+            OpacityAnimator { target: outroPanel; from: outroPanel.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
+            OpacityAnimator { target: startCountdownStage; from: startCountdownStage.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
+            OpacityAnimator { target: countdownNumber; from: countdownNumber.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
+            OpacityAnimator { target: countdownRing; from: countdownRing.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
+            OpacityAnimator { target: flash; from: flash.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
+            OpacityAnimator { target: shockwave; from: shockwave.opacity; to: 0.0; duration: 180; easing.type: Easing.InCubic }
             OpacityAnimator { target: backdrop; from: backdrop.opacity; to: 0.0; duration: 240; easing.type: Easing.InCubic }
         }
         ScriptAction { script: root.active = false }
@@ -7166,8 +7216,8 @@ class RenderThreadShowScreenVfx(QFrame):
         self._root.showSongOutro(str(singer or ""), str(title or ""), str(artist or ""))
         self.raise_()
 
-    def hide_transition(self):
-        self._root.hideTransition()
+    def hide_transition(self, immediate: bool = False):
+        self._root.hideTransition(bool(immediate))
 
     def set_enabled(self, enabled):
         enabled = bool(enabled)
@@ -7664,7 +7714,7 @@ class VideoAreaWidget(QWidget):
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is not None:
             try:
-                overlay.hide_transition()
+                overlay.hide_transition(immediate=bool(immediate))
             except Exception:
                 pass
         if immediate or not self._next_up_overlay_payload:
@@ -9706,6 +9756,7 @@ class BackgroundMusicManager(QMainWindow):
             "queue": state.get("queue", []),
             "waiting_for_add_requests": state.get("_waiting_for_add_requests", {}),
             "waiting_for_add_handled_ids": state.get("_waiting_for_add_handled_ids", set()),
+            "waiting_for_add_removed_tonight": state.get("_waiting_for_add_removed_tonight", {}),
             "remote_attention_requests": state.get("_remote_attention_requests", {}),
             "remote_request_tombstones": state.get("_remote_request_tombstones", {"requests": {}}),
             "remote_removed_request_ids": state.get("_remote_removed_request_ids", set()),
@@ -9774,6 +9825,7 @@ class BackgroundMusicManager(QMainWindow):
             self.queue = snapshot.get("queue", [])
             self._waiting_for_add_requests = snapshot.get("waiting_for_add_requests", {})
             self._waiting_for_add_handled_ids = set(snapshot.get("waiting_for_add_handled_ids", set()))
+            self._waiting_for_add_removed_tonight = snapshot.get("waiting_for_add_removed_tonight", {})
             self._remote_attention_requests = snapshot.get("remote_attention_requests", {})
             self._remote_request_tombstones = snapshot.get("remote_request_tombstones", {"requests": {}})
             self._remote_removed_request_ids = set(snapshot.get("remote_removed_request_ids", set()))
@@ -9785,6 +9837,7 @@ class BackgroundMusicManager(QMainWindow):
             ) + 1
             self.save_data()
             self._save_remote_request_tombstones(self._remote_request_tombstones)
+            self._save_waitlist_removed_tonight()
             self.update_queue_display()
             try:
                 self._schedule_waiting_for_add_view_refresh(reason="undo")
@@ -12291,6 +12344,11 @@ def _build_library_scan_result(
             _normalize_scanned_library_path(t.get("path")): dict(t)
             for t in old_tracks if isinstance(t, dict) and t.get("path")
         }
+        # Purge AppleDouble/resource-fork entries admitted by older scans,
+        # including the less common ". filename" form.
+        for path in list(tracks_by_path):
+            if os.path.basename(path).startswith("."):
+                tracks_by_path.pop(path, None)
         under_root_paths = {p for p in tracks_by_path if _is_under_any_root(p)}
         known_dirs = set(_normalize_scanned_library_path(r) for r in roots)
         for path in under_root_paths:
@@ -12387,7 +12445,7 @@ def _build_library_scan_result(
                     lower = name.lower()
                 except Exception:
                     continue
-                if name.startswith("._") or lower.endswith(".ds_store"):
+                if name.startswith("."):
                     continue
                 try:
                     if entry.is_dir(follow_symlinks=False):
@@ -12484,7 +12542,7 @@ def _build_library_scan_result(
                         check_cancelled()
                     lower = name.lower()
                     full_path = _normalize_scanned_library_path(os.path.join(root, name))
-                    if name.startswith("._") or lower.endswith(".ds_store"):
+                    if name.startswith("."):
                         continue
                     if full_path in seen:
                         continue
@@ -13371,6 +13429,40 @@ class _BpmDetectWorker(QObject):
         self.done.emit(bpm)
 
 
+def _extract_mp3_for_loudness(zip_path: str) -> str:
+    """Extract only the MP3 member needed by offline loudness analysis.
+
+    The returned temporary file is owned by the caller.  Streaming the member
+    avoids holding a full MP3 in Python memory and deliberately ignores the CDG
+    payload, which the audio measurement does not consume.
+    """
+    output = ""
+    try:
+        try:
+            archive = zipfile.ZipFile(zip_path, "r")
+        except UnicodeDecodeError:
+            archive = zipfile.ZipFile(zip_path, "r", metadata_encoding="cp437")
+        with archive:
+            members = [
+                info for info in archive.infolist()
+                if not info.is_dir() and info.filename.lower().endswith(".mp3")
+            ]
+            if len(members) != 1:
+                return ""
+            fd, output = tempfile.mkstemp(prefix="singws-loudness-zip-", suffix=".mp3")
+            os.close(fd)
+            with archive.open(members[0], "r") as source, open(output, "wb") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+        return output
+    except Exception:
+        if output:
+            try:
+                os.unlink(output)
+            except OSError:
+                pass
+        return ""
+
+
 class AnalyzeLibraryWorker(QObject):
     """Batch loudness/gain analysis for karaoke + BGM, off the UI thread.
 
@@ -13381,10 +13473,11 @@ class AnalyzeLibraryWorker(QObject):
     progress = pyqtSignal(int, int, str)   # done, total, current name
     finished = pyqtSignal(int, int)        # analyzed, total
 
-    def __init__(self, items):
+    def __init__(self, items, mode: str = "full"):
         super().__init__()
         # items: list of (primary_path, audio_path, display_name)
         self.items = list(items or [])
+        self.mode = "fast" if mode == "fast" else "full"
         self._cancel = False
         self._cancel_event = threading.Event()
 
@@ -13399,42 +13492,66 @@ class AnalyzeLibraryWorker(QObject):
         total = len(self.items)
         done = 0
         analyzed = 0
-        for _source, audio, name in self.items:
+        failed = 0
+        for item in self.items:
             if self.is_cancelled():
                 break
+            _source, audio, name = item[:3]
+            cache_key = str(item[3] if len(item) > 3 else audio or "")
             done += 1
             self.progress.emit(done, total, str(name or ""))
+            extracted_audio = ""
             try:
                 audio = str(audio or "")
-                sig = _loudness_file_sig(audio)
+                if audio.lower().endswith(".zip"):
+                    extracted_audio = _extract_mp3_for_loudness(audio)
+                    if not extracted_audio:
+                        raise RuntimeError("ZIP does not contain exactly one readable MP3")
+                    audio = extracted_audio
+                sig = _loudness_file_sig(cache_key)
                 with _loudness_sem:
-                    lufs, peak_db = _measure_loudness_lufs(audio, cancel_check=self.is_cancelled)
+                    lufs, peak_db = _measure_loudness_lufs(
+                        audio, cancel_check=self.is_cancelled, mode=self.mode)
                 if self.is_cancelled():
                     break
                 if lufs is not None and sig is not None:
                     with _loudness_lock:
-                        _loudness_cache[audio] = {
+                        _loudness_cache[cache_key] = {
                             "i": float(lufs),
                             "peak_db": peak_db,
                             "mtime": sig[0],
                             "size": sig[1],
+                            "mode": self.mode,
                         }
                     _loudness_save_cache(force=False)
                     analyzed += 1
                     try:
                         _diag(
                             f"[LOUDNESS-LIB] {os.path.basename(audio)} "
-                            f"I={float(lufs):.1f} LUFS "
+                            f"mode={self.mode} I={float(lufs):.1f} LUFS "
                             f"gain={_loudness_gain_from_lufs(lufs, peak_db):+.1f}dB"
                         )
                     except Exception:
                         pass
+                else:
+                    failed += 1
             except Exception as e:
+                failed += 1
                 try:
                     _diag(f"[ANALYZE-LIB] failed for {name}: {e}")
                 except Exception:
                     pass
+            finally:
+                if extracted_audio:
+                    try:
+                        os.unlink(extracted_audio)
+                    except OSError:
+                        pass
         _loudness_save_cache()
+        _diag(
+            f"[LOUDNESS-LIB] pass_complete mode={self.mode} attempted={done} "
+            f"cached={analyzed} failed={failed} cancelled={int(self.is_cancelled())}"
+        )
         self.finished.emit(analyzed, total)
 
 
@@ -14324,6 +14441,19 @@ class ZipCache:
                 return None, None
             entry['last_used'] = datetime.now()
             return entry.get('cdg_path'), entry.get('mp3_path')
+
+    def archive_for_extracted_path(self, extracted_path):
+        """Return the stable source ZIP for a currently cached temp member."""
+        wanted = os.path.abspath(str(extracted_path or ""))
+        if not wanted:
+            return ""
+        with self.lock:
+            for zip_path, entry in self.cache.items():
+                for key in ('cdg_path', 'mp3_path'):
+                    candidate = str(entry.get(key) or "")
+                    if candidate and os.path.abspath(candidate) == wanted:
+                        return str(zip_path)
+        return ""
     
     def _extract_zip(self, zip_path):
         """Extract CDG and MP3 from zip file"""
@@ -20500,6 +20630,8 @@ class KaraokeApp(QWidget):
         self.bottom_settings_button.clicked.connect(self.configure_settings)
         self._waiting_for_add_requests = {}
         self._waiting_for_add_handled_ids = set()
+        self._waiting_for_add_show_removed = False
+        self._waiting_for_add_removed_tonight = self._load_waitlist_removed_tonight()
         # Session map of retired singer-name keys -> surviving singer name,
         # written by rename-merges so later syncs/accepts can't resurrect a
         # duplicate singer under the old name.
@@ -20909,6 +21041,17 @@ class KaraokeApp(QWidget):
         try:
             if self._karaoke_normalize_active(master_active=master_enabled) and audio_path:
                 gain = loudness_gain_db_cached(audio_path)
+                if gain is None:
+                    # MP3+G playback uses a temporary extracted MP3 whose name
+                    # changes between sessions. Batch analysis is therefore
+                    # keyed by the stable ZIP; resolve the current temp member
+                    # back to that archive before scheduling duplicate work.
+                    try:
+                        archive = self.zip_cache.archive_for_extracted_path(audio_path)
+                    except Exception:
+                        archive = ""
+                    if archive:
+                        gain = loudness_gain_db_cached(archive)
                 if gain is None:
                     analyze_loudness_async(audio_path)
                 else:
@@ -26821,12 +26964,15 @@ class KaraokeApp(QWidget):
         logs_btn = QPushButton("Logs")
         logs_btn.setToolTip(f"Open logs folder: {LOGS_DIR}")
 
-        analyze_lib_btn = QPushButton("Cache Loudness Levels")
-        analyze_lib_btn.setToolTip("Measures LUFS/peak for karaoke and background-music files so normalization can apply a cached gain on future playback. Incremental — skips files already cached.")
-        analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False))
+        fast_analyze_lib_btn = QPushButton("Fast Loudness Scan")
+        fast_analyze_lib_btn.setToolTip("Quickly samples one minute per uncached track. Fast results safely attenuate loud tracks and can later be upgraded by Full Loudness Scan.")
+        fast_analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False, mode="fast"))
+        analyze_lib_btn = QPushButton("Full Loudness Scan")
+        analyze_lib_btn.setToolTip("Measures each complete track. Incremental — skips full results and upgrades tracks that only have a fast result.")
+        analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False, mode="full"))
         reanalyze_lib_btn = QPushButton("Rebuild Loudness Cache")
         reanalyze_lib_btn.setToolTip("Force a fresh LUFS/peak measurement for karaoke and background-music files.")
-        reanalyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=True))
+        reanalyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=True, mode="full"))
 
         _search_actions_card = _section_card(tab_search, "Library Tools")
         _search_actions = QHBoxLayout()
@@ -26835,6 +26981,7 @@ class KaraokeApp(QWidget):
         _search_actions.addStretch(1)
         _search_actions_card.addLayout(_search_actions)
         _analyze_row = QHBoxLayout()
+        _analyze_row.addWidget(fast_analyze_lib_btn)
         _analyze_row.addWidget(analyze_lib_btn)
         _analyze_row.addWidget(reanalyze_lib_btn)
         _analyze_row.addStretch(1)
@@ -28886,6 +29033,14 @@ class KaraokeApp(QWidget):
         self.waiting_for_add_waitlist_toggle.setMinimumHeight(38)
         self.waiting_for_add_waitlist_toggle.clicked.connect(self._toggle_waitlist_enabled_from_waiting_page)
         toggle_row.addWidget(self.waiting_for_add_waitlist_toggle)
+        self.waiting_for_add_removed_toggle = QPushButton("Removed Tonight (0)")
+        self.waiting_for_add_removed_toggle.setCheckable(True)
+        self.waiting_for_add_removed_toggle.setMinimumHeight(38)
+        self.waiting_for_add_removed_toggle.setToolTip(
+            "Show waitlist songs removed during this show and restore accidental removals"
+        )
+        self.waiting_for_add_removed_toggle.toggled.connect(self._toggle_waiting_for_add_removed_view)
+        toggle_row.addWidget(self.waiting_for_add_removed_toggle)
         toggle_row.addStretch(1)
         shell_layout.addLayout(toggle_row)
         self._refresh_waitlist_toggle_button()
@@ -29245,6 +29400,121 @@ class KaraokeApp(QWidget):
         if state == "waiting":
             return "Waiting for host to add"
         return labels.get(reason, "Waiting for host to add")
+
+    def _waitlist_evening_key(self) -> str:
+        """Group after-midnight removals with the show that started the prior evening."""
+        return (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")
+
+    def _load_waitlist_removed_tonight(self) -> dict:
+        data = _load_json_file(
+            WAITLIST_REMOVED_TONIGHT_PATH, {}, expected_type=dict,
+            label="Waitlist removed tonight",
+        )
+        tenant = str(getattr(self, "settings", {}).get("user") or getattr(self, "settings", {}).get("tenant") or "")
+        if data.get("evening") != self._waitlist_evening_key() or str(data.get("tenant") or "") != tenant:
+            return {}
+        rows = data.get("requests")
+        if not isinstance(rows, dict):
+            return {}
+        restored = {}
+        for key, req in rows.items():
+            try:
+                rid = int(key)
+            except Exception:
+                continue
+            if rid > 0 and isinstance(req, dict):
+                restored[rid] = dict(req)
+        return restored
+
+    def _save_waitlist_removed_tonight(self) -> None:
+        tenant = str(self.settings.get("user") or self.settings.get("tenant") or "")
+        rows = getattr(self, "_waiting_for_add_removed_tonight", {})
+        try:
+            _save_json_atomic(WAITLIST_REMOVED_TONIGHT_PATH, {
+                "version": 1,
+                "evening": self._waitlist_evening_key(),
+                "tenant": tenant,
+                "requests": rows if isinstance(rows, dict) else {},
+            })
+        except Exception as exc:
+            _diag(f"[WAITING-FOR-ADD] removed-tonight save failed: {exc}")
+
+    def _archive_waitlist_removed_tonight(self, req: dict, *, reason: str) -> None:
+        rid = self._waiting_for_add_request_id(req)
+        if rid <= 0:
+            return
+        rows = getattr(self, "_waiting_for_add_removed_tonight", None)
+        if not isinstance(rows, dict):
+            rows = {}
+            self._waiting_for_add_removed_tonight = rows
+        item = copy.deepcopy(req)
+        item.update({
+            "request_id": rid,
+            "state": "removed",
+            "removed_at": time.time(),
+            "removal_reason": str(reason or "host_remove"),
+            "_removed_tonight": True,
+        })
+        rows[rid] = item
+        self._save_waitlist_removed_tonight()
+
+    def _toggle_waiting_for_add_removed_view(self, checked: bool) -> None:
+        self._waiting_for_add_show_removed = bool(checked)
+        self._schedule_waiting_for_add_view_refresh(reason="removed_tonight_toggle")
+
+    def _restore_selected_waiting_for_add(self) -> None:
+        req = self._selected_waiting_for_add_request()
+        if not isinstance(req, dict) or not req.get("_removed_tonight"):
+            return
+        rid = self._waiting_for_add_request_id(req)
+        if rid <= 0:
+            return
+        restored = copy.deepcopy(req)
+        for key in ("_removed_tonight", "removed_at", "removed_by", "removal_reason", "completed_at"):
+            restored.pop(key, None)
+        restored["state"] = "waiting"
+        restored["pending_status"] = "Restored by host"
+        restored["pending_reason"] = str(restored.get("pending_reason") or "host_restored")
+        self._queue_revision = int(getattr(self, "_queue_revision", 0) or 0) + 1
+        revision = int(self._queue_revision)
+        restored["local_revision"] = revision
+        self._waiting_for_add_requests[rid] = restored
+        self._waiting_for_add_removed_tonight.pop(rid, None)
+        self._waiting_for_add_handled_ids.discard(rid)
+        removed_ids = getattr(self, "_remote_removed_request_ids", None)
+        if isinstance(removed_ids, set):
+            removed_ids.discard(rid)
+        self._drop_remote_request_tombstone(rid, reason="waitlist_restore")
+        self._save_waitlist_removed_tonight()
+        self._restore_waitlist_request_on_server_async(restored, revision)
+        self._schedule_waiting_for_add_view_refresh(reason="restore_removed")
+        self._show_processing_notification("Restored song to tonight's waitlist.", level="success")
+
+    def _restore_waitlist_request_on_server_async(self, req: dict, revision: int) -> None:
+        base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
+        tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        api_key = str(self.settings.get("api_key", "") or "").strip()
+        rid = self._waiting_for_add_request_id(req)
+        if not base_url or not tenant or not api_key or rid <= 0:
+            _diag(f"[WAITING-FOR-ADD] restore pending server sync request_id={rid}")
+            return
+
+        def worker():
+            try:
+                response = requests.post(
+                    f"{base_url}/api/v1/restore_remote_request.php",
+                    data={"user": tenant, "request_id": rid, "local_revision": int(revision)},
+                    headers={"X-API-Key": api_key, "Accept": "application/json"},
+                    timeout=5,
+                )
+                _diag(
+                    f"[WAITING-FOR-ADD] restore server request_id={rid} "
+                    f"ok={int(200 <= response.status_code < 300)} status={response.status_code}"
+                )
+            except Exception as exc:
+                _diag(f"[WAITING-FOR-ADD] restore server failed request_id={rid}: {exc}")
+
+        threading.Thread(target=worker, daemon=True, name="waitlist-restore").start()
 
     def _is_waiting_for_add_request(self, req: dict | None) -> bool:
         if not isinstance(req, dict):
@@ -29677,9 +29947,19 @@ class KaraokeApp(QWidget):
         wait_rows.sort(key=self._waiting_for_add_order_key)
         if wait_rows:
             sections.append({"key": "waitlist", "title": "Waitlist", "rows": wait_rows})
-        # Completed and Removed/Skipped are intentionally not rendered: the view
-        # only shows actionable rows. Terminal removed rows are purged from the
-        # server instead (see _cleanup_terminal_removed_requests).
+        if bool(state.get("_waiting_for_add_show_removed", False)):
+            removed_rows = []
+            removed = state.get("_waiting_for_add_removed_tonight", {})
+            if isinstance(removed, dict):
+                for req in removed.values():
+                    if isinstance(req, dict):
+                        removed_rows.append(self._waiting_for_add_row(req, "removed", selectable=True))
+            removed_rows.sort(
+                key=lambda row: float((row.get("request") or {}).get("removed_at") or 0),
+                reverse=True,
+            )
+            if removed_rows:
+                sections.append({"key": "removed", "title": "Removed Tonight", "rows": removed_rows})
         return sections
 
     def _waiting_for_add_row_text(self, row: dict) -> str:
@@ -30037,6 +30317,11 @@ class KaraokeApp(QWidget):
 
         wait_section = next((s for s in sections if s.get("key") == "waitlist"), {"rows": []})
         count = len(wait_section.get("rows") or [])
+        removed_count = len(state.get("_waiting_for_add_removed_tonight", {}) or {})
+        removed_toggle = state.get("waiting_for_add_removed_toggle")
+        if removed_toggle is not None:
+            removed_toggle.setText(f"Removed Tonight ({removed_count})")
+            removed_toggle.setEnabled(removed_count > 0)
         meta_label = state.get("waiting_for_add_meta_label")
         if meta_label is not None:
             if pending_count and count:
@@ -30106,13 +30391,17 @@ class KaraokeApp(QWidget):
             if waiting_model is None or not index.isValid():
                 return None
             rid = int(waiting_model.requestIdForIndex(index) or 0)
-            return getattr(self, "_waiting_for_add_requests", {}).get(rid)
+            req = getattr(self, "_waiting_for_add_requests", {}).get(rid)
+            if req is None:
+                req = getattr(self, "_waiting_for_add_removed_tonight", {}).get(rid)
+            return req
         except Exception:
             return None
 
     def _on_waiting_for_add_selection_changed(self, *_args):
         req = self._selected_waiting_for_add_request()
         enabled = req is not None
+        is_removed = bool(req and req.get("_removed_tonight"))
         try:
             state = object.__getattribute__(self, "__dict__")
         except Exception:
@@ -30123,11 +30412,12 @@ class KaraokeApp(QWidget):
             clear_button = state.get("waiting_for_add_clear_button")
             clear_all_button = state.get("waiting_for_add_clear_all_button")
             if add_button is not None:
-                add_button.setEnabled(enabled)
+                add_button.setEnabled(enabled and not is_removed)
             if find_button is not None:
-                find_button.setEnabled(enabled)
+                find_button.setEnabled(enabled and not is_removed)
             if clear_button is not None:
                 clear_button.setEnabled(enabled)
+                clear_button.setText("Restore" if is_removed else "Remove")
             if clear_all_button is not None:
                 clear_all_button.setEnabled(self._waiting_for_add_count() > 0)
         except Exception:
@@ -30145,7 +30435,10 @@ class KaraokeApp(QWidget):
         version = self._waiting_for_add_version_text(req)
         duration = self._waiting_for_add_duration_text(req)
         server_received = self._waiting_for_add_server_time_text(req)
-        detail = self._waiting_for_add_reason_text(req)
+        detail = (
+            "Removed tonight — select Restore to return it to the waitlist"
+            if is_removed else self._waiting_for_add_reason_text(req)
+        )
         err = str(req.get("last_error") or req.get("attention_error") or "").strip()
         if err and err != detail:
             detail = f"{detail}. {err}"
@@ -30171,6 +30464,11 @@ class KaraokeApp(QWidget):
             return
         menu = QMenu(self)
         style_app_menu(menu)
+        if req.get("_removed_tonight"):
+            restore_action = menu.addAction("Restore to waitlist")
+            restore_action.triggered.connect(self._restore_selected_waiting_for_add)
+            menu.exec(waiting_list.viewport().mapToGlobal(position))
+            return
         version_action = menu.addAction("Replace with another karaoke version")
         version_action.triggered.connect(lambda: self._find_song_for_selected_waiting_for_add(mode="replace_version"))
         song_action = menu.addAction("Replace with a different song")
@@ -30186,6 +30484,9 @@ class KaraokeApp(QWidget):
     def _add_selected_waiting_for_add(self):
         req = self._selected_waiting_for_add_request()
         if not req:
+            return
+        if req.get("_removed_tonight"):
+            self._restore_selected_waiting_for_add()
             return
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
@@ -30780,10 +31081,14 @@ class KaraokeApp(QWidget):
         req = self._selected_waiting_for_add_request()
         if not req:
             return
+        if req.get("_removed_tonight"):
+            self._restore_selected_waiting_for_add()
+            return
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
         undo = KaraokeApp._begin_undoable_action(self, "Remove Pending Request")
+        self._archive_waitlist_removed_tonight(req, reason="waiting_for_add_cleared")
         try:
             self._waiting_for_add_handled_ids.add(rid)
         except Exception:
@@ -30837,6 +31142,7 @@ class KaraokeApp(QWidget):
             rid = self._waiting_for_add_request_id(req)
             if rid <= 0:
                 continue
+            self._archive_waitlist_removed_tonight(req, reason="waiting_for_add_clear_all")
             handled.add(rid)
             try:
                 self._delete_remote_request(
@@ -32912,18 +33218,43 @@ class KaraokeApp(QWidget):
             _diag(f"[SESSION-LOCATION] sync skipped ({reason}): network not configured")
             return
 
+        # Song completions can arrive close together through playback, queue,
+        # and server reconciliation callbacks.  Only one CoreLocation request
+        # may run at a time; previously each callback started its own ten-second
+        # detector, producing duplicate work and several identical failures in
+        # the same second.
+        state = object.__getattribute__(self, "__dict__")
+        lock = state.get("_session_location_sync_lock")
+        if lock is None:
+            lock = threading.Lock()
+            state["_session_location_sync_lock"] = lock
+        with lock:
+            if bool(state.get("_session_location_sync_inflight", False)):
+                _diag_rate_limited(
+                    "session_location_inflight",
+                    f"[SESSION-LOCATION] sync coalesced ({reason}): detection already running",
+                    60.0,
+                )
+                return
+            state["_session_location_sync_inflight"] = True
+
         def worker():
             try:
                 self.sync_session_location(active=True)
                 _diag(f"[SESSION-LOCATION] sync dispatched ({reason})")
             except Exception as e:
                 _diag(f"[SESSION-LOCATION] sync failed ({reason}): {e}")
+            finally:
+                with lock:
+                    state["_session_location_sync_inflight"] = False
 
         try:
             threading.Thread(
                 target=worker, daemon=True, name=f"singws-location-{reason}"
             ).start()
         except Exception as e:
+            with lock:
+                state["_session_location_sync_inflight"] = False
             _diag(f"[SESSION-LOCATION] sync thread failed ({reason}): {e}")
 
     def _sync_session_location_for_venue(self):
@@ -35385,13 +35716,24 @@ class KaraokeApp(QWidget):
         detected_at = int(self.settings.get("session_location_detected_at", 0) or 0)
 
         if auto_detect and allow_auto_detect:
+            runtime_state = object.__getattribute__(self, "__dict__")
             should_refresh = (
                 lat_raw == "" or lng_raw == "" or
                 (detected_at > 0 and (time.time() - detected_at) >= 300) or detected_at == 0
             )
+            retry_after = float(runtime_state.get("_session_location_retry_after", 0.0) or 0.0)
+            if should_refresh and time.monotonic() < retry_after:
+                should_refresh = False
+                _diag_rate_limited(
+                    "session_location_backoff",
+                    "[SESSION-LOCATION] auto-detect deferred after repeated failure; using saved coordinates",
+                    300.0,
+                )
             if should_refresh:
                 detected, err = self._detect_current_device_location(timeout_sec=10.0)
                 if detected:
+                    runtime_state["_session_location_failure_count"] = 0
+                    runtime_state["_session_location_retry_after"] = 0.0
                     lat_raw = f"{float(detected['latitude']):.6f}"
                     lng_raw = f"{float(detected['longitude']):.6f}"
                     source = str(detected.get("source") or "auto_detected")
@@ -35407,9 +35749,15 @@ class KaraokeApp(QWidget):
                     except Exception:
                         pass
                 elif not lat_raw or not lng_raw:
+                    failures = int(runtime_state.get("_session_location_failure_count", 0) or 0) + 1
+                    runtime_state["_session_location_failure_count"] = failures
+                    runtime_state["_session_location_retry_after"] = time.monotonic() + min(3600.0, 300.0 * (2 ** min(failures - 1, 4)))
                     print(f"[session-location] auto-detect unavailable: {err}")
                     return None
                 else:
+                    failures = int(runtime_state.get("_session_location_failure_count", 0) or 0) + 1
+                    runtime_state["_session_location_failure_count"] = failures
+                    runtime_state["_session_location_retry_after"] = time.monotonic() + min(3600.0, 300.0 * (2 ** min(failures - 1, 4)))
                     source = "manual_fallback"
         try:
             lat = float(lat_raw)
@@ -37127,6 +37475,10 @@ class KaraokeApp(QWidget):
                 area = getattr(state.get(window_name), "video_area", None)
                 if area is not None and hasattr(area, "show_singer_start_vfx"):
                     shown = bool(area.show_singer_start_vfx(singer_display, title, artist)) or shown
+            _diag(
+                f"[SHOW-VFX] singer-start shown={int(shown)} "
+                f"generation={generation!r} singer={str(singer_display or '')!r}"
+            )
             return shown
         except Exception as exc:
             _diag(f"[SHOW-VFX] app singer-start trigger failed: {exc}")
@@ -39269,6 +39621,67 @@ class KaraokeApp(QWidget):
         """Backward-compatible wrapper for older rotation identity call sites."""
         return self._should_preserve_empty_singer_row(singer)
 
+    def _promote_waitlisted_phone_replacement_into_empty_slot(self, req: dict | None) -> bool:
+        """Keep a singer's position when they replace their last song by phone.
+
+        A phone deletion leaves a short-lived empty rotation row. Waitlist mode
+        should still hold genuinely new singers, but a new request belonging to
+        that exact row is a replacement and may fill it without reordering the
+        room.
+        """
+        if not self._is_rotation_mode() or not isinstance(req, dict):
+            return False
+        state = str(req.get("state") or "").strip().lower()
+        if state not in {"waiting", "failed", "failed_needs_review"}:
+            return False
+        singer_name = str(req.get("singer") or "").strip()
+        if not singer_name:
+            return False
+        singer_idx = self._queue_singer_match_index(singer_name, req)
+        if singer_idx < 0:
+            return False
+        try:
+            singer = self.queue[singer_idx]
+        except Exception:
+            return False
+        if singer.get("songs") or not bool(singer.get("temporary_empty_slot", False)):
+            return False
+        if not self._is_server_terminal_empty_slot_reason(singer.get("empty_slot_reason", "")):
+            return False
+        try:
+            if time.time() >= float(singer.get("empty_slot_until") or 0):
+                return False
+        except Exception:
+            return False
+        rid = self._waiting_for_add_request_id(req)
+        try:
+            added = bool(self.process_external_request(dict(req)))
+        except Exception as exc:
+            _diag(f"[ROTATION-SLOT] phone replacement add failed request_id={rid}: {exc}")
+            return False
+        if not added:
+            return False
+        handled = getattr(self, "_waiting_for_add_handled_ids", None)
+        if not isinstance(handled, set):
+            handled = set()
+            self._waiting_for_add_handled_ids = handled
+        if rid > 0:
+            handled.add(rid)
+            try:
+                self._mark_waiting_for_add_delivered_async(rid, req)
+            except Exception:
+                pass
+            pending = getattr(self, "_waiting_for_add_requests", None)
+            if isinstance(pending, dict):
+                pending.pop(rid, None)
+        self._clear_temporary_empty_rotation_slot(singer, reason="phone_replacement_promoted")
+        self._schedule_waiting_for_add_view_refresh(reason="phone_replacement_promoted")
+        _diag(
+            "[ROTATION-SLOT] promoted phone replacement into preserved slot "
+            f"singer={singer_name!r} request_id={rid} singer_idx={singer_idx}"
+        )
+        return True
+
     def _clear_queue_songs_preserving_singers(self, *, reason: str = "host_clear_queue") -> int:
         """Clear queued songs without treating empty song lists as singer deletion."""
         removed = 0
@@ -39944,9 +40357,8 @@ class KaraokeApp(QWidget):
     def _analysis_audio_for_track(self, track):
         """(source, audio_path, display_name) for a karaoke library track.
 
-        CDG measures the paired MP3. ZIPs are skipped because they need
-        extraction first; queued/played ZIP songs still get analyzed through the
-        normal playback loudness path once the audio file exists.
+        CDG measures the paired MP3. ZIPs are measured from a temporary MP3
+        member by AnalyzeLibraryWorker and cached under the stable ZIP path.
         """
         try:
             primary = str(track.get("path") or "")
@@ -39958,6 +40370,8 @@ class KaraokeApp(QWidget):
         if pl.endswith(".cdg"):
             mp3 = os.path.splitext(primary)[0] + ".mp3"
             audio = mp3 if os.path.exists(mp3) else ""
+        elif pl.endswith(".zip"):
+            audio = primary
         elif os.path.splitext(pl)[1] in {".mp4", ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"}:
             audio = primary
         else:
@@ -39965,6 +40379,8 @@ class KaraokeApp(QWidget):
         if not audio:
             return None
         name = str(track.get("display") or track.get("title") or os.path.basename(primary))
+        if pl.endswith(".zip"):
+            return ("Karaoke", audio, name, primary)
         return ("Karaoke", audio, name)
 
     def _bgm_analysis_items(self) -> list[tuple[str, str, str]]:
@@ -40028,7 +40444,7 @@ class KaraokeApp(QWidget):
             items.append(("BGM", path, os.path.basename(path)))
         return items
 
-    def _library_loudness_analysis_items(self, force: bool = False):
+    def _library_loudness_analysis_items(self, force: bool = False, mode: str = "full"):
         """Return deduped karaoke+BGM audio files that need loudness analysis."""
         if not self._any_loudness_normalization_active():
             _diag("[LOUDNESS-LIB] item_scan_skipped reason=normalization_disabled")
@@ -40049,7 +40465,9 @@ class KaraokeApp(QWidget):
 
         seen = set()
         items = []
-        for source, audio, name in raw_items:
+        for item in raw_items:
+            source, audio, name = item[:3]
+            cache_key = str(item[3] if len(item) > 3 else audio or "")
             audio = str(audio or "")
             if not audio or not os.path.exists(audio):
                 continue
@@ -40057,14 +40475,19 @@ class KaraokeApp(QWidget):
             if key in seen:
                 continue
             seen.add(key)
-            if not force and loudness_gain_db_cached(audio) is not None:
-                continue
+            if not force:
+                cached_gain = loudness_gain_db_cached(cache_key)
+                if cached_gain is not None:
+                    cached = loudness_info_cached(cache_key) or {"mode": "full"}
+                    if mode == "fast" or cached.get("mode") == "full":
+                        continue
             label = f"{source}: {name or os.path.basename(audio)}"
-            items.append((source, audio, label))
+            items.append((source, audio, label, cache_key) if len(item) > 3 else (source, audio, label))
         return items
 
-    def analyze_library(self, force: bool = False):
+    def analyze_library(self, force: bool = False, mode: str = "full"):
         """Analyze static loudness/gain for karaoke and BGM libraries."""
+        mode = "fast" if mode == "fast" else "full"
         from PyQt6.QtWidgets import QProgressDialog
         if not self._any_loudness_normalization_active():
             _diag("[LOUDNESS-LIB] skipped reason=normalization_disabled")
@@ -40085,11 +40508,13 @@ class KaraokeApp(QWidget):
                 pass
             return
         tracks = list(getattr(self, "tracks", []) or [])
-        items = self._library_loudness_analysis_items(force=force)
+        items = self._library_loudness_analysis_items(force=force, mode=mode)
 
         if not items:
             QMessageBox.information(self, "Cache Loudness Levels",
-                                    "Nothing to measure — library loudness is already cached."
+                                    ("Nothing to measure — every track already has a loudness result."
+                                     if mode == "fast" else
+                                     "Nothing to measure — every track already has a full loudness result.")
                                     if tracks or self._bgm_analysis_items()
                                     else "No karaoke or background-music tracks found. Scan karaoke or add BGM first.")
             return
@@ -40102,8 +40527,9 @@ class KaraokeApp(QWidget):
             _prog_parent = QApplication.activeModalWidget()
         except Exception:
             _prog_parent = None
-        dlg = QProgressDialog(f"Measuring loudness for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
-        dlg.setWindowTitle("Cache Loudness Levels")
+        scan_name = "Fast" if mode == "fast" else "Full"
+        dlg = QProgressDialog(f"{scan_name} loudness scan for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
+        dlg.setWindowTitle(f"{scan_name} Loudness Scan")
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(True)
         dlg.setAutoReset(True)
@@ -40124,14 +40550,14 @@ class KaraokeApp(QWidget):
             pass
 
         thread = QThread(self)
-        worker = AnalyzeLibraryWorker(items)
+        worker = AnalyzeLibraryWorker(items, mode=mode)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
 
         def _on_progress(done, total, name):
             try:
                 dlg.setValue(done - 1)
-                dlg.setLabelText(f"Measuring loudness {done}/{total}…\n{name}")
+                dlg.setLabelText(f"{scan_name} loudness scan {done}/{total}…\n{name}")
             except Exception:
                 pass
 
@@ -40147,9 +40573,9 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             if cancelled:
-                self._set_processing_text(f"Cancelled loudness cache rebuild after {analyzed} of {total} track(s).")
+                self._set_processing_text(f"Cancelled {scan_name.lower()} loudness scan after {analyzed} of {total} track(s).")
             else:
-                self._set_processing_text(f"Cached loudness levels for {analyzed} of {total} track(s).")
+                self._set_processing_text(f"{scan_name} loudness scan cached {analyzed} of {total} track(s).")
 
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
@@ -44185,6 +44611,9 @@ class KaraokeApp(QWidget):
                 baseline_ns = 0
 
             tracks_by_path = {str(t.get("path") or ""): dict(t) for t in old_tracks if isinstance(t, dict) and t.get("path")}
+            for path in list(tracks_by_path):
+                if os.path.basename(path).startswith("."):
+                    tracks_by_path.pop(path, None)
             under_root_paths = {p for p in tracks_by_path if _is_under_any_root(p)}
             known_dirs = set(os.path.abspath(r) for r in roots)
             for path in under_root_paths:
@@ -44251,7 +44680,7 @@ class KaraokeApp(QWidget):
                         lower = name.lower()
                     except Exception:
                         continue
-                    if name.startswith("._") or lower.endswith(".ds_store"):
+                    if name.startswith("."):
                         continue
                     try:
                         if entry.is_dir(follow_symlinks=False):
@@ -44338,7 +44767,7 @@ class KaraokeApp(QWidget):
                         files_seen += 1
                         lower = name.lower()
                         full_path = os.path.join(root, name)
-                        if name.startswith("._") or lower.endswith(".ds_store"):
+                        if name.startswith("."):
                             continue
                         if full_path in seen:
                             continue
@@ -51877,7 +52306,13 @@ class KaraokeApp(QWidget):
             try:
                 requests.post(
                     f"{base_url}/api/v1/delete_remote_request.php",
-                    data={"user": tenant, "request_id": request_id},
+                    data={
+                        "user": tenant,
+                        "request_id": request_id,
+                        "removed_by": "host",
+                        "removal_reason": reason,
+                        "local_revision": (tombstone or {}).get("local_revision", ""),
+                    },
                     headers=headers,
                     timeout=5,
                 )
@@ -52690,6 +53125,9 @@ class KaraokeApp(QWidget):
                         pass
                 continue
             if self._is_waiting_for_add_request(req):
+                if self._promote_waitlisted_phone_replacement_into_empty_slot(req):
+                    local_remote_ids.add(request_id)
+                    continue
                 hold_reason = str(req.get("pending_reason") or req.get("attention_reason") or "")
                 if (request_id, state, hold_reason) not in logged_holding:
                     logged_holding.add((request_id, state, hold_reason))

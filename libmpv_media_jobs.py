@@ -11,6 +11,7 @@ import ctypes
 import locale
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -21,6 +22,7 @@ import numpy as np
 
 MPV_EVENT_NONE = 0
 MPV_EVENT_SHUTDOWN = 1
+MPV_EVENT_LOG_MESSAGE = 2
 MPV_EVENT_END_FILE = 7
 
 
@@ -30,6 +32,15 @@ class _MpvEvent(ctypes.Structure):
         ("error", ctypes.c_int),
         ("reply_userdata", ctypes.c_uint64),
         ("data", ctypes.c_void_p),
+    ]
+
+
+class _MpvLogMessage(ctypes.Structure):
+    _fields_ = [
+        ("prefix", ctypes.c_char_p),
+        ("level", ctypes.c_char_p),
+        ("text", ctypes.c_char_p),
+        ("log_level", ctypes.c_int),
     ]
 
 
@@ -63,6 +74,7 @@ class OfflineMpvJob:
         self.lib.mpv_command.restype = ctypes.c_int
         self.lib.mpv_wait_event.argtypes = [ctypes.c_void_p, ctypes.c_double]
         self.lib.mpv_wait_event.restype = ctypes.POINTER(_MpvEvent)
+        self.lib.mpv_request_log_messages.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         self.lib.mpv_terminate_destroy.argtypes = [ctypes.c_void_p]
         self.handle = self.lib.mpv_create()
         if not self.handle:
@@ -85,7 +97,10 @@ class OfflineMpvJob:
         if self.lib.mpv_command(self.handle, argv) < 0:
             raise RuntimeError(f"libmpv command failed: {parts[0]}")
 
-    def wait_for_end(self, timeout: float):
+    def request_log_messages(self, level: str):
+        self.lib.mpv_request_log_messages(self.handle, os.fsencode(level))
+
+    def wait_for_end(self, timeout: float, log_messages: list[str] | None = None):
         deadline = time.monotonic() + max(1.0, float(timeout))
         while time.monotonic() < deadline:
             event = self.lib.mpv_wait_event(self.handle, min(0.25, deadline - time.monotonic()))
@@ -95,6 +110,12 @@ class OfflineMpvJob:
                 if event.contents.error < 0:
                     raise RuntimeError(f"libmpv decode ended with error {event.contents.error}")
                 return
+            if event.contents.event_id == MPV_EVENT_LOG_MESSAGE and log_messages is not None:
+                message = ctypes.cast(
+                    event.contents.data, ctypes.POINTER(_MpvLogMessage)
+                ).contents
+                if message.text:
+                    log_messages.append(message.text.decode("utf-8", "replace"))
             if event.contents.event_id == MPV_EVENT_SHUTDOWN:
                 raise RuntimeError("libmpv shut down before decode completed")
         raise TimeoutError("libmpv offline decode timed out")
@@ -156,60 +177,170 @@ def decode_audio_wav(
         job.close()
 
 
-def measure_loudness_lufs(source: str, *, timeout: float = 120.0):
-    """Return BS.1770-style integrated LUFS and sample peak dBFS.
+def _measure_wav_lufs(rendered: str):
+    """Measure a 48 kHz PCM WAV with bounded memory.
 
-    libmpv performs only the decode/resample.  The weighting and two-stage
-    gating are deterministic numpy/scipy work over the temporary PCM WAV.
+    Library scans can process many thousands of full-length songs.  Reading a
+    whole WAV and making several float64/filter copies leaves very large NumPy
+    arenas resident after every song.  Stream the K weighting instead and keep
+    only the overlap needed for the 400 ms / 100 ms BS.1770 blocks.
     """
     from scipy.signal import lfilter
 
-    rendered = decode_audio_wav(
-        source, sample_rate=48000, channels=2, timeout=timeout)
-    try:
-        with wave.open(rendered, "rb") as handle:
-            channels = handle.getnchannels()
-            rate = handle.getframerate()
-            raw = handle.readframes(handle.getnframes())
-        if rate != 48000 or channels not in (1, 2) or not raw:
+    with wave.open(rendered, "rb") as handle:
+        channels = handle.getnchannels()
+        rate = handle.getframerate()
+        if rate != 48000 or channels not in (1, 2) or handle.getsampwidth() != 2:
             return None, None
-        samples = np.frombuffer(raw, dtype="<i2").astype(np.float64) / 32768.0
-        samples = samples.reshape(-1, channels)
-        peak = float(np.max(np.abs(samples)))
-        peak_db = 20.0 * np.log10(max(peak, 1e-12))
-
-        # ITU-R BS.1770 K weighting at 48 kHz: pre-filter shelf followed by
-        # the revised low-frequency RLB high-pass stage.
-        weighted = lfilter(
-            [1.53512485958697, -2.69169618940638, 1.19839281085285],
-            [1.0, -1.69065929318241, 0.73248077421585], samples, axis=0)
-        weighted = lfilter(
-            [1.0, -2.0, 1.0],
-            [1.0, -1.99004745483398, 0.99007225036621], weighted, axis=0)
 
         block = int(rate * 0.400)
         hop = int(block * 0.25)
-        if weighted.shape[0] < block:
-            return None, peak_db
+        shelf_b = [1.53512485958697, -2.69169618940638, 1.19839281085285]
+        shelf_a = [1.0, -1.69065929318241, 0.73248077421585]
+        rlb_b = [1.0, -2.0, 1.0]
+        rlb_a = [1.0, -1.99004745483398, 0.99007225036621]
+        shelf_state = np.zeros((2, channels), dtype=np.float64)
+        rlb_state = np.zeros((2, channels), dtype=np.float64)
+        pending = np.empty((0, channels), dtype=np.float64)
         energies = []
-        for start in range(0, weighted.shape[0] - block + 1, hop):
-            segment = weighted[start:start + block]
-            energies.append(float(np.sum(np.mean(segment * segment, axis=0))))
-        energies = np.asarray(energies, dtype=np.float64)
-        block_lufs = -0.691 + 10.0 * np.log10(np.maximum(energies, 1e-15))
-        absolute = energies[block_lufs >= -70.0]
-        if absolute.size == 0:
-            return None, peak_db
-        ungated_lufs = -0.691 + 10.0 * np.log10(float(np.mean(absolute)))
-        gated = energies[(block_lufs >= -70.0) & (block_lufs >= ungated_lufs - 10.0)]
-        if gated.size == 0:
-            return None, peak_db
-        integrated = -0.691 + 10.0 * np.log10(float(np.mean(gated)))
-        if not (-70.0 <= integrated <= 0.0):
-            return None, peak_db
-        return float(integrated), float(peak_db)
+        peak = 0.0
+
+        while True:
+            raw = handle.readframes(65536)
+            if not raw:
+                break
+            samples = np.frombuffer(raw, dtype="<i2").reshape(-1, channels)
+            peak = max(peak, float(np.max(np.abs(samples.astype(np.int32)))))
+            floating = samples.astype(np.float64) / 32768.0
+            weighted, shelf_state = lfilter(
+                shelf_b, shelf_a, floating, axis=0, zi=shelf_state)
+            weighted, rlb_state = lfilter(
+                rlb_b, rlb_a, weighted, axis=0, zi=rlb_state)
+            pending = np.concatenate((pending, weighted), axis=0)
+            while pending.shape[0] >= block:
+                segment = pending[:block]
+                energies.append(float(np.sum(np.mean(segment * segment, axis=0))))
+                pending = pending[hop:]
+
+    peak_db = 20.0 * np.log10(max(peak / 32768.0, 1e-12))
+    if not energies:
+        return None, float(peak_db)
+    energies = np.asarray(energies, dtype=np.float64)
+    block_lufs = -0.691 + 10.0 * np.log10(np.maximum(energies, 1e-15))
+    absolute = energies[block_lufs >= -70.0]
+    if absolute.size == 0:
+        return None, float(peak_db)
+    ungated_lufs = -0.691 + 10.0 * np.log10(float(np.mean(absolute)))
+    gated = energies[(block_lufs >= -70.0) & (block_lufs >= ungated_lufs - 10.0)]
+    if gated.size == 0:
+        return None, float(peak_db)
+    integrated = -0.691 + 10.0 * np.log10(float(np.mean(gated)))
+    if not (-70.0 <= integrated <= 0.0):
+        return None, float(peak_db)
+    return float(integrated), float(peak_db)
+
+
+def _measure_loudness_lavfi(
+    source: str,
+    *,
+    timeout: float = 120.0,
+    start_seconds: float | None = None,
+    duration_seconds: float | None = None,
+):
+    """Measure directly in libavfilter without creating an intermediate WAV."""
+    job = OfflineMpvJob()
+    messages: list[str] = []
+    try:
+        job.option("config", "no")
+        job.option("vid", "no")
+        job.option("ao", "null")
+        job.option("ao-null-untimed", "yes")
+        job.option("untimed", "yes")
+        job.option("af", "lavfi=[ebur128=peak=sample:framelog=verbose]")
+        if start_seconds is not None:
+            job.option("start", f"{max(0.0, float(start_seconds)):.6f}")
+        if duration_seconds is not None:
+            job.option("length", f"{max(0.01, float(duration_seconds)):.6f}")
+        job.initialize()
+        # libavfilter's informational output is exposed at mpv's verbose level.
+        job.request_log_messages("v")
+        job.command("loadfile", str(source), "replace")
+        job.wait_for_end(timeout, messages)
+    finally:
+        job.close()
+
+    output = "\n".join(messages)
+    integrated = re.findall(r"\bI:\s*(-?\d+(?:\.\d+)?)\s+LUFS", output)
+    peaks = re.findall(r"\bPeak:\s*(-?\d+(?:\.\d+)?)\s+dBFS", output)
+    if not integrated:
+        raise RuntimeError("libmpv ebur128 produced no integrated loudness")
+    lufs = float(integrated[-1])
+    peak_db = float(peaks[-1]) if peaks else None
+    if not (-70.0 <= lufs <= 0.0):
+        return None, peak_db
+    return lufs, peak_db
+
+
+def measure_loudness_lufs(
+    source: str,
+    *,
+    timeout: float = 120.0,
+    start_seconds: float | None = None,
+    duration_seconds: float | None = None,
+):
+    """Return BS.1770 integrated LUFS and sample peak dBFS.
+
+    Prefer libavfilter's native ebur128 implementation so the decoded audio
+    stays in memory.  Retain the bounded-memory WAV analyzer for compatibility
+    with older bundled libmpv builds.
+    """
+    native_error = None
+    try:
+        return _measure_loudness_lavfi(
+            source,
+            timeout=timeout,
+            start_seconds=start_seconds,
+            duration_seconds=duration_seconds,
+        )
+    except Exception as exc:
+        # Older libmpv/libavfilter builds may not expose ebur128. Keep the
+        # bounded-memory PCM implementation as a compatibility fallback.
+        native_error = exc
+    try:
+        rendered = decode_audio_wav(
+            source,
+            sample_rate=48000,
+            channels=2,
+            start_seconds=start_seconds,
+            duration_seconds=duration_seconds,
+            timeout=timeout,
+        )
+    except Exception as fallback_error:
+        raise RuntimeError(
+            "no decodable audio; "
+            f"native measurement failed: {native_error}; "
+            f"PCM fallback failed: {fallback_error}"
+        ) from fallback_error
+    try:
+        return _measure_wav_lufs(rendered)
     finally:
         try:
             os.unlink(rendered)
         except OSError:
             pass
+
+
+def measure_loudness_fast_lufs(source: str, *, timeout: float = 120.0):
+    """Estimate loudness from five short sections spread across a typical song.
+
+    mpv's EDL joins the sections into one in-memory timeline, so ebur128 sees a
+    representative 60-second program without starting five decoder cores.
+    Sections beyond the end of a short track are harmlessly truncated.
+    """
+    source = str(source)
+    escaped = f"%{len(os.fsencode(source))}%{source}"
+    timeline = "edl://" + ";".join(
+        f"{escaped},start={start},length=12"
+        for start in (0, 45, 90, 135, 180)
+    )
+    return measure_loudness_lufs(timeline, timeout=timeout)

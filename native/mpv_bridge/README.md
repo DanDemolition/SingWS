@@ -59,7 +59,8 @@ directly:
 * Python sends the DSP half via `singws_bridge_set_dsp_chain`, built by
   `mpv_audio_filters.build_af_chain(semitones=0, ...)`.
 * The bridge stores it alongside `_desiredSemitones` and `applyAudioFilters`
-  composes both into `af`, key first.
+  composes both into `af`, with DSP before the speed-changing rubberband stage
+  to avoid libmpv's documented desynchronization warning.
 * Both are re-applied on `MPV_EVENT_FILE_LOADED`, so the chain survives song
   changes.
 

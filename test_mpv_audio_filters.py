@@ -338,3 +338,14 @@ class IinaBackendContractTests(unittest.TestCase):
         loaded = drain[drain.index("MPV_EVENT_FILE_LOADED"):]
         loaded = loaded[:loaded.index("MPV_EVENT_END_FILE")]
         self.assertIn("[self applyAudioFilters];", loaded)
+
+    def test_bridge_places_speed_changer_after_dsp_filters(self):
+        with open("native/mpv_bridge/bridge.mm", "r", encoding="utf-8") as fh:
+            bridge = fh.read()
+        compose = bridge[bridge.index("- (void)applyAudioFilters {"):]
+        compose = compose[:compose.index("- (void)setSemitones:")]
+        self.assertLess(
+            compose.index("std::string chain=_dspChain"),
+            compose.index("chain+=pitch"),
+            compose,
+        )

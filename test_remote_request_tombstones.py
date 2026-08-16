@@ -100,6 +100,7 @@ CONNECTED_SETTINGS = {
 
 def make_app(module, tombstone_path: Path, settings=None):
     module.REMOTE_REQUEST_TOMBSTONES_PATH = tombstone_path
+    module.WAITLIST_REMOVED_TONIGHT_PATH = tombstone_path.with_name("waitlist_removed_tonight.json")
     module.DEFERRED_REMOTE_ADDS_PATH = tombstone_path.with_name("deferred_remote_adds.json")
     app = module.KaraokeApp.__new__(module.KaraokeApp)
     app.settings = {
@@ -800,6 +801,51 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertIn("Version: Requested: SC / SC-123", text)
             self.assertIn("Length: 3:05", text)
             self.assertIn("Server:", text)
+
+    def test_removed_tonight_is_hidden_until_requested_and_restores_same_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            req = {
+                "request_id": 1661,
+                "singer": "FrankieRod",
+                "artist": "Judas Priest",
+                "title": "Beyond the Realms of Death",
+                "state": "waiting",
+            }
+            app._waiting_for_add_requests = {1661: dict(req)}
+            app._waiting_for_add_handled_ids = {1661}
+            app._waiting_for_add_removed_tonight = {}
+            app._waiting_for_add_show_removed = False
+            app._schedule_waiting_for_add_view_refresh = lambda **_kwargs: None
+            app._show_processing_notification = lambda *_args, **_kwargs: None
+            app._restore_waitlist_request_on_server_async = lambda restored, revision: None
+            app._archive_waitlist_removed_tonight(req, reason="test")
+            app._waiting_for_add_requests.pop(1661)
+
+            self.assertEqual(app._waiting_for_add_sections(), [])
+            app._waiting_for_add_show_removed = True
+            sections = app._waiting_for_add_sections()
+            self.assertEqual([section["key"] for section in sections], ["removed"])
+            self.assertEqual(sections[0]["rows"][0]["request_id"], 1661)
+
+            app._selected_waiting_for_add_request = lambda: app._waiting_for_add_removed_tonight[1661]
+            app._restore_selected_waiting_for_add()
+
+            self.assertIn(1661, app._waiting_for_add_requests)
+            self.assertEqual(app._waiting_for_add_requests[1661]["state"], "waiting")
+            self.assertNotIn(1661, app._waiting_for_add_removed_tonight)
+            self.assertNotIn(1661, app._waiting_for_add_handled_ids)
+
+    def test_removed_tonight_history_expires_on_a_different_evening(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json")
+            self.singws._save_json_atomic(self.singws.WAITLIST_REMOVED_TONIGHT_PATH, {
+                "version": 1,
+                "evening": "1999-12-31",
+                "tenant": "venue",
+                "requests": {"77": {"request_id": 77, "title": "Old song"}},
+            })
+            self.assertEqual(app._load_waitlist_removed_tonight(), {})
 
     def test_pending_acceptance_section_is_distinct_from_waitlist(self):
         with tempfile.TemporaryDirectory() as td:

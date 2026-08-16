@@ -333,6 +333,66 @@ class RotationIdentityTests(unittest.TestCase):
         self.assertEqual(app.queue[0]["songs"], [])
         self.assertNotIn("temporary_empty_slot", app.queue[0])
 
+    def test_waitlisted_phone_replacement_fills_preserved_slot_without_reordering(self):
+        app = make_app(self.singws)
+        app.queue = [
+            {
+                "name": "Ada",
+                "songs": [],
+                "skipped": False,
+                "temporary_empty_slot": True,
+                "empty_slot_reason": "server_removed",
+                "empty_slot_until": self.singws.time.time() + 180,
+            },
+            {"name": "Grace", "songs": [track("Next")], "skipped": False},
+        ]
+        app._waiting_for_add_requests = {}
+        app._waiting_for_add_handled_ids = set()
+        delivered = []
+        app._mark_waiting_for_add_delivered_async = lambda rid, req=None: delivered.append(rid)
+        req = {
+            "request_id": 7001,
+            "singer": "Ada",
+            "artist": "Artist",
+            "title": "Replacement",
+            "state": "waiting",
+            "pending_reason": "host_not_accepting",
+        }
+        app._waiting_for_add_requests[7001] = dict(req)
+
+        def add_replacement(incoming):
+            app.queue[0]["songs"].append({
+                "remote_request_id": incoming["request_id"],
+                "artist": incoming["artist"],
+                "title": incoming["title"],
+            })
+            return True
+
+        app.process_external_request = add_replacement
+
+        self.assertTrue(app._promote_waitlisted_phone_replacement_into_empty_slot(req))
+        self.assertEqual([singer["name"] for singer in app.queue], ["Ada", "Grace"])
+        self.assertEqual(app.queue[0]["songs"][0]["remote_request_id"], 7001)
+        self.assertNotIn("temporary_empty_slot", app.queue[0])
+        self.assertNotIn(7001, app._waiting_for_add_requests)
+        self.assertIn(7001, app._waiting_for_add_handled_ids)
+        self.assertEqual(delivered, [7001])
+
+    def test_waitlisted_new_singer_does_not_take_someone_elses_empty_slot(self):
+        app = make_app(self.singws)
+        app.queue = [{
+            "name": "Ada",
+            "songs": [],
+            "skipped": False,
+            "temporary_empty_slot": True,
+            "empty_slot_reason": "server_removed",
+            "empty_slot_until": self.singws.time.time() + 180,
+        }]
+        req = {"request_id": 7002, "singer": "Bea", "title": "New", "state": "waiting"}
+        self.assertFalse(app._promote_waitlisted_phone_replacement_into_empty_slot(req))
+        self.assertEqual(app.queue[0]["name"], "Ada")
+        self.assertEqual(app.queue[0]["songs"], [])
+
     def test_server_sync_preserves_empty_slot_order(self):
         app = make_app(self.singws)
         app.queue = [
