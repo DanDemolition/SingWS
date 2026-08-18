@@ -17020,12 +17020,22 @@ Rectangle {
     property string transitionJson: ""
     property string updatePopupText: ""
     property real speedPxPerSec: 34
-    property real cardHeight: Math.max(94, Math.min(122, height * 0.27))
-    property real cardGap: 12
+    // Table columns, as fractions of width. The pinned header and the scrolling
+    // rows read the same numbers so they cannot drift apart.
+    readonly property real colNumber: 0.035
+    readonly property real colSinger: 0.105
+    readonly property real colSong:   0.455
+    readonly property real colArtist: 0.775
+    readonly property real headerHeight: 34
+    readonly property real listHeight: Math.max(0, height - headerHeight)
+    // Single-line table rows rather than two-line cards: the whole point is
+    // fitting more of the room on screen at once.
+    property real cardHeight: Math.max(52, Math.min(74, listHeight * 0.135))
+    property real cardGap: 6
     property bool running: true
     property bool effectsEnabled: true
     readonly property real cycleHeight: firstPass.height + cardGap
-    readonly property bool overflow: rotationModel.count > 1 && cycleHeight > height
+    readonly property bool overflow: rotationModel.count > 1 && cycleHeight > listHeight
 
     ListModel { id: rotationModel }
 
@@ -17181,48 +17191,73 @@ Rectangle {
                 color: index === 0 ? "#f6c945" : "#6954d9"
             }
 
-            Rectangle {
-                id: numberBadge
-                width: 48
-                height: 48
-                radius: 15
-                anchors.left: parent.left
-                anchors.leftMargin: 28
+            Text {
+                x: root.width * root.colNumber
+                width: root.width * (root.colSinger - root.colNumber) - 8
                 anchors.verticalCenter: parent.verticalCenter
-                color: index === 0 ? "#f6c945" : "#272936"
+                text: model.number
+                color: index === 0 ? "#f6c945" : "#8e91a0"
+                font.pixelSize: Math.max(19, Math.min(27, root.cardHeight * 0.42))
+                font.bold: true
+            }
+
+            Row {
+                id: singerCell
+                x: root.width * root.colSinger
+                width: root.width * (root.colSong - root.colSinger) - 14
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 9
 
                 Text {
-                    anchors.centerIn: parent
-                    text: model.number
-                    color: index === 0 ? "#17130a" : "#c9cbd3"
-                    font.pixelSize: 19
+                    id: singerText
+                    width: Math.min(implicitWidth, singerCell.width - (duetBadge.visible ? duetBadge.width + singerCell.spacing : 0))
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: model.singer
+                    color: "#ffffff"
+                    font.pixelSize: Math.max(21, Math.min(30, root.cardHeight * 0.46))
                     font.bold: true
+                    elide: Text.ElideRight
+                }
+                Rectangle {
+                    id: duetBadge
+                    visible: model.duet === true
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: duetLabel.implicitWidth + 14
+                    height: duetLabel.implicitHeight + 6
+                    radius: 5
+                    color: "transparent"
+                    border.width: 1
+                    border.color: "#f6c945"
+                    Text {
+                        id: duetLabel
+                        anchors.centerIn: parent
+                        text: "DUET"
+                        color: "#f6c945"
+                        font.pixelSize: Math.max(11, root.cardHeight * 0.19)
+                        font.bold: true
+                    }
                 }
             }
 
-            Column {
-                anchors.left: numberBadge.right
-                anchors.leftMargin: 18
-                anchors.right: parent.right
-                anchors.rightMargin: 24
+            Text {
+                x: root.width * root.colSong
+                width: root.width * (root.colArtist - root.colSong) - 16
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 6
+                text: model.song
+                color: index === 0 ? "#efe9ff" : "#d3d5de"
+                font.pixelSize: Math.max(16, Math.min(23, root.cardHeight * 0.35))
+                font.italic: true
+                elide: Text.ElideRight
+            }
 
-                Text {
-                    width: parent.width
-                    text: model.singer
-                    color: "#ffffff"
-                    font.pixelSize: Math.max(22, Math.min(31, root.cardHeight * 0.27))
-                    font.bold: true
-                    elide: Text.ElideRight
-                }
-                Text {
-                    width: parent.width
-                    text: model.song
-                    color: index === 0 ? "#d8cef9" : "#a6a9b4"
-                    font.pixelSize: Math.max(14, Math.min(18, root.cardHeight * 0.16))
-                    elide: Text.ElideRight
-                }
+            Text {
+                x: root.width * root.colArtist
+                width: root.width * (1.0 - root.colArtist) - 22
+                anchors.verticalCenter: parent.verticalCenter
+                text: model.artist ? model.artist : ""
+                color: index === 0 ? "#c8bdf0" : "#9a9dab"
+                font.pixelSize: Math.max(15, Math.min(21, root.cardHeight * 0.31))
+                elide: Text.ElideRight
             }
 
             Rectangle {
@@ -17239,11 +17274,65 @@ Rectangle {
         }
     }
 
+    // Column header. Pinned, so it never scrolls with the rows, and it reads
+    // the same column fractions the delegate does.
+    Item {
+        id: headerRow
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: root.headerHeight
+        opacity: 0
+
+        OpacityAnimator on opacity {
+            from: 0.0; to: 1.0; duration: 420; easing.type: Easing.OutCubic
+        }
+
+        Text {
+            x: root.width * root.colNumber
+            anchors.verticalCenter: parent.verticalCenter
+            text: "#"
+            color: "#7c8090"; font.pixelSize: 15; font.bold: true
+        }
+        Text {
+            x: root.width * root.colSinger
+            anchors.verticalCenter: parent.verticalCenter
+            text: "SINGER"
+            color: "#7c8090"; font.pixelSize: 15; font.bold: true
+        }
+        Text {
+            x: root.width * root.colSong
+            anchors.verticalCenter: parent.verticalCenter
+            text: "SONG"
+            color: "#7c8090"; font.pixelSize: 15; font.bold: true
+        }
+        Text {
+            x: root.width * root.colArtist
+            anchors.verticalCenter: parent.verticalCenter
+            text: "ARTIST"
+            color: "#7c8090"; font.pixelSize: 15; font.bold: true
+        }
+        Rectangle {
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: root.width * root.colNumber
+            anchors.rightMargin: 20
+            height: 1
+            color: "#2b2d38"
+        }
+    }
+
     // Keep the card rail on one motion axis. The render-thread YAnimator below
     // provides the smooth conveyor movement without a competing sideways sway.
+    // Clipped to the area under the header so rows scroll beneath it.
     Item {
         id: driftLayer
-        anchors.fill: parent
+        anchors.top: headerRow.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        clip: true
 
         Item {
             id: strip
@@ -18056,10 +18145,26 @@ class RotationView(QMainWindow):
             text = f"{num}. {singer_display}  •  {name}"
 
             self.queue_items.append(text)
+            # Split artist from title so the rail can column them, and expose
+            # the duet flag separately instead of only folding a combined name
+            # into singer_display. Falls back to the combined display string
+            # when the entry cannot be split.
+            row_artist = ""
+            row_song = str(name)
+            if first_active_song is not None:
+                try:
+                    a, t = self._queue_entry_artist_title(first_active_song)
+                    if a and t:
+                        row_artist, row_song = str(a), str(t)
+                except Exception:
+                    pass
             display_items.append({
                 "number": str(num),
                 "singer": str(singer_display),
-                "song": str(name),
+                "song": row_song,
+                "artist": row_artist,
+                "duet": bool(duet_display),
+                "combined": str(name),
             })
             if first_active_song is not None:
                 ready_singer_names.append(str(singer_display))

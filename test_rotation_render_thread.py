@@ -135,9 +135,20 @@ class RenderThreadRotationTests(unittest.TestCase):
         view.update_rotation(queue, tracks, "Alice")
         if view.rotation_rail is not None:
             cards = json.loads(view.rotation_rail._root.property("itemsJson"))
-            self.assertEqual(cards, [{
-                "number": "1", "singer": "Alice", "song": "Journey • Faithfully",
-            }])
+            # The rail gained artist/duet/combined when the rotation screen
+            # became a table (# | SINGER | SONG | ARTIST). Assert the fields
+            # the delegate actually binds rather than the whole dict, so
+            # adding another column does not break this again.
+            self.assertEqual(len(cards), 1)
+            card = cards[0]
+            self.assertEqual(card["number"], "1")
+            self.assertEqual(card["singer"], "Alice")
+            self.assertEqual(card["duet"], False)
+            # This fixture's entry cannot be split, so song keeps the combined
+            # display string and artist stays empty.
+            self.assertEqual(card["song"], "Journey • Faithfully")
+            self.assertEqual(card["artist"], "")
+            self.assertEqual(card["combined"], "Journey • Faithfully")
         else:
             self.assertEqual(view.list_widget.count(), 1)
             self.assertEqual(
