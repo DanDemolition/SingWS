@@ -1976,5 +1976,71 @@ class WaitlistSlotReplacementTests(unittest.TestCase):
         self.assertIn('if singer.get("songs")', promote)
 
 
+class KaraFunAutoStartRecoveryTests(unittest.TestCase):
+    """2026-08-16 01:07: Los Enanitos Verdes never auto-started.
+
+    The search succeeded (FOUND, correct 03:42 duration) and the result was
+    activated. Then, with fast start on, the code did not probe KaraFun at all
+    -- it hard-coded "PLAYING", logged 'play click skipped already playing',
+    and skipped both the play click and the 12-attempt verify loop. KaraFun was
+    not playing: 15s later the monitor read idle=1 playing=0, and it stayed
+    that way until the operator pressed play 32s in.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+        cls.monitor = inspect.getsource(cls.singws.KaraokeApp._start_karafun_completion_monitor)
+        cls.automation = inspect.getsource(cls.singws.KaraokeApp._automate_karafun_search_and_play)
+
+    def test_fast_start_records_that_playback_was_only_assumed(self):
+        self.assertIn('entry["karafun_playback_assumed"] = True', self.automation)
+        self.assertIn("assumed playback", self.automation)
+
+    def test_the_play_control_is_shared_not_inlined(self):
+        """The monitor needs the same press the automation path uses."""
+        self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_press_play_control"))
+        press = inspect.getsource(self.singws.KaraokeApp._karafun_press_play_control)
+        self.assertIn("_macos_native_mouse_click", press)
+        self.assertIn('"PLAY|"', press)
+        self.assertIn("_karafun_press_play_control()", self.automation)
+
+    def test_the_monitor_presses_play_when_the_assumption_was_wrong(self):
+        self.assertIn("playback_assumed", self.monitor)
+        self.assertIn("recovery_pressed", self.monitor)
+        self.assertIn("_karafun_press_play_control()", self.monitor)
+        self.assertIn("playback never started after", self.monitor)
+
+    def test_recovery_presses_only_once(self):
+        """A repeated press would toggle play/pause and silence a playing song."""
+        self.assertIn("recovery_pressed = True", self.monitor)
+        idx = self.monitor.index("recovery_pressed = True")
+        guard = self.monitor[:idx]
+        self.assertIn("not recovery_pressed", guard[-400:])
+
+    def test_recovery_does_not_fire_once_playback_is_confirmed(self):
+        idx = self.monitor.index("recovery_pressed = True")
+        guard = self.monitor[:idx]
+        self.assertIn("playback_confirmed_at is None", guard[-400:])
+        self.assertIn("not playing_reported", guard[-400:])
+
+    def test_recovery_is_skipped_entirely_when_play_was_actually_clicked(self):
+        """Only the fast-start path assumes; the slow path really clicks play."""
+        idx = self.monitor.index("recovery_pressed = True")
+        self.assertIn("playback_assumed", self.monitor[:idx][-400:])
+
+    def test_the_operator_is_warned_when_recovery_also_fails(self):
+        self.assertIn("KaraFun is not playing this song", self.monitor)
+        self.assertIn("notify=True", self.monitor)
+        self.assertIn("KARAFUN_PLAYBACK_ALERT_DELAY_S", self.monitor)
+
+    def test_the_delays_leave_room_for_a_slow_start(self):
+        """KaraFun took ~19s from activation to playing in the working cases."""
+        app = self.singws.KaraokeApp
+        self.assertGreaterEqual(app.KARAFUN_PLAYBACK_RECOVERY_DELAY_S, 10.0)
+        self.assertLess(app.KARAFUN_PLAYBACK_RECOVERY_DELAY_S, app.KARAFUN_PLAYBACK_ALERT_DELAY_S)
+        self.assertLessEqual(app.KARAFUN_PLAYBACK_ALERT_DELAY_S, 60.0)
+
+
 if __name__ == "__main__":
     unittest.main()

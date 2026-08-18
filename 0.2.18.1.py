@@ -49533,6 +49533,40 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+    def _karafun_press_play_control(self) -> tuple[bool, str]:
+        """Click KaraFun's main transport Play control. Returns (ok, error)."""
+        play_script = [
+            'tell application "System Events"',
+            'tell application process "KaraFun"',
+            'set frontmost to true',
+            'set mainWindow to missing value',
+            'repeat with candidateWindow in windows',
+            'try',
+            'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
+            'end try',
+            'end repeat',
+            'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
+            'set wp to position of mainWindow',
+            'set ws to size of mainWindow',
+            '-- Main player Play/Pause button: left transport control in the right-side player panel.',
+            '-- Avoid AXPress/button scans here; KaraFun can hang while enumerating player controls.',
+            'set playX to (item 1 of wp) + ((item 1 of ws) * 0.768)',
+            'set playY to (item 2 of wp) + ((item 2 of ws) * 0.222)',
+            'return "PLAY|" & playX & "|" & playY',
+            'end tell',
+            'end tell',
+        ]
+        ok, played, script_error = self._run_karafun_applescript_sync(play_script, timeout=10)
+        if not ok:
+            return False, str(script_error or "KaraFun play automation failed")
+        play_parts = str(played or "").split("|")
+        if len(play_parts) != 3 or play_parts[0] not in {"PLAY_NEXT", "PLAY"}:
+            return False, str(played or "").split("|", 1)[-1] or "KaraFun did not expose a play control"
+        _diag(f"[KARAFUN-AUTO] pressing KaraFun control mode={play_parts[0]} x={play_parts[1]} y={play_parts[2]}")
+        if not self._macos_native_mouse_click(int(float(play_parts[1])), int(float(play_parts[2])), clicks=1):
+            return False, "Could not click the KaraFun play control"
+        return True, ""
+
     def _karafun_search_script(self, *, query: str, safe_title: str = "", safe_artist: str = "",
                                require_exact_title: bool = False):
         query_literal = self._karafun_applescript_literal(query)
@@ -50197,8 +50231,18 @@ class KaraokeApp(QWidget):
                     # playback directly. The old full accessibility-tree scan
                     # blocked 11-18 seconds after audio had already begun. Let
                     # the completion monitor verify state in the background.
+                    # NOTE: nothing is probed here. Double-clicking a resolved
+                    # result usually starts playback, and the old full AX scan
+                    # blocked 11-18s after audio had begun. But this is an
+                    # ASSUMPTION, not an observation, and when the double-click
+                    # does not take (KaraFun rebuilding its renderer, say) the
+                    # play click was skipped and nothing ever recovered: on
+                    # 2026-08-16 at 01:07 the song sat silent until the operator
+                    # pressed play by hand. The completion monitor now actually
+                    # performs the verification promised here.
                     ok, initial_probe_state = True, "PLAYING"
-                    _diag("[KARAFUN-AUTO] fast start accepted activated result; background monitor will verify playback")
+                    entry["karafun_playback_assumed"] = True
+                    _diag("[KARAFUN-AUTO] fast start assumed playback from activated result; monitor will verify")
                 else:
                     ok, initial_probe, initial_probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
                     initial_probe_state = str(initial_probe or initial_probe_error or "").strip()
@@ -50206,36 +50250,9 @@ class KaraokeApp(QWidget):
                 if ok and initial_probe_state == "PLAYING":
                     _schedule_early_handoff("pre_click_playing")
                 if not (ok and initial_probe_state == "PLAYING"):
-                    play_script = [
-                        'tell application "System Events"',
-                        'tell application process "KaraFun"',
-                        'set frontmost to true',
-                        'set mainWindow to missing value',
-                        'repeat with candidateWindow in windows',
-                        'try',
-                        'if name of candidateWindow is not "Dual Renderer" then set mainWindow to candidateWindow',
-                        'end try',
-                        'end repeat',
-                        'if mainWindow is missing value then return "ERROR|KaraFun control window not found"',
-                        'set wp to position of mainWindow',
-                        'set ws to size of mainWindow',
-                        '-- Main player Play/Pause button: left transport control in the right-side player panel.',
-                        '-- Avoid AXPress/button scans here; KaraFun can hang while enumerating player controls.',
-                        'set playX to (item 1 of wp) + ((item 1 of ws) * 0.768)',
-                        'set playY to (item 2 of wp) + ((item 2 of ws) * 0.222)',
-                        'return "PLAY|" & playX & "|" & playY',
-                        'end tell',
-                        'end tell',
-                    ]
-                    ok, played, script_error = self._run_karafun_applescript_sync(play_script, timeout=10)
-                    if not ok:
-                        raise RuntimeError(script_error or "KaraFun play automation failed")
-                    play_parts = str(played or "").split("|")
-                    if len(play_parts) != 3 or play_parts[0] not in {"PLAY_NEXT", "PLAY"}:
-                        raise RuntimeError(str(played or "").split("|", 1)[-1] or "KaraFun did not expose a play control")
-                    _diag(f"[KARAFUN-AUTO] pressing KaraFun control mode={play_parts[0]} x={play_parts[1]} y={play_parts[2]}")
-                    if not self._macos_native_mouse_click(int(float(play_parts[1])), int(float(play_parts[2])), clicks=1):
-                        raise RuntimeError("Could not click the KaraFun play control")
+                    pressed, press_error = self._karafun_press_play_control()
+                    if not pressed:
+                        raise RuntimeError(press_error or "KaraFun play automation failed")
                     entry["karafun_playback_clock_started_at"] = time.monotonic()
                 else:
                     entry["karafun_playback_clock_started_at"] = result_activated_at
@@ -50381,6 +50398,11 @@ class KaraokeApp(QWidget):
     def _karafun_clock_seconds(value: str):
         return normalize_karafun_duration_seconds(value)
 
+    # Fast start assumes playback; these bound how long that assumption may go
+    # unverified before the monitor presses play, and then warns the operator.
+    KARAFUN_PLAYBACK_RECOVERY_DELAY_S = 12.0
+    KARAFUN_PLAYBACK_ALERT_DELAY_S = 40.0
+
     def _start_karafun_completion_monitor(self, entry: dict):
         """Complete the active external track once KaraFun reports end/idle state."""
         if not isinstance(entry, dict):
@@ -50402,6 +50424,12 @@ class KaraokeApp(QWidget):
         # sing: the rotation advanced and background music came up over the
         # ending. Rebased at the first confirmed playback signal instead.
         playback_confirmed_at = None
+        # Fast start assumes the result double-click began playback and skips
+        # the play click. When that assumption is wrong nothing recovered and
+        # the song sat silent (2026-08-16 01:07, Los Enanitos Verdes: the KJ
+        # pressed play by hand 32s in). These drive one recovery press.
+        playback_assumed = bool(entry.get("karafun_playback_assumed", False))
+        recovery_pressed = False
         last_state = ""
         last_clock_candidates = {}
         idle_stop_count = 0
@@ -50475,7 +50503,7 @@ class KaraokeApp(QWidget):
 
         def _monitor():
             nonlocal seen_playback, last_state, last_clock_candidates, idle_stop_count
-            nonlocal playback_confirmed_at
+            nonlocal playback_confirmed_at, recovery_pressed
 
             def _confirm_playback():
                 nonlocal playback_confirmed_at, seen_playback
@@ -50618,6 +50646,54 @@ class KaraokeApp(QWidget):
                         seen_playback = True
                     else:
                         _confirm_playback()
+                # Recovery: fast start never watched playback begin, and the
+                # monitor now sees KaraFun sitting idle. Press play once rather
+                # than waiting for the operator to notice the silence.
+                if (
+                    playback_assumed
+                    and not recovery_pressed
+                    and playback_confirmed_at is None
+                    and age > self.KARAFUN_PLAYBACK_RECOVERY_DELAY_S
+                    and not playing_reported
+                ):
+                    recovery_pressed = True
+                    _diag(
+                        f"[KARAFUN] playback never started after {age:.0f}s; "
+                        "pressing play once (fast start assumed it had)"
+                    )
+                    try:
+                        pressed, press_error = self._karafun_press_play_control()
+                    except Exception as exc:
+                        pressed, press_error = False, str(exc)
+                    if pressed:
+                        _diag("[KARAFUN] recovery play press sent")
+                    else:
+                        _diag(f"[KARAFUN] recovery play press failed: {press_error}")
+                        self._set_karafun_entry_status(
+                            entry, "manual",
+                            message="KaraFun did not start this song. Press play in KaraFun.",
+                            notify=True, level="warning",
+                        )
+                    time.sleep(1.0)
+                    continue
+
+                # The recovery press did not take either. Tell the operator
+                # instead of leaving a silent room and a spinning monitor.
+                if (
+                    playback_assumed
+                    and recovery_pressed
+                    and playback_confirmed_at is None
+                    and not playing_reported
+                    and age > self.KARAFUN_PLAYBACK_ALERT_DELAY_S
+                    and str(entry.get("karafun_status") or "") != "manual"
+                ):
+                    _diag(f"[KARAFUN] playback still not started after {age:.0f}s; alerting operator")
+                    self._set_karafun_entry_status(
+                        entry, "manual",
+                        message="KaraFun is not playing this song. Press play in KaraFun.",
+                        notify=True, level="warning",
+                    )
+
                 should_complete = (
                     (remaining is not None and remaining <= 5 and age > 8.0)
                     or (idle_reported and not playing_reported and seen_playback and idle_stop_count >= 2 and age > 8.0)

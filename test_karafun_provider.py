@@ -209,7 +209,7 @@ class KaraFunProviderTests(unittest.TestCase):
         worker = worker[:worker.index("def _karafun_clock_seconds")]
         self.assertLess(worker.index("_ensure_karafun_audio_output()"), worker.index("search attempt="))
         self.assertIn("fast start skipped unreliable transparent renderer preflight", worker)
-        self.assertIn("background monitor will verify playback", worker)
+        self.assertIn("fast start assumed playback from activated result; monitor will verify", worker)
         self.assertIn("KaraFun audio safety check failed", worker)
         target = source[source.index("def _karafun_target_audio_output_name"):]
         target = target[:target.index("def _ensure_karafun_audio_output")]
@@ -269,13 +269,19 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('entry["karafun_result_activated_at"] = result_activated_at', worker)
         self.assertIn('entry["karafun_playback_clock_started_at"] = result_activated_at', worker)
         self.assertIn('entry["karafun_playback_clock_started_at"] = time.monotonic()', worker)
-        self.assertIn("set wp to position of mainWindow", worker)
-        self.assertIn("set ws to size of mainWindow", worker)
-        self.assertIn("set playX to (item 1 of wp) + ((item 1 of ws) * 0.768)", worker)
-        self.assertIn("set playY to (item 2 of wp) + ((item 2 of ws) * 0.222)", worker)
-        self.assertIn('return "PLAY|"', worker)
-        self.assertNotIn('return "PLAY_NEXT|"', worker)
-        self.assertIn("_macos_native_mouse_click", worker)
+        # The play control moved into _karafun_press_play_control so the
+        # completion monitor can reuse it to recover a song that never started
+        # (see KaraFunAutoStartRecoveryTests in test_recent_regressions).
+        self.assertIn("self._karafun_press_play_control()", worker)
+        press = source[source.index("def _karafun_press_play_control"):]
+        press = press[:press.index("def _karafun_search_script")]
+        self.assertIn("set wp to position of mainWindow", press)
+        self.assertIn("set ws to size of mainWindow", press)
+        self.assertIn("set playX to (item 1 of wp) + ((item 1 of ws) * 0.768)", press)
+        self.assertIn("set playY to (item 2 of wp) + ((item 2 of ws) * 0.222)", press)
+        self.assertIn('return "PLAY|"', press)
+        self.assertNotIn('return "PLAY_NEXT|"', press)
+        self.assertIn("_macos_native_mouse_click", press)
         self.assertIn("playback pre-click state=", worker)
         self.assertIn("prepare_renderer_script", worker)
         self.assertIn("set frontmost of kf to true", worker)
@@ -287,6 +293,9 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('controlDescription is "pause" or controlDescription is "stop"', worker)
         self.assertLess(worker.index('if playingHintFound then return "PLAYING"'), worker.index('if idleTextFound then return "IDLE"'))
         self.assertIn("play click skipped already playing", worker)
+        # Fast start does not observe playback, it assumes it; the monitor
+        # verifies and presses play once if the assumption was wrong.
+        self.assertIn('entry["karafun_playback_assumed"] = True', worker)
         self.assertIn("playback verify attempt=", worker)
         self.assertIn("def _schedule_early_handoff", worker)
         self.assertIn("def _schedule_bgm_fade", worker)
@@ -319,7 +328,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('labelText contains "tempo"', worker)
         self.assertNotIn('help of elem is "Audio Settings"', worker)
         self.assertIn("self._run_karafun_applescript_sync(search_script", worker)
-        self.assertIn("self._run_karafun_applescript_sync(play_script", worker)
+        self.assertIn("self._run_karafun_applescript_sync(play_script", press)
         self.assertIn('entry["karafun_play_started_at"] = time.time()', worker)
         self.assertIn('entry["karafun_submission_state"] = "karafun_queued"', worker)
         self.assertIn("self._handoff_show_screen_to_karafun()", worker)

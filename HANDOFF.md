@@ -52,6 +52,14 @@ From the 2026-08-16 show logs, plus two the operator reported directly:
     `_is_replaceable_empty_slot_reason`; repeat-preservation stays server-only,
     and tombstones still prevent resurrecting anything the host deleted.
 
+14. Los Enanitos Verdes never auto-started (01:07). The search succeeded and
+    the result was activated, but with fast start on the code does not probe
+    KaraFun at all -- it hard-codes `"PLAYING"`, logs "play click skipped
+    already playing", and skips both the play click and the verify loop. It was
+    not playing; the operator pressed play 32s later. The completion monitor
+    now performs the verification that log line always promised: one recovery
+    play press at 12s, an operator warning at 40s.
+
 Server-side, also on `work/karafun-catalog-ids-2026-08-18` (`d7f0ce5`) and
 **deployed**: KaraFun catalog id stability plus stale-id re-resolve. A later
 commit adds stage-cue expiry — a singer logging in days later on a new device
