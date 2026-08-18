@@ -1,3 +1,91 @@
+## 0.4.5.4 — unreleased
+
+Reconstructed alongside 0.4.5.0–0.4.5.3, which shipped without changelog
+entries; see the note at the end of this section.
+
+### Fixed
+- **KaraFun catalog ids no longer expire.** A `kf_<id>` is the server catalog's
+  own SQLite rowid, and the CSV import cleared the table and reinserted under
+  `AUTOINCREMENT`, renumbering every song on every refresh and invalidating
+  every id ever written into a singer's history. The import now upserts on the
+  natural key so surviving songs keep their ids, and `submitreq.php` treats a
+  stored id as a hint, re-resolving from artist/title when it misses. (Server.)
+- **KaraFun songs can be re-added from Singer History.** Their synthetic
+  `karafun_streaming:<id>` path is in neither the index nor the track list, so
+  the local-only lookup always failed with "Could not match this history song
+  to a local track".
+- **KaraFun played the wrong song.** A search issued while KaraFun was still
+  building its window failed with AXError -1719, and each such failure fell
+  through to a looser query until only the bare title was searched — which
+  matched a different artist's song of the same name. Transient UI errors now
+  retry the same query, and the matcher confirms the artist on the result row.
+- **Background music came up over the end of a KaraFun song.** The completion
+  fallback counted from the renderer handoff rather than from playback, so
+  KaraFun's ~45s startup was charged against the song and the rotation advanced
+  early. The countdown is rebased to the first confirmed playback signal.
+- **Searches could return nothing for songs that are in the library.** A
+  coalesced query was stashed while a worker was running and drained only on
+  the next results signal — but that worker had been interrupted and never
+  emitted again, leaving an empty list. The pending query now also drains when
+  the worker exits. Rows that fail to render are logged instead of vanishing.
+- **The ticker could disappear after a KaraFun song.** Every show-screen
+  restore path raises the window, which can bury the ticker's native surface;
+  only the mpv-reveal and rotation-open paths re-raised it.
+- **The brand picker listed one brand many times.** It was built from raw
+  per-disc ids, offering 121,650 entries with Karaoke Version spread across
+  20,901 of them. Values are canonicalised and filtered to actual brands.
+- **Undecodable files were re-analysed on every loudness pass.** Failures are
+  now remembered against the file's size/mtime, and retried if it is replaced.
+- **The CDG visual offset reaches the follower backend.** It previously had no
+  setter, so the calibrated offset was discarded with a warning and the Display
+  tab's fine tuning did nothing on that path. **Not yet calibrated against
+  hardware.**
+
+### Changed
+- Library loudness scans pause during playback by default
+  (`loudness_scan_holds_for_playback`), with a Settings toggle to keep scanning
+  under a live song when a pass needs to finish.
+
+## 0.4.5.3 — 2026-08-16
+
+### Fixed
+- Show diagnostics, loudness scans and queue recovery: a queue-identity and
+  remote-tombstone repair, library-scan-worker fixes, mpv audio-filter
+  handling, and show-screen VFX corrections. (`903b46d`)
+
+## 0.4.5.2 — 2026-08-16
+
+### Fixed
+- Ticker kept above the native video surfaces. Qt Quick and mpv views are
+  native child surfaces that stack by creation order, so a revealed video host
+  could cover a ticker that was still running. (`0239a1a`)
+
+## 0.4.5.1 — 2026-08-15
+
+### Fixed
+- CDG companion audio attachment in the native mpv bridge, repaired across two
+  passes. (`282a43f`, `129ee1a`)
+
+### Changed
+- Show playback reliability and diagnostics: audio-output pinning, background
+  video/lyrics handling, KaraFun provider fixes and expanded bridge
+  instrumentation. (`4fe6b76`)
+- Release gates updated for the native media stack; the PyInstaller runtime
+  shim was retired. (`48932f4`)
+
+## 0.4.5.0 — 2026-08-14
+
+### Changed
+- Native mpv cleanup completed and CDG output sharpened: ~1,330 lines removed
+  from the main module, the libmpv background engine and media jobs split into
+  their own modules, and both PyInstaller specs and build scripts reworked for
+  the native stack. (`826c5dd`)
+
+> These four entries were reconstructed from the commit history and diffs on
+> 2026-08-18. The releases shipped with single-line commit messages and empty
+> bodies, so they are summaries of what the diffs contain rather than notes
+> written at release time.
+
 ## 0.4.4.10
 
 - Fix macOS Detect Now getting stuck after an app update/re-sign when the saved

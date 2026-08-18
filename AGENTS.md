@@ -368,30 +368,46 @@ still fails); build a genuinely fresh venv:
     ./qtvenv/bin/pip install PyQt6==6.9.1 PyQt6-Qt6==6.9.1 psutil requests \
         numpy qrcode pillow scipy
 
-That runs 792 tests green. It cannot run `test_karaoke_engine_selection` (needs
-`mpv`) or `test_mac_keep_awake` (needs pyobjc) — run those two in
-`.venv-universal`, where they pass. Between the two venvs the suite is fully
-coverable. The shipped .app is unaffected; it bundles its own Qt.
+That runs the suite green apart from four modules that need packages it does
+not carry: `test_karaoke_engine_selection` and `test_libmpv_background_engine`
+(need `mpv`), `test_mac_keep_awake` (needs pyobjc), and `test_phrase_detect`
+(needs the `mpv`-backed decode path). Run those four in `.venv-universal`,
+where all of them pass. Between the two venvs the suite is fully coverable.
+
+**These four failures are the environment, not the code.** They have been
+re-investigated as suspected regressions more than once. Before blaming a
+change for any of them, re-run that module under `.venv-universal`:
+
+    SINGWS_HOME=$(mktemp -d) ./.venv-universal/bin/python -m unittest \
+        test_phrase_detect test_mac_keep_awake test_libmpv_background_engine
+
+`test_phrase_detect` is the misleading one — it fails on an assertion
+(`0.0 != 1.0`) rather than an ImportError, because the decode path degrades
+silently to zero instead of raising. The shipped .app is unaffected; it bundles its own Qt.
 
 Always run with a scratch `SINGWS_HOME` (see live-show rule 7);
 `tools/run_tests.sh` now creates and cleans one automatically.
 
-### mpv still discards the CDG timing offset
+### The CDG timing offset is wired but NOT calibrated
 
-`MpvKaraokeTransport.set_video_offset_ms()` in `mpv_karaoke_transport.py` is a
-deliberate no-op, so the calibrated `FFMPEG_CDG_BASE_OFFSET_MS` (+750ms after
-the baseline migration) never reaches mpv's renderer. Under `mpv-video` the
-offset lands on the audio-only Python transport, which draws nothing — same
-result. Symptom: CDG lyrics run ~750ms out and the Display tab's fine tuning
-does nothing.
+`MpvKaraokeTransport.set_video_offset_ms()` used to be an unconditional no-op,
+so the calibrated `FFMPEG_CDG_BASE_OFFSET_MS` (+750ms after the baseline
+migration) never reached mpv. Symptom: CDG lyrics ran ~750ms out and the
+Display tab's fine tuning did nothing.
 
-Therefore `karaoke_engine` must stay defaulted to `ffmpeg`, saved settings must
-not be migrated onto mpv, and the Settings engine checkbox must stay — removing
-it left no way back to the working engine, and making mpv the default forced a
-version rollback mid-use on 2026-08-07. The fix belongs in
-`MpvPlaybackPlugin._sync_loop` (`mpv_playback.py`), where `delta = master - t`
-becomes `delta = (master + offset_seconds) - t`, plus wiring the setter through
-the plugin. It needs live calibration — do not ship it unverified.
+Both backends can apply it now. The in-process (IINA) backend maps it onto
+mpv's `audio-delay` (`mpv_playback_iina.py`). The follower backend adds it to
+the master reference its video followers chase — `delta = (master +
+self._video_offset_s) - t` in `MpvPlaybackPlugin._sync_loop`
+(`mpv_playback.py`), fed by `setVideoOffsetMs`.
+
+**None of this has been calibrated against a real CDG disc.** The wiring is
+covered by `CdgVisualOffsetTests`, which pins the plumbing and the clamp, not
+the timing; the sign and magnitude are unverified. Until someone runs a real
+disc and checks it on screen, `karaoke_engine` must stay defaulted to `ffmpeg`,
+saved settings must not be migrated onto mpv, and the Settings engine checkbox
+must stay — removing it left no way back to the working engine, and making mpv
+the default forced a version rollback mid-use on 2026-08-07.
 
 ---
 

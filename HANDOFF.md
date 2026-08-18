@@ -1,198 +1,244 @@
 # SingWS handoff
 
-Updated 2026-08-12 after publishing `v0.4.4.1`.
+Updated 2026-08-18.
 
-All product changes from the previous handoff landed in commit `6ffa414`
-(`Release v0.4.4.1`) and were pushed to `origin/main`. The annotated
-`v0.4.4.1` tag and GitHub release are public. The release contains the verified
-Intel installer only; arm64 remains intentionally omitted until it is built and
-verified natively on Apple Silicon.
+## Committed on `work/show-fixes-2026-08-18`, NOT RELEASED, NOT INSTALLED
 
-The public `0.4.4.1` DMG was installed and launched successfully on this Intel
-Mac. It is now preserved at
-`/Applications/SingWS-before-repaint-0.4.4.2.app`; see the uncommitted
-test-build section below for the currently installed app.
+`APP_VERSION` is `0.4.5.4`. `/Applications/SingWS.app` is still **`0.4.5.3`**
+and has never run any of this. The `SingWS-0.4.5.4-x86_64-installer.dmg` in the
+repo root was built partway through the session and is **stale** — it predates
+most of the fixes below. Rebuild before installing.
 
-Validation completed:
+The server half (KaraFun catalog id stability + stale-id re-resolve) **is live
+on wskar.com**, deployed 2026-08-17 23:55 and verified against the live
+88,566-row catalog.
 
-- 450 packaged Mach-O files are x86_64.
-- 871 deployment-target checks are macOS 12.0 or earlier.
-- Bundled libmpv and the native SingWS bridge load cleanly.
-- DMG verification passed; SHA-256 is
-  `7bbd4fe476184aac8c5715f5931b870f9c42e5f82e91ddf6e06a8718fd5c620a`.
-- The focused release/playback/regression suite passed: 133 tests.
-- GitHub reports the same SHA-256 for the uploaded release asset.
+### What is in this branch
 
-## Uncommitted after v0.4.4.1
+From the 2026-08-16 show logs:
 
-The version is bumped to `0.4.4.2`. Audio processing and the known-working
-playback/scaler configuration are unchanged. An attempted format-specific
-scaler change was fully reverted after its first package failed the live CDG
-test; quality work must remain separate from this repaint fix.
+1. Loudness scan leaked ~1 MB/track (472 MB -> 8,635 MB over five hours); one
+   mpv core per scan pass now, measured 1.047 -> 0.025 MB/track.
+2. Four "crashes" from the analyze progress dialog: the delayed re-raise
+   guarded `QTimer.singleShot()` rather than the callback body.
+3. A full-library scan ran all show and produced 744 GUI stalls (worst 6.1s).
+   It now holds between tracks while karaoke plays — **as a setting**
+   (`loudness_scan_holds_for_playback`), because the operator needs to scan
+   during songs or a 134k-track pass never finishes.
+4. A crash left a 712-byte ZIP with no end-of-central-directory record;
+   packaging builds under `.zip.partial` and renames only on success.
+5. KaraFun songs could not be re-added from Singer History (synthetic
+   `karafun_streaming:` paths are in neither store).
+6. KaraFun played Memory from Cats instead of Sugarcult's: transient AXError
+   -1719 failures consumed the query-specificity ladder until only the bare
+   title was searched. Same query is retried now, and the artist is confirmed
+   on the result row.
+7. Background music came up ~30s before a KaraFun song ended: the completion
+   fallback counted KaraFun's ~45s startup as song time.
+8. The ticker vanished after a KaraFun song — every show-screen restore path
+   raises the window and none re-raised the ticker's native surface.
+9. The brand picker offered 121,650 raw disc ids (Karaoke Version across
+   20,901 of them); now 38 canonical brands.
+10. Searches could return nothing for songs that ARE in the library: a
+    coalesced query drained only on a results signal from a worker that had
+    been interrupted and would never emit again.
+11. Undecodable files were re-analysed every pass (40 files + 11 SKK006 ZIPs);
+    failures are remembered against size/mtime.
+12. The CDG visual offset now reaches the follower backend. **UNCALIBRATED.**
 
-The live test also exposed a retained-native-view bug: after Show Karaoke was
-hidden, the bridge logged `output view no-window`; reopening the window left
-the mpv surface detached/black while the separately-owned ticker kept drawing.
-The bridge now explicitly re-presents its retained texture when `VideoWindow`
-is shown, with one bounded AppKit-settle retry. No media reload, audio change or
-surface reorder is involved.
+### Verification
 
-The first `0.4.4.2` build failed live: setting the IINA libmpv core to
-`scale/cscale=nearest` for CDG allowed audio time to advance but never produced
-a render-ready frame, so readiness gating correctly kept both video hosts
-hidden. The scaler changes have been removed from source. The broken app is
-preserved at `/Applications/SingWS-broken-0.4.4.2.app` for diagnosis.
+936 tests under `qtvenv`, plus the 86 that need `.venv-universal` — all green.
+The four `qtvenv` failures are the environment, not the code; see the
+"Running the tests" section of `AGENTS.md`, which now documents this so it
+stops being re-diagnosed as a regression.
 
-The second `0.4.4.2` package contains only the retained-view refresh fix. Its
-focused regression passed. The Intel build verified 450 x86_64 Mach-O files,
-loaded the bundled media core, verified 871 deployment targets at macOS 12.0 or
-earlier, and passed DMG verification. DMG SHA-256:
-`faf5b41aaaf2a7a25845fe7bb989dcf2e918ed3fca3a4824738a8d43a7c4ead5`.
-This exact second package is installed and launched at
-`/Applications/SingWS.app`, but the operator has not yet completed the live
-hide/change-to-Blur/reopen sequence. Do not commit or publish until the picture
-return is confirmed in that sequence.
+### What has NOT been done
 
-## Current live result and cleanup work
+- **Never launched.** Items 6, 7, 8 and 12 drive KaraFun/AppleScript, native
+  surface ordering and CDG timing. None of that is reachable by tests. Item 12
+  in particular needs a real CDG disc checked on screen.
+- Not merged to `main`, not tagged, not released, not built into a current DMG.
+- arm64 is still a release behind and needs an Apple Silicon Mac.
+- No rollback bundle exists in `/Applications`; copy the current app aside
+  before installing over it.
 
-The installed `0.4.4.6` Intel build passed the operator's live CDG test:
-Side Fill -> Blur -> Side Fill, including Settings hiding/recreating the show
-window. Full-edge fill, seam feathering, unstretched lyrics and native-view
-reparenting all work. `/Applications/SingWS-before-0.4.4.6.app` is the immediate
-`0.4.4.5` rollback.
+## Uncommitted: brand picker + KaraFun playback fixes (NOT BUILT, NOT INSTALLED)
 
-Unbuilt cleanup after that confirmation makes the native IINA/libmpv backend
-mandatory, removes both Settings engine switches, ignores/migrates obsolete
-saved engine preferences, removes the `PythonKaraokeTransport` import, and
-removes the Homebrew/follower fallback from backend loading. Source runs now
-find the locally built bridge under `native/mpv_bridge`. The focused engine and
-video regressions pass (27 + 3 tests). The large legacy branch body and
-`mpv_playback.py` still physically exist and must be removed only after their
-build-script/spec/test references are cleaned. Do not remove `ffmpeg` or
-`ffprobe` yet: decorative video, loudness, phrase/waveform/silence analysis,
-BGM fallback and soundboard fallback still consume them.
+Three defects from the 2026-08-16 show, all source-only. `APP_VERSION` is
+bumped to `0.4.5.4` and `dist/` plus `SingWS-0.4.5.4-x86_64-installer.dmg` were
+built, but **nothing was installed** -- `/Applications/SingWS.app` is still
+`0.4.5.3`.
 
-## Unbuilt AirPlay routing repair
+1. **Brand picker listed one brand many times.** `canonical_disc_brand` always
+   mapped `KARAOKE VERSION`/`KV`/`KARAOKE VERSION 00`/`KV 43403` to `KV`, and
+   `normalize_disc_priority` deduped them, so the ten-slot preference was never
+   actually wasted. But the pickers were built from raw `disc_id` values --
+   per-disc codes, not brands -- giving **121,650 entries** with Karaoke Version
+   spread over 20,901 of them. New shared `library_brand_choices()`
+   canonicalises, keeps only values that name a brand (known alias, or a bare
+   token with no disc number), and orders by library coverage: **134,266 tracks
+   -> 38 choices**, KV/SC/CB/SF/SBI first, unaliased house brands (WSK, SINGA)
+   retained.
+2. **KaraFun played the wrong song.** At 22:31 it was asked for Sugarcult -
+   Memory and played Memory from Cats. The right query *was* tried twice and
+   both attempts died on AXError -1719 "Invalid index" because KaraFun's window
+   was still being built one second after launch. Each failure fell through to
+   the next, looser query, so attempt 3 searched the bare title. Transient
+   UI-not-ready errors (`_is_karafun_ui_not_ready_error`) now retry the *same*
+   query up to 3x, and the matcher verifies the artist on the result row:
+   artist-confirmed rows return `FOUND`, title-only rows return `TITLE_ONLY`,
+   and a query carrying no artist accepts only `FOUND`.
+3. **Background music came up ~30s before the song ended.** The duration
+   fallback counted from the renderer handoff, but KaraFun spent ~45s launching
+   and going fullscreen before a note played, so the 235s clock expired
+   mid-outro, advanced the rotation and started the BG deck over the ending.
+   The countdown is now rebased to the first *confirmed* playback signal
+   (`playing_reported` or an advancing clock); the fallback's own countdown is
+   explicitly excluded from rebasing it.
 
-Karaoke output selection was lost in the native mpv migration: the plugin and
-bridge exposed `setAudioDevice`, but the host never called it, so karaoke stayed
-on libmpv's `auto` output regardless of the selected SingWS device. The host now
-pushes the selected output before every karaoke start. Because SingWS stores the
-human-readable CoreAudio label while mpv requires its backend-specific device
-name, the bridge resolves that label through `audio-device-list`. Routing now
-treats an AirPlay display as video-only: Default resolves to headphones or
-built-in Mac speakers, a missing headphone pin falls back locally,
-BGM/soundboard use the same policy, and KaraFun follows the resolved local
-output. If no safe local device exists, native karaoke refuses the system
-default rather than leaking audio to the TV.
+Files: `0.2.18.1.py`, `test_recent_regressions.py`, `test_karafun_provider.py`.
 
-The native bridge compiles successfully. All 114 audio/engine/KaraFun/live-show
-checks exercised by the focused run pass; that wider run also exposes one
-unrelated pre-existing stale location-permission source assertion. This source
-has not been packaged, installed, launched, or tested against a connected
-AirPlay receiver.
+Verification: 908 tests, 19 new, all passing; the same 4 unrelated failures as
+at HEAD. `test_karafun_provider` asserted the old `{"FOUND", "FIRST"}` gate as
+source text and was updated to the widened set. **Fixes 2 and 3 drive
+KaraFun.app through AppleScript and cannot be covered by tests -- they need a
+real KaraFun song before they go near a show.**
 
-## Unbuilt decorative MP4 stretch
+## Uncommitted: KaraFun history re-add (player side NOT BUILT; server side IS LIVE)
 
-MP4 animations behind CDG lyrics now deliberately stretch edge-to-edge instead
-of crop-to-fill. The native path overrides the decorative core to the shared
-16:9 texture and composites that entire texture in the existing single GPU
-draw; the CDG foreground remains aspect-correct. No decode, timer, audio clock,
-or intermediate-frame allocation was added. The dormant painted fallback uses
-the same direct full-source draw behavior.
+A KaraFun song in a singer's history could not be re-added. Two independent
+causes, one per repo.
 
-Ordinary MP4 karaoke tracks now use the same deliberate full-frame stretch on
-the output and preview while CDG keeps its protected native aspect. Decorative
-playlist changes now use a true frozen-frame dissolve. The native compositor
-snapshots the outgoing video's final GPU texture, the same single background
-decoder loads its replacement at zero opacity, and incoming frames crossfade
-directly over that retained image. There is no black dip and no second decoder
-competing with karaoke on the Intel show Mac.
+**Server (deployed 2026-08-17 23:55, verified live).** A `kf_<id>` is the
+server catalog's own SQLite rowid, not a KaraFun identifier, and
+`kf_import_csv()` did `DELETE FROM songdb` then reinserted under
+`AUTOINCREMENT` — so *every* id changed on *every* catalog refresh, killing
+every id ever written into a singer's history. "Sugarcult - Memory" moved
+kf_2219191 -> kf_3168777 -> kf_3255418 while staying in the catalog throughout.
+`submitreq.php` then hard-failed the lookup with "This KaraFun catalog entry is
+no longer available", despite the branch 30 lines below it already re-resolving
+stale local ids from artist/title. Now: `kf_resolve_catalog_song()`
+(`karafun_catalog.inc.php`) treats a stored id as a hint and re-resolves by
+natural key, and the import upserts on `norm_key` so surviving songs keep their
+ids. Deployed files match by SHA-256 and both dead ids resolve to kf_3255418
+against the live 88,566-row catalog.
 
-The decorative MP4 decoder was continuously advancing, but its render callback
-presented new frames only to the audience output. The host preview was refreshed
-only incidentally by CDG render callbacks, making its background visibly pause
-whenever the CDG had no lyric movement. Background frames now present to both
-native surfaces from the background callback; CDG low-activity behavior remains
-independent and cannot throttle either MP4 view.
+**Player (source only — not packaged, not installed).**
+`_resolve_history_song_track` searched only the local library, but a KaraFun
+streaming song's path is the synthetic `karafun_streaming:<id>` reference,
+which is in neither `singws.db` nor `tracks.json` — so the add always failed
+with "Could not match this history song to a local track", whatever the id.
+`_karafun_track_from_history_song()` now rebuilds the external track via the
+existing `_build_karafun_streaming_track()`. No network call: playback drives
+KaraFun.app by artist/title search and never uses the catalog id.
 
-Opening the third-screen rotation QQuick window now performs two bounded
-reassertions of the existing audience-window ticker after native surfaces
-settle. It restarts/raises only the show-screen ticker, adds no ticker to the
-rotation window, and does not activate or steal focus with the show window.
+Files: `0.2.18.1.py`, `test_recent_regressions.py`; server
+`submitreq.php`, `karafun_catalog.inc.php`, `tools/test_karafun_catalog_ids.php`.
 
-The Singer Rotation window now has its own optional announcement marquee for
-drink specials or venue messages. It is configured independently in Ticker
-Settings, appears only on the rotation window, applies live, and is stored with
-venue-scoped settings.
+Verification: 889 player tests (7 new, all passing; the same 4 unrelated
+failures as at HEAD), 23 new server assertions passing, all 10 existing server
+tool tests passing. **The player half has still never been launched.**
 
-Verified karaoke trailing silence now completes the song before mpv's physical
-EOS instead of merely fading BGM underneath and leaving the silent decoder
-alive. The existing file-scan audio floor and CDG final-visible-frame gate still
-prevent quiet endings or unfinished lyrics from being cut. Normal completion
-bookkeeping is retained; the next karaoke auto-starts only when Auto Advance is
-enabled, otherwise BGM resumes/fades as configured.
+## Uncommitted: 2026-08-16 show fixes (NOT BUILT, NOT INSTALLED)
 
-## Unbuilt CDG black-screen repair
+Four defects found in the 2026-08-16 show logs, all fixed in source. **None of
+this has been packaged, installed or launched.** `/Applications/SingWS.app` is
+still the released `0.4.5.3` that produced the faults below. Do not describe
+these as live.
 
-The 2026-08-13 show log identified two reproducible audio-with-black-picture
-tracks: `LG126 03 - The Eagles - After The Thrill Is Gone` and `SF113 03 -
-Orange Juice - Rip It Up`. Both ZIPs and CDG streams are healthy and full
-length (260.20s and 241.04s). The bundled IINA media stack instead reported
-bogus 34.15s and 31.64s graphics durations and never produced a video frame.
+1. **Loudness scan leaked ~1 MB per track.** `_measure_loudness_lavfi` built a
+   fresh mpv core per track and `mpv_terminate_destroy` never returned the
+   memory, growing the app from 472 MB to 8,635 MB over the five-hour show.
+   `libmpv_media_jobs.LoudnessSession` now reuses one core per scan pass.
+   Measured on 40 distinct library tracks: **1.047 MB/track before, 0.025
+   MB/track after (42x)**, with identical LUFS/peak in both full and fast mode.
+   The predicted 8,885 MB for the night's 8,486 scans matches the 8,163 MB
+   actually observed. A session that fails three times running disables itself
+   so an older libmpv without ebur128 still falls back to the WAV analyzer.
+2. **Four "crashes" from the progress dialog.** The delayed re-raise in
+   `_bring_analyze_dialog_to_front` guarded `QTimer.singleShot()` rather than
+   the callback body, so closing the dialog inside 750 ms threw
+   `RuntimeError: wrapped C/C++ object of type QProgressDialog has been deleted`
+   into the event loop. The callback is guarded now.
+3. **Scanning underneath a live song.** A full-library pass ran for the whole
+   show and produced 744 GUI stalls, worst 6.1 s. `AnalyzeLibraryWorker` now
+   holds between tracks while `karaoke_playing` is set, resumes automatically
+   between songs, reports the hold in the dialog, and stays cancellable while
+   held.
+4. **A corrupt log bundle.** The 22:15:45 crash left a 712-byte ZIP with no
+   end-of-central-directory record and logged no `[LOG-EMAIL]` line at all.
+   Packaging now builds under `.zip.partial` and renames only on success, and
+   the crash-email thread logs its own failures instead of dying silently.
 
-The bridge's compatibility probe threshold of 1 still used automatic format
-detection, allowing arbitrary CDG packet bytes to false-positive as another
-raw format. CDG loads now explicitly force libavformat's `cdg` demuxer and
-non-CDG loads explicitly clear that override. The bridge also logs the detected
-media format after each load, making recurrence visible in show logs. Both
-reported files decode as CDG with the forced option, the native bridge rebuilds
-successfully, and the focused transport suite passes (7 tests). This source and
-rebuilt bridge have not been packaged or installed.
+Also fixed: `test_volume_analysis_dialog_is_resurfaced_frontmost` asserted a
+dialog string (`"Measuring loudness"`) that had not existed for some time. It
+failed at unmodified HEAD too — nobody saw it because no venv could run that
+suite (see below).
 
-A second, independent CDG visual watchdog now fires once when audible playback
-has advanced to five seconds without any native graphics frame. It keeps the
-black native children hidden, leaves the singer's audio uninterrupted, records
-the file/time in the show log, and displays a persistent host warning.
+Files: `0.2.18.1.py`, `libmpv_media_jobs.py`, `test_recent_regressions.py`,
+`test_performance_safety.py`.
 
-## Unbuilt KaraFun fast-path restoration
+Verification: 882 tests run, 7 new ones added and passing. The 4 failures
+(`test_libmpv_background_engine`, `test_phrase_detect` x2, `test_mac_keep_awake`)
+fail identically at unmodified HEAD and are unrelated. **Nothing was built or
+launched** — per the live-show rules the next step is a package, an install and
+an actual run before this goes near a show.
 
-The 2026-08-13 show log shows a KaraFun song launching normally, followed by a
-per-song route check opening KaraFun's Audio Settings UI, failing to match its
-device label to `External Headphones`, and aborting playback. That invasive
-Accessibility scan could occupy KaraFun for up to 25 seconds and leave panels
-or option popovers visible.
+`qtvenv/` now exists (PyQt6 6.9.1 matched pair, per the "Running the tests"
+section of `AGENTS.md`). It is the only venv here that can construct a
+QApplication, so `unittest discover` finally completes instead of aborting. It
+is untracked build scaffolding, not part of the app.
 
-KaraFun again owns and persists its configured audio route. SingWS performs
-only an immediate local target sanity check (still rejecting a configured
-AirPlay/display target), never opens Audio Settings, and proceeds directly to
-search/play. The existing background playback monitor remains responsible for
-detecting a real launch failure.
+## Previously released work
 
-The separate modifier automation path also no longer clicks KaraFun's Audio
-Settings button. It adjusts only explicitly named key/tempo controls already
-exposed by the player, avoiding the same slow popover during modified songs.
+**There is no other uncommitted product work in this tree.** Everything described by
+the previous handoff — the AirPlay routing repair, the decorative MP4 stretch
+and frozen-frame crossfade, the CDG black-screen demuxer fix and visual
+watchdog, the KaraFun fast-path restoration, the pre-show diagnostics and
+show-cycle regression, and the loudness-analysis PCM repair — was built,
+released and superseded across `v0.4.5.0` through `v0.4.5.3`. That handoff was
+stale by four releases; this file replaces it.
 
-## Unbuilt pre-show diagnostics and show-cycle regression
+## Current state
 
-Display Settings now includes **Run Pre-Show Check**, a read-only seven-point
-report for the resolved local audio device, video-only display arrangement,
-KaraFun installation, both native video hosts, audience ticker, signup QR URL,
-and the configured background-video folder.
+`main` is at `64ead92 Release v0.4.5.3`, tagged `v0.4.5.3`, with nothing
+unpushed. `APP_VERSION` is `0.4.5.3`. `SingWS-Server` `main` is at
+`ca90564 Restore accidentally removed waitlist requests`, also fully pushed.
 
-`tools/show_cycle_simulation.py` supplies a fast deterministic regression for
-CDG -> MP4 -> KaraFun -> CDG with the rotation screen open and two motionless
-CDG intervals. It checks that the background clock remains independent, both
-video surfaces update, the audience ticker coexists with the ticker-free
-rotation screen, full-frame MP4 stretch and frozen-frame crossfade remain in
-place, the CDG watchdog is wired, and KaraFun does not open Audio Settings.
-The simulation and the focused combined suite pass (34 tests).
+The GitHub release `v0.4.5.3` is public (2026-08-16) and carries the Intel
+installer only. `docs/release.json`, the local
+`SingWS-0.4.5.3-x86_64-installer.dmg` and the published asset all agree on
+SHA-256 `821184448d9e0801d128b86cf2e578fce4f7e2b85ed8ae851d3aa04b2977fae2`.
 
-## Unbuilt loudness-analysis PCM repair
+`/Applications/SingWS.app` reports `0.4.5.3` and is the same build as the
+release: its `libsingws_mpv_bridge.dylib` `__TEXT,__text` hash
+(`49b4615b…3900530`) is identical to `dist/SingWS.app`, which is what the
+0.4.5.3 DMG was packaged from. The operator installed from the build output
+directly rather than from the DMG; the code is the same either way.
 
-The bundled libmpv loudness path reserved its output name with `mkstemp` but
-left the empty WAV in place. libmpv's PCM audio driver refuses to overwrite an
-existing destination, so every uncached analysis ended with `libmpv produced no
-PCM audio`. The scanner now removes only its uniquely reserved zero-byte
-placeholder before initializing libmpv, allowing the driver to create and fill
-the WAV normally.
+## Open items
+
+- **arm64 is one release behind.** `v0.4.5.2` shipped both an Intel and an
+  Apple Silicon installer; `v0.4.5.3` shipped Intel only. Per the standing rule,
+  an arm64 build must be produced and verified natively on an Apple Silicon Mac
+  before it is advertised — it cannot be smoke-tested on this Intel dev Mac.
+- **`CHANGELOG.md` stops at `0.4.4.10`.** None of the four `0.4.5.x` releases
+  have changelog entries, and their commit messages are single-line with empty
+  bodies, so the changelog is currently the weakest record of what shipped.
+  Reconstruct the entries from the diffs before the next release.
+- **Uncommitted documentation wiring** (the only dirty state in either repo):
+  `CLAUDE.md` here is modified to import `@HANDOFF.md`, and
+  `SingWS-Server/CLAUDE.md` is a new untracked file importing this repo's
+  `AGENTS.md` and `HANDOFF.md`. Documentation only, no behaviour change.
+  Because `CLAUDE.md` now imports this file, keeping it current is load-bearing:
+  a stale handoff is read into every session as though it were pending work.
+
+## Rollback path
+
+The previously preserved `SingWS-before-*.app` / `SingWS-broken-*.app` bundles
+are **gone** — `/Applications` now holds only `SingWS.app`. There is no
+installed fallback to switch to mid-show. The rollback is the retained
+`SingWS-0.4.5.2-x86_64-installer.dmg` in the repo root, which must be installed
+before it can be used. If a preserved rollback bundle matters for the next
+release, copy the current app aside before installing over it.

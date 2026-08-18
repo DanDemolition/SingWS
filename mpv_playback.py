@@ -1216,6 +1216,9 @@ class MpvPlaybackPlugin:
         self._seek_hold_active = False
         # Consecutive over-threshold samples per follower; see _sync_loop.
         self._sync_seek_strikes = {}
+        # CDG visual-timing calibration, in seconds, applied to the master
+        # reference the video followers chase (see setVideoOffsetMs).
+        self._video_offset_s = 0.0
         self._screen_change_handlers = []
         # When SingWS drives audio itself (its own decoder -> tempo/key ->
         # normalize -> EQ -> master bus), the followers chase THAT clock and
@@ -2039,6 +2042,26 @@ class MpvPlaybackPlugin:
         return bool(self._engine.ended.is_set())
 
     # -- contract: settings ----------------------------------------------------------------
+    def setVideoOffsetMs(self, ms) -> None:
+        """Apply the CDG visual-timing calibration to the follower clock.
+
+        This backend does not own the audio, so there is no audio-delay to set
+        the way the in-process backend does; instead the offset moves the
+        master reference the video followers converge on. Positive values hold
+        the picture back relative to the audio.
+        """
+        try:
+            clamped = max(-3000, min(3000, int(ms or 0)))
+        except Exception:
+            clamped = 0
+        if clamped == int(round(self._video_offset_s * 1000.0)):
+            return
+        self._video_offset_s = clamped / 1000.0
+        try:
+            self.log(f"[MPV-FOLLOW] visual offset = {clamped:+d}ms")
+        except Exception:
+            pass
+
     def setVolume(self, value) -> None:
         self._volume = max(0.0, min(2.0, float(value)))
         if self._external_audio is not None:
@@ -2166,7 +2189,12 @@ class MpvPlaybackPlugin:
                             t = f.time()
                             if t is None:
                                 continue
-                            delta = master - t
+                            # The CDG visual offset shifts the reference the
+                            # followers chase. Without it this backend ignored
+                            # the calibrated offset entirely, so CDG lyrics ran
+                            # ~750ms out and the Display tab's fine tuning did
+                            # nothing.
+                            delta = (master + self._video_offset_s) - t
                             # A cold start on slower hardware can leave video >1s behind, and at
                             # a 6% cap that takes ~20s to close. One seek fixes it — but NEVER on
                             # CDG, where a mid-stream seek corrupts tiles until the next redraw.

@@ -240,6 +240,30 @@ def _measure_wav_lufs(rendered: str):
     return float(integrated), float(peak_db)
 
 
+def _configure_ebur128_job(job: "OfflineMpvJob"):
+    """Apply the shared pre-initialize options for an ebur128 measurement."""
+    job.option("config", "no")
+    job.option("vid", "no")
+    job.option("ao", "null")
+    job.option("ao-null-untimed", "yes")
+    job.option("untimed", "yes")
+    job.option("af", "lavfi=[ebur128=peak=sample:framelog=verbose]")
+
+
+def _parse_ebur128(messages: list[str]):
+    """Extract (integrated LUFS, sample peak dBFS) from mpv's verbose log."""
+    output = "\n".join(messages)
+    integrated = re.findall(r"\bI:\s*(-?\d+(?:\.\d+)?)\s+LUFS", output)
+    peaks = re.findall(r"\bPeak:\s*(-?\d+(?:\.\d+)?)\s+dBFS", output)
+    if not integrated:
+        raise RuntimeError("libmpv ebur128 produced no integrated loudness")
+    lufs = float(integrated[-1])
+    peak_db = float(peaks[-1]) if peaks else None
+    if not (-70.0 <= lufs <= 0.0):
+        return None, peak_db
+    return lufs, peak_db
+
+
 def _measure_loudness_lavfi(
     source: str,
     *,
@@ -251,12 +275,7 @@ def _measure_loudness_lavfi(
     job = OfflineMpvJob()
     messages: list[str] = []
     try:
-        job.option("config", "no")
-        job.option("vid", "no")
-        job.option("ao", "null")
-        job.option("ao-null-untimed", "yes")
-        job.option("untimed", "yes")
-        job.option("af", "lavfi=[ebur128=peak=sample:framelog=verbose]")
+        _configure_ebur128_job(job)
         if start_seconds is not None:
             job.option("start", f"{max(0.0, float(start_seconds)):.6f}")
         if duration_seconds is not None:
@@ -269,16 +288,83 @@ def _measure_loudness_lavfi(
     finally:
         job.close()
 
-    output = "\n".join(messages)
-    integrated = re.findall(r"\bI:\s*(-?\d+(?:\.\d+)?)\s+LUFS", output)
-    peaks = re.findall(r"\bPeak:\s*(-?\d+(?:\.\d+)?)\s+dBFS", output)
-    if not integrated:
-        raise RuntimeError("libmpv ebur128 produced no integrated loudness")
-    lufs = float(integrated[-1])
-    peak_db = float(peaks[-1]) if peaks else None
-    if not (-70.0 <= lufs <= 0.0):
-        return None, peak_db
-    return lufs, peak_db
+    return _parse_ebur128(messages)
+
+
+class LoudnessSession:
+    """Measure many files through ONE reused mpv core.
+
+    Creating a core per track leaks memory that mpv_terminate_destroy does not
+    return: measured at ~1.5 MB per track, linear and with no plateau, which
+    grew the app past 8 GB during a five-hour library scan on 2026-08-16.
+    Reusing a single core plateaus instead (~0.07 MB per track after warm-up),
+    and the ebur128 filter and decoder reset on every loadfile, so the measured
+    values are identical either way.
+
+    Not thread-safe: one session belongs to one scan pass on one thread.
+    """
+
+    # A single bad file should not permanently disable the fast path, but a
+    # libmpv build without ebur128 fails every time.  Give up after this many
+    # consecutive failures and let callers fall back to the WAV analyzer.
+    _MAX_CONSECUTIVE_FAILURES = 3
+
+    def __init__(self):
+        self._job = None
+        self._failures = 0
+        self._disabled = False
+
+    @property
+    def usable(self) -> bool:
+        return not self._disabled
+
+    def _core(self) -> "OfflineMpvJob":
+        if self._job is None:
+            job = OfflineMpvJob()
+            _configure_ebur128_job(job)
+            job.initialize()
+            job.request_log_messages("v")
+            self._job = job
+        return self._job
+
+    def measure(self, source: str, *, timeout: float = 120.0):
+        """Measure one file. Raises on failure, exactly like the plain path."""
+        if self._disabled:
+            raise RuntimeError("loudness session disabled after repeated failures")
+        messages: list[str] = []
+        try:
+            job = self._core()
+            job.command("loadfile", str(source), "replace")
+            job.wait_for_end(timeout, messages)
+            result = _parse_ebur128(messages)
+        except Exception:
+            # A failed load can leave the core in an unusable state, so drop it
+            # rather than letting the next track inherit the fault.
+            self.close()
+            self._failures += 1
+            if self._failures >= self._MAX_CONSECUTIVE_FAILURES:
+                self._disabled = True
+            raise
+        self._failures = 0
+        return result
+
+    def measure_fast(self, source: str, *, timeout: float = 120.0):
+        return self.measure(_fast_loudness_timeline(source), timeout=timeout)
+
+    def close(self):
+        job, self._job = self._job, None
+        if job is not None:
+            try:
+                job.close()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+        return False
 
 
 def measure_loudness_lufs(
@@ -330,8 +416,8 @@ def measure_loudness_lufs(
             pass
 
 
-def measure_loudness_fast_lufs(source: str, *, timeout: float = 120.0):
-    """Estimate loudness from five short sections spread across a typical song.
+def _fast_loudness_timeline(source: str) -> str:
+    """Build the five-section EDL used by fast loudness estimation.
 
     mpv's EDL joins the sections into one in-memory timeline, so ebur128 sees a
     representative 60-second program without starting five decoder cores.
@@ -339,8 +425,12 @@ def measure_loudness_fast_lufs(source: str, *, timeout: float = 120.0):
     """
     source = str(source)
     escaped = f"%{len(os.fsencode(source))}%{source}"
-    timeline = "edl://" + ";".join(
+    return "edl://" + ";".join(
         f"{escaped},start={start},length=12"
         for start in (0, 45, 90, 135, 180)
     )
-    return measure_loudness_lufs(timeline, timeout=timeout)
+
+
+def measure_loudness_fast_lufs(source: str, *, timeout: float = 120.0):
+    """Estimate loudness from five short sections spread across a typical song."""
+    return measure_loudness_lufs(_fast_loudness_timeline(source), timeout=timeout)

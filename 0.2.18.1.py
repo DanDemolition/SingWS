@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.5.3"
+APP_VERSION = "0.4.5.4"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -1943,6 +1943,44 @@ def _loudness_gain_from_lufs(integrated_lufs: float, peak_db: float | None = Non
     return max(LOUDNESS_MIN_GAIN_DB, min(LOUDNESS_MAX_GAIN_DB, gain))
 
 
+def _loudness_mark_failed(audio_path: str, reason: str = ""):
+    """Remember that a file cannot be analysed, so passes stop retrying it.
+
+    40 files in one library decode to nothing at all ("libmpv ebur128 produced
+    no integrated loudness; PCM fallback failed"), and 11 SKK006 ZIPs have no
+    readable MP3 inside. Only successes were ever cached, so every scan paid
+    for them again -- on a job that already takes many hours. Keyed on the same
+    mtime/size signature as a success, so repairing the file retries it.
+    """
+    sig = _loudness_file_sig(audio_path)
+    if sig is None:
+        return
+    with _loudness_lock:
+        _loudness_cache[audio_path] = {
+            "failed": True,
+            "reason": str(reason or "")[:200],
+            "mtime": sig[0],
+            "size": sig[1],
+            "at": int(time.time()),
+        }
+    _loudness_save_cache(force=False)
+
+
+def loudness_failed_cached(audio_path: str) -> bool:
+    """True when this exact file has already failed analysis."""
+    _loudness_load_cache()
+    if not audio_path:
+        return False
+    entry = _loudness_cache.get(audio_path)
+    if not isinstance(entry, dict) or not entry.get("failed"):
+        return False
+    sig = _loudness_file_sig(audio_path)
+    if sig is None:
+        return False
+    # A changed file is a different file: let it be retried.
+    return int(entry.get("mtime", 0)) == sig[0] and int(entry.get("size", 0)) == sig[1]
+
+
 def loudness_info_cached(audio_path: str):
     """Return cached loudness diagnostics for an audio file, or None."""
     _loudness_load_cache()
@@ -2000,11 +2038,17 @@ def loudness_gain_db_cached(audio_path: str):
         return None
 
 
-def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full"):
+def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full",
+                           session=None):
     """Measure integrated loudness (LUFS) and sample peak via bundled libmpv.
 
     Returns (integrated_lufs, max_peak_db) or (None, None).  The measured peak
     is cached and used only to cap static gain; no live compressor/limiter is added.
+
+    Pass a LoudnessSession when measuring many files in a row: a fresh mpv core
+    per track leaks ~1.5 MB that is never returned, which is what grew the app
+    past 8 GB during a library scan.  A failing session falls back to the plain
+    one-shot path so an older libmpv without ebur128 still works.
     """
     if cancel_check is not None:
         try:
@@ -2014,12 +2058,21 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full
             pass
     try:
         from libmpv_media_jobs import measure_loudness_fast_lufs, measure_loudness_lufs
-        if mode == "fast":
-            # Five sections avoid basing the estimate on one unusually quiet
-            # intro/verse while still decoding only one minute in total.
-            result = measure_loudness_fast_lufs(audio_path, timeout=120.0)
-        else:
-            result = measure_loudness_lufs(audio_path, timeout=120.0)
+        result = None
+        if session is not None and getattr(session, "usable", False):
+            try:
+                result = (session.measure_fast(audio_path, timeout=120.0)
+                          if mode == "fast" else
+                          session.measure(audio_path, timeout=120.0))
+            except Exception:
+                result = None
+        if result is None:
+            if mode == "fast":
+                # Five sections avoid basing the estimate on one unusually quiet
+                # intro/verse while still decoding only one minute in total.
+                result = measure_loudness_fast_lufs(audio_path, timeout=120.0)
+            else:
+                result = measure_loudness_lufs(audio_path, timeout=120.0)
     except Exception as exc:
         _diag(
             f"[LOUDNESS] analysis failed file={os.path.basename(str(audio_path))!r} "
@@ -2076,6 +2129,10 @@ def analyze_loudness_async(audio_path: str):
                 except Exception:
                     pass
                 return
+            if lufs is None and sig is not None and _loudness_workers_allowed():
+                # Remember it so later passes skip this file instead of paying
+                # for the same failed decode again.
+                _loudness_mark_failed(audio_path, "no measurable loudness")
             if lufs is not None and sig is not None:
                 with _loudness_lock:
                     _loudness_cache[audio_path] = {
@@ -2159,19 +2216,34 @@ def prepare_log_email_package(days: int = 3, *, crash_log: str | Path | None = N
     files = sorted({Path(p) for p in files}, key=lambda p: p.name)
     if not files:
         return None, [], "No SingWS log files from the requested window."
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    package = LOGS_DIR / f"singws_logs_last_{int(days)}_days_{stamp}.zip"
+    # Build under a temporary name and rename only on success.  Writing the ZIP
+    # in place left a truncated, unopenable archive sitting next to the good
+    # ones when packaging died partway on 2026-08-16 (a 712-byte file with no
+    # end-of-central-directory record, indistinguishable from a real bundle
+    # until you try to open it).
+    building = package.with_suffix(".zip.partial")
     try:
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        package = LOGS_DIR / f"singws_logs_last_{int(days)}_days_{stamp}.zip"
-        with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(building, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for path in files:
                 try:
                     raw = path.read_text(encoding="utf-8", errors="replace")
                     zf.writestr(path.name, _sanitize_log_text(raw))
                 except Exception as exc:
                     zf.writestr(f"{path.name}.error.txt", f"Failed to read {path.name}: {exc}")
+        os.replace(building, package)
         return package, files, ""
-    except Exception as exc:
-        return None, files, f"Failed to package logs: {exc}"
+    except BaseException as exc:
+        # BaseException so a MemoryError — the likely cause when this ran with
+        # the app at 7.9 GB — also cleans up instead of orphaning the partial.
+        try:
+            building.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if isinstance(exc, Exception):
+            return None, files, f"Failed to package logs: {exc}"
+        raise
 
 
 def _log_email_config_from_settings(settings: dict | None) -> dict:
@@ -2247,8 +2319,15 @@ def maybe_auto_send_crash_logs(crash_log: str | Path | None):
         if not isinstance(settings, dict) or not bool(settings.get("crash_auto_send_logs", False)):
             return
         def _work():
-            ok, msg, package = send_recent_logs_email(settings, 3, crash_log=crash_log)
-            logging.info(f"[LOG-EMAIL] auto crash send ok={int(ok)} package={Path(package).name if package else ''} msg={msg}")
+            # Without this guard a throw here (MemoryError, SMTP teardown, a
+            # disk error) killed the daemon thread without a single log line,
+            # which is why the 22:15:45 crash on 2026-08-16 has no [LOG-EMAIL]
+            # record at all while the other three do.
+            try:
+                ok, msg, package = send_recent_logs_email(settings, 3, crash_log=crash_log)
+                logging.info(f"[LOG-EMAIL] auto crash send ok={int(ok)} package={Path(package).name if package else ''} msg={msg}")
+            except Exception as exc:
+                logging.error(f"[LOG-EMAIL] auto crash send failed: {exc!r}")
         threading.Thread(target=_work, daemon=True, name="singws-crash-log-email").start()
     except Exception as exc:
         logging.error(f"[LOG-EMAIL] auto crash send setup failed: {exc}")
@@ -3144,6 +3223,7 @@ DEFAULTS = {
     "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
+    "loudness_scan_holds_for_playback": True, # False = keep scanning under a live song (faster pass, risks GUI stalls)
     "karafun_open_automatically": True, # Focus/open KaraFun when an external KaraFun queue item becomes active
     "karafun_manage_show_screen": True, # macOS: hand the show display to KaraFun, then restore SingWS on completion
     "karafun_transparent_handoff": True, # Reveal an already-positioned KaraFun renderer through the SingWS show window
@@ -3504,6 +3584,35 @@ def canonical_disc_brand(value, allow_unknown: bool = True) -> str:
         if info.get("canonical"):
             return str(info.get("canonical") or "")
     return raw.upper() if allow_unknown else ""
+
+def library_brand_choices(tracks, should_cancel=None) -> list[str]:
+    """Collapse library disc ids into the brand list the pickers offer.
+
+    disc_id holds a per-disc code -- "KARAOKE VERSION 00", "KV 43403", "KV 00"
+    -- not a brand, and the pickers listed those raw values. One library put
+    121,650 entries in the combo and spread Karaoke Version across 20,901 of
+    them, so the same brand appeared under many names. Canonicalise first, then
+    keep only values that actually name a brand: a known alias, or a bare token
+    carrying no disc number. Ordered by how much of the library each covers.
+    """
+    counts = {}
+    known = set(DISC_BRAND_ALIASES)
+    for index, track in enumerate(tracks or []):
+        if should_cancel is not None and index % 1024 == 0 and should_cancel():
+            return []
+        try:
+            disc = str((track or {}).get("disc_id", "") or "").strip().upper()
+        except Exception:
+            continue
+        if not disc:
+            continue
+        canonical = canonical_disc_brand(disc, allow_unknown=True)
+        if not canonical:
+            continue
+        if canonical not in known and (canonical != disc or any(c.isdigit() for c in disc)):
+            continue
+        counts[canonical] = counts.get(canonical, 0) + 1
+    return [name for name, _count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 def normalize_disc_priority(value, max_items: int = 10):
     """Normalize user priority input into canonical disc/brand prefixes (max 10)."""
@@ -13472,12 +13581,21 @@ class AnalyzeLibraryWorker(QObject):
     """
     progress = pyqtSignal(int, int, str)   # done, total, current name
     finished = pyqtSignal(int, int)        # analyzed, total
+    holding = pyqtSignal(bool)             # paused because karaoke is playing
 
-    def __init__(self, items, mode: str = "full"):
+    # Poll interval while holding off for playback.  Short enough that the scan
+    # resumes promptly between songs, long enough to cost nothing.
+    _PLAYBACK_HOLD_POLL_S = 1.0
+
+    def __init__(self, items, mode: str = "full", should_hold=None):
         super().__init__()
         # items: list of (primary_path, audio_path, display_name)
         self.items = list(items or [])
         self.mode = "fast" if mode == "fast" else "full"
+        # Callable returning True while karaoke is playing.  Scanning underneath
+        # a live song is what produced 744 GUI stalls (worst 6.1s) on
+        # 2026-08-16, so the pass holds between tracks instead of grinding on.
+        self.should_hold = should_hold
         self._cancel = False
         self._cancel_event = threading.Event()
 
@@ -13488,18 +13606,54 @@ class AnalyzeLibraryWorker(QObject):
     def is_cancelled(self):
         return self._cancel or self._cancel_event.is_set() or (not _loudness_workers_allowed())
 
+    def _hold_for_playback(self):
+        """Block between tracks while karaoke is playing. Returns False if cancelled."""
+        if self.should_hold is None:
+            return True
+        holding = False
+        while not self.is_cancelled():
+            try:
+                if not self.should_hold():
+                    break
+            except Exception:
+                break
+            if not holding:
+                holding = True
+                _diag("[LOUDNESS-LIB] holding scan while karaoke plays")
+                self.holding.emit(True)
+            self._cancel_event.wait(self._PLAYBACK_HOLD_POLL_S)
+        if holding:
+            self.holding.emit(False)
+            if not self.is_cancelled():
+                _diag("[LOUDNESS-LIB] resuming scan; karaoke idle")
+        return not self.is_cancelled()
+
     def run(self):
         total = len(self.items)
         done = 0
         analyzed = 0
         failed = 0
+        skipped = 0
+        try:
+            from libmpv_media_jobs import LoudnessSession
+            session = LoudnessSession()
+        except Exception:
+            session = None
         for item in self.items:
             if self.is_cancelled():
+                break
+            if not self._hold_for_playback():
                 break
             _source, audio, name = item[:3]
             cache_key = str(item[3] if len(item) > 3 else audio or "")
             done += 1
             self.progress.emit(done, total, str(name or ""))
+            # A file that already failed analysis is not going to succeed this
+            # pass either. Re-attempting them cost 5-6 repeats each across one
+            # show; the record clears itself if the file is ever replaced.
+            if loudness_failed_cached(cache_key):
+                skipped += 1
+                continue
             extracted_audio = ""
             try:
                 audio = str(audio or "")
@@ -13511,7 +13665,8 @@ class AnalyzeLibraryWorker(QObject):
                 sig = _loudness_file_sig(cache_key)
                 with _loudness_sem:
                     lufs, peak_db = _measure_loudness_lufs(
-                        audio, cancel_check=self.is_cancelled, mode=self.mode)
+                        audio, cancel_check=self.is_cancelled, mode=self.mode,
+                        session=session)
                 if self.is_cancelled():
                     break
                 if lufs is not None and sig is not None:
@@ -13535,18 +13690,31 @@ class AnalyzeLibraryWorker(QObject):
                         pass
                 else:
                     failed += 1
+                    if not self.is_cancelled():
+                        _loudness_mark_failed(cache_key, "no measurable loudness")
             except Exception as e:
                 failed += 1
                 try:
                     _diag(f"[ANALYZE-LIB] failed for {name}: {e}")
                 except Exception:
                     pass
+                if not self.is_cancelled():
+                    # Covers the structural failures too, e.g. a ZIP with no
+                    # readable MP3 inside.
+                    _loudness_mark_failed(cache_key, str(e))
             finally:
                 if extracted_audio:
                     try:
                         os.unlink(extracted_audio)
                     except OSError:
                         pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        if skipped:
+            _diag(f"[LOUDNESS-LIB] skipped {skipped} file(s) that failed analysis previously")
         _loudness_save_cache()
         _diag(
             f"[LOUDNESS-LIB] pass_complete mode={self.mode} attempted={done} "
@@ -15877,23 +16045,14 @@ class SingerHistoryBrandChoicesWorker(QObject):
 
     def run(self):
         started = time.perf_counter()
-        brands = set()
         try:
-            for idx, track in enumerate(self.tracks_ref or []):
-                if self._cancelled:
-                    break
-                if isinstance(track, dict):
-                    disc = str(track.get("disc_id", "") or "").strip()
-                    if disc:
-                        brands.add(disc.upper())
-                if idx and idx % 1024 == 0:
-                    time.sleep(0)
+            choices = library_brand_choices(self.tracks_ref, should_cancel=lambda: self._cancelled)
         except Exception:
-            pass
+            choices = []
         self.finished.emit(
             self.job_id,
             self.cache_key,
-            [] if self._cancelled else sorted(brands),
+            [] if self._cancelled else choices,
             (time.perf_counter() - started) * 1000.0,
         )
 
@@ -22704,13 +22863,25 @@ class KaraokeApp(QWidget):
             # window used to repair this accidentally by raising the ticker.
             # Do the same after every native-video reveal, including bounded
             # retries while AppKit finishes reconnecting the retained view.
-            for delay in (0, 80, 250):
+            self._schedule_show_ticker_reassert("mpv_host_reveal")
+
+    def _schedule_show_ticker_reassert(self, reason: str, delays=(0, 80, 250)):
+        """Re-raise the ticker after anything that re-orders native surfaces.
+
+        The ticker and the mpv hosts are native child views on macOS: they
+        stack by creation order, not by the Qt widget tree, and raising the
+        show window can bury a ticker that is still updating normally. Bounded
+        retries because AppKit finishes reconnecting the retained views a few
+        frames later.
+        """
+        for delay in delays:
+            try:
                 QTimer.singleShot(
                     delay,
-                    lambda phase=f"{delay}ms": self._reassert_show_ticker_surface(
-                        "mpv_host_reveal", phase
-                    ),
+                    lambda phase=f"{delay}ms": self._reassert_show_ticker_surface(reason, phase),
                 )
+            except Exception as exc:
+                _diag(f"[TICKER] surface reassert scheduling failed reason={reason}: {exc}")
 
     def _reassert_show_ticker_surface(self, reason: str, phase: str = ""):
         try:
@@ -26657,6 +26828,20 @@ class KaraokeApp(QWidget):
         current_disc_prio = normalize_disc_priority(self.settings.get("disc_id_priority", ""), max_items=10)
         disc_priority_edit.setText(", ".join(current_disc_prio))
         v.addWidget(disc_priority_edit)
+        loudness_hold_cb = QCheckBox("Pause library loudness scans while a song is playing")
+        loudness_hold_cb.setToolTip(
+            "On (recommended): the scan waits between songs, so it cannot stall the GUI mid-song.\n"
+            "Off: the scan keeps running under live playback. It finishes far sooner during a busy\n"
+            "show, at the cost of possible stalls on this Intel Mac."
+        )
+        loudness_hold_cb.setChecked(bool(self.settings.get("loudness_scan_holds_for_playback", True)))
+        v.addWidget(loudness_hold_cb)
+
+        def on_loudness_hold_toggled(checked: bool):
+            self.settings["loudness_scan_holds_for_playback"] = bool(checked)
+            self.save_settings()
+        loudness_hold_cb.toggled.connect(on_loudness_hold_toggled)
+
         defer_remote_adds_cb = QCheckBox("Defer new song adds until between singers")
         defer_remote_adds_cb.setToolTip("Remote/server requests are accepted and saved immediately, then inserted after the active song ends.")
         defer_remote_adds_cb.setChecked(bool(self.settings.get("defer_remote_adds_until_between_singers", False)))
@@ -32308,16 +32493,11 @@ class KaraokeApp(QWidget):
         if not allow_sync_build:
             return []
         tracks = getattr(self, "tracks", []) or []
-        brands = set()
         _perf_t0 = time.perf_counter()
         try:
-            for t in tracks:
-                disc = str((t or {}).get("disc_id", "") or "").strip()
-                if disc:
-                    brands.add(disc.upper())
+            choices = library_brand_choices(tracks)
         except Exception:
-            pass
-        choices = sorted(brands)
+            choices = []
         try:
             self._history_brand_choices_cached_key = cache_key
             self._history_brand_choices_cache = list(choices)
@@ -32603,9 +32783,55 @@ class KaraokeApp(QWidget):
                 return mp3_path
         return ""
 
+    def _karafun_track_from_history_song(self, song: dict) -> dict | None:
+        """Rebuild a KaraFun streaming track from a history record.
+
+        These songs have no local library row: their path is the synthetic
+        "karafun_streaming:<id>" reference, which is never indexed. Playback
+        drives KaraFun.app by artist/title search, so the stored catalog id is
+        a display reference only and a catalog that has renumbered since does
+        not prevent the add.
+        """
+        if not isinstance(song, dict):
+            return None
+        path = str(song.get("path", "") or "").strip()
+        provider = str(song.get("provider", "") or "").strip().lower()
+        song_type = str(song.get("song_type", "") or "").strip().lower()
+        if not (
+            path.lower().startswith("karafun_streaming:")
+            or provider == "karafun_streaming"
+            or song_type == "karafun_streaming"
+        ):
+            return None
+
+        artist = str(song.get("artist", "") or "").strip()
+        title = str(song.get("title", "") or "").strip()
+        if not (artist or title):
+            return None
+
+        provider_track_id = str(song.get("provider_track_id", "") or "").strip()
+        if not provider_track_id:
+            # Older history rows kept the reference in songid or the path only.
+            songid = str(song.get("songid", "") or "").strip()
+            if songid.lower().startswith("kf_"):
+                provider_track_id = songid
+            elif path.lower().startswith("karafun_streaming:"):
+                provider_track_id = path.split(":", 1)[1].strip()
+
+        return self._build_karafun_streaming_track(
+            artist=artist,
+            title=title,
+            provider_track_id=provider_track_id,
+            provider_url=str(song.get("provider_url", "") or "").strip(),
+        )
+
     def _resolve_history_song_track(self, song: dict, singer_name: str):
         if not isinstance(song, dict):
             return None
+
+        karafun_track = self._karafun_track_from_history_song(song)
+        if karafun_track is not None:
+            return karafun_track
 
         path = str(song.get("path", "") or "").strip()
         if path:
@@ -40550,7 +40776,18 @@ class KaraokeApp(QWidget):
             pass
 
         thread = QThread(self)
-        worker = AnalyzeLibraryWorker(items, mode=mode)
+        # Holding under a live song is the default: an unheld full-library pass
+        # produced 744 GUI stalls (worst 6.1s) on 2026-08-16. But a five-hour
+        # show is nearly wall-to-wall playback, so a held pass barely advances
+        # and an operator who needs it to finish has no way through. The hold is
+        # therefore a setting, not a law.
+        hold_for_playback = bool(self.settings.get("loudness_scan_holds_for_playback", True))
+        if not hold_for_playback:
+            _diag("[LOUDNESS-LIB] playback hold disabled by setting; scanning under live playback")
+        worker = AnalyzeLibraryWorker(
+            items, mode=mode,
+            should_hold=(lambda: bool(getattr(self, "karaoke_playing", False))) if hold_for_playback else None,
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
 
@@ -40558,6 +40795,21 @@ class KaraokeApp(QWidget):
             try:
                 dlg.setValue(done - 1)
                 dlg.setLabelText(f"{scan_name} loudness scan {done}/{total}…\n{name}")
+            except Exception:
+                pass
+
+        def _on_holding(paused):
+            # Say why the counter stopped moving, so a held scan does not look
+            # like a hung one.
+            if not paused:
+                return
+            try:
+                dlg.setLabelText(
+                    f"{scan_name} loudness scan paused while karaoke is playing…\n"
+                    "It resumes automatically between songs."
+                )
+            except RuntimeError:
+                pass
             except Exception:
                 pass
 
@@ -40578,6 +40830,7 @@ class KaraokeApp(QWidget):
                 self._set_processing_text(f"{scan_name} loudness scan cached {analyzed} of {total} track(s).")
 
         worker.progress.connect(_on_progress)
+        worker.holding.connect(_on_holding)
         worker.finished.connect(_on_finished)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -40598,9 +40851,25 @@ class KaraokeApp(QWidget):
             dlg.activateWindow()
         except Exception:
             pass
+        def _raise_again(d=dlg):
+            # The operator can close the dialog before these retries fire, and
+            # PyQt then raises RuntimeError out of the timer callback into the
+            # event loop.  That was logged as four separate "crashes" during the
+            # 2026-08-16 show.  Guarding only the singleShot() call below does
+            # not help: the failure happens when the callback runs, not when it
+            # is scheduled.
+            try:
+                d.show()
+                d.raise_()
+                d.activateWindow()
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+
         for delay_ms in (75, 250, 750):
             try:
-                QTimer.singleShot(delay_ms, lambda d=dlg: (d.show(), d.raise_(), d.activateWindow()))
+                QTimer.singleShot(delay_ms, _raise_again)
             except Exception:
                 pass
 
@@ -45759,6 +46028,17 @@ class KaraokeApp(QWidget):
             karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
         )
         self._search_thread.results_ready.connect(self._apply_db_search_results)
+        # The coalesced query must also drain when the worker simply exits.
+        # results_ready is not a reliable drain trigger: search_tracks() calls
+        # requestInterruption() on the running worker, and run() checks that
+        # flag right after its first emit and returns without emitting again.
+        # So a keystroke landing between a worker's strict emit and its exit
+        # left _pending_search_query set with nothing left to deliver it --
+        # and search_tracks() had already cleared the results list, so the
+        # search stayed empty until something else triggered a new one.
+        self._search_thread.finished.connect(
+            lambda jid=job_id: self._start_pending_search_if_needed(jid)
+        )
         self._search_thread.start()
 
     def on_search_text_changed(self, text):
@@ -46000,6 +46280,7 @@ class KaraokeApp(QWidget):
         # Add items in SMALLER batches with proper yielding to avoid freezing the ticker
         BATCH_SIZE = 25
         batch_idx = [0]  # Use list to avoid nonlocal issues
+        dropped = [0]
         
         def add_next_batch():
             _batch_started = time.perf_counter()
@@ -46023,7 +46304,13 @@ class KaraokeApp(QWidget):
                         except Exception:
                             pass
                         self.results_list.addItem(item)
-                    except Exception:
+                    except Exception as row_exc:
+                        # Silently swallowing this made "my search returns
+                        # nothing" undiagnosable: a row that fails to render
+                        # simply vanished with no trace anywhere.
+                        dropped[0] += 1
+                        if dropped[0] == 1:
+                            _diag(f"[SEARCH] row render failed: {type(row_exc).__name__}: {row_exc}")
                         continue
             finally:
                 # Re-enable updates
@@ -46041,6 +46328,8 @@ class KaraokeApp(QWidget):
             if end < len(rows):
                 QTimer.singleShot(20, add_next_batch)  # 20ms delay ensures ticker gets its 16ms frame
             else:
+                if dropped[0]:
+                    _diag(f"[SEARCH] rendered {self.results_list.count()} of {len(rows)} rows; {dropped[0]} dropped")
                 _perf_log_if_slow("ui_apply_search_results", (time.perf_counter() - _apply_started) * 1000.0)
         
         # Start processing batches
@@ -46062,6 +46351,16 @@ class KaraokeApp(QWidget):
             return
         if pending_job_id != getattr(self, "_search_job_id", 0):
             return
+        # A worker may still be winding down when this fires from its own
+        # finished signal; the pending job is the newest one either way.
+        try:
+            running = getattr(self, "_search_thread", None)
+            if running is not None and running.isRunning() and int(completed_job_id) != int(
+                getattr(running, "job_id", -1)
+            ):
+                return
+        except Exception:
+            pass
         self._pending_search_query = None
         self._pending_search_job_id = None
         try:
@@ -46074,6 +46373,9 @@ class KaraokeApp(QWidget):
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
             )
             self._search_thread.results_ready.connect(self._apply_db_search_results)
+            self._search_thread.finished.connect(
+                lambda jid=int(pending_job_id): self._start_pending_search_if_needed(jid)
+            )
             self._search_thread.start()
         except Exception:
             pass
@@ -48157,6 +48459,29 @@ class KaraokeApp(QWidget):
         )
 
     @staticmethod
+    def _is_karafun_ui_not_ready_error(message: str) -> bool:
+        """True for "KaraFun's window is not built yet", not "no such song".
+
+        KaraFun is launched and driven in the same breath, so the first search
+        can arrive before its window exists and System Events answers with
+        AXError -1719 / "Invalid index". That is transient and says nothing
+        about the catalog: it must be retried with the SAME query rather than
+        falling through to a looser one.
+        """
+        text = str(message or "").lower()
+        if not text:
+            return False
+        if "-1743" in text or "-25211" in text:
+            return False
+        return (
+            "-1719" in text
+            or "invalid index" in text
+            or "can\u2019t get" in text
+            or "can't get" in text
+            or "is not defined" in text
+        )
+
+    @staticmethod
     def _is_karafun_apple_events_error(message: str) -> bool:
         text = str(message or "").lower()
         return (
@@ -49012,6 +49337,10 @@ class KaraokeApp(QWidget):
                 if not restore_fullscreen:
                     vw.showNormal()
                     vw.raise_()
+                    # Raising the show window can bury the ticker underneath the
+                    # mpv host surfaces; closing and reopening the show screen
+                    # used to be the only repair.
+                    self._schedule_show_ticker_reassert("karafun_restore")
                     _diag("[KARAFUN] restored SingWS show screen fullscreen=0")
                     self._activate_host_window_after_karafun()
                     return
@@ -49025,6 +49354,7 @@ class KaraokeApp(QWidget):
                         return
                     try:
                         if vw.isFullScreen():
+                            self._schedule_show_ticker_reassert("karafun_restore_fullscreen")
                             _diag("[KARAFUN] restored SingWS show screen fullscreen=1")
                             return
                         if screen_rect is not None:
@@ -49034,6 +49364,11 @@ class KaraokeApp(QWidget):
                         if not vw.isFullScreen() and attempt < 1:
                             QTimer.singleShot(700, lambda: _enter_singws_fullscreen(attempt + 1))
                         else:
+                            # The fullscreen Space transition settles later than
+                            # a plain reveal, so this ladder runs longer.
+                            self._schedule_show_ticker_reassert(
+                                "karafun_restore_fullscreen", delays=(0, 120, 400, 900)
+                            )
                             _diag(f"[KARAFUN] restored SingWS show screen fullscreen={int(vw.isFullScreen())}")
                     except Exception as e:
                         _diag(f"[KARAFUN] fullscreen retry failed: {e}")
@@ -49179,9 +49514,11 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-    def _karafun_search_script(self, *, query: str, safe_title: str = "", require_exact_title: bool = False):
+    def _karafun_search_script(self, *, query: str, safe_title: str = "", safe_artist: str = "",
+                               require_exact_title: bool = False):
         query_literal = self._karafun_applescript_literal(query)
         safe_title_literal = self._karafun_applescript_literal(safe_title)
+        safe_artist_literal = self._karafun_applescript_literal(safe_artist)
         lines = [
             'tell application "System Events"',
             'set matches to every application process whose name contains "KaraFun"',
@@ -49265,6 +49602,70 @@ class KaraokeApp(QWidget):
                 'set cutoff to (item 1 of wp) + ((item 1 of ws) * 0.7)',
                 'set fallbackX to 0',
                 'set fallbackY to 0',
+            ])
+            if safe_artist:
+                # Titles are not unique. "Memory" is Sugarcult's song and also
+                # Cats', and a title-only match once put the wrong one on the
+                # audience screen. When the artist is known, prefer the result
+                # row that carries it: same row (aligned Y), inside the results
+                # area. Falls through to the title-only pass below, which the
+                # caller may then refuse for an artist-less query.
+                lines.extend([
+                    'repeat with elem in elems',
+                    'try',
+                    f'if (role of elem is "AXStaticText") and ((name of elem as text) contains {safe_title_literal}) then',
+                    'set ep to position of elem',
+                    'if (item 1 of ep) < cutoff then',
+                    'set es to size of elem',
+                    'set rowX to ((item 1 of ep) + ((item 1 of es) div 2))',
+                    'set rowY to ((item 2 of ep) + ((item 2 of es) div 2))',
+                    'set artistMatched to false',
+                    'repeat with artistElem in elems',
+                    'try',
+                    'if role of artistElem is "AXStaticText" then',
+                    'set aName to name of artistElem as text',
+                    'set ap to position of artistElem',
+                    'set aS to size of artistElem',
+                    'set aX to (item 1 of ap) + ((item 1 of aS) div 2)',
+                    'set aY to (item 2 of ap) + ((item 2 of aS) div 2)',
+                    'set aDelta to aY - rowY',
+                    'if aDelta < 0 then set aDelta to -aDelta',
+                    'ignoring case',
+                    f'if aDelta < 30 and aX < cutoff and (aName contains {safe_artist_literal}) then',
+                    'set artistMatched to true',
+                    'end if',
+                    'end ignoring',
+                    'if artistMatched then exit repeat',
+                    'end if',
+                    'end try',
+                    'end repeat',
+                    'if artistMatched then',
+                    'set durationText to ""',
+                    'repeat with durationElem in elems',
+                    'try',
+                    'if role of durationElem is "AXStaticText" then',
+                    'set dName to name of durationElem as text',
+                    'set dp to position of durationElem',
+                    'set ds to size of durationElem',
+                    'set dX to (item 1 of dp) + ((item 1 of ds) div 2)',
+                    'set dY to (item 2 of dp) + ((item 2 of ds) div 2)',
+                    'set rowDelta to dY - rowY',
+                    'if rowDelta < 0 then set rowDelta to -rowDelta',
+                    'if dName contains ":" and (length of dName) < 9 and dX > rowX and rowDelta < 30 then',
+                    'set durationText to dName',
+                    'exit repeat',
+                    'end if',
+                    'end if',
+                    'end try',
+                    'end repeat',
+                    'return "FOUND|" & rowX & "|" & rowY & "|" & durationText',
+                    'end if',
+                    'end if',
+                    'end if',
+                    'end try',
+                    'end repeat',
+                ])
+            lines.extend([
                 'repeat with elem in elems',
                 'try',
                 # KaraFun appends a small attachment/icon character to some
@@ -49293,7 +49694,9 @@ class KaraokeApp(QWidget):
                 'end if',
                 'end try',
                 'end repeat',
-                'return "FOUND|" & rowX & "|" & rowY & "|" & durationText',
+                # Weaker verdict when the artist was known but not confirmed
+                # on the row: the caller decides whether to accept it.
+                f'return "{"TITLE_ONLY" if safe_artist else "FOUND"}|" & rowX & "|" & rowY & "|" & durationText',
                 'end if',
                 'end if',
                 'end try',
@@ -49617,13 +50020,37 @@ class KaraokeApp(QWidget):
                 found = ""
                 selected_query = ""
                 last_error = ""
+                # The query list runs from most specific to least, ending in
+                # title-only. Two things must hold or the wrong song plays:
+                # a transient "KaraFun's window is not ready" error must not
+                # consume a rung of that ladder, and a query that carries no
+                # artist may only accept an artist-verified row.
+                safe_artist_match = str(artist or "").strip()
                 for attempt, query in enumerate(search_queries, start=1):
                     if not query:
                         continue
-                    _diag(f"[KARAFUN-AUTO] search attempt={attempt} query={query!r}")
-                    search_script = self._karafun_search_script(query=query, safe_title=safe_title, require_exact_title=True)
-                    ok, candidate, script_error = self._run_karafun_applescript_sync(search_script, timeout=18)
-                    if not ok:
+                    query_key = query.casefold()
+                    query_has_artist = bool(safe_artist_match) and safe_artist_match.casefold() in query_key
+                    if safe_artist_match and not query_has_artist:
+                        accepted = {"FOUND"}
+                    else:
+                        accepted = {"FOUND", "TITLE_ONLY", "FIRST"}
+                    ok = False
+                    candidate = ""
+                    for ui_retry in range(3):
+                        _diag(
+                            f"[KARAFUN-AUTO] search attempt={attempt} query={query!r}"
+                            + (f" ui_retry={ui_retry + 1}" if ui_retry else "")
+                        )
+                        search_script = self._karafun_search_script(
+                            query=query,
+                            safe_title=safe_title,
+                            safe_artist=safe_artist_match,
+                            require_exact_title=True,
+                        )
+                        ok, candidate, script_error = self._run_karafun_applescript_sync(search_script, timeout=18)
+                        if ok:
+                            break
                         last_error = script_error or candidate or "KaraFun search automation failed"
                         _diag(f"[KARAFUN-AUTO] search attempt={attempt} failed error={str(last_error)[:180]!r}")
                         if (
@@ -49631,17 +50058,35 @@ class KaraokeApp(QWidget):
                             or self._is_karafun_accessibility_error(last_error)
                         ):
                             raise RuntimeError(last_error)
+                        if self._is_karafun_ui_not_ready_error(last_error) and ui_retry < 2:
+                            # KaraFun is still building its window. Retry THIS
+                            # query: falling through to the next one drops the
+                            # artist, and a title-only search can land on a
+                            # different song entirely.
+                            _diag(f"[KARAFUN-AUTO] search attempt={attempt} KaraFun UI not ready; retrying same query")
+                            time.sleep(1.5)
+                            continue
+                        break
+                    if not ok:
                         continue
                     parts = str(candidate or "").split("|")
-                    if len(parts) >= 3 and parts[0] in {"FOUND", "FIRST"}:
+                    kind = parts[0] if parts else ""
+                    if len(parts) >= 3 and kind in accepted:
                         found = str(candidate or "")
                         selected_query = query
                         _diag(f"[KARAFUN-AUTO] search attempt={attempt} result={found!r}")
                         break
+                    if len(parts) >= 3 and kind in {"FOUND", "TITLE_ONLY", "FIRST"}:
+                        last_error = (
+                            f"KaraFun matched a {kind} row for {query!r} without confirming artist "
+                            f"{safe_artist_match!r}"
+                        )
+                        _diag(f"[KARAFUN-AUTO] search attempt={attempt} rejected kind={kind} artist_unconfirmed=1")
+                        continue
                     last_error = parts[-1] if parts else "KaraFun search failed"
                     _diag(f"[KARAFUN-AUTO] search attempt={attempt} no_match result={str(candidate or '')[:180]!r}")
                 parts = found.split("|")
-                if len(parts) < 3 or parts[0] not in {"FOUND", "FIRST"}:
+                if len(parts) < 3 or parts[0] not in {"FOUND", "TITLE_ONLY", "FIRST"}:
                     raise RuntimeError(last_error or "No acceptable KaraFun match")
                 selected_duration = self._karafun_clock_seconds(parts[3] if len(parts) > 3 else "")
                 if selected_duration and selected_duration > 0:
@@ -49652,8 +50097,10 @@ class KaraokeApp(QWidget):
                         )
                 if parts[0] == "FIRST":
                     _diag(f"[KARAFUN-AUTO] selected first visible KaraFun result query={selected_query!r}")
+                elif parts[0] == "TITLE_ONLY":
+                    _diag(f"[KARAFUN-AUTO] selected KaraFun title without artist confirmation query={selected_query!r}")
                 else:
-                    _diag(f"[KARAFUN-AUTO] selected exact KaraFun title query={selected_query!r}")
+                    _diag(f"[KARAFUN-AUTO] selected exact KaraFun title+artist query={selected_query!r}")
 
                 # Finish the audience-display transition before activating the
                 # result. Direct result activation can begin playback at once;
@@ -49929,6 +50376,13 @@ class KaraokeApp(QWidget):
         if started <= 0 or started > now_mono + 5.0:
             started = now_mono
         seen_playback = False
+        # The fallback clock must not start until KaraFun is audibly playing.
+        # Launching the app, the renderer handoff and the fullscreen Space
+        # transition took ~45s on 2026-08-16, all of it charged against the
+        # song's own duration, so the fallback hit zero with ~30s still to
+        # sing: the rotation advanced and background music came up over the
+        # ending. Rebased at the first confirmed playback signal instead.
+        playback_confirmed_at = None
         last_state = ""
         last_clock_candidates = {}
         idle_stop_count = 0
@@ -50002,6 +50456,17 @@ class KaraokeApp(QWidget):
 
         def _monitor():
             nonlocal seen_playback, last_state, last_clock_candidates, idle_stop_count
+            nonlocal playback_confirmed_at
+
+            def _confirm_playback():
+                nonlocal playback_confirmed_at, seen_playback
+                seen_playback = True
+                if playback_confirmed_at is None:
+                    playback_confirmed_at = time.monotonic()
+                    _diag(
+                        "[KARAFUN] playback confirmed; duration fallback rebased "
+                        f"(launch overhead {max(0.0, playback_confirmed_at - started):.1f}s excluded)"
+                    )
             while True:
                 active = getattr(self, "_active_external_karafun", None)
                 if not isinstance(active, dict) or active.get("entry") is not entry:
@@ -50096,10 +50561,10 @@ class KaraokeApp(QWidget):
                             # also holds the duration watchdog off.
                             entry["karafun_last_playing_ts"] = time.monotonic()
                             if current > 2:
-                                seen_playback = True
+                                _confirm_playback()
                     last_clock_candidates = next_clock_candidates
                     if playing_reported:
-                        seen_playback = True
+                        _confirm_playback()
                         idle_stop_count = 0
                         # Timestamp of the newest confirmed "still playing"
                         # reading. The duration watchdog reads this to avoid
@@ -50119,13 +50584,21 @@ class KaraokeApp(QWidget):
                 fallback_remaining = None
                 remaining_from_fallback = False
                 if fallback_duration > 0:
-                    fallback_remaining = fallback_duration - int(time.monotonic() - started)
+                    # Count from the first confirmed playback, not from the
+                    # handoff: everything before that is KaraFun starting up.
+                    fallback_origin = playback_confirmed_at if playback_confirmed_at is not None else started
+                    fallback_remaining = fallback_duration - int(time.monotonic() - fallback_origin)
                 if remaining is None and fallback_remaining is not None:
                     remaining = fallback_remaining
                     remaining_from_fallback = True
                 age = time.monotonic() - started
                 if remaining is not None and remaining > 5:
-                    seen_playback = True
+                    if remaining_from_fallback:
+                        # Derived from the fallback clock itself -- not evidence
+                        # that KaraFun has started, and must never rebase it.
+                        seen_playback = True
+                    else:
+                        _confirm_playback()
                 should_complete = (
                     (remaining is not None and remaining <= 5 and age > 8.0)
                     or (idle_reported and not playing_reported and seen_playback and idle_stop_count >= 2 and age > 8.0)

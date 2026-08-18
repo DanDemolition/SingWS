@@ -977,7 +977,7 @@ class RecentRegressionTests(unittest.TestCase):
         ])
         measured = []
 
-        def fake_measure(path, cancel_check=None, mode="full"):
+        def fake_measure(path, cancel_check=None, mode="full", session=None):
             measured.append(path)
             worker.cancel()
             self.assertTrue(cancel_check())
@@ -1001,7 +1001,7 @@ class RecentRegressionTests(unittest.TestCase):
             ])
             measured = []
 
-            def fake_measure(path, cancel_check=None, mode="full"):
+            def fake_measure(path, cancel_check=None, mode="full", session=None):
                 measured.append(path)
                 self.assertTrue(Path(path).is_file())
                 self.assertTrue(str(path).endswith(".mp3"))
@@ -1122,6 +1122,787 @@ class RecentRegressionTests(unittest.TestCase):
     def test_waitlist_toggle_refreshes_idle_background(self):
         source = inspect.getsource(self.singws.KaraokeApp._set_waitlist_enabled_local)
         self.assertIn("self._apply_idle_background(force=False", source)
+
+    # --- 2026-08-16 show: loudness scan leak, stalls, crash dialog ----------
+
+    def test_loudness_session_reuses_one_mpv_core(self):
+        """One core per pass, not one per track.
+
+        A fresh core leaked ~1 MB per track that mpv_terminate_destroy never
+        returned, growing the app to 8.6 GB across a five-hour library scan.
+        """
+        import libmpv_media_jobs
+
+        created = []
+
+        class FakeJob:
+            def __init__(self):
+                created.append(self)
+                self.closed = False
+                self.loads = 0
+
+            def option(self, *_a):
+                pass
+
+            def initialize(self):
+                pass
+
+            def request_log_messages(self, _level):
+                pass
+
+            def command(self, *_a):
+                self.loads += 1
+
+            def wait_for_end(self, _timeout, messages=None):
+                if messages is not None:
+                    messages.append("I: -14.0 LUFS  Peak: -1.0 dBFS")
+
+            def close(self):
+                self.closed = True
+
+        with mock.patch.object(libmpv_media_jobs, "OfflineMpvJob", FakeJob):
+            with libmpv_media_jobs.LoudnessSession() as session:
+                for _ in range(25):
+                    self.assertEqual(session.measure("/tmp/song.mp3"), (-14.0, -1.0))
+
+        self.assertEqual(len(created), 1, "a core was created per track")
+        self.assertEqual(created[0].loads, 25)
+        self.assertTrue(created[0].closed, "session core was not released")
+
+    def test_loudness_session_disables_itself_after_repeated_failures(self):
+        """An old libmpv without ebur128 must fall back, not fail every track."""
+        import libmpv_media_jobs
+
+        created = []
+
+        class BrokenJob:
+            def __init__(self):
+                created.append(self)
+
+            def option(self, *_a):
+                pass
+
+            def initialize(self):
+                raise RuntimeError("no ebur128 in this build")
+
+            def request_log_messages(self, _level):
+                pass
+
+            def close(self):
+                pass
+
+        with mock.patch.object(libmpv_media_jobs, "OfflineMpvJob", BrokenJob):
+            session = libmpv_media_jobs.LoudnessSession()
+            for _ in range(3):
+                self.assertTrue(session.usable)
+                with self.assertRaises(RuntimeError):
+                    session.measure("/tmp/song.mp3")
+            self.assertFalse(session.usable, "session kept retrying a dead core")
+            with self.assertRaises(RuntimeError):
+                session.measure("/tmp/song.mp3")
+        # Three attempts, then it stops constructing cores entirely.
+        self.assertEqual(len(created), 3)
+
+    def test_measure_loudness_falls_back_when_session_fails(self):
+        """A failing session must not lose the measurement."""
+        class DeadSession:
+            usable = True
+
+            def measure(self, *_a, **_k):
+                raise RuntimeError("core died")
+
+            def measure_fast(self, *_a, **_k):
+                raise RuntimeError("core died")
+
+        with mock.patch("libmpv_media_jobs.measure_loudness_lufs",
+                        return_value=(-13.0, -1.5)) as plain:
+            lufs, peak = self.singws._measure_loudness_lufs(
+                "/tmp/song.mp3", session=DeadSession())
+        self.assertEqual((lufs, peak), (-13.0, -1.5))
+        plain.assert_called_once()
+
+    def test_library_scan_holds_while_karaoke_plays(self):
+        """Scanning under a live song caused 744 GUI stalls on 2026-08-16."""
+        playing = {"value": True}
+        measured = []
+
+        worker = self.singws.AnalyzeLibraryWorker(
+            [("Karaoke", "/tmp/one.mp3", "One")],
+            should_hold=lambda: playing["value"],
+        )
+        worker._PLAYBACK_HOLD_POLL_S = 0.01
+        held = []
+        worker.holding.connect(held.append)
+
+        def fake_measure(path, cancel_check=None, mode="full", session=None):
+            measured.append(path)
+            return -20.0, -2.0
+
+        def release():
+            # Nothing may be measured until karaoke stops.
+            self.assertEqual(measured, [])
+            playing["value"] = False
+
+        import threading
+        threading.Timer(0.05, release).start()
+
+        with mock.patch.object(self.singws, "_measure_loudness_lufs", side_effect=fake_measure), \
+             mock.patch.object(self.singws, "_loudness_file_sig", return_value=(1, 2)), \
+             mock.patch.object(self.singws, "_loudness_save_cache"):
+            worker.run()
+
+        self.assertEqual(measured, ["/tmp/one.mp3"], "scan never resumed")
+        self.assertEqual(held, [True, False], "hold state was not reported")
+
+    def test_library_scan_hold_is_interrupted_by_cancel(self):
+        """Cancelling during a hold must not block until playback ends."""
+        worker = self.singws.AnalyzeLibraryWorker(
+            [("Karaoke", "/tmp/one.mp3", "One")],
+            should_hold=lambda: True,
+        )
+        worker._PLAYBACK_HOLD_POLL_S = 0.01
+        measured = []
+
+        def fake_measure(path, cancel_check=None, mode="full", session=None):
+            measured.append(path)
+            return -20.0, -2.0
+
+        import threading
+        threading.Timer(0.05, worker.cancel).start()
+
+        with mock.patch.object(self.singws, "_measure_loudness_lufs", side_effect=fake_measure), \
+             mock.patch.object(self.singws, "_loudness_save_cache"):
+            worker.run()
+
+        self.assertEqual(measured, [], "cancelled scan still measured a track")
+
+    def test_log_package_leaves_no_partial_zip_behind(self):
+        """A failed package must not orphan an unopenable ZIP.
+
+        On 2026-08-16 packaging died partway and left a 712-byte file with no
+        end-of-central-directory record, indistinguishable from a real bundle.
+        """
+        import zipfile as zf_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            logs = Path(td)
+            (logs / "singws_2026-08-16.log").write_text("hello", encoding="utf-8")
+
+            real_zipfile = zf_mod.ZipFile
+
+            class ExplodingZip(real_zipfile):
+                def writestr(self, *_a, **_k):
+                    raise MemoryError("out of memory mid-package")
+
+            with mock.patch.object(self.singws, "LOGS_DIR", logs), \
+                 mock.patch.object(self.singws, "_recent_log_files",
+                                   return_value=[logs / "singws_2026-08-16.log"]), \
+                 mock.patch.object(self.singws, "flush_log_queue"), \
+                 mock.patch.object(zf_mod, "ZipFile", ExplodingZip):
+                package, _files, error = self.singws.prepare_log_email_package(days=3)
+
+            # The caller must be told, and must not be handed a broken archive.
+            self.assertIsNone(package)
+            self.assertIn("Failed to package logs", error)
+            leftovers = [p.name for p in logs.iterdir() if p.suffix in (".zip", ".partial")]
+            self.assertEqual(leftovers, [], f"partial package left behind: {leftovers}")
+
+    def test_crash_log_email_thread_logs_its_own_failure(self):
+        """A throw here killed the daemon thread with no log line at all."""
+        work = self.singws.maybe_auto_send_crash_logs
+        source = inspect.getsource(work)
+        self.assertIn("def _work():", source)
+        body = source[source.index("def _work():"):]
+        self.assertIn("try:", body)
+        self.assertIn("auto crash send failed", body)
+
+
+class KaraFunHistoryReAddTests(unittest.TestCase):
+    """A KaraFun song in a singer's history has to be re-addable.
+
+    Its path is the synthetic "karafun_streaming:<id>" reference, which is
+    never present in the library index or tracks list, so the local-only
+    lookup in _resolve_history_song_track always failed and the operator got
+    "Could not match this history song to a local track". The stored catalog
+    id is a display reference: playback drives KaraFun.app by artist/title
+    search, so an id the server has since renumbered must not block the add.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def _app(self):
+        app = make_app(self.singws)
+        # An empty library: these entries are never in it, which is the point.
+        app.tracks = []
+        app._track_path_index = {}
+        app._track_path_index_signature = None
+        return app
+
+    def test_karafun_history_song_resolves_without_a_local_track(self):
+        app = self._app()
+        song = {
+            "artist": "Sugarcult",
+            "title": "Memory",
+            "provider": "karafun_streaming",
+            "provider_track_id": "kf_2219191",
+            "songid": "kf_2219191",
+            "song_type": "KARAFUN_STREAMING",
+            "path": "karafun_streaming:kf_2219191",
+        }
+        track = self.singws.KaraokeApp._resolve_history_song_track(app, song, "Dan")
+        self.assertIsInstance(track, dict)
+        self.assertEqual(track["provider"], "karafun_streaming")
+        self.assertEqual(track["artist"], "Sugarcult")
+        self.assertEqual(track["title"], "Memory")
+        self.assertEqual(track["availability_status"], "externally_controlled")
+        self.assertEqual(track["path"], "karafun_streaming:kf_2219191")
+
+    def test_history_row_recorded_with_provider_local_still_resolves(self):
+        """Some rows kept provider='local' with the streaming path and songid."""
+        app = self._app()
+        song = {
+            "artist": "Sugarcult",
+            "title": "Memory",
+            "provider": "local",
+            "provider_track_id": "",
+            "songid": "kf_3168777",
+            "song_type": "KARAFUN_STREAMING",
+            "path": "karafun_streaming:kf_3168777",
+        }
+        track = self.singws.KaraokeApp._resolve_history_song_track(app, song, "Dan")
+        self.assertIsInstance(track, dict)
+        self.assertEqual(track["provider"], "karafun_streaming")
+        self.assertEqual(track["provider_track_id"], "kf_3168777")
+
+    def test_reference_is_recovered_from_the_path_when_nothing_else_has_it(self):
+        app = self._app()
+        song = {
+            "artist": "Gigi Perez",
+            "title": "Sailor Song",
+            "path": "karafun_streaming:kf_3178824",
+        }
+        track = self.singws.KaraokeApp._resolve_history_song_track(app, song, "Shawn")
+        self.assertIsInstance(track, dict)
+        self.assertEqual(track["provider_track_id"], "kf_3178824")
+
+    def test_playback_search_never_uses_the_catalog_id(self):
+        """The id may be stale; the KaraFun handoff must search artist/title."""
+        app = self._app()
+        entry = {
+            "artist": "Sugarcult",
+            "title": "Memory",
+            "provider_track_id": "kf_2219191",
+            "display_name": "Sugarcult - Memory - KaraFun",
+        }
+        queries = self.singws.KaraokeApp._karafun_search_queries_for_entry(app, entry)
+        self.assertTrue(queries)
+        for query in queries:
+            self.assertNotIn("kf_", query.lower())
+        self.assertEqual(queries[0], "Sugarcult Memory")
+
+    def test_a_local_karafun_branded_file_is_still_matched_locally(self):
+        """A KARAFUN-branded MP4 on disk must not be mistaken for a stream."""
+        app = self._app()
+        song = {
+            "artist": "Sugarcult",
+            "title": "Bouncing Off the Walls",
+            "provider": "local",
+            "songid": "KARAFUN",
+            "disc_id": "KARAFUN",
+            "song_type": "MP4",
+            "path": "/Music/KARAFUN - Sugarcult - Bouncing Off the Walls.mp4",
+        }
+        built = self.singws.KaraokeApp._karafun_track_from_history_song(app, song)
+        self.assertIsNone(built, "a local file must not be rebuilt as a streaming reference")
+
+    def test_a_plain_local_song_is_untouched_by_the_karafun_path(self):
+        app = self._app()
+        song = {
+            "artist": "Johnny J",
+            "title": "Wasting My Time",
+            "provider": "local",
+            "song_type": "ZIP",
+            "path": "/Music/KV 08154 - Default - Wasting My Time.zip",
+        }
+        self.assertIsNone(self.singws.KaraokeApp._karafun_track_from_history_song(app, song))
+
+    def test_a_karafun_row_with_no_artist_or_title_is_not_invented(self):
+        app = self._app()
+        song = {"provider": "karafun_streaming", "path": "karafun_streaming:kf_1"}
+        self.assertIsNone(self.singws.KaraokeApp._karafun_track_from_history_song(app, song))
+
+
+class BrandPickerEquivalenceTests(unittest.TestCase):
+    """"KARAOKE VERSION" and "KV" are one brand, and must cost one slot.
+
+    They always collapsed once stored -- canonical_disc_brand maps both to KV
+    and normalize_disc_priority dedupes them -- but the pickers were built from
+    raw disc ids, so the same brand was offered under many separate names.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def test_karaoke_version_and_kv_are_the_same_brand(self):
+        canonical = self.singws.canonical_disc_brand
+        for spelling in (
+            "KV", "KARAOKE VERSION", "Karaoke Version", "karaokeversion",
+            "KARAOKE-VERSION", "KARAOKE_VERSION",
+        ):
+            self.assertEqual(canonical(spelling), "KV", f"{spelling!r} should canonicalize to KV")
+
+    def test_disc_numbered_variants_collapse_to_the_brand(self):
+        canonical = self.singws.canonical_disc_brand
+        for spelling in ("KARAOKE VERSION 00", "KV 00", "KV 43403", "KV92015"):
+            self.assertEqual(canonical(spelling), "KV", f"{spelling!r} should canonicalize to KV")
+
+    def test_listing_both_spellings_consumes_one_priority_slot(self):
+        normalize = self.singws.normalize_disc_priority
+        self.assertEqual(normalize("KV, KARAOKE VERSION"), ["KV"])
+        self.assertEqual(normalize("KARAOKE VERSION, KV, SOUND CHOICE, SC"), ["KV", "SC"])
+        # The cap is 10 brands; duplicates must not eat into it.
+        crowded = "KARAOKE VERSION, KV, KARAOKEVERSION, SC, SOUND CHOICE, ZM, ZOOM, CB, PT, SF, SBI, ME, CC"
+        picked = normalize(crowded, max_items=10)
+        self.assertEqual(len(picked), len(set(picked)), "priority list must not contain duplicates")
+        self.assertEqual(picked.count("KV"), 1)
+        self.assertIn("CC", picked, "room freed by dedupe should reach the later brands")
+
+    def test_brand_picker_offers_each_brand_once(self):
+        tracks = (
+            [{"disc_id": "KARAOKE VERSION 00"}] * 5
+            + [{"disc_id": "KV"}] * 3
+            + [{"disc_id": "KV 43403"}, {"disc_id": "KVMP4 00"}]
+            + [{"disc_id": "SOUND CHOICE"}, {"disc_id": "SC 1234"}]
+            + [{"disc_id": "WSK"}, {"disc_id": ""}, {}]
+        )
+        choices = self.singws.library_brand_choices(tracks)
+        self.assertEqual(choices.count("KV"), 1, "Karaoke Version must appear once, not once per disc")
+        self.assertNotIn("KARAOKE VERSION 00", choices)
+        self.assertNotIn("KV 43403", choices)
+        self.assertIn("SC", choices)
+        self.assertIn("WSK", choices, "an unaliased brand present in the library is still offered")
+        self.assertEqual(len(choices), len(set(choices)))
+
+    def test_brand_picker_is_ordered_by_library_coverage(self):
+        tracks = [{"disc_id": "SC"}] * 2 + [{"disc_id": "KARAOKE VERSION 00"}] * 9 + [{"disc_id": "WSK"}]
+        self.assertEqual(self.singws.library_brand_choices(tracks), ["KV", "SC", "WSK"])
+
+    def test_per_disc_codes_are_not_offered_as_brands(self):
+        tracks = [{"disc_id": "THCOL04 01"}, {"disc_id": "PAN2006 01"}, {"disc_id": "SFMW849 01"}]
+        choices = self.singws.library_brand_choices(tracks)
+        self.assertNotIn("THCOL04 01", choices)
+        self.assertNotIn("PAN2006 01", choices)
+
+    def test_a_cancelled_build_returns_nothing(self):
+        tracks = [{"disc_id": "KV"}] * 4096
+        self.assertEqual(self.singws.library_brand_choices(tracks, should_cancel=lambda: True), [])
+
+
+class KaraFunWrongSongTests(unittest.TestCase):
+    """2026-08-16 22:31: asked for Sugarcult - Memory, played Memory from Cats.
+
+    The log shows the right query WAS tried, twice, and both attempts died on
+    "Invalid index" because KaraFun's window was still being built one second
+    after launch. Each failure fell through to the next, looser query, so the
+    third attempt searched the bare title and matched a different song.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def test_window_not_ready_errors_are_transient(self):
+        transient = self.singws.KaraokeApp._is_karafun_ui_not_ready_error
+        for message in (
+            'Can\u2019t get splitter group 1 of window "Discover" of application process "KaraFun". Invalid index.',
+            'Can\u2019t get item 2 of every window of application process "KaraFun". Invalid index.',
+            "NSAppleScriptErrorNumber = \"-1719\"",
+        ):
+            self.assertTrue(transient(message), f"should be treated as transient: {message[:60]}")
+
+    def test_permission_errors_are_not_treated_as_transient(self):
+        """These must still abort and prompt, never spin on a retry."""
+        transient = self.singws.KaraokeApp._is_karafun_ui_not_ready_error
+        self.assertFalse(transient("NSAppleScriptErrorNumber = -1743 not authorized to send apple events"))
+        self.assertFalse(transient("osascript is not allowed assistive access (-25211)"))
+        self.assertFalse(transient(""))
+
+    def test_a_transient_error_retries_the_same_query(self):
+        source = inspect.getsource(self.singws.KaraokeApp._automate_karafun_search_and_play)
+        self.assertIn("_is_karafun_ui_not_ready_error", source)
+        self.assertIn("ui_retry", source)
+        self.assertIn("retrying same query", source)
+
+    def test_search_script_matches_the_artist_row_when_the_artist_is_known(self):
+        app = make_app(self.singws)
+        script = "\n".join(self.singws.KaraokeApp._karafun_search_script(
+            app, query="Memory", safe_title="Memory", safe_artist="Sugarcult", require_exact_title=True,
+        ))
+        self.assertIn("Sugarcult", script, "the artist must reach the matcher")
+        self.assertIn("artistMatched", script)
+        self.assertIn('return "FOUND|"', script)
+        self.assertIn('return "TITLE_ONLY|"', script,
+                      "a title-only hit must be reported as the weaker verdict")
+
+    def test_script_is_unchanged_when_no_artist_is_known(self):
+        app = make_app(self.singws)
+        script = "\n".join(self.singws.KaraokeApp._karafun_search_script(
+            app, query="Memory", safe_title="Memory", require_exact_title=True,
+        ))
+        self.assertNotIn("artistMatched", script)
+        self.assertNotIn("TITLE_ONLY", script)
+        self.assertIn('return "FOUND|"', script)
+
+    def test_an_artistless_query_only_accepts_an_artist_verified_row(self):
+        source = inspect.getsource(self.singws.KaraokeApp._automate_karafun_search_and_play)
+        self.assertIn("query_has_artist", source)
+        self.assertIn('accepted = {"FOUND"}', source)
+        self.assertIn("artist_unconfirmed", source)
+
+    def test_the_queries_still_run_specific_to_general(self):
+        app = make_app(self.singws)
+        entry = {"artist": "Sugarcult", "title": "Memory"}
+        queries = self.singws.KaraokeApp._karafun_search_queries_for_entry(app, entry)
+        self.assertEqual(queries[0], "Sugarcult Memory")
+        self.assertIn("Memory", queries)
+        self.assertLess(queries.index("Sugarcult Memory"), queries.index("Memory"))
+
+
+class KaraFunCompletionClockTests(unittest.TestCase):
+    """Background music came up ~30s before the song ended.
+
+    The duration fallback counted from the handoff, but KaraFun spent ~45s
+    launching, handing off the renderer and going fullscreen before a note
+    played, so the clock hit zero mid-outro, the rotation advanced and the BG
+    deck started over the ending.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+        cls.source = inspect.getsource(cls.singws.KaraokeApp._start_karafun_completion_monitor)
+
+    def test_the_fallback_counts_from_confirmed_playback(self):
+        self.assertIn("playback_confirmed_at", self.source)
+        self.assertIn("fallback_origin = playback_confirmed_at if playback_confirmed_at is not None else started",
+                      self.source)
+
+    def test_the_fallback_clock_cannot_rebase_itself(self):
+        """The fallback's own countdown is not evidence that playback began."""
+        self.assertIn("if remaining_from_fallback:", self.source)
+        body = self.source[self.source.index("if remaining_from_fallback:"):]
+        head = body[:body.index("else:")]
+        self.assertIn("seen_playback = True", head)
+        self.assertNotIn("_confirm_playback()", head)
+
+    def test_real_playback_signals_do_rebase(self):
+        self.assertIn("if playing_reported:\n                        _confirm_playback()", self.source)
+
+    def test_the_launch_overhead_is_logged(self):
+        self.assertIn("duration fallback rebased", self.source)
+
+    def test_replaying_the_2026_08_16_timeline_no_longer_completes_early(self):
+        """235s song; KaraFun took 45s to start. It must not complete at 235s."""
+        started = 0.0
+        fallback_duration = 235
+        playback_confirmed_at = 45.0  # first playing=1 reading in the log
+
+        def remaining_at(now, origin):
+            return fallback_duration - int(now - origin)
+
+        # Old behaviour: counted from the handoff.
+        self.assertLessEqual(remaining_at(233.0, started), 5,
+                             "old clock reached the completion threshold at ~233s")
+        # New behaviour: the same instant still has most of the outro left.
+        self.assertGreater(remaining_at(233.0, playback_confirmed_at), 5)
+        self.assertEqual(remaining_at(233.0, playback_confirmed_at), 47)
+        # And it does still complete, 45s later.
+        self.assertLessEqual(remaining_at(278.0, playback_confirmed_at), 5)
+
+
+class TickerSurfaceReassertTests(unittest.TestCase):
+    """The ticker vanished again after a KaraFun song returned the show screen.
+
+    The ticker and the mpv hosts are native child views: they stack by creation
+    order, not by the Qt widget tree, so raising the show window can bury a
+    ticker that is still updating. Only the mpv-reveal and rotation-open paths
+    re-raised it; every KaraFun restore path called vw.raise_() and did not.
+    Closing and reopening the show screen was the operator's manual repair.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+        cls.restore = inspect.getsource(cls.singws.KaraokeApp._restore_show_screen_from_karafun)
+
+    def test_every_karafun_restore_path_reasserts_the_ticker(self):
+        raises = self.restore.count("vw.raise_()")
+        reasserts = self.restore.count("_schedule_show_ticker_reassert")
+        self.assertGreaterEqual(raises, 2, "sanity: the restore still raises the show window")
+        self.assertGreaterEqual(
+            reasserts, raises,
+            "every path that raises the show window must re-raise the ticker",
+        )
+
+    def test_the_already_fullscreen_path_reasserts_too(self):
+        """This path returns early without raising, and still re-orders surfaces."""
+        body = self.restore[self.restore.index("if vw.isFullScreen():"):]
+        head = body[:body.index("return")]
+        self.assertIn("_schedule_show_ticker_reassert", head)
+
+    def test_the_fullscreen_ladder_runs_longer_than_a_plain_reveal(self):
+        self.assertIn("delays=(0, 120, 400, 900)", self.restore)
+
+    def test_the_reassert_scheduler_is_shared(self):
+        source = inspect.getsource(self.singws.KaraokeApp._schedule_show_ticker_reassert)
+        self.assertIn("QTimer.singleShot", source)
+        self.assertIn("_reassert_show_ticker_surface", source)
+        reveal = inspect.getsource(self.singws.KaraokeApp._set_native_video_hosts_visible) \
+            if hasattr(self.singws.KaraokeApp, "_set_native_video_hosts_visible") else ""
+        if reveal:
+            self.assertIn("_schedule_show_ticker_reassert", reveal)
+
+
+class LoudnessScanPlaybackHoldTests(unittest.TestCase):
+    """The operator has to scan during songs; the pass is too slow otherwise.
+
+    Holding under live playback is the right default (an unheld pass produced
+    744 GUI stalls on 2026-08-16), but a five-hour show is nearly wall-to-wall
+    playback, so a held scan barely advances. It is a setting now.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def test_holding_is_the_default(self):
+        self.assertTrue(self.singws.DEFAULTS["loudness_scan_holds_for_playback"])
+
+    def test_the_worker_never_holds_when_given_no_hold_callable(self):
+        worker = self.singws.AnalyzeLibraryWorker([], mode="fast", should_hold=None)
+        self.assertTrue(worker._hold_for_playback(), "no hold callable must not block the pass")
+
+    def test_the_worker_holds_then_resumes_when_playback_ends(self):
+        playing = {"value": True}
+        worker = self.singws.AnalyzeLibraryWorker([], mode="fast", should_hold=lambda: playing["value"])
+        worker._PLAYBACK_HOLD_POLL_S = 0.01
+
+        def release():
+            time.sleep(0.05)
+            playing["value"] = False
+
+        import threading as _threading
+        _threading.Thread(target=release, daemon=True).start()
+        self.assertTrue(worker._hold_for_playback())
+
+    def test_a_held_scan_stays_cancellable(self):
+        worker = self.singws.AnalyzeLibraryWorker([], mode="fast", should_hold=lambda: True)
+        worker._PLAYBACK_HOLD_POLL_S = 0.01
+        worker.cancel()
+        self.assertFalse(worker._hold_for_playback(), "cancel must break the hold")
+
+    def test_the_setting_reaches_the_worker(self):
+        source = inspect.getsource(self.singws.KaraokeApp._start_library_loudness_scan) \
+            if hasattr(self.singws.KaraokeApp, "_start_library_loudness_scan") else ""
+        if not source:
+            with open("0.2.18.1.py", "r", encoding="utf-8") as fh:
+                source = fh.read()
+        self.assertIn("loudness_scan_holds_for_playback", source)
+        self.assertIn("if hold_for_playback else None", source)
+
+    def test_the_dialog_crash_guard_is_in_the_callback_body(self):
+        """The four "crashes" on 2026-08-16 came from this exact retry."""
+        source = inspect.getsource(self.singws.KaraokeApp._bring_analyze_dialog_to_front)
+        body = source[source.index("def _raise_again"):]
+        self.assertIn("except RuntimeError:", body)
+
+
+class SearchCoalescingTests(unittest.TestCase):
+    """Searching "Eiffel 65" returned nothing though 9 copies are in the library.
+
+    search_tracks() clears the results list, and when a worker is still running
+    it stashes the query as _pending_search_query and returns, relying on the
+    next results_ready to drain it. But it also calls requestInterruption() on
+    that worker, and run() checks the flag immediately after its first emit and
+    returns without emitting again. A keystroke landing in that window left the
+    query stashed with nothing left to deliver it, and the list already empty.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def test_the_data_is_really_there(self):
+        """Guards against 'it must be a bad index' being re-diagnosed."""
+        run = inspect.getsource(self.singws.SongSearchThread.run)
+        self.assertIn("song_index.search_songs", run)
+
+    def test_run_stops_emitting_once_interrupted(self):
+        """The behaviour that strands the pending query."""
+        run = inspect.getsource(self.singws.SongSearchThread.run)
+        self.assertIn("if self.isInterruptionRequested() or not self.fuzzy:", run)
+        head = run[:run.index("if self.isInterruptionRequested() or not self.fuzzy:")]
+        self.assertIn("self.results_ready.emit", head,
+                      "the strict emit happens before the interruption check")
+
+    def test_the_worker_exit_also_drains_the_pending_query(self):
+        source = inspect.getsource(self.singws.KaraokeApp.search_tracks)
+        self.assertIn("finished.connect", source)
+        self.assertIn("_start_pending_search_if_needed", source)
+
+    def test_the_drain_started_thread_also_drains_on_exit(self):
+        source = inspect.getsource(self.singws.KaraokeApp._start_pending_search_if_needed)
+        self.assertIn("finished.connect", source)
+
+    def test_stale_results_still_drain(self):
+        """The pre-existing drain path must not be lost."""
+        source = inspect.getsource(self.singws.KaraokeApp._apply_db_search_results)
+        stale = source[source.index("Ignore stale results"):]
+        self.assertIn("_start_pending_search_if_needed(job_id)", stale[:400])
+
+    def test_dropped_rows_are_no_longer_silent(self):
+        source = inspect.getsource(self.singws.KaraokeApp._apply_db_search_results)
+        self.assertIn("dropped", source)
+        self.assertIn("row render failed", source)
+        self.assertNotIn("                    except Exception:\n                        continue", source)
+
+
+class LoudnessFailureMemoryTests(unittest.TestCase):
+    """Undecodable files were re-analysed on every pass.
+
+    One show's logs show 40 files that decode to nothing and 11 SKK006 ZIPs
+    with no readable MP3 inside, each retried 5-6 times. Only successes were
+    ever cached, on a job that already takes many hours.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "broken.mp3")
+        with open(self.path, "wb") as fh:
+            fh.write(b"not really audio")
+        self.singws._loudness_cache.clear()
+        self.singws._loudness_cache_loaded = True
+
+    def tearDown(self):
+        self.singws._loudness_cache.clear()
+        self.tmp.cleanup()
+
+    def test_a_failure_is_remembered(self):
+        self.assertFalse(self.singws.loudness_failed_cached(self.path))
+        self.singws._loudness_mark_failed(self.path, "no decodable audio")
+        self.assertTrue(self.singws.loudness_failed_cached(self.path))
+
+    def test_a_replaced_file_is_retried(self):
+        self.singws._loudness_mark_failed(self.path, "no decodable audio")
+        self.assertTrue(self.singws.loudness_failed_cached(self.path))
+        with open(self.path, "wb") as fh:
+            fh.write(b"a different, larger file that might actually decode")
+        self.assertFalse(
+            self.singws.loudness_failed_cached(self.path),
+            "changing the file must clear the failure record",
+        )
+
+    def test_a_failure_record_is_not_mistaken_for_a_measurement(self):
+        self.singws._loudness_mark_failed(self.path, "no decodable audio")
+        self.assertIsNone(self.singws.loudness_info_cached(self.path))
+
+    def test_a_successful_measurement_is_not_reported_as_failed(self):
+        sig = self.singws._loudness_file_sig(self.path)
+        self.singws._loudness_cache[self.path] = {
+            "i": -14.0, "peak_db": -1.0, "mtime": sig[0], "size": sig[1],
+        }
+        self.assertFalse(self.singws.loudness_failed_cached(self.path))
+        self.assertIsNotNone(self.singws.loudness_info_cached(self.path))
+
+    def test_an_unknown_file_is_not_reported_as_failed(self):
+        self.assertFalse(self.singws.loudness_failed_cached(os.path.join(self.tmp.name, "nope.mp3")))
+        self.assertFalse(self.singws.loudness_failed_cached(""))
+
+    def test_the_scan_skips_files_that_already_failed(self):
+        source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
+        self.assertIn("loudness_failed_cached(cache_key)", source)
+        self.assertIn("skipped += 1", source)
+        self.assertIn("_loudness_mark_failed", source)
+
+    def test_the_zip_is_blacklisted_rather_than_its_temp_extraction(self):
+        """For a ZIP, the measured path is a temp file that is deleted after."""
+        measure = inspect.getsource(self.singws._measure_loudness_lufs)
+        self.assertNotIn("_loudness_mark_failed", measure,
+                         "marking here would record a temp path that no longer exists")
+        run = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
+        self.assertIn("_loudness_mark_failed(cache_key", run)
+
+    def test_a_cancelled_scan_does_not_record_failures(self):
+        """Cancelling mid-file must not blacklist a perfectly good track."""
+        source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
+        for marker in ("_loudness_mark_failed(cache_key, \"no measurable loudness\")",
+                       "_loudness_mark_failed(cache_key, str(e))"):
+            idx = source.index(marker)
+            preceding = source[:idx]
+            self.assertIn("if not self.is_cancelled():", preceding[-300:],
+                          "failure recording must be guarded by a cancellation check")
+
+
+try:  # the mpv backends need the python-mpv binding (.venv-universal only)
+    import mpv_playback as _mpv_playback_mod
+    import mpv_karaoke_transport as _mpv_transport_mod
+    _MPV_BACKENDS_IMPORTABLE = True
+except Exception:  # pragma: no cover - depends on the venv in use
+    _mpv_playback_mod = None
+    _mpv_transport_mod = None
+    _MPV_BACKENDS_IMPORTABLE = False
+
+
+@unittest.skipUnless(_MPV_BACKENDS_IMPORTABLE, "mpv backends need .venv-universal")
+class CdgVisualOffsetTests(unittest.TestCase):
+    """The calibrated CDG offset never reached the follower backend.
+
+    set_video_offset_ms() forwards to the backend when it can apply it. The
+    in-process (IINA) backend maps it onto mpv's audio-delay. The follower
+    backend had no setter at all, so the host's value was discarded with a
+    warning and the Display tab's fine tuning did nothing there.
+
+    UNVERIFIED AGAINST HARDWARE: the sign and magnitude need live calibration
+    with a real CDG disc. These tests pin the wiring, not the timing.
+    """
+
+    def test_the_follower_backend_accepts_an_offset(self):
+        mpv_playback = _mpv_playback_mod
+        self.assertTrue(hasattr(mpv_playback.MpvPlaybackPlugin, "setVideoOffsetMs"))
+
+    def test_the_offset_shifts_the_master_reference(self):
+        mpv_playback = _mpv_playback_mod
+        sync = inspect.getsource(mpv_playback.MpvPlaybackPlugin._sync_loop)
+        self.assertIn("delta = (master + self._video_offset_s) - t", sync)
+        self.assertNotIn("delta = master - t", sync)
+
+    def test_the_offset_is_clamped_and_defaults_to_zero(self):
+        mpv_playback = _mpv_playback_mod
+        plugin = mpv_playback.MpvPlaybackPlugin.__new__(mpv_playback.MpvPlaybackPlugin)
+        plugin._video_offset_s = 0.0
+        plugin.log = lambda *_a, **_k: None
+        self.assertEqual(plugin._video_offset_s, 0.0)
+        mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, 750)
+        self.assertAlmostEqual(plugin._video_offset_s, 0.75)
+        mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, 99999)
+        self.assertAlmostEqual(plugin._video_offset_s, 3.0, msg="must clamp to +/-3s")
+        mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, -99999)
+        self.assertAlmostEqual(plugin._video_offset_s, -3.0)
+        mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, None)
+        self.assertAlmostEqual(plugin._video_offset_s, 0.0)
+
+    def test_the_transport_forwards_rather_than_discarding(self):
+        mpv_karaoke_transport = _mpv_transport_mod
+        source = inspect.getsource(mpv_karaoke_transport.MpvKaraokeTransport.set_video_offset_ms)
+        self.assertIn('hasattr(plugin, "setVideoOffsetMs")', source)
+        self.assertIn("plugin.setVideoOffsetMs(value)", source)
 
 
 if __name__ == "__main__":

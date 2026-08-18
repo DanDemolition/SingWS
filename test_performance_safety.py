@@ -860,7 +860,7 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_volume_analysis_dialog_is_resurfaced_frontmost(self):
         analyze = function_source("analyze_library")
         self.assertIn("WindowStaysOnTopHint", analyze)
-        self.assertIn("Measuring loudness", analyze)
+        self.assertIn("loudness scan for", analyze)
         self.assertIn("self._bring_analyze_dialog_to_front(_d)", analyze)
         self.assertIn("self._bring_analyze_dialog_to_front(dlg)", analyze)
         bring = function_source("_bring_analyze_dialog_to_front")
@@ -868,6 +868,27 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("dlg.raise_()", bring)
         self.assertIn("dlg.activateWindow()", bring)
         self.assertIn("QTimer.singleShot", bring)
+
+    def test_analyze_dialog_retry_survives_a_closed_dialog(self):
+        """The delayed raise must guard the callback body, not the scheduling.
+
+        Closing the progress dialog inside the 750ms retry window made PyQt
+        raise "wrapped C/C++ object of type QProgressDialog has been deleted"
+        into the event loop; it was logged as four crashes during the
+        2026-08-16 show. Guarding QTimer.singleShot() alone does not help,
+        because the failure happens when the callback runs.
+        """
+        bring = function_source("_bring_analyze_dialog_to_front")
+        self.assertNotIn("QTimer.singleShot(delay_ms, lambda", bring)
+        callback = bring[bring.index("def _raise_again"):]
+        # The three calls that can touch a deleted object must sit inside a
+        # try that catches RuntimeError, before the scheduling loop.
+        guarded = callback[:callback.index("for delay_ms")]
+        self.assertIn("try:", guarded)
+        self.assertIn("except RuntimeError:", guarded)
+        for call in ("d.show()", "d.raise_()", "d.activateWindow()"):
+            self.assertIn(call, guarded)
+            self.assertLess(guarded.index("try:"), guarded.index(call))
 
     def test_cdg_near_black_cleanup_clamps_only_black_pixels(self):
         image = QImage(3, 1, QImage.Format.Format_ARGB32)
@@ -1123,9 +1144,14 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_mpv_reveal_reasserts_ticker_after_native_surface_settles(self):
         reveal = function_source("_set_mpv_hosts_visible")
         self.assertIn("host.raise_()", reveal)
-        self.assertIn("for delay in (0, 80, 250)", reveal)
-        self.assertIn("_reassert_show_ticker_surface", reveal)
+        self.assertIn("_schedule_show_ticker_reassert", reveal)
         self.assertIn('"mpv_host_reveal"', reveal)
+        # The bounded retry ladder moved into the shared scheduler when the
+        # KaraFun show-screen restore needed the same repair.
+        scheduler = function_source("_schedule_show_ticker_reassert")
+        self.assertIn("delays=(0, 80, 250)", scheduler)
+        self.assertIn("QTimer.singleShot", scheduler)
+        self.assertIn("_reassert_show_ticker_surface", scheduler)
 
     def test_rotation_announcement_is_separate_and_venue_scoped(self):
         ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")

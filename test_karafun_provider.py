@@ -258,7 +258,11 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("search_queries = self._karafun_search_queries_for_entry(entry)", worker)
         self.assertIn("for attempt, query in enumerate(search_queries, start=1):", worker)
         self.assertIn("search_script = self._karafun_search_script(", worker)
-        self.assertIn('len(parts) < 3 or parts[0] not in {"FOUND", "FIRST"}', worker)
+        # TITLE_ONLY joined FOUND/FIRST when artist verification was added: a
+        # title match with the artist unconfirmed is still a usable result for a
+        # query that already named the artist, and is refused for one that did
+        # not (see KaraFunWrongSongTests in test_recent_regressions).
+        self.assertIn('len(parts) < 3 or parts[0] not in {"FOUND", "TITLE_ONLY", "FIRST"}', worker)
         self.assertIn('_apply_verified_duration(entry, selected_duration, source="karafun_result")', worker)
         self.assertIn("replaced_estimate=1", worker)
         self.assertIn("selected duration seconds=", worker)

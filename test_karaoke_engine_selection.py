@@ -300,6 +300,10 @@ class PaintedOverlayVsMpvSurfaceTests(unittest.TestCase):
                      "_reveal_mpv_hosts_if_allowed",
                      "_suppress_mpv_hosts_for_overlay"):
             setattr(host, name, getattr(app, name).__get__(host, app))
+        # Revealing a native host re-raises the ticker (it stacks by creation
+        # order and can be buried). Recorded here rather than executed: these
+        # tests are about surface visibility, not ticker scheduling.
+        host._schedule_show_ticker_reassert = mock.Mock()
         return host
 
     def _visible_calls(self, host):
