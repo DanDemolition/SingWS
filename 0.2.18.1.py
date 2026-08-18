@@ -39746,6 +39746,24 @@ class KaraokeApp(QWidget):
             "server_skipped",
         }
 
+    def _is_replaceable_empty_slot_reason(self, reason: str) -> bool:
+        """Reasons whose preserved slot may be filled by a waitlisted replacement.
+
+        Wider than _is_server_terminal_empty_slot_reason, which governs repeat
+        preservation and must stay server-only. The host removing a singer's
+        last song in the app is the ordinary way a song gets swapped, and it
+        left the singer's replacement stuck on the waitlist: the slot was held
+        for 180s but the promotion refused it because the reason was not
+        server-originated, so the operator had to add it by hand.
+
+        This does not resurrect anything the host removed -- a request the host
+        deleted carries a tombstone and never reaches this path. It only lets a
+        DIFFERENT song take the place the singer already held.
+        """
+        if self._is_server_terminal_empty_slot_reason(reason):
+            return True
+        return str(reason or "").strip().lower() == "host_remove_song"
+
     def _mark_rotation_slot_temporarily_empty(self, singer: dict, *, reason: str = "song_removed") -> bool:
         if not isinstance(singer, dict) or not self._is_rotation_mode():
             return False
@@ -39872,7 +39890,7 @@ class KaraokeApp(QWidget):
             return False
         if singer.get("songs") or not bool(singer.get("temporary_empty_slot", False)):
             return False
-        if not self._is_server_terminal_empty_slot_reason(singer.get("empty_slot_reason", "")):
+        if not self._is_replaceable_empty_slot_reason(singer.get("empty_slot_reason", "")):
             return False
         try:
             if time.time() >= float(singer.get("empty_slot_until") or 0):
@@ -39904,7 +39922,8 @@ class KaraokeApp(QWidget):
         self._schedule_waiting_for_add_view_refresh(reason="phone_replacement_promoted")
         _diag(
             "[ROTATION-SLOT] promoted phone replacement into preserved slot "
-            f"singer={singer_name!r} request_id={rid} singer_idx={singer_idx}"
+            f"singer={singer_name!r} request_id={rid} singer_idx={singer_idx} "
+            f"slot_reason={str(singer.get('empty_slot_reason', '') or '')!r}"
         )
         return True
 

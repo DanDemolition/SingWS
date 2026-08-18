@@ -1905,5 +1905,76 @@ class CdgVisualOffsetTests(unittest.TestCase):
         self.assertIn("plugin.setVideoOffsetMs(value)", source)
 
 
+class WaitlistSlotReplacementTests(unittest.TestCase):
+    """A host song-swap left the singer's replacement stuck on the waitlist.
+
+    Removing a singer's last song holds their rotation row for 180s, and a
+    waitlisted request from that same singer is a replacement that may fill it
+    without reordering the room. But the promotion only accepted slots emptied
+    by the SERVER, so a host removal -- the ordinary way a song is swapped --
+    was refused and the operator had to add the song by hand.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def _app(self):
+        return make_app(self.singws)
+
+    def test_host_removal_can_be_replaced_from_the_waitlist(self):
+        app = self._app()
+        self.assertTrue(
+            self.singws.KaraokeApp._is_replaceable_empty_slot_reason(app, "host_remove_song")
+        )
+
+    def test_server_reasons_are_still_replaceable(self):
+        app = self._app()
+        for reason in ("server_removed", "server_completed", "server_sung", "server_skipped"):
+            self.assertTrue(
+                self.singws.KaraokeApp._is_replaceable_empty_slot_reason(app, reason),
+                f"{reason} must keep working",
+            )
+
+    def test_unrelated_reasons_are_not_replaceable(self):
+        app = self._app()
+        for reason in ("song_removed", "", "host_clear_queue", "load_data"):
+            self.assertFalse(
+                self.singws.KaraokeApp._is_replaceable_empty_slot_reason(app, reason),
+                f"{reason!r} must not open the slot",
+            )
+
+    def test_repeat_preservation_stays_server_only(self):
+        """The wider rule must not leak into _mark_rotation_slot_temporarily_empty."""
+        app = self._app()
+        self.assertFalse(
+            self.singws.KaraokeApp._is_server_terminal_empty_slot_reason(app, "host_remove_song")
+        )
+        mark = inspect.getsource(self.singws.KaraokeApp._mark_rotation_slot_temporarily_empty)
+        self.assertNotIn("_is_replaceable_empty_slot_reason", mark)
+        self.assertIn("_is_server_terminal_empty_slot_reason", mark)
+
+    def test_the_promotion_uses_the_wider_rule(self):
+        promote = inspect.getsource(
+            self.singws.KaraokeApp._promote_waitlisted_phone_replacement_into_empty_slot
+        )
+        self.assertIn("_is_replaceable_empty_slot_reason", promote)
+        self.assertNotIn("_is_server_terminal_empty_slot_reason", promote)
+
+    def test_the_promotion_still_respects_the_expiry_window(self):
+        promote = inspect.getsource(
+            self.singws.KaraokeApp._promote_waitlisted_phone_replacement_into_empty_slot
+        )
+        self.assertIn('time.time() >= float(singer.get("empty_slot_until") or 0)', promote)
+        self.assertIn('bool(singer.get("temporary_empty_slot", False))', promote)
+
+    def test_the_promotion_only_fills_an_empty_row(self):
+        """It must never displace a song the singer still has queued."""
+        promote = inspect.getsource(
+            self.singws.KaraokeApp._promote_waitlisted_phone_replacement_into_empty_slot
+        )
+        self.assertIn('if singer.get("songs")', promote)
+
+
 if __name__ == "__main__":
     unittest.main()
