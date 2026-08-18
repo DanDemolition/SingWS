@@ -44,7 +44,8 @@ From the 2026-08-16 show logs, plus two the operator reported directly:
     been interrupted and would never emit again.
 11. Undecodable files were re-analysed every pass (40 files + 11 SKK006 ZIPs);
     failures are remembered against size/mtime.
-12. The CDG visual offset now reaches the follower backend. **UNCALIBRATED.**
+12. The CDG visual offset now reaches the follower backend. **Confirmed
+    correct on screen by the operator, 2026-08-18.**
 13. A host song-swap stranded the singer's waitlisted replacement. Removing
     their last song holds the rotation row for 180s, but the promotion only
     accepted slots emptied by the SERVER, so `host_remove_song` was refused and

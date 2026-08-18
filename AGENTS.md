@@ -401,13 +401,16 @@ the master reference its video followers chase — `delta = (master +
 self._video_offset_s) - t` in `MpvPlaybackPlugin._sync_loop`
 (`mpv_playback.py`), fed by `setVideoOffsetMs`.
 
-**None of this has been calibrated against a real CDG disc.** The wiring is
-covered by `CdgVisualOffsetTests`, which pins the plumbing and the clamp, not
-the timing; the sign and magnitude are unverified. Until someone runs a real
-disc and checks it on screen, `karaoke_engine` must stay defaulted to `ffmpeg`,
-saved settings must not be migrated onto mpv, and the Settings engine checkbox
-must stay — removing it left no way back to the working engine, and making mpv
-the default forced a version rollback mid-use on 2026-08-07.
+**Confirmed correct on screen by the operator on 2026-08-18.** The wiring is
+also covered by `CdgVisualOffsetTests`, which pins the plumbing and the clamp.
+The long-standing "uncalibrated, do not ship" caveat is closed — stop citing
+the offset as the reason mpv cannot be the default.
+
+Whether `karaoke_engine` should now default to `mpv` is a **separate and still
+open** question. Making mpv the default forced a version rollback mid-use on
+2026-08-07 for reasons beyond the offset, and nobody has retested that. Ask
+before changing the default or migrating saved settings, and keep the Settings
+engine checkbox — removing it once left no way back to the working engine.
 
 ---
 
