@@ -17606,6 +17606,11 @@ class RotationAnnouncementTicker(QWidget):
 
 class RotationView(QMainWindow):
     class SingerItemDelegate(QStyledItemDelegate):
+        # 34pt with 30px of chrome made each row 136px tall on the 720p
+        # rotation display, so the list showed one name. Still large enough to
+        # read across a room, with far less space spent per row.
+        ROW_POINT_SIZE = 28
+
         def paint(self, painter, option, index):
             text = index.data()
             painter.save()
@@ -17620,11 +17625,11 @@ class RotationView(QMainWindow):
                 painter.setBrush(QColor(255, 255, 255, 10))
                 painter.drawRoundedRect(row_rect, 12, 12)
             font = QFont()
-            font.setPointSize(34)
+            font.setPointSize(self.ROW_POINT_SIZE)
             font.setBold(True)
             painter.setFont(font)
             painter.setPen(QColor(_v("text_bright")))
-            text_rect = row_rect.adjusted(18, 8, -18, -8)
+            text_rect = row_rect.adjusted(16, 3, -16, -3)
             painter.drawText(
                 text_rect,
                 Qt.AlignmentFlag.AlignLeft
@@ -17635,7 +17640,7 @@ class RotationView(QMainWindow):
             painter.restore()
         def sizeHint(self, option, index):
             font = QFont()
-            font.setPointSize(34)
+            font.setPointSize(self.ROW_POINT_SIZE)
             font.setBold(True)
             metrics = QFontMetrics(font)
             text = index.data()
@@ -17643,9 +17648,9 @@ class RotationView(QMainWindow):
             max_w = list_widget.viewport().width() - 44 if hasattr(list_widget, "viewport") else option.rect.width() - 44
             line_h = metrics.height()
             rect = metrics.boundingRect(0, 0, max_w, 9999, Qt.TextFlag.TextWordWrap, text)
-            # paint() eats 22px of vertical chrome (row_rect 6 + text_rect 16);
+            # paint() eats 12px of vertical chrome (row_rect 6 + text_rect 6);
             # add it back plus a little slack so descenders (g/y/p/j) never clip.
-            chrome = 22 + 8
+            chrome = 12 + 6
             max_h = line_h * 2 + chrome
             h = min(rect.height() + chrome, max_h)
             return QSize(0, h)
@@ -17697,9 +17702,9 @@ class RotationView(QMainWindow):
             }
             QLabel#rotationNow {
                 color: #FFFFFF;
-                font-size: 40px;
+                font-size: 36px;
                 font-weight: 800;
-                padding: 4px 0px 1px 0px;
+                padding: 1px 0px 0px 0px;
             }
             QLabel#rotationSubtitle {
                 color: #BDB4DB;
@@ -17721,16 +17726,18 @@ class RotationView(QMainWindow):
                 border-radius: 9px;
             }
             QFrame#rotationQrCard {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 rgba(246,201,69,0.16),
-                    stop:1 rgba(246,201,69,0.05));
-                border: 1px solid rgba(246,201,69,0.40);
-                border-radius: 20px;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                    stop:0 rgba(246,201,69,0.20),
+                    stop:1 rgba(246,201,69,0.06));
+                border: 1px solid rgba(246,201,69,0.42);
+                border-radius: 16px;
+                padding: 10px 12px 8px 12px;
             }
             QLabel#rotationQrCaption {
                 color: #F6C945;
-                font-size: 30px;
+                font-size: 15px;
                 font-weight: 800;
+                letter-spacing: 1px;
             }
             QLabel#rotationQrHint {
                 color: #D8D2E4;
@@ -17739,8 +17746,8 @@ class RotationView(QMainWindow):
             }
             QLabel#rotationQrImage {
                 background: #FFFFFF;
-                border-radius: 10px;
-                padding: 6px;
+                border-radius: 8px;
+                padding: 5px;
             }
             QListWidget {
                 background: rgba(255,255,255,0.012);
@@ -17820,24 +17827,37 @@ class RotationView(QMainWindow):
         self.qr_hint_label.setObjectName("rotationQrHint")
         self.qr_hint_label.setWordWrap(True)
 
-        qr_text_column = QVBoxLayout()
-        qr_text_column.setContentsMargins(0, 0, 0, 0)
-        qr_text_column.setSpacing(4)
-        qr_text_column.addStretch(1)
-        qr_text_column.addWidget(self.qr_caption_label)
-        qr_text_column.addWidget(self.qr_hint_label)
-        qr_text_column.addStretch(1)
+        # The QR and the announcements used to be two full-width bands stacked
+        # under the list. On the 1280x720 rotation display that cost 226px and
+        # 68px, and with the surrounding margins it left the rotation list
+        # EIGHT pixels -- the operator saw one name at a time. They now share a
+        # single bottom bar: announcements take the width, the QR sits at the
+        # right as a compact tile with its caption beneath it.
+        self.qr_caption_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        qr_layout = QVBoxLayout()
+        qr_layout.setContentsMargins(0, 0, 0, 0)
+        qr_layout.setSpacing(4)
+        qr_layout.addWidget(self.qr_image_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        qr_layout.addWidget(self.qr_caption_label, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.qr_card = QFrame(self)
         self.qr_card.setObjectName("rotationQrCard")
-        qr_layout = QHBoxLayout(self.qr_card)
-        qr_layout.setContentsMargins(20, 16, 22, 16)
-        qr_layout.setSpacing(20)
-        qr_layout.addWidget(self.qr_image_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        qr_layout.addLayout(qr_text_column, 1)
+        self.qr_card.setLayout(qr_layout)
+        self.qr_card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        # The long-form hint does not survive the compact tile; the caption
+        # ("JOIN THE QUEUE!") carries the message and the QR is self-evident.
+        self.qr_hint_label.hide()
         self.qr_card.hide()
 
         self.announcement_ticker = RotationAnnouncementTicker(self)
+
+        self.bottom_bar = QWidget(self)
+        self.bottom_bar.setObjectName("rotationBottomBar")
+        bottom_layout = QHBoxLayout(self.bottom_bar)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(14)
+        bottom_layout.addWidget(self.announcement_ticker, 1)
+        bottom_layout.addWidget(self.qr_card, 0, Qt.AlignmentFlag.AlignBottom)
 
         self.queue_title_label = QLabel("SINGER ROTATION", self)
         self.queue_title_label.setObjectName("rotationQueueTitle")
@@ -17852,15 +17872,17 @@ class RotationView(QMainWindow):
         safe_area = QWidget(self)
         safe_area.setObjectName("rotationSafe")
         safe_layout = QVBoxLayout(safe_area)
-        safe_layout.setContentsMargins(34, 34, 34, 34)
-        safe_layout.setSpacing(20)
+        # Trimmed from 34/20: on a 720p display these margins alone were
+        # eating more vertical space than the rotation list was given.
+        safe_layout.setContentsMargins(18, 16, 18, 16)
+        safe_layout.setSpacing(10)
         safe_area.setLayout(safe_layout)
 
         shell = QFrame(self)
         shell.setObjectName("rotationShell")
         shell_layout = QVBoxLayout(shell)
-        shell_layout.setContentsMargins(24, 24, 24, 24)
-        shell_layout.setSpacing(18)
+        shell_layout.setContentsMargins(18, 14, 18, 14)
+        shell_layout.setSpacing(10)
 
         if self.now_singing_surface is not None:
             shell_layout.addWidget(self.now_singing_surface)
@@ -17871,8 +17893,7 @@ class RotationView(QMainWindow):
             shell_layout.addWidget(self.rotation_rail, 1)
         else:
             shell_layout.addWidget(self.list_widget, 1)
-        shell_layout.addWidget(self.qr_card)
-        shell_layout.addWidget(self.announcement_ticker)
+        shell_layout.addWidget(self.bottom_bar)
 
         safe_layout.addWidget(shell)
 
@@ -17908,7 +17929,7 @@ class RotationView(QMainWindow):
         if self.rotation_rail is not None:
             self.rotation_rail.set_effects_enabled(enabled)
 
-    ROTATION_QR_SIZE = 180
+    ROTATION_QR_SIZE = 118
 
     def set_announcement_ticker(self, enabled: bool, message: str):
         self.announcement_ticker.set_announcement(enabled, message)
