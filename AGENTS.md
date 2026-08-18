@@ -406,11 +406,14 @@ also covered by `CdgVisualOffsetTests`, which pins the plumbing and the clamp.
 The long-standing "uncalibrated, do not ship" caveat is closed — stop citing
 the offset as the reason mpv cannot be the default.
 
-Whether `karaoke_engine` should now default to `mpv` is a **separate and still
-open** question. Making mpv the default forced a version rollback mid-use on
-2026-08-07 for reasons beyond the offset, and nobody has retested that. Ask
-before changing the default or migrating saved settings, and keep the Settings
-engine checkbox — removing it once left no way back to the working engine.
+**There is no longer an engine choice to make.** `karaoke_engine` survives in
+exactly two places: the `DEFAULTS` entry (`"mpv"`, kept only so old settings
+files deserialize) and a launch-time migration that force-sets it to `"mpv"`
+whatever was saved. There is no Settings checkbox for it and no FFmpeg karaoke
+path left — the native mpv core has owned playback since the 0.4.5.0 cleanup.
+Earlier revisions of this section told agents to keep the default on `ffmpeg`
+and preserve an engine checkbox; both instructions are obsolete and were still
+being acted on as late as 2026-08-18. Do not reintroduce them.
 
 ---
 
