@@ -17814,6 +17814,67 @@ class RotationView(QMainWindow):
                 border: 1px solid rgba(255,255,255,0.07);
                 border-radius: 9px;
             }
+            QWidget#rotationSidebar {
+                background: rgba(255,255,255,0.028);
+                border: 1px solid rgba(255,255,255,0.05);
+                border-radius: 20px;
+            }
+            QLabel#rotationBrand {
+                color: #FFFFFF;
+                font-size: 30px;
+                font-weight: 900;
+                letter-spacing: 1px;
+            }
+            QLabel#rotationScan {
+                color: #C9A6FF;
+                font-size: 14px;
+                font-weight: 800;
+                letter-spacing: 1px;
+            }
+            QLabel#rotationSideHead {
+                color: #F6C945;
+                font-size: 12px;
+                font-weight: 800;
+                letter-spacing: 2px;
+                border-top: 1px solid rgba(255,255,255,0.10);
+                padding-top: 6px;
+            }
+            QLabel#rotationSideSinger {
+                color: #FFFFFF;
+                font-size: 25px;
+                font-weight: 800;
+            }
+            QLabel#rotationSideDetail {
+                color: #A9ADBC;
+                font-size: 14px;
+                font-style: italic;
+            }
+            QLabel#rotationShowTitle {
+                color: #FFFFFF;
+                font-size: 40px;
+                font-weight: 900;
+                letter-spacing: 2px;
+            }
+            QLabel#rotationClock {
+                color: #FFFFFF;
+                font-size: 22px;
+                font-weight: 800;
+            }
+            QFrame#rotationNowPlayingBar {
+                background: rgba(139,110,255,0.13);
+                border: 1px solid rgba(160,135,255,0.45);
+                border-radius: 14px;
+            }
+            QLabel#rotationNowPlaying {
+                color: #FFFFFF;
+                font-size: 17px;
+                font-weight: 800;
+            }
+            QLabel#rotationUpNextStrip {
+                color: #C9C3E4;
+                font-size: 16px;
+                font-weight: 600;
+            }
             QFrame#rotationQrCard {
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
                     stop:0 rgba(246,201,69,0.20),
@@ -17957,6 +18018,85 @@ class RotationView(QMainWindow):
         queue_heading.addWidget(self.queue_title_label)
         queue_heading.addStretch(1)
         queue_heading.addWidget(self.queue_count_label)
+        # ---- Sidebar: brand, QR call-to-action, up next / on deck ----
+        # Moving the QR and the "who is next" information into a fixed column
+        # is what buys the rotation list its height back. Stacked full width,
+        # the QR band and the now-singing card together took ~370px of a 720px
+        # screen and the list showed two names.
+        self.brand_label = QLabel("SingWS", self)
+        self.brand_label.setObjectName("rotationBrand")
+        self.brand_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.scan_label = QLabel("SCAN TO\nJOIN THE QUEUE!", self)
+        self.scan_label.setObjectName("rotationScan")
+        self.scan_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.scan_label.setWordWrap(True)
+
+        def _side_block(kind_text):
+            head = QLabel(kind_text, self)
+            head.setObjectName("rotationSideHead")
+            head.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            singer = QLabel("", self)
+            singer.setObjectName("rotationSideSinger")
+            singer.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            singer.setWordWrap(True)
+            detail = QLabel("", self)
+            detail.setObjectName("rotationSideDetail")
+            detail.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            detail.setWordWrap(True)
+            return head, singer, detail
+
+        (self.up_next_head, self.up_next_singer, self.up_next_detail) = _side_block("UP NEXT")
+        (self.on_deck_head, self.on_deck_singer, self.on_deck_detail) = _side_block("ON DECK")
+
+        self.sidebar = QWidget(self)
+        self.sidebar.setObjectName("rotationSidebar")
+        self.sidebar.setFixedWidth(300)
+        side_layout = QVBoxLayout(self.sidebar)
+        side_layout.setContentsMargins(16, 14, 16, 14)
+        side_layout.setSpacing(8)
+        side_layout.addWidget(self.brand_label)
+        side_layout.addWidget(self.scan_label)
+        side_layout.addWidget(self.qr_card, 0, Qt.AlignmentFlag.AlignHCenter)
+        side_layout.addSpacing(4)
+        side_layout.addWidget(self.up_next_head)
+        side_layout.addWidget(self.up_next_singer)
+        side_layout.addWidget(self.up_next_detail)
+        side_layout.addSpacing(4)
+        side_layout.addWidget(self.on_deck_head)
+        side_layout.addWidget(self.on_deck_singer)
+        side_layout.addWidget(self.on_deck_detail)
+        side_layout.addStretch(1)
+
+        # ---- Main column header: title + clock ----
+        self.show_title_label = QLabel("SHOW ROTATION", self)
+        self.show_title_label.setObjectName("rotationShowTitle")
+        self.clock_label = QLabel("", self)
+        self.clock_label.setObjectName("rotationClock")
+        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(2, 0, 2, 0)
+        title_row.addWidget(self.show_title_label)
+        title_row.addStretch(1)
+        title_row.addWidget(self.clock_label)
+        self._tick_rotation_clock()
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self._tick_rotation_clock)
+        self.clock_timer.start(10000)
+
+        # ---- Now playing strip ----
+        self.now_playing_label = QLabel("", self)
+        self.now_playing_label.setObjectName("rotationNowPlaying")
+        self.up_next_strip_label = QLabel("", self)
+        self.up_next_strip_label.setObjectName("rotationUpNextStrip")
+        self.up_next_strip_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.now_playing_bar = QFrame(self)
+        self.now_playing_bar.setObjectName("rotationNowPlayingBar")
+        np_layout = QHBoxLayout(self.now_playing_bar)
+        np_layout.setContentsMargins(18, 8, 18, 8)
+        np_layout.addWidget(self.now_playing_label)
+        np_layout.addStretch(1)
+        np_layout.addWidget(self.up_next_strip_label)
+
         # ---- Safe area container ----
         safe_area = QWidget(self)
         safe_area.setObjectName("rotationSafe")
@@ -17973,15 +18113,35 @@ class RotationView(QMainWindow):
         shell_layout.setContentsMargins(18, 14, 18, 14)
         shell_layout.setSpacing(10)
 
-        if self.now_singing_surface is not None:
-            shell_layout.addWidget(self.now_singing_surface)
-        else:
-            shell_layout.addWidget(self.now_singing_card)
-        shell_layout.addLayout(queue_heading)
+        # The big now-singing card is retired from the layout: the same
+        # information now reads from the NOW PLAYING strip and the sidebar's
+        # UP NEXT block, and its 142px goes to the rotation list. The surface
+        # is still CREATED (creation order governs native child stacking on
+        # macOS) and still receives set_state, just hidden.
+        for _retired in (self.now_singing_surface, self.now_singing_card):
+            if _retired is not None:
+                _retired.hide()
+
+        main_column = QWidget(self)
+        main_column.setObjectName("rotationMain")
+        main_layout = QVBoxLayout(main_column)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(8)
+        main_layout.addLayout(title_row)
         if self.rotation_rail is not None:
-            shell_layout.addWidget(self.rotation_rail, 1)
+            main_layout.addWidget(self.rotation_rail, 1)
         else:
-            shell_layout.addWidget(self.list_widget, 1)
+            main_layout.addLayout(queue_heading)
+            main_layout.addWidget(self.list_widget, 1)
+
+        body_row = QHBoxLayout()
+        body_row.setContentsMargins(0, 0, 0, 0)
+        body_row.setSpacing(14)
+        body_row.addWidget(self.sidebar)
+        body_row.addWidget(main_column, 1)
+
+        shell_layout.addLayout(body_row, 1)
+        shell_layout.addWidget(self.now_playing_bar)
         shell_layout.addWidget(self.bottom_bar)
 
         safe_layout.addWidget(shell)
@@ -18019,6 +18179,50 @@ class RotationView(QMainWindow):
             self.rotation_rail.set_effects_enabled(enabled)
 
     ROTATION_QR_SIZE = 118
+
+    def _tick_rotation_clock(self):
+        """Wall clock for the audience screen: 11:28 PM over SAT MAY 17."""
+        try:
+            now = time.localtime()
+            self.clock_label.setText(
+                time.strftime("%I:%M %p", now).lstrip("0")
+                + "\n"
+                + time.strftime("%a %b %d", now).upper()
+            )
+        except Exception:
+            pass
+
+    def set_now_playing_strip(self, now_text: str, next_text: str):
+        """Bottom strip: what is on stage and who follows."""
+        try:
+            now_text = str(now_text or "").strip()
+            next_text = str(next_text or "").strip()
+            self.now_playing_label.setText(
+                f"NOW PLAYING   {now_text}" if now_text else ""
+            )
+            self.up_next_strip_label.setText(
+                f"Up Next:  {next_text}" if next_text else ""
+            )
+            self.now_playing_bar.setVisible(bool(now_text or next_text))
+        except Exception:
+            pass
+
+    def set_side_lineup(self, up_next, on_deck):
+        """Sidebar UP NEXT / ON DECK blocks. Each value is (singer, detail)."""
+        try:
+            for (singer_lbl, detail_lbl, head_lbl), value in (
+                ((self.up_next_singer, self.up_next_detail, self.up_next_head), up_next),
+                ((self.on_deck_singer, self.on_deck_detail, self.on_deck_head), on_deck),
+            ):
+                singer, detail = (value or ("", ""))
+                singer = str(singer or "").strip()
+                detail = str(detail or "").strip()
+                singer_lbl.setText(singer)
+                detail_lbl.setText(detail)
+                for lbl in (singer_lbl, detail_lbl, head_lbl):
+                    lbl.setVisible(bool(singer))
+        except Exception:
+            pass
 
     def set_announcement_ticker(self, enabled: bool, message: str):
         self.announcement_ticker.set_announcement(enabled, message)
@@ -18189,6 +18393,46 @@ class RotationView(QMainWindow):
                 break
         if self.now_singing_surface is not None:
             self.now_singing_surface.set_state(now_singing_text, next_singer, countdown_text)
+
+        # Feed the mockup's panels from the rows we just built. display_items
+        # is already ordered, so the first two rows that are not the singer on
+        # stage are up-next and on-deck.
+        try:
+            lineup = []
+            now_key = str(now_singing_text or "").strip().casefold()
+            for row in display_items:
+                if str(row.get("singer", "")).strip().casefold() == now_key:
+                    continue
+                song = str(row.get("song", "") or "")
+                artist = str(row.get("artist", "") or "")
+                detail = f"{song}\n{artist}" if (song and artist) else (song or artist)
+                lineup.append((str(row.get("singer", "")), detail))
+                if len(lineup) >= 2:
+                    break
+            self.set_side_lineup(
+                lineup[0] if len(lineup) > 0 else ("", ""),
+                lineup[1] if len(lineup) > 1 else ("", ""),
+            )
+            now_row = next(
+                (r for r in display_items
+                 if str(r.get("singer", "")).strip().casefold() == now_key),
+                None,
+            )
+            now_strip = ""
+            if now_row is not None:
+                song = str(now_row.get("song", "") or "")
+                now_strip = f"{now_row.get('singer', '')} - {song}" if song else str(now_row.get("singer", ""))
+            elif now_singing_text and now_singing_text != "Singer Rotation":
+                now_strip = str(now_singing_text)
+            next_strip = ""
+            if lineup:
+                first_song = str((display_items[0] if display_items else {}).get("song", "") or "")
+                next_detail = lineup[0][1].split("\n")[0] if lineup[0][1] else ""
+                next_strip = f"{lineup[0][0]} - {next_detail}" if next_detail else lineup[0][0]
+            self.set_now_playing_strip(now_strip, next_strip)
+        except Exception as exc:
+            _diag(f"[ROTATION] lineup panels failed: {exc}")
+
         if self.rotation_rail is not None:
             self.rotation_rail.set_items(display_items)
         else:
