@@ -1170,6 +1170,16 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('"rotation_announcement_message"', venue_settings)
         self.assertNotIn("video_window.ticker", ticker)
 
+    def test_rotation_announcement_tiles_without_a_visible_wrap_reset(self):
+        ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")
+        view_start = MAIN_SOURCE.index("class RotationView(QMainWindow)", ticker_start)
+        ticker = MAIN_SOURCE[ticker_start:view_start]
+        self.assertIn("def _marquee_x_positions", ticker)
+        self.assertIn("self._offset % cycle", ticker)
+        self.assertIn("while x < scroll_right", ticker)
+        self.assertNotIn("first_x = scroll_left + scroll_width", ticker)
+        self.assertNotIn("self._offset %= cycle", ticker)
+
     def test_singer_history_edits_use_debounced_save_path(self):
         source = function_source("_commit_singer_history_change")
         self.assertIn("_schedule_save_data", source)

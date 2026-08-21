@@ -17649,6 +17649,22 @@ class RotationAnnouncementTicker(QWidget):
         self._offset += self.SPEED_PX_PER_SEC * dt
         self.update()
 
+    def _marquee_x_positions(self, scroll_left: int, scroll_width: int, text_width: int):
+        """Tile the announcement across the viewport at one continuous phase."""
+        text_width = max(1, int(text_width))
+        cycle = text_width + self.GAP_PX
+        x = int(scroll_left) - int(self._offset % cycle)
+        # When the leading copy has fully cleared the clip, advance to the next
+        # tile without resetting the animation or jumping a visible copy.
+        while x + text_width < scroll_left:
+            x += cycle
+        positions = []
+        scroll_right = int(scroll_left) + max(0, int(scroll_width))
+        while x < scroll_right:
+            positions.append(x)
+            x += cycle
+        return positions
+
     def paintEvent(self, event):
         if not self._message:
             return
@@ -17684,12 +17700,9 @@ class RotationAnnouncementTicker(QWidget):
         painter.setPen(QColor(245, 242, 252))
         metrics = QFontMetrics(message_font)
         text_width = max(1, metrics.horizontalAdvance(self._message))
-        cycle = text_width + self.GAP_PX
-        self._offset %= cycle
-        first_x = scroll_left + scroll_width - int(self._offset)
         baseline = (self.height() + metrics.ascent() - metrics.descent()) // 2
-        painter.drawText(first_x, baseline, self._message)
-        painter.drawText(first_x + cycle, baseline, self._message)
+        for x in self._marquee_x_positions(scroll_left, scroll_width, text_width):
+            painter.drawText(x, baseline, self._message)
         painter.restore()
 
 
