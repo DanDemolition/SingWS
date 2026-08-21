@@ -50036,7 +50036,7 @@ class KaraokeApp(QWidget):
                 lines.extend([
                     'repeat with elem in elems',
                     'try',
-                    f'if (role of elem is "AXStaticText") and ((name of elem as text) contains {safe_title_literal}) then',
+                    f'if (role of elem is "AXStaticText") and (((name of elem) as text) contains {safe_title_literal}) then',
                     'set ep to position of elem',
                     'if (item 1 of ep) < cutoff then',
                     'set es to size of elem',
@@ -50048,9 +50048,9 @@ class KaraokeApp(QWidget):
                     'if role of artistElem is "AXStaticText" then',
                     'set aName to name of artistElem as text',
                     'set ap to position of artistElem',
-                    'set aS to size of artistElem',
-                    'set aX to (item 1 of ap) + ((item 1 of aS) div 2)',
-                    'set aY to (item 2 of ap) + ((item 2 of aS) div 2)',
+                    'set artistSize to size of artistElem',
+                    'set aX to (item 1 of ap) + ((item 1 of artistSize) div 2)',
+                    'set aY to (item 2 of ap) + ((item 2 of artistSize) div 2)',
                     'set aDelta to aY - rowY',
                     'if aDelta < 0 then set aDelta to -aDelta',
                     'ignoring case',
@@ -50093,7 +50093,7 @@ class KaraokeApp(QWidget):
                 'try',
                 # KaraFun appends a small attachment/icon character to some
                 # result titles, so equality rejects the correct visible row.
-                f'if (role of elem is "AXStaticText") and ((name of elem as text) contains {safe_title_literal}) then',
+                f'if (role of elem is "AXStaticText") and (((name of elem) as text) contains {safe_title_literal}) then',
                 'set ep to position of elem',
                 'if (item 1 of ep) < cutoff then',
                 'set es to size of elem',

@@ -4,6 +4,7 @@ import math
 import os
 from pathlib import Path
 import struct
+import subprocess
 from types import SimpleNamespace
 import tempfile
 import time
@@ -1555,6 +1556,32 @@ class KaraFunWrongSongTests(unittest.TestCase):
         self.assertNotIn("artistMatched", script)
         self.assertNotIn("TITLE_ONLY", script)
         self.assertIn('return "FOUND|"', script)
+
+    @unittest.skipUnless(os.uname().sysname == "Darwin", "requires the macOS AppleScript compiler")
+    def test_generated_search_scripts_compile(self):
+        """Catch syntax errors before the KaraFun handoff reaches a live show."""
+        app = make_app(self.singws)
+        variants = (
+            {"query": "Memory"},
+            {"query": "Memory", "safe_title": "Memory", "require_exact_title": True},
+            {
+                "query": "Sugarcult Memory",
+                "safe_title": "Memory",
+                "safe_artist": "Sugarcult",
+                "require_exact_title": True,
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for index, kwargs in enumerate(variants):
+                script = "\n".join(self.singws.KaraokeApp._karafun_search_script(app, **kwargs))
+                result = subprocess.run(
+                    ["/usr/bin/osacompile", "-o", str(Path(temp_dir) / f"search-{index}.scpt"), "-"],
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_an_artistless_query_only_accepts_an_artist_verified_row(self):
         source = inspect.getsource(self.singws.KaraokeApp._automate_karafun_search_and_play)

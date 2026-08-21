@@ -248,7 +248,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("query_literal = self._karafun_applescript_literal(query)", search_helper)
         self.assertIn("safe_title_literal = self._karafun_applescript_literal(safe_title)", search_helper)
         self.assertIn("keystroke {query_literal}", search_helper)
-        self.assertIn("(name of elem as text) contains {safe_title_literal}", search_helper)
+        self.assertIn("((name of elem) as text) contains {safe_title_literal}", search_helper)
         self.assertIn('if durationText is not "" then return "FIRST|"', search_helper)
         self.assertIn('if (n is not "") and (centerX < cutoff) and (centerY > ((item 2 of wp) + 110)) then', search_helper)
         self.assertIn("durationText", search_helper)
