@@ -1,8 +1,10 @@
 """Server-added requests must not steal the queue selection: after any
 server-originated insert (auto-accept, waitlist promotion, between-songs add,
 sync burst, reconnect refresh), the rebuild re-selects the TOP actionable
-rotation row instead of the newly added row. Host-driven adds keep the old
-behavior (select what the host just added).
+rotation row instead of the newly added row. During playback, an explicitly
+selected request is preserved by stable request ID if it still exists; a
+removed selection is cleared. Host-driven adds keep the old behavior (select
+what the host just added).
 
 Covers _mark_server_queue_mutation / _queue_top_actionable_row /
 _restore_queue_selection_after_rebuild in 0.2.18.1.py."""
@@ -106,8 +108,9 @@ def model_rows_for_queue(queue, leading_header=False):
         rows.append({"kind": "header", "singer_idx": -1, "song_idx": -1})
     for si, s in enumerate(queue):
         rows.append({"kind": "singer", "singer_idx": si, "song_idx": -1})
-        for gi, _ in enumerate(s.get("songs", [])):
-            rows.append({"kind": "song", "singer_idx": si, "song_idx": gi})
+        for gi, entry in enumerate(s.get("songs", [])):
+            rows.append({"kind": "song", "singer_idx": si, "song_idx": gi,
+                         "entry": entry})
     return rows
 
 
@@ -181,6 +184,33 @@ class ServerAddSelectionTests(unittest.TestCase):
         # host has selected (identity restore path).
         self._rebuild(app, selected_identity=("singer", 0, -1))
         self.assertEqual(app.queue_display.current_row, 0)
+
+    def test_server_update_during_playback_preserves_selected_request_by_id(self):
+        app = self._app()
+        selected = dict(song("G1"), remote_request_id=77)
+        app.queue = [singer("Ada", ["A1"]), singer("Grace", [])]
+        app.queue[1]["songs"] = [selected]
+        stable_id = app._ensure_queue_entry_id(selected)
+
+        # A server insert shifts Grace from singer index 1 to 2.
+        app.queue.insert(0, singer("New", ["N1"]))
+        app.karaoke_playing = True
+        app._queue_select_top_after_server_update = True
+        self._rebuild(app, selected_identity=("song", 1, 0, stable_id))
+
+        row = app.queue_display.current_row
+        picked = app.queue_display_model._rows[row]
+        self.assertIs(picked["entry"], selected)
+        self.assertEqual((picked["singer_idx"], picked["song_idx"]), (2, 0))
+
+    def test_server_update_during_playback_clears_removed_request(self):
+        app = self._app()
+        app.queue = [singer("Ada", ["A1"])]
+        app.karaoke_playing = True
+        app._queue_select_top_after_server_update = True
+        self._rebuild(app, selected_identity=("song", 1, 0, "remote:77"))
+
+        self.assertEqual(app.queue_display.current_row, -1)
 
     # -- request added while the host is typing --------------------------------
 

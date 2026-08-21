@@ -1,8 +1,11 @@
 import ast
 import pathlib
 import re
+import sys
+import types
 import unittest
 import importlib.util
+from unittest import mock
 
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication
@@ -90,6 +93,25 @@ class PerformanceSafetyTests(unittest.TestCase):
         source = function_source("update_queue_display")
         self.assertIn("queue_display.setUpdatesEnabled(False)", source)
         self.assertIn("queue_display.setUpdatesEnabled(True)", source)
+
+    def test_cached_loudness_failures_do_not_flood_gui_progress(self):
+        items = [
+            (f"/tmp/{i}.zip", f"/tmp/{i}.zip", f"Track {i}", f"/tmp/{i}.zip")
+            for i in range(5000)
+        ]
+        worker = self.singws.AnalyzeLibraryWorker(items)
+        progress = []
+        worker.progress.connect(lambda done, total, name: progress.append(done))
+        fake_jobs = types.ModuleType("libmpv_media_jobs")
+        fake_jobs.LoudnessSession = lambda: types.SimpleNamespace(close=lambda: None)
+
+        with mock.patch.dict(sys.modules, {"libmpv_media_jobs": fake_jobs}), \
+             mock.patch.object(self.singws, "_loudness_workers_allowed", return_value=True), \
+             mock.patch.object(self.singws, "loudness_failed_cached", return_value=True), \
+             mock.patch.object(self.singws.time, "monotonic", return_value=1.0):
+            worker.run()
+
+        self.assertEqual(progress, [1, len(items)])
 
     def test_queue_add_defers_metadata_lookup_during_playback(self):
         source = function_source("_add_song_to_queue")
@@ -1152,6 +1174,18 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("delays=(0, 80, 250)", scheduler)
         self.assertIn("QTimer.singleShot", scheduler)
         self.assertIn("_reassert_show_ticker_surface", scheduler)
+
+    def test_show_screen_ticker_self_heals_late_native_restacking(self):
+        video_start = MAIN_SOURCE.index("class VideoWindow(QWidget)")
+        video_end = MAIN_SOURCE.index("class AddToQueueDialog", video_start)
+        video = MAIN_SOURCE[video_start:video_end]
+        show_event = function_source("showEvent")
+        guard = function_source("_tick_ticker_surface_guard")
+        self.assertIn("_ticker_surface_guard_timer.start(3000)", video)
+        self.assertIn('reassert("video_window_show", delays=(0, 120, 400))', show_event)
+        self.assertIn('settings.get("ticker_enabled", True)', guard)
+        self.assertIn("ticker.raise_()", guard)
+        self.assertNotIn("activateWindow", guard)
 
     def test_rotation_announcement_is_separate_and_venue_scoped(self):
         ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")

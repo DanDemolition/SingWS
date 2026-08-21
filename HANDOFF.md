@@ -1,13 +1,72 @@
 # SingWS handoff
 
-Updated 2026-08-18.
+Updated 2026-08-21.
+
+## Uncommitted after the 2026-08-20 show
+
+The installed 0.4.5.4 bundle exposed a KaraFun AppleScript syntax regression.
+The artist-row matching code named an AppleScript variable `aS`; identifiers
+are case-insensitive, so the compiler read it as the reserved keyword `as` and
+every automatic KaraFun search failed with error -2741. The variable is now
+`artistSize`, with a regression assertion in `test_karafun_provider.py`.
+
+Focused KaraFun tests pass (33 tests), and a representative generated search
+script for Sugarcult / Memory compiles with macOS `osacompile`. This is not
+built or installed. The show log also reports Accessibility denial -25211 for
+the installed app, so SingWS must be enabled in System Settings > Privacy &
+Security > Accessibility before an end-to-end KaraFun test.
+
+The same uncommitted work now requests the native macOS Accessibility prompt
+once, 3.5 seconds after the first launch with automatic KaraFun queueing
+enabled. A persisted marker prevents repeated launch prompts; the existing
+song-time permission warning remains the recovery path if access is later
+revoked.
+
+The audience rotation screen now shifts the complete composition through a
+six-pixel perimeter every 20 seconds (`rotation_burn_in_shift_enabled`) so the
+otherwise-static title, sidebar, QR, clock and bottom bars do not occupy the
+same pixels all night. Render-thread rail ribbons also keep moving when the
+queue is too short to scroll. The 1280x720 offscreen layout was rendered before
+and after a shift with no clipping or reflow; native QML rail content cannot be
+captured by Qt's offscreen QWidget grab and still needs an installed on-screen
+check.
+
+The 8.5-second GUI stall at 21:44 coincided with the library analyzer racing
+through its cached invalid-ZIP block. It emitted one queued Qt progress signal
+per cached failure, fast enough to swamp the event loop. Progress is now
+rate-limited to 10 Hz while always emitting the first and final item; a
+5,000-cached-failure regression test observes exactly two updates.
+
+Server queue refreshes no longer discard the host's selected request during
+playback merely because another request arrived and shifted its row. Song
+selection capture now includes the queue entry's stable ID, and the rebuild
+restores the matching entry at its new row. If that request was actually
+removed, selection is cleared as before, so a different request is never
+silently highlighted.
+
+The audience ticker could still disappear until the operator closed and
+reopened the show screen. It was alive but macOS had restacked its native Qt
+Quick child surface behind the retained video surface after the bounded
+transition callbacks. The show window now reasserts ticker stacking whenever
+it becomes visible and has a quiet three-second guard that raises the visible,
+enabled ticker without taking keyboard focus. This self-heals late AppKit
+restacking during a show.
+
+Verification for the current uncommitted set: 147 ticker/KaraFun/performance
+tests pass, including the new self-healing invariant. The 124 recent-regression
+tests also pass independently (4 skipped). Running both Qt
+test groups in one Python process exited 134 during macOS pasteboard teardown
+after the test bodies; the same recent-regression group is clean in its own
+offscreen process. `git diff --check` is clean.
+
+## Previous 0.4.5.4 release handoff
 
 ## Committed on `work/show-fixes-2026-08-18`, NOT RELEASED, NOT INSTALLED
 
-`APP_VERSION` is `0.4.5.4`. `/Applications/SingWS.app` is still **`0.4.5.3`**
-and has never run any of this. The `SingWS-0.4.5.4-x86_64-installer.dmg` in the
-repo root was built partway through the session and is **stale** — it predates
-most of the fixes below. Rebuild before installing.
+`APP_VERSION` is `0.4.5.4`. `/Applications/SingWS.app` is now **`0.4.5.4`**, but
+it predates the uncommitted post-show fixes above. The
+`SingWS-0.4.5.4-x86_64-installer.dmg` in the repo root is **stale** — rebuild
+before installing.
 
 The server half (KaraFun catalog id stability + stale-id re-resolve) **is live
 on wskar.com**, deployed 2026-08-17 23:55 and verified against the live

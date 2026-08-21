@@ -3221,6 +3221,7 @@ DEFAULTS = {
     "next_up_overlay_duration_sec": 10, # retained only for backward-compatible settings loading
     "show_screen_vfx_enabled": True, # audience spotlights/countdown/explosion; lightweight overlay remains when off
     "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
+    "rotation_burn_in_shift_enabled": True, # slowly orbit the complete audience layout by a few pixels
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "loudness_scan_holds_for_playback": True, # False = keep scanning under a live song (faster pass, risks GUI stalls)
@@ -3228,6 +3229,7 @@ DEFAULTS = {
     "karafun_manage_show_screen": True, # macOS: hand the show display to KaraFun, then restore SingWS on completion
     "karafun_transparent_handoff": True, # Reveal an already-positioned KaraFun renderer through the SingWS show window
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
+    "karafun_accessibility_prompt_requested": False, # macOS trust prompt is requested once for an automation-enabled install
     "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
     "karafun_audio_output_follow_singws": True, # Pin KaraFun to SingWS's saved physical output instead of AirPlay/system default
     "karafun_audio_output_name": "", # Optional KaraFun-only device name; blank follows audio_output_name
@@ -13064,12 +13066,42 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer.timeout.connect(self._tick_idle_overlay)
         self._idle_overlay_timer.start(50)
 
+        # macOS can restack the retained mpv and Qt Quick child windows long
+        # after the transition callback which raised them. The ticker remains
+        # alive and scrolling but ends up behind the video surface; hiding and
+        # reopening the audience window repairs it only because AppKit rebuilds
+        # that ordering. Reassert the non-overlapping bottom ticker periodically
+        # so the show screen heals itself without operator intervention.
+        self._ticker_surface_guard_timer = QTimer(self)
+        self._ticker_surface_guard_timer.timeout.connect(self._tick_ticker_surface_guard)
+        self._ticker_surface_guard_timer.start(3000)
+
     def showEvent(self, event):
         super().showEvent(event)
         owner = getattr(self, "_external_owner", None)
         refresh = getattr(owner, "_refresh_mpv_video_views", None) if owner is not None else None
         if callable(refresh):
             refresh("show_event")
+        reassert = getattr(owner, "_schedule_show_ticker_reassert", None) if owner is not None else None
+        if callable(reassert):
+            reassert("video_window_show", delays=(0, 120, 400))
+
+    def _tick_ticker_surface_guard(self):
+        """Keep the native ticker above late-restacked video child surfaces."""
+        try:
+            if not self.isVisible():
+                return
+            owner = getattr(self, "_external_owner", None)
+            settings = getattr(owner, "settings", {}) if owner is not None else {}
+            if not bool(settings.get("ticker_enabled", True)):
+                return
+            ticker = getattr(self, "ticker", None)
+            if ticker is None or not ticker.isVisible():
+                return
+            ticker.raise_()
+            ticker.update()
+        except Exception:
+            pass
 
     def _attach_show_vfx(self, area):
         if not _native_quick_child_surfaces_supported():
@@ -13586,6 +13618,7 @@ class AnalyzeLibraryWorker(QObject):
     # Poll interval while holding off for playback.  Short enough that the scan
     # resumes promptly between songs, long enough to cost nothing.
     _PLAYBACK_HOLD_POLL_S = 1.0
+    _PROGRESS_MIN_INTERVAL_S = 0.10
 
     def __init__(self, items, mode: str = "full", should_hold=None):
         super().__init__()
@@ -13634,6 +13667,7 @@ class AnalyzeLibraryWorker(QObject):
         analyzed = 0
         failed = 0
         skipped = 0
+        last_progress_emit = 0.0
         try:
             from libmpv_media_jobs import LoudnessSession
             session = LoudnessSession()
@@ -13647,7 +13681,14 @@ class AnalyzeLibraryWorker(QObject):
             _source, audio, name = item[:3]
             cache_key = str(item[3] if len(item) > 3 else audio or "")
             done += 1
-            self.progress.emit(done, total, str(name or ""))
+            # Cached failures can be skipped thousands per second. Emitting a
+            # queued Qt signal for every one floods the GUI event queue and
+            # froze the show for 8.5 seconds when a scan reached its failure
+            # block. Ten updates/second is visually smooth and bounded.
+            progress_now = time.monotonic()
+            if done == 1 or done == total or progress_now - last_progress_emit >= self._PROGRESS_MIN_INTERVAL_S:
+                self.progress.emit(done, total, str(name or ""))
+                last_progress_emit = progress_now
             # A file that already failed analysis is not going to succeed this
             # pass either. Re-attempting them cost 5-6 repeats each across one
             # show; the record clears itself if the file is ever replaced.
@@ -17418,7 +17459,7 @@ Rectangle {
         id: scrollLightRibbons
         anchors.fill: parent
         z: 2
-        visible: root.effectsEnabled && root.overflow
+        visible: root.effectsEnabled
         opacity: 0.12
         clip: true
 
@@ -18151,6 +18192,13 @@ class RotationView(QMainWindow):
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.addWidget(safe_area)
+        self._burn_in_layout = central_layout
+        self._burn_in_orbit = (
+            (0, 0), (2, 0), (4, 0), (6, 0),
+            (6, 2), (6, 4), (6, 6), (4, 6),
+            (2, 6), (0, 6), (0, 4), (0, 2),
+        )
+        self._burn_in_orbit_index = 0
         self.setCentralWidget(central)
         self.list_widget.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -18166,6 +18214,10 @@ class RotationView(QMainWindow):
         self.last_scroll_percent = 0.0
         settings = getattr(parent, "settings", {}) if parent is not None else {}
         self.set_effects_enabled(bool(settings.get("rotation_vfx_enabled", True)))
+        self._burn_in_shift_enabled = bool(settings.get("rotation_burn_in_shift_enabled", True))
+        self._burn_in_shift_timer = QTimer(self)
+        self._burn_in_shift_timer.timeout.connect(self._advance_burn_in_shift)
+        self._burn_in_shift_timer.start(20000)
         self.set_announcement_ticker(
             bool(settings.get("rotation_announcement_enabled", False)),
             settings.get("rotation_announcement_message", ""),
@@ -18179,6 +18231,22 @@ class RotationView(QMainWindow):
             self.rotation_rail.set_effects_enabled(enabled)
 
     ROTATION_QR_SIZE = 118
+
+    def _advance_burn_in_shift(self):
+        """Move every static audience-screen element through a six-pixel orbit."""
+        try:
+            if not self._burn_in_shift_enabled or not self.isVisible():
+                return
+            self._burn_in_orbit_index = (
+                self._burn_in_orbit_index + 1
+            ) % len(self._burn_in_orbit)
+            x, y = self._burn_in_orbit[self._burn_in_orbit_index]
+            # Opposing margins keep the usable size constant. That moves the
+            # complete widget/native-surface composition without reflowing it.
+            span = 6
+            self._burn_in_layout.setContentsMargins(x, y, span - x, span - y)
+        except Exception as exc:
+            _diag(f"[ROTATION] burn-in shift failed: {exc}")
 
     def _tick_rotation_clock(self):
         """Wall clock for the audience screen: 11:28 PM over SAT MAY 17."""
@@ -21317,6 +21385,10 @@ class KaraokeApp(QWidget):
         # new venue kept advertising the previous one until the first rotation
         # upload, and nearby-signup checks were made against the wrong place.
         QTimer.singleShot(2500, self._sync_session_location_on_startup)
+
+        # Ask from the signed SingWS process after its first window is visible;
+        # waiting for the first KaraFun song is too late for a live handoff.
+        QTimer.singleShot(3500, self._request_karafun_accessibility_on_first_launch)
 
         # Build the rotation window while the app is idle, so its Qt Quick
         # startup cost is not paid on the first click during a show.
@@ -38889,9 +38961,20 @@ class KaraokeApp(QWidget):
             # index-shifted row) highlighted as if it were the next singer.
             self._queue_select_top_after_server_update = False
             if bool(getattr(self, "karaoke_playing", False)):
+                stable_entry_id = str(selected_identity[3] or "") if selected_identity and len(selected_identity) > 3 else ""
+                if stable_entry_id and getattr(self, "queue_display_model", None) is not None:
+                    for row_num, row in enumerate(self.queue_display_model._rows):
+                        entry = row.get("entry")
+                        if isinstance(entry, dict) and self._ensure_queue_entry_id(entry) == stable_entry_id:
+                            self.queue_display.setCurrentRow(row_num)
+                            _diag(
+                                "[QUEUE-SELECT] server update during playback -> "
+                                f"preserved request selection id={stable_entry_id!r} row={row_num}"
+                            )
+                            return
                 # A server mutation must never create a competing highlighted
-                # row during playback. Current/next remain model presentation
-                # roles; ordinary editing selection is cleared.
+                # row during playback. If the selected request was removed (or
+                # the selection was a non-request row), clear it.
                 self.queue_display.setCurrentRow(-1)
                 try:
                     _diag("[QUEUE-SELECT] server update during playback -> cleared editing selection")
@@ -47621,7 +47704,16 @@ class KaraokeApp(QWidget):
                     selected_identity = ("singer", self._queue_item_singer_index(selected_item, self.get_selected_index()), -1)
                 elif kind == "song":
                     singer_idx, song_idx = self._queue_item_song_indices(selected_item, self.get_selected_index())
-                    selected_identity = ("song", singer_idx, song_idx)
+                    stable_entry_id = ""
+                    try:
+                        model = getattr(self, "queue_display_model", None)
+                        row_data = model.rowDict(selected_item.row()) if isinstance(model, QueueListModel) else {}
+                        entry = row_data.get("entry")
+                        if isinstance(entry, dict):
+                            stable_entry_id = self._ensure_queue_entry_id(entry)
+                    except Exception:
+                        stable_entry_id = ""
+                    selected_identity = ("song", singer_idx, song_idx, stable_entry_id)
         except Exception:
             selected_identity = None
         model_rows = []
@@ -48985,6 +49077,38 @@ class KaraokeApp(QWidget):
             pass
         return message
 
+    def _request_karafun_accessibility_on_first_launch(self):
+        """Ask macOS for Accessibility trust once, after the main UI appears."""
+        if sys.platform != "darwin":
+            return
+        if not bool(self.settings.get("karafun_auto_queue_enabled", False)):
+            return
+        if bool(self.settings.get("karafun_accessibility_prompt_requested", False)):
+            return
+        # Persist before invoking macOS: dismissing the system prompt must not
+        # turn every subsequent launch into another unsolicited prompt.
+        self.settings["karafun_accessibility_prompt_requested"] = True
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        try:
+            import objc
+            from Foundation import NSDictionary
+
+            options = NSDictionary.dictionaryWithObject_forKey_(
+                True, "AXTrustedCheckOptionPrompt"
+            )
+            app_services = ctypes.CDLL(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+            )
+            app_services.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+            app_services.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+            trusted = bool(app_services.AXIsProcessTrustedWithOptions(objc.pyobjc_id(options)))
+            _diag(f"[KARAFUN] accessibility launch preflight trusted={int(trusted)} prompt_requested=1")
+        except Exception as exc:
+            _diag(f"[KARAFUN] accessibility launch prompt unavailable: {exc}")
+
     def _karafun_run_window_script(self, lines, on_complete=None, *, timeout: float = 18) -> bool:
         """Run non-blocking macOS Accessibility automation for KaraFun."""
         if sys.platform != "darwin":
@@ -50048,9 +50172,11 @@ class KaraokeApp(QWidget):
                     'if role of artistElem is "AXStaticText" then',
                     'set aName to name of artistElem as text',
                     'set ap to position of artistElem',
-                    'set aS to size of artistElem',
-                    'set aX to (item 1 of ap) + ((item 1 of aS) div 2)',
-                    'set aY to (item 2 of ap) + ((item 2 of aS) div 2)',
+                    # AppleScript identifiers are case-insensitive, so `aS`
+                    # is parsed as the reserved coercion keyword `as`.
+                    'set artistSize to size of artistElem',
+                    'set aX to (item 1 of ap) + ((item 1 of artistSize) div 2)',
+                    'set aY to (item 2 of ap) + ((item 2 of artistSize) div 2)',
                     'set aDelta to aY - rowY',
                     'if aDelta < 0 then set aDelta to -aDelta',
                     'ignoring case',

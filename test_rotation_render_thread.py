@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -66,6 +67,14 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertIn("id: topScrollFeather", source)
         self.assertIn("id: bottomScrollFeather", source)
         self.assertIn("id: scrollEdgeGlint", source)
+        self.assertIn("visible: root.effectsEnabled", source)
+
+    def test_complete_rotation_layout_has_burn_in_orbit(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn('"rotation_burn_in_shift_enabled": True', source)
+        self.assertIn("def _advance_burn_in_shift(self):", source)
+        self.assertIn("self._burn_in_shift_timer.start(20000)", source)
+        self.assertIn("self._burn_in_layout.setContentsMargins", source)
 
     def test_vfx_stay_in_the_qt_quick_scene(self):
         source = mod.QML_ROTATION_RAIL_SOURCE

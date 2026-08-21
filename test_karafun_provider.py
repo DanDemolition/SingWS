@@ -252,6 +252,8 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('if durationText is not "" then return "FIRST|"', search_helper)
         self.assertIn('if (n is not "") and (centerX < cutoff) and (centerY > ((item 2 of wp) + 110)) then', search_helper)
         self.assertIn("durationText", search_helper)
+        self.assertNotIn("set aS to", search_helper)
+        self.assertIn("set artistSize to size of artistElem", search_helper)
         self.assertIn('return "FOUND|" & rowX & "|" & rowY & "|" & durationText', search_helper)
         self.assertIn('return "FIRST|" & centerX & "|" & centerY & "|" & durationText', search_helper)
         self.assertIn("def _karafun_search_queries_for_entry", source)
@@ -423,6 +425,17 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("def _is_karafun_accessibility_error", source)
         self.assertIn("not allowed assistive access", source)
         self.assertIn("Privacy_Accessibility", source)
+
+    def test_first_launch_requests_native_accessibility_prompt_once(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn('"karafun_accessibility_prompt_requested": False', source)
+        self.assertIn("def _request_karafun_accessibility_on_first_launch", source)
+        self.assertIn('"AXTrustedCheckOptionPrompt"', source)
+        self.assertIn("AXIsProcessTrustedWithOptions", source)
+        self.assertIn(
+            "QTimer.singleShot(3500, self._request_karafun_accessibility_on_first_launch)",
+            source,
+        )
         self.assertIn("KARAFUN PERMISSION", source)
 
         search_only = source[source.index("def _automate_karafun_search_only"):]
