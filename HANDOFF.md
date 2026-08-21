@@ -2,7 +2,7 @@
 
 Updated 2026-08-21.
 
-## Uncommitted after the 2026-08-20 show
+## Released and installed as 0.4.5.5 after the 2026-08-20 show
 
 The installed 0.4.5.4 bundle exposed a KaraFun AppleScript syntax regression.
 The artist-row matching code named an AppleScript variable `aS`; identifiers
@@ -11,10 +11,10 @@ every automatic KaraFun search failed with error -2741. The variable is now
 `artistSize`, with a regression assertion in `test_karafun_provider.py`.
 
 Focused KaraFun tests pass (33 tests), and a representative generated search
-script for Sugarcult / Memory compiles with macOS `osacompile`. This is not
-built or installed. The show log also reports Accessibility denial -25211 for
-the installed app, so SingWS must be enabled in System Settings > Privacy &
-Security > Accessibility before an end-to-end KaraFun test.
+script for Sugarcult / Memory compiles with macOS `osacompile`. The show log
+also reports Accessibility denial -25211, so SingWS must be enabled in System
+Settings > Privacy & Security > Accessibility before an end-to-end KaraFun
+test.
 
 The same uncommitted work now requests the native macOS Accessibility prompt
 once, 3.5 seconds after the first launch with automatic KaraFun queueing
@@ -52,12 +52,21 @@ it becomes visible and has a quiet three-second guard that raises the visible,
 enabled ticker without taking keyboard focus. This self-heals late AppKit
 restacking during a show.
 
-Verification for the current uncommitted set: 147 ticker/KaraFun/performance
-tests pass, including the new self-healing invariant. The 124 recent-regression
-tests also pass independently (4 skipped). Running both Qt
+Verification before release: 147 ticker/KaraFun/performance tests pass,
+including the new self-healing invariant. The 124 recent-regression tests also
+pass independently (4 skipped). Running both Qt
 test groups in one Python process exited 134 during macOS pasteboard teardown
 after the test bodies; the same recent-regression group is clean in its own
 offscreen process. `git diff --check` is clean.
+
+Release `v0.4.5.5` was published on 2026-08-21 as an Intel/macOS 12+ build.
+The official runner passed 774 tests plus 21 subtests; architecture, bundled
+media loading, minimum macOS version, signing, DMG checksum and asset-size
+verification all passed. The signed DMG was installed at
+`/Applications/SingWS.app`; the prior bundle is preserved at
+`/Applications/SingWS-0.4.5.4-rollback.app`. A fresh installed launch was
+visually checked and logged the native Accessibility preflight. The audience
+ticker was visible. Apple Silicon remains unavailable for this release.
 
 ## Previous 0.4.5.4 release handoff
 
