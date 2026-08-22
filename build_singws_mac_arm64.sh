@@ -139,6 +139,23 @@ trap cleanup EXIT
 mkdir -p "$STAGING/dist"
 ditto --norsrc --noextattr "$APP_PATH" "$STAGING/dist/$APP_NAME.app"
 
+# PyInstaller recreates compatibility symlinks after Analysis, including links
+# for Qt's FFmpeg libraries even though that unused plugin and its libraries
+# were filtered out. Remove only those now-dangling aliases before codesign and
+# dmgbuild traverse the staged bundle.
+for link_dir in Contents/Frameworks Contents/Resources; do
+    for library in libavcodec.61.dylib libavformat.61.dylib libavutil.59.dylib \
+                   libswresample.5.dylib libswscale.8.dylib; do
+        link="$STAGING/dist/$APP_NAME.app/$link_dir/$library"
+        [[ ! -L "$link" ]] || rm "$link"
+    done
+done
+if find -L "$STAGING/dist/$APP_NAME.app" -type l -print -quit | grep -q .; then
+    echo "Staged app contains a dangling symlink"
+    find -L "$STAGING/dist/$APP_NAME.app" -type l -print
+    exit 1
+fi
+
 codesign --force --deep --sign - \
     --entitlements SingWS.entitlements "$STAGING/dist/$APP_NAME.app"
 codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"

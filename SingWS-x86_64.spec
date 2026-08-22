@@ -188,6 +188,14 @@ def _keep_runtime_binary(item):
     """Discard Qt hook additions that the desktop app cannot exercise."""
     destination = str(item[0]).replace("\\", "/")
     name = Path(destination).name
+    qt_ffmpeg_names = (
+        "libavcodec.", "libavformat.", "libavutil.",
+        "libswresample.", "libswscale.",
+    )
+    # PyInstaller also adds top-level symlink TOC entries for these libraries.
+    # Remove those with their targets so staging has no dangling links.
+    if name.startswith(qt_ffmpeg_names):
+        return False
     if "/plugins/generic/" in destination:
         return False
     allowlisted_groups = {
@@ -201,9 +209,7 @@ def _keep_runtime_binary(item):
     if "/plugins/imageformats/" in destination and name in qt_plugin_excludes["imageformats"]:
         return False
     # These are the dependency closure of Qt's removed FFmpeg media plugin.
-    if "PyQt6/Qt6/lib/" in destination and name.startswith(
-        ("libavcodec.", "libavformat.", "libavutil.", "libswresample.", "libswscale.")
-    ):
+    if "PyQt6/Qt6/lib/" in destination and name.startswith(qt_ffmpeg_names):
         return False
     return True
 
@@ -272,8 +278,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.5.7',
-        'CFBundleVersion': '0.4.5.7',
+        'CFBundleShortVersionString': '0.4.5.8',
+        'CFBundleVersion': '0.4.5.8',
         'LSMinimumSystemVersion': '12.0',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
