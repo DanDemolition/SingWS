@@ -2,11 +2,11 @@
 
 Updated 2026-08-22.
 
-## Unreleased fixes from the 2026-08-21 show
+## Released as 0.4.5.6 after the 2026-08-21 show
 
 The 0.4.5.5 show exposed three operator-visible KaraFun/show-screen faults and
-one pre-show performance freeze. These fixes are in the working tree and are
-not built, installed, or live yet.
+one pre-show performance freeze. These fixes are published in GitHub release
+`v0.4.5.6`; the installed `/Applications/SingWS.app` remains 0.4.5.5.
 
 When fast-start result activation does not actually begin KaraFun playback,
 the completion monitor now retries the exact already-matched result once. The
@@ -25,9 +25,13 @@ dialog is created. The 5.8-second 20:55 freeze occurred before the first worker
 result and while the GUI was constructing the 134k-track job, so the existing
 10 Hz worker-progress throttle could not address it.
 
-Verification: the module compiles, `git diff --check` is clean, and 239 focused
-KaraFun/recent-regression/performance tests pass (4 skipped). The KaraFun retry
-and macOS window ordering still require a real installed KaraFun/on-screen test.
+Release verification: 774 tests plus 21 subtests passed. The Intel app passed
+architecture, bundled media loading, macOS 12 minimum-version, signing and DMG
+checksum checks. The published 165,859,307-byte installer matches the generated
+0.4.5.6 update manifest. A scratch-data launch of the built app completed in
+1.5 seconds with BASS, mpv, Qt Quick ticker, both displays and the new parent
+window reassertion active. Live KaraFun result-retry behavior still requires an
+end-to-end song test. Apple Silicon is unavailable for this release.
 
 ## Released and installed as 0.4.5.5 after the 2026-08-20 show
 
