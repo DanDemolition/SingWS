@@ -3900,28 +3900,10 @@ class BackgroundMusicPlayer(QObject):
         self.artwork_cache_size = 50  # Cache up to 50 artworks
         self.precache_count = 5  # Pre-cache this many tracks ahead
         
-        # MAIN PIPELINE (current track)
-        self.gst_bg_pipeline = None
-        self._gst_bg_norm = {}
-        
-        # CROSSFADE PIPELINE (next track for seamless transitions)
-        self.gst_crossfade_pipeline = None
         self.crossfade_active = False
         self.crossfade_duration_ms = BGM_TRACK_CROSSFADE_MS
         self._crossfade_target_index = None
-        
-        # Fade timers
-        self.fade_timer = QTimer(self)
-        self.fade_timer.timeout.connect(self._fade_step)
-        self.fade_direction = 0  # 1 for fade in, -1 for fade out, 0 for none
-        self.fade_target_volume = 0.3
-        self.fade_step_size = 0.05
-        
-        # Crossfade timer
-        self.crossfade_timer = QTimer(self)
-        self.crossfade_timer.timeout.connect(self._crossfade_step)
         self.crossfade_progress = 0.0  # 0.0 = main only, 1.0 = crossfade only
-        self.crossfade_step_size = 0.02  # Smaller steps for smoother crossfade
         
         # Track position monitoring for auto-crossfade
         self.position_timer = QTimer(self)
@@ -3968,7 +3950,7 @@ class BackgroundMusicPlayer(QObject):
     def _bg_volume_diag(self, stage: str, path: str | None = None, extra: str = ""):
         try:
             engine = getattr(self, "_bass_engine", None)
-            backend = getattr(engine, "backend_name", "BASS") if engine is not None else "GStreamer"
+            backend = getattr(engine, "backend_name", "BASS") if engine is not None else "none"
             master = ""
             if engine is not None:
                 try:
@@ -4056,7 +4038,7 @@ class BackgroundMusicPlayer(QObject):
             except BassBackgroundError as bass_err:
                 # BASS failure recovery: fall back to the libmpv/Qt background
                 # engine (same deck/crossfade API) before ever considering the
-                # legacy GStreamer pipeline.
+                # retired pipeline implementation.
                 _diag(f"[BG-BASS] unavailable ({bass_err}); trying libmpv/Qt background engine")
                 self._bass_engine = LibmpvBackgroundEngine(output_name=output_name)
             backend = getattr(self._bass_engine, "backend_name", "BASS")
@@ -4316,205 +4298,12 @@ class BackgroundMusicPlayer(QObject):
             except Exception:
                 pass
         try:
-            p = self.gst_bg_pipeline
-            if p is not None:
-                filesrc = p.get_by_name("bg_music_filesrc")
-                if filesrc is not None:
-                    loc = filesrc.get_property("location")
-                    if loc:
-                        return str(loc)
-        except Exception:
-            pass
-        try:
             if self.playlist and 0 <= int(self.current_index) < len(self.playlist):
                 return str(self.playlist[int(self.current_index)])
         except Exception:
             pass
         return ""
         
-    def _create_bg_pipeline(self, file_path, pipeline_name="bg_music"):
-        """Create GStreamer pipeline for background music with a lightweight meter branch."""
-        pipeline = Gst.Pipeline.new(pipeline_name)
-
-        filesrc = Gst.ElementFactory.make("filesrc", f"{pipeline_name}_filesrc")
-        filesrc.set_property("location", file_path)
-
-        decodebin = Gst.ElementFactory.make("decodebin", f"{pipeline_name}_decodebin")
-
-        audioconvert = Gst.ElementFactory.make("audioconvert", f"{pipeline_name}_audioconvert")
-        audioresample = Gst.ElementFactory.make("audioresample", f"{pipeline_name}_audioresample")
-        tee = Gst.ElementFactory.make("tee", f"{pipeline_name}_tee")
-
-        # Main playback branch
-        main_queue = Gst.ElementFactory.make("queue", f"{pipeline_name}_main_q")
-        volume = Gst.ElementFactory.make("volume", f"{pipeline_name}_volume")
-        norm_factor, info = self._bg_norm_factor_for_path(file_path)
-        try:
-            self._gst_bg_norm[pipeline_name] = norm_factor
-        except Exception:
-            pass
-        # GStreamer fallback uses one static LUFS gain times the user/fade
-        # volume element.  This keeps it single-pass like BASS: no live
-        # compressor and no duplicate normalization branch.
-        volume.set_property("volume", max(0.0, float(self.volume) * float(norm_factor)))
-        try:
-            lufs_label = f"{float(info.get('lufs')):.1f}" if info else "pending"
-        except Exception:
-            lufs_label = "pending"
-        _diag(
-            f"[BG-AUDIO] track={Path(file_path).name} gst={pipeline_name} "
-            f"chain=GStreamer -> volume(norm_gain={20.0 * math.log10(max(1e-9, norm_factor)):+.1f}dB, "
-            f"LUFS={lufs_label}) -> output"
-        )
-        try:
-            parent = self.parent()
-            if parent is not None and hasattr(parent, "_create_audio_sink_for_selected_output"):
-                audiosink = parent._create_audio_sink_for_selected_output(
-                    f"{pipeline_name}_audiosink",
-                    default_factory="autoaudiosink",
-                )
-            else:
-                audiosink = Gst.ElementFactory.make("autoaudiosink", f"{pipeline_name}_audiosink")
-        except Exception:
-            audiosink = Gst.ElementFactory.make("autoaudiosink", f"{pipeline_name}_audiosink")
-
-        # Meter branch (appsink) - optional visualizer input.
-        meter_disabled = False
-        meter_queue = meter_convert = meter_resample = meter_caps = meter_sink = None
-        if not meter_disabled:
-            meter_queue = Gst.ElementFactory.make("queue", f"{pipeline_name}_meter_q")
-            meter_convert = Gst.ElementFactory.make("audioconvert", f"{pipeline_name}_meter_conv")
-            meter_resample = Gst.ElementFactory.make("audioresample", f"{pipeline_name}_meter_res")
-            meter_caps = Gst.ElementFactory.make("capsfilter", f"{pipeline_name}_meter_caps")
-            meter_sink = Gst.ElementFactory.make("appsink", f"{pipeline_name}_meter_sink")
-
-        if meter_caps is not None:
-            try:
-                meter_caps.set_property("caps", Gst.Caps.from_string("audio/x-raw,format=S16LE,channels=1,rate=22050"))
-            except Exception:
-                pass
-
-        if meter_sink is not None:
-            try:
-                meter_sink.set_property("emit-signals", True)
-                # Keep visualizer timing aligned with what the audience hears.
-                meter_sink.set_property("sync", True)
-                meter_sink.set_property("max-buffers", 1)
-                meter_sink.set_property("drop", True)
-                meter_sink.connect("new-sample", self._on_meter_sample)
-            except Exception:
-                meter_sink = None
-
-        elements = [
-            filesrc, decodebin, audioconvert, audioresample, tee,
-            main_queue, volume, audiosink,
-        ]
-        meter_chain_ok = all([meter_queue, meter_convert, meter_resample, meter_caps, meter_sink])
-        if meter_chain_ok:
-            elements += [meter_queue, meter_convert, meter_resample, meter_caps, meter_sink]
-
-        for e in elements:
-            if e is not None:
-                pipeline.add(e)
-
-        filesrc.link(decodebin)
-        audioconvert.link(audioresample)
-        audioresample.link(tee)
-
-        # Main branch link
-        tee.link(main_queue)
-        main_queue.link(volume)
-        volume.link(audiosink)
-
-        # Meter branch link
-        if meter_chain_ok:
-            try:
-                tee.link(meter_queue)
-                meter_queue.link(meter_convert)
-                meter_convert.link(meter_resample)
-                meter_resample.link(meter_caps)
-                meter_caps.link(meter_sink)
-            except Exception:
-                pass
-
-        def on_pad_added(src, pad):
-            try:
-                caps = pad.query_caps(None).to_string()
-                if caps.startswith("audio/"):
-                    sink_pad = audioconvert.get_static_pad("sink")
-                    if sink_pad and not sink_pad.is_linked():
-                        pad.link(sink_pad)
-            except Exception:
-                pass
-
-        decodebin.connect("pad-added", on_pad_added)
-
-        bus = pipeline.get_bus()
-        bus.add_signal_watch()
-        bus.connect("message", self._on_bg_message, pipeline_name)
-
-        return pipeline
-
-    def _on_meter_sample(self, sink):
-        """Appsink callback: compute lightweight RMS meter (0..1)."""
-        _perf_t0 = time.perf_counter()
-        try:
-            sample = sink.emit("pull-sample")
-            if sample is None:
-                return Gst.FlowReturn.OK
-            buf = sample.get_buffer()
-            if buf is None:
-                return Gst.FlowReturn.OK
-
-            ok, info = buf.map(Gst.MapFlags.READ)
-            if not ok:
-                return Gst.FlowReturn.OK
-            try:
-                raw = bytes(info.data or b"")
-            finally:
-                buf.unmap(info)
-
-            if not raw:
-                return Gst.FlowReturn.OK
-
-            # S16LE mono expected (via capsfilter). Keep this tiny for low CPU.
-            nbytes = min(len(raw), 4096)
-            nbytes -= (nbytes % 2)
-            if nbytes <= 2:
-                return Gst.FlowReturn.OK
-
-            arr = array('h')
-            arr.frombytes(raw[:nbytes])
-            if sys.byteorder != 'little':
-                arr.byteswap()
-
-            n = len(arr)
-            if n <= 0:
-                return Gst.FlowReturn.OK
-
-            step = max(1, n // 1024)
-            total = 0.0
-            count = 0
-            for i in range(0, n, step):
-                v = float(arr[i])
-                total += v * v
-                count += 1
-
-            if count <= 0:
-                return Gst.FlowReturn.OK
-
-            rms = (total / float(count)) ** 0.5 / 32768.0
-            # Lift low-level material a bit so bars remain readable.
-            target = max(0.0, min(1.0, rms * 4.0))
-            self._meter_level = (self._meter_level * 0.70) + (target * 0.30)
-            self._meter_last_ts = time.monotonic()
-        except Exception:
-            pass
-        finally:
-            _perf_log_if_slow("audio_bg_meter_callback", (time.perf_counter() - _perf_t0) * 1000.0)
-        return Gst.FlowReturn.OK
-
-
     def _karaoke_is_active(self) -> bool:
         """
         Returns True if karaoke is currently playing (as reported by the parent app).
@@ -4641,12 +4430,6 @@ class BackgroundMusicPlayer(QObject):
             return max(0.05, min(4.0, float(info.get("gain_linear", 1.0) or 1.0))), info
         except Exception:
             return 1.0, info
-
-    def _gst_pipeline_norm(self, pipeline_name: str) -> float:
-        try:
-            return max(0.05, min(4.0, float(getattr(self, "_gst_bg_norm", {}).get(pipeline_name, 1.0))))
-        except Exception:
-            return 1.0
 
     def _schedule_bg_normalize_retry(self, path: str, deck: str):
         """Retry normalization shortly, to catch the async loudness result for a
@@ -4808,32 +4591,6 @@ class BackgroundMusicPlayer(QObject):
                 print(f"Starting BASSmix crossfade with {time_left:.1f}s left in track")
                 self._start_crossfade()
             return
-        if not self.is_playing or not self.gst_bg_pipeline or self.crossfade_active:
-            return
-        # If user requested stop-at-end, do not start crossfade into next track.
-        if bool(getattr(self, "stop_after_current", False)):
-            return
-            
-        # Query position and duration
-        success_pos, position = self.gst_bg_pipeline.query_position(Gst.Format.TIME)
-        success_dur, duration = self.gst_bg_pipeline.query_duration(Gst.Format.TIME)
-        
-        if success_pos and success_dur and duration > 0:
-            # Convert to seconds
-            pos_sec = position / Gst.SECOND
-            dur_sec = duration / Gst.SECOND
-            time_left = dur_sec - pos_sec
-
-            if self._check_bg_tail_silence(pos_sec, dur_sec, time_left):
-                print(f"[BG] trailing silence detected at {pos_sec:.1f}s — advancing early")
-                self._start_crossfade()
-                return
-
-            # Start crossfade if less than crossfade_duration seconds left
-            crossfade_start_time = self.crossfade_duration_ms / 1000.0
-            if time_left <= crossfade_start_time and time_left > 0:
-                print(f"Starting crossfade with {time_left:.1f}s left in track")
-                self._start_crossfade()
 
     def get_playback_times(self) -> tuple[float, float]:
         """Return (position_seconds, duration_seconds) for current BG track."""
@@ -4842,17 +4599,7 @@ class BackgroundMusicPlayer(QObject):
                 return self._bass_engine.get_times()
             except Exception:
                 return 0.0, 0.0
-        try:
-            p = self.gst_bg_pipeline
-            if not p:
-                return 0.0, 0.0
-            ok_pos, pos = p.query_position(Gst.Format.TIME)
-            ok_dur, dur = p.query_duration(Gst.Format.TIME)
-            if not ok_pos or not ok_dur or dur <= 0:
-                return 0.0, 0.0
-            return max(0.0, pos / Gst.SECOND), max(0.0, dur / Gst.SECOND)
-        except Exception:
-            return 0.0, 0.0
+        return 0.0, 0.0
 
     def is_effectively_playing(self) -> bool:
         """True only when BG is really running (not stale PLAYING/muted state)."""
@@ -4867,50 +4614,7 @@ class BackgroundMusicPlayer(QObject):
                 )
             except Exception:
                 return False
-        if self.gst_bg_pipeline is None:
-            return False
-
-        # Fast state gate first.
-        try:
-            _ret, state, _pending = self.gst_bg_pipeline.get_state(0)
-            if state != Gst.State.PLAYING:
-                return False
-        except Exception:
-            pass
-
-        # If effectively muted and no active fade/crossfade, treat as not playing.
-        try:
-            live_vol = None
-            vol_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-            if vol_element is not None:
-                live_vol = float(vol_element.get_property("volume") or 0.0)
-            if live_vol is None:
-                live_vol = float(self.volume or 0.0)
-            if live_vol <= 0.0005 and not self.fade_timer.isActive() and not self.crossfade_active:
-                return False
-        except Exception:
-            pass
-
-        # Detect stuck playback: PLAYING but no position movement.
-        try:
-            ok_pos, pos = self.gst_bg_pipeline.query_position(Gst.Format.TIME)
-            if ok_pos:
-                pos_sec = max(0.0, float(pos) / float(Gst.SECOND))
-                now = time.monotonic()
-                prev_pos = self._play_probe_pos
-                prev_ts = self._play_probe_ts
-                self._play_probe_pos = pos_sec
-                self._play_probe_ts = now
-
-                if prev_pos is not None and prev_ts is not None:
-                    dt = max(0.0, now - float(prev_ts))
-                    # Need enough time between probes before calling it stuck.
-                    if dt >= 0.35 and pos_sec <= (float(prev_pos) + 0.01) and not self.fade_timer.isActive():
-                        return False
-        except Exception:
-            pass
-
-        return True
+        return False
 
     def seek_seconds(self, seconds: float) -> bool:
         """Seek current BG track to absolute seconds."""
@@ -4920,25 +4624,7 @@ class BackgroundMusicPlayer(QObject):
             except Exception as e:
                 _diag(f"[BG-BASS] seek failed: {e}")
                 return False
-        try:
-            p = self.gst_bg_pipeline
-            if not p:
-                return False
-
-            ok_dur, dur = p.query_duration(Gst.Format.TIME)
-            target_ns = int(max(0.0, float(seconds)) * Gst.SECOND)
-            if ok_dur and dur > 0:
-                target_ns = max(0, min(int(dur - 1), target_ns))
-
-            return bool(
-                p.seek_simple(
-                    Gst.Format.TIME,
-                    Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
-                    target_ns,
-                )
-            )
-        except Exception:
-            return False
+        return False
     
     def _start_crossfade(self, target_index=None):
         """Start crossfade to next track"""
@@ -4974,73 +4660,8 @@ class BackgroundMusicPlayer(QObject):
             except Exception as e:
                 print(f"Failed to start BASSmix crossfade: {e}")
                 return False
-        if self.crossfade_active or not self.playlist:
-            return False
-        self._sync_volume_from_ui_or_settings("crossfade-start")
-            
-        # Get next track
-        next_index = (
-            int(target_index) % len(self.playlist)
-            if target_index is not None
-            else (self.current_index + 1) % len(self.playlist)
-        )
-        next_file = self.playlist[next_index]
-        
-        print(f"Starting crossfade to: {Path(next_file).name}")
-        
-        # Create crossfade pipeline for next track
-        try:
-            self.gst_crossfade_pipeline = self._create_bg_pipeline(next_file, "bg_crossfade")
-            # Start crossfade pipeline at 0 volume
-            crossfade_volume = self.gst_crossfade_pipeline.get_by_name("bg_crossfade_volume")
-            if crossfade_volume:
-                crossfade_volume.set_property("volume", 0.0)
-            
-            self.gst_crossfade_pipeline.set_state(Gst.State.PLAYING)
-            
-            # Start crossfade process
-            self.crossfade_active = True
-            self.crossfade_progress = 0.0
-            self._crossfade_target_index = next_index
-            steps = self.crossfade_duration_ms // 50  # 50ms per step
-            self.crossfade_step_size = 1.0 / steps if steps > 0 else 1.0
-            self.crossfade_timer.start(50)
-            return True
-            
-        except Exception as e:
-            print(f"Failed to start crossfade: {e}")
-            return False
+        return False
     
-    def _crossfade_step(self):
-        """Single step of crossfade animation"""
-        if not self.crossfade_active:
-            self.crossfade_timer.stop()
-            return
-            
-        self.crossfade_progress += self.crossfade_step_size
-        
-        if self.crossfade_progress >= 1.0:
-            # Crossfade complete - switch to new track
-            self._complete_crossfade()
-            return
-        
-        # Equal-power mixing avoids the audible dip that a linear blend has at
-        # its midpoint while still leaving each endpoint at the exact target.
-        main_mix, crossfade_mix = self._crossfade_mix_gains(self.crossfade_progress)
-        main_volume = self.volume * main_mix * self._gst_pipeline_norm("bg_music")
-        crossfade_volume = self.volume * crossfade_mix * self._gst_pipeline_norm("bg_crossfade")
-        
-        # Apply volumes
-        if self.gst_bg_pipeline:
-            main_vol_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-            if main_vol_element:
-                main_vol_element.set_property("volume", main_volume)
-        
-        if self.gst_crossfade_pipeline:
-            crossfade_vol_element = self.gst_crossfade_pipeline.get_by_name("bg_crossfade_volume")
-            if crossfade_vol_element:
-                crossfade_vol_element.set_property("volume", crossfade_volume)
-
     @staticmethod
     def _crossfade_mix_gains(progress):
         """Return equal-power outgoing/incoming gains for a 0..1 blend."""
@@ -5076,84 +4697,7 @@ class BackgroundMusicPlayer(QObject):
                 self.parent().update_bg_track_display()
             QTimer.singleShot(200, self._start_artwork_precache)
             print(f"Switched to: {Path(self.playlist[self.current_index]).name}")
-            return
-        print("Completing crossfade")
-        
-        # Stop the old pipeline
-        if self.gst_bg_pipeline:
-            try:
-                bus = self.gst_bg_pipeline.get_bus()
-                bus.remove_signal_watch()
-            except:
-                pass
-            self.gst_bg_pipeline.set_state(Gst.State.NULL)
-        
-        # Switch pipelines
-        self.gst_bg_pipeline = self.gst_crossfade_pipeline
-        self.gst_crossfade_pipeline = None
-        try:
-            self._gst_bg_norm["bg_music"] = self._gst_pipeline_norm("bg_crossfade")
-            self._gst_bg_norm.pop("bg_crossfade", None)
-        except Exception:
-            pass
-        
-        # Update track index
-        target_index = getattr(self, "_crossfade_target_index", None)
-        self.current_index = (
-            int(target_index) % len(self.playlist)
-            if target_index is not None
-            else (self.current_index + 1) % len(self.playlist)
-        )
-        self._crossfade_target_index = None
-        
-        # Set correct volume
-        if self.gst_bg_pipeline:
-            volume_element = self.gst_bg_pipeline.get_by_name("bg_crossfade_volume")
-            if volume_element:
-                volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_crossfade"))
-        
-        # Reset crossfade state
-        self.crossfade_active = False
-        self.crossfade_progress = 0.0
-        self.crossfade_timer.stop()
-        
-        # IMMEDIATE UI update - don't delay
-        if hasattr(self.parent(), 'update_bg_track_display'):
-            self.parent().update_bg_track_display()
-        
-        # Start pre-caching for upcoming tracks
-        QTimer.singleShot(200, self._start_artwork_precache)
-        
-        print(f"Switched to: {Path(self.playlist[self.current_index]).name}")
-        
-    def _on_bg_message(self, bus, msg, pipeline_name):
-        """Handle GStreamer messages for background music"""
-        mtype = msg.type
-
-        if mtype == Gst.MessageType.EOS:
-            if pipeline_name == "bg_music":
-                if self.crossfade_active:
-                    QTimer.singleShot(0, self._complete_crossfade)
-                else:
-                    if bool(getattr(self, "stop_after_current", False)):
-                        self.stop_after_current = False
-                        QTimer.singleShot(0, self.stop)
-                    else:
-                        QTimer.singleShot(0, self.next_track)
-            if hasattr(self.parent(), 'update_bg_button_state'):
-                QTimer.singleShot(100, self.parent().update_bg_button_state)
-            if hasattr(self.parent(), 'update_bg_track_display'):
-                QTimer.singleShot(120, self.parent().update_bg_track_display)
-            return
-
-        if mtype == Gst.MessageType.ERROR:
-            err, debug = msg.parse_error()
-            print(f"Background music error in {pipeline_name}: {err}")
-            if pipeline_name == "bg_music":
-                QTimer.singleShot(0, self.next_track)
-            if hasattr(self.parent(), 'update_bg_button_state'):
-                QTimer.singleShot(100, self.parent().update_bg_button_state)
-            return
+        return
 
     def preload_current_track_paused(self) -> bool:
         """Build current track pipeline and leave it PAUSED (silent preroll)."""
@@ -5178,140 +4722,8 @@ class BackgroundMusicPlayer(QObject):
             except Exception as e:
                 print(f"[BG-BASS] Preload exception: {e}")
                 return False
-        if not self.playlist:
-            return False
-        if self.gst_bg_pipeline is not None:
-            self._sync_volume_from_ui_or_settings("preload-existing")
-            return True
-        try:
-            current_file = self.playlist[self.current_index]
-            self._bg_volume_diag("preload-before-media-load", current_file)
-            self._sync_volume_from_ui_or_settings("preload")
-            self.gst_bg_pipeline = self._create_bg_pipeline(current_file, "bg_music")
-            try:
-                volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-                if volume_element:
-                    volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
-            except Exception:
-                pass
-            ret = self.gst_bg_pipeline.set_state(Gst.State.PAUSED)
-            if ret == Gst.StateChangeReturn.FAILURE:
-                print("[BG] Preload failed (PAUSED)")
-                try:
-                    self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                except Exception:
-                    pass
-                self.gst_bg_pipeline = None
-                return False
-            self.is_playing = False
-            self._bg_volume_diag("preload-after-media-load", current_file)
-            print(f"[BG] Preloaded track (paused): {Path(current_file).name}")
-            return True
-        except Exception as e:
-            print(f"[BG] Preload exception: {e}")
-            self.gst_bg_pipeline = None
-            return False
+        return False
 
-    def _rebuild_current_track_and_seek(self, seek_sec: float = 0.0, dur_sec: float = 0.0) -> bool:
-        """Recreate BG pipeline for current index and seek to approx previous position."""
-        if not self.playlist:
-            return False
-        try:
-            current_file = self.playlist[self.current_index]
-        except Exception:
-            return False
-
-        try:
-            if self.gst_bg_pipeline:
-                try:
-                    bus = self.gst_bg_pipeline.get_bus()
-                    bus.remove_signal_watch()
-                except Exception:
-                    pass
-                try:
-                    self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        self.gst_bg_pipeline = None
-
-        # Preserve seek UI during rebuild so labels/slider don't flash to 0:00.
-        try:
-            parent = self.parent()
-            hold_pos = max(0.0, float(seek_sec or 0.0))
-            hold_dur = max(0.0, float(dur_sec or 0.0))
-            hold_until = time.monotonic() + 1.1
-
-            if parent is not None:
-                # Main-window BG seek UI hold
-                if hasattr(parent, "_bg_main_last_pos"):
-                    parent._bg_main_last_pos = hold_pos
-                if hasattr(parent, "_bg_main_last_dur") and hold_dur > 0.0:
-                    parent._bg_main_last_dur = hold_dur
-                if hasattr(parent, "_bg_main_seek_hold_until"):
-                    parent._bg_main_seek_hold_until = hold_until
-
-                # BG manager seek UI hold
-                mgr = getattr(parent, "bg_manager", None)
-                if mgr is not None:
-                    if hasattr(mgr, "_seek_last_pos"):
-                        mgr._seek_last_pos = hold_pos
-                    if hasattr(mgr, "_seek_last_dur") and hold_dur > 0.0:
-                        mgr._seek_last_dur = hold_dur
-                    if hasattr(mgr, "_seek_hold_until"):
-                        mgr._seek_hold_until = hold_until
-        except Exception:
-            pass
-
-        print(f"[BG] Rebuilding pipeline for recovery: {Path(current_file).name}")
-        try:
-            self.gst_bg_pipeline = self._create_bg_pipeline(current_file, "bg_music")
-            # Recovery path: preroll paused, seek, then play.
-            ret = self.gst_bg_pipeline.set_state(Gst.State.PAUSED)
-            if ret == Gst.StateChangeReturn.FAILURE:
-                print("[BG] Recovery rebuild failed to preroll")
-                try:
-                    self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                except Exception:
-                    pass
-                self.gst_bg_pipeline = None
-                self.is_playing = False
-                return False
-
-            try:
-                target = max(0.0, float(seek_sec or 0.0))
-            except Exception:
-                target = 0.0
-
-            def _seek_then_play():
-                try:
-                    if self.gst_bg_pipeline is None:
-                        return
-                    if target > 0.0:
-                        self.seek_seconds(target)
-                    ret_play = self.gst_bg_pipeline.set_state(Gst.State.PLAYING)
-                    if ret_play == Gst.StateChangeReturn.FAILURE:
-                        print("[BG] Recovery rebuild failed to play")
-                        try:
-                            self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                        except Exception:
-                            pass
-                        self.gst_bg_pipeline = None
-                        self.is_playing = False
-                        return
-                    QTimer.singleShot(80, self._ensure_volume_set)
-                except Exception:
-                    pass
-
-            # Small delay to allow decodebin pads to appear before seek.
-            QTimer.singleShot(120, _seek_then_play)
-            return True
-        except Exception as e:
-            print(f"[BG] Recovery rebuild exception: {e}")
-            self.gst_bg_pipeline = None
-            self.is_playing = False
-            return False
 
     def play(self):
         """Start/resume background music"""
@@ -5357,124 +4769,7 @@ class BackgroundMusicPlayer(QObject):
             except Exception as e:
                 print(f"[BG-BASS] play failed: {e}")
             return
-
-        # If manager shuffled/reordered while idle, rebuild once before playing.
-        if self._pipeline_realign_needed and self.gst_bg_pipeline is not None and not self.is_playing:
-            try:
-                self.stop()
-            except Exception:
-                pass
-        self._pipeline_realign_needed = False
-        
-        # Ensure we aren't stuck at zero from a prior fade-out
-        target_volume = self._sync_volume_from_ui_or_settings("play")
-        if self.volume <= 0.001:
-            self.volume = target_volume
-            print(f"[BG] Play sanity: using desired volume {self.volume}")
-
-        def _start_fresh_pipeline():
-            current_file = self.playlist[self.current_index]
-            if not self._bg_first_play_logged:
-                self._bg_first_play_logged = True
-                _diag(f"[BG-VOLUME] first BGM file selected={Path(current_file).name!r}")
-            print(f"Creating new background music pipeline for: {current_file}")
-            self._bg_volume_diag("play-before-media-load", current_file)
-            self.gst_bg_pipeline = self._create_bg_pipeline(current_file, "bg_music")
-            try:
-                volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-                if volume_element:
-                    volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
-            except Exception:
-                pass
-            self._bg_volume_diag("play-after-media-load", current_file)
-            # Preroll in PAUSED first, then switch to PLAYING shortly after.
-            # This reduces first-frame/startup skips on some systems.
-            ret = self.gst_bg_pipeline.set_state(Gst.State.PAUSED)
-            if ret == Gst.StateChangeReturn.FAILURE:
-                print("[BG] Failed to preroll new pipeline")
-                try:
-                    self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                except Exception:
-                    pass
-                self.gst_bg_pipeline = None
-                self.is_playing = False
-                return False
-
-            def _go_playing():
-                if self.gst_bg_pipeline is None:
-                    return
-                try:
-                    volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-                    if volume_element:
-                        volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
-                except Exception:
-                    pass
-                self._bg_volume_diag("play-before-GStreamer-PLAYING", current_file)
-                ret_play = self.gst_bg_pipeline.set_state(Gst.State.PLAYING)
-                if ret_play == Gst.StateChangeReturn.FAILURE:
-                    print("[BG] Failed to start new pipeline from preroll")
-                    try:
-                        self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                    except Exception:
-                        pass
-                    self.gst_bg_pipeline = None
-                    self.is_playing = False
-                    return
-                self._bg_volume_diag("play-after-GStreamer-PLAYING", current_file)
-                self._schedule_volume_state_probe("gst-play")
-                # Ensure desired volume is re-applied after state change.
-                QTimer.singleShot(70, self._ensure_volume_set)
-
-            QTimer.singleShot(120, _go_playing)
-            return True
-
-        if self.gst_bg_pipeline:
-            # Resume existing pipeline
-            print("Resuming existing background music pipeline")
-            paused_pos, _paused_dur = self.get_playback_times()
-            self._ensure_volume_set()
-            self._bg_volume_diag("resume-before-GStreamer-PLAYING", self.get_active_track_path())
-            ret_main = self.gst_bg_pipeline.set_state(Gst.State.PLAYING)
-            if ret_main == Gst.StateChangeReturn.FAILURE:
-                print("[BG] Resume failed; recreating pipeline")
-                try:
-                    self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                except Exception:
-                    pass
-                self.gst_bg_pipeline = None
-                if not _start_fresh_pipeline():
-                    return
-            else:
-                # If pause happened during crossfade, resume both branches + timer.
-                if self.crossfade_active:
-                    if self.gst_crossfade_pipeline:
-                        self.gst_crossfade_pipeline.set_state(Gst.State.PLAYING)
-                        if not self.crossfade_timer.isActive():
-                            self.crossfade_timer.start(50)
-                    else:
-                        # Defensive recovery: clear stale crossfade state.
-                        self.crossfade_active = False
-                        self.crossfade_progress = 0.0
-                self._bg_volume_diag("resume-after-GStreamer-PLAYING", self.get_active_track_path())
-                self._schedule_volume_state_probe("gst-resume")
-                QTimer.singleShot(100, self._ensure_volume_set)
-                # Some sinks can report PLAYING but never advance after unpause.
-                # Verify movement once, then self-heal by rebuilding at same position.
-                def _verify_unpause(start_pos: float):
-                    if not self.is_playing or self.gst_bg_pipeline is None:
-                        return
-                    now_pos, _now_dur = self.get_playback_times()
-                    # ~120ms tolerance avoids false positives on jittery clocks.
-                    if now_pos <= (float(start_pos) + 0.12):
-                        print(f"[BG] Resume appears stuck at {now_pos:.2f}s; recovering")
-                        self._rebuild_current_track_and_seek(float(start_pos), float(_paused_dur))
-                QTimer.singleShot(450, lambda: _verify_unpause(float(paused_pos)))
-        else:
-            if not _start_fresh_pipeline():
-                return
-            
-        self.is_playing = True
-        print(f"Playing background music: {Path(self.playlist[self.current_index]).name}")
+        print("[BG] no background audio engine available")
         
     def pause(self):
         """Pause background music"""
@@ -5487,21 +4782,10 @@ class BackgroundMusicPlayer(QObject):
             self._play_probe_ts = None
             print("BASSmix background music paused")
             return
-        try:
-            self.fade_timer.stop()
-        except Exception:
-            pass
-        self.fade_direction = 0
-        if self.gst_bg_pipeline:
-            self.gst_bg_pipeline.set_state(Gst.State.PAUSED)
-        if self.gst_crossfade_pipeline:
-            self.gst_crossfade_pipeline.set_state(Gst.State.PAUSED)
         self.is_playing = False
-        self.crossfade_timer.stop()
         self._meter_level = 0.0
         self._play_probe_pos = None
         self._play_probe_ts = None
-        print("Background music paused")
         
     def stop(self):
         """Stop background music"""
@@ -5509,10 +4793,6 @@ class BackgroundMusicPlayer(QObject):
             self._bass_fade_generation += 1
             self._bass_crossfade_generation += 1
             self._bass_engine.stop()
-            try:
-                self._gst_bg_norm.clear()
-            except Exception:
-                pass
             self.crossfade_active = False
             self.crossfade_progress = 0.0
             self._crossfade_target_index = None
@@ -5522,43 +4802,13 @@ class BackgroundMusicPlayer(QObject):
             self._play_probe_ts = None
             print("BASSmix background music stopped")
             return
-        try:
-            self.fade_timer.stop()
-        except Exception:
-            pass
-        self.fade_direction = 0
-        # Stop both pipelines
-        if self.gst_bg_pipeline:
-            try:
-                bus = self.gst_bg_pipeline.get_bus()
-                bus.remove_signal_watch()
-            except:
-                pass
-            self.gst_bg_pipeline.set_state(Gst.State.NULL)
-            self.gst_bg_pipeline = None
-            
-        if self.gst_crossfade_pipeline:
-            try:
-                bus = self.gst_crossfade_pipeline.get_bus()
-                bus.remove_signal_watch()
-            except:
-                pass
-            self.gst_crossfade_pipeline.set_state(Gst.State.NULL)
-            self.gst_crossfade_pipeline = None
-        try:
-            self._gst_bg_norm.clear()
-        except Exception:
-            pass
-        
-        # Reset crossfade state
         self.crossfade_active = False
+        self.crossfade_progress = 0.0
         self._crossfade_target_index = None
-        self.crossfade_timer.stop()
         self.is_playing = False
         self._meter_level = 0.0
         self._play_probe_pos = None
         self._play_probe_ts = None
-        print("Background music stopped")
 
     def set_stop_after_current(self, enabled: bool):
         """Session-only toggle: stop at EOS instead of advancing to next track."""
@@ -5583,45 +4833,6 @@ class BackgroundMusicPlayer(QObject):
                     self.play()
             _diag(f"[AUDIO] BASSmix BG output switched at {pos_sec:.2f}s")
             return
-        if not self.playlist:
-            return
-
-        was_playing = bool(self.is_playing)
-        pos_sec, dur_sec = self.get_playback_times()
-
-        # Stop any fade/crossfade motion so old pipeline state cannot leak into rebuilt output.
-        try:
-            self.fade_timer.stop()
-        except Exception:
-            pass
-        self.fade_direction = 0
-        try:
-            self.crossfade_timer.stop()
-        except Exception:
-            pass
-        self.crossfade_active = False
-        if self.gst_crossfade_pipeline is not None:
-            try:
-                self.gst_crossfade_pipeline.set_state(Gst.State.NULL)
-            except Exception:
-                pass
-            self.gst_crossfade_pipeline = None
-
-        if was_playing:
-            if self._rebuild_current_track_and_seek(float(pos_sec), float(dur_sec)):
-                self.is_playing = True
-                _diag(f"[AUDIO] BG output switched immediately at {pos_sec:.2f}s")
-            return
-
-        # Paused/prerolled case: rebuild paused pipeline so next play uses new output.
-        if self.gst_bg_pipeline is not None:
-            try:
-                self.gst_bg_pipeline.set_state(Gst.State.NULL)
-            except Exception:
-                pass
-            self.gst_bg_pipeline = None
-            self.preload_current_track_paused()
-            _diag("[AUDIO] BG output switched (applies on next BG resume)")
         
     def next_track(self):
         """Advance to next track (manual or auto-advance) - OPTIMIZED FOR INSTANT UI"""
@@ -5693,14 +4904,6 @@ class BackgroundMusicPlayer(QObject):
             self._bass_engine.set_master_volume(self.volume)
             self._bg_volume_diag("ensure-volume-applied", self.get_active_track_path())
             return
-        if self.gst_bg_pipeline:
-            volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-            if volume_element:
-                print(f"Setting background music volume to {self.volume}")
-                volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
-                self._bg_volume_diag("ensure-volume-applied", self.get_active_track_path())
-            else:
-                print("Warning: Could not find volume element in background music pipeline")  
 
     def _target_volume_from_ui(self):
         """Prefer the manager's visible slider; fall back to saved setting."""
@@ -5737,32 +4940,7 @@ class BackgroundMusicPlayer(QObject):
                 eff = self.volume
             _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend=BASS master_gain={eff:.3f}")
             return
-
-        applied_any = False
-        # Update main pipeline volume
-        if self.gst_bg_pipeline:
-            volume_element = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-            if volume_element:
-                # If crossfade is active, apply crossfade volume
-                if self.crossfade_active:
-                    main_mix, _incoming_mix = self._crossfade_mix_gains(self.crossfade_progress)
-                    main_volume = self.volume * main_mix * self._gst_pipeline_norm("bg_music")
-                    volume_element.set_property("volume", main_volume)
-                else:
-                    volume_element.set_property("volume", self.volume * self._gst_pipeline_norm("bg_music"))
-                applied_any = True
-
-        # Update crossfade pipeline volume
-        if self.gst_crossfade_pipeline:
-            crossfade_volume_element = self.gst_crossfade_pipeline.get_by_name("bg_crossfade_volume")
-            if crossfade_volume_element:
-                if self.crossfade_active:
-                    _main_mix, incoming_mix = self._crossfade_mix_gains(self.crossfade_progress)
-                    crossfade_volume = self.volume * incoming_mix * self._gst_pipeline_norm("bg_crossfade")
-                    crossfade_volume_element.set_property("volume", crossfade_volume)
-                applied_any = True
-        backend = "GStreamer" if self.gst_bg_pipeline else "none"
-        _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend={backend} element_found={applied_any}")
+        _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend=none")
 
     def cancel_pending_fades(self, restore_to_target: bool = True):
         """Cancel any in-flight BG fade/crossfade so stale timers cannot mute playback later."""
@@ -5782,33 +4960,11 @@ class BackgroundMusicPlayer(QObject):
             self.volume = target
             self._bass_engine.set_master_volume(target)
             return
-        try:
-            self.fade_timer.stop()
-        except Exception:
-            pass
-        self.fade_direction = 0
-        try:
-            self.crossfade_timer.stop()
-        except Exception:
-            pass
         self.crossfade_active = False
+        self.crossfade_progress = 0.0
         self._crossfade_target_index = None
-
-        if not restore_to_target:
-            return
-
-        try:
-            target = max(0.0, min(1.0, float(self._target_volume_from_ui())))
-        except Exception:
-            target = max(0.0, min(1.0, float(self.volume or 0.8)))
-
-        try:
-            if self.gst_bg_pipeline and self.is_playing:
-                self.set_volume(target)
-            else:
-                self.volume = target
-        except Exception:
-            self.volume = target
+        if restore_to_target:
+            self.volume = max(0.0, min(1.0, float(self._target_volume_from_ui())))
                 
     def ensure_audible(self, reason: str = ""):
         """Recover the 'flag says playing but silent' state: a karaoke-start
@@ -5867,23 +5023,6 @@ class BackgroundMusicPlayer(QObject):
                     f"settle_ms={settle_ms}"
                 )
             return
-        if not self.gst_bg_pipeline or not self.is_playing:
-            return
-            
-        # Stop any crossfade in progress
-        self.crossfade_timer.stop()
-        self.crossfade_active = False
-        self._crossfade_target_index = None
-        if self.gst_crossfade_pipeline:
-            self.gst_crossfade_pipeline.set_state(Gst.State.NULL)
-            self.gst_crossfade_pipeline = None
-            
-        self.fade_direction = -1
-        self.fade_target_volume = 0.0
-        steps = duration_ms // 50  # 50ms per step
-        current_vol = self.volume
-        self.fade_step_size = current_vol / steps if steps > 0 else current_vol
-        self.fade_timer.start(50)
         
     def fade_in(self, target_volume=None, duration_ms=1000, allow_during_karaoke=False):
         """Fade in background music - if no target_volume, use current slider value"""
@@ -5927,94 +5066,9 @@ class BackgroundMusicPlayer(QObject):
             except Exception as e:
                 print(f"[BG-BASS] fade in failed: {e}")
             return
-        
-        print(f"Starting fade in to volume {target_volume}")
-        
-        # Start playing if not already
-        if not self.gst_bg_pipeline or not self.is_playing:
-            print("Starting playback for fade in...")
-            # Ensure pipeline exists (prefer prerolled paused pipeline for smoother start)
-            if not self.gst_bg_pipeline:
-                if not self.preload_current_track_paused():
-                    return
+        print("[BG] fade in unavailable: no background audio engine")
 
-            # Start from silence BEFORE entering PLAYING to avoid audible blip.
-            try:
-                _ve = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-                if _ve:
-                    _ve.set_property("volume", 0.0)
-            except Exception:
-                pass
-            self._bg_volume_diag("fade-in-before-GStreamer-PLAYING", self.get_active_track_path(), extra=f"target={float(target_volume):.3f}")
-
-            ret = self.gst_bg_pipeline.set_state(Gst.State.PLAYING)
-            if ret == Gst.StateChangeReturn.FAILURE:
-                print("[BG] fade_in start failed")
-                try:
-                    self.gst_bg_pipeline.set_state(Gst.State.NULL)
-                except Exception:
-                    pass
-                self.gst_bg_pipeline = None
-                self.is_playing = False
-                return
-
-            self.is_playing = True
-            self._bg_volume_diag("fade-in-after-GStreamer-PLAYING", self.get_active_track_path(), extra=f"target={float(target_volume):.3f}")
-            self._schedule_volume_state_probe("gst-fade-in")
-            # Let playback settle very briefly, then ramp up.
-            QTimer.singleShot(60, lambda: self._do_fade_in(target_volume, duration_ms))
-        else:
-            self._do_fade_in(target_volume, duration_ms)
-
-    def _do_fade_in(self, target_volume, duration_ms):
-        """Actually perform the fade in"""
-        self.fade_direction = 1
-        self.fade_target_volume = target_volume
-        steps = duration_ms // 50  # 50ms per step
-        # Start from a small audible floor to reduce perceived dead-air at handoff.
-        floor = max(0.0, min(float(target_volume) * 0.25, float(target_volume) - 0.01))
-        self.fade_step_size = (float(target_volume) - floor) / steps if steps > 0 else max(0.0, float(target_volume) - floor)
-        try:
-            if self.gst_bg_pipeline:
-                _ve = self.gst_bg_pipeline.get_by_name("bg_music_volume")
-                if _ve:
-                    _ve.set_property("volume", floor * self._gst_pipeline_norm("bg_music"))
-            # Keep internal value aligned with actual starting point so ramp is smooth.
-            self.volume = floor
-        except Exception:
-            pass
-        print(f"Fade in: target={target_volume}, steps={steps}, step_size={self.fade_step_size}")
-        self.fade_timer.start(50)
         
-    def _fade_step(self):
-        """Single step of fade animation"""
-        if self.fade_direction == 0:
-            self.fade_timer.stop()
-            return
-            
-        current_vol = self.volume
-        
-        if self.fade_direction == 1:  # Fade in
-            new_vol = min(current_vol + self.fade_step_size, self.fade_target_volume)
-            self.set_volume(new_vol)
-            if new_vol >= self.fade_target_volume:
-                self.fade_direction = 0
-                self.fade_timer.stop()
-                print(f"Fade in complete at volume: {new_vol}")
-        else:  # Fade out
-            new_vol = max(current_vol - self.fade_step_size, self.fade_target_volume)
-            self.set_volume(new_vol)
-            if new_vol <= self.fade_target_volume:
-                self.fade_direction = 0
-                self.fade_timer.stop()
-                if self.fade_target_volume == 0.0:
-                    self.pause()
-                # Restore desired volume so the next play isn't stuck at 0.0
-                try:
-                    self.volume = self._target_volume_from_ui()
-                    print(f"Restored desired BG volume to {self.volume} after fade-out")
-                except Exception:
-                    pass
 
     def _extract_artwork_sync(self, file_path):
         """Synchronous artwork extraction (for background threads)"""
@@ -8962,7 +8016,7 @@ class BackgroundMusicManager(QMainWindow):
                 active = ""
                 if hasattr(player, "get_active_track_path"):
                     active = str(player.get_active_track_path() or "")
-                if getattr(player, "gst_bg_pipeline", None) is not None and active and expected and active != expected:
+                if active and expected and active != expected:
                     if defer_pipeline_realign:
                         player._pipeline_realign_needed = True
                     else:
@@ -55482,7 +54536,8 @@ class KaraokeApp(QWidget):
             print(f"  - Current index: {self.bg_music.current_index}")
             print(f"  - Is playing: {self.bg_music.is_playing}")
             print(f"  - Volume: {self.bg_music.volume}")
-            print(f"  - Has pipeline: {self.bg_music.gst_bg_pipeline is not None}")
+            engine = getattr(self.bg_music, "_bass_engine", None)
+            print(f"  - Audio engine: {getattr(engine, 'backend_name', 'none')}")
             if self.bg_music.playlist:
                 print(f"  - Current track: {self.bg_music.get_current_track_info()}")
         else:

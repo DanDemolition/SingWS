@@ -2,6 +2,19 @@
 
 Updated 2026-08-22.
 
+## 0.4.5.8 cleanup in progress
+
+On `cleanup/dead-media-paths-0.4.5.8`, `BackgroundMusicPlayer` no longer
+contains the unreachable GStreamer fallback. The live BASS engine remains the
+primary path and `LibmpvBackgroundEngine` remains the recovery path when BASS
+initialization fails. Removed code included the old GStreamer pipeline builder,
+meter callback, pipeline seek/state probes, timer-driven fades and crossfades,
+output rebuild, and stale pipeline bookkeeping (about 940 lines). Playlist
+realignment now checks the active native deck rather than a permanently absent
+GStreamer object. A regression assertion prevents `Gst.` or the retired
+pipeline fields from returning to the background player. Fifty-three focused
+background/performance tests pass with scratch data.
+
 ## Pending 0.4.5.7 show-screen hotfix
 
 The 0.4.5.6 parent-window ticker repair called AppKit's

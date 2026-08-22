@@ -26,6 +26,14 @@ def function_source(name: str) -> str:
 
 
 class PerformanceSafetyTests(unittest.TestCase):
+    def test_background_player_has_no_retired_gstreamer_path(self):
+        start = MAIN_SOURCE.index("class BackgroundMusicPlayer(QObject)")
+        end = MAIN_SOURCE.index("class BackgroundMusicManager", start)
+        player = MAIN_SOURCE[start:end]
+        self.assertNotIn("Gst.", player)
+        self.assertNotIn("gst_bg_pipeline", player)
+        self.assertNotIn("gst_crossfade_pipeline", player)
+
     @classmethod
     def setUpClass(cls):
         spec = importlib.util.spec_from_file_location("singws_main_perf", "0.2.18.1.py")
