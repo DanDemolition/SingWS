@@ -36,6 +36,13 @@ and completed a scratch launch in 1.68 seconds with BASS, mpv, Qt Quick, ticker,
 and the show window active. The trial DMG step encountered a transient macOS
 `hdiutil` device error after the app checks; the release build must rerun it.
 
+Startup request reconciliation no longer emits a full `REQUEST-DIAG` plus
+header refresh for every historical request and every terminal request already
+absent from the local queue. Those rows are now summarized by count; terminal
+rows that actually remove a live local entry retain their detailed audit. The
+header refresh is batched once at the end of reconciliation. The tombstone,
+relay, queue-authority, and show-critical suites pass with scratch data.
+
 ## Pending 0.4.5.7 show-screen hotfix
 
 The 0.4.5.6 parent-window ticker repair called AppKit's

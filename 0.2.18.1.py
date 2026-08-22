@@ -53183,6 +53183,7 @@ class KaraokeApp(QWidget):
         logged_holding = _logged_set("_remote_sync_logged_holding")
         logged_tombstone_repush = _logged_set("_remote_sync_logged_tombstone_repush")
         ignored_historical = 0
+        terminal_not_present = 0
         for req in reqs or []:
             if not isinstance(req, dict):
                 continue
@@ -53238,7 +53239,7 @@ class KaraokeApp(QWidget):
                     terminal_titles[request_id] = str(req.get("title") or "")
                 except Exception:
                     pass
-                if removed_count or (request_id, state) not in logged_terminal:
+                if removed_count:
                     logged_terminal.add((request_id, state))
                     self._log_remote_request_diag(
                         req,
@@ -53247,6 +53248,9 @@ class KaraokeApp(QWidget):
                         queue_insert_result="removed" if removed_count else "not_present",
                         failure_reason="",
                     )
+                elif (request_id, state) not in logged_terminal:
+                    logged_terminal.add((request_id, state))
+                    terminal_not_present += 1
                 continue
             tombstone = self._remote_request_matches_tombstone(req)
             if tombstone is not None and self._tombstone_signature_conflicts(tombstone, req):
@@ -53324,21 +53328,6 @@ class KaraokeApp(QWidget):
                 ignored_historical += 1
                 if (request_id, state) not in logged_historical:
                     logged_historical.add((request_id, state))
-                    _diag(
-                        "[REMOTE-SYNC] historical request ignored "
-                        f"request_id={request_id} state={state!r} sent={int(bool(req.get('sent')))} "
-                        f"delivered={int(bool(req.get('delivered')))}"
-                    )
-                    try:
-                        self._log_remote_request_diag(
-                            req,
-                            status="ignored",
-                            match_result="historical",
-                            queue_insert_result="not_attempted",
-                            failure_reason=f"historical_state:{state or 'sent'}",
-                        )
-                    except Exception:
-                        pass
                 continue
             if self._is_waiting_for_add_request(req):
                 if self._promote_waitlisted_phone_replacement_into_empty_slot(req):
@@ -53413,7 +53402,12 @@ class KaraokeApp(QWidget):
         if ignored_historical:
             _diag(
                 "[REMOTE-SYNC] historical requests ignored "
-                f"count={ignored_historical} (details logged once per request/state)"
+                f"count={ignored_historical}"
+            )
+        if terminal_not_present:
+            _diag(
+                "[REMOTE-SYNC] terminal requests already absent locally "
+                f"count={terminal_not_present}"
             )
 
         desired_ids = {item["request_id"] for item in normalized}
@@ -53758,6 +53752,10 @@ class KaraokeApp(QWidget):
             # rebuild must re-select the top rotation row, not the new rows.
             self._mark_server_queue_mutation(reason="reconcile_remote_requests")
         self._request_queue_display_refresh()
+        try:
+            self._refresh_header_status()
+        except Exception:
+            pass
         try:
             # Always debounce. The old else-branch wrote queue + singer history
             # + singer prefs synchronously on the GUI thread at the end of every
