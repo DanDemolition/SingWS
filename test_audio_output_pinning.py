@@ -13,6 +13,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 os.environ.setdefault("SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS", "1")
 
@@ -129,7 +130,12 @@ class AudioOutputPinningTests(unittest.TestCase):
             {"audio_output_id": "dev_stale", "audio_output_name": "External Headphones"},
             [cache[0], cache[2], cache[3]],
         )
-        self.assertEqual(app._safe_local_audio_output_name(), "MacBook Pro Speakers")
+        # Do not let the development Mac's current hardware default contradict
+        # this synthetic "headphones are missing" device list.
+        from PyQt6.QtMultimedia import QMediaDevices
+        airplay_default = types.SimpleNamespace(description=lambda: "Sony BRAVIA (AirPlay)")
+        with mock.patch.object(QMediaDevices, "defaultAudioOutput", return_value=airplay_default):
+            self.assertEqual(app._safe_local_audio_output_name(), "MacBook Pro Speakers")
 
     def test_default_prefers_local_output_and_never_display(self):
         app = self._app({"audio_output_id": "default"}, self._cache())
