@@ -13087,7 +13087,7 @@ class VideoWindow(QWidget):
             reassert("video_window_show", delays=(0, 120, 400))
 
     def _tick_ticker_surface_guard(self):
-        """Keep the native ticker above late-restacked video child surfaces."""
+        """Keep the show window and ticker above late-restacked native surfaces."""
         try:
             if not self.isVisible():
                 return
@@ -13098,6 +13098,13 @@ class VideoWindow(QWidget):
             ticker = getattr(self, "ticker", None)
             if ticker is None or not ticker.isVisible():
                 return
+            # A manually-fullscreened KaraFun renderer can restack the entire
+            # audience NSWindow. Reopening the show screen repaired it by
+            # ordering that parent forward, which raising this child cannot do.
+            if not isinstance(getattr(owner, "_active_external_karafun", None), dict):
+                reassert_window = getattr(owner, "_reassert_show_window_surface", None)
+                if callable(reassert_window):
+                    reassert_window("ticker_guard")
             ticker.raise_()
             ticker.update()
         except Exception:
@@ -13762,6 +13769,26 @@ class AnalyzeLibraryWorker(QObject):
             f"cached={analyzed} failed={failed} cancelled={int(self.is_cancelled())}"
         )
         self.finished.emit(analyzed, total)
+
+
+class AnalyzeLibraryPreparationWorker(QObject):
+    """Build the batch-analysis file list without blocking the Qt event loop."""
+    finished = pyqtSignal(object)
+
+    def __init__(self, app, force: bool, mode: str):
+        super().__init__()
+        self.app = app
+        self.force = bool(force)
+        self.mode = str(mode or "full")
+
+    def run(self):
+        try:
+            items = self.app._library_loudness_analysis_items(
+                force=self.force, mode=self.mode
+            )
+            self.finished.emit({"items": items, "error": ""})
+        except Exception as exc:
+            self.finished.emit({"items": [], "error": str(exc)})
 
 
 class WaveformDecodeWorker(QObject):
@@ -23340,6 +23367,26 @@ class KaraokeApp(QWidget):
             _diag(f"[TICKER] show-screen surface reasserted reason={reason}{suffix}")
         except Exception as exc:
             _diag(f"[TICKER] surface reassert failed reason={reason}: {exc}")
+
+    def _reassert_show_window_surface(self, reason: str):
+        """Order the macOS audience parent forward without taking focus."""
+        if sys.platform != "darwin":
+            return
+        if isinstance(getattr(self, "_active_external_karafun", None), dict):
+            return
+        video_window = getattr(self, "video_window", None)
+        if video_window is None or not video_window.isVisible():
+            return
+        try:
+            import objc
+            native_view = objc.objc_object(c_void_p=int(QWidget.winId(video_window)))
+            native_window = native_view.window()
+            if native_window is None:
+                return
+            native_window.orderFrontRegardless()
+            _diag(f"[SHOW-SURFACE] audience window reasserted reason={reason}")
+        except Exception as exc:
+            _diag(f"[SHOW-SURFACE] audience window reassert failed reason={reason}: {exc}")
 
     def _refresh_mpv_video_views(self, reason: str = ""):
         """Re-present libmpv's retained texture after the show window returns."""
@@ -41205,8 +41252,38 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             return
+        if getattr(self, "_analyze_preparing", False):
+            return
+        self._analyze_preparing = True
+        self._set_processing_text("Preparing loudness scan…", auto_dismiss_ms=None)
+        prep_thread = QThread(self)
+        prep_worker = AnalyzeLibraryPreparationWorker(self, force, mode)
+        prep_worker.moveToThread(prep_thread)
+        prep_thread.started.connect(prep_worker.run)
+
+        def _prepared(result):
+            self._analyze_preparing = False
+            result = result if isinstance(result, dict) else {}
+            error = str(result.get("error") or "")
+            if error:
+                self._show_processing_notification(
+                    f"Could not prepare loudness scan: {error[:160]}", level="error"
+                )
+                return
+            self._start_analyze_library_items(list(result.get("items") or []), mode=mode)
+
+        prep_worker.finished.connect(_prepared)
+        prep_worker.finished.connect(prep_thread.quit)
+        prep_worker.finished.connect(prep_worker.deleteLater)
+        prep_thread.finished.connect(prep_thread.deleteLater)
+        self._analyze_lib_prepare_job = (prep_thread, prep_worker)
+        prep_thread.start()
+
+    def _start_analyze_library_items(self, items, mode: str = "full"):
+        """Create the progress UI after background file enumeration completes."""
+        mode = "fast" if mode == "fast" else "full"
+        from PyQt6.QtWidgets import QProgressDialog
         tracks = list(getattr(self, "tracks", []) or [])
-        items = self._library_loudness_analysis_items(force=force, mode=mode)
 
         if not items:
             QMessageBox.information(self, "Cache Loudness Levels",
@@ -50668,7 +50745,9 @@ class KaraokeApp(QWidget):
                     else:
                         _diag("[KARAFUN-AUTO] fullscreen audience handoff timed out before play")
                 _diag(f"[KARAFUN-AUTO] activating KaraFun result mode={parts[0]} x={parts[1]} y={parts[2]}")
-                if not self._macos_native_double_click(int(float(parts[1])), int(float(parts[2]))):
+                activation_point = (int(float(parts[1])), int(float(parts[2])))
+                entry["karafun_result_activation_point"] = activation_point
+                if not self._macos_native_double_click(*activation_point):
                     raise RuntimeError("Could not double-click the KaraFun result")
                 result_activated_at = time.monotonic()
                 entry["karafun_result_activated_at"] = result_activated_at
@@ -51142,9 +51221,10 @@ class KaraokeApp(QWidget):
                         seen_playback = True
                     else:
                         _confirm_playback()
-                # Recovery: fast start never watched playback begin, and the
-                # monitor now sees KaraFun sitting idle. Press play once rather
-                # than waiting for the operator to notice the silence.
+                # Recovery: if result activation did not take, pressing Play
+                # while KaraFun is still idle has no loaded song to start. Retry
+                # the already-matched result once; only use Play as a fallback
+                # when that saved activation point is unavailable.
                 if (
                     playback_assumed
                     and not recovery_pressed
@@ -51155,21 +51235,39 @@ class KaraokeApp(QWidget):
                     recovery_pressed = True
                     _diag(
                         f"[KARAFUN] playback never started after {age:.0f}s; "
-                        "pressing play once (fast start assumed it had)"
+                        "retrying the matched result once (fast start assumed it had)"
                     )
+                    activation_point = entry.get("karafun_result_activation_point")
                     try:
-                        pressed, press_error = self._karafun_press_play_control()
-                    except Exception as exc:
-                        pressed, press_error = False, str(exc)
-                    if pressed:
-                        _diag("[KARAFUN] recovery play press sent")
-                    else:
-                        _diag(f"[KARAFUN] recovery play press failed: {press_error}")
-                        self._set_karafun_entry_status(
-                            entry, "manual",
-                            message="KaraFun did not start this song. Press play in KaraFun.",
-                            notify=True, level="warning",
+                        reactivated = bool(
+                            isinstance(activation_point, (tuple, list))
+                            and len(activation_point) == 2
+                            and self._macos_native_double_click(
+                                int(activation_point[0]), int(activation_point[1])
+                            )
                         )
+                    except Exception as exc:
+                        reactivated = False
+                        press_error = str(exc)
+                    else:
+                        press_error = ""
+                    if reactivated:
+                        entry["karafun_result_activated_at"] = time.monotonic()
+                        _diag("[KARAFUN] recovery result activation sent")
+                    else:
+                        try:
+                            pressed, press_error = self._karafun_press_play_control()
+                        except Exception as exc:
+                            pressed, press_error = False, str(exc)
+                        if pressed:
+                            _diag("[KARAFUN] recovery play press sent")
+                        else:
+                            _diag(f"[KARAFUN] recovery play press failed: {press_error}")
+                            self._set_karafun_entry_status(
+                                entry, "manual",
+                                message="KaraFun did not start this song. Press play in KaraFun.",
+                                notify=True, level="warning",
+                            )
                     time.sleep(1.0)
                     continue
 

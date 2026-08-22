@@ -2005,9 +2005,12 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertIn('"PLAY|"', press)
         self.assertIn("_karafun_press_play_control()", self.automation)
 
-    def test_the_monitor_presses_play_when_the_assumption_was_wrong(self):
+    def test_the_monitor_retries_the_matched_result_when_the_assumption_was_wrong(self):
         self.assertIn("playback_assumed", self.monitor)
         self.assertIn("recovery_pressed", self.monitor)
+        self.assertIn("karafun_result_activation_point", self.automation)
+        self.assertIn("karafun_result_activation_point", self.monitor)
+        self.assertIn("_macos_native_double_click", self.monitor)
         self.assertIn("_karafun_press_play_control()", self.monitor)
         self.assertIn("playback never started after", self.monitor)
 

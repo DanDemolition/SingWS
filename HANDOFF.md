@@ -1,6 +1,33 @@
 # SingWS handoff
 
-Updated 2026-08-21.
+Updated 2026-08-22.
+
+## Unreleased fixes from the 2026-08-21 show
+
+The 0.4.5.5 show exposed three operator-visible KaraFun/show-screen faults and
+one pre-show performance freeze. These fixes are in the working tree and are
+not built, installed, or live yet.
+
+When fast-start result activation does not actually begin KaraFun playback,
+the completion monitor now retries the exact already-matched result once. The
+old recovery clicked Play while KaraFun was still idle and had no loaded song,
+which logged success without recovering the 22:58 Jazzystics track. The Play
+control remains the fallback if the saved result location is unavailable.
+
+The show-screen ticker guard now reorders the parent macOS audience window as
+well as its ticker child, without activating it and only while external
+KaraFun playback is inactive. This mirrors why closing and reopening the show
+screen repaired the ticker after KaraFun had been fullscreened manually; a
+child-only `raise_()` cannot repair a parent NSWindow displaced by AppKit.
+
+Full-library loudness job enumeration now runs on a QThread before the progress
+dialog is created. The 5.8-second 20:55 freeze occurred before the first worker
+result and while the GUI was constructing the 134k-track job, so the existing
+10 Hz worker-progress throttle could not address it.
+
+Verification: the module compiles, `git diff --check` is clean, and 239 focused
+KaraFun/recent-regression/performance tests pass (4 skipped). The KaraFun retry
+and macOS window ordering still require a real installed KaraFun/on-screen test.
 
 ## Released and installed as 0.4.5.5 after the 2026-08-20 show
 

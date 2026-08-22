@@ -113,6 +113,18 @@ class PerformanceSafetyTests(unittest.TestCase):
 
         self.assertEqual(progress, [1, len(items)])
 
+    def test_loudness_item_enumeration_runs_before_progress_ui_on_worker(self):
+        analyze = function_source("analyze_library")
+        start = function_source("_start_analyze_library_items")
+        worker_start = MAIN_SOURCE.index("class AnalyzeLibraryPreparationWorker")
+        worker_end = MAIN_SOURCE.index("class WaveformDecodeWorker", worker_start)
+        worker = MAIN_SOURCE[worker_start:worker_end]
+        self.assertIn("AnalyzeLibraryPreparationWorker", analyze)
+        self.assertIn("prep_thread.start()", analyze)
+        self.assertNotIn("_library_loudness_analysis_items", analyze)
+        self.assertIn("_library_loudness_analysis_items", worker)
+        self.assertIn("QProgressDialog", start)
+
     def test_queue_add_defers_metadata_lookup_during_playback(self):
         source = function_source("_add_song_to_queue")
         self.assertIn("karaoke_playing", source)
@@ -881,10 +893,11 @@ class PerformanceSafetyTests(unittest.TestCase):
 
     def test_volume_analysis_dialog_is_resurfaced_frontmost(self):
         analyze = function_source("analyze_library")
-        self.assertIn("WindowStaysOnTopHint", analyze)
-        self.assertIn("loudness scan for", analyze)
+        start = function_source("_start_analyze_library_items")
+        self.assertIn("WindowStaysOnTopHint", start)
+        self.assertIn("loudness scan for", start)
         self.assertIn("self._bring_analyze_dialog_to_front(_d)", analyze)
-        self.assertIn("self._bring_analyze_dialog_to_front(dlg)", analyze)
+        self.assertIn("self._bring_analyze_dialog_to_front(dlg)", start)
         bring = function_source("_bring_analyze_dialog_to_front")
         self.assertIn("dlg.show()", bring)
         self.assertIn("dlg.raise_()", bring)
@@ -1184,8 +1197,12 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_ticker_surface_guard_timer.start(3000)", video)
         self.assertIn('reassert("video_window_show", delays=(0, 120, 400))', show_event)
         self.assertIn('settings.get("ticker_enabled", True)', guard)
+        self.assertIn("_reassert_show_window_surface", guard)
         self.assertIn("ticker.raise_()", guard)
         self.assertNotIn("activateWindow", guard)
+        parent_reassert = function_source("_reassert_show_window_surface")
+        self.assertIn("orderFrontRegardless", parent_reassert)
+        self.assertIn("_active_external_karafun", parent_reassert)
 
     def test_rotation_announcement_is_separate_and_venue_scoped(self):
         ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")
