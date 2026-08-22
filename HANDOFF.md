@@ -25,6 +25,17 @@ output tests were removed; native BASS/libmpv background and mpv transport
 coverage remains. Fifty-four focused transport, release, and removal tests
 pass.
 
+The frozen bundle now post-filters Qt plugins automatically collected by
+PyInstaller. It keeps Cocoa, Darwin audio, SecureTransport, the native network
+reachability/style/SVG support, and ordinary artwork formats; it drops test-only
+minimal/offscreen platforms, touch input, the unused Qt FFmpeg player plugin,
+two unused TLS backends, and PDF/TGA/WBMP image handlers. Test-only Python
+packages are excluded from the frozen graph. A trial Intel app passed
+architecture, bundled-media and macOS-12 checks, shrank from 375 MB to 350 MB,
+and completed a scratch launch in 1.68 seconds with BASS, mpv, Qt Quick, ticker,
+and the show window active. The trial DMG step encountered a transient macOS
+`hdiutil` device error after the app checks; the release build must rerun it.
+
 ## Pending 0.4.5.7 show-screen hotfix
 
 The 0.4.5.6 parent-window ticker repair called AppKit's

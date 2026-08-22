@@ -97,7 +97,6 @@ qt_plugins_root = (
     / "plugins"
 )
 qt_plugin_groups = (
-    "generic",
     "iconengines",
     "imageformats",
     "multimedia",
@@ -106,11 +105,26 @@ qt_plugin_groups = (
     "styles",
     "tls",
 )
+qt_plugin_allowlists = {
+    "platforms": {"libqcocoa.dylib"},
+    "multimedia": {"libdarwinmediaplugin.dylib"},
+    "tls": {"libqsecuretransportbackend.dylib"},
+}
+qt_plugin_excludes = {
+    "imageformats": {"libqpdf.dylib", "libqtga.dylib", "libqwbmp.dylib"},
+}
 for plugin_group in qt_plugin_groups:
     plugin_dir = qt_plugins_root / plugin_group
     plugin_files = sorted(plugin_dir.glob("*.dylib"))
     if not plugin_files:
         raise SystemExit(f"Required Qt plugin group is missing: {plugin_dir}")
+    allowed = qt_plugin_allowlists.get(plugin_group)
+    if allowed is not None:
+        plugin_files = [path for path in plugin_files if path.name in allowed]
+    excluded = qt_plugin_excludes.get(plugin_group, set())
+    plugin_files = [path for path in plugin_files if path.name not in excluded]
+    if not plugin_files:
+        raise SystemExit(f"Qt plugin allowlist removed every file in: {plugin_dir}")
     for plugin_file in plugin_files:
         binaries.append(
             (str(plugin_file), f"PyQt6/Qt6/plugins/{plugin_group}")
@@ -158,11 +172,37 @@ a = Analysis(
     runtime_hooks=[],
     # Keep GStreamer and the retired python-mpv/follower stack out of the
     # permanent native-bridge package.
-    excludes=['gi', 'gi.repository', 'mpv',
+    excludes=['gi', 'gi.repository', 'mpv', 'pytest', '_pytest', 'pygments',
+              'setuptools', 'wheel',
               'signalsmith_audio_native'],
     noarchive=False,
     optimize=0,
 )
+
+
+def _keep_runtime_binary(item):
+    destination = str(item[0]).replace("\\", "/")
+    name = Path(destination).name
+    if "/plugins/generic/" in destination:
+        return False
+    allowlisted_groups = {
+        "/plugins/platforms/": {"libqcocoa.dylib"},
+        "/plugins/multimedia/": {"libdarwinmediaplugin.dylib"},
+        "/plugins/tls/": {"libqsecuretransportbackend.dylib"},
+    }
+    for marker, allowed in allowlisted_groups.items():
+        if marker in destination and name not in allowed:
+            return False
+    if "/plugins/imageformats/" in destination and name in qt_plugin_excludes["imageformats"]:
+        return False
+    if "PyQt6/Qt6/lib/" in destination and name.startswith(
+        ("libavcodec.", "libavformat.", "libavutil.", "libswresample.", "libswscale.")
+    ):
+        return False
+    return True
+
+
+a.binaries = [item for item in a.binaries if _keep_runtime_binary(item)]
 
 # Fail loudly if GStreamer ever sneaks back into the frozen graph.
 _gst_binaries = [item for item in a.binaries if 'gst' in str(item[0]).lower() or 'gstreamer' in str(item[0]).lower()]
