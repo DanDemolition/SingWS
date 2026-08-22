@@ -13085,6 +13085,9 @@ class VideoWindow(QWidget):
         reassert = getattr(owner, "_schedule_show_ticker_reassert", None) if owner is not None else None
         if callable(reassert):
             reassert("video_window_show", delays=(0, 120, 400))
+        reassert_window = getattr(owner, "_reassert_show_window_surface", None) if owner is not None else None
+        if callable(reassert_window):
+            QTimer.singleShot(0, lambda: reassert_window("video_window_show"))
 
     def _tick_ticker_surface_guard(self):
         """Keep the show window and ticker above late-restacked native surfaces."""
@@ -13098,13 +13101,10 @@ class VideoWindow(QWidget):
             ticker = getattr(self, "ticker", None)
             if ticker is None or not ticker.isVisible():
                 return
-            # A manually-fullscreened KaraFun renderer can restack the entire
-            # audience NSWindow. Reopening the show screen repaired it by
-            # ordering that parent forward, which raising this child cannot do.
-            if not isinstance(getattr(owner, "_active_external_karafun", None), dict):
-                reassert_window = getattr(owner, "_reassert_show_window_surface", None)
-                if callable(reassert_window):
-                    reassert_window("ticker_guard")
+            # Keep this periodic repair inside the already-visible audience
+            # window. Ordering the parent NSWindow forward on every tick fights
+            # the rotation window and can make Show Karaoke Screen appear dead.
+            # The parent is reasserted once from showEvent instead.
             ticker.raise_()
             ticker.update()
         except Exception:

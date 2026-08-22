@@ -2,6 +2,22 @@
 
 Updated 2026-08-22.
 
+## Pending 0.4.5.7 show-screen hotfix
+
+The 0.4.5.6 parent-window ticker repair called AppKit's
+`orderFrontRegardless()` from the three-second ticker guard. On the installed
+build this continuously reordered the audience parent, fought the rotation
+window lifecycle, made Show Karaoke Screen appear not to open, and introduced
+new GUI stalls. The periodic guard now raises only the ticker child. The whole
+audience parent is reasserted once from `VideoWindow.showEvent`, preserving the
+operator-observed close/reopen recovery without continuously disturbing other
+show windows.
+
+Focused show-screen and rotation safety tests pass. The broader performance
+module reaches its known local Qt platform-plugin environment abort after its
+non-GUI assertions; release verification must use `tools/run_tests.sh` as
+documented in `AGENTS.md`.
+
 ## Released as 0.4.5.6 after the 2026-08-21 show
 
 The 0.4.5.5 show exposed three operator-visible KaraFun/show-screen faults and
