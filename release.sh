@@ -118,7 +118,7 @@ git add \
   SingWS-x86_64.spec SingWS-arm64.spec \
   build_all.sh build_singws_mac_intel.sh build_singws_mac_arm64.sh \
   test_mpv_karaoke_transport.py test_karaoke_engine_selection.py \
-  tools/mpv_smoke_test.py tools/verify_macos_min_version.py \
+  tools/verify_macos_min_version.py \
   tools/write_manifest.py tools/release_version.py \
   test_release_tools.py docs/index.html docs/release.json
 git commit -m "Release $TAG"

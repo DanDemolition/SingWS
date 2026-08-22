@@ -1850,8 +1850,8 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
                           "failure recording must be guarded by a cancellation check")
 
 
-try:  # the mpv backends need the python-mpv binding (.venv-universal only)
-    import mpv_playback as _mpv_playback_mod
+try:  # the native mpv backend loads only where its bridge is available
+    import mpv_playback_iina as _mpv_playback_mod
     import mpv_karaoke_transport as _mpv_transport_mod
     _MPV_BACKENDS_IMPORTABLE = True
 except Exception:  # pragma: no cover - depends on the venv in use
@@ -1860,43 +1860,35 @@ except Exception:  # pragma: no cover - depends on the venv in use
     _MPV_BACKENDS_IMPORTABLE = False
 
 
-@unittest.skipUnless(_MPV_BACKENDS_IMPORTABLE, "mpv backends need .venv-universal")
+@unittest.skipUnless(_MPV_BACKENDS_IMPORTABLE, "native mpv backend unavailable")
 class CdgVisualOffsetTests(unittest.TestCase):
-    """The calibrated CDG offset never reached the follower backend.
+    """The live in-process backend applies the calibrated visual offset."""
 
-    set_video_offset_ms() forwards to the backend when it can apply it. The
-    in-process (IINA) backend maps it onto mpv's audio-delay. The follower
-    backend had no setter at all, so the host's value was discarded with a
-    warning and the Display tab's fine tuning did nothing there.
-
-    UNVERIFIED AGAINST HARDWARE: the sign and magnitude need live calibration
-    with a real CDG disc. These tests pin the wiring, not the timing.
-    """
-
-    def test_the_follower_backend_accepts_an_offset(self):
+    def test_the_native_backend_accepts_an_offset(self):
         mpv_playback = _mpv_playback_mod
         self.assertTrue(hasattr(mpv_playback.MpvPlaybackPlugin, "setVideoOffsetMs"))
 
-    def test_the_offset_shifts_the_master_reference(self):
+    def test_the_offset_maps_to_native_audio_delay(self):
         mpv_playback = _mpv_playback_mod
-        sync = inspect.getsource(mpv_playback.MpvPlaybackPlugin._sync_loop)
-        self.assertIn("delta = (master + self._video_offset_s) - t", sync)
-        self.assertNotIn("delta = master - t", sync)
+        setter = inspect.getsource(mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs)
+        self.assertIn("singws_bridge_set_audio_delay", setter)
+        self.assertIn("self._video_offset_ms / 1000.0", setter)
 
     def test_the_offset_is_clamped_and_defaults_to_zero(self):
         mpv_playback = _mpv_playback_mod
         plugin = mpv_playback.MpvPlaybackPlugin.__new__(mpv_playback.MpvPlaybackPlugin)
-        plugin._video_offset_s = 0.0
+        plugin._video_offset_ms = 0
+        plugin._handle = None
         plugin.log = lambda *_a, **_k: None
-        self.assertEqual(plugin._video_offset_s, 0.0)
+        self.assertEqual(plugin._video_offset_ms, 0)
         mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, 750)
-        self.assertAlmostEqual(plugin._video_offset_s, 0.75)
+        self.assertEqual(plugin._video_offset_ms, 750)
         mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, 99999)
-        self.assertAlmostEqual(plugin._video_offset_s, 3.0, msg="must clamp to +/-3s")
+        self.assertEqual(plugin._video_offset_ms, 3000, msg="must clamp to +/-3000ms")
         mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, -99999)
-        self.assertAlmostEqual(plugin._video_offset_s, -3.0)
+        self.assertEqual(plugin._video_offset_ms, -3000)
         mpv_playback.MpvPlaybackPlugin.setVideoOffsetMs(plugin, None)
-        self.assertAlmostEqual(plugin._video_offset_s, 0.0)
+        self.assertEqual(plugin._video_offset_ms, 0)
 
     def test_the_transport_forwards_rather_than_discarding(self):
         mpv_karaoke_transport = _mpv_transport_mod

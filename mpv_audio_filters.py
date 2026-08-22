@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-``mpv_playback`` drives mpv as an out-of-process binary over JSON IPC, so audio
+The native mpv bridge applies this chain inside its in-process media core, so audio
 samples never reach Python. The NumPy processors in :mod:`singws_eq` and
 :mod:`singws_master_audio` are block processors that must sit *in* the sample
 path, which means they cannot run when mpv owns the audio. Rather than hand the

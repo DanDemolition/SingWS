@@ -90,13 +90,10 @@ fi
 # script with no pytest cases, so it is excluded rather than reported as a
 # collection failure; run it directly if you need it.
 #
-# tools/mpv_smoke_test.py is the same kind of thing for mpv: a manual script
-# that imports python-mpv, which the test venv does not have. vendor/pybind11
-# ships upstream's own suite, which needs a compiled pybind11_tests module that
+# vendor/pybind11 ships upstream's own suite, which needs a compiled pybind11_tests module that
 # is never built here. Both aborted collection outright, so this runner — and
 # therefore release.sh, which gates on it — could not finish at all.
 exec "$PYTHON" -m pytest -q \
     "${PYTEST_EXTRA[@]}" \
     --ignore=test_bass_init_once.py \
-    --ignore=tools/mpv_smoke_test.py \
     --ignore=vendor

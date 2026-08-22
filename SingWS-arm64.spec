@@ -158,7 +158,7 @@ a = Analysis(
     runtime_hooks=[],
     # Keep GStreamer and the retired python-mpv/follower stack out of the
     # permanent native-bridge package.
-    excludes=['gi', 'gi.repository', 'mpv', 'mpv_playback',
+    excludes=['gi', 'gi.repository', 'mpv',
               'signalsmith_audio_native'],
     noarchive=False,
     optimize=0,

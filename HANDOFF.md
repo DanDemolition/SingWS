@@ -15,6 +15,16 @@ GStreamer object. A regression assertion prevents `Gst.` or the retired
 pipeline fields from returning to the background player. Fifty-three focused
 background/performance tests pass with scratch data.
 
+The retired `python_karaoke_transport.py`, `ffmpeg_background_engine.py`, and
+out-of-process `mpv_playback.py` implementations are also removed. Shipped
+builds already excluded them; their remaining consumers were tests of the old
+implementations and an obsolete manual smoke script. Intro-loop and CDG-offset
+contracts now target the live `mpv_karaoke_transport.py` and
+`mpv_playback_iina.py` paths. The duplicate FFmpeg background and Qt-audio
+output tests were removed; native BASS/libmpv background and mpv transport
+coverage remains. Fifty-four focused transport, release, and removal tests
+pass.
+
 ## Pending 0.4.5.7 show-screen hotfix
 
 The 0.4.5.6 parent-window ticker repair called AppKit's

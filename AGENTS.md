@@ -399,7 +399,7 @@ Both backends can apply it now. The in-process (IINA) backend maps it onto
 mpv's `audio-delay` (`mpv_playback_iina.py`). The follower backend adds it to
 the master reference its video followers chase — `delta = (master +
 self._video_offset_s) - t` in `MpvPlaybackPlugin._sync_loop`
-(`mpv_playback.py`), fed by `setVideoOffsetMs`.
+(`mpv_playback_iina.py`), fed by `setVideoOffsetMs`.
 
 **Confirmed correct on screen by the operator on 2026-08-18.** The wiring is
 also covered by `CdgVisualOffsetTests`, which pins the plumbing and the clamp.

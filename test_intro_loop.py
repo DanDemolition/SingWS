@@ -41,14 +41,12 @@ class LoopTargetContractTests(unittest.TestCase):
         self.assertIsNone(self.loop_target(5.0, 12.0, 4.0))   # end <= start
         self.assertIsNone(self.loop_target(5.0, 4.0, 4.0))
 
-    def test_source_has_loop_target(self):
-        # Guard against the transport implementation drifting from this contract.
-        with open("python_karaoke_transport.py", "r", encoding="utf-8") as f:
+    def test_live_transport_keeps_loop_region(self):
+        # Guard the native mpv transport used by every shipped build.
+        with open("mpv_karaoke_transport.py", "r", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("def _loop_target(", src)
         self.assertIn("def set_loop(", src)
-        self.assertIn("def clear_loop(", src)
-        self.assertIn("self.seek(_wrap)", src)  # the loop-back in _tick
+        self.assertIn("self._loop = (start, end) if end > start else None", src)
 
 
 class LoopLengthMathTests(unittest.TestCase):
