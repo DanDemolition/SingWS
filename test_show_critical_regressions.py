@@ -571,9 +571,9 @@ class ShowCriticalRegressionTests(unittest.TestCase):
         app = self.bare_app()
         calls = []
 
-        def _show_singer_start(_self, singer, title, artist):
+        def _show_singer_start(_self, singer, title, artist, style):
             # The real VideoAreaWidget reports whether the overlay was shown.
-            calls.append((singer, artist, title))
+            calls.append((singer, artist, title, style))
             return True
 
         area = type("Area", (), {"show_singer_start_vfx": _show_singer_start})()
@@ -582,7 +582,9 @@ class ShowCriticalRegressionTests(unittest.TestCase):
 
         self.assertFalse(app._trigger_show_screen_singer_start_vfx("Skipped", "A", "Old", generation=7))
         self.assertTrue(app._trigger_show_screen_singer_start_vfx("Current", "B", "New", generation=8))
-        self.assertEqual(calls, [("Current", "B", "New")])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:3], ("Current", "B", "New"))
+        self.assertIn(calls[0][3], self.singws.SHOW_TRANSITION_EFFECTS)
 
     def test_skip_invalidates_and_stops_an_unconfirmed_start(self):
         app = self.bare_app()

@@ -1184,6 +1184,27 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("rotation_view.ticker", opened + reassert + shared)
         self.assertNotIn("video_window.activateWindow", shared)
 
+    def test_video_window_reasserts_ticker_after_display_geometry_settles(self):
+        start = MAIN_SOURCE.index("class VideoWindow(QWidget)")
+        end = MAIN_SOURCE.index("class AddToQueueDialog", start)
+        video = MAIN_SOURCE[start:end]
+        settled = function_source("_reassert_surfaces_after_geometry_change")
+        self.assertIn("_geometry_surface_reassert_timer.setSingleShot(True)", video)
+        self.assertIn(
+            "def resizeEvent(self, event):\n        super().resizeEvent(event)\n"
+            "        self._schedule_geometry_surface_reassert()",
+            video,
+        )
+        self.assertIn(
+            "def moveEvent(self, event):\n        super().moveEvent(event)\n"
+            "        self._schedule_geometry_surface_reassert()",
+            video,
+        )
+        self.assertIn('refresh("video_window_geometry")', settled)
+        self.assertIn(
+            'reassert("video_window_geometry", delays=(0, 120, 400))', settled
+        )
+
     def test_mpv_reveal_reasserts_ticker_after_native_surface_settles(self):
         reveal = function_source("_set_mpv_hosts_visible")
         self.assertIn("host.raise_()", reveal)

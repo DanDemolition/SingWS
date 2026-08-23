@@ -221,6 +221,9 @@ class CdgTimingBaselinePerEngineTests(unittest.TestCase):
             "_cdg_timing_offset_key",
             "_cdg_timing_base_offset_ms",
             "_effective_cdg_timing_offset_ms",
+            "_mp4_timing_offset_key",
+            "_mp4_timing_base_offset_ms",
+            "_effective_mp4_timing_offset_ms",
         ):
             setattr(host, name, getattr(app, name).__get__(host, app))
         return host
@@ -229,6 +232,37 @@ class CdgTimingBaselinePerEngineTests(unittest.TestCase):
         self.assertNotEqual(
             self.singws.FFMPEG_CDG_BASE_OFFSET_MS,
             self.singws.MPV_CDG_BASE_OFFSET_MS,
+        )
+
+    def test_mpv_baseline_includes_the_show_calibrated_100ms_adjustment(self):
+        self.assertEqual(self.singws.MPV_CDG_BASE_OFFSET_MS, -50)
+
+    def test_mpv_baseline_migration_preserves_effective_timing(self):
+        start = MAIN_SOURCE.index(
+            'if not bool(self.settings.get("mpv_cdg_minus_50_baseline_migrated"'
+        )
+        block = MAIN_SOURCE[start:start + 1500]
+        self.assertIn('if "cdg_timing_offset_mpv_ms" in self.settings', block)
+        self.assertIn("saved_fine - 100", block)
+        self.assertIn(
+            'self.settings["mpv_cdg_minus_50_baseline_migrated"] = True', block
+        )
+
+    def test_mpv_mp4_baseline_makes_zero_the_normal_fine_tuning(self):
+        host = self._host(karaoke_engine="mpv", mp4_timing_offset_mpv_ms=0)
+        self.assertEqual(self.singws.MPV_MP4_BASE_OFFSET_MS, 100)
+        self.assertEqual(host._mp4_timing_base_offset_ms(), 100)
+        self.assertEqual(host._effective_mp4_timing_offset_ms(), 100)
+
+    def test_mpv_mp4_baseline_migration_preserves_effective_timing(self):
+        start = MAIN_SOURCE.index(
+            'if not bool(self.settings.get("mpv_mp4_100_baseline_migrated"'
+        )
+        block = MAIN_SOURCE[start:start + 1500]
+        self.assertIn('if "mp4_timing_offset_mpv_ms" in self.settings', block)
+        self.assertIn("saved_fine - MPV_MP4_BASE_OFFSET_MS", block)
+        self.assertIn(
+            'self.settings["mpv_mp4_100_baseline_migrated"] = True', block
         )
 
     def test_obsolete_preferences_still_use_mpv_timing(self):

@@ -3148,7 +3148,10 @@ FFMPEG_CDG_BASE_OFFSET_MS = 750
 # (IINA) backend decodes the .cdg inside mpv off real timestamps and needs
 # almost nothing. Applying the FFmpeg figure there put CDG ~750ms out and left
 # the operator cancelling it by hand on the Display slider.
-MPV_CDG_BASE_OFFSET_MS = -150
+MPV_CDG_BASE_OFFSET_MS = -50
+# Show calibration for MP4 tracks on the native mpv surface. Keep this out of
+# the user-facing fine-tuning value so the normal control position is zero.
+MPV_MP4_BASE_OFFSET_MS = 100
 
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
@@ -3214,12 +3217,21 @@ DEFAULTS = {
     "ffmpeg_cdg_timing_migrated": True,
     "ffmpeg_cdg_750_baseline_migrated": False,
     "cdg_timing_engine_split_migrated": False,
+    "mpv_cdg_minus_50_baseline_migrated": False,
+    "mpv_mp4_100_baseline_migrated": False,
     "mp4_timing_offset_ms": 0,       # MP4/video trim, FFmpeg/painter engine
     "mp4_timing_offset_mpv_ms": 0,   # MP4/video trim, mpv engine (different display latency)
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
     "next_up_overlay_enabled": False, # legacy Next Up panel retired; QR remains visible between singers
     "next_up_overlay_duration_sec": 10, # retained only for backward-compatible settings loading
     "show_screen_vfx_enabled": True, # audience spotlights/countdown/explosion; lightweight overlay remains when off
+    "show_transition_effects": [
+        "curtain_reveal", "moving_spotlights", "neon_scan", "spinning_record",
+        "confetti_drop", "audio_pulse", "camera_iris", "marquee_lightbulbs",
+        "color_ribbon_wipe", "star_tunnel", "mosaic_tile_reveal",
+        "waveform_sweep", "jukebox_flip", "laser_fan", "film_countdown",
+        "polaroid_drop",
+    ],
     "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
     "rotation_burn_in_shift_enabled": True, # slowly orbit the complete audience layout by a few pixels
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
@@ -5525,6 +5537,39 @@ class BackgroundVideoShuffleBag:
         return pick
 
 
+SHOW_TRANSITION_EFFECTS = (
+    "curtain_reveal", "moving_spotlights", "neon_scan", "spinning_record",
+    "confetti_drop", "audio_pulse", "camera_iris", "marquee_lightbulbs",
+    "color_ribbon_wipe", "star_tunnel", "mosaic_tile_reveal",
+    "waveform_sweep", "jukebox_flip", "laser_fan", "film_countdown",
+    "polaroid_drop",
+)
+
+
+class ShowTransitionShuffleBag:
+    """Use every enabled show transition once before reshuffling."""
+
+    def __init__(self, effects, rng=None):
+        allowed = set(SHOW_TRANSITION_EFFECTS)
+        self._effects = [str(effect) for effect in effects if str(effect) in allowed]
+        self._rng = rng if rng is not None else random.Random()
+        self._queue: list[str] = []
+        self._last: str | None = None
+
+    def next(self) -> str:
+        if not self._effects:
+            return "moving_spotlights"
+        if not self._queue:
+            order = list(self._effects)
+            self._rng.shuffle(order)
+            if len(order) > 1 and order[0] == self._last:
+                order[0], order[-1] = order[-1], order[0]
+            self._queue = order
+        pick = self._queue.pop(0)
+        self._last = pick
+        return pick
+
+
 class NativeLyricsBackgroundVideoPlayer(QObject):
     """Muted decorative MP4 playlist decoded inside the native mpv bridge."""
 
@@ -5634,6 +5679,7 @@ Rectangle {
     property int startCountdownValue: 0
     property bool startCountdownActive: false
     property int burstSerial: 0
+    property string transitionStyle: "moving_spotlights"
     signal nextUpCountdownFinished()
 
     function showNextUp(singer, song, artist, onDeck, durationSeconds) {
@@ -5654,7 +5700,7 @@ Rectangle {
         nextUpEntrance.restart()
     }
 
-    function showSingerStart(singer, song, artist) {
+    function showSingerStart(singer, song, artist, style) {
         // A previous outro/Next Up exit may still be finishing when the next
         // singer is started. Cancel those writers before resetting the shared
         // overlay state, or their final ScriptAction can hide this countdown.
@@ -5667,6 +5713,7 @@ Rectangle {
         singerText = singer || ""
         songText = song || ""
         artistText = artist || ""
+        transitionStyle = style || "moving_spotlights"
         countdownTimer.stop()
         singerCountdownTimer.stop()
         active = true
@@ -5684,10 +5731,11 @@ Rectangle {
         singerCountdownTimer.restart()
     }
 
-    function showSongOutro(singer, song, artist) {
+    function showSongOutro(singer, song, artist, style) {
         singerText = singer || ""
         songText = song || ""
         artistText = artist || ""
+        transitionStyle = style || "moving_spotlights"
         countdownTimer.stop()
         singerCountdownTimer.stop()
         startCountdownActive = false
@@ -5788,7 +5836,7 @@ Rectangle {
     Item {
         id: spotlights
         anchors.fill: parent
-        visible: root.active && root.effectsEnabled
+        visible: root.active && root.effectsEnabled && root.transitionStyle === "moving_spotlights"
         opacity: 0.42
         clip: true
         Repeater {
@@ -5858,6 +5906,201 @@ Rectangle {
         }
     }
 
+    // Every shuffled look stays inside this one pre-existing Quick surface.
+    // The ticker is a later-created sibling below VideoWindow's video area, so
+    // none of these styles can create or cover its native child surface.
+    Item {
+        id: styleLayer
+        anchors.fill: parent
+        z: 8
+        visible: root.active && root.effectsEnabled
+        clip: true
+
+        Item {
+            anchors.fill: parent
+            visible: root.transitionStyle === "curtain_reveal"
+            Rectangle {
+                id: curtainLeft
+                width: parent.width * 0.51; height: parent.height
+                color: "#d12c70"
+                gradient: Gradient { GradientStop { position: 0; color: "#2b0739" } GradientStop { position: 1; color: "#ef3f82" } }
+                SequentialAnimation on x { running: curtainLeft.visible; loops: Animation.Infinite
+                    NumberAnimation { from: 0; to: -curtainLeft.width * 0.96; duration: 720; easing.type: Easing.InOutCubic }
+                    PauseAnimation { duration: 900 }
+                    NumberAnimation { to: 0; duration: 620; easing.type: Easing.InOutCubic }
+                    PauseAnimation { duration: 250 }
+                }
+            }
+            Rectangle {
+                id: curtainRight
+                width: parent.width * 0.51; height: parent.height; x: parent.width - width
+                color: "#7e174f"
+                SequentialAnimation on x { running: curtainRight.visible; loops: Animation.Infinite
+                    NumberAnimation { from: root.width - curtainRight.width; to: root.width - curtainRight.width * 0.04; duration: 720; easing.type: Easing.InOutCubic }
+                    PauseAnimation { duration: 900 }
+                    NumberAnimation { to: root.width - curtainRight.width; duration: 620; easing.type: Easing.InOutCubic }
+                    PauseAnimation { duration: 250 }
+                }
+            }
+        }
+
+        Repeater {
+            model: root.transitionStyle === "neon_scan" ? 7 : 0
+            Rectangle {
+                required property int index
+                width: root.width * 1.3; height: 3; x: -root.width * 0.15
+                color: index % 2 ? "#ff42ae" : "#45eaff"; opacity: 0.72; rotation: -8 + index * 2
+                SequentialAnimation on y { running: root.active; loops: Animation.Infinite
+                    PauseAnimation { duration: index * 90 }
+                    NumberAnimation { from: -20; to: root.height + 20; duration: 1150 + index * 80; easing.type: Easing.InOutSine }
+                }
+            }
+        }
+
+        Item {
+            anchors.fill: parent; visible: root.transitionStyle === "spinning_record"
+            Rectangle {
+                id: recordDisc; width: Math.min(root.width, root.height) * 0.68; height: width; radius: width / 2
+                x: -width * 0.18; anchors.verticalCenter: parent.verticalCenter; color: "#17131c"
+                border.width: Math.max(4, width * 0.045); border.color: "#332b3a"
+                Rectangle { anchors.centerIn: parent; width: parent.width * 0.28; height: width; radius: width / 2; color: "#ff4f9a"; border.width: 6; border.color: "#f6c945" }
+                RotationAnimator on rotation { running: recordDisc.visible; from: 0; to: 360; duration: 2600; loops: Animation.Infinite }
+            }
+        }
+
+        Repeater {
+            model: root.transitionStyle === "audio_pulse" ? 24 : 0
+            Rectangle {
+                required property int index
+                width: Math.max(5, root.width * 0.009); height: root.height * (0.12 + (index % 7) * 0.055)
+                x: root.width * 0.20 + index * root.width * 0.026; y: root.height - height
+                radius: width / 2; color: index % 2 ? "#ff4f9a" : "#a36cff"; opacity: 0.48
+                SequentialAnimation on scale { running: root.active; loops: Animation.Infinite
+                    NumberAnimation { from: 0.25; to: 1.0; duration: 260 + index * 17; easing.type: Easing.InOutSine }
+                    NumberAnimation { to: 0.25; duration: 300 + index * 13; easing.type: Easing.InOutSine }
+                }
+            }
+        }
+
+        Rectangle {
+            id: irisRing; visible: root.transitionStyle === "camera_iris"; anchors.centerIn: parent
+            width: Math.min(root.width, root.height) * 0.72; height: width; radius: width / 2
+            color: "transparent"; border.width: width * 0.42; border.color: "#e805030a"
+            SequentialAnimation on scale { running: irisRing.visible; loops: Animation.Infinite
+                NumberAnimation { from: 0.18; to: 2.8; duration: 900; easing.type: Easing.InOutCubic }
+                PauseAnimation { duration: 900 }
+                NumberAnimation { to: 0.18; duration: 650; easing.type: Easing.InOutCubic }
+            }
+        }
+
+        Rectangle {
+            id: marqueeFrame; visible: root.transitionStyle === "marquee_lightbulbs"
+            anchors.fill: parent; anchors.margins: Math.max(24, root.height * 0.06); radius: 28
+            color: "transparent"; border.width: 9; border.color: "#f6c945"
+            SequentialAnimation on opacity { running: marqueeFrame.visible; loops: Animation.Infinite
+                NumberAnimation { from: 0.28; to: 1.0; duration: 320 }
+                NumberAnimation { to: 0.45; duration: 320 }
+            }
+        }
+
+        Repeater {
+            model: root.transitionStyle === "color_ribbon_wipe" ? 5 : 0
+            Rectangle {
+                required property int index
+                width: root.width * 1.45; height: root.height * 0.075; x: -width; y: root.height * (0.22 + index * 0.12)
+                rotation: -8; radius: height / 2; opacity: 0.72
+                color: index % 3 === 0 ? "#42e7ff" : (index % 3 === 1 ? "#a36cff" : "#ff4f9a")
+                SequentialAnimation on x { running: root.active; loops: Animation.Infinite
+                    PauseAnimation { duration: index * 90 }
+                    NumberAnimation { from: -width; to: root.width; duration: 1250; easing.type: Easing.InOutCubic }
+                    PauseAnimation { duration: 600 }
+                }
+            }
+        }
+
+        Repeater {
+            model: root.transitionStyle === "star_tunnel" ? 32 : 0
+            Rectangle {
+                id: starParticle
+                required property int index
+                readonly property real angle: index * 0.79
+                width: 4 + index % 3; height: width; radius: width / 2; color: "#ffffff"
+                x: root.width / 2 + Math.cos(angle) * 12; y: root.height / 2 + Math.sin(angle) * 12; opacity: 0.9
+                ParallelAnimation { running: root.active; loops: Animation.Infinite
+                    XAnimator { target: starParticle; from: root.width / 2; to: root.width / 2 + Math.cos(starParticle.angle) * root.width * 0.65; duration: 850 + index * 24 }
+                    YAnimator { target: starParticle; from: root.height / 2; to: root.height / 2 + Math.sin(starParticle.angle) * root.height * 0.75; duration: 850 + index * 24 }
+                    OpacityAnimator { target: starParticle; from: 1; to: 0; duration: 850 + index * 24 }
+                }
+            }
+        }
+
+        Grid {
+            visible: root.transitionStyle === "mosaic_tile_reveal"; anchors.fill: parent; columns: 5
+            Repeater { model: 20
+                Rectangle { required property int index; width: root.width / 5; height: root.height / 4; color: index % 2 ? "#7b35bd" : "#dc3e87"; opacity: 0.76
+                    SequentialAnimation on scale { running: parent.parent.visible; loops: Animation.Infinite
+                        PauseAnimation { duration: index * 32 }
+                        NumberAnimation { from: 1; to: 0.02; duration: 420; easing.type: Easing.InCubic }
+                        PauseAnimation { duration: 900 }
+                        NumberAnimation { to: 1; duration: 420; easing.type: Easing.OutBack }
+                    }
+                }
+            }
+        }
+
+        Repeater {
+            model: root.transitionStyle === "waveform_sweep" ? 35 : 0
+            Rectangle { required property int index; width: Math.max(3, root.width * 0.006); radius: width / 2
+                height: root.height * (0.04 + Math.abs(Math.sin(index * 0.72)) * 0.20); y: root.height * 0.5 - height / 2
+                x: -root.width * 0.15 + index * root.width * 0.034; color: index % 2 ? "#42e7ff" : "#ff4f9a"; opacity: 0.72
+                SequentialAnimation on x { running: root.active; loops: Animation.Infinite
+                    NumberAnimation { from: -root.width * 0.15 + index * root.width * 0.034; to: root.width * 0.15 + index * root.width * 0.034; duration: 950; easing.type: Easing.InOutSine }
+                    NumberAnimation { to: -root.width * 0.15 + index * root.width * 0.034; duration: 950; easing.type: Easing.InOutSine }
+                }
+            }
+        }
+
+        Rectangle {
+            id: jukeboxArch; visible: root.transitionStyle === "jukebox_flip"; anchors.horizontalCenter: parent.horizontalCenter; y: root.height * 0.08
+            width: root.width * 0.50; height: root.height * 0.80; radius: width / 2; color: "#181029"; border.width: 12; border.color: "#f6c945"; opacity: 0.58
+            SequentialAnimation on scale { running: jukeboxArch.visible; loops: Animation.Infinite
+                NumberAnimation { from: 0.94; to: 1.04; duration: 800; easing.type: Easing.InOutSine }
+                NumberAnimation { to: 0.94; duration: 800; easing.type: Easing.InOutSine }
+            }
+        }
+
+        Repeater {
+            model: root.transitionStyle === "laser_fan" ? 9 : 0
+            Rectangle { required property int index; width: 3; height: root.height * 1.1; x: root.width / 2; y: root.height * 0.32
+                transformOrigin: Item.Bottom; rotation: -64 + index * 16; color: index % 2 ? "#58f2ff" : "#c26cff"; opacity: 0.54
+                SequentialAnimation on rotation { running: root.active; loops: Animation.Infinite
+                    NumberAnimation { from: -64 + index * 16; to: -54 + index * 16; duration: 900 + index * 45; easing.type: Easing.InOutSine }
+                    NumberAnimation { to: -64 + index * 16; duration: 900 + index * 45; easing.type: Easing.InOutSine }
+                }
+            }
+        }
+
+        Item { anchors.fill: parent; visible: root.transitionStyle === "film_countdown"
+            Rectangle { anchors.centerIn: parent; width: Math.min(root.width, root.height) * 0.72; height: width; radius: width / 2; color: "transparent"; border.width: 3; border.color: "#a8ead8b8" }
+            Rectangle { id: filmSweep; width: 2; height: parent.height; color: "#70ead8b8"; opacity: 0.6
+                SequentialAnimation on x { running: root.active && root.transitionStyle === "film_countdown"; loops: Animation.Infinite
+                    NumberAnimation { from: root.width * 0.18; to: root.width * 0.80; duration: 180 }
+                    PauseAnimation { duration: 520 }
+                }
+            }
+        }
+
+        Rectangle {
+            id: polaroid; visible: root.transitionStyle === "polaroid_drop"; anchors.centerIn: parent
+            width: root.width * 0.46; height: root.height * 0.58; color: "#f2eadf"; border.width: 10; border.color: "#f2eadf"; opacity: 0.42
+            SequentialAnimation on rotation { running: polaroid.visible; loops: Animation.Infinite
+                NumberAnimation { from: -14; to: 4; duration: 650; easing.type: Easing.OutBack }
+                PauseAnimation { duration: 950 }
+                NumberAnimation { to: 14; duration: 480; easing.type: Easing.InCubic }
+            }
+        }
+    }
+
     Rectangle {
         id: flash
         anchors.fill: parent
@@ -5900,7 +6143,7 @@ Rectangle {
         id: confettiBurst
         anchors.fill: parent
         z: 19
-        visible: root.effectsEnabled
+        visible: root.effectsEnabled && root.transitionStyle === "confetti_drop"
         Repeater {
             model: 42
             Item {
@@ -6373,12 +6616,16 @@ class RenderThreadShowScreenVfx(QFrame):
         )
         self.raise_()
 
-    def show_singer_start(self, singer: str, title: str = "", artist: str = ""):
-        self._root.showSingerStart(str(singer or ""), str(title or ""), str(artist or ""))
+    def show_singer_start(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
+        self._root.showSingerStart(
+            str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
+        )
         self.raise_()
 
-    def show_song_outro(self, singer: str, title: str = "", artist: str = ""):
-        self._root.showSongOutro(str(singer or ""), str(title or ""), str(artist or ""))
+    def show_song_outro(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
+        self._root.showSongOutro(
+            str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
+        )
         self.raise_()
 
     def hide_transition(self, immediate: bool = False):
@@ -6482,7 +6729,7 @@ class VideoAreaWidget(QWidget):
         self._next_up_overlay_log("hidden reason=countdown_complete; QR restored")
         self.update()
 
-    def show_singer_start_vfx(self, singer: str, title: str = "", artist: str = ""):
+    def show_singer_start_vfx(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is None:
             # Intel uses the painter-only sequence (no countdown/native Quick
@@ -6493,13 +6740,13 @@ class VideoAreaWidget(QWidget):
             )
             return True
         try:
-            overlay.show_singer_start(singer, title, artist)
+            overlay.show_singer_start(singer, title, artist, style)
             return True
         except Exception as exc:
             _diag(f"[SHOW-VFX] singer-start failed: {exc}")
             return False
 
-    def show_song_outro_vfx(self, singer: str, title: str = "", artist: str = ""):
+    def show_song_outro_vfx(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
         if not bool(getattr(self, "_show_vfx_enabled", True)):
             return False
         overlay = getattr(self, "_show_vfx_overlay", None)
@@ -6507,7 +6754,7 @@ class VideoAreaWidget(QWidget):
             self._show_fallback_transition("APPLAUSE!", singer, title, artist)
             return True
         try:
-            overlay.show_song_outro(singer, title, artist)
+            overlay.show_song_outro(singer, title, artist, style)
             return True
         except Exception as exc:
             _diag(f"[SHOW-VFX] song-outro failed: {exc}")
@@ -12130,6 +12377,17 @@ class VideoWindow(QWidget):
         self._ticker_surface_guard_timer.timeout.connect(self._tick_ticker_surface_guard)
         self._ticker_surface_guard_timer.start(3000)
 
+        # Startup can show this window on one screen and place it on the saved
+        # audience screen a few seconds later. That move reconnects the native
+        # mpv/Qt Quick children after showEvent's reassertions have already run.
+        # Debounce move/resize bursts, then refresh the retained video views and
+        # put the ticker back on top once the new screen geometry has settled.
+        self._geometry_surface_reassert_timer = QTimer(self)
+        self._geometry_surface_reassert_timer.setSingleShot(True)
+        self._geometry_surface_reassert_timer.timeout.connect(
+            self._reassert_surfaces_after_geometry_change
+        )
+
     def showEvent(self, event):
         super().showEvent(event)
         owner = getattr(self, "_external_owner", None)
@@ -12163,6 +12421,25 @@ class VideoWindow(QWidget):
             ticker.update()
         except Exception:
             pass
+
+    def _schedule_geometry_surface_reassert(self):
+        try:
+            timer = getattr(self, "_geometry_surface_reassert_timer", None)
+            if timer is not None:
+                timer.start(180)
+        except Exception:
+            pass
+
+    def _reassert_surfaces_after_geometry_change(self):
+        if not self.isVisible():
+            return
+        owner = getattr(self, "_external_owner", None)
+        refresh = getattr(owner, "_refresh_mpv_video_views", None) if owner is not None else None
+        if callable(refresh):
+            refresh("video_window_geometry")
+        reassert = getattr(owner, "_schedule_show_ticker_reassert", None) if owner is not None else None
+        if callable(reassert):
+            reassert("video_window_geometry", delays=(0, 120, 400))
 
     def _attach_show_vfx(self, area):
         if not _native_quick_child_surfaces_supported():
@@ -12296,6 +12573,7 @@ class VideoWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._schedule_geometry_surface_reassert()
         try:
             now = time.monotonic()
             if (now - float(getattr(self, "_resize_diag_last_ts", 0.0))) >= 1.0:
@@ -12307,6 +12585,10 @@ class VideoWindow(QWidget):
                 self._resize_diag_last_ts = now
         except Exception:
             pass
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._schedule_geometry_surface_reassert()
 
     def mouseDoubleClickEvent(self, event):
         """Toggle fullscreen on double-click"""
@@ -18632,6 +18914,37 @@ class KaraokeApp(QWidget):
                     LEGACY_SHARED_BASE_MS + saved_fine - MPV_CDG_BASE_OFFSET_MS))
                 self.settings["cdg_timing_offset_ms"] = 0
             self.settings["cdg_timing_engine_split_migrated"] = True
+            changed = True
+        if not bool(self.settings.get("mpv_cdg_minus_50_baseline_migrated", False)):
+            # Show testing established +100ms as the normal mpv fine tuning.
+            # Carry it in the baseline so the control returns to zero without
+            # changing the effective timing on already-calibrated installs.
+            if "cdg_timing_offset_mpv_ms" in self.settings:
+                try:
+                    saved_fine = int(
+                        self.settings.get("cdg_timing_offset_mpv_ms", 0) or 0
+                    )
+                except Exception:
+                    saved_fine = 0
+                self.settings["cdg_timing_offset_mpv_ms"] = max(
+                    -3000, min(3000, saved_fine - 100)
+                )
+            self.settings["mpv_cdg_minus_50_baseline_migrated"] = True
+            changed = True
+        if not bool(self.settings.get("mpv_mp4_100_baseline_migrated", False)):
+            # Preserve the effective timing while moving the show-calibrated
+            # +100ms mpv trim into the baseline and returning the control to 0.
+            if "mp4_timing_offset_mpv_ms" in self.settings:
+                try:
+                    saved_fine = int(
+                        self.settings.get("mp4_timing_offset_mpv_ms", 0) or 0
+                    )
+                except Exception:
+                    saved_fine = 0
+                self.settings["mp4_timing_offset_mpv_ms"] = max(
+                    -3000, min(3000, saved_fine - MPV_MP4_BASE_OFFSET_MS)
+                )
+            self.settings["mpv_mp4_100_baseline_migrated"] = True
             changed = True
         if not bool(self.settings.get("end_silence_threshold_2_5_migrated", False)):
             # Earlier releases used 6s by default and show testing commonly
@@ -26142,7 +26455,8 @@ class KaraokeApp(QWidget):
         mp4_offset_spin.setRange(-3000, 3000)
         mp4_offset_spin.setSingleStep(10)
         try:
-            mp4_offset_spin.setValue(self._effective_mp4_timing_offset_ms())
+            mp4_offset_spin.setValue(max(-3000, min(3000, int(
+                self.settings.get(self._mp4_timing_offset_key(), 0) or 0))))
         except Exception:
             mp4_offset_spin.setValue(0)
         mp4to_row.addWidget(mp4_offset_spin)
@@ -37239,19 +37553,42 @@ class KaraokeApp(QWidget):
         except Exception:
             state = {}
         try:
+            style = str(state.pop("_pending_show_transition_style", "") or "")
+            if not style:
+                style = self._next_show_transition_style()
             shown = False
             for window_name in ("video_window", "preview_window"):
                 area = getattr(state.get(window_name), "video_area", None)
                 if area is not None and hasattr(area, "show_singer_start_vfx"):
-                    shown = bool(area.show_singer_start_vfx(singer_display, title, artist)) or shown
+                    shown = bool(area.show_singer_start_vfx(singer_display, title, artist, style)) or shown
             _diag(
                 f"[SHOW-VFX] singer-start shown={int(shown)} "
-                f"generation={generation!r} singer={str(singer_display or '')!r}"
+                f"generation={generation!r} singer={str(singer_display or '')!r} style={style}"
             )
             return shown
         except Exception as exc:
             _diag(f"[SHOW-VFX] app singer-start trigger failed: {exc}")
         return False
+
+    def _next_show_transition_style(self) -> str:
+        state = object.__getattribute__(self, "__dict__")
+        settings = state.get("settings")
+        configured = (
+            settings.get("show_transition_effects", SHOW_TRANSITION_EFFECTS)
+            if isinstance(settings, dict)
+            else SHOW_TRANSITION_EFFECTS
+        )
+        if not isinstance(configured, (list, tuple)):
+            configured = SHOW_TRANSITION_EFFECTS
+        enabled = tuple(str(value) for value in configured if str(value) in SHOW_TRANSITION_EFFECTS)
+        if not enabled:
+            enabled = ("moving_spotlights",)
+        bag = state.get("_show_transition_shuffle_bag")
+        if not isinstance(bag, ShowTransitionShuffleBag) or state.get("_show_transition_effects_key") != enabled:
+            bag = ShowTransitionShuffleBag(enabled)
+            state["_show_transition_shuffle_bag"] = bag
+            state["_show_transition_effects_key"] = enabled
+        return bag.next()
 
     def _song_outro_payload_from_current(self) -> dict:
         try:
@@ -37497,6 +37834,8 @@ class KaraokeApp(QWidget):
             _diag(f"[SONG-OUTRO] skipped reason={reason}; singer unavailable")
             return False
         try:
+            style = self._next_show_transition_style()
+            state["_pending_show_transition_style"] = style
             shown = False
             for window_name in ("video_window", "preview_window"):
                 area = getattr(state.get(window_name), "video_area", None)
@@ -37506,8 +37845,12 @@ class KaraokeApp(QWidget):
                     singer,
                     str(payload.get("title", "") or ""),
                     str(payload.get("artist", "") or ""),
+                    style,
                 )) or shown
-            _diag(f"[SONG-OUTRO] shown={int(shown)} reason={reason} singer={singer!r}; QR follows")
+            _diag(
+                f"[SONG-OUTRO] shown={int(shown)} reason={reason} singer={singer!r} "
+                f"style={style}; QR follows"
+            )
             return shown
         except Exception as exc:
             _diag(f"[SONG-OUTRO] failed reason={reason}: {exc}")
@@ -39300,24 +39643,6 @@ class KaraokeApp(QWidget):
             "server_skipped",
         }
 
-    def _is_replaceable_empty_slot_reason(self, reason: str) -> bool:
-        """Reasons whose preserved slot may be filled by a waitlisted replacement.
-
-        Wider than _is_server_terminal_empty_slot_reason, which governs repeat
-        preservation and must stay server-only. The host removing a singer's
-        last song in the app is the ordinary way a song gets swapped, and it
-        left the singer's replacement stuck on the waitlist: the slot was held
-        for 180s but the promotion refused it because the reason was not
-        server-originated, so the operator had to add it by hand.
-
-        This does not resurrect anything the host removed -- a request the host
-        deleted carries a tombstone and never reaches this path. It only lets a
-        DIFFERENT song take the place the singer already held.
-        """
-        if self._is_server_terminal_empty_slot_reason(reason):
-            return True
-        return str(reason or "").strip().lower() == "host_remove_song"
-
     def _mark_rotation_slot_temporarily_empty(self, singer: dict, *, reason: str = "song_removed") -> bool:
         if not isinstance(singer, dict) or not self._is_rotation_mode():
             return False
@@ -39418,68 +39743,6 @@ class KaraokeApp(QWidget):
     def _should_preserve_rotation_identity(self, singer) -> bool:
         """Backward-compatible wrapper for older rotation identity call sites."""
         return self._should_preserve_empty_singer_row(singer)
-
-    def _promote_waitlisted_phone_replacement_into_empty_slot(self, req: dict | None) -> bool:
-        """Keep a singer's position when they replace their last song by phone.
-
-        A phone deletion leaves a short-lived empty rotation row. Waitlist mode
-        should still hold genuinely new singers, but a new request belonging to
-        that exact row is a replacement and may fill it without reordering the
-        room.
-        """
-        if not self._is_rotation_mode() or not isinstance(req, dict):
-            return False
-        state = str(req.get("state") or "").strip().lower()
-        if state not in {"waiting", "failed", "failed_needs_review"}:
-            return False
-        singer_name = str(req.get("singer") or "").strip()
-        if not singer_name:
-            return False
-        singer_idx = self._queue_singer_match_index(singer_name, req)
-        if singer_idx < 0:
-            return False
-        try:
-            singer = self.queue[singer_idx]
-        except Exception:
-            return False
-        if singer.get("songs") or not bool(singer.get("temporary_empty_slot", False)):
-            return False
-        if not self._is_replaceable_empty_slot_reason(singer.get("empty_slot_reason", "")):
-            return False
-        try:
-            if time.time() >= float(singer.get("empty_slot_until") or 0):
-                return False
-        except Exception:
-            return False
-        rid = self._waiting_for_add_request_id(req)
-        try:
-            added = bool(self.process_external_request(dict(req)))
-        except Exception as exc:
-            _diag(f"[ROTATION-SLOT] phone replacement add failed request_id={rid}: {exc}")
-            return False
-        if not added:
-            return False
-        handled = getattr(self, "_waiting_for_add_handled_ids", None)
-        if not isinstance(handled, set):
-            handled = set()
-            self._waiting_for_add_handled_ids = handled
-        if rid > 0:
-            handled.add(rid)
-            try:
-                self._mark_waiting_for_add_delivered_async(rid, req)
-            except Exception:
-                pass
-            pending = getattr(self, "_waiting_for_add_requests", None)
-            if isinstance(pending, dict):
-                pending.pop(rid, None)
-        self._clear_temporary_empty_rotation_slot(singer, reason="phone_replacement_promoted")
-        self._schedule_waiting_for_add_view_refresh(reason="phone_replacement_promoted")
-        _diag(
-            "[ROTATION-SLOT] promoted phone replacement into preserved slot "
-            f"singer={singer_name!r} request_id={rid} singer_idx={singer_idx} "
-            f"slot_reason={str(singer.get('empty_slot_reason', '') or '')!r}"
-        )
-        return True
 
     def _clear_queue_songs_preserving_singers(self, *, reason: str = "host_clear_queue") -> int:
         """Clear queued songs without treating empty song lists as singer deletion."""
@@ -44890,8 +45153,13 @@ class KaraokeApp(QWidget):
             if str(getattr(self, "_current_karaoke_mode", "") or "").lower() == "mp4":
                 t = getattr(self, "karaoke_transport", None)
                 if t is not None and hasattr(t, "set_video_offset_ms"):
-                    t.set_video_offset_ms(ms)
-                    _diag(f"[VIDEO-OFFSET] live MP4 offset engine={engine} total={ms:+d}ms")
+                    effective_ms = self._effective_mp4_timing_offset_ms()
+                    t.set_video_offset_ms(effective_ms)
+                    _diag(
+                        f"[VIDEO-OFFSET] live MP4 offset engine={engine} "
+                        f"base={self._mp4_timing_base_offset_ms():+d}ms "
+                        f"fine={ms:+d}ms total={effective_ms:+d}ms"
+                    )
         except Exception:
             pass
 
@@ -45225,14 +45493,15 @@ class KaraokeApp(QWidget):
         )
 
     def _effective_mp4_timing_offset_ms(self) -> int:
-        """MP4 visual offset for the active engine. No baseline: unlike CDG,
-        neither engine has a systematic decoder offset to compensate, so this is
-        operator trim only."""
+        """Return the active engine's MP4 baseline plus saved fine tuning."""
         try:
-            return max(-3000, min(3000, int(
-                self.settings.get(self._mp4_timing_offset_key(), 0) or 0)))
+            fine_ms = int(self.settings.get(self._mp4_timing_offset_key(), 0) or 0)
         except Exception:
-            return 0
+            fine_ms = 0
+        return max(-3000, min(3000, self._mp4_timing_base_offset_ms() + fine_ms))
+
+    def _mp4_timing_base_offset_ms(self) -> int:
+        return MPV_MP4_BASE_OFFSET_MS if self._cdg_timing_engine() == "mpv" else 0
 
     def _effective_visual_timer_interval_ms(self) -> int:
         """Throttle visual polling only. Audio timing remains authoritative."""
@@ -53330,9 +53599,6 @@ class KaraokeApp(QWidget):
                     logged_historical.add((request_id, state))
                 continue
             if self._is_waiting_for_add_request(req):
-                if self._promote_waitlisted_phone_replacement_into_empty_slot(req):
-                    local_remote_ids.add(request_id)
-                    continue
                 hold_reason = str(req.get("pending_reason") or req.get("attention_reason") or "")
                 if (request_id, state, hold_reason) not in logged_holding:
                     logged_holding.add((request_id, state, hold_reason))

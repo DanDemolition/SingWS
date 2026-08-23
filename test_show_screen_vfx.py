@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import random
 import sys
 import unittest
 from pathlib import Path
@@ -31,6 +32,30 @@ mod = load_main_module()
 
 
 class ShowScreenVfxTests(unittest.TestCase):
+    def test_selected_transition_set_is_complete_and_shuffle_bagged(self):
+        expected = {
+            "curtain_reveal", "moving_spotlights", "neon_scan", "spinning_record",
+            "confetti_drop", "audio_pulse", "camera_iris", "marquee_lightbulbs",
+            "color_ribbon_wipe", "star_tunnel", "mosaic_tile_reveal",
+            "waveform_sweep", "jukebox_flip", "laser_fan", "film_countdown",
+            "polaroid_drop",
+        }
+        self.assertEqual(set(mod.SHOW_TRANSITION_EFFECTS), expected)
+        self.assertEqual(set(mod.DEFAULTS["show_transition_effects"]), expected)
+        bag = mod.ShowTransitionShuffleBag(mod.SHOW_TRANSITION_EFFECTS, random.Random(17))
+        first = [bag.next() for _ in expected]
+        second = [bag.next() for _ in expected]
+        self.assertEqual(set(first), expected)
+        self.assertEqual(set(second), expected)
+        self.assertNotEqual(first[-1], second[0])
+
+    def test_all_selected_styles_live_in_the_existing_single_qml_surface(self):
+        source = mod.QML_SHOW_SCREEN_VFX_SOURCE
+        for effect in mod.SHOW_TRANSITION_EFFECTS:
+            self.assertIn(f'root.transitionStyle === "{effect}"', source)
+        self.assertEqual(source.count("id: styleLayer"), 1)
+        self.assertNotIn("QQuickView", source)
+
     def test_qml_has_next_up_countdown_and_stage_effects(self):
         source = mod.QML_SHOW_SCREEN_VFX_SOURCE
         self.assertIn("function showNextUp", source)
@@ -47,7 +72,7 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertIn("id: songOutroSequence", source)
         self.assertIn("signal nextUpCountdownFinished()", source)
         self.assertIn("root.nextUpCountdownFinished()", source)
-        spotlights = source[source.index("id: spotlights"):source.index("id: flash")]
+        spotlights = source[source.index("id: spotlights"):source.index("id: styleLayer")]
         self.assertIn("model: 3", spotlights)
         self.assertIn("RotationAnimator", spotlights)
         self.assertNotIn("XAnimator", spotlights)
@@ -77,13 +102,14 @@ class ShowScreenVfxTests(unittest.TestCase):
         overlay.resize(960, 540)
         overlay.show()
         before = int(overlay._root.property("burstSerial") or 0)
-        overlay.show_singer_start("Jordan", "Purple Rain", "Prince")
+        overlay.show_singer_start("Jordan", "Purple Rain", "Prince", "camera_iris")
         QTest.qWait(100)
         self.assertTrue(overlay._root.property("startCountdownActive"))
         self.assertEqual(int(overlay._root.property("startCountdownValue") or 0), 3)
         self.assertEqual(int(overlay._root.property("burstSerial") or 0), before)
         self.assertEqual(overlay._root.property("singerText"), "Jordan")
         self.assertEqual(overlay._root.property("songText"), "Purple Rain")
+        self.assertEqual(overlay._root.property("transitionStyle"), "camera_iris")
         QTest.qWait(3050)
         self.assertFalse(overlay._root.property("startCountdownActive"))
         self.assertEqual(int(overlay._root.property("startCountdownValue") or 0), 0)
@@ -172,11 +198,11 @@ class ShowScreenVfxTests(unittest.TestCase):
             def show_next_up(self, payload, duration):
                 calls.append(("next", dict(payload), duration))
 
-            def show_singer_start(self, singer, title, artist):
-                calls.append(("start", singer, title, artist))
+            def show_singer_start(self, singer, title, artist, style):
+                calls.append(("start", singer, title, artist, style))
 
-            def show_song_outro(self, singer, title, artist):
-                calls.append(("outro", singer, title, artist))
+            def show_song_outro(self, singer, title, artist, style):
+                calls.append(("outro", singer, title, artist, style))
 
             def hide_transition(self, immediate=False):
                 calls.append(("hide", bool(immediate)))
@@ -189,8 +215,8 @@ class ShowScreenVfxTests(unittest.TestCase):
         area.show_song_outro_vfx("Maya", "Halo", "Beyoncé")
         area.hide_next_up_overlay(immediate=True, reason="test")
         self.assertEqual(calls[0][0], "next")
-        self.assertEqual(calls[1], ("start", "Maya", "Halo", "Beyoncé"))
-        self.assertEqual(calls[2], ("outro", "Maya", "Halo", "Beyoncé"))
+        self.assertEqual(calls[1], ("start", "Maya", "Halo", "Beyoncé", "moving_spotlights"))
+        self.assertEqual(calls[2], ("outro", "Maya", "Halo", "Beyoncé", "moving_spotlights"))
         self.assertEqual(calls[3], ("hide", True))
 
     def test_disabled_show_vfx_retains_basic_countdown_but_suppresses_other_events(self):
