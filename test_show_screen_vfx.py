@@ -49,12 +49,54 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(set(second), expected)
         self.assertNotEqual(first[-1], second[0])
 
+    def test_outro_and_next_singer_get_separate_transition_draws(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        singer_start = source[source.index("def _trigger_show_screen_singer_start_vfx"):]
+        singer_start = singer_start[:singer_start.index("def _next_show_transition_style")]
+        outro = source[source.index("def _mark_next_up_overlay_pending_after_completion"):]
+        outro = outro[:outro.index("def _consume_next_up_overlay_for_transition")]
+
+        self.assertIn("style = self._next_show_transition_style()", singer_start)
+        self.assertIn("style = self._next_show_transition_style()", outro)
+        self.assertNotIn('state["_pending_show_transition_style"] = style', outro)
+
     def test_all_selected_styles_live_in_the_existing_single_qml_surface(self):
         source = mod.QML_SHOW_SCREEN_VFX_SOURCE
         for effect in mod.SHOW_TRANSITION_EFFECTS:
             self.assertIn(f'root.transitionStyle === "{effect}"', source)
         self.assertEqual(source.count("id: styleLayer"), 1)
         self.assertNotIn("QQuickView", source)
+
+    def test_shuffled_style_is_not_hidden_behind_the_countdown_veil(self):
+        source = mod.QML_SHOW_SCREEN_VFX_SOURCE
+        style_layer = source[source.index("id: styleLayer"):]
+        style_layer = style_layer[:style_layer.index('visible: root.active && root.effectsEnabled')]
+        countdown = source[source.index("id: startCountdownStage"):]
+        countdown = countdown[:countdown.index('text: "GET READY')]
+        spotlights = source[source.index("id: spotlights"):]
+        spotlights = spotlights[:spotlights.index("clip: true")]
+        confetti = source[source.index("id: confettiBurst"):]
+        confetti = confetti[:confetti.index("visible: root.effectsEnabled")]
+
+        self.assertIn("z: 22", style_layer)
+        self.assertIn("z: 22", spotlights)
+        self.assertIn("z: 22", confetti)
+        self.assertIn('color: "#52070612"', countdown)
+        self.assertNotIn('color: "#f2070612"', countdown)
+
+    def test_shared_explosion_only_runs_for_the_confetti_style(self):
+        source = mod.QML_SHOW_SCREEN_VFX_SOURCE
+        self.assertIn(
+            'readonly property bool burstStyle: transitionStyle === "confetti_drop"',
+            source,
+        )
+        singer_sequence = source[source.index("id: singerStartSequence"):]
+        singer_sequence = singer_sequence[:singer_sequence.index("id: songOutroSequence")]
+        outro_sequence = source[source.index("id: songOutroSequence"):]
+        outro_sequence = outro_sequence[:outro_sequence.index("id: overlayExit")]
+        for sequence in (singer_sequence, outro_sequence):
+            self.assertIn("root.burstStyle ?", sequence)
+            self.assertNotIn("target: shockwave; from: 0.0; to: 1.0", sequence)
 
     def test_qml_has_next_up_countdown_and_stage_effects(self):
         source = mod.QML_SHOW_SCREEN_VFX_SOURCE

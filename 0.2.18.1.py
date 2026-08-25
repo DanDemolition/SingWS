@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.5.9"
+APP_VERSION = "0.4.6.0"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -124,6 +124,7 @@ import hashlib
 import song_index  # local module (~/SingWS/singws.db)
 import phrase_markers  # local module (~/SingWS/phrase_markers.db) — Phrase-Aligned Song Start
 import phrase_detect  # local module — tempo/beat analysis + beat-aligned loops
+import transition_analysis  # pure, fail-closed audio/visual transition metadata
 try:
     from mutagen import File as MutagenFile
 except Exception:
@@ -1834,6 +1835,17 @@ BG_MUSIC_INDEX_PATH = APP_USER_DIR / "bgmusic.json"
 # level. Analysis runs in the background; playback just reads the cached gain.
 # BGM applies this per source deck, under the user volume/fade master.
 LOUDNESS_CACHE_PATH = APP_USER_DIR / "loudness.json"
+# Separate, additive cache: changing transition algorithms never invalidates
+# the existing LUFS/peak work in loudness.json.
+TRANSITION_ANALYSIS_CACHE_PATH = APP_USER_DIR / "transition-analysis.json"
+_transition_analysis_cache = transition_analysis.TransitionAnalysisCache(
+    TRANSITION_ANALYSIS_CACHE_PATH
+)
+_transition_analysis_cache_loaded = False
+_transition_analysis_cache_loading = False
+_transition_analysis_cache_lock = threading.Lock()
+_transition_analysis_last_save_ts = 0.0
+_TRANSITION_ANALYSIS_SAVE_INTERVAL_S = 10.0
 LOUDNESS_TARGET_LUFS = -16.0
 LOUDNESS_MAX_GAIN_DB = 12.0      # clamp so a bad measurement can't blow out volume
 LOUDNESS_MIN_GAIN_DB = -18.0
@@ -1846,6 +1858,66 @@ _loudness_cancel_event = threading.Event()
 # Serialize loudness analysis so only one short-lived libmpv PCM decode runs
 # at a time and cannot starve live playback on weaker Intel Macs.
 _loudness_sem = threading.Semaphore(1)
+
+
+def transition_analysis_cached(path: str):
+    """Return validated transition metadata without doing live decode work."""
+    global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
+    with _transition_analysis_cache_lock:
+        if not _transition_analysis_cache_loaded:
+            if not _transition_analysis_cache_loading:
+                _transition_analysis_cache_loading = True
+
+                def _load_transition_cache():
+                    global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
+                    with _transition_analysis_cache_lock:
+                        try:
+                            _transition_analysis_cache.load()
+                        except Exception as exc:
+                            _diag(f"[TRANSITION] cache load failed; safe fallback active: {exc}")
+                        finally:
+                            _transition_analysis_cache_loaded = True
+                            _transition_analysis_cache_loading = False
+
+                threading.Thread(
+                    target=_load_transition_cache, daemon=True,
+                    name="transition-cache-load",
+                ).start()
+            # Never parse a library-sized JSON file on the playback/UI path.
+            return None
+        return _transition_analysis_cache.get(str(path or ""))
+
+
+def _transition_analysis_cached_sync(path: str):
+    """Worker-thread cache read used by enumeration/backfill, never the UI."""
+    global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
+    with _transition_analysis_cache_lock:
+        if not _transition_analysis_cache_loaded:
+            _transition_analysis_cache.load()
+            _transition_analysis_cache_loaded = True
+            _transition_analysis_cache_loading = False
+        return _transition_analysis_cache.get(str(path or ""))
+
+
+def _transition_analysis_store(record, *, force: bool = False) -> bool:
+    """Incrementally persist one valid result without touching loudness.json."""
+    global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
+    global _transition_analysis_last_save_ts
+    try:
+        with _transition_analysis_cache_lock:
+            if not _transition_analysis_cache_loaded:
+                _transition_analysis_cache.load()
+                _transition_analysis_cache_loaded = True
+                _transition_analysis_cache_loading = False
+            _transition_analysis_cache.put(record)
+            now = time.monotonic()
+            if force or (now - _transition_analysis_last_save_ts) >= _TRANSITION_ANALYSIS_SAVE_INTERVAL_S:
+                _transition_analysis_cache.save()
+                _transition_analysis_last_save_ts = now
+        return True
+    except Exception as exc:
+        _diag(f"[TRANSITION] cache write failed file={getattr(record, 'path', '')!r}: {exc}")
+        return False
 
 
 def _loudness_workers_allowed() -> bool:
@@ -3272,6 +3344,7 @@ DEFAULTS = {
     "empty_rotation_slot_timeout_sec": 180, # keep a singer's place briefly while replacing a removed song
     "intro_loop_enabled": False,            # between songs: loop the next song's intro (instead of BGM)
     "intro_loop_bars": 8,                   # bars to loop: 4 / 8 / 16
+    "seamless_transitions_enabled": True,  # master safety switch; OFF preserves normal physical EOS behavior
     "karaoke_bgm_crossfade_enabled": False, # allow intentional karaoke -> BGM overlap at song end
     "karaoke_allow_early_silence_trim": False, # advanced: may end karaoke early after sustained trailing silence
     "end_silence_trim_enabled": False,     # CDG/ZIP/MP4: optional early trim; off to preserve complete endings
@@ -3939,6 +4012,9 @@ class BackgroundMusicPlayer(QObject):
         self._bg_first_play_logged = False
         self._bg_volume_probe_generation = 0
         self._bg_last_volume_source = "default"
+        self._startup_preload_generation = 0
+        self._startup_preload_in_progress = False
+        self._startup_preload_resume_request = None
         self._init_bass_engine()
 
     def _platform_audio_label(self) -> str:
@@ -4594,15 +4670,39 @@ class BackgroundMusicPlayer(QObject):
                 return
             pos_sec, dur_sec = engine.get_times()
             time_left = dur_sec - pos_sec
-            crossfade_start_time = self.crossfade_duration_ms / 1000.0
+            adaptive_ms, adaptive_reason = self._adaptive_crossfade_duration_ms()
+            crossfade_start_time = adaptive_ms / 1000.0
             if self._check_bg_tail_silence(pos_sec, dur_sec, time_left):
                 print(f"[BG] trailing silence detected at {pos_sec:.1f}s — advancing early")
                 self._start_crossfade()
                 return
             if dur_sec > 0.0 and 0.0 < time_left <= crossfade_start_time:
+                _diag(
+                    f"[TRANSITION] BGM crossfade selected duration={adaptive_ms}ms "
+                    f"reason={adaptive_reason} track={Path(self.playlist[self.current_index]).name!r}"
+                )
                 print(f"Starting BASSmix crossfade with {time_left:.1f}s left in track")
-                self._start_crossfade()
+                self._start_crossfade(duration_ms=adaptive_ms)
             return
+
+    def _adaptive_crossfade_duration_ms(self):
+        """Select from cached metadata only; missing data keeps configured timing."""
+        configured = max(2000, min(8000, int(self.crossfade_duration_ms)))
+        try:
+            host = self.parent()
+            settings = getattr(host, "settings", {}) if host is not None else {}
+            if not bool(settings.get("seamless_transitions_enabled", True)):
+                return configured, "seamless_disabled"
+            if not self.playlist:
+                return configured, "no_playlist"
+            current_file = self.playlist[self.current_index]
+            record = transition_analysis_cached(current_file)
+            seconds, reason = transition_analysis.select_bgm_crossfade_seconds(
+                record, default_seconds=configured / 1000.0,
+            )
+            return int(round(seconds * 1000.0)), reason
+        except Exception:
+            return configured, "safe_fallback"
 
     def get_playback_times(self) -> tuple[float, float]:
         """Return (position_seconds, duration_seconds) for current BG track."""
@@ -4638,7 +4738,7 @@ class BackgroundMusicPlayer(QObject):
                 return False
         return False
     
-    def _start_crossfade(self, target_index=None):
+    def _start_crossfade(self, target_index=None, duration_ms=None):
         """Start crossfade to next track"""
         # Reset trailing-silence detector for the upcoming track.
         self._bg_silence_accum_s = 0.0
@@ -4653,9 +4753,12 @@ class BackgroundMusicPlayer(QObject):
                 else (self.current_index + 1) % len(self.playlist)
             )
             next_file = self.playlist[next_index]
+            selected_duration_ms = max(
+                2000, min(8000, int(duration_ms or self.crossfade_duration_ms))
+            )
             try:
                 norm_gain, info = self._bg_norm_factor_for_path(next_file)
-                if not self._bass_engine.start_crossfade(next_file, self.crossfade_duration_ms, norm_gain=norm_gain):
+                if not self._bass_engine.start_crossfade(next_file, selected_duration_ms, norm_gain=norm_gain):
                     return False
                 _diag(f"[BG-AUDIO] track={Path(next_file).name} deck=secondary chain={self._bg_dsp_chain_label(next_file, info)}")
                 print(f"Starting BASSmix crossfade to: {Path(next_file).name}")
@@ -4665,7 +4768,7 @@ class BackgroundMusicPlayer(QObject):
                 self._bass_crossfade_generation += 1
                 generation = int(self._bass_crossfade_generation)
                 QTimer.singleShot(
-                    max(1, int(self.crossfade_duration_ms)),
+                    max(1, selected_duration_ms),
                     lambda g=generation: self._complete_crossfade(g),
                 )
                 return True
@@ -4736,6 +4839,104 @@ class BackgroundMusicPlayer(QObject):
                 return False
         return False
 
+    def preload_current_track_paused_async(self) -> bool:
+        """Prescan the startup BGM source off the GUI thread, then attach it."""
+        if not self._bass_ready() or not self.playlist:
+            return False
+        engine = self._bass_engine
+        if engine.primary is not None:
+            return True
+        # Only the native BASS backend exposes a safe split between slow file
+        # prescan and live mixer mutation. Other backends remain lazy and load
+        # on first Play instead of moving QObject work to a Python thread.
+        if not (
+            hasattr(engine, "prepare_primary")
+            and hasattr(engine, "install_prepared_primary")
+            and hasattr(engine, "discard_prepared_primary")
+        ):
+            _diag("[BG-BASS] startup preload skipped; backend has no worker-safe prepare path")
+            return False
+        if bool(getattr(self, "_startup_preload_in_progress", False)):
+            return True
+
+        current_file = str(self.playlist[self.current_index])
+        target = self._sync_volume_from_ui_or_settings("startup-preload-queue")
+        norm_gain, info = self._bg_norm_factor_for_path(current_file)
+        self._startup_preload_generation += 1
+        generation = int(self._startup_preload_generation)
+        self._startup_preload_in_progress = True
+        _diag(f"[BG-BASS] startup preload queued track={Path(current_file).name!r}")
+
+        def _worker():
+            prepared = None
+            error = ""
+            started = time.monotonic()
+            try:
+                prepared = engine.prepare_primary(current_file, norm_gain=norm_gain)
+            except Exception as exc:
+                error = str(exc)
+
+            def _finish():
+                resume_request = getattr(self, "_startup_preload_resume_request", None)
+                stale = (
+                    generation != int(getattr(self, "_startup_preload_generation", 0) or 0)
+                    or engine is not getattr(self, "_bass_engine", None)
+                    or not self.playlist
+                    or str(self.playlist[self.current_index]) != current_file
+                )
+                if stale or error or prepared is None:
+                    if prepared is not None:
+                        engine.discard_prepared_primary(prepared)
+                    if generation == int(getattr(self, "_startup_preload_generation", 0) or 0):
+                        self._startup_preload_in_progress = False
+                        self._startup_preload_resume_request = None
+                    _diag(
+                        f"[BG-BASS] startup preload discarded stale={int(stale)} "
+                        f"error={error[:160]!r}"
+                    )
+                    return
+                try:
+                    installed = bool(engine.install_prepared_primary(prepared, volume=target))
+                except Exception as exc:
+                    installed = False
+                    error_text = str(exc)
+                else:
+                    error_text = ""
+                self._startup_preload_in_progress = False
+                self._startup_preload_resume_request = None
+                if not installed:
+                    _diag(f"[BG-BASS] startup preload attach failed error={error_text[:160]!r}")
+                    if resume_request:
+                        if resume_request[0] == "fade":
+                            self.fade_in(*resume_request[1:])
+                        else:
+                            self.play()
+                    return
+                self.is_playing = False
+                self._bg_volume_diag(
+                    "startup-preload-ready", current_file,
+                    extra=f"elapsed_ms={(time.monotonic() - started) * 1000.0:.0f} target={target:.3f}",
+                )
+                _diag(
+                    f"[BG-BASS] startup preload ready track={Path(current_file).name!r} "
+                    f"chain={self._bg_dsp_chain_label(current_file, info)}"
+                )
+                if resume_request:
+                    _diag(f"[BG-BASS] honoring queued startup action={resume_request[0]}")
+                    if resume_request[0] == "fade":
+                        self.fade_in(*resume_request[1:])
+                    else:
+                        self.play()
+
+            host = self.parent()
+            if host is not None and hasattr(host, "_run_on_ui_thread"):
+                host._run_on_ui_thread(_finish)
+            elif prepared is not None:
+                engine.discard_prepared_primary(prepared)
+
+        threading.Thread(target=_worker, daemon=True, name="bgm-startup-preload").start()
+        return True
+
 
     def play(self):
         """Start/resume background music"""
@@ -4750,6 +4951,11 @@ class BackgroundMusicPlayer(QObject):
                
         if not self.enabled:
             print("BG disabled; play() ignored")
+            return
+
+        if bool(getattr(self, "_startup_preload_in_progress", False)):
+            self._startup_preload_resume_request = ("play",)
+            _diag("[BG-BASS] play queued behind startup preload")
             return
 
         if self._bass_ready():
@@ -4801,6 +5007,11 @@ class BackgroundMusicPlayer(QObject):
         
     def stop(self):
         """Stop background music"""
+        self._startup_preload_generation = int(
+            getattr(self, "_startup_preload_generation", 0) or 0
+        ) + 1
+        self._startup_preload_in_progress = False
+        self._startup_preload_resume_request = None
         if self._bass_ready():
             self._bass_fade_generation += 1
             self._bass_crossfade_generation += 1
@@ -5051,6 +5262,13 @@ class BackgroundMusicPlayer(QObject):
         if target_volume is None:
             target_volume = self._target_volume_from_ui()
             print(f"Using target volume from UI/setting: {target_volume}")
+
+        if bool(getattr(self, "_startup_preload_in_progress", False)):
+            self._startup_preload_resume_request = (
+                "fade", target_volume, duration_ms, allow_during_karaoke,
+            )
+            _diag("[BG-BASS] fade-in queued behind startup preload")
+            return
 
         if self._bass_ready():
             try:
@@ -5680,6 +5898,7 @@ Rectangle {
     property bool startCountdownActive: false
     property int burstSerial: 0
     property string transitionStyle: "moving_spotlights"
+    readonly property bool burstStyle: transitionStyle === "confetti_drop"
     signal nextUpCountdownFinished()
 
     function showNextUp(singer, song, artist, onDeck, durationSeconds) {
@@ -5836,6 +6055,7 @@ Rectangle {
     Item {
         id: spotlights
         anchors.fill: parent
+        z: 22
         visible: root.active && root.effectsEnabled && root.transitionStyle === "moving_spotlights"
         opacity: 0.42
         clip: true
@@ -5912,7 +6132,10 @@ Rectangle {
     Item {
         id: styleLayer
         anchors.fill: parent
-        z: 8
+        // Keep shuffled artwork immediately beneath the singer/countdown
+        // typography. It used to sit at z=8 behind a 95%-opaque z=24 panel,
+        // so logs changed style while every audience transition looked alike.
+        z: 22
         visible: root.active && root.effectsEnabled
         clip: true
 
@@ -6142,7 +6365,7 @@ Rectangle {
     Item {
         id: confettiBurst
         anchors.fill: parent
-        z: 19
+        z: 22
         visible: root.effectsEnabled && root.transitionStyle === "confetti_drop"
         Repeater {
             model: 42
@@ -6298,7 +6521,10 @@ Rectangle {
 
         Rectangle {
             anchors.fill: parent
-            color: "#f2070612"
+            // A readable veil, not an opaque replacement for the selected
+            // transition beneath it. The old #f2 alpha hid every shuffled
+            // style and left only the common 3-2-1 sequence visible.
+            color: "#52070612"
         }
 
         Text {
@@ -6480,13 +6706,13 @@ Rectangle {
         id: singerStartSequence
         ParallelAnimation {
             OpacityAnimator { target: backdrop; from: 0.96; to: 0.82; duration: 130 }
-            OpacityAnimator { target: flash; from: 0.0; to: 0.95; duration: 75 }
-            OpacityAnimator { target: shockwave; from: 0.0; to: 1.0; duration: 70 }
+            OpacityAnimator { target: flash; from: 0.0; to: root.burstStyle ? 0.95 : 0.0; duration: 75 }
+            OpacityAnimator { target: shockwave; from: 0.0; to: root.burstStyle ? 1.0 : 0.0; duration: 70 }
             ScaleAnimator { target: shockwave; from: 0.15; to: 4.8; duration: 680; easing.type: Easing.OutCubic }
         }
         ParallelAnimation {
-            OpacityAnimator { target: flash; from: 0.95; to: 0.0; duration: 300; easing.type: Easing.OutCubic }
-            OpacityAnimator { target: shockwave; from: 1.0; to: 0.0; duration: 360; easing.type: Easing.OutQuad }
+            OpacityAnimator { target: flash; from: root.burstStyle ? 0.95 : 0.0; to: 0.0; duration: 300; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: shockwave; from: root.burstStyle ? 1.0 : 0.0; to: 0.0; duration: 360; easing.type: Easing.OutQuad }
             OpacityAnimator { target: nowPanel; from: 0.0; to: 1.0; duration: 280; easing.type: Easing.OutCubic }
             ScaleAnimator { target: nowPanel; from: 0.40; to: 1.12; duration: 480; easing.type: Easing.OutBack }
             RotationAnimator { target: nowPanel; from: -5; to: 0; duration: 480; easing.type: Easing.OutBack }
@@ -6505,24 +6731,24 @@ Rectangle {
         id: songOutroSequence
         ParallelAnimation {
             OpacityAnimator { target: backdrop; from: 0.0; to: 0.92; duration: 150; easing.type: Easing.OutCubic }
-            OpacityAnimator { target: flash; from: 0.0; to: 1.0; duration: 70 }
-            OpacityAnimator { target: shockwave; from: 0.0; to: 1.0; duration: 60 }
+            OpacityAnimator { target: flash; from: 0.0; to: root.burstStyle ? 1.0 : 0.0; duration: 70 }
+            OpacityAnimator { target: shockwave; from: 0.0; to: root.burstStyle ? 1.0 : 0.0; duration: 60 }
             ScaleAnimator { target: shockwave; from: 0.10; to: 5.6; duration: 620; easing.type: Easing.OutCubic }
             OpacityAnimator { target: outroPanel; from: 0.0; to: 1.0; duration: 210; easing.type: Easing.OutCubic }
             ScaleAnimator { target: outroPanel; from: 0.36; to: 1.14; duration: 480; easing.type: Easing.OutBack }
         }
         ParallelAnimation {
-            OpacityAnimator { target: flash; from: 1.0; to: 0.0; duration: 240; easing.type: Easing.OutCubic }
-            OpacityAnimator { target: shockwave; from: 1.0; to: 0.0; duration: 320; easing.type: Easing.OutQuad }
+            OpacityAnimator { target: flash; from: root.burstStyle ? 1.0 : 0.0; to: 0.0; duration: 240; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: shockwave; from: root.burstStyle ? 1.0 : 0.0; to: 0.0; duration: 320; easing.type: Easing.OutQuad }
             ScaleAnimator { target: outroPanel; from: 1.14; to: 1.0; duration: 170; easing.type: Easing.OutBounce }
         }
         ScriptAction { script: root.burstSerial += 1 }
         ParallelAnimation {
-            OpacityAnimator { target: flash; from: 0.0; to: 0.52; duration: 65 }
+            OpacityAnimator { target: flash; from: 0.0; to: root.burstStyle ? 0.52 : 0.0; duration: 65 }
             ScaleAnimator { target: outroPanel; from: 1.0; to: 1.07; duration: 120; easing.type: Easing.OutQuad }
         }
         ParallelAnimation {
-            OpacityAnimator { target: flash; from: 0.52; to: 0.0; duration: 180; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: flash; from: root.burstStyle ? 0.52 : 0.0; to: 0.0; duration: 180; easing.type: Easing.OutCubic }
             ScaleAnimator { target: outroPanel; from: 1.07; to: 1.0; duration: 170; easing.type: Easing.OutBack }
         }
         PauseAnimation { duration: 520 }
@@ -12967,7 +13193,7 @@ class AnalyzeLibraryWorker(QObject):
         super().__init__()
         # items: list of (primary_path, audio_path, display_name)
         self.items = list(items or [])
-        self.mode = "fast" if mode == "fast" else "full"
+        self.mode = mode if mode in {"fast", "full", "transition"} else "full"
         # Callable returning True while karaoke is playing.  Scanning underneath
         # a live song is what produced 744 GUI stalls (worst 6.1s) on
         # 2026-08-16, so the pass holds between tracks instead of grinding on.
@@ -12980,7 +13206,9 @@ class AnalyzeLibraryWorker(QObject):
         self._cancel_event.set()
 
     def is_cancelled(self):
-        return self._cancel or self._cancel_event.is_set() or (not _loudness_workers_allowed())
+        return self._cancel or self._cancel_event.is_set() or (
+            self.mode != "transition" and not _loudness_workers_allowed()
+        )
 
     def _hold_for_playback(self):
         """Block between tracks while karaoke is playing. Returns False if cancelled."""
@@ -13023,6 +13251,7 @@ class AnalyzeLibraryWorker(QObject):
                 break
             _source, audio, name = item[:3]
             cache_key = str(item[3] if len(item) > 3 else audio or "")
+            primary_path = str(item[4] if len(item) > 4 else cache_key or audio or "")
             done += 1
             # Cached failures can be skipped thousands per second. Emitting a
             # queued Qt signal for every one floods the GUI event queue and
@@ -13047,12 +13276,32 @@ class AnalyzeLibraryWorker(QObject):
                         raise RuntimeError("ZIP does not contain exactly one readable MP3")
                     audio = extracted_audio
                 sig = _loudness_file_sig(cache_key)
+                existing_loudness = loudness_info_cached(cache_key)
+                envelope = None
                 with _loudness_sem:
-                    lufs, peak_db = _measure_loudness_lufs(
-                        audio, cancel_check=self.is_cancelled, mode=self.mode,
-                        session=session)
+                    if self.mode in {"full", "transition"} and session is not None and getattr(session, "usable", False):
+                        try:
+                            lufs, peak_db, envelope = session.measure_transition(
+                                audio, timeout=120.0,
+                            )
+                        except Exception:
+                            lufs, peak_db = _measure_loudness_lufs(
+                                audio, cancel_check=self.is_cancelled, mode="full",
+                                session=session,
+                            )
+                    else:
+                        lufs, peak_db = _measure_loudness_lufs(
+                            audio, cancel_check=self.is_cancelled,
+                            mode=("fast" if self.mode == "fast" else "full"),
+                            session=session)
                 if self.is_cancelled():
                     break
+                # A transition-only backfill necessarily decodes the stream,
+                # and the combined filter emits LUFS too. Preserve the already
+                # accepted full loudness result instead of rewriting it.
+                if existing_loudness is not None and existing_loudness.get("mode") == "full":
+                    lufs = float(existing_loudness["lufs"])
+                    peak_db = existing_loudness.get("peak_db")
                 if lufs is not None and sig is not None:
                     with _loudness_lock:
                         _loudness_cache[cache_key] = {
@@ -13060,7 +13309,7 @@ class AnalyzeLibraryWorker(QObject):
                             "peak_db": peak_db,
                             "mtime": sig[0],
                             "size": sig[1],
-                            "mode": self.mode,
+                            "mode": "fast" if self.mode == "fast" else "full",
                         }
                     _loudness_save_cache(force=False)
                     analyzed += 1
@@ -13072,6 +13321,49 @@ class AnalyzeLibraryWorker(QObject):
                         )
                     except Exception:
                         pass
+                    if envelope:
+                        transition_record = transition_analysis.build_audio_transition_analysis(
+                            path=cache_key,
+                            media_kind=("bgm" if str(_source).lower() == "bgm" else "karaoke"),
+                            duration=len(envelope) * transition_analysis.DEFAULT_HOP_SECONDS,
+                            envelope_db=envelope,
+                            integrated_lufs=lufs,
+                            peak_db=peak_db,
+                        )
+                        if transition_record is not None and _transition_analysis_store(transition_record):
+                            _diag(
+                                f"[TRANSITION] audio metadata cached file={os.path.basename(cache_key)!r} "
+                                f"audio_start={transition_record.audio_start} "
+                                f"audio_end={transition_record.audio_end} "
+                                f"fade_start={transition_record.fade_start}"
+                            )
+                    if envelope and primary_path.lower().endswith(".cdg"):
+                        visual = transition_analysis.analyze_cdg_visual(primary_path)
+                        with _transition_analysis_cache_lock:
+                            visual_record = _transition_analysis_cache.merge_visual_result(
+                                path=primary_path, media_kind="cdg",
+                                duration=float(visual.duration or 0.0), result=visual,
+                            )
+                        if visual_record is not None:
+                            _transition_analysis_store(visual_record)
+                    elif envelope and primary_path.lower().endswith(".mp4"):
+                        try:
+                            from libmpv_media_jobs import sample_video_tail_metrics
+                            visual = transition_analysis.analyze_mp4_visual_offline(
+                                primary_path,
+                                duration=len(envelope) * transition_analysis.DEFAULT_HOP_SECONDS,
+                                metric_sampler=sample_video_tail_metrics,
+                            )
+                            with _transition_analysis_cache_lock:
+                                visual_record = _transition_analysis_cache.merge_visual_result(
+                                    path=primary_path, media_kind="mp4",
+                                    duration=len(envelope) * transition_analysis.DEFAULT_HOP_SECONDS,
+                                    result=visual,
+                                )
+                            if visual_record is not None:
+                                _transition_analysis_store(visual_record)
+                        except Exception as exc:
+                            _diag(f"[TRANSITION] MP4 visual backfill failed file={primary_path!r}: {exc}")
                 else:
                     failed += 1
                     if not self.is_cancelled():
@@ -13097,6 +13389,15 @@ class AnalyzeLibraryWorker(QObject):
                 session.close()
             except Exception:
                 pass
+        # Flush the final batch so cancellation/quit resumes from the last
+        # successfully analyzed track without rewriting the growing JSON file
+        # for every item.
+        try:
+            with _transition_analysis_cache_lock:
+                if _transition_analysis_cache_loaded:
+                    _transition_analysis_cache.save()
+        except Exception as exc:
+            _diag(f"[TRANSITION] final cache flush failed: {exc}")
         if skipped:
             _diag(f"[LOUDNESS-LIB] skipped {skipped} file(s) that failed analysis previously")
         _loudness_save_cache()
@@ -13119,9 +13420,12 @@ class AnalyzeLibraryPreparationWorker(QObject):
 
     def run(self):
         try:
-            items = self.app._library_loudness_analysis_items(
-                force=self.force, mode=self.mode
-            )
+            if self.mode == "transition":
+                items = self.app._library_transition_analysis_items(force=self.force)
+            else:
+                items = self.app._library_loudness_analysis_items(
+                    force=self.force, mode=self.mode
+                )
             self.finished.emit({"items": items, "error": ""})
         except Exception as exc:
             self.finished.emit({"items": [], "error": str(exc)})
@@ -23059,6 +23363,7 @@ class KaraokeApp(QWidget):
             _diag(f"[VIDEO-OFFSET] mpv offset apply failed: {exc}")
         self._setup_end_silence_state(mode, None)
         self._arm_audio_end_floor(audio_path)
+        self._arm_visual_end_floor(video_path, mode)
         self._update_karaoke_key_ui()
         _diag(
             f"[KARAOKE-ENGINE] engine=mpv mode={mode} "
@@ -24963,16 +25268,15 @@ class KaraokeApp(QWidget):
         return True
 
     def _karaoke_bgm_crossfade_enabled(self) -> bool:
-        """True only when the host explicitly allows BGM to overlap karaoke endings."""
-        try:
-            return bool(self.settings.get("karaoke_bgm_crossfade_enabled", False))
-        except Exception:
-            return False
+        """Duration-only karaoke/BGM overlap is retired for lyric safety."""
+        return False
 
     def _karaoke_early_silence_trim_enabled(self) -> bool:
         """True only for the advanced legacy early-end silence trim path."""
         try:
             return (
+                bool(self.settings.get("seamless_transitions_enabled", True))
+                and
                 bool(self.settings.get("karaoke_allow_early_silence_trim", False))
                 and bool(self.settings.get("end_silence_trim_enabled", False))
             )
@@ -26756,9 +27060,20 @@ class KaraokeApp(QWidget):
         v.addLayout(gap_row)
 
         v.addSpacing(8)
+        seamless_transitions_cb = QCheckBox("Seamless transitions")
+        seamless_transitions_cb.setToolTip(
+            "Master safety switch. Turn off to use normal physical end-of-file behavior; "
+            "cached analysis is preserved."
+        )
+        seamless_transitions_cb.setChecked(
+            bool(self.settings.get("seamless_transitions_enabled", True))
+        )
+        v.addWidget(seamless_transitions_cb)
+
         karaoke_bgm_crossfade_cb = QCheckBox("Crossfade background music over the song end")
-        karaoke_bgm_crossfade_cb.setToolTip("Off: background music starts only after karaoke playback has fully ended.")
-        karaoke_bgm_crossfade_cb.setChecked(bool(self.settings.get("karaoke_bgm_crossfade_enabled", False)))
+        karaoke_bgm_crossfade_cb.setToolTip("Disabled: background music never overlaps active karaoke lyrics or visuals.")
+        karaoke_bgm_crossfade_cb.setChecked(False)
+        karaoke_bgm_crossfade_cb.setEnabled(False)
         v.addWidget(karaoke_bgm_crossfade_cb)
 
         end_silence_cb = QCheckBox("Use verified silent tail for background-music handoff")
@@ -27010,8 +27325,15 @@ class KaraokeApp(QWidget):
         fast_analyze_lib_btn.setToolTip("Quickly samples one minute per uncached track. Fast results safely attenuate loud tracks and can later be upgraded by Full Loudness Scan.")
         fast_analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False, mode="fast"))
         analyze_lib_btn = QPushButton("Full Loudness Scan")
-        analyze_lib_btn.setToolTip("Measures each complete track. Incremental — skips full results and upgrades tracks that only have a fast result.")
+        analyze_lib_btn.setToolTip("Measures LUFS/peak and transition audio boundaries in one decode pass. Incremental — existing full results are preserved.")
         analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False, mode="full"))
+        analyze_transitions_btn = QPushButton("Analyze Missing Transition Data")
+        analyze_transitions_btn.setToolTip(
+            "Backfills only missing audio/visual transition metadata. Existing loudness results are preserved; scanning pauses during karaoke."
+        )
+        analyze_transitions_btn.clicked.connect(
+            lambda: self.analyze_library(force=False, mode="transition")
+        )
         reanalyze_lib_btn = QPushButton("Rebuild Loudness Cache")
         reanalyze_lib_btn.setToolTip("Force a fresh LUFS/peak measurement for karaoke and background-music files.")
         reanalyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=True, mode="full"))
@@ -27025,6 +27347,7 @@ class KaraokeApp(QWidget):
         _analyze_row = QHBoxLayout()
         _analyze_row.addWidget(fast_analyze_lib_btn)
         _analyze_row.addWidget(analyze_lib_btn)
+        _analyze_row.addWidget(analyze_transitions_btn)
         _analyze_row.addWidget(reanalyze_lib_btn)
         _analyze_row.addStretch(1)
         _search_actions_card.addLayout(_analyze_row)
@@ -27308,8 +27631,22 @@ class KaraokeApp(QWidget):
             self.settings["end_silence_trim_enabled"] = bool(checked)
             self.save_settings()
 
+        def on_seamless_transitions_toggled(checked: bool):
+            self.settings["seamless_transitions_enabled"] = bool(checked)
+            if not checked:
+                # Do not interrupt the current song. Invalidating the optional
+                # early-end state makes all later timer ticks use physical EOS.
+                self._end_silence_tail_handoff_started = False
+                self._end_silence_triggered = False
+                self._bg_crossfade_prefired = False
+                _diag("[TRANSITION] seamless intelligence disabled; using physical EOS fallback")
+            else:
+                _diag("[TRANSITION] seamless intelligence enabled for future transitions")
+            self.save_settings()
+
         def on_karaoke_bgm_crossfade_toggled(checked: bool):
-            self.settings["karaoke_bgm_crossfade_enabled"] = bool(checked)
+            del checked
+            self.settings["karaoke_bgm_crossfade_enabled"] = False
             self.save_settings()
 
         def on_end_threshold_changed(value: float):
@@ -27571,6 +27908,7 @@ class KaraokeApp(QWidget):
 
         audio_output_combo.currentIndexChanged.connect(on_audio_output_changed)
         bg_gap_spin.valueChanged.connect(on_bg_gap_changed)
+        seamless_transitions_cb.toggled.connect(on_seamless_transitions_toggled)
         karaoke_bgm_crossfade_cb.toggled.connect(on_karaoke_bgm_crossfade_toggled)
         end_silence_cb.toggled.connect(on_end_silence_toggled)
         auto_advance_cb.toggled.connect(on_auto_advance_toggled)
@@ -36558,6 +36896,11 @@ class KaraokeApp(QWidget):
         self._end_silence_tail_handoff_started = False
         self._karaoke_audio_end_s = None
         self._karaoke_audio_end_path = ""
+        self._karaoke_visual_end_s = None
+        self._karaoke_visual_end_path = ""
+        self._karaoke_visual_end_confidence = 0.0
+        self._karaoke_visual_end_reason = "analysis_unavailable"
+        self._end_visual_unknown_log_ts = 0.0
         self._end_audio_hold_log_ts = 0.0
         self._end_audio_unknown_log_ts = 0.0
         self._bg_crossfade_prefired = False  # reset per-song BG pre-start flag
@@ -36659,6 +37002,101 @@ class KaraokeApp(QWidget):
             f"[END-AUDIO] last audible audio at {self._karaoke_audio_end_s:.2f}s "
             f"(trailing_silence={trailing:.2f}s duration={duration:.2f}s source={source}) "
             f"file={os.path.basename(scan_path)}"
+        )
+
+    def _arm_visual_end_floor(self, visual_path: str, mode: str):
+        """Use validated visual metadata; uncertain formats fall back to EOS."""
+        self._karaoke_visual_end_s = None
+        self._karaoke_visual_end_path = str(visual_path or "")
+        self._karaoke_visual_end_confidence = 0.0
+        self._karaoke_visual_end_reason = "analysis_unavailable"
+        mode = str(mode or "").lower()
+        if not visual_path:
+            _diag(f"[END-VISUAL] early completion unavailable mode={mode or 'unknown'}; using normal EOS")
+            return
+        if not self._karaoke_early_silence_trim_enabled():
+            return
+
+        # Cache access never blocks: while the additive cache is loading this
+        # returns None and the song safely uses physical EOS. MP4 decoding is
+        # intentionally never started from the live playback path.
+        cached = transition_analysis_cached(str(visual_path))
+        if cached is not None:
+            cached_end = getattr(cached, "visual_end", None)
+            cached_confidence = float(getattr(cached, "visual_confidence", 0.0) or 0.0)
+            if cached_end is not None and cached_confidence >= 0.85:
+                self._apply_visual_end_values(
+                    str(visual_path), mode, cached_end, cached_confidence,
+                    str(getattr(cached, "safety_reason", "cached_visual") or "cached_visual"),
+                    source="cache",
+                )
+                return
+            _diag(
+                f"[TRANSITION] {mode.upper()} cached visual metadata is uncertain; "
+                f"using physical-duration fallback file={os.path.basename(str(visual_path))}"
+            )
+
+        if mode != "cdg":
+            _diag(
+                f"[TRANSITION] {mode.upper() or 'VIDEO'} visual analysis unavailable; "
+                f"using physical-duration fallback file={os.path.basename(str(visual_path))}"
+            )
+            return
+
+        def worker(scan_path: str):
+            result = transition_analysis.analyze_cdg_visual(scan_path)
+            try:
+                self._run_on_ui_thread(lambda: self._apply_visual_end_floor(scan_path, result))
+            except Exception as exc:
+                _diag(f"[END-VISUAL] could not deliver CDG scan result: {exc}")
+
+        try:
+            threading.Thread(
+                target=worker, args=(str(visual_path),), daemon=True,
+                name="singws-cdg-visual-end-scan",
+            ).start()
+        except Exception:
+            pass
+
+    def _apply_visual_end_floor(self, scan_path: str, result):
+        if str(scan_path) != str(getattr(self, "_karaoke_visual_end_path", "")):
+            return
+        safe = bool(getattr(result, "safe_for_early_completion", False))
+        visual_end = getattr(result, "visual_end", None)
+        confidence = float(getattr(result, "confidence", 0.0) or 0.0)
+        reason = str(getattr(result, "reason", "analysis_unavailable") or "analysis_unavailable")
+        self._karaoke_visual_end_reason = reason
+        if not safe or visual_end is None or confidence < 0.85:
+            self._karaoke_visual_end_s = None
+            self._karaoke_visual_end_confidence = 0.0
+            _diag(f"[END-VISUAL] CDG early completion suppressed reason={reason} file={os.path.basename(scan_path)}")
+            return
+        self._apply_visual_end_values(
+            scan_path, "cdg", visual_end, confidence, reason, source="scan",
+        )
+
+    def _apply_visual_end_values(
+        self, scan_path: str, mode: str, visual_end: float,
+        confidence: float, reason: str, *, source: str,
+    ):
+        """Apply a validated visual floor only to the media that requested it."""
+        if str(scan_path) != str(getattr(self, "_karaoke_visual_end_path", "")):
+            _diag(f"[TRANSITION] stale visual endpoint ignored source={source}")
+            return
+        try:
+            visual_end = float(visual_end)
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            return
+        if visual_end < 0.0 or confidence < 0.85:
+            return
+        self._karaoke_visual_end_s = max(0.0, float(visual_end))
+        self._karaoke_visual_end_confidence = confidence
+        self._karaoke_visual_end_reason = str(reason or "verified_visual_end")
+        _diag(
+            f"[TRANSITION] verified {str(mode or 'visual').upper()} visual end="
+            f"{self._karaoke_visual_end_s:.2f}s confidence={confidence:.2f} "
+            f"reason={reason} source={source} file={os.path.basename(scan_path)}"
         )
 
     def _effective_karaoke_duration_ns(self, dur_ns):
@@ -37011,6 +37449,24 @@ class KaraokeApp(QWidget):
                 )
             return False
 
+        # Audio completion alone never authorizes a karaoke handoff.
+        visual_end = getattr(self, "_karaoke_visual_end_s", None)
+        visual_confidence = float(getattr(self, "_karaoke_visual_end_confidence", 0.0) or 0.0)
+        if visual_end is None or visual_confidence < 0.85:
+            self._end_silence_accum_s = 0.0
+            last_log = float(getattr(self, "_end_visual_unknown_log_ts", 0.0) or 0.0)
+            if (now - last_log) >= 10.0:
+                self._end_visual_unknown_log_ts = now
+                _diag(
+                    f"[END-VISUAL] handoff suppressed; visual endpoint unverified "
+                    f"mode={getattr(self, '_end_silence_mode', '')} "
+                    f"reason={getattr(self, '_karaoke_visual_end_reason', 'analysis_unavailable')}"
+                )
+            return False
+        if elapsed < float(visual_end):
+            self._end_silence_accum_s = 0.0
+            return False
+
         # Past the scanned audio end. With a meter, confirm it really is quiet;
         # without one, time past the verified endpoint IS the silence.
         if meterless or db <= float(self._end_silence_db_threshold):
@@ -37045,7 +37501,7 @@ class KaraokeApp(QWidget):
         # still changing" safeguard below, are left untouched.
         confident_end = remain <= float(
             getattr(self, "_end_silence_confident_remain_s", 6.0)
-        ) and (cdg_done or getattr(self, "_end_silence_mode", "") == "mp4")
+        ) and elapsed >= float(visual_end)
         if confident_end:
             threshold_s = min(
                 threshold_s,
@@ -37066,20 +37522,8 @@ class KaraokeApp(QWidget):
             duration_s = max(0.0, float(dur_ns) / float(NS_PER_SECOND))
             post_content_elapsed = elapsed >= max(60.0, duration_s * 0.35)
             reason = ""
-            if getattr(self, "_end_silence_mode", "") == "mp4":
-                if near_end:
-                    reason = "mp4_near_end_extended_silence"
-            elif cdg_done:
-                reason = "cdg_lyrics_complete_extended_silence"
-            elif cdg_stale and near_end:
-                reason = "empty_trailing_cdg_frames_extended_silence"
-            elif post_content_elapsed and self._stuck_song_confirmed(cdg_stale_for):
-                # The only reason that can fire in the MIDDLE of a song, so it
-                # needs its own, far longer evidence window -- see
-                # _stuck_song_confirmed.
-                reason = "long_no_lyrics_no_audio"
-            elif near_end:
-                reason = "near_end_extended_silence"
+            if near_end and elapsed >= float(visual_end):
+                reason = "verified_audio_and_visual_tail"
 
             # CDG/ZIP safeguard: while graphics are still changing, do not cut
             # just because the audio dips below threshold.  This protects quiet
@@ -37553,9 +37997,11 @@ class KaraokeApp(QWidget):
         except Exception:
             state = {}
         try:
-            style = str(state.pop("_pending_show_transition_style", "") or "")
-            if not style:
-                style = self._next_show_transition_style()
+            # Outro and singer-start are separate beats in the gap. Give each
+            # one its own shuffle-bag draw; carrying the outro style forward
+            # made every effect appear twice in a row during a live show.
+            state.pop("_pending_show_transition_style", None)
+            style = self._next_show_transition_style()
             shown = False
             for window_name in ("video_window", "preview_window"):
                 area = getattr(state.get(window_name), "video_area", None)
@@ -37835,7 +38281,6 @@ class KaraokeApp(QWidget):
             return False
         try:
             style = self._next_show_transition_style()
-            state["_pending_show_transition_style"] = style
             shown = False
             for window_name in ("video_window", "preview_window"):
                 area = getattr(state.get(window_name), "video_area", None)
@@ -40441,9 +40886,8 @@ class KaraokeApp(QWidget):
         if not audio:
             return None
         name = str(track.get("display") or track.get("title") or os.path.basename(primary))
-        if pl.endswith(".zip"):
-            return ("Karaoke", audio, name, primary)
-        return ("Karaoke", audio, name)
+        cache_key = primary if pl.endswith(".zip") else audio
+        return ("Karaoke", audio, name, cache_key, primary)
 
     def _bgm_analysis_items(self) -> list[tuple[str, str, str]]:
         """BGM tracks to include in batch loudness analysis."""
@@ -40503,7 +40947,7 @@ class KaraokeApp(QWidget):
             if key in seen:
                 continue
             seen.add(key)
-            items.append(("BGM", path, os.path.basename(path)))
+            items.append(("BGM", path, os.path.basename(path), path, path))
         return items
 
     def _library_loudness_analysis_items(self, force: bool = False, mode: str = "full"):
@@ -40541,17 +40985,65 @@ class KaraokeApp(QWidget):
                 cached_gain = loudness_gain_db_cached(cache_key)
                 if cached_gain is not None:
                     cached = loudness_info_cached(cache_key) or {"mode": "full"}
-                    if mode == "fast" or cached.get("mode") == "full":
+                    transition_record = _transition_analysis_cached_sync(cache_key)
+                    transition_complete = bool(
+                        transition_record is not None
+                        and transition_record.audio_start is not None
+                        and transition_record.audio_end is not None
+                    )
+                    if mode == "fast" or (
+                        cached.get("mode") == "full" and transition_complete
+                    ):
                         continue
             label = f"{source}: {name or os.path.basename(audio)}"
-            items.append((source, audio, label, cache_key) if len(item) > 3 else (source, audio, label))
+            primary = str(item[4] if len(item) > 4 else cache_key or audio or "")
+            items.append((source, audio, label, cache_key, primary))
+        return items
+
+    def _library_transition_analysis_items(self, force: bool = False):
+        """Return only files missing additive audio/visual transition fields."""
+        raw_items = []
+        for track in list(getattr(self, "tracks", []) or []):
+            item = self._analysis_audio_for_track(track)
+            if item:
+                raw_items.append(item)
+        raw_items.extend(self._bgm_analysis_items())
+
+        seen = set()
+        items = []
+        for item in raw_items:
+            source, audio, name = item[:3]
+            cache_key = str(item[3] if len(item) > 3 else audio or "")
+            primary = str(item[4] if len(item) > 4 else cache_key or audio or "")
+            if not audio or not cache_key or not os.path.exists(audio):
+                continue
+            identity = (os.path.abspath(cache_key), os.path.abspath(primary))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            audio_record = _transition_analysis_cached_sync(cache_key)
+            audio_complete = bool(
+                audio_record is not None
+                and audio_record.audio_start is not None
+                and audio_record.audio_end is not None
+            )
+            ext = os.path.splitext(primary)[1].lower()
+            visual_complete = True
+            if ext in {".cdg", ".mp4"}:
+                visual_record = _transition_analysis_cached_sync(primary)
+                visual_complete = bool(
+                    visual_record is not None and visual_record.visual_method
+                )
+            if force or not (audio_complete and visual_complete):
+                label = f"{source}: {name or os.path.basename(audio)}"
+                items.append((source, audio, label, cache_key, primary))
         return items
 
     def analyze_library(self, force: bool = False, mode: str = "full"):
         """Analyze static loudness/gain for karaoke and BGM libraries."""
-        mode = "fast" if mode == "fast" else "full"
+        mode = mode if mode in {"fast", "full", "transition"} else "full"
         from PyQt6.QtWidgets import QProgressDialog
-        if not self._any_loudness_normalization_active():
+        if mode != "transition" and not self._any_loudness_normalization_active():
             _diag("[LOUDNESS-LIB] skipped reason=normalization_disabled")
             QMessageBox.information(
                 self,
@@ -40572,7 +41064,10 @@ class KaraokeApp(QWidget):
         if getattr(self, "_analyze_preparing", False):
             return
         self._analyze_preparing = True
-        self._set_processing_text("Preparing loudness scan…", auto_dismiss_ms=None)
+        self._set_processing_text(
+            "Preparing transition scan…" if mode == "transition" else "Preparing loudness scan…",
+            auto_dismiss_ms=None,
+        )
         prep_thread = QThread(self)
         prep_worker = AnalyzeLibraryPreparationWorker(self, force, mode)
         prep_worker.moveToThread(prep_thread)
@@ -40598,12 +41093,14 @@ class KaraokeApp(QWidget):
 
     def _start_analyze_library_items(self, items, mode: str = "full"):
         """Create the progress UI after background file enumeration completes."""
-        mode = "fast" if mode == "fast" else "full"
+        mode = mode if mode in {"fast", "full", "transition"} else "full"
         from PyQt6.QtWidgets import QProgressDialog
         tracks = list(getattr(self, "tracks", []) or [])
 
         if not items:
-            QMessageBox.information(self, "Cache Loudness Levels",
+            QMessageBox.information(self, "Analyze Track Data",
+                                    "Nothing to measure — every track already has transition data."
+                                    if mode == "transition" else
                                     ("Nothing to measure — every track already has a loudness result."
                                      if mode == "fast" else
                                      "Nothing to measure — every track already has a full loudness result.")
@@ -40619,9 +41116,10 @@ class KaraokeApp(QWidget):
             _prog_parent = QApplication.activeModalWidget()
         except Exception:
             _prog_parent = None
-        scan_name = "Fast" if mode == "fast" else "Full"
-        dlg = QProgressDialog(f"{scan_name} loudness scan for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
-        dlg.setWindowTitle(f"{scan_name} Loudness Scan")
+        scan_name = "Transitions" if mode == "transition" else ("Fast" if mode == "fast" else "Full")
+        scan_subject = "transition scan" if mode == "transition" else "loudness scan"
+        dlg = QProgressDialog(f"{scan_name} {scan_subject} for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
+        dlg.setWindowTitle(f"{scan_name} Analysis")
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(True)
         dlg.setAutoReset(True)
@@ -40647,7 +41145,10 @@ class KaraokeApp(QWidget):
         # show is nearly wall-to-wall playback, so a held pass barely advances
         # and an operator who needs it to finish has no way through. The hold is
         # therefore a setting, not a law.
-        hold_for_playback = bool(self.settings.get("loudness_scan_holds_for_playback", True))
+        hold_for_playback = (
+            True if mode == "transition"
+            else bool(self.settings.get("loudness_scan_holds_for_playback", True))
+        )
         if not hold_for_playback:
             _diag("[LOUDNESS-LIB] playback hold disabled by setting; scanning under live playback")
         worker = AnalyzeLibraryWorker(
@@ -40660,7 +41161,7 @@ class KaraokeApp(QWidget):
         def _on_progress(done, total, name):
             try:
                 dlg.setValue(done - 1)
-                dlg.setLabelText(f"{scan_name} loudness scan {done}/{total}…\n{name}")
+                dlg.setLabelText(f"{scan_name} {scan_subject} {done}/{total}…\n{name}")
             except Exception:
                 pass
 
@@ -40671,7 +41172,7 @@ class KaraokeApp(QWidget):
                 return
             try:
                 dlg.setLabelText(
-                    f"{scan_name} loudness scan paused while karaoke is playing…\n"
+                    f"{scan_name} {scan_subject} paused while karaoke is playing…\n"
                     "It resumes automatically between songs."
                 )
             except RuntimeError:
@@ -40691,9 +41192,9 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             if cancelled:
-                self._set_processing_text(f"Cancelled {scan_name.lower()} loudness scan after {analyzed} of {total} track(s).")
+                self._set_processing_text(f"Cancelled {scan_name.lower()} {scan_subject} after {analyzed} of {total} track(s).")
             else:
-                self._set_processing_text(f"{scan_name} loudness scan cached {analyzed} of {total} track(s).")
+                self._set_processing_text(f"{scan_name} {scan_subject} cached {analyzed} of {total} track(s).")
 
         worker.progress.connect(_on_progress)
         worker.holding.connect(_on_holding)
@@ -43999,9 +44500,11 @@ class KaraokeApp(QWidget):
             self.bg_music.playlist = paths
             self.bg_music.current_index = 0
             print(f"[BG] Startup loaded playlist with {len(paths)} track(s)")
-            # Warm audio path once on startup to reduce first-play hiccup.
+            # Prescan the first source on a worker. BASS_STREAM_PRESCAN can
+            # take multiple seconds on network/large files and must never run
+            # from a zero-delay GUI timer during launch.
             try:
-                QTimer.singleShot(0, self.bg_music.preload_current_track_paused)
+                QTimer.singleShot(0, self.bg_music.preload_current_track_paused_async)
             except Exception:
                 pass
         except Exception as e:
@@ -50063,10 +50566,15 @@ class KaraokeApp(QWidget):
                         if bool(getattr(self, "_karafun_handoff_complete", False)):
                             break
                         time.sleep(0.1)
-                    if bool(getattr(self, "_karafun_handoff_complete", False)):
+                    handoff_ready = bool(getattr(self, "_karafun_handoff_complete", False))
+                    entry["karafun_handoff_timed_out_before_play"] = not handoff_ready
+                    if handoff_ready:
                         _diag("[KARAFUN-AUTO] fullscreen audience handoff ready before play")
                     else:
-                        _diag("[KARAFUN-AUTO] fullscreen audience handoff timed out before play")
+                        _diag(
+                            "[KARAFUN-AUTO] fullscreen audience handoff timed out before play; "
+                            "arming accelerated playback verification"
+                        )
                 _diag(f"[KARAFUN-AUTO] activating KaraFun result mode={parts[0]} x={parts[1]} y={parts[2]}")
                 activation_point = (int(float(parts[1])), int(float(parts[2])))
                 entry["karafun_result_activation_point"] = activation_point
@@ -50158,9 +50666,15 @@ class KaraokeApp(QWidget):
                 # The pre-click probe is already a positive playback
                 # verification. Do not immediately run the same expensive AX
                 # scan again while the fullscreen handoff is starting.
-                verified_playing = bool(ok and initial_probe_state == "PLAYING")
+                # Fast start deliberately skips the probe, so its synthetic
+                # PLAYING value is permission to continue asynchronously, not
+                # evidence that KaraFun actually started. The completion
+                # monitor performs that verification without holding up audio.
+                verified_playing = bool(
+                    ok and initial_probe_state == "PLAYING" and not fast_start
+                )
                 last_playback_probe = ""
-                if not verified_playing:
+                if not verified_playing and not fast_start:
                     for probe_attempt in range(12):
                         time.sleep(1.0)
                         ok, probe_result, probe_error = self._run_karafun_applescript_sync(playback_probe_script, timeout=5)
@@ -50170,7 +50684,7 @@ class KaraokeApp(QWidget):
                             _schedule_early_handoff("playback_verified")
                             verified_playing = True
                             break
-                if not verified_playing:
+                if not verified_playing and not fast_start:
                     raise RuntimeError(f"KaraFun did not report active playback after Play ({last_playback_probe or 'unknown state'})")
                 if not entry.get("karafun_playback_clock_started_at"):
                     entry["karafun_playback_clock_started_at"] = time.monotonic()
@@ -50299,6 +50813,7 @@ class KaraokeApp(QWidget):
     # Fast start assumes playback; these bound how long that assumption may go
     # unverified before the monitor presses play, and then warns the operator.
     KARAFUN_PLAYBACK_RECOVERY_DELAY_S = 12.0
+    KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S = 6.0
     KARAFUN_PLAYBACK_ALERT_DELAY_S = 40.0
 
     def _start_karafun_completion_monitor(self, entry: dict):
@@ -50328,6 +50843,7 @@ class KaraokeApp(QWidget):
         # pressed play by hand 32s in). These drive one recovery press.
         playback_assumed = bool(entry.get("karafun_playback_assumed", False))
         recovery_pressed = False
+        playing_hint_count = 0
         last_state = ""
         last_clock_candidates = {}
         idle_stop_count = 0
@@ -50401,7 +50917,7 @@ class KaraokeApp(QWidget):
 
         def _monitor():
             nonlocal seen_playback, last_state, last_clock_candidates, idle_stop_count
-            nonlocal playback_confirmed_at, recovery_pressed
+            nonlocal playback_confirmed_at, recovery_pressed, playing_hint_count
 
             def _confirm_playback():
                 nonlocal playback_confirmed_at, seen_playback
@@ -50509,17 +51025,28 @@ class KaraokeApp(QWidget):
                                 _confirm_playback()
                     last_clock_candidates = next_clock_candidates
                     if playing_reported:
-                        _confirm_playback()
+                        playing_hint_count += 1
                         idle_stop_count = 0
-                        # Timestamp of the newest confirmed "still playing"
-                        # reading. The duration watchdog reads this to avoid
-                        # cutting a song KaraFun has not finished.
-                        entry["karafun_last_playing_ts"] = time.monotonic()
+                        # A single stale Pause/Stop accessibility label is not
+                        # proof that playback began. Require it on consecutive
+                        # polls; an advancing player clock above confirms
+                        # immediately and is handled earlier in this block.
+                        if playing_hint_count >= 2:
+                            _confirm_playback()
+                            # Timestamp of the newest confirmed "still playing"
+                            # reading. The duration watchdog reads this to avoid
+                            # cutting a song KaraFun has not finished.
+                            entry["karafun_last_playing_ts"] = time.monotonic()
                     elif idle_reported and seen_playback:
+                        playing_hint_count = 0
                         idle_stop_count += 1
                     else:
+                        playing_hint_count = 0
                         idle_stop_count = 0
-                    state_label = f"idle={int(idle_reported)} playing={int(playing_reported)} remaining={remaining}"
+                    state_label = (
+                        f"idle={int(idle_reported)} playing={int(playing_reported)} "
+                        f"playing_streak={playing_hint_count} remaining={remaining}"
+                    )
                     if state_label != last_state:
                         _diag(f"[KARAFUN] monitor state {state_label} idle_stop_count={idle_stop_count}")
                         last_state = state_label
@@ -50537,12 +51064,13 @@ class KaraokeApp(QWidget):
                     remaining = fallback_remaining
                     remaining_from_fallback = True
                 age = time.monotonic() - started
+                recovery_delay = (
+                    self.KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S
+                    if bool(entry.get("karafun_handoff_timed_out_before_play", False))
+                    else self.KARAFUN_PLAYBACK_RECOVERY_DELAY_S
+                )
                 if remaining is not None and remaining > 5:
-                    if remaining_from_fallback:
-                        # Derived from the fallback clock itself -- not evidence
-                        # that KaraFun has started, and must never rebase it.
-                        seen_playback = True
-                    else:
+                    if not remaining_from_fallback:
                         _confirm_playback()
                 # Recovery: if result activation did not take, pressing Play
                 # while KaraFun is still idle has no loaded song to start. Retry
@@ -50552,8 +51080,7 @@ class KaraokeApp(QWidget):
                     playback_assumed
                     and not recovery_pressed
                     and playback_confirmed_at is None
-                    and age > self.KARAFUN_PLAYBACK_RECOVERY_DELAY_S
-                    and not playing_reported
+                    and age > recovery_delay
                 ):
                     recovery_pressed = True
                     _diag(
@@ -50600,7 +51127,6 @@ class KaraokeApp(QWidget):
                     playback_assumed
                     and recovery_pressed
                     and playback_confirmed_at is None
-                    and not playing_reported
                     and age > self.KARAFUN_PLAYBACK_ALERT_DELAY_S
                     and str(entry.get("karafun_status") or "") != "manual"
                 ):

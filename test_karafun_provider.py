@@ -298,6 +298,8 @@ class KaraFunProviderTests(unittest.TestCase):
         # Fast start does not observe playback, it assumes it; the monitor
         # verifies and presses play once if the assumption was wrong.
         self.assertIn('entry["karafun_playback_assumed"] = True', worker)
+        self.assertIn('entry["karafun_handoff_timed_out_before_play"] = not handoff_ready', worker)
+        self.assertIn("arming accelerated playback verification", worker)
         self.assertIn("playback verify attempt=", worker)
         self.assertIn("def _schedule_early_handoff", worker)
         self.assertIn("def _schedule_bgm_fade", worker)
@@ -316,8 +318,9 @@ class KaraFunProviderTests(unittest.TestCase):
         ]
         self.assertIn('if bool(self.settings.get("karafun_manage_show_screen", True)):', pre_play_handoff)
         self.assertNotIn("if self._karafun_transparent_renderer_ready:", pre_play_handoff)
-        self.assertIn('verified_playing = bool(ok and initial_probe_state == "PLAYING")', worker)
-        self.assertIn("if not verified_playing:", worker)
+        self.assertIn('and initial_probe_state == "PLAYING" and not fast_start', worker)
+        self.assertIn("if not verified_playing and not fast_start:", worker)
+        self.assertEqual(worker.count("if not verified_playing and not fast_start:"), 2)
         self.assertIn('while bool(getattr(self, "_karafun_handoff_in_progress", False))', worker)
         self.assertIn("KaraFun did not report active playback after Play", worker)
         self.assertIn('adjustment_signature = f"key={requested_key};tempo={requested_tempo}"', source)
@@ -361,6 +364,11 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("idle_stop_count = 0", monitor)
         self.assertIn("idle_stop_count += 1", monitor)
         self.assertIn("idle_stop_count >= 2 and age > 8.0", monitor)
+        self.assertIn("playing_hint_count >= 2", monitor)
+        self.assertIn("playing_streak={playing_hint_count}", monitor)
+        self.assertIn("KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S", monitor)
+        self.assertIn('entry.get("karafun_handoff_timed_out_before_play", False)', monitor)
+        self.assertNotIn("seen_playback = True\n                    else:", monitor)
         self.assertIn('entry.get("karafun_playback_clock_started_at")', monitor)
         self.assertIn("fallback_duration={fallback_duration} clock_age=", monitor)
         self.assertIn("remaining_from_fallback = True", monitor)

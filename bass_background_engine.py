@@ -76,6 +76,8 @@ class _Deck:
     path: str
     handle: int
     norm_gain: float = 1.0
+    mtime: int = 0
+    size: int = 0
 
 
 def _runtime_roots() -> list[Path]:
@@ -635,20 +637,77 @@ class BassBackgroundEngine:
 
     def _make_deck(self, path: str, volume: float, norm_gain: float = 1.0) -> _Deck:
         self._ensure_mixer()
+        deck = self.prepare_primary(path, norm_gain=norm_gain)
+        try:
+            self._attach_prepared_deck(deck, volume)
+        except Exception:
+            self.discard_prepared_primary(deck)
+            raise
+        return deck
+
+    def prepare_primary(self, path: str, norm_gain: float = 1.0) -> _Deck:
+        """Open/prescan a source without touching the live mixer.
+
+        BASS_STREAM_PRESCAN is the slow part for some files. Keeping mixer
+        attachment separate lets startup perform that disk work on a worker
+        while all live graph mutations remain on the UI thread.
+        """
         flags = BASS_SAMPLE_FLOAT | BASS_STREAM_DECODE | BASS_STREAM_PRESCAN
         handle = int(self.bass.BASS_StreamCreateFile(0, os.fsencode(path), 0, 0, flags))
         if not handle:
             raise self._error(f"BASS_StreamCreateFile({Path(path).name})")
+        try:
+            stat = os.stat(path)
+            mtime, size = int(stat.st_mtime), int(stat.st_size)
+        except OSError:
+            mtime, size = 0, 0
+        return _Deck(str(path), handle, self._norm_factor(norm_gain), mtime, size)
+
+    def _attach_prepared_deck(self, deck: _Deck, volume: float) -> None:
+        self._ensure_mixer()
         if not self.mix.BASS_Mixer_StreamAddChannel(
             self.mixer,
-            handle,
+            deck.handle,
             BASS_MIXER_CHAN_BUFFER | BASS_MIXER_CHAN_DOWNMIX,
         ):
-            self.bass.BASS_StreamFree(handle)
             raise self._error("BASS_Mixer_StreamAddChannel")
-        deck = _Deck(str(path), handle, self._norm_factor(norm_gain))
         self._set_deck_volume(deck, volume)
-        return deck
+
+    def install_prepared_primary(self, deck: _Deck, volume: float | None = None) -> bool:
+        """Install a worker-prepared deck into the live graph on its owner thread."""
+        if deck is None or not self._deck_matches_file(deck, deck.path):
+            self.discard_prepared_primary(deck)
+            return False
+        self.stop()
+        if volume is not None:
+            self.master_volume = self._gain(volume)
+        try:
+            self._attach_prepared_deck(deck, 1.0)
+        except Exception:
+            self.discard_prepared_primary(deck)
+            raise
+        self.primary = deck
+        self.set_master_volume(self.master_volume)
+        return True
+
+    def discard_prepared_primary(self, deck: _Deck | None) -> None:
+        """Free an unattached prepared stream that became stale or failed."""
+        if deck is None:
+            return
+        try:
+            self.bass.BASS_StreamFree(deck.handle)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _deck_matches_file(deck: _Deck | None, path: str) -> bool:
+        if deck is None or deck.path != str(path):
+            return False
+        try:
+            stat = os.stat(path)
+            return (int(stat.st_mtime), int(stat.st_size)) == (deck.mtime, deck.size)
+        except OSError:
+            return False
 
     def _gain(self, value: float) -> float:
         try:
@@ -829,13 +888,40 @@ class BassBackgroundEngine:
             )
 
     def start_crossfade(self, path: str, duration_ms: int, norm_gain: float = 1.0) -> bool:
-        if self.primary is None or self.secondary is not None:
+        if self.primary is None:
             return False
-        self.secondary = self._make_deck(path, 0.0, norm_gain=norm_gain)
+        if not self._deck_matches_file(self.secondary, path):
+            self._free_deck(self.secondary)
+            self.secondary = self._make_deck(path, 0.0, norm_gain=norm_gain)
+        else:
+            self.secondary.norm_gain = self._norm_factor(norm_gain)
+            self._set_deck_volume(self.secondary, 0.0)
         self._slide_deck_volume(self.primary, 0.0, duration_ms)
         self._slide_deck_volume(self.secondary, 1.0, duration_ms)
         self.play()
         return True
+
+    def preload_secondary(self, path: str, norm_gain: float = 1.0) -> bool:
+        """Prepare the exact next file silently without starting a crossfade."""
+        if self.primary is None or not path:
+            return False
+        if self._deck_matches_file(self.secondary, path):
+            self.secondary.norm_gain = self._norm_factor(norm_gain)
+            self._set_deck_volume(self.secondary, 0.0)
+            return True
+        self._free_deck(self.secondary)
+        self.secondary = None
+        try:
+            self.secondary = self._make_deck(path, 0.0, norm_gain=norm_gain)
+            return True
+        except Exception:
+            self.secondary = None
+            return False
+
+    def invalidate_secondary_preload(self):
+        """Discard a prepared next deck after playlist/file identity changes."""
+        self._free_deck(self.secondary)
+        self.secondary = None
 
     def complete_crossfade(self) -> bool:
         if self.secondary is None:

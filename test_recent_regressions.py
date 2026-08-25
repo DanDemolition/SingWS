@@ -789,7 +789,9 @@ class RecentRegressionTests(unittest.TestCase):
                     incremental = app._library_loudness_analysis_items(force=False)
                     forced = app._library_loudness_analysis_items(force=True)
 
-            self.assertNotIn(str(mp3), [item[1] for item in incremental])
+            # A valid LUFS row no longer hides missing transition metadata;
+            # the full scan backfills boundaries while preserving that LUFS.
+            self.assertIn(str(mp3), [item[1] for item in incremental])
             self.assertIn(str(mp3), [item[1] for item in forced])
 
     def test_loudness_measurement_uses_bundled_libmpv_job(self):
@@ -1029,7 +1031,7 @@ class RecentRegressionTests(unittest.TestCase):
 
         self.assertEqual(gain, 0.0)
 
-    def test_full_scan_upgrades_fast_cache_but_skips_full_cache(self):
+    def test_full_scan_upgrades_fast_cache_and_backfills_missing_transitions(self):
         app = make_app(self.singws)
         app.tracks = [{"path": "/tmp/song.mp3", "display": "Song"}]
         app._karaoke_normalize_active = lambda: True
@@ -1049,7 +1051,15 @@ class RecentRegressionTests(unittest.TestCase):
 
         self.assertEqual(fast_items, [])
         self.assertEqual(len(full_items), 1)
-        self.assertEqual(completed_items, [])
+        self.assertEqual(len(completed_items), 1)
+
+        complete = SimpleNamespace(audio_start=0.2, audio_end=180.0)
+        with mock.patch.object(os.path, "exists", return_value=True), \
+             mock.patch.object(self.singws, "loudness_gain_db_cached", return_value=0.0), \
+             mock.patch.object(self.singws, "loudness_info_cached", return_value={"mode": "full"}), \
+             mock.patch.object(self.singws, "_transition_analysis_cached_sync", return_value=complete):
+            fully_complete_items = app._library_loudness_analysis_items(mode="full")
+        self.assertEqual(fully_complete_items, [])
 
     def test_processing_text_auto_dismisses_by_default(self):
         app = make_app(self.singws)
@@ -1593,14 +1603,13 @@ class KaraFunCompletionClockTests(unittest.TestCase):
 
     def test_the_fallback_clock_cannot_rebase_itself(self):
         """The fallback's own countdown is not evidence that playback began."""
-        self.assertIn("if remaining_from_fallback:", self.source)
-        body = self.source[self.source.index("if remaining_from_fallback:"):]
-        head = body[:body.index("else:")]
-        self.assertIn("seen_playback = True", head)
-        self.assertNotIn("_confirm_playback()", head)
+        self.assertIn("if not remaining_from_fallback:", self.source)
+        body = self.source[self.source.index("if not remaining_from_fallback:"):]
+        self.assertIn("_confirm_playback()", body[:160])
 
     def test_real_playback_signals_do_rebase(self):
-        self.assertIn("if playing_reported:\n                        _confirm_playback()", self.source)
+        self.assertIn("if playing_hint_count >= 2:", self.source)
+        self.assertIn("_confirm_playback()", self.source)
 
     def test_the_launch_overhead_is_logged(self):
         self.assertIn("duration fallback rebased", self.source)
@@ -1961,7 +1970,9 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         idx = self.monitor.index("recovery_pressed = True")
         guard = self.monitor[:idx]
         self.assertIn("playback_confirmed_at is None", guard[-400:])
-        self.assertIn("not playing_reported", guard[-400:])
+        # A lone/stale playing label is no longer allowed to suppress recovery;
+        # only confirmed playback does so.
+        self.assertNotIn("not playing_reported", guard[-400:])
 
     def test_recovery_is_skipped_entirely_when_play_was_actually_clicked(self):
         """Only the fast-start path assumes; the slow path really clicks play."""

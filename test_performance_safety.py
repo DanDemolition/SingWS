@@ -34,6 +34,41 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("gst_bg_pipeline", player)
         self.assertNotIn("gst_crossfade_pipeline", player)
 
+    def test_adaptive_bgm_crossfade_is_cached_and_fail_safe(self):
+        player = MAIN_SOURCE[
+            MAIN_SOURCE.index("class BackgroundMusicPlayer(QObject)"):
+            MAIN_SOURCE.index("class BackgroundMusicManager")
+        ]
+        self.assertIn("def _adaptive_crossfade_duration_ms", player)
+        self.assertIn("transition_analysis_cached(current_file)", player)
+        self.assertIn("select_bgm_crossfade_seconds", player)
+        self.assertIn('return configured, "safe_fallback"', player)
+        self.assertIn("selected_duration_ms", player)
+        cache = MAIN_SOURCE[MAIN_SOURCE.index("def transition_analysis_cached"):]
+        cache = cache[:cache.index("def _loudness_workers_allowed")]
+        self.assertIn("threading.Thread", cache)
+        self.assertIn("return None", cache)
+
+    def test_full_loudness_scan_also_populates_transition_metadata(self):
+        self.assertIn("session.measure_transition(", MAIN_SOURCE)
+        self.assertIn("build_audio_transition_analysis(", MAIN_SOURCE)
+        self.assertIn("_transition_analysis_store(transition_record)", MAIN_SOURCE)
+        self.assertIn("existing_loudness.get(\"mode\") == \"full\"", MAIN_SOURCE)
+        media_jobs = pathlib.Path("libmpv_media_jobs.py").read_text(encoding="utf-8")
+        self.assertIn("asetnsamples=n=4800:p=1", media_jobs)
+        self.assertIn("lavfi.astats.Overall.RMS_level", media_jobs)
+        self.assertIn("def measure_transition", media_jobs)
+
+    def test_missing_transition_backfill_is_resumable_and_holds_for_playback(self):
+        self.assertIn('QPushButton("Analyze Missing Transition Data")', MAIN_SOURCE)
+        self.assertIn("def _library_transition_analysis_items", MAIN_SOURCE)
+        self.assertIn('mode="transition"', MAIN_SOURCE)
+        self.assertIn('True if mode == "transition"', MAIN_SOURCE)
+        enumerate_source = function_source("_library_transition_analysis_items")
+        self.assertIn("audio_complete", enumerate_source)
+        self.assertIn("visual_complete", enumerate_source)
+        self.assertIn("if force or not (audio_complete and visual_complete)", enumerate_source)
+
     @classmethod
     def setUpClass(cls):
         spec = importlib.util.spec_from_file_location("singws_main_perf", "0.2.18.1.py")
@@ -223,7 +258,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_end_silence_confident_min_s", trim)
         # Both conditions are required: little left to play AND lyrics finished
         # (or MP4). Either alone would risk cutting a quiet ending short.
-        self.assertIn('cdg_done or getattr(self, "_end_silence_mode", "") == "mp4"', trim)
+        self.assertIn('and elapsed >= float(visual_end)', trim)
         # Must only ever reduce the wait, never extend it.
         self.assertIn("threshold_s = min(", trim)
         # The CDG "graphics still changing" safeguard must remain downstream.
@@ -903,7 +938,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         analyze = function_source("analyze_library")
         start = function_source("_start_analyze_library_items")
         self.assertIn("WindowStaysOnTopHint", start)
-        self.assertIn("loudness scan for", start)
+        self.assertIn('scan_subject = "transition scan"', start)
+        self.assertIn("{scan_subject} for", start)
         self.assertIn("self._bring_analyze_dialog_to_front(_d)", analyze)
         self.assertIn("self._bring_analyze_dialog_to_front(dlg)", start)
         bring = function_source("_bring_analyze_dialog_to_front")
@@ -1090,23 +1126,22 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertNotIn("_effective_mp4_max_height", source)
         self.assertNotIn("_intel_show_effects_backoff_logged", source)
 
-    def test_karaoke_to_bgm_overlap_requires_explicit_setting(self):
+    def test_karaoke_to_bgm_overlap_is_retired_for_lyric_safety(self):
         self.assertIn('"karaoke_bgm_crossfade_enabled": False', MAIN_SOURCE)
         self.assertIn('"karaoke_allow_early_silence_trim": False', MAIN_SOURCE)
-        end_handler = function_source("_handle_media_end_safe")
-        self.assertIn("self._karaoke_bgm_crossfade_enabled()", end_handler)
+        overlap_gate = function_source("_karaoke_bgm_crossfade_enabled")
+        self.assertIn("return False", overlap_gate)
+        self.assertNotIn("settings.get", overlap_gate)
         timer_tick = function_source("update_time_left")
         self.assertIn("crossfade_enabled = self._karaoke_bgm_crossfade_enabled()", timer_tick)
         self.assertIn("if (crossfade_enabled", timer_tick)
         self.assertNotIn("silent_prefire", timer_tick)
         trim = function_source("_maybe_trim_end_silence")
         self.assertIn("self._karaoke_early_silence_trim_enabled()", trim)
-        self.assertIn("self._karaoke_bgm_crossfade_enabled()", trim)
+        self.assertIn("_karaoke_visual_end_s", trim)
+        self.assertIn("visual endpoint unverified", trim)
         self.assertIn("ending karaoke before EOS", trim)
         self.assertIn('_handle_media_end_safe("verified_silent_tail")', trim)
-        self.assertIn("and (not end_silence_triggered)", end_handler)
-        fade = function_source("_start_bg_with_fade")
-        self.assertIn('resume_reason == "karaoke_end_overlap" and self._karaoke_bgm_crossfade_enabled()', fade)
 
     def test_trailing_silence_uses_shorter_safe_handoff_threshold(self):
         self.assertIn('"end_silence_trim_threshold_sec": 2.5', MAIN_SOURCE)
@@ -1114,7 +1149,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("old_threshold in (5.0, 6.0)", MAIN_SOURCE)
         self.assertIn('self.settings["end_silence_trim_threshold_sec"] = 2.5', MAIN_SOURCE)
         trim = function_source("_maybe_trim_end_silence")
-        self.assertIn("cdg_lyrics_finished", trim)
+        self.assertIn("visual_confidence < 0.85", trim)
         self.assertIn("near_end", trim)
 
     def test_silence_trim_requires_verified_audio_endpoint(self):
@@ -1124,6 +1159,23 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertLess(unknown_guard, handoff)
         self.assertIn("trim suppressed; verified audio endpoint unavailable", trim)
         self.assertIn("return False", trim[unknown_guard:handoff])
+
+    def test_silence_trim_requires_verified_visual_endpoint(self):
+        trim = function_source("_maybe_trim_end_silence")
+        visual_guard = trim.index("if visual_end is None or visual_confidence < 0.85:")
+        handoff = trim.index("self._end_silence_tail_handoff_started = True")
+        self.assertLess(visual_guard, handoff)
+        self.assertIn("visual endpoint unverified", trim)
+        arm = function_source("_arm_visual_end_floor")
+        self.assertIn("transition_analysis_cached", arm)
+        self.assertIn('if mode != "cdg":', arm)
+        self.assertIn("transition_analysis.analyze_cdg_visual", arm)
+        self.assertIn("MP4 decoding is", arm)
+        self.assertIn("physical-duration fallback", arm)
+        self.assertIn('self.settings.get("seamless_transitions_enabled", True)', MAIN_SOURCE)
+        self.assertIn('QCheckBox("Seamless transitions")', MAIN_SOURCE)
+        self.assertIn("using physical EOS fallback", MAIN_SOURCE)
+        self.assertIn("threading.Thread", arm)
 
     def test_verified_silent_tail_completes_karaoke_before_decoder_eos(self):
         trim = function_source("_maybe_trim_end_silence")

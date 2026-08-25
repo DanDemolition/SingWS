@@ -1,4 +1,5 @@
 import importlib.util
+from pathlib import Path
 import unittest
 
 import bass_background_engine as bbe
@@ -276,6 +277,66 @@ class BackgroundTrackCrossfadeTests(unittest.TestCase):
         player.previous_track()
         self.assertEqual(player.targets, [0])
         self.assertEqual(player.current_index, 1)
+
+
+class BassSecondaryPreloadContractTests(unittest.TestCase):
+    def test_startup_primary_prescan_is_split_from_live_mixer_attachment(self):
+        source = Path("bass_background_engine.py").read_text(encoding="utf-8")
+        prepare = source[source.index("def prepare_primary"):]
+        prepare = prepare[:prepare.index("def _attach_prepared_deck")]
+        attach = source[source.index("def _attach_prepared_deck"):]
+        attach = attach[:attach.index("def install_prepared_primary")]
+
+        self.assertIn("BASS_StreamCreateFile", prepare)
+        self.assertNotIn("BASS_Mixer_StreamAddChannel", prepare)
+        self.assertIn("BASS_Mixer_StreamAddChannel", attach)
+
+    def test_app_startup_uses_worker_preload_not_gui_thread_prescan(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        bootstrap = source[source.index("def _bootstrap_bg_playlist_on_startup"):]
+        bootstrap = bootstrap[:bootstrap.index("def save_data")]
+        async_preload = source[source.index("def preload_current_track_paused_async"):]
+        async_preload = async_preload[:async_preload.index("def play(self)")]
+
+        self.assertIn("preload_current_track_paused_async", bootstrap)
+        self.assertNotIn("self.bg_music.preload_current_track_paused)", bootstrap)
+        self.assertIn("threading.Thread", async_preload)
+        self.assertIn('name="bgm-startup-preload"', async_preload)
+        self.assertIn("host._run_on_ui_thread(_finish)", async_preload)
+        self.assertIn("honoring queued startup action=", async_preload)
+
+        play = source[source.index("def play(self)"):]
+        play = play[:play.index("def pause(self)")]
+        self.assertIn("play queued behind startup preload", play)
+
+        stop = source[source.index("def stop(self)"):]
+        stop = stop[:stop.index("def set_stop_after_current")]
+        self.assertIn("_startup_preload_generation", stop)
+        self.assertIn("_startup_preload_resume_request = None", stop)
+
+    def test_crossfade_reuses_only_the_exact_unchanged_preload(self):
+        source = Path("bass_background_engine.py").read_text(encoding="utf-8")
+        preload = source[source.index("def preload_secondary"):]
+        preload = preload[:preload.index("def invalidate_secondary_preload")]
+        crossfade = source[source.index("def start_crossfade"):]
+        crossfade = crossfade[:crossfade.index("def preload_secondary")]
+        identity = source[source.index("def _deck_matches_file"):]
+        identity = identity[:identity.index("def _gain")]
+        self.assertIn("deck.path != str(path)", identity)
+        self.assertIn("stat.st_mtime", identity)
+        self.assertIn("stat.st_size", identity)
+        self.assertIn("_deck_matches_file(self.secondary, path)", preload)
+        self.assertIn("_deck_matches_file(self.secondary, path)", crossfade)
+        self.assertIn("self._free_deck(self.secondary)", crossfade)
+        self.assertIn("self._make_deck(path, 0.0", crossfade)
+
+    def test_preload_is_silent_and_optional(self):
+        source = Path("bass_background_engine.py").read_text(encoding="utf-8")
+        preload = source[source.index("def preload_secondary"):]
+        preload = preload[:preload.index("def invalidate_secondary_preload")]
+        self.assertIn("self._make_deck(path, 0.0", preload)
+        self.assertIn("return False", preload)
+        self.assertIn("except Exception:", preload)
 
 
 if __name__ == "__main__":

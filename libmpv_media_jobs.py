@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import locale
+import math
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import time
 import wave
+import shutil
 
 import numpy as np
 
@@ -177,6 +179,66 @@ def decode_audio_wav(
         job.close()
 
 
+def sample_video_tail_metrics(
+    source: str,
+    *,
+    duration_seconds: float,
+    tail_seconds: float = 45.0,
+    frames_per_second: float = 1.0,
+    width: int = 32,
+    height: int = 18,
+    timeout: float = 60.0,
+) -> list[dict[str, float]]:
+    """Decode tiny grayscale tail thumbnails and return activity metrics.
+
+    The bundled libmpv image output owns decoding; Python reads only bounded
+    32x18 PNGs. This is an offline scan, never a live render path.
+    """
+    from PIL import Image
+
+    duration = max(0.0, float(duration_seconds))
+    if duration <= 0.0:
+        return []
+    tail = max(1.0, min(duration, float(tail_seconds)))
+    start = max(0.0, duration - tail)
+    fps = max(0.2, min(4.0, float(frames_per_second)))
+    width = max(8, min(160, int(width)))
+    height = max(8, min(90, int(height)))
+    output_dir = Path(tempfile.mkdtemp(prefix="singws-mpv-video-tail-"))
+    job = OfflineMpvJob()
+    try:
+        job.option("config", "no")
+        job.option("ao", "null")
+        job.option("vo", "image")
+        job.option("vo-image-outdir", str(output_dir))
+        job.option("vo-image-format", "png")
+        job.option("start", f"{start:.6f}")
+        job.option("length", f"{tail:.6f}")
+        job.option("untimed", "yes")
+        job.option("vf", f"fps={fps:.6f},scale={width}:{height},format=gray")
+        job.initialize()
+        job.command("loadfile", str(source), "replace")
+        job.wait_for_end(timeout)
+
+        paths = sorted(output_dir.glob("*.png"))
+        samples = []
+        previous = None
+        for index, path in enumerate(paths):
+            with Image.open(path) as image:
+                pixels = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+            difference = 1.0 if previous is None else float(np.mean(np.abs(pixels - previous)))
+            samples.append({
+                "timestamp": min(duration, start + index / fps),
+                "mean_luma": float(np.mean(pixels)),
+                "difference": difference,
+            })
+            previous = pixels
+        return samples
+    finally:
+        job.close()
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
 def _measure_wav_lufs(rendered: str):
     """Measure a 48 kHz PCM WAV with bounded memory.
 
@@ -240,14 +302,23 @@ def _measure_wav_lufs(rendered: str):
     return float(integrated), float(peak_db)
 
 
-def _configure_ebur128_job(job: "OfflineMpvJob"):
+def _configure_ebur128_job(job: "OfflineMpvJob", *, include_envelope: bool = False):
     """Apply the shared pre-initialize options for an ebur128 measurement."""
     job.option("config", "no")
     job.option("vid", "no")
     job.option("ao", "null")
     job.option("ao-null-untimed", "yes")
     job.option("untimed", "yes")
-    job.option("af", "lavfi=[ebur128=peak=sample:framelog=verbose]")
+    graph = "ebur128=peak=sample:framelog=verbose"
+    if include_envelope:
+        # Continue the same decoded stream through fixed 100 ms RMS windows.
+        # ametadata prints one compact scalar per window; no PCM/waveform is
+        # retained and loudness + transition boundaries share one decode pass.
+        graph += (
+            ",asetnsamples=n=4800:p=1,astats=metadata=1:reset=1,"
+            "ametadata=print:key=lavfi.astats.Overall.RMS_level"
+        )
+    job.option("af", f"lavfi=[{graph}]")
 
 
 def _parse_ebur128(messages: list[str]):
@@ -262,6 +333,23 @@ def _parse_ebur128(messages: list[str]):
     if not (-70.0 <= lufs <= 0.0):
         return None, peak_db
     return lufs, peak_db
+
+
+def _parse_transition_envelope(messages: list[str]) -> list[float]:
+    values = re.findall(
+        r"lavfi\.astats\.Overall\.RMS_level=(-?(?:\d+(?:\.\d+)?|inf))",
+        "\n".join(messages), flags=re.IGNORECASE,
+    )
+    envelope = []
+    for raw in values:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = -96.0
+        if not math.isfinite(value):
+            value = -96.0
+        envelope.append(max(-96.0, min(6.0, value)))
+    return envelope
 
 
 def _measure_loudness_lavfi(
@@ -318,10 +406,10 @@ class LoudnessSession:
     def usable(self) -> bool:
         return not self._disabled
 
-    def _core(self) -> "OfflineMpvJob":
+    def _core(self, *, include_envelope: bool = False) -> "OfflineMpvJob":
         if self._job is None:
             job = OfflineMpvJob()
-            _configure_ebur128_job(job)
+            _configure_ebur128_job(job, include_envelope=include_envelope)
             job.initialize()
             job.request_log_messages("v")
             self._job = job
@@ -351,6 +439,32 @@ class LoudnessSession:
     def measure_fast(self, source: str, *, timeout: float = 120.0):
         return self.measure(_fast_loudness_timeline(source), timeout=timeout)
 
+    def measure_transition(self, source: str, *, timeout: float = 120.0):
+        """Return LUFS, peak, and 100 ms RMS envelope from one decode pass."""
+        # A core's filter graph is immutable after initialization. Full library
+        # scans consistently use this method; close a prior plain core if a
+        # caller changes modes on the same session.
+        if self._job is not None and not bool(getattr(self, "_envelope_core", False)):
+            self.close()
+        self._envelope_core = True
+        messages: list[str] = []
+        try:
+            job = self._core(include_envelope=True)
+            job.command("loadfile", str(source), "replace")
+            job.wait_for_end(timeout, messages)
+            lufs, peak = _parse_ebur128(messages)
+            envelope = _parse_transition_envelope(messages)
+            if not envelope:
+                raise RuntimeError("libmpv transition analysis produced no RMS envelope")
+            self._failures = 0
+            return lufs, peak, envelope
+        except Exception:
+            self.close()
+            self._failures += 1
+            if self._failures >= self._MAX_CONSECUTIVE_FAILURES:
+                self._disabled = True
+            raise
+
     def close(self):
         job, self._job = self._job, None
         if job is not None:
@@ -358,6 +472,7 @@ class LoudnessSession:
                 job.close()
             except Exception:
                 pass
+        self._envelope_core = False
 
     def __enter__(self):
         return self
