@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.6.0"
+APP_VERSION = "0.4.6.1"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -1863,6 +1863,11 @@ _loudness_sem = threading.Semaphore(1)
 def transition_analysis_cached(path: str):
     """Return validated transition metadata without doing live decode work."""
     global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
+    if _transition_analysis_cache_loaded:
+        # CPython dictionary reads are atomic. Do not take the persistence lock
+        # on this playback/UI path: serializing a library-sized cache in the
+        # analysis worker held it for 1–2 seconds during the 2026-08-27 show.
+        return _transition_analysis_cache.get(str(path or ""))
     with _transition_analysis_cache_lock:
         if not _transition_analysis_cache_loaded:
             if not _transition_analysis_cache_loading:
@@ -1899,7 +1904,7 @@ def _transition_analysis_cached_sync(path: str):
         return _transition_analysis_cache.get(str(path or ""))
 
 
-def _transition_analysis_store(record, *, force: bool = False) -> bool:
+def _transition_analysis_store(record, *, force: bool = False, persist: bool = True) -> bool:
     """Incrementally persist one valid result without touching loudness.json."""
     global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
     global _transition_analysis_last_save_ts
@@ -1911,7 +1916,7 @@ def _transition_analysis_store(record, *, force: bool = False) -> bool:
                 _transition_analysis_cache_loading = False
             _transition_analysis_cache.put(record)
             now = time.monotonic()
-            if force or (now - _transition_analysis_last_save_ts) >= _TRANSITION_ANALYSIS_SAVE_INTERVAL_S:
+            if persist and (force or (now - _transition_analysis_last_save_ts) >= _TRANSITION_ANALYSIS_SAVE_INTERVAL_S):
                 _transition_analysis_cache.save()
                 _transition_analysis_last_save_ts = now
         return True
@@ -2138,6 +2143,11 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full
                           session.measure(audio_path, timeout=120.0))
             except Exception:
                 result = None
+        if result is None and bool(getattr(session, "isolated", False)):
+            # Never fall back to constructing a one-shot libmpv core inside
+            # the live show process. Those cores retain native allocations
+            # after destroy; the isolated helper is the memory boundary.
+            return None, None
         if result is None:
             if mode == "fast":
                 # Five sections avoid basing the estimate on one unusually quiet
@@ -2165,6 +2175,11 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full
 def analyze_loudness_async(audio_path: str):
     """Measure + cache loudness for a file in the background if not already done."""
     if not audio_path:
+        return
+    if str(audio_path).lower().startswith((
+        "karafun_streaming:", "external_karafun:", "karafun_local:"
+    )):
+        _diag(f"[LOUDNESS] analysis skipped reason=external_provider file={audio_path!r}")
         return
     if not _loudness_workers_allowed():
         try:
@@ -13240,8 +13255,8 @@ class AnalyzeLibraryWorker(QObject):
         skipped = 0
         last_progress_emit = 0.0
         try:
-            from libmpv_media_jobs import LoudnessSession
-            session = LoudnessSession()
+            from libmpv_media_jobs import IsolatedLoudnessSession
+            session = IsolatedLoudnessSession()
         except Exception:
             session = None
         for item in self.items:
@@ -13330,7 +13345,9 @@ class AnalyzeLibraryWorker(QObject):
                             integrated_lufs=lufs,
                             peak_db=peak_db,
                         )
-                        if transition_record is not None and _transition_analysis_store(transition_record):
+                        if transition_record is not None and _transition_analysis_store(
+                            transition_record, persist=False
+                        ):
                             _diag(
                                 f"[TRANSITION] audio metadata cached file={os.path.basename(cache_key)!r} "
                                 f"audio_start={transition_record.audio_start} "
@@ -13345,7 +13362,7 @@ class AnalyzeLibraryWorker(QObject):
                                 duration=float(visual.duration or 0.0), result=visual,
                             )
                         if visual_record is not None:
-                            _transition_analysis_store(visual_record)
+                            _transition_analysis_store(visual_record, persist=False)
                     elif envelope and primary_path.lower().endswith(".mp4"):
                         try:
                             from libmpv_media_jobs import sample_video_tail_metrics
@@ -13361,7 +13378,7 @@ class AnalyzeLibraryWorker(QObject):
                                     result=visual,
                                 )
                             if visual_record is not None:
-                                _transition_analysis_store(visual_record)
+                                _transition_analysis_store(visual_record, persist=False)
                         except Exception as exc:
                             _diag(f"[TRANSITION] MP4 visual backfill failed file={primary_path!r}: {exc}")
                 else:
@@ -49406,7 +49423,10 @@ class KaraokeApp(QWidget):
                 'click at {bestButtonX, bestButtonY}',
                 'end try',
                 'end try',
-                'repeat 20 times',
+                '-- Renderer creation regularly took more than the old two-second',
+                '-- window on the show Mac. Wait here instead of rerunning the',
+                '-- entire toggle close/recreate sequence against a late window.',
+                'repeat 60 times',
                 'set outputWindow to missing value',
                 'repeat with candidateWindow in windows',
                 'try',
@@ -51080,6 +51100,7 @@ class KaraokeApp(QWidget):
                     playback_assumed
                     and not recovery_pressed
                     and playback_confirmed_at is None
+                    and not playing_reported
                     and age > recovery_delay
                 ):
                     recovery_pressed = True
@@ -51139,7 +51160,12 @@ class KaraokeApp(QWidget):
 
                 should_complete = (
                     (remaining is not None and remaining <= 5 and age > 8.0)
-                    or (idle_reported and not playing_reported and seen_playback and idle_stop_count >= 2 and age > 8.0)
+                    # STATE|IDLE is emitted only when KaraFun explicitly says
+                    # nothing is playing and exposes no Pause/Stop control.
+                    # Once playback was confirmed, waiting for a second full
+                    # accessibility scrape added 13–26 seconds of dead air at
+                    # the 2026-08-27 show without providing another signal.
+                    or (idle_reported and not playing_reported and seen_playback and idle_stop_count >= 1 and age > 8.0)
                 )
                 if should_complete:
                     def _complete_near_end():
@@ -57206,6 +57232,11 @@ class ManageFoldersDialog(QDialog):
                 it = self._list.takeItem(r)
                 self._list.insertItem(r+1, it)
                 self._list.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+if __name__ == "__main__" and "--singws-offline-analysis-worker" in sys.argv:
+    from libmpv_media_jobs import run_isolated_analysis_worker
+    raise SystemExit(run_isolated_analysis_worker())
+
 
 if __name__ == "__main__":
     from PyQt6.QtGui import QPalette, QColor

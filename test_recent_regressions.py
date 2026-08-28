@@ -1,5 +1,7 @@
 import importlib.util
 import inspect
+import io
+import json
 import math
 import os
 from pathlib import Path
@@ -1966,13 +1968,13 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         guard = self.monitor[:idx]
         self.assertIn("not recovery_pressed", guard[-400:])
 
-    def test_recovery_does_not_fire_once_playback_is_confirmed(self):
+    def test_recovery_does_not_fire_once_playback_is_confirmed_or_reporting_playing(self):
         idx = self.monitor.index("recovery_pressed = True")
         guard = self.monitor[:idx]
         self.assertIn("playback_confirmed_at is None", guard[-400:])
-        # A lone/stale playing label is no longer allowed to suppress recovery;
-        # only confirmed playback does so.
-        self.assertNotIn("not playing_reported", guard[-400:])
+        # The first live poll arrives around 14 seconds. Re-activating the
+        # result despite its PLAYING state restarts an already audible song.
+        self.assertIn("not playing_reported", guard[-400:])
 
     def test_recovery_is_skipped_entirely_when_play_was_actually_clicked(self):
         """Only the fast-start path assumes; the slow path really clicks play."""
@@ -1990,6 +1992,64 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertGreaterEqual(app.KARAFUN_PLAYBACK_RECOVERY_DELAY_S, 10.0)
         self.assertLess(app.KARAFUN_PLAYBACK_RECOVERY_DELAY_S, app.KARAFUN_PLAYBACK_ALERT_DELAY_S)
         self.assertLessEqual(app.KARAFUN_PLAYBACK_ALERT_DELAY_S, 60.0)
+
+
+class PostShowAnalysisSafetyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+
+    def test_external_karafun_reference_never_starts_local_loudness_decode(self):
+        with mock.patch.object(self.singws, "_loudness_load_cache") as load_cache, \
+             mock.patch.object(self.singws, "_measure_loudness_lufs") as measure:
+            self.singws.analyze_loudness_async("karafun_streaming:kf_123")
+        load_cache.assert_not_called()
+        measure.assert_not_called()
+
+    def test_playback_transition_cache_read_does_not_wait_for_save_lock(self):
+        source = inspect.getsource(self.singws.transition_analysis_cached)
+        loaded_branch = source[:source.index("with _transition_analysis_cache_lock")]
+        self.assertIn("_transition_analysis_cache.get", loaded_branch)
+
+    def test_isolated_worker_protocol_returns_transition_payload(self):
+        import libmpv_media_jobs
+
+        class FakeSession:
+            def measure_transition(self, source, timeout=0):
+                self.request = (source, timeout)
+                return -14.0, -1.0, [-60.0, -12.0]
+
+            def close(self):
+                pass
+
+        request = io.StringIO(json.dumps({
+            "source": "/tmp/song.mp3", "mode": "transition", "timeout": 9.0,
+        }) + "\n" + json.dumps({"command": "quit"}) + "\n")
+        response = io.StringIO()
+        with mock.patch.object(libmpv_media_jobs, "LoudnessSession", FakeSession):
+            self.assertEqual(libmpv_media_jobs.run_isolated_analysis_worker(request, response), 0)
+        line = response.getvalue().strip()
+        self.assertTrue(line.startswith(libmpv_media_jobs._ANALYSIS_RESULT_PREFIX))
+        payload = json.loads(line[len(libmpv_media_jobs._ANALYSIS_RESULT_PREFIX):])
+        self.assertEqual(payload["envelope"], [-60.0, -12.0])
+
+    def test_batch_worker_uses_recyclable_isolated_session(self):
+        source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
+        self.assertIn("IsolatedLoudnessSession", source)
+
+    def test_isolated_analyzer_contains_decoder_noise_and_caches_bad_files(self):
+        import libmpv_media_jobs
+
+        start = inspect.getsource(libmpv_media_jobs.IsolatedLoudnessSession._start)
+        self.assertIn("stderr=subprocess.DEVNULL", start)
+        batch = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
+        self.assertIn("loudness_failed_cached(cache_key)", batch)
+        self.assertIn('_loudness_mark_failed(cache_key, "no measurable loudness")', batch)
+
+    def test_batch_transition_results_flush_once_instead_of_every_track(self):
+        source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
+        self.assertIn("persist=False", source)
+        self.assertIn("_transition_analysis_cache.save()", source)
 
 
 if __name__ == "__main__":

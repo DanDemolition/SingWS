@@ -2,6 +2,60 @@
 
 Updated 2026-08-22.
 
+## Post-show KaraFun restart hotfix (2026-08-28)
+
+Built and installed locally on the Intel show Mac on 2026-08-28. The signed
+0.4.6.0 hotfix bundle is `/Applications/SingWS.app`; the prior bundle is
+preserved at `/Applications/SingWS-0.4.6.0-rollback-20260828.app`. The Intel
+installer is `SingWS-0.4.6.0-x86_64-installer.dmg` (SHA-256
+`9d98e62201760f3853ebafe2763d5a2bb2a97e44b5ec8198a843b00b002d3d75`).
+Architecture, bundled media, macOS 12 minimum version, strict signing and DMG
+verification passed. Both the staged bundle and installed copy launched with
+scratch data in about 1.8 seconds with BASS, mpv, Qt Quick VFX and ticker ready.
+The empty scratch queue did not exercise a live transition or real KaraFun
+handoff; those remain end-to-end show checks.
+
+The 2026-08-27 live log showed every external KaraFun song restarting on the
+first completion-monitor poll. KaraFun already reported `playing=1`, but the
+fast-start recovery path still double-clicked the saved search result at
+14–15 seconds because two consecutive playing hints were required for full
+confirmation. Recovery now remains armed for genuinely idle starts but will
+not reactivate a result while the current poll reports playback. The eight
+focused KaraFun auto-start recovery tests pass with scratch show data; Python
+compilation and `git diff --check` are clean.
+
+The same logs exposed a second full-library analysis leak: RSS rose from
+717 MB to 7.7 GB while the combined loudness/transition-envelope path ran.
+Batch analysis now uses a recyclable helper process, capped at 100 tracks per
+process, so libmpv/filter allocations are reclaimed by macOS without entering
+the live show process. A real stereo WAV passed through the helper entry point
+and returned LUFS, peak and 30 envelope windows. Batch transition records are
+kept in memory and atomically flushed once at completion/cancellation instead
+of encoding the 13 MB cache every ten seconds. Playback-side cache reads no
+longer wait on the persistence lock. Synthetic external KaraFun references are
+also rejected before local loudness lookup, eliminating predictable decoder
+failures.
+
+The same log was checked for the reported visual-transition repetition. The
+installed 0.4.6.0 build used all 16 enabled transition styles exactly once in
+each complete shuffle-bag cycle, so no chooser reset or missing configured
+style was found.
+
+The external KaraFun completion monitor now accepts the first explicit idle
+state after playback has been confirmed. That state is emitted only when
+KaraFun says nothing is playing and exposes no Pause/Stop control; requiring a
+second full Accessibility scrape added 13–26 seconds of dead air during the
+2026-08-27 show. The pre-playback safeguards are unchanged, so an idle result
+cannot complete a track that was never confirmed playing.
+
+Offline analyzer decoder chatter is now explicitly contained in the recyclable
+helper's discarded stderr, and regression coverage pins both that boundary and
+the existing signature-keyed failure cache for malformed media. The KaraFun
+Dual Renderer creation wait is widened from two to six seconds inside the
+first handoff attempt; the 2026-08-27 renderer consistently appeared after the
+old window expired, causing the complete toggle sequence to run twice. The
+outer retry remains as a bounded recovery for a genuinely failed creation.
+
 ## 0.4.5.8 cleanup in progress
 
 On `cleanup/dead-media-paths-0.4.5.8`, `BackgroundMusicPlayer` no longer

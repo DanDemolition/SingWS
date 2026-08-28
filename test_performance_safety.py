@@ -52,7 +52,7 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_full_loudness_scan_also_populates_transition_metadata(self):
         self.assertIn("session.measure_transition(", MAIN_SOURCE)
         self.assertIn("build_audio_transition_analysis(", MAIN_SOURCE)
-        self.assertIn("_transition_analysis_store(transition_record)", MAIN_SOURCE)
+        self.assertIn("_transition_analysis_store(\n                            transition_record, persist=False", MAIN_SOURCE)
         self.assertIn("existing_loudness.get(\"mode\") == \"full\"", MAIN_SOURCE)
         media_jobs = pathlib.Path("libmpv_media_jobs.py").read_text(encoding="utf-8")
         self.assertIn("asetnsamples=n=4800:p=1", media_jobs)
@@ -146,7 +146,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         progress = []
         worker.progress.connect(lambda done, total, name: progress.append(done))
         fake_jobs = types.ModuleType("libmpv_media_jobs")
-        fake_jobs.LoudnessSession = lambda: types.SimpleNamespace(close=lambda: None)
+        fake_jobs.IsolatedLoudnessSession = lambda: types.SimpleNamespace(close=lambda: None)
 
         with mock.patch.dict(sys.modules, {"libmpv_media_jobs": fake_jobs}), \
              mock.patch.object(self.singws, "_loudness_workers_allowed", return_value=True), \

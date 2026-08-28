@@ -8,11 +8,13 @@ executables; callers can request a WAV render and analyze it with numpy.
 from __future__ import annotations
 
 import ctypes
+import json
 import locale
 import math
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -473,6 +475,177 @@ class LoudnessSession:
             except Exception:
                 pass
         self._envelope_core = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+        return False
+
+
+_ANALYSIS_RESULT_PREFIX = "SINGWS_ANALYSIS_RESULT "
+
+
+def run_isolated_analysis_worker(input_stream=None, output_stream=None) -> int:
+    """Serve bounded offline-analysis requests for the parent SingWS process."""
+    input_stream = input_stream if input_stream is not None else sys.stdin
+    output_stream = output_stream if output_stream is not None else sys.stdout
+    session = LoudnessSession()
+    try:
+        for raw in input_stream:
+            try:
+                request = json.loads(str(raw or ""))
+            except (TypeError, ValueError):
+                continue
+            if request.get("command") == "quit":
+                return 0
+            response = {"ok": False, "error": "invalid analysis request"}
+            try:
+                source = str(request.get("source") or "")
+                timeout = float(request.get("timeout") or 120.0)
+                mode = str(request.get("mode") or "full")
+                if mode == "transition":
+                    lufs, peak, envelope = session.measure_transition(source, timeout=timeout)
+                    response = {"ok": True, "lufs": lufs, "peak": peak, "envelope": envelope}
+                elif mode == "fast":
+                    lufs, peak = session.measure_fast(source, timeout=timeout)
+                    response = {"ok": True, "lufs": lufs, "peak": peak}
+                else:
+                    lufs, peak = session.measure(source, timeout=timeout)
+                    response = {"ok": True, "lufs": lufs, "peak": peak}
+            except Exception as exc:
+                response = {"ok": False, "error": str(exc)[:500]}
+            output_stream.write(_ANALYSIS_RESULT_PREFIX + json.dumps(response, separators=(",", ":")) + "\n")
+            output_stream.flush()
+    finally:
+        session.close()
+    return 0
+
+
+class IsolatedLoudnessSession:
+    """Proxy batch analysis through a recyclable helper process.
+
+    The combined RMS-envelope filter leaked native memory in the main process
+    during the 2026-08-27 show. A helper is recycled after a bounded number of
+    tracks, so all decoder/filter allocations are returned to macOS at process
+    exit without disturbing live playback.
+    """
+
+    _MAX_TRACKS_PER_HELPER = 100
+    _MAX_CONSECUTIVE_FAILURES = 3
+    isolated = True
+
+    def __init__(self, command=None):
+        self._command = list(command) if command else None
+        self._process = None
+        self._tracks = 0
+        self._failures = 0
+        self._disabled = False
+        self._scratch = None
+
+    @property
+    def usable(self) -> bool:
+        return not self._disabled
+
+    def _worker_command(self) -> list[str]:
+        if self._command:
+            return list(self._command)
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--singws-offline-analysis-worker"]
+        entrypoint = Path(__file__).resolve().parent / "0.2.18.1.py"
+        return [sys.executable, str(entrypoint), "--singws-offline-analysis-worker"]
+
+    def _start(self):
+        if self._process is not None and self._process.poll() is None:
+            return
+        self.close()
+        self._scratch = tempfile.mkdtemp(prefix="singws-analysis-worker-")
+        environment = os.environ.copy()
+        environment["SINGWS_HOME"] = self._scratch
+        environment["PYTHONUNBUFFERED"] = "1"
+        self._process = subprocess.Popen(
+            self._worker_command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            env=environment,
+        )
+        self._tracks = 0
+
+    def _request(self, source: str, mode: str, timeout: float):
+        if self._disabled:
+            raise RuntimeError("isolated loudness session disabled after repeated failures")
+        if self._tracks >= self._MAX_TRACKS_PER_HELPER:
+            self.close()
+        try:
+            self._start()
+            process = self._process
+            if process is None or process.stdin is None or process.stdout is None:
+                raise RuntimeError("offline analysis helper did not start")
+            request = {"source": str(source), "mode": str(mode), "timeout": float(timeout)}
+            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            process.stdin.flush()
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    raise RuntimeError("offline analysis helper exited without a result")
+                if line.startswith(_ANALYSIS_RESULT_PREFIX):
+                    response = json.loads(line[len(_ANALYSIS_RESULT_PREFIX):])
+                    break
+            self._tracks += 1
+            if not bool(response.get("ok")):
+                raise RuntimeError(str(response.get("error") or "offline analysis failed"))
+            self._failures = 0
+            if mode == "transition":
+                return response.get("lufs"), response.get("peak"), list(response.get("envelope") or [])
+            return response.get("lufs"), response.get("peak")
+        except Exception:
+            self.close()
+            self._failures += 1
+            if self._failures >= self._MAX_CONSECUTIVE_FAILURES:
+                self._disabled = True
+            raise
+
+    def measure(self, source: str, *, timeout: float = 120.0):
+        return self._request(source, "full", timeout)
+
+    def measure_fast(self, source: str, *, timeout: float = 120.0):
+        return self._request(source, "fast", timeout)
+
+    def measure_transition(self, source: str, *, timeout: float = 120.0):
+        return self._request(source, "transition", timeout)
+
+    def close(self):
+        process, self._process = self._process, None
+        if process is not None:
+            try:
+                if process.poll() is None and process.stdin is not None:
+                    process.stdin.write('{"command":"quit"}\n')
+                    process.stdin.flush()
+                process.wait(timeout=3.0)
+            except Exception:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2.0)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+            finally:
+                for stream in (process.stdin, process.stdout):
+                    try:
+                        if stream is not None:
+                            stream.close()
+                    except Exception:
+                        pass
+        scratch, self._scratch = self._scratch, None
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
+        self._tracks = 0
 
     def __enter__(self):
         return self
