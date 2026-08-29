@@ -2,7 +2,7 @@
 
 Updated 2026-08-29.
 
-## Turbo first-batch timeout loop (2026-08-29, unbuilt)
+## Turbo first-batch timeout loop (2026-08-29, released in 0.4.6.3)
 
 Live inspection of the installed 0.4.6.3 build found Turbo stopped at 4/120,428
 with all four parent workers waiting for isolated-helper responses. A failed
@@ -12,15 +12,17 @@ four-minute freeze. Turbo now makes one 45-second isolated attempt (plus the
 existing five-second protocol grace), logs the filename and reason with
 `retry=0`, marks the unchanged file failed, and advances. Normal non-Turbo scans
 retain their 120-second behavior. The scratch-data suite passes with 790 tests
-plus 21 subtests. This follow-up is not in the installed/published 0.4.6.3 build.
+plus 21 subtests. The replacement Intel DMG was mounted and its app and frozen
+video helper were launched successfully. Its SHA-256 is
+`bf408e233a89e5d2daa3c0a27cd15e88a3a57be69ea028a08ecc7f0f7975af15`.
 
-## Duplicate manager select-all (2026-08-29, unbuilt)
+## Duplicate manager select-all (2026-08-29, released in 0.4.6.3)
 
 The duplicate results dialog now has a `Select All Duplicates` action. It checks
 only items carrying the cleanup-eligible checkbox flag, so recommended keepers
 and same-audio/different-CDG review versions remain unselected. The scratch-data
-suite passes with 790 tests plus 21 subtests. This follow-up is not included in
-the currently published 0.4.6.3 installer.
+suite passes with 790 tests plus 21 subtests. It ships in the same replacement
+0.4.6.3 installer described above.
 
 ## Turbo MP4 visual-scan stall fix (2026-08-29, released in 0.4.6.3)
 
