@@ -1,8 +1,8 @@
 # SingWS handoff
 
-Updated 2026-08-22.
+Updated 2026-08-29.
 
-## Turbo MP4 visual-scan stall fix (2026-08-29, built; release blocked)
+## Turbo MP4 visual-scan stall fix (2026-08-29, released in 0.4.6.3)
 
 Live testing of the installed 0.4.6.3 candidate showed Turbo Full Scan advancing
 MP4 files in roughly 43–49-second batches, with many KVDM tracks grouped in the
@@ -42,14 +42,14 @@ assertion failing; the removed module was excluded because it no longer exists.
 The new Intel app passed x86_64 architecture, bundled-media loading, and the
 macOS 12 minimum-version sweep. Its staged copy passed strict signing, launched
 cleanly with scratch data, and returned valid samples through the frozen offline
-video-tail helper. DMG creation is blocked by the host disk-image service:
-repeated attempts, including unsandboxed retries, returned `Device not
-configured` or `Resource temporarily unavailable` from `hdiutil create`; disk
-space is healthy. Do not publish or reuse the earlier installer—the same-version
-replacement DMG has not been created, hashed, launched from its mounted image,
-or uploaded yet.
+video-tail helper. After a host restart cleared the disk-image service failure,
+the replacement DMG was created and verified, and the app and frozen video-tail
+helper were both run from its mounted image. The same-version `v0.4.6.3` tag,
+GitHub release asset, and update manifest were replaced with this build. The
+Intel DMG SHA-256 is
+`bf487c439ec67a9d2e1aadefe87f32c95d9b4001c22b77459cbba8640d2194d4`.
 
-## Duplicate Song Manager (2026-08-29, built; release blocked)
+## Duplicate Song Manager (2026-08-29, released in 0.4.6.3)
 
 Settings > Search/Library > Library Tools now exposes a review-first duplicate
 manager for MP3+G ZIPs. It uses central-directory CRC/size only to narrow the
