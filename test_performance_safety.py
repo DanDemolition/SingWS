@@ -68,6 +68,26 @@ class PerformanceSafetyTests(unittest.TestCase):
         settings = MAIN_SOURCE[MAIN_SOURCE.index('QPushButton("Turbo Full Scan")'):]
         self.assertIn('mode="turbo"', settings)
 
+    def test_turbo_serializes_mp4_visual_decodes_and_wires_cancellation(self):
+        worker = MAIN_SOURCE[
+            MAIN_SOURCE.index("class AnalyzeLibraryWorker(QObject)"):
+            MAIN_SOURCE.index("class AnalyzeLibraryParallelCoordinator(QObject)")
+        ]
+        self.assertIn("_mp4_visual_analysis_sem.acquire(timeout=0.25)", worker)
+        self.assertIn("_mp4_visual_analysis_sem.release()", worker)
+        self.assertIn("cancel_check=self.is_cancelled", worker)
+        self.assertIn("session.measure_video_tail", worker)
+        self.assertNotIn("from libmpv_media_jobs import sample_video_tail_metrics", worker)
+        self.assertIn("persist=False, checkpoint=True", worker)
+        self.assertIn("MP4 visual analysis started", worker)
+        self.assertIn("MP4 visual analysis finished", worker)
+        start = function_source("_start_analyze_library_items")
+        self.assertIn("worker.stage.connect(_on_stage)", start)
+        media_jobs = pathlib.Path("libmpv_media_jobs.py").read_text(encoding="utf-8")
+        self.assertIn("raise InterruptedError(\"libmpv offline decode cancelled\")", media_jobs)
+        self.assertIn("job.wait_for_end(timeout, cancel_check=cancel_check)", media_jobs)
+        self.assertIn('job.option("audio", "no")', media_jobs)
+
     def test_missing_transition_backfill_is_resumable_and_holds_for_playback(self):
         self.assertIn('QPushButton("Analyze Missing Transition Data")', MAIN_SOURCE)
         self.assertIn("def _library_transition_analysis_items", MAIN_SOURCE)

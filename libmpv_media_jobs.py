@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import subprocess
 import sys
 import tempfile
@@ -114,9 +115,14 @@ class OfflineMpvJob:
     def request_log_messages(self, level: str):
         self.lib.mpv_request_log_messages(self.handle, os.fsencode(level))
 
-    def wait_for_end(self, timeout: float, log_messages: list[str] | None = None):
+    def wait_for_end(
+        self, timeout: float, log_messages: list[str] | None = None,
+        cancel_check=None,
+    ):
         deadline = time.monotonic() + max(1.0, float(timeout))
         while time.monotonic() < deadline:
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("libmpv offline decode cancelled")
             event = self.lib.mpv_wait_event(self.handle, min(0.25, deadline - time.monotonic()))
             if not event:
                 continue
@@ -200,6 +206,7 @@ def sample_video_tail_metrics(
     width: int = 32,
     height: int = 18,
     timeout: float = 60.0,
+    cancel_check=None,
 ) -> list[dict[str, float]]:
     """Decode tiny grayscale tail thumbnails and return activity metrics.
 
@@ -221,6 +228,10 @@ def sample_video_tail_metrics(
     try:
         job.option("config", "no")
         job.option("ao", "null")
+        # This is a video-only metric pass. Leaving the media's audio enabled
+        # lets the null audio output pace mpv close to realtime, which made a
+        # 45-second tail take about 43 seconds even with untimed=yes.
+        job.option("audio", "no")
         job.option("vo", "image")
         job.option("vo-image-outdir", str(output_dir))
         job.option("vo-image-format", "png")
@@ -230,12 +241,14 @@ def sample_video_tail_metrics(
         job.option("vf", f"fps={fps:.6f},scale={width}:{height},format=gray")
         job.initialize()
         job.command("loadfile", str(source), "replace")
-        job.wait_for_end(timeout)
+        job.wait_for_end(timeout, cancel_check=cancel_check)
 
         paths = sorted(output_dir.glob("*.png"))
         samples = []
         previous = None
         for index, path in enumerate(paths):
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("video tail analysis cancelled")
             with Image.open(path) as image:
                 pixels = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
             difference = 1.0 if previous is None else float(np.mean(np.abs(pixels - previous)))
@@ -602,7 +615,18 @@ def run_isolated_analysis_worker(input_stream=None, output_stream=None) -> int:
                 source = str(request.get("source") or "")
                 timeout = float(request.get("timeout") or 120.0)
                 mode = str(request.get("mode") or "full")
-                if mode == "transition":
+                if mode == "video_tail":
+                    # Do not retain the audio filter core alongside the video
+                    # decoder. The helper is recyclable specifically so these
+                    # native allocations never accumulate in the live app.
+                    session.close()
+                    samples = sample_video_tail_metrics(
+                        source,
+                        duration_seconds=float(request.get("duration") or 0.0),
+                        timeout=timeout,
+                    )
+                    response = {"ok": True, "samples": samples}
+                elif mode == "transition":
                     lufs, peak, envelope = session.measure_transition(source, timeout=timeout)
                     response = {"ok": True, "lufs": lufs, "peak": peak, "envelope": envelope}
                 elif mode == "karaoke_transition":
@@ -680,7 +704,10 @@ class IsolatedLoudnessSession:
         )
         self._tracks = 0
 
-    def _request(self, source: str, mode: str, timeout: float):
+    def _request(
+        self, source: str, mode: str, timeout: float, *,
+        extra: dict | None = None, cancel_check=None,
+    ):
         if self._disabled:
             raise RuntimeError("isolated loudness session disabled after repeated failures")
         if self._tracks >= self._MAX_TRACKS_PER_HELPER:
@@ -691,9 +718,21 @@ class IsolatedLoudnessSession:
             if process is None or process.stdin is None or process.stdout is None:
                 raise RuntimeError("offline analysis helper did not start")
             request = {"source": str(source), "mode": str(mode), "timeout": float(timeout)}
+            if extra:
+                request.update(extra)
             process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
             process.stdin.flush()
+            deadline = time.monotonic() + max(1.0, float(timeout)) + 5.0
             while True:
+                if cancel_check is not None and cancel_check():
+                    raise InterruptedError("offline analysis helper request cancelled")
+                if process.poll() is not None:
+                    raise RuntimeError("offline analysis helper exited without a result")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("offline analysis helper response timed out")
+                readable, _, _ = select.select([process.stdout], [], [], 0.25)
+                if not readable:
+                    continue
                 line = process.stdout.readline()
                 if not line:
                     raise RuntimeError("offline analysis helper exited without a result")
@@ -711,6 +750,8 @@ class IsolatedLoudnessSession:
                     response.get("lufs"), response.get("peak"), response.get("duration"),
                     response.get("audio_start"), response.get("audio_end"),
                 )
+            if mode == "video_tail":
+                return list(response.get("samples") or [])
             return response.get("lufs"), response.get("peak")
         except Exception:
             self.close()
@@ -731,6 +772,16 @@ class IsolatedLoudnessSession:
     def measure_karaoke_transition(self, source: str, *, timeout: float = 120.0):
         response = self._request(source, "karaoke_transition", timeout)
         return response
+
+    def measure_video_tail(
+        self, source: str, *, duration_seconds: float,
+        timeout: float = 60.0, cancel_check=None,
+    ):
+        return self._request(
+            source, "video_tail", timeout,
+            extra={"duration": float(duration_seconds)},
+            cancel_check=cancel_check,
+        )
 
     def close(self):
         process, self._process = self._process, None

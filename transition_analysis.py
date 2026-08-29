@@ -197,6 +197,9 @@ class TransitionAnalysisCache:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
+        self.checkpoint_path = self.path.with_name(
+            self.path.stem + ".checkpoint.jsonl"
+        )
         self._records: dict[str, TransitionAnalysis] = {}
 
     def load(self) -> None:
@@ -204,14 +207,31 @@ class TransitionAnalysisCache:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return
+            payload = {}
         rows = payload.get("records", {}) if isinstance(payload, dict) else {}
-        if not isinstance(rows, dict):
-            return
-        for key, value in rows.items():
-            record = TransitionAnalysis.from_dict(value)
-            if record is not None and record.analysis_version == TRANSITION_ANALYSIS_VERSION:
-                self._records[str(key)] = record
+        if isinstance(rows, dict):
+            for key, value in rows.items():
+                record = TransitionAnalysis.from_dict(value)
+                if record is not None and record.analysis_version == TRANSITION_ANALYSIS_VERSION:
+                    self._records[str(key)] = record
+        # Replay both sides of an interrupted compaction. Later JSONL rows win,
+        # so an audio-only row can be followed by its completed visual merge.
+        for checkpoint in (
+            self.checkpoint_path.with_suffix(".jsonl.flushing"),
+            self.checkpoint_path,
+        ):
+            try:
+                lines = checkpoint.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                    record = TransitionAnalysis.from_dict(row["record"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if record is not None and record.analysis_version == TRANSITION_ANALYSIS_VERSION:
+                    self._records[record.path] = record
 
     def get(self, path: str) -> TransitionAnalysis | None:
         record = self._records.get(str(path))
@@ -221,6 +241,17 @@ class TransitionAnalysisCache:
         if not isinstance(record, TransitionAnalysis) or not record.is_valid():
             raise ValueError("invalid transition analysis record")
         self._records[record.path] = record
+
+    def append_checkpoint(self, record: TransitionAnalysis) -> None:
+        """Durably stage one valid batch result without rewriting the cache."""
+        if not isinstance(record, TransitionAnalysis) or not record.is_valid():
+            raise ValueError("invalid transition analysis record")
+        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.checkpoint_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(
+                {"record": record.to_dict()}, separators=(",", ":")
+            ) + "\n")
+            handle.flush()
 
     def merge_visual_result(
         self,
@@ -264,6 +295,7 @@ class TransitionAnalysisCache:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        flushing = self.checkpoint_path.with_suffix(".jsonl.flushing")
         payload = {
             "analysis_version": TRANSITION_ANALYSIS_VERSION,
             "records": {key: value.to_dict() for key, value in self._records.items()},
@@ -274,6 +306,14 @@ class TransitionAnalysisCache:
             encoding="utf-8",
         )
         os.replace(temporary, self.path)
+        # The caller holds the transition persistence lock across this compact
+        # save, so no append can race the atomic replacement. Checkpoints are
+        # removed only after the complete cache is safely in place.
+        for checkpoint in (flushing, self.checkpoint_path):
+            try:
+                checkpoint.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def audio_boundaries_from_envelope(

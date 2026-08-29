@@ -96,6 +96,43 @@ class CacheTests(unittest.TestCase):
         loaded.load()
         self.assertEqual(loaded.get(str(self.media)).audio_end, 9.7)
 
+    def test_checkpoint_recovers_result_without_full_cache_save(self):
+        cache = ta.TransitionAnalysisCache(self.cache_path)
+        cache.put(self.record)
+        cache.append_checkpoint(self.record)
+        self.assertFalse(self.cache_path.exists())
+
+        recovered = ta.TransitionAnalysisCache(self.cache_path)
+        recovered.load()
+        self.assertEqual(recovered.get(str(self.media)).audio_end, 9.7)
+
+    def test_later_checkpoint_row_wins_and_save_compacts_it(self):
+        cache = ta.TransitionAnalysisCache(self.cache_path)
+        cache.put(self.record)
+        cache.append_checkpoint(self.record)
+        updated = ta.TransitionAnalysis.from_dict(self.record.to_dict())
+        updated.audio_end = 8.8
+        cache.put(updated)
+        cache.append_checkpoint(updated)
+
+        recovered = ta.TransitionAnalysisCache(self.cache_path)
+        recovered.load()
+        self.assertEqual(recovered.get(str(self.media)).audio_end, 8.8)
+        recovered.save()
+        self.assertFalse(recovered.checkpoint_path.exists())
+        compacted = ta.TransitionAnalysisCache(self.cache_path)
+        compacted.load()
+        self.assertEqual(compacted.get(str(self.media)).audio_end, 8.8)
+
+    def test_malformed_checkpoint_rows_are_ignored(self):
+        cache = ta.TransitionAnalysisCache(self.cache_path)
+        cache.checkpoint_path.write_text(
+            "not json\n" + json.dumps({"wrong": {}}) + "\n",
+            encoding="utf-8",
+        )
+        cache.load()
+        self.assertIsNone(cache.get(str(self.media)))
+
     def test_karaoke_cache_omits_raw_envelope(self):
         self.record.media_kind = "karaoke"
         cache = ta.TransitionAnalysisCache(self.cache_path)

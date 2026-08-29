@@ -1906,7 +1906,10 @@ def _transition_analysis_cached_sync(path: str):
         return _transition_analysis_cache.get(str(path or ""))
 
 
-def _transition_analysis_store(record, *, force: bool = False, persist: bool = True) -> bool:
+def _transition_analysis_store(
+    record, *, force: bool = False, persist: bool = True,
+    checkpoint: bool = False,
+) -> bool:
     """Incrementally persist one valid result without touching loudness.json."""
     global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
     global _transition_analysis_last_save_ts
@@ -1917,6 +1920,8 @@ def _transition_analysis_store(record, *, force: bool = False, persist: bool = T
                 _transition_analysis_cache_loaded = True
                 _transition_analysis_cache_loading = False
             _transition_analysis_cache.put(record)
+            if checkpoint:
+                _transition_analysis_cache.append_checkpoint(record)
             now = time.monotonic()
             if persist and (force or (now - _transition_analysis_last_save_ts) >= _TRANSITION_ANALYSIS_SAVE_INTERVAL_S):
                 _transition_analysis_cache.save()
@@ -13336,6 +13341,9 @@ def _extract_mp3_for_loudness(zip_path: str) -> str:
         return ""
 
 
+_mp4_visual_analysis_sem = threading.Semaphore(1)
+
+
 class AnalyzeLibraryWorker(QObject):
     """Batch loudness/gain analysis for karaoke + BGM, off the UI thread.
 
@@ -13346,6 +13354,7 @@ class AnalyzeLibraryWorker(QObject):
     progress = pyqtSignal(int, int, str)   # done, total, current name
     finished = pyqtSignal(int, int)        # analyzed, total
     holding = pyqtSignal(bool)             # paused because karaoke is playing
+    stage = pyqtSignal(str)                # slower substage detail for the dialog
 
     # Poll interval while holding off for playback.  Short enough that the scan
     # resumes promptly between songs, long enough to cost nothing.
@@ -13396,6 +13405,13 @@ class AnalyzeLibraryWorker(QObject):
             if not self.is_cancelled():
                 _diag("[LOUDNESS-LIB] resuming scan; karaoke idle")
         return not self.is_cancelled()
+
+    def _acquire_mp4_visual_slot(self):
+        """Serialize expensive video decodes without making cancel wait for them."""
+        while not self.is_cancelled():
+            if _mp4_visual_analysis_sem.acquire(timeout=0.25):
+                return True
+        return False
 
     def run(self):
         total = len(self.items)
@@ -13527,7 +13543,7 @@ class AnalyzeLibraryWorker(QObject):
                                 setattr(transition_record, field, getattr(existing_visual, field))
                             transition_analysis.calculate_effective_karaoke_end(transition_record)
                         if _transition_analysis_store(
-                            transition_record, persist=False
+                            transition_record, persist=False, checkpoint=True
                         ):
                             _diag(
                                 f"[TRANSITION] audio metadata cached file={os.path.basename(cache_key)!r} "
@@ -13544,15 +13560,31 @@ class AnalyzeLibraryWorker(QObject):
                                 duration=float(visual.duration or 0.0), result=visual,
                             )
                         if visual_record is not None:
-                            _transition_analysis_store(visual_record, persist=False)
+                            _transition_analysis_store(
+                                visual_record, persist=False, checkpoint=True
+                            )
                     elif transition_record is not None and not visual_is_cached and primary_path.lower().endswith(".mp4"):
+                        visual_slot = False
+                        visual_started = time.monotonic()
                         try:
-                            from libmpv_media_jobs import sample_video_tail_metrics
+                            self.stage.emit(f"Waiting to analyze video ending…\n{name}")
+                            visual_slot = self._acquire_mp4_visual_slot()
+                            if not visual_slot:
+                                break
+                            if session is None or not getattr(session, "usable", False):
+                                raise RuntimeError("isolated MP4 visual helper unavailable")
+                            self.stage.emit(f"Analyzing video ending…\n{name}")
+                            _diag(f"[TRANSITION] MP4 visual analysis started file={primary_path!r}")
                             visual = transition_analysis.analyze_mp4_visual_offline(
                                 primary_path,
                                 duration=float(transition_record.duration),
-                                metric_sampler=sample_video_tail_metrics,
+                                metric_sampler=lambda path, *, duration_seconds: session.measure_video_tail(
+                                    path, duration_seconds=duration_seconds, timeout=60.0,
+                                    cancel_check=self.is_cancelled,
+                                ),
                             )
+                            if self.is_cancelled():
+                                break
                             with _transition_analysis_cache_lock:
                                 visual_record = _transition_analysis_cache.merge_visual_result(
                                     path=primary_path, media_kind="mp4",
@@ -13560,9 +13592,19 @@ class AnalyzeLibraryWorker(QObject):
                                     result=visual,
                                 )
                             if visual_record is not None:
-                                _transition_analysis_store(visual_record, persist=False)
+                                _transition_analysis_store(
+                                    visual_record, persist=False, checkpoint=True
+                                )
                         except Exception as exc:
                             _diag(f"[TRANSITION] MP4 visual backfill failed file={primary_path!r}: {exc}")
+                        finally:
+                            if visual_slot:
+                                _mp4_visual_analysis_sem.release()
+                            _diag(
+                                f"[TRANSITION] MP4 visual analysis finished file={primary_path!r} "
+                                f"elapsed={time.monotonic() - visual_started:.1f}s "
+                                f"cancelled={int(self.is_cancelled())}"
+                            )
                 else:
                     failed += 1
                     if not self.is_cancelled():
@@ -41468,6 +41510,14 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        def _on_stage(message):
+            try:
+                dlg.setLabelText(str(message or ""))
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+
         def _on_worker_finished(index, analyzed, subtotal):
             progress_by_worker[index] = subtotal
             finished_state["count"] += 1
@@ -41507,6 +41557,7 @@ class KaraokeApp(QWidget):
                 lambda done, total, name, i=index: _on_progress(i, done, total, name)
             )
             worker.holding.connect(_on_holding)
+            worker.stage.connect(_on_stage)
             worker.finished.connect(
                 lambda analyzed, total, i=index: _on_worker_finished(i, analyzed, total)
             )

@@ -2048,9 +2048,33 @@ class PostShowAnalysisSafetyTests(unittest.TestCase):
         payload = json.loads(line[len(libmpv_media_jobs._ANALYSIS_RESULT_PREFIX):])
         self.assertEqual(payload["envelope"], [-60.0, -12.0])
 
+    def test_isolated_worker_protocol_returns_video_tail_metrics(self):
+        import libmpv_media_jobs
+
+        class FakeSession:
+            def close(self):
+                pass
+
+        expected = [{"timestamp": 9.0, "mean_luma": 0.2, "difference": 0.1}]
+        request = io.StringIO(json.dumps({
+            "source": "/tmp/song.mp4", "mode": "video_tail",
+            "duration": 12.0, "timeout": 9.0,
+        }) + "\n" + json.dumps({"command": "quit"}) + "\n")
+        response = io.StringIO()
+        with mock.patch.object(libmpv_media_jobs, "LoudnessSession", FakeSession), \
+             mock.patch.object(libmpv_media_jobs, "sample_video_tail_metrics", return_value=expected) as sampler:
+            self.assertEqual(libmpv_media_jobs.run_isolated_analysis_worker(request, response), 0)
+        sampler.assert_called_once_with(
+            "/tmp/song.mp4", duration_seconds=12.0, timeout=9.0,
+        )
+        line = response.getvalue().strip()
+        payload = json.loads(line[len(libmpv_media_jobs._ANALYSIS_RESULT_PREFIX):])
+        self.assertEqual(payload["samples"], expected)
+
     def test_batch_worker_uses_recyclable_isolated_session(self):
         source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
         self.assertIn("IsolatedLoudnessSession", source)
+        self.assertIn("session.measure_video_tail", source)
 
     def test_karaoke_batch_uses_compact_transition_analysis(self):
         source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)

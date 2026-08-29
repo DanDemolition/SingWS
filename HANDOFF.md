@@ -2,6 +2,51 @@
 
 Updated 2026-08-22.
 
+## Turbo MP4 visual-scan stall fix (2026-08-29, unbuilt)
+
+Live testing of the installed 0.4.6.3 candidate showed Turbo Full Scan advancing
+MP4 files in roughly 43–49-second batches, with many KVDM tracks grouped in the
+stalls. Four audio helpers were isolated, but each corresponding Qt worker still
+started an in-process libmpv tail-thumbnail decode, causing four simultaneous
+video decoders, 1.0–1.7-second GUI stalls, and a 244 MB RSS rise in four minutes.
+
+MP4 visual backfills now run through the recyclable offline helper and are
+serialized through one cancellable slot while the four audio helpers remain
+parallel. Waiting workers and the helper-response boundary poll cancellation
+every 250 ms; cancellation terminates a still-decoding helper. The video-only
+job disables audio: a real 20-second fixture tail fell from 20 seconds to 2.28
+seconds once null audio stopped pacing the decoder near realtime. The progress
+dialog identifies the waiting/analyzing-video-ending stage, and start/finish
+diagnostics include the file, elapsed time, and cancellation state.
+
+The isolated video protocol and real subprocess path both pass, along with the
+focused transition/recent-regression tests. Python compilation and `git diff
+--check` are clean. The GUI source guard was added, but this machine's documented
+Qt platform-probe abort prevented that GUI module from running in the combined
+command. This change is not built or installed; the currently running scan still
+has the old behavior.
+
+Transition results now have the same crash-resume property as loudness results.
+Each successful batch audio or visual merge appends a compact JSONL checkpoint;
+cache load replays both the normal checkpoint and an interrupted-compaction
+checkpoint with later rows winning. A successful atomic full-cache replacement
+then removes the checkpoint. Abrupt quits between the per-track result and final
+Turbo compaction therefore no longer repeat completed MP4 work. Three focused
+checkpoint recovery/compaction/malformed-row tests bring the focused total to
+52 passing tests with scratch show data.
+
+Same-version release verification ran on 2026-08-29: 786 tests plus 21
+subtests passed through the scratch-data release runner. The fresh Qt run made
+198 attempts and reached the same two documented baseline debts as the earlier
+candidate (one removed module name and one stale ticker source assertion). The
+new Intel app passed x86_64 architecture, bundled-media loading, and the macOS
+12 minimum-version sweep. Its staged copy passed strict signing. DMG creation
+is blocked by the host disk-image service: three attempts, including an
+unsandboxed retry, returned `Device not configured` or `Resource temporarily
+unavailable` from `hdiutil create`; disk space is healthy. Do not publish or
+reuse the earlier installer—the same-version replacement DMG has not been
+created, hashed, launched from its mounted image, or uploaded yet.
+
 ## Full-library analysis acceleration (0.4.6.3 built, not yet published/installed)
 
 The single-worker full scan now uses combined EBU R128 plus compact silence

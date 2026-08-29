@@ -13,6 +13,13 @@
   the derived fields playback consumes, preventing gigabyte-scale cache growth.
 - Valid CDG/MP4 visual transition results are preserved during later loudness
   refreshes, and decoder logs retain only values consumed by the analyzers.
+- MP4 tail-thumbnail analysis now disables audio so libmpv no longer paces the
+  video-only pass near realtime, and runs inside recyclable helpers rather than
+  accumulating decoder allocations in the live app. Video analysis is
+  serialized, cancellable, timed in diagnostics, and identified in progress.
+- Transition audio/visual results use their own append-only JSONL checkpoint,
+  so an abrupt quit or crash resumes completed work instead of repeating the
+  MP4 portion before the final cache compaction.
 
 ## 0.4.5.4 — unreleased
 
