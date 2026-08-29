@@ -2,6 +2,14 @@
 
 Updated 2026-08-29.
 
+## Duplicate manager select-all (2026-08-29, unbuilt)
+
+The duplicate results dialog now has a `Select All Duplicates` action. It checks
+only items carrying the cleanup-eligible checkbox flag, so recommended keepers
+and same-audio/different-CDG review versions remain unselected. The scratch-data
+suite passes with 790 tests plus 21 subtests. This follow-up is not included in
+the currently published 0.4.6.3 installer.
+
 ## Turbo MP4 visual-scan stall fix (2026-08-29, released in 0.4.6.3)
 
 Live testing of the installed 0.4.6.3 candidate showed Turbo Full Scan advancing

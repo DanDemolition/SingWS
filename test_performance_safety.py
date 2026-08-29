@@ -93,6 +93,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         manager = function_source("_show_duplicate_song_results")
         self.assertIn("Nothing is selected automatically", manager)
         self.assertIn("Different lyric rendering", manager)
+        self.assertIn('"Select All Duplicates"', manager)
+        self.assertIn("item.flags() & Qt.ItemFlag.ItemIsUserCheckable", manager)
         self.assertIn("Move Selected to Recovery", manager)
         self.assertIn('APP_USER_DIR / "duplicate-recovery"', manager)
         self.assertIn("removed_paths=sorted(removed)", manager)

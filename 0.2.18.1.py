@@ -41569,11 +41569,23 @@ class KaraokeApp(QWidget):
         tree.resizeColumnToContents(1)
         layout.addWidget(tree, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dlg)
+        select_all_btn = buttons.addButton(
+            "Select All Duplicates", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        select_all_btn.setEnabled(eligible > 0)
         move_btn = buttons.addButton(
             "Move Selected to Recovery", QDialogButtonBox.ButtonRole.ActionRole
         )
         move_btn.setEnabled(eligible > 0)
         buttons.rejected.connect(dlg.reject)
+
+        def select_all_duplicates():
+            iterator = QTreeWidgetItemIterator(tree)
+            while iterator.value():
+                item = iterator.value()
+                if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    item.setCheckState(0, Qt.CheckState.Checked)
+                iterator += 1
 
         def move_selected():
             selected = []
@@ -41621,6 +41633,7 @@ class KaraokeApp(QWidget):
                     dlg, "Duplicate Song Manager", f"Could not move selected files:\n{exc}"
                 )
 
+        select_all_btn.clicked.connect(select_all_duplicates)
         move_btn.clicked.connect(move_selected)
         layout.addWidget(buttons)
         dlg.exec()
