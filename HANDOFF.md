@@ -2,6 +2,18 @@
 
 Updated 2026-08-29.
 
+## Turbo first-batch timeout loop (2026-08-29, unbuilt)
+
+Live inspection of the installed 0.4.6.3 build found Turbo stopped at 4/120,428
+with all four parent workers waiting for isolated-helper responses. A failed
+120-second compact-transition request was silently retried through a replacement
+helper for another 120 seconds, making one bad first-batch file look like a
+four-minute freeze. Turbo now makes one 45-second isolated attempt (plus the
+existing five-second protocol grace), logs the filename and reason with
+`retry=0`, marks the unchanged file failed, and advances. Normal non-Turbo scans
+retain their 120-second behavior. The scratch-data suite passes with 790 tests
+plus 21 subtests. This follow-up is not in the installed/published 0.4.6.3 build.
+
 ## Duplicate manager select-all (2026-08-29, unbuilt)
 
 The duplicate results dialog now has a `Select All Duplicates` action. It checks

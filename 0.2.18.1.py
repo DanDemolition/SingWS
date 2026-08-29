@@ -13465,17 +13465,31 @@ class AnalyzeLibraryWorker(QObject):
                 analysis_guard = contextlib.nullcontext() if self.parallel else _loudness_sem
                 with analysis_guard:
                     if self.mode in {"full", "transition"} and session is not None and getattr(session, "usable", False):
+                        helper_timeout = 45.0 if self.parallel else 120.0
                         try:
                             if str(_source).lower() == "karaoke":
                                 compact_transition = session.measure_karaoke_transition(
-                                    audio, timeout=120.0
+                                    audio, timeout=helper_timeout
                                 )
                                 lufs, peak_db = compact_transition[:2]
                             else:
                                 lufs, peak_db, envelope = session.measure_transition(
-                                    audio, timeout=120.0,
+                                    audio, timeout=helper_timeout,
                                 )
-                        except Exception:
+                        except Exception as exc:
+                            # Turbo already runs four isolated helpers. Retrying
+                            # the same file through a freshly spawned helper made
+                            # one timeout look like a four-minute frozen dialog.
+                            # Fail this item after its single bounded attempt;
+                            # later scans skip the recorded failure unless the
+                            # source file changes.
+                            if self.parallel and bool(getattr(session, "isolated", False)):
+                                self.stage.emit(f"Skipping stalled analysis…\n{name}")
+                                _diag(
+                                    f"[LOUDNESS-LIB] turbo helper failed file={cache_key!r} "
+                                    f"timeout={helper_timeout:.0f}s retry=0 reason={exc}"
+                                )
+                                raise RuntimeError(f"Turbo helper failed: {exc}") from exc
                             lufs, peak_db = _measure_loudness_lufs(
                                 audio, cancel_check=self.is_cancelled, mode="full",
                                 session=session,

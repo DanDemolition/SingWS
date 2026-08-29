@@ -88,6 +88,15 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("job.wait_for_end(timeout, cancel_check=cancel_check)", media_jobs)
         self.assertIn('job.option("audio", "no")', media_jobs)
 
+    def test_turbo_helper_timeout_does_not_retry_the_same_file(self):
+        worker = MAIN_SOURCE[
+            MAIN_SOURCE.index("class AnalyzeLibraryWorker(QObject)"):
+            MAIN_SOURCE.index("class AnalyzeLibraryParallelCoordinator(QObject)")
+        ]
+        self.assertIn("helper_timeout = 45.0 if self.parallel else 120.0", worker)
+        self.assertIn('f"timeout={helper_timeout:.0f}s retry=0 reason={exc}"', worker)
+        self.assertIn('raise RuntimeError(f"Turbo helper failed: {exc}") from exc', worker)
+
     def test_duplicate_manager_is_review_first_and_recoverable(self):
         self.assertIn('QPushButton("Duplicate Song Manager")', MAIN_SOURCE)
         manager = function_source("_show_duplicate_song_results")
