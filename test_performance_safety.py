@@ -59,11 +59,20 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("lavfi.astats.Overall.RMS_level", media_jobs)
         self.assertIn("def measure_transition", media_jobs)
 
+    def test_turbo_scan_uses_four_isolated_workers_and_holds_for_playback(self):
+        start = function_source("_start_analyze_library_items")
+        self.assertIn('worker_count = min(4, len(items)) if mode == "turbo" else 1', start)
+        self.assertIn('parallel=(mode == "turbo")', start)
+        self.assertIn('True if mode in {"transition", "turbo"}', start)
+        self.assertIn("AnalyzeLibraryParallelCoordinator", start)
+        settings = MAIN_SOURCE[MAIN_SOURCE.index('QPushButton("Turbo Full Scan")'):]
+        self.assertIn('mode="turbo"', settings)
+
     def test_missing_transition_backfill_is_resumable_and_holds_for_playback(self):
         self.assertIn('QPushButton("Analyze Missing Transition Data")', MAIN_SOURCE)
         self.assertIn("def _library_transition_analysis_items", MAIN_SOURCE)
         self.assertIn('mode="transition"', MAIN_SOURCE)
-        self.assertIn('True if mode == "transition"', MAIN_SOURCE)
+        self.assertIn('True if mode in {"transition", "turbo"}', MAIN_SOURCE)
         enumerate_source = function_source("_library_transition_analysis_items")
         self.assertIn("audio_complete", enumerate_source)
         self.assertIn("visual_complete", enumerate_source)

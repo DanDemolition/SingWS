@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.6.2"
+APP_VERSION = "0.4.6.3"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -121,6 +121,7 @@ except ImportError:
 # ============================================================================
 
 import hashlib
+import contextlib
 import song_index  # local module (~/SingWS/singws.db)
 import phrase_markers  # local module (~/SingWS/phrase_markers.db) — Phrase-Aligned Song Start
 import phrase_detect  # local module — tempo/beat analysis + beat-aligned loops
@@ -1835,6 +1836,7 @@ BG_MUSIC_INDEX_PATH = APP_USER_DIR / "bgmusic.json"
 # level. Analysis runs in the background; playback just reads the cached gain.
 # BGM applies this per source deck, under the user volume/fade master.
 LOUDNESS_CACHE_PATH = APP_USER_DIR / "loudness.json"
+LOUDNESS_CHECKPOINT_PATH = APP_USER_DIR / "loudness.checkpoint.jsonl"
 # Separate, additive cache: changing transition algorithms never invalidates
 # the existing LUFS/peak work in loudness.json.
 TRANSITION_ANALYSIS_CACHE_PATH = APP_USER_DIR / "transition-analysis.json"
@@ -1962,6 +1964,25 @@ def _loudness_load_cache():
                 data = json.loads(LOUDNESS_CACHE_PATH.read_text(encoding="utf-8") or "{}")
                 if isinstance(data, dict):
                     _loudness_cache.update(data)
+            # Batch scans append one compact record per completed item instead
+            # of repeatedly encoding the growing library dictionary. A partial
+            # final compaction is replayed too, making app/process crashes
+            # resumable without a multi-megabyte rewrite every ten seconds.
+            for checkpoint in (
+                LOUDNESS_CHECKPOINT_PATH.with_suffix(".jsonl.flushing"),
+                LOUDNESS_CHECKPOINT_PATH,
+            ):
+                if not checkpoint.exists():
+                    continue
+                for line in checkpoint.read_text(encoding="utf-8").splitlines():
+                    try:
+                        row = json.loads(line)
+                        path = str(row["path"])
+                        entry = row["entry"]
+                        if path and isinstance(entry, dict):
+                            _loudness_cache[path] = entry
+                    except (KeyError, TypeError, ValueError):
+                        continue
         except Exception:
             pass
         _loudness_cache_loaded = True
@@ -1969,6 +1990,20 @@ def _loudness_load_cache():
 
 _LOUDNESS_SAVE_INTERVAL_S = 10.0
 _loudness_last_save_ts = 0.0
+
+
+def _loudness_append_checkpoint(path: str, entry: dict) -> None:
+    """Durably stage one batch result in O(1) work."""
+    try:
+        line = json.dumps(
+            {"path": str(path), "entry": dict(entry)}, separators=(",", ":")
+        ) + "\n"
+        with _loudness_lock:
+            with LOUDNESS_CHECKPOINT_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+    except Exception as exc:
+        _diag(f"[LOUDNESS-LIB] checkpoint failed file={path!r}: {exc}")
 
 
 def _loudness_save_cache(force: bool = True):
@@ -1982,15 +2017,26 @@ def _loudness_save_cache(force: bool = True):
     force=True when it finishes. Callers must NOT hold _loudness_lock.
     """
     global _loudness_last_save_ts
+    flushing = LOUDNESS_CHECKPOINT_PATH.with_suffix(".jsonl.flushing")
     with _loudness_lock:
         if not force and (time.monotonic() - _loudness_last_save_ts) < _LOUDNESS_SAVE_INTERVAL_S:
             return
         snapshot = dict(_loudness_cache)
         _loudness_last_save_ts = time.monotonic()
+        if force and LOUDNESS_CHECKPOINT_PATH.exists():
+            try:
+                os.replace(LOUDNESS_CHECKPOINT_PATH, flushing)
+            except OSError:
+                pass
     try:
         tmp = LOUDNESS_CACHE_PATH.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(snapshot), encoding="utf-8")
         os.replace(tmp, LOUDNESS_CACHE_PATH)
+        if force:
+            try:
+                flushing.unlink()
+            except OSError:
+                pass
     except Exception:
         pass
 
@@ -2032,15 +2078,16 @@ def _loudness_mark_failed(audio_path: str, reason: str = ""):
     sig = _loudness_file_sig(audio_path)
     if sig is None:
         return
-    with _loudness_lock:
-        _loudness_cache[audio_path] = {
+    entry = {
             "failed": True,
             "reason": str(reason or "")[:200],
             "mtime": sig[0],
             "size": sig[1],
             "at": int(time.time()),
         }
-    _loudness_save_cache(force=False)
+    with _loudness_lock:
+        _loudness_cache[audio_path] = entry
+    _loudness_append_checkpoint(audio_path, entry)
 
 
 def loudness_failed_cached(audio_path: str) -> bool:
@@ -13305,7 +13352,7 @@ class AnalyzeLibraryWorker(QObject):
     _PLAYBACK_HOLD_POLL_S = 1.0
     _PROGRESS_MIN_INTERVAL_S = 0.10
 
-    def __init__(self, items, mode: str = "full", should_hold=None):
+    def __init__(self, items, mode: str = "full", should_hold=None, *, parallel=False, finalize_cache=True):
         super().__init__()
         # items: list of (primary_path, audio_path, display_name)
         self.items = list(items or [])
@@ -13314,6 +13361,8 @@ class AnalyzeLibraryWorker(QObject):
         # a live song is what produced 744 GUI stalls (worst 6.1s) on
         # 2026-08-16, so the pass holds between tracks instead of grinding on.
         self.should_hold = should_hold
+        self.parallel = bool(parallel)
+        self.finalize_cache = bool(finalize_cache)
         self._cancel = False
         self._cancel_event = threading.Event()
 
@@ -13394,12 +13443,21 @@ class AnalyzeLibraryWorker(QObject):
                 sig = _loudness_file_sig(cache_key)
                 existing_loudness = loudness_info_cached(cache_key)
                 envelope = None
-                with _loudness_sem:
+                compact_transition = None
+                existing_visual = _transition_analysis_cached_sync(primary_path)
+                analysis_guard = contextlib.nullcontext() if self.parallel else _loudness_sem
+                with analysis_guard:
                     if self.mode in {"full", "transition"} and session is not None and getattr(session, "usable", False):
                         try:
-                            lufs, peak_db, envelope = session.measure_transition(
-                                audio, timeout=120.0,
-                            )
+                            if str(_source).lower() == "karaoke":
+                                compact_transition = session.measure_karaoke_transition(
+                                    audio, timeout=120.0
+                                )
+                                lufs, peak_db = compact_transition[:2]
+                            else:
+                                lufs, peak_db, envelope = session.measure_transition(
+                                    audio, timeout=120.0,
+                                )
                         except Exception:
                             lufs, peak_db = _measure_loudness_lufs(
                                 audio, cancel_check=self.is_cancelled, mode="full",
@@ -13419,15 +13477,16 @@ class AnalyzeLibraryWorker(QObject):
                     lufs = float(existing_loudness["lufs"])
                     peak_db = existing_loudness.get("peak_db")
                 if lufs is not None and sig is not None:
+                    loudness_entry = {
+                        "i": float(lufs),
+                        "peak_db": peak_db,
+                        "mtime": sig[0],
+                        "size": sig[1],
+                        "mode": "fast" if self.mode == "fast" else "full",
+                    }
                     with _loudness_lock:
-                        _loudness_cache[cache_key] = {
-                            "i": float(lufs),
-                            "peak_db": peak_db,
-                            "mtime": sig[0],
-                            "size": sig[1],
-                            "mode": "fast" if self.mode == "fast" else "full",
-                        }
-                    _loudness_save_cache(force=False)
+                        _loudness_cache[cache_key] = loudness_entry
+                    _loudness_append_checkpoint(cache_key, loudness_entry)
                     analyzed += 1
                     try:
                         _diag(
@@ -13437,7 +13496,15 @@ class AnalyzeLibraryWorker(QObject):
                         )
                     except Exception:
                         pass
-                    if envelope:
+                    transition_record = None
+                    if compact_transition is not None:
+                        _, _, duration, audio_start, audio_end = compact_transition
+                        transition_record = transition_analysis.build_karaoke_transition_analysis(
+                            path=cache_key, duration=duration,
+                            audio_start=audio_start, audio_end=audio_end,
+                            integrated_lufs=lufs, peak_db=peak_db,
+                        )
+                    elif envelope:
                         transition_record = transition_analysis.build_audio_transition_analysis(
                             path=cache_key,
                             media_kind=("bgm" if str(_source).lower() == "bgm" else "karaoke"),
@@ -13446,7 +13513,20 @@ class AnalyzeLibraryWorker(QObject):
                             integrated_lufs=lufs,
                             peak_db=peak_db,
                         )
-                        if transition_record is not None and _transition_analysis_store(
+                    if transition_record is not None:
+                        # MP4 audio and visual metadata share a cache key. Keep
+                        # an already-valid visual result while refreshing audio.
+                        if (
+                            primary_path == cache_key and existing_visual is not None
+                            and existing_visual.visual_method
+                        ):
+                            for field in (
+                                "visual_start", "visual_end", "visual_confidence",
+                                "visual_method", "safety_reason",
+                            ):
+                                setattr(transition_record, field, getattr(existing_visual, field))
+                            transition_analysis.calculate_effective_karaoke_end(transition_record)
+                        if _transition_analysis_store(
                             transition_record, persist=False
                         ):
                             _diag(
@@ -13455,7 +13535,8 @@ class AnalyzeLibraryWorker(QObject):
                                 f"audio_end={transition_record.audio_end} "
                                 f"fade_start={transition_record.fade_start}"
                             )
-                    if envelope and primary_path.lower().endswith(".cdg"):
+                    visual_is_cached = bool(existing_visual is not None and existing_visual.visual_method)
+                    if transition_record is not None and not visual_is_cached and primary_path.lower().endswith(".cdg"):
                         visual = transition_analysis.analyze_cdg_visual(primary_path)
                         with _transition_analysis_cache_lock:
                             visual_record = _transition_analysis_cache.merge_visual_result(
@@ -13464,18 +13545,18 @@ class AnalyzeLibraryWorker(QObject):
                             )
                         if visual_record is not None:
                             _transition_analysis_store(visual_record, persist=False)
-                    elif envelope and primary_path.lower().endswith(".mp4"):
+                    elif transition_record is not None and not visual_is_cached and primary_path.lower().endswith(".mp4"):
                         try:
                             from libmpv_media_jobs import sample_video_tail_metrics
                             visual = transition_analysis.analyze_mp4_visual_offline(
                                 primary_path,
-                                duration=len(envelope) * transition_analysis.DEFAULT_HOP_SECONDS,
+                                duration=float(transition_record.duration),
                                 metric_sampler=sample_video_tail_metrics,
                             )
                             with _transition_analysis_cache_lock:
                                 visual_record = _transition_analysis_cache.merge_visual_result(
                                     path=primary_path, media_kind="mp4",
-                                    duration=len(envelope) * transition_analysis.DEFAULT_HOP_SECONDS,
+                                    duration=float(transition_record.duration),
                                     result=visual,
                                 )
                             if visual_record is not None:
@@ -13510,20 +13591,50 @@ class AnalyzeLibraryWorker(QObject):
         # Flush the final batch so cancellation/quit resumes from the last
         # successfully analyzed track without rewriting the growing JSON file
         # for every item.
-        try:
-            with _transition_analysis_cache_lock:
-                if _transition_analysis_cache_loaded:
-                    _transition_analysis_cache.save()
-        except Exception as exc:
-            _diag(f"[TRANSITION] final cache flush failed: {exc}")
+        if self.finalize_cache:
+            try:
+                with _transition_analysis_cache_lock:
+                    if _transition_analysis_cache_loaded:
+                        _transition_analysis_cache.save()
+            except Exception as exc:
+                _diag(f"[TRANSITION] final cache flush failed: {exc}")
         if skipped:
             _diag(f"[LOUDNESS-LIB] skipped {skipped} file(s) that failed analysis previously")
-        _loudness_save_cache()
+        if self.finalize_cache:
+            _loudness_save_cache()
         _diag(
             f"[LOUDNESS-LIB] pass_complete mode={self.mode} attempted={done} "
             f"cached={analyzed} failed={failed} cancelled={int(self.is_cancelled())}"
         )
         self.finished.emit(analyzed, total)
+
+
+class AnalyzeLibraryParallelCoordinator(QObject):
+    """Own and cancel a bounded set of isolated batch-analysis workers."""
+
+    def __init__(self, workers):
+        super().__init__()
+        self.workers = list(workers or [])
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+        for worker in self.workers:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+
+    def is_cancelled(self):
+        if self._cancelled:
+            return True
+        for worker in self.workers:
+            try:
+                if worker.is_cancelled():
+                    return True
+            except RuntimeError:
+                continue
+        return False
 
 
 class AnalyzeLibraryPreparationWorker(QObject):
@@ -27496,6 +27607,11 @@ class KaraokeApp(QWidget):
         analyze_lib_btn = QPushButton("Full Loudness Scan")
         analyze_lib_btn.setToolTip("Measures LUFS/peak and transition audio boundaries in one decode pass. Incremental — existing full results are preserved.")
         analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False, mode="full"))
+        turbo_analyze_lib_btn = QPushButton("Turbo Full Scan")
+        turbo_analyze_lib_btn.setToolTip(
+            "Runs four isolated analyzers while idle and pauses between tracks during karaoke playback."
+        )
+        turbo_analyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=False, mode="turbo"))
         analyze_transitions_btn = QPushButton("Analyze Missing Transition Data")
         analyze_transitions_btn.setToolTip(
             "Backfills only missing audio/visual transition metadata. Existing loudness results are preserved; scanning pauses during karaoke."
@@ -27516,6 +27632,7 @@ class KaraokeApp(QWidget):
         _analyze_row = QHBoxLayout()
         _analyze_row.addWidget(fast_analyze_lib_btn)
         _analyze_row.addWidget(analyze_lib_btn)
+        _analyze_row.addWidget(turbo_analyze_lib_btn)
         _analyze_row.addWidget(analyze_transitions_btn)
         _analyze_row.addWidget(reanalyze_lib_btn)
         _analyze_row.addStretch(1)
@@ -41211,7 +41328,7 @@ class KaraokeApp(QWidget):
 
     def analyze_library(self, force: bool = False, mode: str = "full"):
         """Analyze static loudness/gain for karaoke and BGM libraries."""
-        mode = mode if mode in {"fast", "full", "transition"} else "full"
+        mode = mode if mode in {"fast", "full", "transition", "turbo"} else "full"
         from PyQt6.QtWidgets import QProgressDialog
         if mode != "transition" and not self._any_loudness_normalization_active():
             _diag("[LOUDNESS-LIB] skipped reason=normalization_disabled")
@@ -41263,7 +41380,7 @@ class KaraokeApp(QWidget):
 
     def _start_analyze_library_items(self, items, mode: str = "full"):
         """Create the progress UI after background file enumeration completes."""
-        mode = mode if mode in {"fast", "full", "transition"} else "full"
+        mode = mode if mode in {"fast", "full", "transition", "turbo"} else "full"
         from PyQt6.QtWidgets import QProgressDialog
         tracks = list(getattr(self, "tracks", []) or [])
 
@@ -41286,7 +41403,7 @@ class KaraokeApp(QWidget):
             _prog_parent = QApplication.activeModalWidget()
         except Exception:
             _prog_parent = None
-        scan_name = "Transitions" if mode == "transition" else ("Fast" if mode == "fast" else "Full")
+        scan_name = "Transitions" if mode == "transition" else ("Fast" if mode == "fast" else ("Turbo" if mode == "turbo" else "Full"))
         scan_subject = "transition scan" if mode == "transition" else "loudness scan"
         dlg = QProgressDialog(f"{scan_name} {scan_subject} for {len(items)} track(s)…", "Cancel", 0, len(items), _prog_parent or self)
         dlg.setWindowTitle(f"{scan_name} Analysis")
@@ -41309,29 +41426,30 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        thread = QThread(self)
         # Holding under a live song is the default: an unheld full-library pass
         # produced 744 GUI stalls (worst 6.1s) on 2026-08-16. But a five-hour
         # show is nearly wall-to-wall playback, so a held pass barely advances
         # and an operator who needs it to finish has no way through. The hold is
         # therefore a setting, not a law.
         hold_for_playback = (
-            True if mode == "transition"
+            True if mode in {"transition", "turbo"}
             else bool(self.settings.get("loudness_scan_holds_for_playback", True))
         )
         if not hold_for_playback:
             _diag("[LOUDNESS-LIB] playback hold disabled by setting; scanning under live playback")
-        worker = AnalyzeLibraryWorker(
-            items, mode=mode,
-            should_hold=(lambda: bool(getattr(self, "karaoke_playing", False))) if hold_for_playback else None,
-        )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
+        worker_count = min(4, len(items)) if mode == "turbo" else 1
+        partitions = [items[index::worker_count] for index in range(worker_count)]
+        threads = []
+        workers = []
+        progress_by_worker = [0] * worker_count
+        finished_state = {"count": 0, "analyzed": 0}
 
-        def _on_progress(done, total, name):
+        def _on_progress(index, done, _subtotal, name):
+            progress_by_worker[index] = done
+            aggregate_done = sum(progress_by_worker)
             try:
-                dlg.setValue(done - 1)
-                dlg.setLabelText(f"{scan_name} {scan_subject} {done}/{total}…\n{name}")
+                dlg.setValue(max(0, aggregate_done - 1))
+                dlg.setLabelText(f"{scan_name} {scan_subject} {aggregate_done}/{len(items)}…\n{name}")
             except Exception:
                 pass
 
@@ -41350,33 +41468,61 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-        def _on_finished(analyzed, total):
+        def _on_worker_finished(index, analyzed, subtotal):
+            progress_by_worker[index] = subtotal
+            finished_state["count"] += 1
+            finished_state["analyzed"] += analyzed
+            if finished_state["count"] < worker_count:
+                return
+            if mode == "turbo":
+                try:
+                    with _transition_analysis_cache_lock:
+                        if _transition_analysis_cache_loaded:
+                            _transition_analysis_cache.save()
+                except Exception as exc:
+                    _diag(f"[TRANSITION] final turbo cache flush failed: {exc}")
+                _loudness_save_cache()
             self._analyze_running = False
-            cancelled = False
+            cancelled = coordinator.is_cancelled()
             try:
-                cancelled = bool(worker.is_cancelled())
-            except Exception:
-                cancelled = False
-            try:
-                dlg.setValue(total)
+                dlg.setValue(len(items))
             except Exception:
                 pass
+            analyzed_total = finished_state["analyzed"]
             if cancelled:
-                self._set_processing_text(f"Cancelled {scan_name.lower()} {scan_subject} after {analyzed} of {total} track(s).")
+                self._set_processing_text(f"Cancelled {scan_name.lower()} {scan_subject} after {analyzed_total} of {len(items)} track(s).")
             else:
-                self._set_processing_text(f"{scan_name} {scan_subject} cached {analyzed} of {total} track(s).")
+                self._set_processing_text(f"{scan_name} {scan_subject} cached {analyzed_total} of {len(items)} track(s).")
 
-        worker.progress.connect(_on_progress)
-        worker.holding.connect(_on_holding)
-        worker.finished.connect(_on_finished)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        dlg.canceled.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
+        for index, partition in enumerate(partitions):
+            thread = QThread(self)
+            worker = AnalyzeLibraryWorker(
+                partition, mode=("full" if mode == "turbo" else mode),
+                should_hold=(lambda: bool(getattr(self, "karaoke_playing", False))) if hold_for_playback else None,
+                parallel=(mode == "turbo"), finalize_cache=(mode != "turbo"),
+            )
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.progress.connect(
+                lambda done, total, name, i=index: _on_progress(i, done, total, name)
+            )
+            worker.holding.connect(_on_holding)
+            worker.finished.connect(
+                lambda analyzed, total, i=index: _on_worker_finished(i, analyzed, total)
+            )
+            worker.finished.connect(thread.quit)
+            worker.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            threads.append(thread)
+            workers.append(worker)
+        coordinator = AnalyzeLibraryParallelCoordinator(workers)
+        coordinator.threads = threads
+        dlg.canceled.connect(coordinator.cancel, Qt.ConnectionType.DirectConnection)
         # keep refs alive + mark running so a second click just resurfaces this one
         self._analyze_running = True
-        self._analyze_lib_job = (thread, worker, dlg)
-        thread.start()
+        self._analyze_lib_job = (threads[0], coordinator, dlg)
+        for thread in threads:
+            thread.start()
         self._bring_analyze_dialog_to_front(dlg)
 
     def _bring_analyze_dialog_to_front(self, dlg) -> None:

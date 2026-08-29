@@ -2,6 +2,65 @@
 
 Updated 2026-08-22.
 
+## Full-library analysis acceleration (0.4.6.3 built, not yet published/installed)
+
+The single-worker full scan now uses combined EBU R128 plus compact silence
+boundary detection for karaoke instead of generating, transferring, and
+persisting a 100 ms RMS envelope. A real library ZIP measured 2.48 seconds on
+the old path and 1.17 seconds on the compact path with identical LUFS/peak;
+the derived start/end were 4.38/200.69 seconds. BGM retains dense envelopes
+for fade analysis. Karaoke transition cache serialization now omits raw
+envelopes (the existing cache was already 17 MB for 2,059 records and projected
+near 1 GB at library scale), while preserving derived audio/visual safety data.
+
+Full loudness results are appended to a crash-resumable JSONL checkpoint during
+the pass instead of rewriting the complete growing loudness JSON every ten
+seconds; completion atomically compacts it. Existing CDG/MP4 visual metadata is
+preserved and skips repeat decoding during a loudness refresh. Forty-nine
+focused transition/post-show/performance tests pass with scratch show data;
+Python compilation and `git diff --check` are clean. A broader combined Qt run
+reached the documented local Cocoa platform-plugin abort after its completed
+test bodies. Turbo multi-process analysis is deliberately the next milestone,
+not part of this unbuilt change.
+
+Decoder message collection is now filtered to the LUFS/peak/boundary values the
+parsers actually consume and ebur128 per-frame reporting is quiet. ZIP member
+extraction measured only 0.014–0.017 seconds and is not a useful optimization.
+The complete 130,824-ZIP catalog was also checked through central-directory
+MP3 CRC/size identities in 17.1 seconds: only 1,060 decodes (0.81%) are exact
+duplicates, too little benefit to justify a duplicate-alias cache contract.
+The operator-authorized live caches were moved, while SingWS was stopped, to
+`~/SingWS/cache-backups/analysis-reset-20260829-0900/`; no queue, settings, or
+history data was touched.
+
+At the operator's request that rollback cache was then permanently deleted.
+Turbo Full Scan now partitions pending items across four separately spawned,
+recyclable analysis helpers. It bypasses only the single-worker semaphore,
+retains the per-cache locks, always holds between tracks while karaoke plays,
+supports one-button cancellation across all helpers, and performs one final
+cache compaction after every helper exits. An isolated-process benchmark over
+12 real full-track measurements produced 1.68 tracks/second with three helpers
+and 2.16 tracks/second with four, so four is the measured default on this
+six-core show Mac (29% faster than three in that run).
+
+An exact-content cleanup audit distinguishes identical audio from identical
+audio+CDG; only the latter is eligible for a recommended keeper. The proposed
+review surface shows canonical path/naming and keeps deletion explicit rather
+than automatically removing a potentially better lyric rendering.
+
+Release verification for the Intel `0.4.6.3` candidate: 782 tests plus 21
+subtests passed through the scratch-data release runner. The fresh Qt
+environment ran 197 GUI tests with 195 passing; its two exceptions are baseline
+test debt (one removed module name and one source assertion already stale on
+`v0.4.6.2`), not changed behavior. The canonical build passed x86_64
+architecture, bundled media loading, macOS 12 minimum-version, staged strict
+signing, and DMG verification. The signed app from the mounted installer
+launched with scratch data in 1.34 seconds with BASS, mpv, Qt Quick VFX, ticker,
+and the audience window ready. Its frozen compact analyzer returned LUFS, peak,
+duration, and audio edges for a real library MP3. The 151,672,698-byte Intel
+DMG SHA-256 is `d0a832784f865db34043cd5f7aa667db8095b597b4166e505887a7093b9c3f3e`.
+GitHub publication and local installation remain pending.
+
 ## Post-show KaraFun restart hotfix (2026-08-28)
 
 Built and installed locally on the Intel show Mac on 2026-08-28. The signed

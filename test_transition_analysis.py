@@ -96,6 +96,23 @@ class CacheTests(unittest.TestCase):
         loaded.load()
         self.assertEqual(loaded.get(str(self.media)).audio_end, 9.7)
 
+    def test_karaoke_cache_omits_raw_envelope(self):
+        self.record.media_kind = "karaoke"
+        cache = ta.TransitionAnalysisCache(self.cache_path)
+        cache.put(self.record)
+        cache.save()
+        row = json.loads(self.cache_path.read_text(encoding="utf-8"))["records"][str(self.media)]
+        self.assertEqual(row["envelope_db"], [])
+
+    def test_compact_karaoke_builder_keeps_only_derived_edges(self):
+        record = ta.build_karaoke_transition_analysis(
+            path=str(self.media), duration=10.0, audio_start=0.4, audio_end=9.2,
+            integrated_lufs=-15.0, peak_db=-1.2,
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record.envelope_db, [])
+        self.assertEqual(record.audio_start, 0.4)
+
     def test_changed_file_invalidates_record(self):
         cache = ta.TransitionAnalysisCache(self.cache_path)
         cache.put(self.record)

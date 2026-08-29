@@ -143,7 +143,14 @@ class TransitionAnalysis:
 
     def to_dict(self) -> dict:
         payload = asdict(self)
-        payload["envelope_db"] = quantize_envelope_db(self.envelope_db)
+        # Karaoke playback uses only the derived boundaries. Retaining roughly
+        # 2,000 envelope samples per song made a full-library JSON cache trend
+        # toward a gigabyte with no runtime consumer. BGM keeps its envelope
+        # because fade policy may be recalculated from it in future versions.
+        payload["envelope_db"] = (
+            quantize_envelope_db(self.envelope_db)
+            if str(self.media_kind).lower() == "bgm" else []
+        )
         return payload
 
     @classmethod
@@ -387,6 +394,26 @@ def build_audio_transition_analysis(
         peak_db=_finite_float(peak_db), audio_start=audio_start,
         audio_end=audio_end, fade_start=fade_start,
         fade_confidence=fade_confidence,
+    )
+    return record if record.is_valid() else None
+
+
+def build_karaoke_transition_analysis(
+    *, path: str, duration: float, audio_start, audio_end,
+    integrated_lufs=None, peak_db=None,
+) -> TransitionAnalysis | None:
+    """Build compact karaoke metadata from already-confirmed audio edges."""
+    signature = file_signature(path)
+    total = _finite_float(duration)
+    start = _finite_float(audio_start)
+    end = _finite_float(audio_end)
+    if signature is None or total is None or total <= 0.0:
+        return None
+    record = TransitionAnalysis(
+        path=str(path), mtime=signature[0], size=signature[1],
+        media_kind="karaoke", duration=total, envelope_db=[],
+        integrated_lufs=_finite_float(integrated_lufs),
+        peak_db=_finite_float(peak_db), audio_start=start, audio_end=end,
     )
     return record if record.is_valid() else None
 

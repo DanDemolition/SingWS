@@ -2052,6 +2052,12 @@ class PostShowAnalysisSafetyTests(unittest.TestCase):
         source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
         self.assertIn("IsolatedLoudnessSession", source)
 
+    def test_karaoke_batch_uses_compact_transition_analysis(self):
+        source = inspect.getsource(self.singws.AnalyzeLibraryWorker.run)
+        self.assertIn("measure_karaoke_transition", source)
+        self.assertIn("build_karaoke_transition_analysis", source)
+        self.assertIn("_loudness_append_checkpoint", source)
+
     def test_isolated_analyzer_contains_decoder_noise_and_caches_bad_files(self):
         import libmpv_media_jobs
 

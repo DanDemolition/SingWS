@@ -30,6 +30,16 @@ MPV_EVENT_LOG_MESSAGE = 2
 MPV_EVENT_END_FILE = 7
 
 
+class _AnalysisMessageBuffer(list):
+    """Keep only filter values consumed by the analysis parsers."""
+
+    _MARKERS = ("I:", "Peak:", "silence_", "lavfi.astats.Overall.RMS_level")
+
+    def append(self, message):
+        if any(marker in message for marker in self._MARKERS):
+            super().append(message)
+
+
 class _MpvEvent(ctypes.Structure):
     _fields_ = [
         ("event_id", ctypes.c_int),
@@ -311,7 +321,7 @@ def _configure_ebur128_job(job: "OfflineMpvJob", *, include_envelope: bool = Fal
     job.option("ao", "null")
     job.option("ao-null-untimed", "yes")
     job.option("untimed", "yes")
-    graph = "ebur128=peak=sample:framelog=verbose"
+    graph = "ebur128=peak=sample:framelog=quiet"
     if include_envelope:
         # Continue the same decoded stream through fixed 100 ms RMS windows.
         # ametadata prints one compact scalar per window; no PCM/waveform is
@@ -321,6 +331,28 @@ def _configure_ebur128_job(job: "OfflineMpvJob", *, include_envelope: bool = Fal
             "ametadata=print:key=lavfi.astats.Overall.RMS_level"
         )
     job.option("af", f"lavfi=[{graph}]")
+
+
+def _configure_karaoke_transition_job(job: "OfflineMpvJob"):
+    """Measure loudness and confirmed silent edges without a dense envelope.
+
+    Karaoke playback consumes only the derived first/last audible timestamps.
+    The old 100 ms astats path printed and transferred thousands of values per
+    song, then persisted them even though playback never read them again.
+    """
+    job.option("config", "no")
+    job.option("vid", "no")
+    job.option("ao", "null")
+    job.option("ao-null-untimed", "yes")
+    job.option("untimed", "yes")
+    job.option(
+        "af",
+        "lavfi=[ebur128=peak=sample:framelog=quiet,"
+        # A short synthetic tail guarantees a final silence event even when
+        # the source ends on audible content. ebur128 runs before the pad, so
+        # the added silence cannot change the integrated loudness result.
+        "apad=pad_dur=0.5,silencedetect=n=-55dB:d=0.3]",
+    )
 
 
 def _parse_ebur128(messages: list[str]):
@@ -354,6 +386,43 @@ def _parse_transition_envelope(messages: list[str]) -> list[float]:
     return envelope
 
 
+def _parse_karaoke_boundaries(messages: list[str]) -> tuple[float, float | None, float | None]:
+    """Return duration and conservative non-silent edges from lavfi logs."""
+    output = "\n".join(messages)
+    events = []
+    for match in re.finditer(
+        r"silence_(start|end):\s*(\d+(?:\.\d+)?)", output, re.IGNORECASE
+    ):
+        events.append((match.group(1).lower(), float(match.group(2))))
+    silence_ends = [value for kind, value in events if kind == "end"]
+    if not silence_ends:
+        raise RuntimeError("libmpv transition analysis produced no duration")
+    duration = max(0.01, silence_ends[-1] - 0.5)
+
+    audio_start = 0.0
+    if events and events[0][0] == "start" and events[0][1] <= 0.11:
+        leading_end = next((value for kind, value in events[1:] if kind == "end"), None)
+        if leading_end is None or leading_end >= duration - 0.15:
+            return duration, None, None
+        audio_start = leading_end
+
+    audio_end = duration
+    last_start_index = next(
+        (index for index in range(len(events) - 1, -1, -1) if events[index][0] == "start"),
+        None,
+    )
+    if last_start_index is not None:
+        trailing_start = events[last_start_index][1]
+        later_ends = [
+            value for kind, value in events[last_start_index + 1:] if kind == "end"
+        ]
+        if not later_ends or later_ends[-1] >= duration - 0.15:
+            audio_end = min(duration, trailing_start)
+    if audio_end < audio_start:
+        return duration, None, None
+    return duration, audio_start, audio_end
+
+
 def _measure_loudness_lavfi(
     source: str,
     *,
@@ -363,7 +432,7 @@ def _measure_loudness_lavfi(
 ):
     """Measure directly in libavfilter without creating an intermediate WAV."""
     job = OfflineMpvJob()
-    messages: list[str] = []
+    messages: list[str] = _AnalysisMessageBuffer()
     try:
         _configure_ebur128_job(job)
         if start_seconds is not None:
@@ -421,7 +490,7 @@ class LoudnessSession:
         """Measure one file. Raises on failure, exactly like the plain path."""
         if self._disabled:
             raise RuntimeError("loudness session disabled after repeated failures")
-        messages: list[str] = []
+        messages: list[str] = _AnalysisMessageBuffer()
         try:
             job = self._core()
             job.command("loadfile", str(source), "replace")
@@ -449,7 +518,7 @@ class LoudnessSession:
         if self._job is not None and not bool(getattr(self, "_envelope_core", False)):
             self.close()
         self._envelope_core = True
-        messages: list[str] = []
+        messages: list[str] = _AnalysisMessageBuffer()
         try:
             job = self._core(include_envelope=True)
             job.command("loadfile", str(source), "replace")
@@ -467,6 +536,33 @@ class LoudnessSession:
                 self._disabled = True
             raise
 
+    def measure_karaoke_transition(self, source: str, *, timeout: float = 120.0):
+        """Return LUFS, peak, duration and edges without a dense RMS envelope."""
+        if self._job is not None and not bool(getattr(self, "_karaoke_transition_core", False)):
+            self.close()
+        self._karaoke_transition_core = True
+        messages: list[str] = _AnalysisMessageBuffer()
+        try:
+            if self._job is None:
+                job = OfflineMpvJob()
+                _configure_karaoke_transition_job(job)
+                job.initialize()
+                job.request_log_messages("v")
+                self._job = job
+            job = self._job
+            job.command("loadfile", str(source), "replace")
+            job.wait_for_end(timeout, messages)
+            lufs, peak = _parse_ebur128(messages)
+            duration, audio_start, audio_end = _parse_karaoke_boundaries(messages)
+            self._failures = 0
+            return lufs, peak, duration, audio_start, audio_end
+        except Exception:
+            self.close()
+            self._failures += 1
+            if self._failures >= self._MAX_CONSECUTIVE_FAILURES:
+                self._disabled = True
+            raise
+
     def close(self):
         job, self._job = self._job, None
         if job is not None:
@@ -475,6 +571,7 @@ class LoudnessSession:
             except Exception:
                 pass
         self._envelope_core = False
+        self._karaoke_transition_core = False
 
     def __enter__(self):
         return self
@@ -508,6 +605,14 @@ def run_isolated_analysis_worker(input_stream=None, output_stream=None) -> int:
                 if mode == "transition":
                     lufs, peak, envelope = session.measure_transition(source, timeout=timeout)
                     response = {"ok": True, "lufs": lufs, "peak": peak, "envelope": envelope}
+                elif mode == "karaoke_transition":
+                    lufs, peak, duration, audio_start, audio_end = session.measure_karaoke_transition(
+                        source, timeout=timeout
+                    )
+                    response = {
+                        "ok": True, "lufs": lufs, "peak": peak, "duration": duration,
+                        "audio_start": audio_start, "audio_end": audio_end,
+                    }
                 elif mode == "fast":
                     lufs, peak = session.measure_fast(source, timeout=timeout)
                     response = {"ok": True, "lufs": lufs, "peak": peak}
@@ -601,6 +706,11 @@ class IsolatedLoudnessSession:
             self._failures = 0
             if mode == "transition":
                 return response.get("lufs"), response.get("peak"), list(response.get("envelope") or [])
+            if mode == "karaoke_transition":
+                return (
+                    response.get("lufs"), response.get("peak"), response.get("duration"),
+                    response.get("audio_start"), response.get("audio_end"),
+                )
             return response.get("lufs"), response.get("peak")
         except Exception:
             self.close()
@@ -617,6 +727,10 @@ class IsolatedLoudnessSession:
 
     def measure_transition(self, source: str, *, timeout: float = 120.0):
         return self._request(source, "transition", timeout)
+
+    def measure_karaoke_transition(self, source: str, *, timeout: float = 120.0):
+        response = self._request(source, "karaoke_transition", timeout)
+        return response
 
     def close(self):
         process, self._process = self._process, None

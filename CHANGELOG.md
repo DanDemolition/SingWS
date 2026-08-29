@@ -1,3 +1,19 @@
+## 0.4.6.3 — 2026-08-29
+
+### Changed
+- Full karaoke analysis now derives compact silence boundaries alongside EBU
+  R128 loudness instead of generating and retaining a dense 100 ms envelope.
+  A real library track measured 53% faster while returning identical LUFS and
+  peak values.
+- Turbo Full Scan runs four isolated recyclable helpers while idle. It always
+  holds between tracks during karaoke playback and uses coordinated
+  cancellation and final cache compaction.
+- Batch loudness results use an append-only crash-recovery checkpoint, avoiding
+  repeated whole-library JSON rewrites. Karaoke transition records retain only
+  the derived fields playback consumes, preventing gigabyte-scale cache growth.
+- Valid CDG/MP4 visual transition results are preserved during later loudness
+  refreshes, and decoder logs retain only values consumed by the analyzers.
+
 ## 0.4.5.4 — unreleased
 
 Reconstructed alongside 0.4.5.0–0.4.5.3, which shipped without changelog
