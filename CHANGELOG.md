@@ -20,6 +20,11 @@
 - Transition audio/visual results use their own append-only JSONL checkpoint,
   so an abrupt quit or crash resumes completed work instead of repeating the
   MP4 portion before the final cache compaction.
+- Library Tools now includes a Duplicate Song Manager for MP3+G ZIP archives.
+  It narrows candidates from ZIP metadata, verifies MP3 and CDG members with
+  SHA-256, keeps alternate lyric renderings review-only, recommends but never
+  preselects a keeper, and moves explicitly selected redundant archives into a
+  recoverable SingWS folder while updating the library index.
 
 ## 0.4.5.4 — unreleased
 

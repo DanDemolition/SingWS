@@ -895,7 +895,8 @@ from PyQt6.QtWidgets import (
     QListView, QLineEdit, QFileDialog, QLabel, QComboBox, QHBoxLayout, QGridLayout,
     QSizePolicy, QDialog, QDialogButtonBox, QListWidgetItem, QStyledItemDelegate, QStyle,
     QInputDialog, QMessageBox, QFrame, QMainWindow, QToolButton, QStyleOptionViewItem,
-    QStackedWidget, QSpinBox,
+    QStackedWidget, QSpinBox, QTreeWidget, QTreeWidgetItem,
+    QTreeWidgetItemIterator, QProgressDialog,
     QTextEdit, QPlainTextEdit
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat
@@ -13700,6 +13701,32 @@ class AnalyzeLibraryPreparationWorker(QObject):
             self.finished.emit({"items": items, "error": ""})
         except Exception as exc:
             self.finished.emit({"items": [], "error": str(exc)})
+
+
+class DuplicateSongAuditWorker(QObject):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(object)
+
+    def __init__(self, paths):
+        super().__init__()
+        self.paths = list(paths or [])
+        self._cancelled = threading.Event()
+
+    def cancel(self):
+        self._cancelled.set()
+
+    def run(self):
+        try:
+            import duplicate_song_audit
+            result = duplicate_song_audit.audit_zip_duplicates(
+                self.paths,
+                progress=lambda done, total, name: self.progress.emit(done, total, name),
+                cancel_check=self._cancelled.is_set,
+            )
+        except Exception as exc:
+            result = {"groups": [], "scanned": 0, "unreadable": 0,
+                      "cancelled": False, "error": str(exc)}
+        self.finished.emit(result)
 
 
 class WaveformDecodeWorker(QObject):
@@ -27636,6 +27663,11 @@ class KaraokeApp(QWidget):
         # Quick action buttons, grouped into their relevant tabs.
         scan_folder_btn = QPushButton("Library Locations")
         export_csv_btn = QPushButton("Export CSV")
+        duplicate_manager_btn = QPushButton("Duplicate Song Manager")
+        duplicate_manager_btn.setToolTip(
+            "Find exact duplicate ZIP audio, distinguish alternate CDG lyrics, and review recoverable cleanup choices."
+        )
+        duplicate_manager_btn.clicked.connect(self.open_duplicate_song_manager)
         ticker_settings_btn = QPushButton("Ticker Settings")
         set_background_btn = QPushButton("Set Background")
         pre_show_btn = QPushButton("Run Pre-Show Check")
@@ -27669,6 +27701,7 @@ class KaraokeApp(QWidget):
         _search_actions = QHBoxLayout()
         _search_actions.addWidget(scan_folder_btn)
         _search_actions.addWidget(export_csv_btn)
+        _search_actions.addWidget(duplicate_manager_btn)
         _search_actions.addStretch(1)
         _search_actions_card.addLayout(_search_actions)
         _analyze_row = QHBoxLayout()
@@ -41419,6 +41452,178 @@ class KaraokeApp(QWidget):
         prep_thread.finished.connect(prep_thread.deleteLater)
         self._analyze_lib_prepare_job = (prep_thread, prep_worker)
         prep_thread.start()
+
+    def open_duplicate_song_manager(self):
+        """Run an exact-content ZIP audit, then show a review-only result tree."""
+        existing = getattr(self, "_duplicate_audit_job", None)
+        if existing:
+            try:
+                _thread, _worker, progress = existing
+                progress.show()
+                progress.raise_()
+                return
+            except Exception:
+                pass
+        paths = [
+            str(track.get("path") or "")
+            for track in list(getattr(self, "tracks", []) or [])
+            if isinstance(track, dict) and str(track.get("path") or "").lower().endswith(".zip")
+        ]
+        if not paths:
+            QMessageBox.information(self, "Duplicate Song Manager", "No ZIP karaoke tracks are loaded.")
+            return
+        parent = QApplication.activeModalWidget() or self
+        progress = QProgressDialog("Reading ZIP catalog entries…", "Cancel", 0, len(paths), parent)
+        progress.setWindowTitle("Duplicate Song Audit")
+        progress.setWindowModality(Qt.WindowModality.NonModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        thread = QThread(self)
+        worker = DuplicateSongAuditWorker(paths)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        progress.canceled.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
+
+        def on_progress(done, total, name):
+            try:
+                progress.setMaximum(max(1, total))
+                progress.setValue(done)
+                progress.setLabelText(f"Reading ZIP catalog {done:,}/{total:,}…\n{name}")
+            except RuntimeError:
+                pass
+
+        def on_finished(result):
+            self._duplicate_audit_job = None
+            try:
+                progress.close()
+            except Exception:
+                pass
+            result = result if isinstance(result, dict) else {}
+            if result.get("cancelled"):
+                self._set_processing_text("Duplicate audit cancelled.")
+                return
+            if result.get("error"):
+                QMessageBox.warning(self, "Duplicate Song Manager", f"Audit failed:\n{result['error']}")
+                return
+            self._show_duplicate_song_results(result)
+
+        worker.progress.connect(on_progress)
+        worker.finished.connect(on_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._duplicate_audit_job = (thread, worker, progress)
+        thread.start()
+        progress.show()
+
+    def _show_duplicate_song_results(self, result):
+        groups = list(result.get("groups") or [])
+        parent = QApplication.activeModalWidget() or self
+        dlg = QDialog(parent)
+        dlg.setWindowTitle("Duplicate Song Manager")
+        dlg.resize(980, 620)
+        layout = QVBoxLayout(dlg)
+        eligible = sum(
+            max(0, len(group.get("paths") or []) - 1)
+            for group in groups if group.get("eligible")
+        )
+        summary = QLabel(
+            f"Scanned {int(result.get('scanned') or 0):,} ZIPs • "
+            f"{eligible:,} exact audio+CDG duplicate candidate(s) • "
+            f"{int(result.get('unreadable') or 0):,} unreadable/unsupported.\n"
+            "Nothing is selected automatically. Same-audio files with different CDG lyrics are review-only."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        tree = QTreeWidget(dlg)
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(["Archive", "Status", "Location"])
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for group in groups:
+            paths = list(group.get("paths") or [])
+            if group.get("eligible"):
+                title = f"Exact audio + CDG ({len(paths)} copies)"
+                status = "Eligible for recoverable cleanup"
+            else:
+                title = f"Same audio, different CDG ({len(paths)} versions)"
+                status = "Keep/review lyric versions"
+            top = QTreeWidgetItem([title, status, ""])
+            tree.addTopLevelItem(top)
+            keeper = str(group.get("keeper") or "")
+            for path in paths:
+                is_keeper = bool(keeper and path == keeper)
+                child = QTreeWidgetItem([
+                    Path(path).name,
+                    "Recommended keeper" if is_keeper else (
+                        "Selectable duplicate" if group.get("eligible") else "Different lyric rendering"
+                    ),
+                    str(Path(path).parent),
+                ])
+                child.setData(0, Qt.ItemDataRole.UserRole, path)
+                if group.get("eligible") and not is_keeper:
+                    child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    child.setCheckState(0, Qt.CheckState.Unchecked)
+                top.addChild(child)
+            top.setExpanded(True)
+        tree.resizeColumnToContents(0)
+        tree.resizeColumnToContents(1)
+        layout.addWidget(tree, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dlg)
+        move_btn = buttons.addButton(
+            "Move Selected to Recovery", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        move_btn.setEnabled(eligible > 0)
+        buttons.rejected.connect(dlg.reject)
+
+        def move_selected():
+            selected = []
+            iterator = QTreeWidgetItemIterator(tree)
+            while iterator.value():
+                item = iterator.value()
+                if item.checkState(0) == Qt.CheckState.Checked:
+                    path = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+                    if path:
+                        selected.append(path)
+                iterator += 1
+            if not selected:
+                QMessageBox.information(
+                    dlg, "Duplicate Song Manager", "Select one or more duplicate archives first."
+                )
+                return
+            answer = QMessageBox.question(
+                dlg, "Move Duplicate Archives?",
+                f"Move {len(selected)} selected archive(s) into SingWS duplicate recovery?\n\n"
+                "The recommended keepers and different-CDG versions will remain in place.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                import duplicate_song_audit
+                moved = duplicate_song_audit.move_to_recovery(
+                    selected, APP_USER_DIR / "duplicate-recovery"
+                )
+                removed = {row["source"] for row in moved["moved"]}
+                self.tracks = [
+                    track for track in list(getattr(self, "tracks", []) or [])
+                    if str(track.get("path") or "") not in removed
+                ]
+                self._persist_tracks_json(
+                    trigger_reindex=True, removed_paths=sorted(removed)
+                )
+                dlg.accept()
+                QMessageBox.information(
+                    self, "Duplicates Moved",
+                    f"Moved {len(removed)} archive(s) to:\n{moved['folder']}\n\n"
+                    "They can be restored manually from that folder."
+                )
+            except Exception as exc:
+                QMessageBox.warning(
+                    dlg, "Duplicate Song Manager", f"Could not move selected files:\n{exc}"
+                )
+
+        move_btn.clicked.connect(move_selected)
+        layout.addWidget(buttons)
+        dlg.exec()
 
     def _start_analyze_library_items(self, items, mode: str = "full"):
         """Create the progress UI after background file enumeration completes."""

@@ -47,6 +47,23 @@ unavailable` from `hdiutil create`; disk space is healthy. Do not publish or
 reuse the earlier installer—the same-version replacement DMG has not been
 created, hashed, launched from its mounted image, or uploaded yet.
 
+## Duplicate Song Manager (2026-08-29, unbuilt)
+
+Settings > Search/Library > Library Tools now exposes a review-first duplicate
+manager for MP3+G ZIPs. It uses central-directory CRC/size only to narrow the
+catalog, then SHA-256 verifies candidate MP3 and CDG members before making any
+archive cleanup-eligible. Identical audio with different CDG data is displayed
+as review-only. Exact audio+CDG groups receive a deterministic recommended
+keeper, but no candidate is preselected. Explicitly checked archives move to a
+timestamped `~/SingWS/duplicate-recovery/` folder and are removed from the
+persisted library/search index; move failures attempt rollback.
+
+The live 130,824-ZIP catalog completed read-only in 150.72 seconds and reported
+1,053 exact audio+CDG groups, 1,057 selectable redundant archives, two
+same-audio/different-CDG review groups, and 35 unreadable candidates. Four pure
+audit/recovery tests and the GUI source safety guard pass; Python compilation
+and `git diff --check` are clean. No live archive was moved.
+
 ## Full-library analysis acceleration (0.4.6.3 built, not yet published/installed)
 
 The single-worker full scan now uses combined EBU R128 plus compact silence

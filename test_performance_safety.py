@@ -88,6 +88,15 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("job.wait_for_end(timeout, cancel_check=cancel_check)", media_jobs)
         self.assertIn('job.option("audio", "no")', media_jobs)
 
+    def test_duplicate_manager_is_review_first_and_recoverable(self):
+        self.assertIn('QPushButton("Duplicate Song Manager")', MAIN_SOURCE)
+        manager = function_source("_show_duplicate_song_results")
+        self.assertIn("Nothing is selected automatically", manager)
+        self.assertIn("Different lyric rendering", manager)
+        self.assertIn("Move Selected to Recovery", manager)
+        self.assertIn('APP_USER_DIR / "duplicate-recovery"', manager)
+        self.assertIn("removed_paths=sorted(removed)", manager)
+
     def test_missing_transition_backfill_is_resumable_and_holds_for_playback(self):
         self.assertIn('QPushButton("Analyze Missing Transition Data")', MAIN_SOURCE)
         self.assertIn("def _library_transition_analysis_items", MAIN_SOURCE)
