@@ -2,7 +2,7 @@
 
 Updated 2026-08-22.
 
-## Turbo MP4 visual-scan stall fix (2026-08-29, unbuilt)
+## Turbo MP4 visual-scan stall fix (2026-08-29, built; release blocked)
 
 Live testing of the installed 0.4.6.3 candidate showed Turbo Full Scan advancing
 MP4 files in roughly 43–49-second batches, with many KVDM tracks grouped in the
@@ -35,19 +35,21 @@ Turbo compaction therefore no longer repeat completed MP4 work. Three focused
 checkpoint recovery/compaction/malformed-row tests bring the focused total to
 52 passing tests with scratch show data.
 
-Same-version release verification ran on 2026-08-29: 786 tests plus 21
+Same-version release verification ran on 2026-08-29: 790 tests plus 21
 subtests passed through the scratch-data release runner. The fresh Qt run made
-198 attempts and reached the same two documented baseline debts as the earlier
-candidate (one removed module name and one stale ticker source assertion). The
-new Intel app passed x86_64 architecture, bundled-media loading, and the macOS
-12 minimum-version sweep. Its staged copy passed strict signing. DMG creation
-is blocked by the host disk-image service: three attempts, including an
-unsandboxed retry, returned `Device not configured` or `Resource temporarily
-unavailable` from `hdiutil create`; disk space is healthy. Do not publish or
-reuse the earlier installer—the same-version replacement DMG has not been
-created, hashed, launched from its mounted image, or uploaded yet.
+198 tests, with 197 passing and only the documented stale ticker source
+assertion failing; the removed module was excluded because it no longer exists.
+The new Intel app passed x86_64 architecture, bundled-media loading, and the
+macOS 12 minimum-version sweep. Its staged copy passed strict signing, launched
+cleanly with scratch data, and returned valid samples through the frozen offline
+video-tail helper. DMG creation is blocked by the host disk-image service:
+repeated attempts, including unsandboxed retries, returned `Device not
+configured` or `Resource temporarily unavailable` from `hdiutil create`; disk
+space is healthy. Do not publish or reuse the earlier installer—the same-version
+replacement DMG has not been created, hashed, launched from its mounted image,
+or uploaded yet.
 
-## Duplicate Song Manager (2026-08-29, unbuilt)
+## Duplicate Song Manager (2026-08-29, built; release blocked)
 
 Settings > Search/Library > Library Tools now exposes a review-first duplicate
 manager for MP3+G ZIPs. It uses central-directory CRC/size only to narrow the
