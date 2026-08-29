@@ -122,6 +122,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("Dual Renderer unavailable; retrying recreation", source)
         self.assertIn("The renderer can temporarily disappear from AX", source)
         self.assertIn("'repeat 30 times'", source)
+        self.assertIn("'repeat 100 times'", source)
         self.assertIn("'return lastState'", source)
         self.assertIn("timeout=6", source)
         self.assertIn("QTimer.singleShot(400, _double_click_and_verify)", source)
@@ -145,8 +146,8 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("KaraFun debounces this toggle", handoff)
         self.assertIn("'delay 0.8'", handoff)
         self.assertIn("create a fresh renderer", handoff)
-        self.assertIn("Renderer creation regularly took more", handoff)
-        self.assertIn("'repeat 60 times'", handoff)
+        self.assertIn("Renderer creation regularly takes 6-10 seconds", handoff)
+        self.assertIn("'repeat 100 times'", handoff)
         self.assertNotIn('perform action "AXPress" of bestButton', handoff)
         self.assertNotIn("'click bestButton'", handoff)
         fallback = handoff[handoff.index("def _fullscreen_karafun"):]

@@ -2181,6 +2181,14 @@ def analyze_loudness_async(audio_path: str):
     )):
         _diag(f"[LOUDNESS] analysis skipped reason=external_provider file={audio_path!r}")
         return
+    if str(audio_path).lower().endswith(".zip"):
+        # libmpv cannot select the MP3 member inside an MP3+G archive. The
+        # next-up prescan extracts it and queues the resolved MP3 instead.
+        _diag(
+            f"[LOUDNESS] analysis skipped reason=archive_requires_extraction "
+            f"file={os.path.basename(str(audio_path))}"
+        )
+        return
     if not _loudness_workers_allowed():
         try:
             _diag(f"[LOUDNESS] analysis skipped reason=workers_disabled file={os.path.basename(audio_path)}")
@@ -6846,6 +6854,57 @@ class RenderThreadShowScreenVfx(QFrame):
         if area is not None and hasattr(area, "finish_next_up_countdown"):
             area.finish_next_up_countdown()
 
+    def _raise_native_surface(self) -> bool:
+        """Keep the Quick transition above mpv's native host-screen view."""
+        try:
+            self.raise_()
+            self._container.raise_()
+        except Exception:
+            pass
+        if sys.platform != "darwin":
+            return False
+        try:
+            import objc
+            from ctypes import c_void_p
+            from AppKit import NSWindowAbove
+
+            native_view = objc.objc_object(c_void_p=int(self._container.winId()))
+            native_window = native_view.window()
+            content_view = native_window.contentView() if native_window is not None else None
+            reordered = False
+            view = native_view
+            for _depth in range(8):
+                parent = view.superview()
+                if parent is None:
+                    break
+                parent.addSubview_positioned_relativeTo_(view, NSWindowAbove, None)
+                reordered = True
+                if content_view is not None and parent == content_view:
+                    break
+                view = parent
+            return reordered
+        except Exception as exc:
+            if not bool(getattr(self, "_native_raise_failure_logged", False)):
+                self._native_raise_failure_logged = True
+                _diag(f"[SHOW-VFX] native surface reorder unavailable: {exc}")
+            return False
+
+    def _reassert_surface_order(self):
+        native_reordered = self._raise_native_surface()
+        try:
+            style = str(self._root.property("transitionStyle") or "")
+        except Exception:
+            style = ""
+        _diag(
+            f"[SHOW-VFX] host surface raised native={int(native_reordered)} "
+            f"style={style or 'n/a'}"
+        )
+
+    def _schedule_surface_reassert(self):
+        self._reassert_surface_order()
+        QTimer.singleShot(80, self._reassert_surface_order)
+        QTimer.singleShot(240, self._reassert_surface_order)
+
     def show_next_up(self, payload: dict, duration_sec: float = 10.0):
         payload = payload if isinstance(payload, dict) else {}
         self._root.showNextUp(
@@ -6855,19 +6914,19 @@ class RenderThreadShowScreenVfx(QFrame):
             str(payload.get("on_deck", "") or ""),
             float(duration_sec or 10.0),
         )
-        self.raise_()
+        self._schedule_surface_reassert()
 
     def show_singer_start(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
         self._root.showSingerStart(
             str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
         )
-        self.raise_()
+        self._schedule_surface_reassert()
 
     def show_song_outro(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
         self._root.showSongOutro(
             str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
         )
-        self.raise_()
+        self._schedule_surface_reassert()
 
     def hide_transition(self, immediate: bool = False):
         self._root.hideTransition(bool(immediate))
@@ -12658,10 +12717,52 @@ class VideoWindow(QWidget):
             # window. Ordering the parent NSWindow forward on every tick fights
             # the rotation window and can make Show Karaoke Screen appear dead.
             # The parent is reasserted once from showEvent instead.
-            ticker.raise_()
-            ticker.update()
+            self._raise_ticker_surface()
         except Exception:
             pass
+
+    def _raise_ticker_surface(self) -> bool:
+        """Raise both Qt and Cocoa sides of the retained ticker surface.
+
+        QWidget.raise_() does not reliably reorder a QQuickView window
+        container against retained mpv/native transition views on macOS. Walk
+        the ticker container's native ancestor chain to the audience content
+        view and reorder each sibling without activating the NSWindow.
+        """
+        ticker = getattr(self, "ticker", None)
+        if ticker is None:
+            return False
+        ticker.raise_()
+        ticker.update()
+        if sys.platform != "darwin" or self.ticker_backend != "quick-render-thread":
+            return False
+        try:
+            import objc
+            from AppKit import NSWindowAbove
+
+            container = getattr(ticker, "_container", None)
+            if container is None:
+                return False
+            native_view = objc.objc_object(c_void_p=int(container.winId()))
+            native_window = native_view.window()
+            content_view = native_window.contentView() if native_window is not None else None
+            reordered = False
+            view = native_view
+            for _depth in range(8):
+                parent = view.superview()
+                if parent is None:
+                    break
+                parent.addSubview_positioned_relativeTo_(view, NSWindowAbove, None)
+                reordered = True
+                if content_view is not None and parent == content_view:
+                    break
+                view = parent
+            return reordered
+        except Exception as exc:
+            if not bool(getattr(self, "_ticker_native_raise_failure_logged", False)):
+                self._ticker_native_raise_failure_logged = True
+                _diag(f"[TICKER] native surface reorder unavailable: {exc}")
+            return False
 
     def _schedule_geometry_surface_reassert(self):
         try:
@@ -14136,6 +14237,7 @@ class PreviewWindow(QWidget):
             old_id = int(old.winId())
             old_size = old.size()
             old_policy = old.sizePolicy()
+            old_overlay = getattr(old, "_show_vfx_overlay", None)
             new_area = VideoAreaWidget(self)
             new_area.setSizePolicy(old_policy)
             if not old.background_pixmap.isNull():
@@ -14156,6 +14258,11 @@ class PreviewWindow(QWidget):
                     reason="preview_surface_recreate",
                 )
             self._main_layout.replaceWidget(old, new_area)
+            if old_overlay is not None:
+                old._show_vfx_overlay = None
+                old_overlay.setParent(new_area)
+                new_area.set_show_vfx_overlay(old_overlay)
+                self.show_vfx = old_overlay
             old.setParent(None)
             old.deleteLater()
             self.video_area = new_area
@@ -15623,6 +15730,20 @@ class SingerHistoryDirectoryBuildWorker(QObject):
             })
 
 
+def _history_song_last_sang_text(timestamp, *, now=None) -> str:
+    """Return a compact local-time label that makes same-night repeats obvious."""
+    try:
+        performed = datetime.fromtimestamp(int(timestamp or 0))
+        current = now if isinstance(now, datetime) else datetime.now()
+        time_text = performed.strftime("%I:%M %p").lstrip("0")
+        if performed.date() == current.date():
+            return f"Last sang tonight at {time_text}"
+        date_format = "%b %d" if performed.year == current.year else "%b %d, %Y"
+        return f"Last sang {performed.strftime(date_format)} at {time_text}"
+    except Exception:
+        return "Last sang date unavailable"
+
+
 class SingerHistorySongsBuildWorker(QObject):
     """Build one singer's song-history rows away from the GUI thread."""
 
@@ -15657,6 +15778,7 @@ class SingerHistorySongsBuildWorker(QObject):
             meta.append(song_type)
         meta.append(f"Key {key:+d}")
         meta.append(f"Tempo {tempo}%")
+        meta.append(_history_song_last_sang_text(song.get("last_performed_at")))
         return f"{artist} • {title}\n" + "  ·  ".join(meta)
 
     def run(self):
@@ -19408,6 +19530,23 @@ class KaraokeApp(QWidget):
         self.preview_window = PreviewWindow()
         self.preview_window._external_owner = self
         self.preview_window.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # The operator preview must render the exact same shuffled transition
+        # as the audience output. It previously had no Quick layer, so every
+        # style silently collapsed to the one generic painter fallback.
+        try:
+            if _native_quick_child_surfaces_supported():
+                preview_vfx = RenderThreadShowScreenVfx(self.preview_window.video_area)
+                self.preview_window.video_area.set_show_vfx_overlay(preview_vfx)
+                self.preview_window.video_area.set_show_vfx_enabled(
+                    bool(self.settings.get("show_screen_vfx_enabled", True))
+                )
+                self.preview_window.show_vfx = preview_vfx
+                _diag("[SHOW-VFX] host preview transition layer ready; audience styles mirrored")
+            else:
+                self.preview_window.show_vfx = None
+        except Exception as exc:
+            self.preview_window.show_vfx = None
+            _diag(f"[SHOW-VFX] host preview layer unavailable; using painter fallback: {exc}")
         try:
             if self._idle_bg_current_path:
                 self.preview_window.video_area.set_background_image(self._idle_bg_current_path)
@@ -23049,10 +23188,12 @@ class KaraokeApp(QWidget):
             if ticker is None:
                 return
             video_window.set_ticker_enabled(True)
-            ticker.raise_()
-            ticker.update()
+            native_reordered = video_window._raise_ticker_surface()
             suffix = f" phase={phase}" if phase else ""
-            _diag(f"[TICKER] show-screen surface reasserted reason={reason}{suffix}")
+            _diag(
+                f"[TICKER] show-screen surface reasserted reason={reason}{suffix} "
+                f"native={int(bool(native_reordered))}"
+            )
         except Exception as exc:
             _diag(f"[TICKER] surface reassert failed reason={reason}: {exc}")
 
@@ -25285,8 +25426,14 @@ class KaraokeApp(QWidget):
         return True
 
     def _karaoke_bgm_crossfade_enabled(self) -> bool:
-        """Duration-only karaoke/BGM overlap is retired for lyric safety."""
-        return False
+        """True when the host explicitly allows duration-based end overlap."""
+        try:
+            return (
+                bool(self.settings.get("seamless_transitions_enabled", True))
+                and bool(self.settings.get("karaoke_bgm_crossfade_enabled", False))
+            )
+        except Exception:
+            return False
 
     def _karaoke_early_silence_trim_enabled(self) -> bool:
         """True only for the advanced legacy early-end silence trim path."""
@@ -27088,9 +27235,14 @@ class KaraokeApp(QWidget):
         v.addWidget(seamless_transitions_cb)
 
         karaoke_bgm_crossfade_cb = QCheckBox("Crossfade background music over the song end")
-        karaoke_bgm_crossfade_cb.setToolTip("Disabled: background music never overlaps active karaoke lyrics or visuals.")
-        karaoke_bgm_crossfade_cb.setChecked(False)
-        karaoke_bgm_crossfade_cb.setEnabled(False)
+        karaoke_bgm_crossfade_cb.setToolTip(
+            "Starts background music about three seconds before the reported song end. "
+            "Turn this off for tracks whose reported duration ends before their final lyrics."
+        )
+        karaoke_bgm_crossfade_cb.setChecked(
+            bool(self.settings.get("karaoke_bgm_crossfade_enabled", False))
+        )
+        karaoke_bgm_crossfade_cb.setEnabled(seamless_transitions_cb.isChecked())
         v.addWidget(karaoke_bgm_crossfade_cb)
 
         end_silence_cb = QCheckBox("Use verified silent tail for background-music handoff")
@@ -27650,6 +27802,7 @@ class KaraokeApp(QWidget):
 
         def on_seamless_transitions_toggled(checked: bool):
             self.settings["seamless_transitions_enabled"] = bool(checked)
+            karaoke_bgm_crossfade_cb.setEnabled(bool(checked))
             if not checked:
                 # Do not interrupt the current song. Invalidating the optional
                 # early-end state makes all later timer ticks use physical EOS.
@@ -27662,8 +27815,7 @@ class KaraokeApp(QWidget):
             self.save_settings()
 
         def on_karaoke_bgm_crossfade_toggled(checked: bool):
-            del checked
-            self.settings["karaoke_bgm_crossfade_enabled"] = False
+            self.settings["karaoke_bgm_crossfade_enabled"] = bool(checked)
             self.save_settings()
 
         def on_end_threshold_changed(value: float):
@@ -32119,6 +32271,7 @@ class KaraokeApp(QWidget):
             meta.append(song_type)
         meta.append(f"Key {key:+d}")
         meta.append(f"Tempo {tempo}%")
+        meta.append(_history_song_last_sang_text(song.get("last_performed_at")))
         return f"{artist} • {title}\n" + "  ·  ".join(meta)
 
     def _format_history_timestamp(self, ts: int) -> str:
@@ -47038,11 +47191,6 @@ class KaraokeApp(QWidget):
         if seconds is None:
             return False
         scraped = str(source or "").strip() == "karafun_result"
-        if scraped and seconds == KARAFUN_ESTIMATED_DURATION_SECONDS:
-            # A scrape that lands exactly on our own catalog estimate is
-            # indistinguishable from that estimate. Keep whatever we had so it
-            # cannot arm playback completion.
-            return False
         current = normalize_karafun_duration_seconds(entry.get("duration"))
         if current is not None and not bool(entry.get("duration_estimated", False)):
             # A scraped result is read off KaraFun's own window for the exact
@@ -49423,10 +49571,10 @@ class KaraokeApp(QWidget):
                 'click at {bestButtonX, bestButtonY}',
                 'end try',
                 'end try',
-                '-- Renderer creation regularly took more than the old two-second',
-                '-- window on the show Mac. Wait here instead of rerunning the',
-                '-- entire toggle close/recreate sequence against a late window.',
-                'repeat 60 times',
+                '-- Renderer creation regularly takes 6-10 seconds on the show',
+                '-- Mac. Wait here instead of rerunning the entire toggle',
+                '-- close/recreate sequence against a late window.',
+                'repeat 100 times',
                 'set outputWindow to missing value',
                 'repeat with candidateWindow in windows',
                 'try',
@@ -56007,7 +56155,12 @@ class KaraokeApp(QWidget):
             print(f"Using saved bg_volume: {target_volume}")
 
         allow_overlap = (resume_reason == "karaoke_end_overlap" and self._karaoke_bgm_crossfade_enabled())
-        fade_in_ms = 3000 if resume_reason in ("karaoke_end", "karaoke_end_overlap", "manual_stop") else 1000
+        # A normal EOS fallback starts only after karaoke has gone silent.  A
+        # three-second ramp here sounds like dead air, especially when duration
+        # metadata was not reliable enough to pre-fire the overlap.  Keep the
+        # long ramp only for paths where BGM is intentionally rising underneath
+        # karaoke; post-EOS recovery should become audible promptly.
+        fade_in_ms = 3000 if resume_reason in ("karaoke_end_overlap", "manual_stop") else 1000
         print(f"BG fade-in reason={resume_reason} duration={fade_in_ms}ms")
 
         # Start fade in with current slider volume

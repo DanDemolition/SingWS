@@ -894,6 +894,21 @@ class RecentRegressionTests(unittest.TestCase):
             ):
                 libmpv_media_jobs.measure_loudness_lufs("/tmp/video-only.mp4")
 
+    def test_async_loudness_skips_mp3g_archive_until_audio_is_extracted(self):
+        with mock.patch.object(self.singws, "_diag") as diag, mock.patch.object(
+            self.singws, "_loudness_workers_allowed"
+        ) as workers_allowed, mock.patch.object(
+            self.singws.threading, "Thread"
+        ) as thread:
+            self.singws.analyze_loudness_async("/tmp/Singer - Song.ZIP")
+
+        workers_allowed.assert_not_called()
+        thread.assert_not_called()
+        diag.assert_called_once_with(
+            "[LOUDNESS] analysis skipped reason=archive_requires_extraction "
+            "file=Singer - Song.ZIP"
+        )
+
     def test_libmpv_loudness_measurement_streams_wav_in_bounded_chunks(self):
         import libmpv_media_jobs
 

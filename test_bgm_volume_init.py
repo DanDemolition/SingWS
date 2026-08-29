@@ -1,5 +1,6 @@
 import importlib.util
 import os
+from types import SimpleNamespace
 import unittest
 
 
@@ -36,6 +37,7 @@ class FakeBgMusic:
         self.playlist = ["/tmp/bg.mp3"]
         self.is_playing = False
         self.stopped = False
+        self.fade_in_calls = []
 
     def stop(self):
         self.stopped = True
@@ -44,6 +46,7 @@ class FakeBgMusic:
         return "bg"
 
     def fade_in(self, *args, **kwargs):
+        self.fade_in_calls.append((args, kwargs))
         self.is_playing = True
 
 
@@ -141,6 +144,23 @@ class BgmVolumeInitTests(unittest.TestCase):
 
         self.assertFalse(app._start_bg_with_fade())
         self.assertFalse(app.bg_music.is_playing)
+
+    def test_normal_karaoke_end_uses_fast_post_eos_fade(self):
+        app = SimpleNamespace(
+            settings={
+                "bg_enabled": True,
+                "bg_autoplay_on_idle": True,
+                "bg_volume": 0.8,
+            },
+            bg_music=FakeBgMusic(),
+            _bgm_session_started=True,
+            _bg_resume_reason="karaoke_end",
+            _clear_bg_transition_timers=lambda: None,
+            update_bg_button_state=lambda: None,
+        )
+
+        self.assertTrue(self.singws.KaraokeApp._start_bg_with_fade(app))
+        self.assertEqual(app.bg_music.fade_in_calls[-1][0][1], 1000)
 
 
 if __name__ == "__main__":

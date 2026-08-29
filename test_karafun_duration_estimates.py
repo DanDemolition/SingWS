@@ -63,16 +63,18 @@ class KaraFunDurationEstimateTests(unittest.TestCase):
         self.assertFalse(estimated.get("duration_estimated", False))
         self.assertEqual(estimated["duration_source"], "karafun_result")
 
-        ambiguous_default = {
+        exact_four_minutes = {
             "duration": self.estimate,
             "duration_estimated": True,
             "duration_source": "karafun_default_estimate",
         }
-        # A scrape landing exactly on our own estimate stays untrusted.
+        # A duration scraped from the exact KaraFun result row is verified even
+        # when it happens to equal the generic estimate. Rejecting 4:00 here
+        # left real four-minute songs without a completion watchdog.
         same_as_estimate = f"{self.estimate // 60}:{self.estimate % 60:02d}"
-        self.assertFalse(app._apply_verified_duration(ambiguous_default, same_as_estimate, source="karafun_result"))
-        self.assertTrue(ambiguous_default["duration_estimated"])
-        self.assertEqual(ambiguous_default["duration_source"], "karafun_default_estimate")
+        self.assertTrue(app._apply_verified_duration(exact_four_minutes, same_as_estimate, source="karafun_result"))
+        self.assertFalse(exact_four_minutes["duration_estimated"])
+        self.assertEqual(exact_four_minutes["duration_source"], "karafun_result")
 
         manual = {"duration": 199, "duration_source": "manual_host"}
         self.assertFalse(app._apply_verified_duration(manual, "3:58", source="karafun_result"))

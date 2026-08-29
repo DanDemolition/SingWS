@@ -67,6 +67,27 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(source.count("id: styleLayer"), 1)
         self.assertNotIn("QQuickView", source)
 
+    def test_host_quick_surface_is_natively_reasserted_for_each_effect(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        overlay = source[source.index("class RenderThreadShowScreenVfx"):]
+        overlay = overlay[:overlay.index("class VideoAreaWidget")]
+        self.assertIn("def _raise_native_surface", overlay)
+        self.assertIn("addSubview_positioned_relativeTo_", overlay)
+        self.assertIn("def _schedule_surface_reassert", overlay)
+        self.assertEqual(overlay.count("self._schedule_surface_reassert()"), 3)
+
+    def test_host_preview_uses_and_preserves_same_quick_transition_layer(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        preview_init = source[source.index("self.preview_window = PreviewWindow()"):]
+        preview_init = preview_init[:preview_init.index("# Karaoke transport card")]
+        self.assertIn("RenderThreadShowScreenVfx(self.preview_window.video_area)", preview_init)
+        self.assertIn("set_show_vfx_overlay(preview_vfx)", preview_init)
+
+        preview_class = source[source.index("class PreviewWindow"):]
+        preview_class = preview_class[:preview_class.index("class ", 10)]
+        self.assertIn('old_overlay = getattr(old, "_show_vfx_overlay", None)', preview_class)
+        self.assertIn("new_area.set_show_vfx_overlay(old_overlay)", preview_class)
+
     def test_shuffled_style_is_not_hidden_behind_the_countdown_veil(self):
         source = mod.QML_SHOW_SCREEN_VFX_SOURCE
         style_layer = source[source.index("id: styleLayer"):]
