@@ -1972,10 +1972,14 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
         self.assertIn("target: nameText", qml)
         init = inspect.getsource(self.singws.DetachedPainterTicker.__init__)
         sync = inspect.getsource(self.singws.DetachedPainterTicker.sync_surface_geometry)
+        painter = inspect.getsource(self.singws.Ticker.paintEvent)
         self.assertIn("WA_DontCreateNativeAncestors", init)
         self.assertIn("WA_NativeWindow", init)
         self.assertIn("setTransientParent", sync)
         self.assertIn("self._view.raise_()", sync)
+        self.assertIn("queue_flash_started", painter)
+        self.assertIn("timer_pulse_started", painter)
+        self.assertIn("drawRoundedRect", painter)
 
 
 try:  # the native mpv backend loads only where its bridge is available

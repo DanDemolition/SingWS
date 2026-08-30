@@ -57311,6 +57311,10 @@ class Ticker(QFrame):
         self._gap = 16
         self._timer_pad_px = 8
         self._bold = False
+        self._effects_enabled = True
+        self._queue_flash_started = 0.0
+        self._timer_pulse_started = 0.0
+        self._last_timer_pulse_text = ""
         self._is_scrolling_enabled = True
         self._size_idx = TICKER_SIZE_DEFAULT_INDEX
         self._scroll_speed_px_per_sec = TICKER_SPEED_DEFAULT
@@ -57533,6 +57537,11 @@ class Ticker(QFrame):
         self._rebuild_active_strip()
         self.update()
 
+    def set_effects_enabled(self, enabled: bool):
+        """Draw ticker lighting in this painter without adding another surface."""
+        self._effects_enabled = bool(enabled)
+        self.update()
+
     def _recompute_widths(self):
         self._right_width = self._timer_fm.horizontalAdvance(self._right_text) + (self._timer_pad_px * 2)
 
@@ -57714,6 +57723,8 @@ class Ticker(QFrame):
         formatted_list = self._format_queue_text()
         if not force and (formatted_list == self._active_text or formatted_list == self._pending_text):
             return
+        if self._effects_enabled and formatted_list:
+            self._queue_flash_started = time.monotonic()
         if force or self._active_width <= 0:
             self._pending_text = ""
             self._activate_text(formatted_list)
@@ -57727,6 +57738,15 @@ class Ticker(QFrame):
             txt = self.get_time_left_callback() or "--:--"
             if txt != self._right_text:
                 self._right_text = txt
+                if self._effects_enabled and txt != self._last_timer_pulse_text:
+                    try:
+                        parts = [int(part) for part in txt.split(":")]
+                        minutes, seconds = parts[-2], parts[-1]
+                        if seconds == 0 or (minutes == 0 and seconds <= 10):
+                            self._timer_pulse_started = time.monotonic()
+                            self._last_timer_pulse_text = txt
+                    except Exception:
+                        pass
                 old_start = self._scroll_start_x()
                 self._recompute_widths()
                 new_start = self._scroll_start_x()
@@ -57737,6 +57757,8 @@ class Ticker(QFrame):
                 self.update()
 
     def paintEvent(self, event):
+        from PyQt6.QtGui import QLinearGradient
+
         painter = QPainter(self)
         # Smooth subpixel blitting + anti-aliased text so fractional scroll
         # positions render as fluid motion rather than 1 px stair-steps.
@@ -57745,9 +57767,72 @@ class Ticker(QFrame):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.fillRect(self.rect(), QColor("black"))
 
+        now = time.monotonic()
+        if self._effects_enabled:
+            # Painter-native equivalents of the newer QML lighting. They share
+            # this one backing surface and never alter the marquee geometry.
+            atmosphere = QLinearGradient(0, 0, self.width(), 0)
+            atmosphere.setColorAt(0.0, QColor(20, 5, 3, 32))
+            atmosphere.setColorAt(0.45, QColor(56, 34, 10, 82))
+            atmosphere.setColorAt(1.0, QColor(16, 5, 3, 18))
+            painter.fillRect(self.rect(), atmosphere)
+
+            ribbon_w = max(100.0, self.width() * 0.18)
+            travel = self.width() + ribbon_w * 2.5
+            ribbon_x = -ribbon_w * 1.5 + travel * ((now % 6.5) / 6.5)
+            ribbon = QLinearGradient(-ribbon_w / 2.0, 0, ribbon_w / 2.0, 0)
+            ribbon.setColorAt(0.0, QColor(255, 255, 255, 0))
+            ribbon.setColorAt(0.42, QColor(168, 149, 255, 70))
+            ribbon.setColorAt(0.58, QColor(196, 181, 253, 90))
+            ribbon.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.save()
+            painter.setOpacity(0.20)
+            painter.translate(ribbon_x + ribbon_w / 2.0, self.height() / 2.0)
+            painter.rotate(17.0)
+            painter.fillRect(QRectF(-ribbon_w / 2.0, -self.height(), ribbon_w, self.height() * 2.0), ribbon)
+            painter.restore()
+
+            flash_age = now - self._queue_flash_started
+            if 0.0 <= flash_age < 0.52:
+                if flash_age < 0.10:
+                    flash_alpha = flash_age / 0.10 * 0.22
+                else:
+                    flash_alpha = (1.0 - ((flash_age - 0.10) / 0.42)) * 0.22
+                flash = QLinearGradient(0, 0, max(1, self.width()), 0)
+                flash.setColorAt(0.0, QColor(109, 40, 217, int(255 * flash_alpha)))
+                flash.setColorAt(0.25, QColor(196, 181, 253, int(190 * flash_alpha)))
+                flash.setColorAt(1.0, QColor(18, 19, 25, 0))
+                painter.fillRect(self.rect().adjusted(0, 1, 0, -1), flash)
+
         right_x = max(0, self.width() - self._right_width - self._right_margin)
         right_rect = QRect(right_x, 0, self._right_width, self.height())
         left_clip = QRect(0, 0, max(0, right_x - self._gap), self.height())
+
+        if self._effects_enabled:
+            pulse_age = now - self._timer_pulse_started
+            pulse_scale = 1.0
+            if 0.0 <= pulse_age < 0.285:
+                pulse_scale += 0.045 * math.sin(math.pi * pulse_age / 0.285)
+            pill_h = min(self.height() - 6.0, max(28.0, self._timer_font.pixelSize() * 1.18))
+            pill = QRectF(
+                right_rect.center().x() - (right_rect.width() * pulse_scale) / 2.0,
+                (self.height() - pill_h * pulse_scale) / 2.0,
+                right_rect.width() * pulse_scale,
+                pill_h * pulse_scale,
+            )
+            painter.setPen(QPen(QColor("#c4b5fd"), 1.0))
+            painter.setBrush(QBrush(QColor("#6d28d9")))
+            painter.drawRoundedRect(pill, min(13.0, pill.height() / 2.0), min(13.0, pill.height() / 2.0))
+
+            pulse_x = max(3.0, right_x - 18.0)
+            pulse_phase = (math.sin(now * math.tau / 2.7) + 1.0) / 2.0
+            ring_r = 2.5 + pulse_phase * 1.1
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(self._color, 1.0))
+            painter.drawEllipse(QPointF(pulse_x, self.height() / 2.0), ring_r, ring_r)
+            painter.setBrush(QBrush(self._color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPointF(pulse_x, self.height() / 2.0), 1.5, 1.5)
 
         painter.save()
         painter.setClipRect(left_clip)
@@ -57767,6 +57852,13 @@ class Ticker(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             self._right_text,
         )
+        if self._effects_enabled:
+            edge = QLinearGradient(0, 0, self.width(), 0)
+            edge.setColorAt(0.0, QColor(109, 40, 217, 0))
+            edge.setColorAt(0.35, QColor(109, 40, 217, 136))
+            edge.setColorAt(0.70, QColor(196, 181, 253, 160))
+            edge.setColorAt(1.0, QColor(196, 181, 253, 0))
+            painter.fillRect(QRectF(0, max(0, self.height() - 2), self.width(), 2), edge)
         painter.end()
 
 
@@ -57864,6 +57956,9 @@ class DetachedPainterTicker(QFrame):
 
     def set_color(self, color: str):
         self._view.set_color(color)
+
+    def set_effects_enabled(self, enabled: bool):
+        self._view.set_effects_enabled(enabled)
 
     def start_scrolling(self):
         self._view.start_scrolling()

@@ -22,6 +22,17 @@ creation hit the machine's recurring `hdiutil: Device not configured` error.
 CDG/video and actual scrolling smoothness still require the operator's live
 visual test.
 
+The detached painter now also implements the ticker lighting natively in the
+same paint pass: moving ribbon/atmosphere, queue-change flash, countdown pill
+and pulse, live indicator, and edge glow.  It exposes the existing
+`ticker_vfx_enabled` control, while retaining the isolated painter surface and
+pre-rendered marquee.  The follow-up build passed 181 focused tests, the full
+799-test plus 21-subtest runner, strict signing, and a scratch launch reporting
+`backend=detached-openkj-painter effects=available`.  It is staged at
+`/private/tmp/singws-painter-vfx.Ru9c2n/dist/SingWS.app`, but is not installed:
+the running normal app rejected the clean quit request with `User canceled`,
+so its bundle was deliberately left untouched.
+
 ## Karaoke archive recovery after loudness-cache audit
 
 All 471 retained structural loudness failures were audited with 7-Zip. Seventy
