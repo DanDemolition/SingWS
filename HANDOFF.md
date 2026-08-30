@@ -2,6 +2,56 @@
 
 Updated 2026-08-29.
 
+## Same-version 0.4.6.4 show-fix replacement (2026-08-29)
+
+The Intel replacement candidate includes the stuck Show Screen transition
+surface fix and the verified audio-tail BGM handoff fix below.  Release
+verification passed 790 tests plus 21 subtests in the scratch-data runner and
+168 focused fresh-Qt GUI/transition tests.  The app passed x86_64 architecture,
+bundled-media loading, the macOS 12 minimum-version sweep, staged strict
+signing, and DMG verification.  A hidden scratch-data Cocoa launch from the
+mounted DMG reached BASS, Qt Quick VFX, the ticker, and the audience window in
+1.53 seconds and honored the timed smoke exit.  Its frozen offline helper
+returned valid LUFS/peak values for the real MP4 fixture.  The replacement Intel
+DMG is 151,674,726 bytes with SHA-256
+`8c4e189e1d6ce2cbdff1058762ff765cc1e79b9339b54829064c627e5f789f98`.
+It is being published as a same-version `v0.4.6.4` replacement; it must not be
+installed over the running live-show app until the operator explicitly asks.
+
+## Verified audio-tail BGM handoff (2026-08-29, 0.4.6.4 replacement)
+
+Live 0.4.6.4 playback of Sound Choice `SC8671 10 - David Bowie - Changes`
+correctly scanned its last audible audio at 219.73s in a 230.43s file, but still
+left 10.70 seconds of dead air.  The CDG visual scan conservatively returned
+`static_or_active_nonblank_final_screen`, and the playback path incorrectly
+required a verified visual endpoint before it would even start the audio-only
+BGM crossfade.
+
+The source now starts the configured three-second BGM fade as soon as playback
+passes the verified audio endpoint, even if a static/nonblank CDG final card is
+retained.  Actual early song completion still requires the existing verified
+visual endpoint and final-lyrics gates, so this closes audible dead air without
+cutting lyrics or clearing the audience image.  The installed app and live show
+were not touched; after-show verification remains required.
+
+## Stuck Show Screen transition surface (2026-08-29, 0.4.6.4 replacement)
+
+During a live 0.4.6.4 show, a CDG track decoded and advanced normally but the
+audience display remained black behind the ticker and request QR after the
+`mosaic_tile_reveal` singer-start transition.  The 0.4.6.4 transition container
+was raised above the retained libmpv view but remained a full-screen native
+child after QML made the transition inactive; on macOS, that nominally
+transparent child can still occlude libmpv as solid black.
+
+The source now keeps the existing QQuickView alive but collapses only its native
+window container to zero size whenever the transition becomes inactive.  It
+restores the saved maximum size immediately before each next-up, singer-start,
+or outro animation.  This avoids the historically crash-prone hide/recreate
+path.  The focused Show Screen VFX suite passes 18 tests in the fresh Qt venv;
+Python compilation and `git diff --check` are clean.  The installed app and live
+show data/settings were not touched.  This still needs an after-show macOS
+on-screen smoke test with transitions enabled before building or installing.
+
 ## Turbo first-batch timeout loop (2026-08-29, released in 0.4.6.3)
 
 Live inspection of the installed 0.4.6.3 build found Turbo stopped at 4/120,428

@@ -6886,6 +6886,10 @@ class RenderThreadShowScreenVfx(QFrame):
             self._root.nextUpCountdownFinished.connect(self._on_next_up_countdown_finished)
         except Exception:
             pass
+        try:
+            self._root.activeChanged.connect(self._schedule_native_surface_retire)
+        except Exception:
+            pass
         self._container = QWidget.createWindowContainer(self._view, self)
         # A window container is native, and Qt promotes every ancestor of a
         # native widget unless this is set. Several of these in one top-level
@@ -6897,15 +6901,43 @@ class RenderThreadShowScreenVfx(QFrame):
             Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self._container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._native_surface_maximum_size = self._container.maximumSize()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._container)
+        self._retire_native_surface_if_inactive()
 
     def _on_next_up_countdown_finished(self):
         area = self.parentWidget()
         if area is not None and hasattr(area, "finish_next_up_countdown"):
             area.finish_next_up_countdown()
+
+    def _schedule_native_surface_retire(self):
+        # active changes from inside a QML ScriptAction.  Let that animation
+        # callback unwind before changing the native window-container geometry.
+        QTimer.singleShot(0, self._retire_native_surface_if_inactive)
+
+    def _retire_native_surface_if_inactive(self):
+        """Remove an idle Quick child from the native stacking plane.
+
+        A transparent QQuickView window container can still occlude a retained
+        libmpv NSView as solid black on macOS.  Hiding/recreating Quick surfaces
+        has historically been crash-prone on this Intel show Mac, so keep the
+        objects alive and collapse only the inactive container.
+        """
+        try:
+            if bool(self._root.property("active")):
+                return
+            self._container.setMaximumSize(0, 0)
+            self._container.updateGeometry()
+            _diag("[SHOW-VFX] inactive native surface retired")
+        except Exception as exc:
+            _diag(f"[SHOW-VFX] native surface retire failed: {exc}")
+
+    def _prepare_native_surface(self):
+        self._container.setMaximumSize(self._native_surface_maximum_size)
+        self._container.updateGeometry()
 
     def _raise_native_surface(self) -> bool:
         """Raise only the Quick transition widgets managed by Qt.
@@ -6941,6 +6973,7 @@ class RenderThreadShowScreenVfx(QFrame):
 
     def show_next_up(self, payload: dict, duration_sec: float = 10.0):
         payload = payload if isinstance(payload, dict) else {}
+        self._prepare_native_surface()
         self._root.showNextUp(
             str(payload.get("singer", "") or ""),
             str(payload.get("title", "") or ""),
@@ -6951,12 +6984,14 @@ class RenderThreadShowScreenVfx(QFrame):
         self._schedule_surface_reassert()
 
     def show_singer_start(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
+        self._prepare_native_surface()
         self._root.showSingerStart(
             str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
         )
         self._schedule_surface_reassert()
 
     def show_song_outro(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
+        self._prepare_native_surface()
         self._root.showSongOutro(
             str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
         )
@@ -37667,6 +37702,43 @@ class KaraokeApp(QWidget):
             stale_for = 0.0
         return silent_for >= window and stale_for >= window
 
+    def _prefire_bgm_at_verified_audio_end(self) -> bool:
+        """Fade BGM under a verified dead audio tail without ending visuals.
+
+        Audio analysis is sufficient authority for an audio-only crossfade. A
+        CDG may deliberately retain a nonblank final card, so visual analysis
+        remains the separate authority for stopping karaoke before decoder EOS.
+        """
+        if bool(self.settings.get("karaoke_auto_advance", False)):
+            return False
+        if not self._karaoke_bgm_crossfade_enabled():
+            return False
+        if bool(getattr(self, "_bg_crossfade_prefired", False)):
+            return False
+        if not hasattr(self, "bg_music"):
+            return False
+        if not bool(getattr(self.bg_music, "playlist", None)):
+            return False
+        if bool(getattr(self.bg_music, "is_playing", False)):
+            return False
+        if not bool(self.settings.get("bg_enabled", True)):
+            return False
+        if not bool(self.settings.get("bg_autoplay_on_idle", True)):
+            return False
+        self._bg_crossfade_prefired = True
+        try:
+            self._bg_resume_reason = "karaoke_verified_audio_tail"
+            self.bg_music.fade_in(None, 3000, allow_during_karaoke=True)
+            _diag(
+                "[CROSSFADE] BG fade started at verified audio end; "
+                "karaoke visuals retained until their safe endpoint"
+            )
+            return True
+        except Exception as exc:
+            self._bg_crossfade_prefired = False
+            _diag(f"[CROSSFADE] verified-audio-tail BG fade failed: {exc}")
+            return False
+
     def _maybe_trim_end_silence(self, dur_ns: int, pos_ns: int) -> bool:
         """End karaoke once the scanned audio and visible lyrics are finished."""
         if not self._karaoke_early_silence_trim_enabled():
@@ -37752,6 +37824,12 @@ class KaraokeApp(QWidget):
                     f"(pos={elapsed:.2f}s db={'n/a' if meterless else f'{db:.1f}'})"
                 )
             return False
+
+        # The file scan has now proved that audible karaoke content is over.
+        # Start the requested audio crossfade even when a conservative CDG scan
+        # keeps a static/nonblank final card visible. Actual song completion
+        # remains guarded by the independently verified visual endpoint below.
+        self._prefire_bgm_at_verified_audio_end()
 
         # Audio completion alone never authorizes a karaoke handoff.
         visual_end = getattr(self, "_karaoke_visual_end_s", None)
@@ -37883,24 +37961,6 @@ class KaraokeApp(QWidget):
                 f"(db={'n/a' if meterless else f'{db:.1f}'}, silent={self._end_silence_accum_s:.2f}s, "
                 f"remain={remain:.2f}s, cdg_done={cdg_done}, cdg_stale={cdg_stale_for:.2f}s)"
             )
-            if (
-                not self._end_silence_auto_advance_next
-                and
-                self._karaoke_bgm_crossfade_enabled()
-                and not bool(getattr(self, "_bg_crossfade_prefired", False))
-                and hasattr(self, "bg_music")
-                and bool(getattr(self.bg_music, "playlist", None))
-                and not bool(getattr(self.bg_music, "is_playing", False))
-                and bool(self.settings.get("bg_enabled", True))
-                and bool(self.settings.get("bg_autoplay_on_idle", True))
-            ):
-                self._bg_crossfade_prefired = True
-                try:
-                    self._bg_resume_reason = "karaoke_verified_silent_tail"
-                    self.bg_music.fade_in(None, 3000, allow_during_karaoke=True)
-                    _diag("[CROSSFADE] BG fade started under verified silent karaoke tail")
-                except Exception as exc:
-                    _diag(f"[CROSSFADE] verified-tail BG fade failed: {exc}")
             QTimer.singleShot(
                 0,
                 lambda: self._handle_media_end_safe("verified_silent_tail"),

@@ -1228,10 +1228,27 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("using physical EOS fallback", MAIN_SOURCE)
         self.assertIn("threading.Thread", arm)
 
+    def test_verified_audio_tail_can_crossfade_while_cdg_final_card_remains(self):
+        trim = function_source("_maybe_trim_end_silence")
+        audio_crossfade = trim.index("self._prefire_bgm_at_verified_audio_end()")
+        visual_guard = trim.index("if visual_end is None or visual_confidence < 0.85:")
+        self.assertLess(audio_crossfade, visual_guard)
+
+        prefire = function_source("_prefire_bgm_at_verified_audio_end")
+        self.assertIn('self.settings.get("karaoke_auto_advance", False)', prefire)
+        self.assertIn("_karaoke_bgm_crossfade_enabled()", prefire)
+        self.assertIn("bg_music.fade_in(None, 3000, allow_during_karaoke=True)", prefire)
+        self.assertIn("karaoke visuals retained until their safe endpoint", prefire)
+        self.assertNotIn("_handle_media_end_safe", prefire)
+
     def test_verified_silent_tail_completes_karaoke_before_decoder_eos(self):
         trim = function_source("_maybe_trim_end_silence")
         self.assertIn("verified tail complete", trim)
-        self.assertIn("bg_music.fade_in", trim)
+        self.assertIn("_prefire_bgm_at_verified_audio_end", trim)
+        self.assertIn(
+            "bg_music.fade_in",
+            function_source("_prefire_bgm_at_verified_audio_end"),
+        )
         self.assertIn('_handle_media_end_safe("verified_silent_tail")', trim)
         self.assertIn("_end_silence_triggered = True", trim)
         self.assertIn('_end_silence_auto_advance_next = bool(', trim)
@@ -1280,10 +1297,12 @@ class PerformanceSafetyTests(unittest.TestCase):
         opened = function_source("open_rotation_view")
         reassert = function_source("_reassert_show_ticker_after_rotation_open")
         shared = function_source("_reassert_show_ticker_surface")
+        native_raise = function_source("_raise_ticker_surface")
         self.assertIn("_reassert_show_ticker_after_rotation_open", opened)
         self.assertIn('_reassert_show_ticker_surface("rotation_open")', reassert)
         self.assertIn("video_window.set_ticker_enabled(True)", shared)
-        self.assertIn("ticker.raise_()", shared)
+        self.assertIn("video_window._raise_ticker_surface()", shared)
+        self.assertIn("ticker.raise_()", native_raise)
         self.assertNotIn("rotation_view.ticker", opened + reassert + shared)
         self.assertNotIn("video_window.activateWindow", shared)
 

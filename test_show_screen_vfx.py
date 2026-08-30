@@ -220,6 +220,12 @@ class ShowScreenVfxTests(unittest.TestCase):
 
         self.assertFalse(overlay._root.property("active"))
         self.assertFalse(overlay._root.property("startCountdownActive"))
+        self.assertEqual(overlay._container.maximumWidth(), 0)
+        self.assertEqual(overlay._container.maximumHeight(), 0)
+
+        overlay.show_singer_start("FrankieRod", "Painkiller", "Judas Priest")
+        QTest.qWait(50)
+        self.assertEqual(overlay._container.maximumSize(), overlay._native_surface_maximum_size)
 
     def test_song_outro_fires_double_burst_and_clears_quickly(self):
         overlay = mod.RenderThreadShowScreenVfx()
