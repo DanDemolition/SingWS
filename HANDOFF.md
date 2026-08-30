@@ -18,9 +18,10 @@ was verified by both Python `zipfile` and 7-Zip before being installed; the
 post-run audit found zero integrity failures and zero Deflate64 members. Four
 more healthy ZIPs were rebuilt after removing only `__MACOSX`/AppleDouble junk
 entries which had been mistaken for duplicate MP3/CDG pairs. Original archives
-are preserved under
-`~/SingWS/cache-backups/deflate64-repack-20260830-074824/` (397 files) and
-`~/SingWS/cache-backups/deflate64-repack-20260830-075352/` (4 files).
+were subsequently moved to Trash at the operator's request under
+`~/.Trash/deflate64-repack-20260830-074824/` (397 files) and
+`~/.Trash/deflate64-repack-20260830-075352/` (4 files). The converted library
+copies were reverified immediately before that move.
 
 All 471 old failure-cache records are now harmlessly stale: 70 source paths no
 longer exist and all 401 repaired archives have changed file signatures, so the
