@@ -1320,19 +1320,15 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("QTimer.singleShot", scheduler)
         self.assertIn("_reassert_show_ticker_surface", scheduler)
 
-    def test_show_screen_ticker_self_heals_late_native_restacking(self):
+    def test_show_screen_ticker_reasserts_only_for_surface_events(self):
         video_start = MAIN_SOURCE.index("class VideoWindow(QWidget)")
         video_end = MAIN_SOURCE.index("class AddToQueueDialog", video_start)
         video = MAIN_SOURCE[video_start:video_end]
         show_event = function_source("showEvent")
-        guard = function_source("_tick_ticker_surface_guard")
-        self.assertIn("_ticker_surface_guard_timer.start(3000)", video)
+        self.assertNotIn("_ticker_surface_guard_timer", video)
+        self.assertNotIn("def _tick_ticker_surface_guard", video)
         self.assertIn('reassert("video_window_show", delays=(0, 120, 400))', show_event)
         self.assertIn('reassert_window("video_window_show")', show_event)
-        self.assertIn('settings.get("ticker_enabled", True)', guard)
-        self.assertNotIn("_reassert_show_window_surface", guard)
-        self.assertIn("self._raise_ticker_surface()", guard)
-        self.assertNotIn("activateWindow", guard)
         native_raise = function_source("_raise_ticker_surface")
         self.assertIn('ticker_backend != "quick-render-thread"', native_raise)
         self.assertIn('getattr(ticker, "_container", None)', native_raise)

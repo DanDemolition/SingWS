@@ -12720,16 +12720,6 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer.timeout.connect(self._tick_idle_overlay)
         self._idle_overlay_timer.start(50)
 
-        # macOS can restack the retained mpv and Qt Quick child windows long
-        # after the transition callback which raised them. The ticker remains
-        # alive and scrolling but ends up behind the video surface; hiding and
-        # reopening the audience window repairs it only because AppKit rebuilds
-        # that ordering. Reassert the non-overlapping bottom ticker periodically
-        # so the show screen heals itself without operator intervention.
-        self._ticker_surface_guard_timer = QTimer(self)
-        self._ticker_surface_guard_timer.timeout.connect(self._tick_ticker_surface_guard)
-        self._ticker_surface_guard_timer.start(3000)
-
         # Startup can show this window on one screen and place it on the saved
         # audience screen a few seconds later. That move reconnects the native
         # mpv/Qt Quick children after showEvent's reassertions have already run.
@@ -12753,26 +12743,6 @@ class VideoWindow(QWidget):
         reassert_window = getattr(owner, "_reassert_show_window_surface", None) if owner is not None else None
         if callable(reassert_window):
             QTimer.singleShot(0, lambda: reassert_window("video_window_show"))
-
-    def _tick_ticker_surface_guard(self):
-        """Keep the show window and ticker above late-restacked native surfaces."""
-        try:
-            if not self.isVisible():
-                return
-            owner = getattr(self, "_external_owner", None)
-            settings = getattr(owner, "settings", {}) if owner is not None else {}
-            if not bool(settings.get("ticker_enabled", True)):
-                return
-            ticker = getattr(self, "ticker", None)
-            if ticker is None or not ticker.isVisible():
-                return
-            # Keep this periodic repair inside the already-visible audience
-            # window. Ordering the parent NSWindow forward on every tick fights
-            # the rotation window and can make Show Karaoke Screen appear dead.
-            # The parent is reasserted once from showEvent instead.
-            self._raise_ticker_surface()
-        except Exception:
-            pass
 
     def _raise_ticker_surface(self) -> bool:
         """Raise both Qt and Cocoa sides of the retained ticker surface.
