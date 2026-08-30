@@ -67,16 +67,34 @@ class ShowScreenVfxTests(unittest.TestCase):
         self.assertEqual(source.count("id: styleLayer"), 1)
         self.assertNotIn("QQuickView", source)
 
-    def test_host_quick_surface_is_natively_reasserted_for_each_effect(self):
+    def test_host_quick_surface_hands_plane_back_to_video_when_inactive(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         overlay = source[source.index("class RenderThreadShowScreenVfx"):]
         overlay = overlay[:overlay.index("class VideoAreaWidget")]
-        self.assertIn("def _raise_native_surface", overlay)
+        self.assertNotIn("def _raise_native_surface", overlay)
         self.assertIn("self._container.raise_()", overlay)
+        self.assertIn("self._container.lower()", overlay)
         self.assertNotIn("addSubview_positioned_relativeTo_", overlay)
         self.assertNotIn("NSWindowAbove", overlay)
-        self.assertIn("def _schedule_surface_reassert", overlay)
-        self.assertEqual(overlay.count("self._schedule_surface_reassert()"), 3)
+        self.assertNotIn("def _schedule_surface_reassert", overlay)
+        self.assertIn("activeChanged.connect(self._schedule_surface_plane_update)", overlay)
+        self.assertEqual(overlay.count("self._update_surface_plane()"), 4)
+
+    def test_ticker_has_qt_only_periodic_restack_guard(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        window = source[source.index("class VideoWindow"):]
+        window = window[:window.index("class PreviewWindow")]
+        self.assertIn("self._ticker_surface_guard_timer.start(1000)", window)
+        self.assertIn("def _tick_ticker_surface_guard", window)
+        ticker_raise = window[window.index("def _raise_ticker_surface"):]
+        ticker_raise = ticker_raise[:ticker_raise.index("def ", 10)]
+        self.assertIn('getattr(ticker, "_container", None)', ticker_raise)
+        self.assertIn("container.raise_()", ticker_raise)
+        guard = window[window.index("def _tick_ticker_surface_guard"):]
+        guard = guard[:guard.index("def ", 10)]
+        self.assertIn("self._raise_ticker_surface()", guard)
+        self.assertNotIn("addSubview_positioned_relativeTo_", window)
+        self.assertNotIn("NSWindowAbove", window)
 
     def test_host_preview_uses_and_preserves_same_quick_transition_layer(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
@@ -220,12 +238,12 @@ class ShowScreenVfxTests(unittest.TestCase):
 
         self.assertFalse(overlay._root.property("active"))
         self.assertFalse(overlay._root.property("startCountdownActive"))
-        self.assertEqual(overlay._container.maximumWidth(), 0)
-        self.assertEqual(overlay._container.maximumHeight(), 0)
+        self.assertGreater(overlay._container.maximumWidth(), 0)
+        self.assertGreater(overlay._container.maximumHeight(), 0)
 
         overlay.show_singer_start("FrankieRod", "Painkiller", "Judas Priest")
         QTest.qWait(50)
-        self.assertEqual(overlay._container.maximumSize(), overlay._native_surface_maximum_size)
+        self.assertTrue(overlay._root.property("active"))
 
     def test_song_outro_fires_double_burst_and_clears_quickly(self):
         overlay = mod.RenderThreadShowScreenVfx()

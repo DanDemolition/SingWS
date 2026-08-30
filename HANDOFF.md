@@ -1,6 +1,88 @@
 # SingWS handoff
 
-Updated 2026-08-29.
+Updated 2026-08-30.
+
+## Installed 0.4.6.4 replacement after live CDG/ticker validation
+
+The final Intel build was installed at `/Applications/SingWS.app` after a real
+CDG test confirmed the GPU singer transition, CDG video, background video, and
+smooth render-thread ticker all work together. The transition QQuickView now
+hands its plane back to mpv when inactive; the ticker QQuickView uses a detached,
+non-activating transient surface aligned to the audience ticker strip.
+
+The complete scratch suite passes 793 tests plus 21 subtests, focused GUI
+surface coverage passes, the bundle passes x86_64 architecture, bundled-media,
+macOS 12 minimum-version, strict signing, and installed scratch-launch checks.
+The verified installer is `SingWS-0.4.6.4-x86_64-installer.dmg`, SHA-256
+`3b1efbe462580dac3aa33d89b12e69173eeb81956c2baab7846dca2980d8c6bc`.
+The previous installed copy is preserved at
+`/Applications/SingWS-0.4.6.4-pre-20260830-fixes.app`.
+
+## 2026-08-29 show follow-up: Intel surfaces, KaraFun start latency, analysis failures
+
+The complete show logs confirmed that the installed 0.4.6.4 transition-surface
+retirement code ran, but the audience CDG video remained occluded. The operator
+identified v0.4.6.1 as a known-good visuals-plus-CDG baseline. History traced
+the regression to v0.4.6.2's repeated native/Cocoa ancestor reordering, which
+could lift a shared native container above the video. The transition layer now
+uses the v0.4.6.1 Qt-only `raise_()` behavior again: no native ancestor walk,
+no container restack, no delayed repeated restacks, and no zero-size retirement.
+The ticker likewise raises only its Qt widget. The v0.4.6.1 periodic Qt-only
+ticker guard is restored at a one-second interval, so an AppKit late restack is
+repaired promptly without touching a shared Cocoa ancestor.
+`quick_gpu_surfaces=auto` remains enabled on Intel, while the explicit
+Off/environment override remains as a safety switch.
+
+A real staged-build CDG test then showed both native mpv views presenting while
+the picture remained covered after a `star_tunnel` effect. This disproved the
+simple v0.4.6.1 overlay revert on the current stack. The transition container
+now occupies the top plane only while QML reports `active`; when the animation
+ends it is lowered beneath video without resizing, hiding, destroying, or
+walking Cocoa ancestors. The ticker stays on its independent guarded plane.
+The follow-up live test confirmed CDG video became visible after the effect,
+while the Quick ticker remained behind mpv. Its guard now raises both the ticker
+widget and its own non-overlapping bottom-strip container every second, without
+reordering any shared native ancestor.
+
+A second live test proved that even the ticker's own container raise does not
+move its Quick native child above mpv on this Intel/macOS stack. Intel now uses
+the reliable painter ticker independently of the Quick transition capability.
+GPU transitions remain enabled and retain the verified video-plane handoff;
+only the continuously retained ticker backend changes. `SINGWS_QUICK_TICKER=1`
+exists solely as a diagnostic override.
+
+The painter ticker was visible in the third live test but the operator confirmed
+its scrolling was choppy. The Intel render-thread ticker is therefore retained
+but moved out of the mpv native-child hierarchy: its QQuickView is now a
+non-activating transient surface positioned over the audience window's ticker
+strip and resynchronised by the existing one-second guard. This preserves QML
+`XAnimator` scrolling/effects while avoiding the child-plane conflict.
+
+All four automatic KaraFun searches found and activated the intended result;
+three completed and one was explicitly returned to the queue.  Each start
+nevertheless waited up to 12 seconds for a Dual Renderer handoff which took
+longer and completed afterward.  Result activation now proceeds immediately
+after scheduling the handoff, while renderer recreation/fullscreening continues
+in parallel.  Exact-match, playback verification, one-shot recovery, and the
+operator warning remain unchanged.
+
+The logs also exposed a poisoned loudness failure cache: a Turbo run recorded
+roughly 119,000 valid ZIPs as lacking a readable MP3 after a temporary resource
+failure.  That specific cached structural claim is now revalidated against the
+ZIP directory, so valid single-MP3 archives are retried and overwrite the bad
+entry while genuinely invalid archives remain skipped.  ZIP extraction no
+longer swallows its underlying exception, and temporary filesystem errors stop
+the worker without signature-blacklisting the track.
+
+Focused fresh-Qt transition/KaraFun/performance coverage passes 168 tests.  An
+additional 30 focused non-GUI tests pass.  Python compilation and
+`git diff --check` are clean.  The complete scratch-data runner passes 792 tests
+plus 21 subtests; its documented mismatched Qt environment excluded GUI modules,
+which are covered by the fresh-Qt run above.  Three request terminal updates
+briefly received `cross_store_sync_conflict`, then succeeded through the durable
+second push within one to three seconds; no server change was needed.  Nothing
+has been built or installed, and the changes still need an after-show on-screen
+CDG plus real KaraFun smoke test.
 
 ## Same-version 0.4.6.4 show-fix replacement (2026-08-29)
 

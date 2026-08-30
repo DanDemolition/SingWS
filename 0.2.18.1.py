@@ -2108,7 +2108,28 @@ def loudness_failed_cached(audio_path: str) -> bool:
     if sig is None:
         return False
     # A changed file is a different file: let it be retried.
-    return int(entry.get("mtime", 0)) == sig[0] and int(entry.get("size", 0)) == sig[1]
+    if int(entry.get("mtime", 0)) != sig[0] or int(entry.get("size", 0)) != sig[1]:
+        return False
+    # A resource failure during the 2026-08-29 Turbo run was flattened into
+    # the same message as a structurally invalid ZIP and poisoned almost the
+    # whole library's failure cache. Revalidate only that cheap structural
+    # claim. A currently readable, single-MP3 archive must be retried; a true
+    # no/multiple-MP3 package remains skipped.
+    if (
+        str(audio_path).lower().endswith(".zip")
+        and str(entry.get("reason") or "") == "ZIP does not contain exactly one readable MP3"
+    ):
+        try:
+            with zipfile.ZipFile(audio_path, "r") as archive:
+                members = [
+                    info for info in archive.infolist()
+                    if not info.is_dir() and info.filename.lower().endswith(".mp3")
+                ]
+            if len(members) == 1:
+                return False
+        except Exception:
+            pass
+    return True
 
 
 def loudness_info_cached(audio_path: str):
@@ -6887,7 +6908,7 @@ class RenderThreadShowScreenVfx(QFrame):
         except Exception:
             pass
         try:
-            self._root.activeChanged.connect(self._schedule_native_surface_retire)
+            self._root.activeChanged.connect(self._schedule_surface_plane_update)
         except Exception:
             pass
         self._container = QWidget.createWindowContainer(self._view, self)
@@ -6901,79 +6922,46 @@ class RenderThreadShowScreenVfx(QFrame):
             Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self._container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._native_surface_maximum_size = self._container.maximumSize()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._container)
-        self._retire_native_surface_if_inactive()
+        self._update_surface_plane()
 
     def _on_next_up_countdown_finished(self):
         area = self.parentWidget()
         if area is not None and hasattr(area, "finish_next_up_countdown"):
             area.finish_next_up_countdown()
 
-    def _schedule_native_surface_retire(self):
-        # active changes from inside a QML ScriptAction.  Let that animation
-        # callback unwind before changing the native window-container geometry.
-        QTimer.singleShot(0, self._retire_native_surface_if_inactive)
+    def _schedule_surface_plane_update(self):
+        # active changes from a QML ScriptAction. Let the scene-graph callback
+        # unwind before changing the native window-container sibling order.
+        QTimer.singleShot(0, self._update_surface_plane)
 
-    def _retire_native_surface_if_inactive(self):
-        """Remove an idle Quick child from the native stacking plane.
+    def _update_surface_plane(self):
+        """Raise only while animating, then lower beneath the mpv view.
 
-        A transparent QQuickView window container can still occlude a retained
-        libmpv NSView as solid black on macOS.  Hiding/recreating Quick surfaces
-        has historically been crash-prone on this Intel show Mac, so keep the
-        objects alive and collapse only the inactive container.
+        The transparent QQuickView child can still occlude the native mpv view
+        after its pixels become transparent. Resizing it to zero did not change
+        its native plane. Lowering the existing objects avoids the Intel crash
+        risk of destroying/recreating Quick surfaces and leaves the ticker on
+        its independent top plane.
         """
         try:
-            if bool(self._root.property("active")):
-                return
-            self._container.setMaximumSize(0, 0)
-            self._container.updateGeometry()
-            _diag("[SHOW-VFX] inactive native surface retired")
-        except Exception as exc:
-            _diag(f"[SHOW-VFX] native surface retire failed: {exc}")
-
-    def _prepare_native_surface(self):
-        self._container.setMaximumSize(self._native_surface_maximum_size)
-        self._container.updateGeometry()
-
-    def _raise_native_surface(self) -> bool:
-        """Raise only the Quick transition widgets managed by Qt.
-
-        Walking and reordering the Cocoa ancestor chain can raise a shared
-        audience-window ancestor above mpv's output view.  The bridge then
-        keeps presenting frames behind the idle artwork.  Keep this operation
-        scoped to the overlay and its window container.
-        """
-        try:
-            self.raise_()
-            self._container.raise_()
+            active = bool(self._root.property("active"))
+            if active:
+                self.raise_()
+                self._container.raise_()
+            else:
+                self._container.lower()
+                self.lower()
             self.update()
-            return True
-        except Exception:
-            return False
-
-    def _reassert_surface_order(self):
-        native_reordered = self._raise_native_surface()
-        try:
-            style = str(self._root.property("transitionStyle") or "")
-        except Exception:
-            style = ""
-        _diag(
-            f"[SHOW-VFX] host surface raised native={int(native_reordered)} "
-            f"style={style or 'n/a'}"
-        )
-
-    def _schedule_surface_reassert(self):
-        self._reassert_surface_order()
-        QTimer.singleShot(80, self._reassert_surface_order)
-        QTimer.singleShot(240, self._reassert_surface_order)
+            _diag(f"[SHOW-VFX] surface plane={'effect' if active else 'video'}")
+        except Exception as exc:
+            _diag(f"[SHOW-VFX] surface plane update failed: {exc}")
 
     def show_next_up(self, payload: dict, duration_sec: float = 10.0):
         payload = payload if isinstance(payload, dict) else {}
-        self._prepare_native_surface()
         self._root.showNextUp(
             str(payload.get("singer", "") or ""),
             str(payload.get("title", "") or ""),
@@ -6981,21 +6969,19 @@ class RenderThreadShowScreenVfx(QFrame):
             str(payload.get("on_deck", "") or ""),
             float(duration_sec or 10.0),
         )
-        self._schedule_surface_reassert()
+        self._update_surface_plane()
 
     def show_singer_start(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
-        self._prepare_native_surface()
         self._root.showSingerStart(
             str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
         )
-        self._schedule_surface_reassert()
+        self._update_surface_plane()
 
     def show_song_outro(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
-        self._prepare_native_surface()
         self._root.showSongOutro(
             str(singer or ""), str(title or ""), str(artist or ""), str(style or "moving_spotlights")
         )
-        self._schedule_surface_reassert()
+        self._update_surface_plane()
 
     def hide_transition(self, immediate: bool = False):
         self._root.hideTransition(bool(immediate))
@@ -12560,23 +12546,10 @@ def set_quick_surfaces_override(mode: str) -> None:
 def _native_quick_child_surfaces_supported() -> bool:
     """Return whether QWidget-hosted QQuickView children are safe here.
 
-    "auto" now means ON everywhere, Intel Macs included.
-
-    The Intel-macOS exclusion was added on 2026-08-01 ("Fix Intel crashes and
-    playback stalls") and it was a misattribution. Across 126 crash reports on
-    this machine, Qt Quick and the scene graph appear in the faulting thread
-    exactly **zero** times; the crash the gate was meant to stop --
-    QPaintDevice::devicePixelRatio() inside QBackingStore::flush, which is the
-    QWidget painter path -- kept happening with the gate in place. The decisive
-    evidence arrived on 2026-08-09: the 04:11:44 crash is that exact signature
-    in a session with **no Quick surfaces at all** (`quick surfaces …
-    resolved=off`, legacy painter ticker, native-widget rotation renderer, mpv's
-    core never created because nothing had played). Quick cannot cause a crash
-    it is absent for, so keeping the ticker and transitions switched off on
-    Intel bought nothing and cost the animation.
-
-    "off" remains available for an operator who wants the plain painter path,
-    and SINGWS_QUICK_SURFACES=1/0 still wins for a one-off test.
+    Quick surfaces were stable in v0.4.6.1 on the Intel show Mac. The later
+    failure came from native surface reordering added in v0.4.6.2, not from the
+    surfaces themselves, so "auto" keeps them enabled. An explicit setting or
+    SINGWS_QUICK_SURFACES=1/0 remains available as an operator safety override.
     """
     # Tests need the real Quick implementations even when they run headless.
     if os.environ.get("QT_QPA_PLATFORM", "").strip().lower() == "offscreen":
@@ -12586,7 +12559,25 @@ def _native_quick_child_surfaces_supported() -> bool:
         return env == "1"
     if _QUICK_SURFACES_OVERRIDE == "off":
         return False
+    if _QUICK_SURFACES_OVERRIDE == "on":
+        return True
     return True
+
+
+def _native_quick_ticker_supported() -> bool:
+    """Return whether the render-thread ticker implementation is available.
+
+    Intel uses its detached transient surface rather than a native QWidget
+    child, so it no longer competes with mpv's child stacking plane.
+    """
+    env = os.environ.get("SINGWS_QUICK_TICKER", "").strip()
+    if env in {"0", "1"}:
+        return env == "1"
+    return _native_quick_child_surfaces_supported()
+
+
+def _detached_quick_ticker_required() -> bool:
+    return sys.platform == "darwin" and platform.machine().lower() in {"x86_64", "amd64"}
 
 
 def parse_filename_stem(stem: str, fmt: str = DEFAULT_FILENAME_FORMAT) -> tuple[str, str, str]:
@@ -12682,7 +12673,7 @@ class VideoWindow(QWidget):
         # QPainter Ticker (still functional, just GUI-thread paced).
         self.ticker = None
         self.ticker_backend = "none"
-        if _native_quick_child_surfaces_supported():
+        if _native_quick_ticker_supported():
             try:
                 self.ticker = RenderThreadTicker(
                     get_singer_list_callback,
@@ -12693,7 +12684,7 @@ class VideoWindow(QWidget):
             except Exception as e:
                 _diag(f"[TICKER] Qt Quick unavailable, using legacy painter ticker: {e}")
         else:
-            _diag("[TICKER] using legacy painter ticker (GPU surfaces set to off)")
+            _diag("[TICKER] using legacy painter ticker (Quick ticker disabled)")
         if self.ticker is None:
             self.ticker = Ticker(
                 get_singer_list_callback,
@@ -12736,6 +12727,15 @@ class VideoWindow(QWidget):
         self._idle_overlay_timer.timeout.connect(self._tick_idle_overlay)
         self._idle_overlay_timer.start(50)
 
+        # AppKit can restack the retained video and Qt Quick children after a
+        # screen move, fullscreen change, or late media-surface attachment.
+        # v0.4.6.1 safely healed the ticker with QWidget.raise_(); the later
+        # regression came from walking/reordering shared Cocoa ancestors. Keep
+        # the known-good Qt-only guard, with a short bounded recovery window.
+        self._ticker_surface_guard_timer = QTimer(self)
+        self._ticker_surface_guard_timer.timeout.connect(self._tick_ticker_surface_guard)
+        self._ticker_surface_guard_timer.start(1000)
+
         # Startup can show this window on one screen and place it on the saved
         # audience screen a few seconds later. That move reconnects the native
         # mpv/Qt Quick children after showEvent's reassertions have already run.
@@ -12761,24 +12761,38 @@ class VideoWindow(QWidget):
             QTimer.singleShot(0, lambda: reassert_window("video_window_show"))
 
     def _raise_ticker_surface(self) -> bool:
-        """Raise only the retained ticker widgets managed by Qt.
-
-        Never reorder the Cocoa ancestor chain here: a ticker or transition
-        container can share an ancestor with the painted idle surface, and
-        lifting that ancestor covers an otherwise healthy mpv output view.
-        """
+        """Raise the ticker's own bottom-strip surfaces, never its ancestors."""
         ticker = getattr(self, "ticker", None)
         if ticker is None:
             return False
         try:
-            container = getattr(ticker, "_container", None)
             ticker.raise_()
+            container = getattr(ticker, "_container", None)
             if container is not None:
                 container.raise_()
+            sync = getattr(ticker, "sync_surface_geometry", None)
+            if callable(sync):
+                sync()
             ticker.update()
             return True
         except Exception:
             return False
+
+    def _tick_ticker_surface_guard(self):
+        """Repair late ticker restacks using the v0.4.6.1 Qt-only path."""
+        try:
+            if not self.isVisible():
+                return
+            owner = getattr(self, "_external_owner", None)
+            settings = getattr(owner, "settings", {}) if owner is not None else {}
+            if not bool(settings.get("ticker_enabled", True)):
+                return
+            ticker = getattr(self, "ticker", None)
+            if ticker is None or not ticker.isVisible():
+                return
+            self._raise_ticker_surface()
+        except Exception:
+            pass
 
     def _schedule_geometry_surface_reassert(self):
         try:
@@ -13302,7 +13316,7 @@ def _extract_mp3_for_loudness(zip_path: str) -> str:
                 os.unlink(output)
             except OSError:
                 pass
-        return ""
+        raise
 
 
 _mp4_visual_analysis_sem = threading.Semaphore(1)
@@ -13588,6 +13602,16 @@ class AnalyzeLibraryWorker(QObject):
                     if not self.is_cancelled():
                         _loudness_mark_failed(cache_key, "no measurable loudness")
             except Exception as e:
+                if isinstance(e, OSError):
+                    # A temporary filesystem/resource fault is not evidence
+                    # that this track is bad. Stop this worker without writing
+                    # a signature-keyed failure that could suppress the entire
+                    # library on later runs.
+                    self.cancel()
+                    _diag(
+                        f"[ANALYZE-LIB] stopping after transient file error for {name}: {e}"
+                    )
+                    continue
                 failed += 1
                 try:
                     _diag(f"[ANALYZE-LIB] failed for {name}: {e}")
@@ -51148,25 +51172,23 @@ class KaraokeApp(QWidget):
                 else:
                     _diag(f"[KARAFUN-AUTO] selected exact KaraFun title+artist query={selected_query!r}")
 
-                # Finish the audience-display transition before activating the
-                # result. Direct result activation can begin playback at once;
-                # handing off afterward exposes several seconds of the song in
-                # KaraFun's normal window before its fullscreen Space is ready.
+                # Start the audience-display handoff before activating the
+                # result, but do not block playback on it. Live 2026-08-29
+                # handoffs needed 14-28 seconds to recreate and fullscreen the
+                # Dual Renderer. The old 12-second wait delayed every song and
+                # still expired before the renderer was ready, so it bought no
+                # display guarantee. The handoff continues independently while
+                # KaraFun starts producing audio.
                 _schedule_bgm_fade("before_fullscreen_handoff")
                 if bool(self.settings.get("karafun_manage_show_screen", True)):
                     _schedule_early_handoff("before_result_activation")
-                    handoff_deadline = time.monotonic() + 12.0
-                    while time.monotonic() < handoff_deadline:
-                        if bool(getattr(self, "_karafun_handoff_complete", False)):
-                            break
-                        time.sleep(0.1)
                     handoff_ready = bool(getattr(self, "_karafun_handoff_complete", False))
                     entry["karafun_handoff_timed_out_before_play"] = not handoff_ready
                     if handoff_ready:
                         _diag("[KARAFUN-AUTO] fullscreen audience handoff ready before play")
                     else:
                         _diag(
-                            "[KARAFUN-AUTO] fullscreen audience handoff timed out before play; "
+                            "[KARAFUN-AUTO] fullscreen audience handoff continuing during playback; "
                             "arming accelerated playback verification"
                         )
                 _diag(f"[KARAFUN-AUTO] activating KaraFun result mode={parts[0]} x={parts[1]} y={parts[2]}")
@@ -56978,20 +57000,31 @@ class RenderThreadTicker(QFrame):
         except Exception:
             pass
 
-        self._container = QWidget.createWindowContainer(self._view, self)
-        # A window container is native, and Qt promotes every ancestor of a
-        # native widget unless this is set. Several of these in one top-level
-        # is precisely the state described in _rotation_quick_surfaces_supported
-        # -- Cocoa dereferencing a released paint device on hide -- which is
-        # what got Qt Quick banned on Intel macOS rather than any fault of
-        # Quick's. Keep the container native and leave the ancestors alone.
-        self._container.setAttribute(
-            Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
-        self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(self._container)
+        self._detached_surface = _detached_quick_ticker_required()
+        self._container = None
+        if self._detached_surface:
+            # A QWidget-hosted QQuickView is a native sibling of mpv and loses
+            # that stack fight on Intel macOS. Keep the same render-thread QML
+            # scene in a non-activating transient window over the ticker's
+            # dedicated bottom strip instead. It follows the audience window
+            # but never enters mpv's native child plane.
+            self._view.setFlags(
+                Qt.WindowType.Tool
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowDoesNotAcceptFocus
+            )
+            self._view.setTitle("SingWS Audience Ticker")
+            QTimer.singleShot(0, self.sync_surface_geometry)
+            _diag("[TICKER] render-thread surface mode=detached-transient")
+        else:
+            self._container = QWidget.createWindowContainer(self._view, self)
+            self._container.setAttribute(
+                Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+            self._container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+            lay.addWidget(self._container)
 
         # Same timer names as the legacy Ticker (VideoWindow.set_ticker_enabled
         # starts/stops them via hasattr).
@@ -57020,6 +57053,43 @@ class RenderThreadTicker(QFrame):
         self.update_queue_text()
         self.update_right_text()
         self.start_scrolling()
+
+    def sync_surface_geometry(self):
+        if not self._detached_surface:
+            return
+        try:
+            host = self.window()
+            if not self.isVisible() or host is None or not host.isVisible():
+                self._view.hide()
+                return
+            handle = host.windowHandle()
+            if handle is not None and self._view.transientParent() is not handle:
+                self._view.setTransientParent(handle)
+            top_left = self.mapToGlobal(QPoint(0, 0))
+            self._view.setGeometry(top_left.x(), top_left.y(), self.width(), self.height())
+            if not self._view.isVisible():
+                self._view.show()
+            self._view.raise_()
+        except Exception as exc:
+            _diag(f"[TICKER] detached surface sync failed: {exc}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self.sync_surface_geometry)
+
+    def hideEvent(self, event):
+        if self._detached_surface:
+            self._view.hide()
+        super().hideEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.sync_surface_geometry)
+
+    def closeEvent(self, event):
+        if self._detached_surface:
+            self._view.close()
+        super().closeEvent(event)
 
     def _settings_owner(self):
         try:

@@ -153,27 +153,23 @@ class RecentRegressionTests(unittest.TestCase):
             4,
         )
 
-    def test_quick_child_surfaces_follow_the_setting_not_the_architecture(self):
-        """Intel Macs get the animated ticker and transitions again.
-
-        The 2026-08-01 Intel exclusion was a misattribution: the crash it was
-        meant to stop happened again on 2026-08-09 in a session with no Quick
-        surfaces running at all. "auto" now means on everywhere; only an
-        explicit Off (setting or env) turns the Quick surfaces back off.
-        """
+    def test_quick_child_surfaces_default_on_on_intel_with_safety_override(self):
+        """Intel keeps the v0.4.6.1 visuals unless the operator disables them."""
         intel = lambda: (  # noqa: E731 - three patches, used twice below
             mock.patch.object(self.singws.sys, "platform", "darwin"),
             mock.patch.object(self.singws.platform, "machine", return_value="x86_64"),
             mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": "", "SINGWS_QUICK_SURFACES": ""}),
         )
         try:
-            for mode in ("auto", "on"):
-                self.singws.set_quick_surfaces_override(mode)
-                with intel()[0], intel()[1], intel()[2]:
-                    self.assertTrue(
-                        self.singws._native_quick_child_surfaces_supported(), mode
-                    )
-                    self.assertTrue(self.singws._rotation_quick_surfaces_supported(), mode)
+            self.singws.set_quick_surfaces_override("auto")
+            with intel()[0], intel()[1], intel()[2]:
+                self.assertTrue(self.singws._native_quick_child_surfaces_supported())
+                self.assertTrue(self.singws._rotation_quick_surfaces_supported())
+
+            self.singws.set_quick_surfaces_override("on")
+            with intel()[0], intel()[1], intel()[2]:
+                self.assertTrue(self.singws._native_quick_child_surfaces_supported())
+                self.assertTrue(self.singws._rotation_quick_surfaces_supported())
 
             self.singws.set_quick_surfaces_override("off")
             with intel()[0], intel()[1], intel()[2]:
@@ -187,10 +183,33 @@ class RecentRegressionTests(unittest.TestCase):
         finally:
             self.singws.set_quick_surfaces_override("auto")
 
+    def test_intel_keeps_quick_ticker_on_detached_surface(self):
+        with (
+            mock.patch.object(self.singws.sys, "platform", "darwin"),
+            mock.patch.object(self.singws.platform, "machine", return_value="x86_64"),
+            mock.patch.dict(
+                os.environ,
+                {"QT_QPA_PLATFORM": "", "SINGWS_QUICK_SURFACES": "", "SINGWS_QUICK_TICKER": ""},
+            ),
+        ):
+            self.singws.set_quick_surfaces_override("auto")
+            self.assertTrue(self.singws._native_quick_child_surfaces_supported())
+            self.assertTrue(self.singws._native_quick_ticker_supported())
+            self.assertTrue(self.singws._detached_quick_ticker_required())
+
+        with mock.patch.dict(os.environ, {"SINGWS_QUICK_TICKER": "1"}):
+            self.assertTrue(self.singws._native_quick_ticker_supported())
+
         video_init = inspect.getsource(self.singws.VideoWindow.__init__)
         show_vfx = inspect.getsource(self.singws.VideoWindow._attach_show_vfx)
-        self.assertIn("_native_quick_child_surfaces_supported()", video_init)
+        self.assertIn("_native_quick_ticker_supported()", video_init)
         self.assertIn("_native_quick_child_surfaces_supported()", show_vfx)
+
+        ticker_init = inspect.getsource(self.singws.RenderThreadTicker.__init__)
+        ticker_sync = inspect.getsource(self.singws.RenderThreadTicker.sync_surface_geometry)
+        self.assertIn("_detached_quick_ticker_required()", ticker_init)
+        self.assertIn("WindowDoesNotAcceptFocus", ticker_init)
+        self.assertIn("setTransientParent", ticker_sync)
 
     def test_ticker_effects_checkbox_is_live_after_switching_surfaces_on(self):
         """A pending on-at-next-launch state must not grey the control out.
@@ -1875,6 +1894,39 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
             preceding = source[:idx]
             self.assertIn("if not self.is_cancelled():", preceding[-300:],
                           "failure recording must be guarded by a cancellation check")
+
+    def test_a_valid_zip_is_not_trapped_by_the_2026_08_29_failure_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            package = Path(td) / "valid.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("song.mp3", b"audio")
+                archive.writestr("song.cdg", b"graphics")
+            sig = self.singws._loudness_file_sig(str(package))
+            with mock.patch.dict(self.singws._loudness_cache, {
+                str(package): {
+                    "failed": True,
+                    "reason": "ZIP does not contain exactly one readable MP3",
+                    "mtime": sig[0],
+                    "size": sig[1],
+                },
+            }, clear=True), mock.patch.object(self.singws, "_loudness_cache_loaded", True):
+                self.assertFalse(self.singws.loudness_failed_cached(str(package)))
+
+    def test_a_structurally_invalid_zip_stays_failure_cached(self):
+        with tempfile.TemporaryDirectory() as td:
+            package = Path(td) / "invalid.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("song.cdg", b"graphics")
+            sig = self.singws._loudness_file_sig(str(package))
+            with mock.patch.dict(self.singws._loudness_cache, {
+                str(package): {
+                    "failed": True,
+                    "reason": "ZIP does not contain exactly one readable MP3",
+                    "mtime": sig[0],
+                    "size": sig[1],
+                },
+            }, clear=True), mock.patch.object(self.singws, "_loudness_cache_loaded", True):
+                self.assertTrue(self.singws.loudness_failed_cached(str(package)))
 
 
 try:  # the native mpv backend loads only where its bridge is available

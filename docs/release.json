@@ -1,7 +1,7 @@
 {
   "name": "SingWS",
   "version": "0.4.6.4",
-  "release_date": "2026-08-29",
+  "release_date": "2026-08-30",
   "repository": "DanDemolition/SingWS",
   "release_url": "https://github.com/DanDemolition/SingWS/releases/latest",
   "downloads": {
@@ -10,7 +10,7 @@
       "filename": "SingWS-0.4.6.4-x86_64-installer.dmg",
       "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-0.4.6.4-x86_64-installer.dmg",
       "size": "145 MB",
-      "sha256": "8c4e189e1d6ce2cbdff1058762ff765cc1e79b9339b54829064c627e5f789f98"
+      "sha256": "3b1efbe462580dac3aa33d89b12e69173eeb81956c2baab7846dca2980d8c6bc"
     }
   }
 }

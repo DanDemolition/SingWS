@@ -302,7 +302,9 @@ class KaraFunProviderTests(unittest.TestCase):
         # verifies and presses play once if the assumption was wrong.
         self.assertIn('entry["karafun_playback_assumed"] = True', worker)
         self.assertIn('entry["karafun_handoff_timed_out_before_play"] = not handoff_ready', worker)
+        self.assertIn("fullscreen audience handoff continuing during playback", worker)
         self.assertIn("arming accelerated playback verification", worker)
+        self.assertNotIn("handoff_deadline", worker)
         self.assertIn("playback verify attempt=", worker)
         self.assertIn("def _schedule_early_handoff", worker)
         self.assertIn("def _schedule_bgm_fade", worker)
@@ -316,7 +318,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('_schedule_early_handoff("playback_verified")', worker)
         self.assertIn("self._run_on_ui_thread(self._handoff_show_screen_to_karafun)", worker)
         pre_play_handoff = worker[
-            worker.index('# Finish the audience-display transition before activating the'):
+            worker.index('# Start the audience-display handoff before activating the'):
             worker.index('activating KaraFun result mode=')
         ]
         self.assertIn('if bool(self.settings.get("karafun_manage_show_screen", True)):', pre_play_handoff)
