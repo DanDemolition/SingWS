@@ -2,6 +2,32 @@
 
 Updated 2026-08-30.
 
+## Karaoke archive recovery after loudness-cache audit
+
+All 471 retained structural loudness failures were audited with 7-Zip. Seventy
+unusable archives were moved, not deleted, to
+`~/.Trash/SingWS-unusable-karaoke-20260830-0745/` with their library-relative
+folders preserved: 19 contained CDG graphics but no real MP3, and 51 failed
+integrity testing with no individually extractable MP3 member. Nine of the
+failed archives still had extractable CDG data, but no usable audio, so they are
+included in the same reviewable Trash set.
+
+The other 401 archives were recovered. 397 healthy Deflate64 ZIPs (1.53 GiB)
+were extracted with 7-Zip and rebuilt using standard Deflate. Each replacement
+was verified by both Python `zipfile` and 7-Zip before being installed; the
+post-run audit found zero integrity failures and zero Deflate64 members. Four
+more healthy ZIPs were rebuilt after removing only `__MACOSX`/AppleDouble junk
+entries which had been mistaken for duplicate MP3/CDG pairs. Original archives
+are preserved under
+`~/SingWS/cache-backups/deflate64-repack-20260830-074824/` (397 files) and
+`~/SingWS/cache-backups/deflate64-repack-20260830-075352/` (4 files).
+
+All 471 old failure-cache records are now harmlessly stale: 70 source paths no
+longer exist and all 401 repaired archives have changed file signatures, so the
+normal (non-Force) loudness scan will retry the repaired songs while retaining
+every valid LUFS measurement. A normal library rescan is required once so the
+70 trashed tracks disappear from search results.
+
 ## Installed post-release loudness-cache repair and smoother ticker
 
 The 2026-08-29 Turbo resource failure had actually left 117,532 legacy ZIP
