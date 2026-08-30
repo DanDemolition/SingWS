@@ -1858,6 +1858,7 @@ _loudness_cache_loaded = False
 _loudness_lock = threading.Lock()
 _loudness_inflight = set()
 _loudness_cancel_event = threading.Event()
+_LOUDNESS_FAILURE_CACHE_VERSION = 2
 # Serialize loudness analysis so only one short-lived libmpv PCM decode runs
 # at a time and cannot starve live playback on weaker Intel Macs.
 _loudness_sem = threading.Semaphore(1)
@@ -2086,6 +2087,7 @@ def _loudness_mark_failed(audio_path: str, reason: str = ""):
         return
     entry = {
             "failed": True,
+            "failure_version": _LOUDNESS_FAILURE_CACHE_VERSION,
             "reason": str(reason or "")[:200],
             "mtime": sig[0],
             "size": sig[1],
@@ -2109,6 +2111,20 @@ def loudness_failed_cached(audio_path: str) -> bool:
         return False
     # A changed file is a different file: let it be retried.
     if int(entry.get("mtime", 0)) != sig[0] or int(entry.get("size", 0)) != sig[1]:
+        return False
+    # The 2026-08-29 resource-exhaustion run wrote ambiguous failures as the
+    # generic "no measurable loudness" result or a Turbo helper timeout. Those
+    # legacy records predate failure_version and cannot be distinguished from
+    # a real decode failure. Retry each once; a genuine failure is immediately
+    # re-recorded at the current version, while a valid file overwrites it with
+    # LUFS data. Specific structural failures remain cached below.
+    if (
+        int(entry.get("failure_version", 0)) < _LOUDNESS_FAILURE_CACHE_VERSION
+        and (
+            str(entry.get("reason") or "") == "no measurable loudness"
+            or str(entry.get("reason") or "").startswith("Turbo helper failed:")
+        )
+    ):
         return False
     # A resource failure during the 2026-08-29 Turbo run was flattened into
     # the same message as a structurally invalid ZIP and poisoned almost the
@@ -56676,7 +56692,7 @@ Rectangle {
         if (root.churnHold) return
         anim.stop()
         if (!root.running || root.displayText === "" || nameText.contentWidth <= 0 || root.scrollAreaW <= 0) {
-            nameText.x = root.scrollAreaW
+            movingNameLayer.x = root.scrollAreaW
             return
         }
         var travel = root.scrollAreaW + nameText.contentWidth
@@ -56788,16 +56804,30 @@ Rectangle {
         height: root.height
         clip: true
 
-        Text {
-            id: nameText
-            text: root.displayText
-            color: root.tickerColor
-            font.pixelSize: root.namesPx
-            font.bold: root.tickerBold
-            font.family: root.fontFamily
-            y: Math.round((leftClip.height - height) / 2)
+        Item {
+            id: movingNameLayer
             x: root.scrollAreaW
-            onContentWidthChanged: root.scheduleRestart()
+            y: 0
+            width: nameText.contentWidth
+            height: leftClip.height
+            // Cache the glyph run once and move the texture with bilinear
+            // subpixel filtering.  Animating Text directly can re-rasterize or
+            // pixel-snap glyphs on Intel, which reads as uneven scrolling even
+            // though XAnimator itself is vsync paced.
+            layer.enabled: true
+            layer.smooth: true
+
+            Text {
+                id: nameText
+                text: root.displayText
+                color: root.tickerColor
+                font.pixelSize: root.namesPx
+                font.bold: root.tickerBold
+                font.family: root.fontFamily
+                y: Math.round((movingNameLayer.height - height) / 2)
+                x: 0
+                onContentWidthChanged: root.scheduleRestart()
+            }
         }
     }
 
@@ -56867,7 +56897,7 @@ Rectangle {
     // (onFinished fires only on natural completion, not on manual stop).
     XAnimator {
         id: anim
-        target: nameText
+        target: movingNameLayer
         easing.type: Easing.Linear
         loops: 1
         onFinished: {

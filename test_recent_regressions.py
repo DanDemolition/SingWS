@@ -1844,6 +1844,10 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
         self.assertFalse(self.singws.loudness_failed_cached(self.path))
         self.singws._loudness_mark_failed(self.path, "no decodable audio")
         self.assertTrue(self.singws.loudness_failed_cached(self.path))
+        self.assertEqual(
+            self.singws._loudness_cache[self.path]["failure_version"],
+            self.singws._LOUDNESS_FAILURE_CACHE_VERSION,
+        )
 
     def test_a_replaced_file_is_retried(self):
         self.singws._loudness_mark_failed(self.path, "no decodable audio")
@@ -1927,6 +1931,48 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
                 },
             }, clear=True), mock.patch.object(self.singws, "_loudness_cache_loaded", True):
                 self.assertTrue(self.singws.loudness_failed_cached(str(package)))
+
+    def test_legacy_ambiguous_failures_are_retried_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            package = Path(td) / "poisoned.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("song.mp3", b"audio")
+                archive.writestr("song.cdg", b"graphics")
+            sig = self.singws._loudness_file_sig(str(package))
+            legacy = {
+                "failed": True,
+                "reason": "no measurable loudness",
+                "mtime": sig[0],
+                "size": sig[1],
+            }
+            current = {**legacy, "failure_version": self.singws._LOUDNESS_FAILURE_CACHE_VERSION}
+            with mock.patch.object(self.singws, "_loudness_cache_loaded", True):
+                self.singws._loudness_cache[str(package)] = legacy
+                self.assertFalse(self.singws.loudness_failed_cached(str(package)))
+                self.singws._loudness_cache[str(package)] = current
+                self.assertTrue(self.singws.loudness_failed_cached(str(package)))
+
+            media = str(Path(td) / "video.mp4")
+            Path(media).write_bytes(b"video")
+            sig = self.singws._loudness_file_sig(media)
+            self.singws._loudness_cache[media] = {
+                "failed": True,
+                "reason": "Turbo helper failed: offline analysis helper response timed out",
+                "mtime": sig[0],
+                "size": sig[1],
+            }
+            self.assertFalse(self.singws.loudness_failed_cached(media))
+
+    def test_ticker_scrolls_a_cached_subpixel_texture_without_surface_changes(self):
+        qml = self.singws.QML_TICKER_RT_SOURCE
+        self.assertIn("id: movingNameLayer", qml)
+        self.assertIn("layer.enabled: true", qml)
+        self.assertIn("layer.smooth: true", qml)
+        self.assertIn("target: movingNameLayer", qml)
+        self.assertNotIn("target: nameText", qml)
+        sync = inspect.getsource(self.singws.RenderThreadTicker.sync_surface_geometry)
+        self.assertIn("setTransientParent", sync)
+        self.assertIn("self._view.raise_()", sync)
 
 
 try:  # the native mpv backend loads only where its bridge is available

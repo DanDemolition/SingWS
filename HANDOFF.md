@@ -2,6 +2,40 @@
 
 Updated 2026-08-30.
 
+## Installed post-release loudness-cache repair and smoother ticker
+
+The 2026-08-29 Turbo resource failure had actually left 117,532 legacy ZIP
+records as `no measurable loudness`, not only the narrower structural message
+handled by the first release fix. The live cache was repaired atomically while
+SingWS was closed: all 14,120 valid LUFS measurements were preserved, 117,532
+poisoned ZIP records plus 2,399 ambiguous legacy non-ZIP/time-out records were
+removed for retry, and 471 specific CRC, deflate, header, unsupported-
+compression, or invalid-package failures remain cached. Backups are under
+`~/SingWS/cache-backups/loudness-poison-repair-20260830-071049/` and
+`~/SingWS/cache-backups/loudness-poison-repair-20260830-073214/`.
+
+New failure records carry `failure_version=2`. Legacy ambiguous
+`no measurable loudness` and Turbo-helper time-out records are retried once;
+if genuinely bad, they are immediately cached at the current version. The
+repair utility performs the same narrow cleanup with a backup and atomic
+replace while asserting that valid measurements are unchanged.
+
+The detached Intel QML ticker keeps exactly the validated transient-window and
+CDG/video stacking path. Only its moving glyph item changed: text is cached as
+a smooth texture layer and `XAnimator` moves that layer with subpixel filtering,
+avoiding Intel glyph re-rasterization/pixel snapping that looked choppy.
+
+The complete scratch suite passes 797 tests plus 21 subtests. Matching-Qt
+ticker/show-surface coverage passes 67 tests, including construction of the
+detached render-thread ticker and the unchanged transition plane behavior.
+Python compilation and `git diff --check` are clean. Nothing in this section
+was published as a new DMG. The Intel bundle passed its architecture, bundled-
+media, macOS 12 minimum-version, signing, staged scratch-launch, and installed
+scratch-launch checks. It is installed at `/Applications/SingWS.app`; the prior
+tested show build is preserved at
+`/Applications/SingWS-0.4.6.4-pre-ticker-20260830.app`. The new ticker still
+needs operator judgment with a long real queue on the audience display.
+
 ## Installed 0.4.6.4 replacement after live CDG/ticker validation
 
 The final Intel build was installed at `/Applications/SingWS.app` after a real
