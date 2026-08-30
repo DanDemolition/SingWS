@@ -41553,6 +41553,7 @@ class KaraokeApp(QWidget):
         tree.setColumnCount(3)
         tree.setHeaderLabels(["Archive", "Status", "Location"])
         tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        cleanup_role = int(Qt.ItemDataRole.UserRole) + 1
         for group in groups:
             paths = list(group.get("paths") or [])
             if group.get("eligible"):
@@ -41562,6 +41563,7 @@ class KaraokeApp(QWidget):
                 title = f"Same audio, different CDG ({len(paths)} versions)"
                 status = "Keep/review lyric versions"
             top = QTreeWidgetItem([title, status, ""])
+            top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             tree.addTopLevelItem(top)
             keeper = str(group.get("keeper") or "")
             for path in paths:
@@ -41574,9 +41576,13 @@ class KaraokeApp(QWidget):
                     str(Path(path).parent),
                 ])
                 child.setData(0, Qt.ItemDataRole.UserRole, path)
-                if group.get("eligible") and not is_keeper:
+                cleanup_eligible = bool(group.get("eligible") and not is_keeper)
+                child.setData(0, cleanup_role, cleanup_eligible)
+                if cleanup_eligible:
                     child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     child.setCheckState(0, Qt.CheckState.Unchecked)
+                else:
+                    child.setFlags(child.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 top.addChild(child)
             top.setExpanded(True)
         tree.resizeColumnToContents(0)
@@ -41597,7 +41603,7 @@ class KaraokeApp(QWidget):
             iterator = QTreeWidgetItemIterator(tree)
             while iterator.value():
                 item = iterator.value()
-                if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                if bool(item.data(0, cleanup_role)):
                     item.setCheckState(0, Qt.CheckState.Checked)
                 iterator += 1
 
@@ -41606,7 +41612,10 @@ class KaraokeApp(QWidget):
             iterator = QTreeWidgetItemIterator(tree)
             while iterator.value():
                 item = iterator.value()
-                if item.checkState(0) == Qt.CheckState.Checked:
+                if (
+                    bool(item.data(0, cleanup_role))
+                    and item.checkState(0) == Qt.CheckState.Checked
+                ):
                     path = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
                     if path:
                         selected.append(path)
