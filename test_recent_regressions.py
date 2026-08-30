@@ -1024,7 +1024,8 @@ class RecentRegressionTests(unittest.TestCase):
             self.assertTrue(cancel_check())
             return -20.0, -2.0
 
-        with mock.patch.object(self.singws, "_measure_loudness_lufs", side_effect=fake_measure), \
+        with mock.patch("libmpv_media_jobs.IsolatedLoudnessSession.measure_karaoke_transition",
+                             side_effect=lambda path, **kw: fake_measure(path, worker.is_cancelled) + (180.0, 0.0, 180.0)), \
              mock.patch.object(self.singws, "_loudness_file_sig", return_value=(1, 2)), \
              mock.patch.object(self.singws, "_loudness_save_cache"):
             worker.run()
@@ -1048,7 +1049,8 @@ class RecentRegressionTests(unittest.TestCase):
                 self.assertTrue(str(path).endswith(".mp3"))
                 return -18.0, -2.0
 
-            with mock.patch.object(self.singws, "_measure_loudness_lufs", side_effect=fake_measure), \
+            with mock.patch("libmpv_media_jobs.IsolatedLoudnessSession.measure_karaoke_transition",
+                             side_effect=lambda path, **kw: fake_measure(path, worker.is_cancelled) + (180.0, 0.0, 180.0)), \
                  mock.patch.object(self.singws, "_loudness_save_cache"), \
                  mock.patch.dict(self.singws._loudness_cache, {}, clear=True):
                 worker.run()
@@ -1295,7 +1297,8 @@ class RecentRegressionTests(unittest.TestCase):
         import threading
         threading.Timer(0.05, release).start()
 
-        with mock.patch.object(self.singws, "_measure_loudness_lufs", side_effect=fake_measure), \
+        with mock.patch("libmpv_media_jobs.IsolatedLoudnessSession.measure_karaoke_transition",
+                             side_effect=lambda path, **kw: fake_measure(path, worker.is_cancelled) + (180.0, 0.0, 180.0)), \
              mock.patch.object(self.singws, "_loudness_file_sig", return_value=(1, 2)), \
              mock.patch.object(self.singws, "_loudness_save_cache"):
             worker.run()
@@ -1319,7 +1322,8 @@ class RecentRegressionTests(unittest.TestCase):
         import threading
         threading.Timer(0.05, worker.cancel).start()
 
-        with mock.patch.object(self.singws, "_measure_loudness_lufs", side_effect=fake_measure), \
+        with mock.patch("libmpv_media_jobs.IsolatedLoudnessSession.measure_karaoke_transition",
+                             side_effect=lambda path, **kw: fake_measure(path, worker.is_cancelled) + (180.0, 0.0, 180.0)), \
              mock.patch.object(self.singws, "_loudness_save_cache"):
             worker.run()
 

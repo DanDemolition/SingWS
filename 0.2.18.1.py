@@ -1858,7 +1858,7 @@ _loudness_cache_loaded = False
 _loudness_lock = threading.Lock()
 _loudness_inflight = set()
 _loudness_cancel_event = threading.Event()
-_LOUDNESS_FAILURE_CACHE_VERSION = 2
+_LOUDNESS_FAILURE_CACHE_VERSION = 3
 # Serialize loudness analysis so only one short-lived libmpv PCM decode runs
 # at a time and cannot starve live playback on weaker Intel Macs.
 _loudness_sem = threading.Semaphore(1)
@@ -2114,7 +2114,7 @@ def loudness_failed_cached(audio_path: str) -> bool:
         return False
     # The 2026-08-29 resource-exhaustion run wrote ambiguous failures as the
     # generic "no measurable loudness" result or a Turbo helper timeout. Those
-    # legacy records predate failure_version and cannot be distinguished from
+    # legacy records (including version 2 from the buffered-pipe bug) cannot be distinguished from
     # a real decode failure. Retry each once; a genuine failure is immediately
     # re-recorded at the current version, while a valid file overwrites it with
     # LUFS data. Specific structural failures remain cached below.
@@ -2224,20 +2224,24 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full
         except Exception:
             pass
     try:
-        from libmpv_media_jobs import measure_loudness_fast_lufs, measure_loudness_lufs
+        from libmpv_media_jobs import AnalysisHelperError, AnalysisTrackError, measure_loudness_fast_lufs, measure_loudness_lufs
         result = None
         if session is not None and getattr(session, "usable", False):
             try:
                 result = (session.measure_fast(audio_path, timeout=120.0)
                           if mode == "fast" else
                           session.measure(audio_path, timeout=120.0))
-            except Exception:
+            except AnalysisTrackError:
+                raise
+            except Exception as exc:
+                if bool(getattr(session, "isolated", False)):
+                    raise AnalysisHelperError(str(exc)) from exc
                 result = None
         if result is None and bool(getattr(session, "isolated", False)):
             # Never fall back to constructing a one-shot libmpv core inside
             # the live show process. Those cores retain native allocations
             # after destroy; the isolated helper is the memory boundary.
-            return None, None
+            raise AnalysisHelperError("isolated analysis helper unavailable")
         if result is None:
             if mode == "fast":
                 # Five sections avoid basing the estimate on one unusually quiet
@@ -2245,6 +2249,8 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full
                 result = measure_loudness_fast_lufs(audio_path, timeout=120.0)
             else:
                 result = measure_loudness_lufs(audio_path, timeout=120.0)
+    except (AnalysisHelperError, AnalysisTrackError):
+        raise
     except Exception as exc:
         _diag(
             f"[LOUDNESS] analysis failed file={os.path.basename(str(audio_path))!r} "
@@ -13354,6 +13360,7 @@ class AnalyzeLibraryWorker(QObject):
     finished = pyqtSignal(int, int)        # analyzed, total
     holding = pyqtSignal(bool)             # paused because karaoke is playing
     stage = pyqtSignal(str)                # slower substage detail for the dialog
+    analysis_error = pyqtSignal(str)       # abort the whole batch without poisoning media
 
     # Poll interval while holding off for playback.  Short enough that the scan
     # resumes promptly between songs, long enough to cost nothing.
@@ -13420,7 +13427,7 @@ class AnalyzeLibraryWorker(QObject):
         skipped = 0
         last_progress_emit = 0.0
         try:
-            from libmpv_media_jobs import IsolatedLoudnessSession
+            from libmpv_media_jobs import AnalysisHelperError, AnalysisTrackError, IsolatedLoudnessSession
             session = IsolatedLoudnessSession()
         except Exception:
             session = None
@@ -13449,6 +13456,11 @@ class AnalyzeLibraryWorker(QObject):
                 continue
             extracted_audio = ""
             try:
+                if session is None or not getattr(session, "usable", False):
+                    self.cancel()
+                    self.analysis_error.emit("Analysis helper unavailable")
+                    _diag("[ANALYZE-LIB] stopping: analysis helper unavailable")
+                    break
                 audio = str(audio or "")
                 if audio.lower().endswith(".zip"):
                     extracted_audio = _extract_mp3_for_loudness(audio)
@@ -13474,20 +13486,11 @@ class AnalyzeLibraryWorker(QObject):
                                 lufs, peak_db, envelope = session.measure_transition(
                                     audio, timeout=helper_timeout,
                                 )
+                        except AnalysisTrackError:
+                            raise
                         except Exception as exc:
-                            # Turbo already runs four isolated helpers. Retrying
-                            # the same file through a freshly spawned helper made
-                            # one timeout look like a four-minute frozen dialog.
-                            # Fail this item after its single bounded attempt;
-                            # later scans skip the recorded failure unless the
-                            # source file changes.
-                            if self.parallel and bool(getattr(session, "isolated", False)):
-                                self.stage.emit(f"Skipping stalled analysis…\n{name}")
-                                _diag(
-                                    f"[LOUDNESS-LIB] turbo helper failed file={cache_key!r} "
-                                    f"timeout={helper_timeout:.0f}s retry=0 reason={exc}"
-                                )
-                                raise RuntimeError(f"Turbo helper failed: {exc}") from exc
+                            if bool(getattr(session, "isolated", False)):
+                                raise AnalysisHelperError(f"Analysis helper failed: {exc}") from exc
                             lufs, peak_db = _measure_loudness_lufs(
                                 audio, cancel_check=self.is_cancelled, mode="full",
                                 session=session,
@@ -13623,6 +13626,16 @@ class AnalyzeLibraryWorker(QObject):
                     if not self.is_cancelled():
                         _loudness_mark_failed(cache_key, "no measurable loudness")
             except Exception as e:
+                if isinstance(e, AnalysisTrackError):
+                    failed += 1
+                    self.stage.emit(f"Could not measure this track; continuing…\n{name}")
+                    _diag(f"[ANALYZE-LIB] track left retryable file={cache_key!r}: {e}")
+                    continue
+                if isinstance(e, AnalysisHelperError):
+                    self.cancel()
+                    self.analysis_error.emit(str(e))
+                    _diag(f"[ANALYZE-LIB] stopping without caching helper failure: {e}")
+                    continue
                 if isinstance(e, OSError):
                     # A temporary filesystem/resource fault is not evidence
                     # that this track is bad. Stop this worker without writing
@@ -41758,7 +41771,7 @@ class KaraokeApp(QWidget):
         threads = []
         workers = []
         progress_by_worker = [0] * worker_count
-        finished_state = {"count": 0, "analyzed": 0}
+        finished_state = {"count": 0, "analyzed": 0, "error": ""}
 
         def _on_progress(index, done, _subtotal, name):
             progress_by_worker[index] = done
@@ -41792,6 +41805,11 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        def _on_analysis_error(message):
+            finished_state["error"] = str(message)
+            coordinator.cancel()
+            _on_stage(f"Scan stopped: {message}\nSaving completed results…")
+
         def _on_worker_finished(index, analyzed, subtotal):
             progress_by_worker[index] = subtotal
             finished_state["count"] += 1
@@ -41813,7 +41831,9 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             analyzed_total = finished_state["analyzed"]
-            if cancelled:
+            if finished_state["error"]:
+                self._set_processing_text(f"Scan stopped: {finished_state['error']}. Saved {analyzed_total} measurements; unmeasured tracks will retry.")
+            elif cancelled:
                 self._set_processing_text(f"Cancelled {scan_name.lower()} {scan_subject} after {analyzed_total} of {len(items)} track(s).")
             else:
                 self._set_processing_text(f"{scan_name} {scan_subject} cached {analyzed_total} of {len(items)} track(s).")
@@ -41832,6 +41852,7 @@ class KaraokeApp(QWidget):
             )
             worker.holding.connect(_on_holding)
             worker.stage.connect(_on_stage)
+            worker.analysis_error.connect(_on_analysis_error)
             worker.finished.connect(
                 lambda analyzed, total, i=index: _on_worker_finished(i, analyzed, total)
             )

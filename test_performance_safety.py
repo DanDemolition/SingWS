@@ -94,8 +94,7 @@ class PerformanceSafetyTests(unittest.TestCase):
             MAIN_SOURCE.index("class AnalyzeLibraryParallelCoordinator(QObject)")
         ]
         self.assertIn("helper_timeout = 45.0 if self.parallel else 120.0", worker)
-        self.assertIn('f"timeout={helper_timeout:.0f}s retry=0 reason={exc}"', worker)
-        self.assertIn('raise RuntimeError(f"Turbo helper failed: {exc}") from exc', worker)
+        self.assertIn('raise AnalysisHelperError(f"Analysis helper failed: {exc}") from exc', worker)
 
     def test_duplicate_manager_is_review_first_and_recoverable(self):
         self.assertIn('QPushButton("Duplicate Song Manager")', MAIN_SOURCE)
@@ -137,7 +136,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         preview_end = MAIN_SOURCE.index("class PreviewWindow", preview_start)
         preview_source = MAIN_SOURCE[preview_start:preview_end]
         ticker_start = MAIN_SOURCE.index("class Ticker(QFrame)")
-        ticker_source = MAIN_SOURCE[ticker_start:]
+        ticker_end = MAIN_SOURCE.index("class DetachedPainterTicker", ticker_start)
+        ticker_source = MAIN_SOURCE[ticker_start:ticker_end]
         self.assertNotIn("WA_NativeWindow", preview_source)
         self.assertNotIn("WA_DontCreateNativeAncestors", preview_source)
         self.assertNotIn("WA_NativeWindow", ticker_source)
@@ -197,6 +197,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         progress = []
         worker.progress.connect(lambda done, total, name: progress.append(done))
         fake_jobs = types.ModuleType("libmpv_media_jobs")
+        fake_jobs.AnalysisHelperError = RuntimeError
+        fake_jobs.AnalysisTrackError = ValueError
         fake_jobs.IsolatedLoudnessSession = lambda: types.SimpleNamespace(close=lambda: None)
 
         with mock.patch.dict(sys.modules, {"libmpv_media_jobs": fake_jobs}), \
@@ -1339,13 +1341,18 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("QTimer.singleShot", scheduler)
         self.assertIn("_reassert_show_ticker_surface", scheduler)
 
-    def test_show_screen_ticker_reasserts_only_for_surface_events(self):
+    def test_show_screen_ticker_guard_does_not_reorder_audience_parent(self):
         video_start = MAIN_SOURCE.index("class VideoWindow(QWidget)")
         video_end = MAIN_SOURCE.index("class AddToQueueDialog", video_start)
         video = MAIN_SOURCE[video_start:video_end]
         show_event = function_source("showEvent")
-        self.assertNotIn("_ticker_surface_guard_timer", video)
-        self.assertNotIn("def _tick_ticker_surface_guard", video)
+        self.assertIn("self._ticker_surface_guard_timer.start(1000)", video)
+        guard = function_source("_tick_ticker_surface_guard")
+        self.assertIn("self._raise_ticker_surface()", guard)
+        self.assertIn("if not self.isVisible():", guard)
+        self.assertIn('settings.get("ticker_enabled", True)', guard)
+        self.assertNotIn("_reassert_show_window_surface", guard)
+        self.assertNotIn("orderFront", guard)
         self.assertIn('reassert("video_window_show", delays=(0, 120, 400))', show_event)
         self.assertIn('reassert_window("video_window_show")', show_event)
         native_raise = function_source("_raise_ticker_surface")

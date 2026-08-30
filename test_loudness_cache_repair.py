@@ -7,6 +7,15 @@ from tools.repair_loudness_cache import repair
 
 
 class LoudnessCacheRepairTests(unittest.TestCase):
+    def test_pending_checkpoint_requires_clean_shutdown(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "loudness.json"
+            path.write_text('{}')
+            path.with_suffix('.checkpoint.jsonl').write_text('pending result\n')
+            with self.assertRaisesRegex(RuntimeError, 'Close SingWS cleanly'):
+                repair(path, apply=True)
+            self.assertEqual(path.read_text(), '{}')
+
     def test_repair_preserves_measurements_and_specific_failures(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "loudness.json"
@@ -29,13 +38,13 @@ class LoudnessCacheRepairTests(unittest.TestCase):
 
             removed, preserved, backup = repair(path, apply=True)
 
-            self.assertEqual(removed, 3)
+            self.assertEqual(removed, 4)
             self.assertEqual(preserved, 1)
             self.assertIsNotNone(backup)
             repaired = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(repaired["/songs/good.zip"], original["/songs/good.zip"])
             self.assertNotIn("/songs/poison.zip", repaired)
-            self.assertIn("/songs/real.zip", repaired)
+            self.assertNotIn("/songs/real.zip", repaired)
             self.assertIn("/songs/broken.zip", repaired)
             self.assertNotIn("/songs/video.mp4", repaired)
             self.assertNotIn("/songs/timeout.zip", repaired)

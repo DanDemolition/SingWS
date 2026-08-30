@@ -597,6 +597,14 @@ class LoudnessSession:
 _ANALYSIS_RESULT_PREFIX = "SINGWS_ANALYSIS_RESULT "
 
 
+class AnalysisHelperError(RuntimeError):
+    """The analysis service failed; this is not a permanent media failure."""
+
+
+class AnalysisTrackError(RuntimeError):
+    """A responsive helper could not measure this track; leave it retryable."""
+
+
 def run_isolated_analysis_worker(input_stream=None, output_stream=None) -> int:
     """Serve bounded offline-analysis requests for the parent SingWS process."""
     input_stream = input_stream if input_stream is not None else sys.stdin
@@ -645,6 +653,11 @@ def run_isolated_analysis_worker(input_stream=None, output_stream=None) -> int:
                     response = {"ok": True, "lufs": lufs, "peak": peak}
             except Exception as exc:
                 response = {"ok": False, "error": str(exc)[:500]}
+                # The request completed with an analysis error, rather than
+                # losing the helper/pipe. Recreate the native session so a bad
+                # file cannot disable analysis of the tracks following it.
+                session.close()
+                session = LoudnessSession()
             output_stream.write(_ANALYSIS_RESULT_PREFIX + json.dumps(response, separators=(",", ":")) + "\n")
             output_stream.flush()
     finally:
@@ -698,8 +711,7 @@ class IsolatedLoudnessSession:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            bufsize=0,
             env=environment,
         )
         self._tracks = 0
@@ -709,7 +721,7 @@ class IsolatedLoudnessSession:
         extra: dict | None = None, cancel_check=None,
     ):
         if self._disabled:
-            raise RuntimeError("isolated loudness session disabled after repeated failures")
+            raise AnalysisHelperError("isolated loudness session disabled after repeated failures")
         if self._tracks >= self._MAX_TRACKS_PER_HELPER:
             self.close()
         try:
@@ -720,28 +732,36 @@ class IsolatedLoudnessSession:
             request = {"source": str(source), "mode": str(mode), "timeout": float(timeout)}
             if extra:
                 request.update(extra)
-            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            process.stdin.write((json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8"))
             process.stdin.flush()
             deadline = time.monotonic() + max(1.0, float(timeout)) + 5.0
+            pending = b""
             while True:
                 if cancel_check is not None and cancel_check():
                     raise InterruptedError("offline analysis helper request cancelled")
-                if process.poll() is not None:
-                    raise RuntimeError("offline analysis helper exited without a result")
                 if time.monotonic() >= deadline:
                     raise TimeoutError("offline analysis helper response timed out")
                 readable, _, _ = select.select([process.stdout], [], [], 0.25)
                 if not readable:
                     continue
-                line = process.stdout.readline()
-                if not line:
+                # Do not combine select with TextIOWrapper.readline: it can
+                # read the result ahead while returning a startup log line,
+                # leaving select waiting on an empty OS pipe forever.
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
                     raise RuntimeError("offline analysis helper exited without a result")
-                if line.startswith(_ANALYSIS_RESULT_PREFIX):
-                    response = json.loads(line[len(_ANALYSIS_RESULT_PREFIX):])
+                pending += chunk
+                response = None
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    if line.startswith(_ANALYSIS_RESULT_PREFIX.encode("ascii")):
+                        response = json.loads(line[len(_ANALYSIS_RESULT_PREFIX):])
+                        break
+                if response is not None:
                     break
             self._tracks += 1
             if not bool(response.get("ok")):
-                raise RuntimeError(str(response.get("error") or "offline analysis failed"))
+                raise AnalysisTrackError(str(response.get("error") or "offline analysis failed"))
             self._failures = 0
             if mode == "transition":
                 return response.get("lufs"), response.get("peak"), list(response.get("envelope") or [])
@@ -753,12 +773,16 @@ class IsolatedLoudnessSession:
             if mode == "video_tail":
                 return list(response.get("samples") or [])
             return response.get("lufs"), response.get("peak")
-        except Exception:
+        except AnalysisTrackError:
+            self.close()
+            self._failures = 0
+            raise
+        except Exception as exc:
             self.close()
             self._failures += 1
             if self._failures >= self._MAX_CONSECUTIVE_FAILURES:
                 self._disabled = True
-            raise
+            raise AnalysisHelperError(str(exc)) from exc
 
     def measure(self, source: str, *, timeout: float = 120.0):
         return self._request(source, "full", timeout)
@@ -788,7 +812,7 @@ class IsolatedLoudnessSession:
         if process is not None:
             try:
                 if process.poll() is None and process.stdin is not None:
-                    process.stdin.write('{"command":"quit"}\n')
+                    process.stdin.write(b'{"command":"quit"}\n')
                     process.stdin.flush()
                 process.wait(timeout=3.0)
             except Exception:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove only ambiguous legacy failures poisoned by the 2026-08-29 scan."""
+"""Remove only ambiguous failures poisoned by the 2026-08-29/30 scans."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import shutil
 
 
 POISON_REASON = "no measurable loudness"
-CURRENT_FAILURE_VERSION = 2
+CURRENT_FAILURE_VERSION = 3
 
 
 def is_poisoned_entry(path: str, entry: object) -> bool:
@@ -36,6 +36,12 @@ def valid_measurement_count(cache: dict) -> int:
 
 
 def repair(cache_path: Path, *, apply: bool) -> tuple[int, int, Path | None]:
+    # A clean shutdown compacts these. Refuse a partial repair that could be
+    # undone by journal replay, or discard measurements not yet in the JSON.
+    for suffix in (".checkpoint.jsonl", ".checkpoint.jsonl.flushing"):
+        journal = cache_path.with_suffix(suffix)
+        if apply and journal.exists() and journal.stat().st_size:
+            raise RuntimeError("Close SingWS cleanly before repair: pending loudness checkpoint")
     cache = json.loads(cache_path.read_text(encoding="utf-8"))
     if not isinstance(cache, dict):
         raise ValueError("loudness cache root is not an object")

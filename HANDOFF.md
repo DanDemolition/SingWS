@@ -2,6 +2,99 @@
 
 Updated 2026-08-30.
 
+## Same-version 0.4.6.5 release refresh
+
+The verified running app is packaged in a new Intel installer without changing
+APP_VERSION. Release verification and checksum are documented in
+`docs/verification/2026-08-30-loudness-release-refresh.md`. The refresh supersedes
+the older analyzer blocker below. Existing 0.4.6.5 users need a manual download
+because there is no version increase. The live scan was left running.
+
+## Follow-up: continue past individual analysis failures — installed
+
+The first pipe fix stopped the user's real Full scan after White Hot succeeded
+and the next track returned `libmpv ebur128 produced no integrated loudness`.
+That safeguard incorrectly treated a reported per-track error like a dead
+helper. The follow-up introduces `AnalysisTrackError`: a received error response
+skips that track without writing a permanent failure, closes its native helper,
+and continues. Transport/pipe failures still use `AnalysisHelperError` and stop
+the batch safely. The native worker resets its session after reported errors,
+so consecutive problem tracks cannot disable subsequent analysis.
+
+Installed `/Applications/SingWS.app` is still 0.4.6.5, executable SHA-256
+`ecfcb0e0771c7ff6b33eee267528540117c85d923ac06acc29fc2122a40a0489`.
+Previous bundle:
+`/Applications/SingWS-0.4.6.5-before-track-error-fix-20260830.app`.
+No new cache repair was required: 14,123 valid measurements and 70 structural
+failure records were retained. Both scratch and normal installed launches
+passed; the scratch app was closed before normal app reopened at 14:31.
+
+Tests: 805 tests + 24 subtests, plus 247 focused GUI/regression tests.
+A scratch run of the next 16 actual library items (diagnostic audio timeout
+shortened to 8s) completed without cancellation: 7 measurements persisted and
+reloaded unchanged, 9 analysis errors left uncached/retryable. These include
+native decode timeouts, not only immediate missing-LUFS responses. The Coolio
+MP3 produced many decoder `Header missing` errors and format changes; archive
+integrity alone does not imply valid audio. No media files were changed.
+The packaged helper was separately verified to report a missing-file error and
+then successfully measure a valid tone. Strict signing, frozen-code markers,
+432 Mach-O architecture and 840 minimum-macOS checks passed; installed and
+staged executable hashes match. No full-library completion or new DMG claimed.
+
+## Loudness helper pipe fix — installed 2026-08-30
+
+The analyzer blocker below is now repaired in `/Applications/SingWS.app`
+(still version 0.4.6.5, executable SHA-256
+`a6f4f1717d16c9a293f9990e9d1ad324bee1c9fb18525b2a2e606d1cace5ccc9`).
+The old app is retained at
+`/Applications/SingWS-0.4.6.5-before-scan-fix-20260830.app`.
+
+Root cause reproduced against the installed helper: TextIOWrapper.readline
+read ahead past the startup log into the result, while select subsequently
+waited on an empty OS pipe. The helper had already finished, and was waiting
+for another request. Binary unbuffered pipe reads with explicit line assembly
+fix this, including partial-line timeout handling. The batch now stops and
+cancels companion workers on helper failure without caching it as a bad song;
+the UI reports the stop. Fast mode also propagates helper errors. Failure
+schema 3 retries ambiguous version-2 failures. Structural ZIP failures remain
+cached. The repair utility refuses pending checkpoints requiring clean quit.
+
+SingWS was closed cleanly before repair: 119,276 ambiguous failure records
+removed, all 14,122 valid records then present preserved exactly, including
+all 14,120 original measurements. Backup:
+`~/SingWS/cache-backups/loudness-poison-repair-20260830-141831/loudness.json`.
+70 structural failures remain. No full rescan has been started by this task;
+normal Full/Turbo can resume without Force.
+
+Verification: 802 tests + 24 subtests in the non-GUI runner; 244 focused
+GUI/regression/transport tests; final repair tests 3/3. Three real previously
+poisoned ZIPs successfully measured through the staged helper, persisted and
+reloaded unchanged in a scratch home. Binary markers, 432-file x86_64 check,
+840-file macOS-12 check, bundled media loading, strict signing, scratch launch
+and installed launch passed. Installed executable matches staged SHA exactly.
+No new DMG/release was published. Full-library completion and external-display
+playback were not tested in this task. Source changes remain uncommitted.
+
+## 0.4.6.5 readiness audit: analyzer blocker found
+
+The installed and running app is 0.4.6.5; frozen-code markers, strict signing,
+architecture, minimum macOS version, bundled media loading, and DMG checksum
+all pass. The non-GUI runner passes 799 tests plus 21 subtests; a separate
+matching-Qt run passes 202 GUI/performance tests after correcting two obsolete
+test assertions. All 401 repaired ZIPs pass integrity checks, and the 70
+quarantined files are absent and no longer indexed. Details and test outputs:
+`docs/verification/2026-08-30-show-readiness.md`.
+
+**Do not treat the loudness repair as complete.** The 08:12 live cache contains
+68,667 new-version `no measurable loudness` failures and 24 helper timeouts.
+After three helper failures, the isolated session disables itself but the batch
+keeps marking subsequent unmeasured songs failed. The old-version repair tool
+does not remove these version-2 records. No live data or application code was
+changed by the audit. Stop further full/Turbo scans pending a session-failure
+guard, real installed-helper validation, and a backed-up repair while closed.
+External-display playback, audible crossfades, and KaraFun end-to-end acceptance
+also remain unverified by this audit.
+
 ## Detached OpenKJ-style ticker repair (installed for visual test)
 
 The Intel show Mac now uses the pre-rendered QPainter ticker that was smooth in
