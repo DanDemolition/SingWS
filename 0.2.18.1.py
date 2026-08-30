@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.6.3"
+APP_VERSION = "0.4.6.4"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -6908,38 +6908,19 @@ class RenderThreadShowScreenVfx(QFrame):
             area.finish_next_up_countdown()
 
     def _raise_native_surface(self) -> bool:
-        """Keep the Quick transition above mpv's native host-screen view."""
+        """Raise only the Quick transition widgets managed by Qt.
+
+        Walking and reordering the Cocoa ancestor chain can raise a shared
+        audience-window ancestor above mpv's output view.  The bridge then
+        keeps presenting frames behind the idle artwork.  Keep this operation
+        scoped to the overlay and its window container.
+        """
         try:
             self.raise_()
             self._container.raise_()
+            self.update()
+            return True
         except Exception:
-            pass
-        if sys.platform != "darwin":
-            return False
-        try:
-            import objc
-            from ctypes import c_void_p
-            from AppKit import NSWindowAbove
-
-            native_view = objc.objc_object(c_void_p=int(self._container.winId()))
-            native_window = native_view.window()
-            content_view = native_window.contentView() if native_window is not None else None
-            reordered = False
-            view = native_view
-            for _depth in range(8):
-                parent = view.superview()
-                if parent is None:
-                    break
-                parent.addSubview_positioned_relativeTo_(view, NSWindowAbove, None)
-                reordered = True
-                if content_view is not None and parent == content_view:
-                    break
-                view = parent
-            return reordered
-        except Exception as exc:
-            if not bool(getattr(self, "_native_raise_failure_logged", False)):
-                self._native_raise_failure_logged = True
-                _diag(f"[SHOW-VFX] native surface reorder unavailable: {exc}")
             return False
 
     def _reassert_surface_order(self):
@@ -12745,46 +12726,23 @@ class VideoWindow(QWidget):
             QTimer.singleShot(0, lambda: reassert_window("video_window_show"))
 
     def _raise_ticker_surface(self) -> bool:
-        """Raise both Qt and Cocoa sides of the retained ticker surface.
+        """Raise only the retained ticker widgets managed by Qt.
 
-        QWidget.raise_() does not reliably reorder a QQuickView window
-        container against retained mpv/native transition views on macOS. Walk
-        the ticker container's native ancestor chain to the audience content
-        view and reorder each sibling without activating the NSWindow.
+        Never reorder the Cocoa ancestor chain here: a ticker or transition
+        container can share an ancestor with the painted idle surface, and
+        lifting that ancestor covers an otherwise healthy mpv output view.
         """
         ticker = getattr(self, "ticker", None)
         if ticker is None:
             return False
-        ticker.raise_()
-        ticker.update()
-        if sys.platform != "darwin" or self.ticker_backend != "quick-render-thread":
-            return False
         try:
-            import objc
-            from AppKit import NSWindowAbove
-
             container = getattr(ticker, "_container", None)
-            if container is None:
-                return False
-            native_view = objc.objc_object(c_void_p=int(container.winId()))
-            native_window = native_view.window()
-            content_view = native_window.contentView() if native_window is not None else None
-            reordered = False
-            view = native_view
-            for _depth in range(8):
-                parent = view.superview()
-                if parent is None:
-                    break
-                parent.addSubview_positioned_relativeTo_(view, NSWindowAbove, None)
-                reordered = True
-                if content_view is not None and parent == content_view:
-                    break
-                view = parent
-            return reordered
-        except Exception as exc:
-            if not bool(getattr(self, "_ticker_native_raise_failure_logged", False)):
-                self._ticker_native_raise_failure_logged = True
-                _diag(f"[TICKER] native surface reorder unavailable: {exc}")
+            ticker.raise_()
+            if container is not None:
+                container.raise_()
+            ticker.update()
+            return True
+        except Exception:
             return False
 
     def _schedule_geometry_surface_reassert(self):

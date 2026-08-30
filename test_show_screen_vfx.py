@@ -72,7 +72,9 @@ class ShowScreenVfxTests(unittest.TestCase):
         overlay = source[source.index("class RenderThreadShowScreenVfx"):]
         overlay = overlay[:overlay.index("class VideoAreaWidget")]
         self.assertIn("def _raise_native_surface", overlay)
-        self.assertIn("addSubview_positioned_relativeTo_", overlay)
+        self.assertIn("self._container.raise_()", overlay)
+        self.assertNotIn("addSubview_positioned_relativeTo_", overlay)
+        self.assertNotIn("NSWindowAbove", overlay)
         self.assertIn("def _schedule_surface_reassert", overlay)
         self.assertEqual(overlay.count("self._schedule_surface_reassert()"), 3)
 
