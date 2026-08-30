@@ -183,7 +183,7 @@ class RecentRegressionTests(unittest.TestCase):
         finally:
             self.singws.set_quick_surfaces_override("auto")
 
-    def test_intel_keeps_quick_ticker_on_detached_surface(self):
+    def test_intel_uses_proven_painter_ticker_on_detached_surface(self):
         with (
             mock.patch.object(self.singws.sys, "platform", "darwin"),
             mock.patch.object(self.singws.platform, "machine", return_value="x86_64"),
@@ -205,9 +205,11 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("_native_quick_ticker_supported()", video_init)
         self.assertIn("_native_quick_child_surfaces_supported()", show_vfx)
 
-        ticker_init = inspect.getsource(self.singws.RenderThreadTicker.__init__)
-        ticker_sync = inspect.getsource(self.singws.RenderThreadTicker.sync_surface_geometry)
-        self.assertIn("_detached_quick_ticker_required()", ticker_init)
+        video_init = inspect.getsource(self.singws.VideoWindow.__init__)
+        ticker_init = inspect.getsource(self.singws.DetachedPainterTicker.__init__)
+        ticker_sync = inspect.getsource(self.singws.DetachedPainterTicker.sync_surface_geometry)
+        self.assertIn("_detached_quick_ticker_required()", video_init)
+        self.assertIn("Ticker(", ticker_init)
         self.assertIn("WindowDoesNotAcceptFocus", ticker_init)
         self.assertIn("setTransientParent", ticker_sync)
 
@@ -1963,14 +1965,15 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
             }
             self.assertFalse(self.singws.loudness_failed_cached(media))
 
-    def test_ticker_scrolls_a_cached_subpixel_texture_without_surface_changes(self):
+    def test_failed_qml_texture_layer_is_removed_and_detached_painter_is_isolated(self):
         qml = self.singws.QML_TICKER_RT_SOURCE
-        self.assertIn("id: movingNameLayer", qml)
-        self.assertIn("layer.enabled: true", qml)
-        self.assertIn("layer.smooth: true", qml)
-        self.assertIn("target: movingNameLayer", qml)
-        self.assertNotIn("target: nameText", qml)
-        sync = inspect.getsource(self.singws.RenderThreadTicker.sync_surface_geometry)
+        self.assertNotIn("id: movingNameLayer", qml)
+        self.assertNotIn("layer.enabled: true", qml)
+        self.assertIn("target: nameText", qml)
+        init = inspect.getsource(self.singws.DetachedPainterTicker.__init__)
+        sync = inspect.getsource(self.singws.DetachedPainterTicker.sync_surface_geometry)
+        self.assertIn("WA_DontCreateNativeAncestors", init)
+        self.assertIn("WA_NativeWindow", init)
         self.assertIn("setTransientParent", sync)
         self.assertIn("self._view.raise_()", sync)
 

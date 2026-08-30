@@ -12681,15 +12681,20 @@ class VideoWindow(QWidget):
         # show. Any future attempt to defer this has to re-raise the ticker.
         self._attach_show_vfx(self.video_area)
 
-        # Bottom ticker. Preferred backend is the Qt Quick render-thread ticker
-        # (RenderThreadTicker): the scroll animation runs on the scene-graph
-        # render thread, so it stays glass-smooth even while the GUI/Python
-        # thread is busy with queue updates, GStreamer state, or dialogs. If
-        # Qt Quick can't load on a machine, fall back to the legacy in-process
-        # QPainter Ticker (still functional, just GUI-thread paced).
+        # On Intel macOS use the proven pre-rendered painter ticker on its own
+        # detached transient window.  That restores the smooth 0.4.1-era
+        # renderer/cadence without putting another native child into mpv's
+        # stacking hierarchy.  Other platforms retain the render-thread ticker.
         self.ticker = None
         self.ticker_backend = "none"
-        if _native_quick_ticker_supported():
+        if _detached_quick_ticker_required():
+            self.ticker = DetachedPainterTicker(
+                get_singer_list_callback,
+                self,
+                get_time_left_callback=get_time_left_callback,
+            )
+            self.ticker_backend = "detached-openkj-painter"
+        elif _native_quick_ticker_supported():
             try:
                 self.ticker = RenderThreadTicker(
                     get_singer_list_callback,
@@ -56692,7 +56697,7 @@ Rectangle {
         if (root.churnHold) return
         anim.stop()
         if (!root.running || root.displayText === "" || nameText.contentWidth <= 0 || root.scrollAreaW <= 0) {
-            movingNameLayer.x = root.scrollAreaW
+            nameText.x = root.scrollAreaW
             return
         }
         var travel = root.scrollAreaW + nameText.contentWidth
@@ -56804,30 +56809,16 @@ Rectangle {
         height: root.height
         clip: true
 
-        Item {
-            id: movingNameLayer
+        Text {
+            id: nameText
+            text: root.displayText
+            color: root.tickerColor
+            font.pixelSize: root.namesPx
+            font.bold: root.tickerBold
+            font.family: root.fontFamily
             x: root.scrollAreaW
-            y: 0
-            width: nameText.contentWidth
-            height: leftClip.height
-            // Cache the glyph run once and move the texture with bilinear
-            // subpixel filtering.  Animating Text directly can re-rasterize or
-            // pixel-snap glyphs on Intel, which reads as uneven scrolling even
-            // though XAnimator itself is vsync paced.
-            layer.enabled: true
-            layer.smooth: true
-
-            Text {
-                id: nameText
-                text: root.displayText
-                color: root.tickerColor
-                font.pixelSize: root.namesPx
-                font.bold: root.tickerBold
-                font.family: root.fontFamily
-                y: Math.round((movingNameLayer.height - height) / 2)
-                x: 0
-                onContentWidthChanged: root.scheduleRestart()
-            }
+            y: Math.round((leftClip.height - height) / 2)
+            onContentWidthChanged: root.scheduleRestart()
         }
     }
 
@@ -56897,7 +56888,7 @@ Rectangle {
     // (onFinished fires only on natural completion, not on manual stop).
     XAnimator {
         id: anim
-        target: movingNameLayer
+        target: nameText
         easing.type: Easing.Linear
         loops: 1
         onFinished: {
@@ -57777,6 +57768,133 @@ class Ticker(QFrame):
             self._right_text,
         )
         painter.end()
+
+
+class DetachedPainterTicker(QFrame):
+    """Layout placeholder for the proven painter ticker on a safe top-level surface.
+
+    The painter itself is intentionally not a native child of VideoWindow: on
+    Intel macOS that would re-enter mpv/Qt native-child stacking and the
+    QBackingStore crash path.  A non-activating transient window follows this
+    placeholder instead, preserving the old isolated repaint cadence.
+    """
+
+    def __init__(self, get_singer_list_callback, parent=None, get_time_left_callback=None):
+        super().__init__(parent)
+        self.setStyleSheet("background-color: black;")
+        self.setContentsMargins(0, 0, 0, 0)
+        self._container = None
+        self._view = Ticker(
+            get_singer_list_callback,
+            parent=None,
+            get_time_left_callback=get_time_left_callback,
+        )
+        self._view.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self._view.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._view.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+        self._view.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.queue_update_timer = self._view.queue_update_timer
+        self.right_update_timer = self._view.right_update_timer
+        self.frame_timer = self._view.frame_timer
+        self.set_size_preset(self._view._size_idx)
+
+    @property
+    def _size_idx(self):
+        return self._view._size_idx
+
+    @property
+    def _frame_interval_ms(self):
+        return self._view._frame_interval_ms
+
+    @property
+    def scroll_timer(self):
+        return self._view.scroll_timer
+
+    def _settings_owner(self):
+        owner = getattr(self, "_external_settings_owner", None)
+        if owner is not None and hasattr(owner, "settings"):
+            return owner
+        w = self.parent()
+        while w is not None:
+            if hasattr(w, "settings"):
+                return w
+            w = w.parent()
+        return None
+
+    def _sync_owner(self):
+        self._view._external_settings_owner = self._settings_owner()
+
+    def sync_surface_geometry(self):
+        try:
+            host = self.window()
+            if not self.isVisible() or host is None or not host.isVisible():
+                self._view.hide()
+                return
+            self._sync_owner()
+            host_handle = host.windowHandle()
+            self._view.winId()
+            view_handle = self._view.windowHandle()
+            if host_handle is not None and view_handle is not None:
+                if view_handle.transientParent() is not host_handle:
+                    view_handle.setTransientParent(host_handle)
+            top_left = self.mapToGlobal(QPoint(0, 0))
+            self._view.setGeometry(top_left.x(), top_left.y(), self.width(), self.height())
+            if not self._view.isVisible():
+                self._view.show()
+            self._view.raise_()
+        except Exception as exc:
+            _diag(f"[TICKER] detached painter surface sync failed: {exc}")
+
+    def set_size_preset(self, idx: int):
+        self._sync_owner()
+        self._view.set_size_preset(idx)
+        self.setFixedHeight(self._view.height())
+        QTimer.singleShot(0, self.sync_surface_geometry)
+
+    def set_scroll_speed(self, value):
+        self._sync_owner()
+        self._view.set_scroll_speed(value)
+
+    def set_bold(self, enabled: bool):
+        self._view.set_bold(enabled)
+
+    def set_color(self, color: str):
+        self._view.set_color(color)
+
+    def start_scrolling(self):
+        self._view.start_scrolling()
+
+    def stop_scrolling(self):
+        self._view.stop_scrolling()
+
+    def force_refresh_now(self):
+        self._view.force_refresh_now()
+
+    def update_queue_text(self, force: bool = False):
+        self._view.update_queue_text(force=force)
+
+    def update_right_text(self):
+        self._view.update_right_text()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self.sync_surface_geometry)
+
+    def hideEvent(self, event):
+        self._view.hide()
+        super().hideEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.sync_surface_geometry)
+
+    def closeEvent(self, event):
+        self._view.close()
+        super().closeEvent(event)
 
 # -------- Manage Folders dialog --------
 class ManageFoldersDialog(QDialog):

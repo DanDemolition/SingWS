@@ -2,6 +2,26 @@
 
 Updated 2026-08-30.
 
+## Detached OpenKJ-style ticker repair (installed for visual test)
+
+The Intel show Mac now uses the pre-rendered QPainter ticker that was smooth in
+the 0.4.1-era builds, hosted in a separate non-activating transient window.
+This restores its elapsed-time, refresh-rate-paced fractional pixmap scrolling
+without returning the ticker to mpv's native-child stacking hierarchy.  The
+uneven QML cached-layer experiment was removed.  Other platforms retain the
+render-thread QML ticker.
+
+The installed `/Applications/SingWS.app` is this build and the replaced bundle
+is preserved at `/Applications/SingWS-0.4.6.4-qml-ticker-20260830.app`.
+The installed app launched at 08:12 with
+`backend=detached-openkj-painter`, while the Qt Quick audience transition layer
+also initialized normally.  Automated verification passed: 200 focused GUI /
+show-screen tests and the full 799-test plus 21-subtest runner.  The build
+passed x86_64, bundled-media, macOS-12, and strict signing checks; only DMG
+creation hit the machine's recurring `hdiutil: Device not configured` error.
+CDG/video and actual scrolling smoothness still require the operator's live
+visual test.
+
 ## Karaoke archive recovery after loudness-cache audit
 
 All 471 retained structural loudness failures were audited with 7-Zip. Seventy

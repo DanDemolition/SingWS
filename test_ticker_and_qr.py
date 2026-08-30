@@ -95,6 +95,31 @@ class _Owner:
         return s
 
 
+class DetachedPainterTickerTests(unittest.TestCase):
+    def test_wraps_proven_painter_and_delegates_live_settings(self):
+        ticker = mod.DetachedPainterTicker(
+            lambda: (["Alice", "Bob"], "Welcome"),
+            parent=None,
+            get_time_left_callback=lambda: "2:47",
+        )
+        try:
+            ticker._external_settings_owner = _Owner()
+            ticker.set_scroll_speed(95.0)
+            ticker.set_size_preset(4)
+            ticker.update_queue_text(force=True)
+            ticker.update_right_text()
+            self.assertIsInstance(ticker._view, mod.Ticker)
+            self.assertAlmostEqual(ticker._view._scroll_speed_px_per_sec, 95.0)
+            self.assertEqual(ticker.height(), mod.TICKER_SIZE_PRESETS[4][0])
+            self.assertEqual(ticker._view._active_text, "Welcome   |   1. Alice   |   2. Bob")
+            self.assertEqual(ticker._view._right_text, "2:47")
+            self.assertTrue(ticker._view.testAttribute(Qt.WidgetAttribute.WA_NativeWindow))
+            self.assertTrue(ticker._view.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+        finally:
+            ticker.close()
+            ticker.deleteLater()
+
+
 @unittest.skipUnless(_qtquick_available(), "PyQt6.QtQuick unavailable")
 class RenderThreadTickerTests(unittest.TestCase):
     def _make(self, singers, message="", time_text="3:00"):
