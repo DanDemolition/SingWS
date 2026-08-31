@@ -29,8 +29,10 @@ helper and shortcut checks pass. The old download page was updated to the
 new installer-derived version/link/size/hash alongside docs/release.json.
 Private backup/build/test receipt: `../local-installs/20260831-115652/`.
 Report: `docs/verification/2026-08-31-release-0.4.6.6.md`.
-Publication is in progress; push main only after the uploaded release asset is
-verified and the release is public.
+Published as the latest GitHub release after its remote size and SHA-256
+matched the verified local DMG. The final follow-up commit pushes main only
+after publication, making docs/release.json visible to auto-update clients.
+Release: `https://github.com/DanDemolition/SingWS/releases/tag/v0.4.6.6`.
 
 ## Ticker no longer covers host controls — installed 2026-08-31 11:27 PDT
 
