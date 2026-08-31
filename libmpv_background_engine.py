@@ -386,13 +386,14 @@ class LibmpvBackgroundEngine:
             self._master_proc = processor
             self._master_proc_configured = False
 
-    def start_crossfade(self, path: str, duration_ms: int, norm_gain: float = 1.0) -> bool:
+    def start_crossfade(self, path: str, duration_ms: int, norm_gain: float = 1.0,
+                        start_seconds: float = 0.0) -> bool:
         with self._lock:
             if self.primary is None or self.secondary is not None:
                 return False
         # Build outside the lock (offline decode can block), then attach only
         # if the crossfade state is still valid.
-        deck = self._make_deck(path, 0.0, norm_gain=norm_gain)
+        deck = self._make_deck(path, 0.0, norm_gain=norm_gain, start_seconds=start_seconds)
         with self._lock:
             if self.primary is None or self.secondary is not None:
                 self._free_deck(deck)

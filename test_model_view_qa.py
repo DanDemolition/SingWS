@@ -465,32 +465,42 @@ class ModelBackedViewQATests(unittest.TestCase):
             "ROTATION START • WAITING FOR SONG",
         )
 
-    def test_rotation_window_shows_waiting_slot_but_does_not_cue_it(self):
+    def test_rotation_window_hides_waiting_slots_without_removing_host_singers(self):
         rendered = []
         next_states = []
+        counts = []
+        lineups = []
         fake = SimpleNamespace(
             queue_items=[],
             rotation_rail=SimpleNamespace(set_items=lambda items: rendered.extend(items)),
             list_widget=SimpleNamespace(),
             now_singing_label=SimpleNamespace(setText=lambda text: None),
-            queue_count_label=SimpleNamespace(setText=lambda text: None),
+            queue_count_label=SimpleNamespace(setText=counts.append),
             queue_title_label=SimpleNamespace(setText=lambda text: next_states.append(("title", text))),
             now_singing_surface=SimpleNamespace(
                 set_state=lambda current, next_singer, countdown: next_states.append((current, next_singer))
             ),
             display_name_for_queue_entry=lambda entry, path, tracks: entry.get("title", "Song"),
+            set_side_lineup=lambda up_next, on_deck: lineups.append((up_next, on_deck)),
+            set_now_playing_strip=lambda current, upcoming: None,
         )
         queue = [
             {"name": "Waiting Singer", "songs": [], "skipped": False, "rotation_marker": True},
+            {"name": "Skipped Song Singer", "songs": [{"title": "Skipped", "skipped": True}]},
             {"name": "Ready Singer", "songs": [{"song_info": "/tmp/song.mp3", "title": "Ready Song"}], "skipped": False},
         ]
 
         self.singws.RotationView.update_rotation(fake, queue, [], "Current Singer")
 
-        self.assertEqual([item["singer"] for item in rendered], ["Waiting Singer", "Ready Singer"])
-        self.assertIn("Waiting for song", rendered[0]["song"])
+        self.assertEqual([item["singer"] for item in rendered], ["Ready Singer"])
+        self.assertEqual(rendered[0]["number"], "1")
+        self.assertEqual(counts, ["1 SINGER"])
+        self.assertEqual(lineups, [(("Ready Singer", "Ready Song"), ("", ""))])
+        self.assertEqual(len(queue), 3)
+        self.assertTrue(queue[0]["rotation_marker"])
+        self.assertEqual(queue[0]["songs"], [])
         self.assertEqual(next_states[-1], ("Current Singer", "Ready Singer"))
-        self.assertIn("START: Waiting Singer", next_states[0][1])
+        self.assertEqual(next_states[0][1], "SINGER ROTATION")
 
 
 if __name__ == "__main__":

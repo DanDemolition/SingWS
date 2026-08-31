@@ -396,7 +396,7 @@ class BgmPolicyTests(unittest.TestCase):
     def test_verified_dead_tail_advances_promptly(self):
         self.assertEqual(
             ta.select_bgm_crossfade_seconds(self.record(audio_end=235.0)),
-            (2.0, "verified_dead_tail"),
+            (5.0, "verified_dead_tail"),
         )
 
     def test_confident_natural_fade_uses_fade_length_with_bounds(self):
@@ -410,6 +410,16 @@ class BgmPolicyTests(unittest.TestCase):
             ta.select_bgm_crossfade_seconds(self.record(fade_confidence=0.0)),
             (2.5, "hard_ending"),
         )
+
+    def test_content_window_excludes_silent_padding_with_analysis_margin(self):
+        record = self.record(audio_start=3.0, audio_end=220.0, hop_seconds=0.1)
+        self.assertEqual(ta.bgm_audio_window(record, 240.0), (2.9, 220.1))
+
+    def test_content_window_rejects_stale_or_invalid_metadata(self):
+        for record in (None, self.record(analysis_version=-1),
+                       self.record(audio_start=250.0), self.record(duration=230.0)):
+            with self.subTest(record=record):
+                self.assertEqual(ta.bgm_audio_window(record, 240.0), (0.0, 240.0))
 
 
 class PreparedIdentityTests(unittest.TestCase):

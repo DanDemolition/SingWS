@@ -39,7 +39,9 @@ BASS_DEVICE_DEFAULT = 2
 BASS_MIXER_POSEX = 0x2000
 BASS_MIXER_NONSTOP = 0x20000
 BASS_MIXER_CHAN_BUFFER = 0x2000
+BASS_MIXER_CHAN_PAUSE = 0x20000
 BASS_MIXER_CHAN_DOWNMIX = 0x400000
+BASS_MIXER_ENV_VOL = 2
 BASS_POS_MIXER_RESET = 0x10000
 
 
@@ -49,6 +51,10 @@ class _BassDeviceInfo(ctypes.Structure):
         ("driver", ctypes.c_char_p),
         ("flags", DWORD),
     ]
+
+
+class _BassMixerNode(ctypes.Structure):
+    _fields_ = [("pos", QWORD), ("value", ctypes.c_float)]
 
 
 class _BassDx8ParamEq(ctypes.Structure):
@@ -136,6 +142,7 @@ class BassBackgroundEngine:
         self.mixer = 0
         self.primary: _Deck | None = None
         self.secondary: _Deck | None = None
+        self._crossfade_end_bytes = 0
         self.master_volume = 0.8
         self._plugin_handles: list[int] = []
         self._closed = False
@@ -190,6 +197,8 @@ class BassBackgroundEngine:
         self.bass.BASS_ChannelPlay.restype = BOOL
         self.bass.BASS_ChannelPause.argtypes = [DWORD]
         self.bass.BASS_ChannelPause.restype = BOOL
+        self.bass.BASS_ChannelLock.argtypes = [DWORD, BOOL]
+        self.bass.BASS_ChannelLock.restype = BOOL
         self.bass.BASS_ChannelStop.argtypes = [DWORD]
         self.bass.BASS_ChannelStop.restype = BOOL
         self.bass.BASS_ChannelIsActive.argtypes = [DWORD]
@@ -221,6 +230,16 @@ class BassBackgroundEngine:
         self.mix.BASS_Mixer_ChannelGetPosition.restype = QWORD
         self.mix.BASS_Mixer_ChannelSetPosition.argtypes = [DWORD, QWORD, DWORD]
         self.mix.BASS_Mixer_ChannelSetPosition.restype = BOOL
+        self.mix.BASS_Mixer_ChannelFlags.argtypes = [DWORD, DWORD, DWORD]
+        self.mix.BASS_Mixer_ChannelFlags.restype = DWORD
+        self.mix.BASS_Mixer_ChannelSetEnvelope.argtypes = [
+            DWORD, DWORD, ctypes.POINTER(_BassMixerNode), DWORD,
+        ]
+        self.mix.BASS_Mixer_ChannelSetEnvelope.restype = BOOL
+        self.mix.BASS_Mixer_ChannelGetEnvelopePos.argtypes = [
+            DWORD, DWORD, ctypes.POINTER(ctypes.c_float),
+        ]
+        self.mix.BASS_Mixer_ChannelGetEnvelopePos.restype = QWORD
         self.mix.BASS_Mixer_ChannelGetLevelEx.argtypes = [
             DWORD,
             ctypes.POINTER(ctypes.c_float),
@@ -635,11 +654,12 @@ class BassBackgroundEngine:
         if hasattr(self, "_eq_ref"):
             self._eq_ref["eq"] = None
 
-    def _make_deck(self, path: str, volume: float, norm_gain: float = 1.0) -> _Deck:
+    def _make_deck(self, path: str, volume: float, norm_gain: float = 1.0,
+                   paused: bool = False) -> _Deck:
         self._ensure_mixer()
         deck = self.prepare_primary(path, norm_gain=norm_gain)
         try:
-            self._attach_prepared_deck(deck, volume)
+            self._attach_prepared_deck(deck, volume, paused=paused)
         except Exception:
             self.discard_prepared_primary(deck)
             raise
@@ -663,15 +683,17 @@ class BassBackgroundEngine:
             mtime, size = 0, 0
         return _Deck(str(path), handle, self._norm_factor(norm_gain), mtime, size)
 
-    def _attach_prepared_deck(self, deck: _Deck, volume: float) -> None:
+    def _attach_prepared_deck(self, deck: _Deck, volume: float, paused: bool = False) -> None:
         self._ensure_mixer()
         if not self.mix.BASS_Mixer_StreamAddChannel(
             self.mixer,
             deck.handle,
-            BASS_MIXER_CHAN_BUFFER | BASS_MIXER_CHAN_DOWNMIX,
+            BASS_MIXER_CHAN_BUFFER | BASS_MIXER_CHAN_DOWNMIX | BASS_MIXER_CHAN_PAUSE,
         ):
             raise self._error("BASS_Mixer_StreamAddChannel")
         self._set_deck_volume(deck, volume)
+        if not paused:
+            self.mix.BASS_Mixer_ChannelFlags(deck.handle, 0, BASS_MIXER_CHAN_PAUSE)
 
     def install_prepared_primary(self, deck: _Deck, volume: float | None = None) -> bool:
         """Install a worker-prepared deck into the live graph on its owner thread."""
@@ -818,6 +840,7 @@ class BassBackgroundEngine:
         return bool(self.bass.BASS_ChannelPause(self.mixer))
 
     def stop(self):
+        self._crossfade_end_bytes = 0
         self._free_deck(self.secondary)
         self._free_deck(self.primary)
         self.secondary = None
@@ -866,7 +889,7 @@ class BassBackgroundEngine:
         if self.secondary is None:
             return
         self.secondary.norm_gain = self._norm_factor(factor)
-        self._set_deck_volume(self.secondary, 0.0)
+        self._set_deck_volume(self.secondary, 1.0 if getattr(self, "_crossfade_end_bytes", 0) else 0.0)
 
     def set_master_volume(self, volume: float):
         self.master_volume = self._gain(volume)
@@ -887,23 +910,99 @@ class BassBackgroundEngine:
                 max(0, int(duration_ms)),
             )
 
-    def start_crossfade(self, path: str, duration_ms: int, norm_gain: float = 1.0) -> bool:
+    def start_crossfade(self, path: str, duration_ms: int, norm_gain: float = 1.0,
+                        start_seconds: float = 0.0) -> bool:
         if self.primary is None:
             return False
         if not self._deck_matches_file(self.secondary, path):
             self._free_deck(self.secondary)
-            self.secondary = self._make_deck(path, 0.0, norm_gain=norm_gain)
+            self.secondary = None
+            self.secondary = self._make_deck(path, 0.0, norm_gain=norm_gain, paused=True)
         else:
             self.secondary.norm_gain = self._norm_factor(norm_gain)
             self._set_deck_volume(self.secondary, 0.0)
-        self._slide_deck_volume(self.primary, 0.0, duration_ms)
-        self._slide_deck_volume(self.secondary, 1.0, duration_ms)
+        # Both envelopes start in the same mixer processing block. BASSmix
+        # applies them on the audio clock, independently of GUI timer stalls.
+        if not self.bass.BASS_ChannelLock(self.mixer, 1):
+            self.cancel_crossfade()
+            return False
+        try:
+            length = int(self.bass.BASS_ChannelGetLength(self.secondary.handle, BASS_POS_BYTE))
+            if start_seconds > 0.0:
+                offset = int(self.bass.BASS_ChannelSeconds2Bytes(self.secondary.handle, start_seconds))
+                if 0 < offset < length:
+                    # Do not reset the mixer buffer: outgoing audio is queued there.
+                    if not self.mix.BASS_Mixer_ChannelSetPosition(self.secondary.handle, offset, BASS_POS_BYTE):
+                        raise self._error("BASS_Mixer_ChannelSetPosition(incoming)")
+            source_start = int(self.bass.BASS_ChannelGetPosition(
+                self.secondary.handle, BASS_POS_BYTE,
+            ))
+            available = float(self.bass.BASS_ChannelBytes2Seconds(self.secondary.handle, max(0, length - source_start)))
+            seconds = max(0.05, min(duration_ms / 1000.0, available))
+            self._crossfade_end_bytes = max(8, int(self.bass.BASS_ChannelSeconds2Bytes(self.mixer, seconds)))
+            self._crossfade_end_source_bytes = min(length, source_start + int(
+                self.bass.BASS_ChannelSeconds2Bytes(self.secondary.handle, seconds),
+            ))
+            for deck, incoming in ((self.primary, False), (self.secondary, True)):
+                nodes = (_BassMixerNode * 65)()
+                for i, node in enumerate(nodes):
+                    node.pos = (self._crossfade_end_bytes * i // 64) // 8 * 8
+                    angle = i / 64.0 * math.pi * 0.5
+                    node.value = math.sin(angle) if incoming else math.cos(angle)
+                nodes[-1].value = 1.0 if incoming else 0.0
+                self._set_deck_volume(deck, 1.0)  # normalization; envelope owns the fade
+                if not self.mix.BASS_Mixer_ChannelSetEnvelope(deck.handle, BASS_MIXER_ENV_VOL, nodes, len(nodes)):
+                    raise self._error("BASS_Mixer_ChannelSetEnvelope")
+            self.mix.BASS_Mixer_ChannelFlags(self.secondary.handle, 0, BASS_MIXER_CHAN_PAUSE)
+        except Exception:
+            self.cancel_crossfade()
+            raise
+        finally:
+            self.bass.BASS_ChannelLock(self.mixer, 0)
         self.play()
+        return True
+
+    def crossfade_finished(self) -> bool:
+        end = getattr(self, "_crossfade_end_bytes", 0)
+        if not end or self.secondary is None:
+            return False
+        value = ctypes.c_float()
+        pos = int(self.mix.BASS_Mixer_ChannelGetEnvelopePos(self.secondary.handle, BASS_MIXER_ENV_VOL, ctypes.byref(value)))
+        ended = self.mix.BASS_Mixer_ChannelIsActive(self.secondary.handle) == BASS_ACTIVE_STOPPED
+        if not ended and (pos == 0xFFFFFFFFFFFFFFFF or value.value < 1.0):
+            return False
+        # Keep the UI/track promotion on the audible clock, after buffered
+        # overlap has played, rather than promoting as soon as it is decoded.
+        audible = int(self.mix.BASS_Mixer_ChannelGetPosition(self.secondary.handle, BASS_POS_BYTE))
+        return bool(ended or (audible != 0xFFFFFFFFFFFFFFFF and audible >= self._crossfade_end_source_bytes))
+
+    def crossfade_lead_seconds(self) -> float:
+        """Queued audio ahead of the audible clock; schedule envelopes this early."""
+        if self.primary is None:
+            return 0.0
+        decoded = int(self.bass.BASS_ChannelGetPosition(self.primary.handle, BASS_POS_BYTE))
+        if decoded == 0xFFFFFFFFFFFFFFFF:
+            return 0.0
+        audible, _duration = self.get_times()
+        return max(0.0, float(self.bass.BASS_ChannelBytes2Seconds(self.primary.handle, decoded)) - audible)
+
+    def install_prepared_secondary(self, deck: _Deck) -> bool:
+        """Attach an already scanned next source without letting it consume audio."""
+        if self.primary is None or getattr(self, "_crossfade_end_bytes", 0) or not self._deck_matches_file(deck, deck.path):
+            self.discard_prepared_primary(deck)
+            return False
+        self.invalidate_secondary_preload()
+        try:
+            self._attach_prepared_deck(deck, 0.0, paused=True)
+        except Exception:
+            self.discard_prepared_primary(deck)
+            raise
+        self.secondary = deck
         return True
 
     def preload_secondary(self, path: str, norm_gain: float = 1.0) -> bool:
         """Prepare the exact next file silently without starting a crossfade."""
-        if self.primary is None or not path:
+        if self.primary is None or not path or getattr(self, "_crossfade_end_bytes", 0):
             return False
         if self._deck_matches_file(self.secondary, path):
             self.secondary.norm_gain = self._norm_factor(norm_gain)
@@ -912,7 +1011,7 @@ class BassBackgroundEngine:
         self._free_deck(self.secondary)
         self.secondary = None
         try:
-            self.secondary = self._make_deck(path, 0.0, norm_gain=norm_gain)
+            self.secondary = self._make_deck(path, 0.0, norm_gain=norm_gain, paused=True)
             return True
         except Exception:
             self.secondary = None
@@ -930,13 +1029,17 @@ class BassBackgroundEngine:
         self.primary = self.secondary
         self.secondary = None
         self._free_deck(old)
+        self._crossfade_end_bytes = 0
+        self.mix.BASS_Mixer_ChannelSetEnvelope(self.primary.handle, BASS_MIXER_ENV_VOL, None, 0)
         self._set_deck_volume(self.primary, 1.0)
         return True
 
     def cancel_crossfade(self):
+        self._crossfade_end_bytes = 0
         self._free_deck(self.secondary)
         self.secondary = None
         if self.primary is not None:
+            self.mix.BASS_Mixer_ChannelSetEnvelope(self.primary.handle, BASS_MIXER_ENV_VOL, None, 0)
             self._set_deck_volume(self.primary, 1.0)
 
     def get_times(self) -> tuple[float, float]:
@@ -987,7 +1090,9 @@ class BassBackgroundEngine:
         return int(self.bass.BASS_ChannelIsActive(self.mixer)) == BASS_ACTIVE_PAUSED
 
     def meter_level(self) -> float:
-        deck = self.secondary or self.primary
+        # A prepared source is paused and silent. It must not hide the current
+        # track from the meter / trailing-silence detector.
+        deck = self.secondary if getattr(self, "_crossfade_end_bytes", 0) else self.primary
         if deck is None:
             return 0.0
         levels = (ctypes.c_float * 2)()

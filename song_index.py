@@ -36,7 +36,7 @@ _LOOKUP_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
 _CACHE_LOCK = threading.RLock()
 
 def user_singws_dir() -> Path:
-    p = Path.home() / APP_DIRNAME
+    p = Path(os.environ.get("SINGWS_HOME") or (Path.home() / APP_DIRNAME))
     p.mkdir(parents=True, exist_ok=True)
     return p
 

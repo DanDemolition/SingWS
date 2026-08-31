@@ -1980,7 +1980,7 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
         self.assertIn("WA_DontCreateNativeAncestors", init)
         self.assertIn("WA_NativeWindow", init)
         self.assertIn("setTransientParent", sync)
-        self.assertIn("self._view.raise_()", sync)
+        self.assertIn("self._order_surface_above_output(host)", sync)
         self.assertIn("queue_flash_started", painter)
         self.assertIn("timer_pulse_started", painter)
         self.assertIn("drawRoundedRect", painter)

@@ -304,6 +304,14 @@ scratch root:
 `tools/run_tests.sh` does this. Confirm afterwards that the live log line count
 did not move.
 
+**Operator rehearsal preference (2026-08-31):** use the actual
+`/Applications/SingWS.app` with its normal profile and existing server connection.
+The operator explicitly rejected keeping a separate SingWS Test app/profile.
+For future manual rehearsals, back up the existing app and data, install the
+candidate locally under the normal app identity, and keep publication separate.
+Do not copy old rehearsal history into the normal profile. This preference does
+not change the scratch `SINGWS_HOME` requirement for automated tests above.
+
 ### 8. Native crashes are not in the app log
 
 `SingWS/logs/*.log` only catches Python exceptions. Real segfaults land in

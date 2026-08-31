@@ -1,7 +1,10 @@
+import ast
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import karafun_provider
 import song_index
@@ -9,6 +12,54 @@ from playback_providers import AvailabilityStatus, SongProvider
 
 
 class KaraFunProviderTests(unittest.TestCase):
+    def test_slow_start_recovery_does_not_warn_after_positive_playback_hint(self):
+        tree = ast.parse(Path("0.2.18.1.py").read_text())
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                      and n.name == "_start_karafun_completion_monitor")
+        clock = [100.0]
+        entry = {"title": "Sober", "karafun_playback_assumed": True,
+                 "karafun_result_activation_point": (303, 217)}
+        host = SimpleNamespace(
+            _active_external_karafun={"entry": entry},
+            KARAFUN_PLAYBACK_RECOVERY_DELAY_S=12,
+            KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S=2,
+            KARAFUN_PLAYBACK_ALERT_DELAY_S=40,
+            _macos_native_double_click=mock.Mock(return_value=True),
+            _set_karafun_entry_status=mock.Mock(),
+            _karafun_clock_seconds=lambda value: None,
+        )
+        states = iter(["STATE|IDLE", "STATE|PLAYING", "STATE|PLAYING"])
+        probes = []
+
+        def probe(script, **kwargs):
+            probes.append(script)
+            clock[0] += 20.0
+            return True, next(states), ""
+
+        def advance(seconds):
+            clock[0] += seconds
+            if len(probes) == 3:
+                host._active_external_karafun = None
+
+        host._run_karafun_applescript_sync = probe
+        namespace = {
+            "uuid": SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="test-monitor")),
+            "time": SimpleNamespace(monotonic=lambda: clock[0],
+                                    sleep=advance),
+            "threading": SimpleNamespace(Thread=lambda target, **kw: SimpleNamespace(start=target)),
+            "_diag": lambda message: None,
+        }
+        exec(compile(ast.Module(body=[method], type_ignores=[]), "monitor-test", "exec"), namespace)
+        namespace[method.name](host, entry)
+        host._macos_native_double_click.assert_called_once_with(303, 217)
+        host._set_karafun_entry_status.assert_not_called()
+        self.assertGreater(entry["karafun_last_playing_ts"], 100)
+        self.assertEqual(len(probes), 3)
+        script = "\n".join(probes[0])
+        self.assertNotIn("help of elem", script)
+        self.assertNotIn("value of elem", script)
+        self.assertIn('elementRole is "AXStaticText"', script)
+
     def test_streaming_reference_becomes_external_track_dict(self):
         ref = karafun_provider.KaraFunReference(
             title="Song",
@@ -132,11 +183,11 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("_karafun_handoff_token", source)
         self.assertIn("show-screen handoff already in progress; duplicate ignored", source)
         self.assertIn("skipped stale show-screen handoff result", source)
-        self.assertIn('_schedule_early_handoff("before_result_activation")', source)
+        self.assertIn('_schedule_early_handoff("after_result_activation")', source)
         self.assertIn("fullscreen audience handoff ready before play", source)
         self.assertLess(
-            source.index('_schedule_early_handoff("before_result_activation")'),
-            source.index("activating KaraFun result mode="),
+            source.index('if not self._macos_native_double_click(*activation_point):'),
+            source.index('_schedule_early_handoff("after_result_activation")'),
         )
         handoff = source[source.index("def _handoff_show_screen_to_karafun"):]
         handoff = handoff[:handoff.index("def _restore_show_screen_from_karafun")]
@@ -316,10 +367,10 @@ class KaraFunProviderTests(unittest.TestCase):
         )
         self.assertIn('_schedule_early_handoff("pre_click_playing")', worker)
         self.assertIn('_schedule_early_handoff("playback_verified")', worker)
-        self.assertIn("self._run_on_ui_thread(self._handoff_show_screen_to_karafun)", worker)
+        self.assertIn("self._handoff_show_screen_to_karafun() if _session_is_current() else None", worker)
         pre_play_handoff = worker[
-            worker.index('# Start the audience-display handoff before activating the'):
-            worker.index('activating KaraFun result mode=')
+            worker.index('entry["karafun_result_activated_at"] = result_activated_at'):
+            worker.index('playback_probe_script = [')
         ]
         self.assertIn('if bool(self.settings.get("karafun_manage_show_screen", True)):', pre_play_handoff)
         self.assertNotIn("if self._karafun_transparent_renderer_ready:", pre_play_handoff)
@@ -337,7 +388,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('labelText contains "key"', worker)
         self.assertIn('labelText contains "tempo"', worker)
         self.assertNotIn('help of elem is "Audio Settings"', worker)
-        self.assertIn("self._run_karafun_applescript_sync(search_script", worker)
+        self.assertIn("_run_session_script(search_script", worker)
         self.assertIn("self._run_karafun_applescript_sync(play_script", press)
         self.assertIn('entry["karafun_play_started_at"] = time.time()', worker)
         self.assertIn('entry["karafun_submission_state"] = "karafun_queued"', worker)
@@ -350,7 +401,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('if automatic_playback:', start)
         self.assertIn("self._automate_karafun_search_and_play(entry, key=key, tempo_percent=tempo_percent)", start)
 
-    def test_karafun_monitor_completes_once_with_five_seconds_remaining(self):
+    def test_karafun_monitor_requires_idle_and_end_evidence(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         monitor = source[source.index("def _start_karafun_completion_monitor"):]
         monitor = monitor[:monitor.index("def _fade_bg_for_external_karafun")]
@@ -359,10 +410,13 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("last_clock_candidates = {}", monitor)
         self.assertIn("next_clock_candidates = {}", monitor)
         self.assertIn("current <= previous", monitor)
-        self.assertIn("0 <= current < total", monitor)
+        self.assertIn("0 <= current <= total", monitor)
         self.assertIn("for i in range(0, max(0, len(clocks) - 1))", monitor)
         self.assertIn("current, total = clocks[i], clocks[i + 1]", monitor)
-        self.assertIn("remaining <= 5 and age > 8.0", monitor)
+        self.assertIn("last_clock_remaining <= 5", monitor)
+        self.assertIn("fallback_remaining <= 5", monitor)
+        self.assertIn("and (clock_near_end or expected_end_reached)", monitor)
+        self.assertNotIn('n contains "your queue is empty"', monitor)
         self.assertIn("STATE|IDLE", monitor)
         self.assertIn('if idleTextFound and not playingHintFound then set out to out & "STATE|IDLE"', monitor)
         self.assertIn('if playingHintFound then set out to out & "STATE|PLAYING"', monitor)
@@ -379,12 +433,11 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('entry.get("karafun_playback_clock_started_at")', monitor)
         self.assertIn("fallback_duration={fallback_duration} clock_age=", monitor)
         self.assertIn("remaining_from_fallback = True", monitor)
-        self.assertIn('reason = "duration_fallback" if remaining_from_fallback else "karaFun_idle"', monitor)
+        self.assertIn('reason = "karaFun_idle_clock_end" if clock_near_end else "karaFun_idle_expected_end"', monitor)
         self.assertIn("completion event received reason=", monitor)
-        self.assertIn("duration_fallback", monitor)
         self.assertIn("NSAppleScript calls into KaraFun are not safely concurrent", monitor)
         self.assertIn('if bool(getattr(self, "_karafun_handoff_in_progress", False)):', monitor)
-        self.assertIn('self._finish_external_karafun_playback("complete")', monitor)
+        self.assertIn('self._finish_external_karafun_playback("complete", expected_active=active_session)', monitor)
         self.assertIn("karafun_completion_monitor", monitor)
         automation = source[source.index("def _automate_karafun_search_and_play"):]
         automation = automation[:automation.index("def _karafun_clock_seconds")]

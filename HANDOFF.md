@@ -1,6 +1,460 @@
 # SingWS handoff
 
-Updated 2026-08-30.
+Updated 2026-08-31.
+
+## Release 0.4.6.6 built and locally installed — 2026-08-31 12:03 PDT
+
+The operator requested publication after testing the normal app. The release
+contains the accumulated fixes below, with only APP_VERSION changed from the
+tested 0.4.6.5 candidate. Both spec versions match 0.4.6.6. Intel/macOS 12+ only,
+matching the prior public release; no untested ARM build is advertised.
+
+991 desktop tests + 39 subtests, 86 native tests, 282 independent focused GUI
+tests, five isolated server-history suites and 16 versioned release-tool tests
+pass. The first full-runner attempt failed in its documented broken Qt test
+environment; it was rerun fully with working Qt, not counted as a pass or
+silently skipped. The exact release app is installed/launched, the host toolbar
+is visible and relay connected, with no new Python/native errors. The operator
+was actively using Settings; it was left untouched. Server config and history
+were unchanged at verification. Full KaraFun/external-display rehearsal remains
+unverified and is explicitly disclosed in the release notes.
+
+Executable SHA-256:
+`422ad95492e1b4f4414289e8b890726137f69719811c17816d68a7d498f2068b`.
+Installer SHA-256:
+`e1eb87748c23be0210c9faed7b52f07cf297c8e8790019b8e37c591e468dfc41`.
+Frozen code/native-load/architecture/macOS/signing checks pass. The mounted
+installer's 3,183 entries exactly match the signed app; hdiutil verification,
+helper and shortcut checks pass. The old download page was updated to the
+new installer-derived version/link/size/hash alongside docs/release.json.
+Private backup/build/test receipt: `../local-installs/20260831-115652/`.
+Report: `docs/verification/2026-08-31-release-0.4.6.6.md`.
+Publication is in progress; push main only after the uploaded release asset is
+verified and the release is public.
+
+## Ticker no longer covers host controls — installed 2026-08-31 11:27 PDT
+
+The detached painter's floating Tool window was at native level 3 above the
+level-0 host. `DetachedPainterTicker` now matches the audience window's level
+and orders only its own window directly above that audience window. The ticker
+ignores mouse input, hides when its output is minimized/hidden, and hides on
+ordering failure rather than leaving a floating strip. No native mpv view
+reparenting, host/audience global raise, audio, queue, history, or server edits.
+
+307 regressions and eight isolated native checks pass. Actual installed host
+toolbar is visibly uncovered, and a normal mouse click on its bottom Settings
+button opened Settings successfully; closed without changes. No new Python
+errors or native crashes. History and server configuration preserved.
+Normal app `/Applications/SingWS.app`, still version 0.4.6.5, executable SHA-256:
+`2af5d6fe2909af944ea820172d981858285da621e025ff31f4640d261462edfe`.
+Frozen code, native loads, architecture/macOS compatibility and strict signing
+verified. Previous app/data and private desktop evidence are in
+`../local-installs/20260831-112154/`. Nothing published. Source changes only main
+relative to prior candidate. Report and commands:
+`docs/verification/2026-08-31-ticker-host-overlap.md`.
+The external-display/full-song KaraFun rehearsal remains pending.
+
+## KaraFun false completion fixed and installed — 2026-08-31 11:08 PDT
+
+The operator confirmed they did NOT stop/skip the song. That resolves the audit
+question below: the 10:50:25 completion was incorrect. `0.2.18.1.py` no longer
+uses empty-queue text as idle, retries only explicit idle before any playing
+hint, and completes only on idle corroborated by fresh end-clock evidence or
+the verified duration since confirmed playback. Unknown readings, early idle
+and watchdog expiry cannot advance rotation. The independent watchdog now
+requests manual Complete if it cannot verify an end, rather than forcing it.
+
+18 new state/timer scenarios and 325 combined regressions pass. Manual Complete,
+normal-end single-observation transitions and stale-session guards are covered.
+No renderer/audio/server changes or history cleanup. The slow accessibility
+scrape remains; physical full-song/end/next-video testing is still required.
+Normal-app candidate build/receipts: `../local-installs/20260831-110236/`.
+Report: `docs/verification/2026-08-31-karafun-false-completion.md`.
+Installed `/Applications/SingWS.app` (normal identity/profile, version 0.4.6.5),
+executable SHA-256:
+`9adb6b0c305c03bd150a3e0c085b475f699590e7f8c9853d274f66cff1740dff`.
+All 18 safety cases also passed against the actual frozen monitor in the new
+bundle. Frozen-source, 432 architecture, 840 minimum-macOS, native-load and
+strict signing checks pass. Previous app and normal data backed up in the
+receipt directory. Launched at 11:08: normal library and relay loaded, requests
+closed, audience artwork/ticker visually checked, no new error/crash report.
+Server settings and history content remain unchanged. No publication or
+physical karaoke playback by this task. Full-song/end/next-video rehearsal is
+still needed; do not assume the old permission grant necessarily survives an
+ad-hoc rebuilt executable if macOS requests it again.
+
+## Latest actual-app log audit — 2026-08-31 ~10:52 PDT
+
+Read-only audit of the 10:47/10:49 candidate sessions found no new matching
+native crash report or Python traceback; server calls are successful. The
+earlier Accessibility failure was resolved after the operator restarted:
+KaraFun search/activation/fullscreen verification succeeded at 10:49–10:50.
+
+Two monitor behaviors need attention: unknown state (`idle=0 playing=0`) caused
+an automatic result retry at 10:50:01, and the first idle reading at 10:50:25
+completed a 263-second song with 251 seconds remaining. Local Lol history now
+contains one play, acknowledged by the server on its first attempt. Asked the
+operator whether they stopped/skipped intentionally; awaiting their answer
+before choosing early-stop versus bad-idle handling. Do not delete that test
+performance or manipulate their active session without instruction.
+
+Simulated the exact installed frozen monitor with fake UI/network/timers:
+unknown -> playing x3 -> idle produces retry at 10s and completion at 34.4s.
+No real clicks/playback or live data writes. Probes still take 4.9–10s. The
+saved External Headphones device is absent and the normal default fallback is
+active. No code/build/settings/server changes were made. Full findings and
+smallest proposed changes: `docs/verification/2026-08-31-current-app-log-audit.md`.
+
+## Actual app installed; separate test setup retired — 2026-08-31 10:47 PDT
+
+The operator explicitly requested future manual testing in the actual app with
+the normal profile/server, not a separate SingWS Test setup. This preference is
+now in AGENTS.md; automated tests still require scratch SINGWS_HOME.
+
+`/Applications/SingWS.app` now contains the same production source hashes as the
+private candidate the operator tested, rebuilt using the normal Intel spec and
+`com.singws.app` identity. No TEST title/profile hook. Version is still 0.4.6.5;
+no publication, installer replacement, or server configuration change occurred.
+Installed executable SHA-256:
+`4ab3b8f768f4d06081e18f02f5d6acd69289617f568af508b09099f566367751`.
+
+The old app ZIP and 16 normal profile JSON/SQLite files were backed up under
+`../local-installs/20260831-104012/`. The profile backup is private and contains
+credentials: do not publish it. Old ZIP integrity/hash, SQLite quick_check,
+57 focused regressions, frozen code equivalence, 432 Intel architecture checks,
+840 macOS-12 checks, native-library loads and strict deep signing passed.
+
+The installed app was launched, loaded the normal 133,113-track library and
+connected its host relay; request accepting remained off. Its exact frozen
+catalog method with normal settings returned 94 online KaraFun rows for Adele.
+This was a read-only lookup, not a physical playback test. The initial screenshot
+shows the audience artwork/ticker and a macOS location-permission prompt. The
+operator was asked to choose Allow or Don't Allow; that privacy choice was not
+automated. At 10:48:34 the operator started a KaraFun request under Lol and
+reached KaraFun launch, but the app reported missing macOS Accessibility
+permission. The operator was notified to enable the normal SingWS app in
+Privacy & Security > Accessibility, then quit/reopen it. Do not grant that
+permission automatically or interrupt the operator's active test. Successful
+KaraFun playback/completion/next-video rehearsal remains pending.
+
+The separate app was moved from personal Applications to Trash. Its test data,
+ZIP and logs are archived at `../retired-test-builds/20260831-040139/`; the old
+launcher is disabled. No test history/settings were imported into the normal
+profile. The independent-catalog proposal below is superseded by this choice.
+Manual song completions now affect actual history/Fun Stats, as explained to
+the operator. Build/install/search receipts: `../local-installs/20260831-104012/`.
+
+## Private test KaraFun search diagnosis — 2026-08-31
+
+The operator reports the other fixes passed the tests they ran; KaraFun playback
+is still untested because catalog results are absent. This is operator-reported
+QA, not confirmation of every individual checklist item or hardware scenario.
+
+The installed test executable still matches `19f881e6...76dad`. Its frozen
+`SongSearchThread._karafun_rows` returns immediately without a tenant. Both
+KaraFun provider/search toggles are enabled, but the current test settings have
+no `user`/`tenant` and use `https://beta.wskar.com`. A verified HTTPS catalog GET
+to that beta host returns 404; the production public endpoint returns HTTP 200
+and 94 Adele results without credentials. Thus there are two configuration
+obstacles, not evidence of a KaraFun playback regression. No SingWS bundle
+process was running at the diagnostic check.
+
+The private profile's isolation omitted the catalog dependency. Do not fix this
+by copying live host credentials: that would reconnect rehearsal queue/history.
+The smallest proposed code change is independent public catalog access without
+a tenant requirement, using an explicit working catalog URL for the test app.
+This diagnosis did not change source, the installed bundle, settings or server.
+KaraFun search remains blocked in this test build pending that change.
+
+## Statistics server deployed — 2026-08-31 10:23 PDT
+
+The user explicitly requested production deployment. The five coordinated PHP
+files are now live on wskar.com: `api/v1/singer_history_sync.php`,
+`api/v1/manage_singer_history.php`, `submitreq.php`, `history_admin.php`, and
+`funstats.php`. Deployed hashes match the tested source. WSK requests were
+closed, and other open tenant flags had stale/empty queues rather than recent
+show activity.
+
+All 16 existing tenant history databases and the previous five PHP files were
+backed up under `/root/singws-statistics-deploy/20260831T172139Z/backup`, outside
+the webroot in a private directory. Only the additive `provider_metadata`
+column was explicitly migrated in WSK history. Every pre-existing WSK history
+row and tombstone matches the backup; queue, settings, config and request
+accepting flag hashes are unchanged. No history reset or app release occurred.
+
+Five isolated PHP suites passed again. The production PHP interpreter and the
+deployed helper each passed a scratch-database probe: twelve syncs preserve one
+streaming performance and its provider ID. Live Fun Stats and history admin
+return HTTP 200; the updated Fun Stats label confirms new code is served.
+Authenticated history sync returns HTTP 200/ok with zero singers/songs/plays;
+history management still rejects an unauthenticated request with HTTP 401.
+
+Deployment manifest, HTTP checks and receipt:
+`/Users/Daniel/Documents/SingWS/server-deployments/20260831T172139Z/`.
+Guarded code-only rollback is prepared at the remote deployment directory's
+`rollback.py`; it was not executed. Do not restore an old database over new
+performances. Full report: `../SingWS-Server/deploy/2026-08-31-statistics.md`.
+
+The separate SingWS Test profile remains disconnected from the live website;
+deployment did not change its credentials or upload its test history. The
+operator has confirmed the waveform works in that build. Remaining playback
+rehearsal and any deliberate live-client connection are separate steps.
+
+## Private Intel test build — 20260831-040139, not released
+
+The user requested a build to rehearse before releasing. A separately named
+and identified app now exists at
+`/Users/Daniel/Applications/SingWS Test.app` (bundle ID `com.singws.app.test`).
+Executable SHA-256:
+`19f881e6fc5ff04ef984afd9f0d7c168a584669bcb1d0616de2d32a00ae76dad`.
+The public version remains 0.4.6.5; no release, installer replacement or server
+deployment occurred. `/Applications/SingWS.app` is still `ecfcb0e0...a0489`.
+
+The test bundle is frozen from a source snapshot with all pending fixes. Only
+that snapshot adds the timestamp to the host window title and a runtime hook
+defaulting SINGWS_HOME to a persistent private test profile. The profile,
+launcher, ZIP, exact source diffs, manifest and checklist are in
+`/Users/Daniel/Documents/SingWS/Test Builds/20260831-040139/`.
+It copies the library, playlist, artwork and caches but starts with empty
+queue/history, no website credentials and no automatic updates/log emailing.
+Real media files are referenced, not duplicated or changed.
+
+Preparing this profile revealed that song_index and three BGM playlist paths
+ignored SINGWS_HOME. `song_index.py` and `0.2.18.1.py` now honor the same data
+root as the rest of the app; the ordinary default is unchanged. Three tests in
+`test_profile_isolation.py` verify database/phrase paths and playlist
+load/analysis/save without altering a simulated live profile.
+
+559 desktop regressions, 54 native-backend tests and five isolated PHP suites
+pass. The bundle passes 432 Intel architecture checks, 840 macOS-12 checks,
+native-library load probes and strict deep signing. Actual frozen main,
+BGM engines, transition analysis, song index and profile hook match the build
+snapshot. The packaged helper handles a missing file then measures valid audio.
+
+The test app was launched, but its initial GUI inspection reached the macOS
+Documents-access permission prompt. The user was asked to click Allow; startup
+and physical playback cannot yet be signed off. The old app declined a graceful
+AppleScript quit (-128); it was not killed. Ask the operator to close that copy
+before playback tests. Only the built-in display is attached. Full status:
+`docs/verification/2026-08-31-private-test-build.md`.
+
+## Log audit / safe crash reporting — source fix, not installed
+
+Reviewed the user's three Aug 30–31 logs and macOS crash reports. The four
+14:30 Aug 30 native aborts belong to a temporary `/private/tmp/.../SingWS.app`
+bundle, not the evening installed session. Their faulting stacks enter
+`QMessageBox.critical` through Python's exception hook. The current handler
+still tries to construct that widget without checking for a GUI application.
+
+`exception_handler` now shows its existing dialog only on a live QApplication's
+GUI thread, never during shutdown or in headless/startup contexts. Report-write
+and optional send failures cannot suppress the original exception on stderr;
+the dialog no longer claims a report was saved if writing failed. Eight isolated
+process tests cover these cases, including a real unhandled exception exiting
+with Python status 1 rather than a native abort. Two regressions failed before
+the change. The combined app/history/playback/analysis run passes 530 tests.
+
+The 01:35:14 completion conflict for request 1788161651096 recovered at
+01:35:20 on attempt 2. No server lifecycle changes were justified by that log.
+Older helper timeouts and unsupported-compression records precede the installed
+analysis fixes and documented archive recovery below. Preview-server timeouts,
+retryable decoder errors, and startup stalls remain observations, not proven
+new root causes. Details and exact test command:
+`docs/verification/2026-08-31-log-audit.md`.
+
+Installed executable remains `ecfcb0e0...a0489` (0.4.6.5). The app was running
+and its live log continued normal polling during this audit; all tests used
+scratch SINGWS_HOME. No build, install, server deployment, media edit, or live
+show-data reset was performed. Rehearse a rebuilt app before show installation.
+
+## Singer/Fun Stats inflation — source fix in both repos, not deployed
+
+Reproduced the cause of Shawn's growing counts with real app/PHP sync round
+trips against scratch SQLite. Python kept KaraFun provider/track identities;
+PHP stripped provider metadata and returned the same song as a local row.
+Subsequent syncs summed the streaming records into that growing local snapshot.
+The pre-reset backup shows this exact pattern (Self Aware: local 2,925 plus two
+KaraFun rows of one play each; Apocalypse: local 1,555 plus a KaraFun row of one).
+The deployed PHP file hashes match the pre-fix source.
+
+Server history now retains provider metadata in an additive JSON column and
+uses the same song keys as the app, including provider-specific deletions.
+Duplicate cumulative snapshots merge by maximum, not addition. Desktop remote
+merges preserve newly completed plays even when a response has an equal/older
+timestamp. Singer totals returned by sync derive from the retained song counts.
+Web submission no longer records a performance; the existing host completion
+path does. Fun Stats ignores zero-play saved songs. The recent-song card is
+accurately labelled with lifetime totals for recently sung songs: the existing
+data does not contain dates for every performance, so it cannot calculate true
+30-day totals.
+
+514 combined app regressions pass, including actual Python↔PHP round trips,
+provider preservation, repeated sync, legitimate repeats, stale responses,
+deletion, and duplicate/aborted completion callbacks. Five PHP suites cover
+history, Fun Stats, request retries, singer management and pending completion,
+using a disposable server copy. Run them safely with
+`python3 ../SingWS-Server/tools/run_history_regressions.py`.
+Full findings, test commands and rollout boundaries:
+`docs/verification/2026-08-31-statistics-counts.md`.
+
+The cleared live history and its backups were not modified. Existing inflated
+song snapshots cannot be repaired reliably from aggregate totals; do not
+restore the old history. These changes are not in the installed app or on
+wskar.com yet. Deploy the coordinated server files outside a show, then build
+and validate the app with the other pending fixes before installation.
+
+## Background track transitions — source fix, not installed
+
+The user requests smoother BGM crossfades with no silence between tracks.
+The old scheduler selected `verified_dead_tail` but still counted back from
+the file's duration, shortening the overlap to two seconds. Show-log examples
+include Moliy / Shake It To The Max (21:50:03), Dorothy / TOMBSTONE TOWN
+(22:28:25), and Jimin / Who (23:06:37). Their cached silent tails are 2.6,
+2.2, and 2.2 seconds respectively: that policy could begin after audible
+content had already finished. Paired native logarithmic slides also did not
+use the equal-power curve already described in the player.
+
+`0.2.18.1.py` now schedules against validated audible content bounds and
+compensates for queued BASS audio. Known incoming silence is skipped with a
+small analysis margin; unknown/stale metadata retains the full file bounds.
+Late/manual transitions shorten to fit remaining audio, with a 100ms recovery
+fade after EOF or detected silence. A worker prepares the next BASS source;
+its result is discarded after a playlist, source, or engine change.
+
+`bass_background_engine.py` holds the next source paused, not merely muted,
+and applies paired equal-power BASSmix envelopes on the native audio clock.
+Normalization and mixer-master fades remain separate. Completion follows the
+incoming audible position, so pausing cannot cause a GUI timer to promote an
+unfinished fade. The meter ignores paused preloads. The libmpv fallback accepts
+the same incoming content offset; its mixing implementation is unchanged.
+
+Native decode-only mixer tests cover continuity, normalized power, untouched
+preloaded intros, cancellation, partial envelope failure, EOF and short files.
+Scheduler tests cover silent padding, queued audio, late/manual starts,
+stop-after-current, pause, and stale preload results. Details and commands:
+`docs/verification/2026-08-31-bgm-crossfades.md`.
+Installed 0.4.6.5 remains `ecfcb0e0...a0489`. No build/install or physical-output
+listening test was performed. Do not present this as an installed/show-tested
+fix; a rebuilt app still needs repeated playlist transitions and karaoke
+interrupt/resume checks with the actual output device.
+
+## KaraFun premature completion / orphaned launch — source fix, not installed
+
+Dan / Sugarcult / Memory was marked complete at 00:12:59 in
+`singws_2026-08-30.log`, while search was still running. The worker activated
+the result and published playing at 00:13:09 after the active session and
+Complete dialog were already gone. No monitor existed at the premature
+completion, and no monitor completion event was logged.
+
+Reproduced a matching trigger against the pre-change dialog: Qt Return invokes
+the default Complete button. The dialog was shown/activated after automation
+started, while its search sends Return. Actual key routing that night is not
+logged, but the old dialog's erroneous Return behavior is reproduced.
+
+The dialog now has no default/auto-default buttons, opens before the launch
+worker, and does not activate itself for automatic playback. Explicit Complete
+still works. Launch script calls check active-session identity before/after;
+queued handoff/fade/success callbacks ignore ended sessions. Monitor results,
+queued completions, and dialog buttons are bound to their original active
+session, even if the same request object is later replayed. Finish requests now
+log action and submission state. Already-running external AppleScript cannot
+be interrupted by these Python checks; they prevent subsequent launch actions
+and stale result application.
+
+Added `test_karafun_lifecycle.py`: keyboard versus explicit completion,
+cancellation during search, old-dialog rejection, and monitor completion versus
+a replacement session. 136 focused lifecycle/provider/performance tests pass
+with scratch SINGWS_HOME and qtvenv offscreen. Live logs stayed unchanged.
+The installed 0.4.6.5 executable is still `ecfcb0e0...a0489`; no new build
+has been installed. Before treating this as show-ready, run a built-app test:
+KaraFun search → full song → automatic/manual completion → next local CDG/MP4
+with visible audience video, ticker, and correct focus; repeat with a cancelled
+launch and a returned/replayed request. This is not yet end-to-end validated.
+
+## Respect laptop background work — source fix, not installed
+
+The user reports SingWS raising over other laptop apps. Installed 0.4.6.5
+still contains the one-second ticker restack guard and unconditional KaraFun
+host activation; its hash remains the documented `ecfcb0e0...a0489`.
+The ticker guard now skips restacking while the application is inactive,
+without stopping playback or rendering. Delayed startup focus requests only
+activate the host if SingWS is still foreground. KaraFun host-return requests
+(including the delayed retry) only reclaim focus while SingWS or KaraFun is
+foreground; a browser/editor remains in front. Transparent audience restoration
+no longer explicitly activates the entire application.
+
+Audience geometry, native child ordering, display placement and playback are
+otherwise unchanged. Three regressions cover background ticker restacking,
+foreground-app selection and delayed focus restoration. Verify with scratch
+`QT_QPA_PLATFORM=offscreen ./qtvenv/bin/python -m unittest
+test_performance_safety test_karafun_provider`. Native macOS focus behavior and
+audience ticker visibility while switching apps still require an installed
+on-screen test; these changes have not been built or installed.
+
+## Live singer-history reset completed 2026-08-31
+
+At the user's request, local and wskar tenant `wsk` singer history were backed
+up and cleared while SingWS was closed and the local queue empty. The legacy
+server `history` table was also cleared so old totals cannot reappear when a
+singer returns. Deletion markers were retained/added to block older sync data.
+Live history sync and Fun Stats both verify zero singers and performances.
+Backups and reset details:
+`../history-reset-backups/20260831-021037/README.md`.
+Queue, library and settings were unchanged. This was a data reset, not a fix
+for the underlying statistics inflation. Do not restore old history casually.
+
+## Audience rotation: hide singers without songs — source only
+
+At the operator's request, `RotationView.update_rotation` excludes empty and
+all-skipped-song slots from the audience rail, displayed count, rotation-start
+header and upcoming-singer panels. Host slots, ordering, markers, history and
+server data are untouched. The existing model-view regression now verifies
+the new audience filtering and preservation of host data. This change is not
+built or installed; installed 0.4.6.5 remains unchanged.
+
+## KaraFun activation and slow verification — source fix, not installed
+
+Athena / Mahalia / Sober in `singws_2026-08-30.log.2026-08-30`:
+search began 23:56:22, exact result at :30, renderer handoff finished :53
+after a retry, first idle probe at 23:57:09, recovery at :09, first positive
+playback hint at :28 (with an incorrect manual warning), confirmation at :46.
+These are local automation delays; logs do not establish a streaming/network
+failure or the exact instant audio started. The installed executable matches
+the documented 0.4.6.5 hash and contains the earlier nonblocking handoff fix.
+
+`0.2.18.1.py` now completes result activation and its existing 0.8-second
+settling delay before scheduling the renderer handoff, preventing overlapping
+coordinate-click sequences. Completion polling reads role plus only relevant
+button/static-text attributes, instead of name/description/help/value on every
+node; polls taking >=4 seconds log their measured duration. A first positive
+playing hint suppresses the erroneous manual-start warning while the second
+observation is pending. Existing matching, renderer recreation, screen placement,
+two-observation confirmation and end-of-song behavior remain in place.
+
+Focused tests: scratch-data `QT_QPA_PLATFORM=offscreen ./qtvenv/bin/python -m unittest
+test_karafun_provider test_performance_safety`. The new monitor simulation covers
+idle recovery followed by slow positive observations without a false warning.
+The generated monitor script compiles with `osacompile`. No live automation
+was executed; actual startup speed and display behavior still need a built-app
+song test before shipping. The now-singer animation fix below is also unbuilt.
+
+## Now-singer bar animation — source fix, not built or installed
+
+The operator card's `BarLevelMeter` still expected level samples from retired
+audio paths; current mpv playback has no level tap. It now accepts a playback
+provider and uses decorative motion when no measurement is available. The host
+gates this on karaoke playback and its pause state. Measured silence and stale
+samples retain their existing zero-level behavior; stopping still stops the
+timer. No audio routing, DSP, transport levels, or end detection changed.
+
+Changed `0.2.18.1.py` and added two regressions in
+`test_performance_safety.py`. All 109 tests pass using
+`SINGWS_HOME=$(mktemp -d) QT_QPA_PLATFORM=offscreen ./qtvenv/bin/python -m unittest test_performance_safety`.
+An isolated offscreen widget run also captured distinct timer-driven active
+frames and a paused baseline. The live log count remained 99,025 lines.
+Installed 0.4.6.5 executable hash still matches `ecfcb0e0...a0489` above;
+decompressed main bytecode confirms the legacy provider and absence of this fix.
+A built-app playback/visual check remains before shipping.
 
 ## Same-version 0.4.6.5 release refresh
 

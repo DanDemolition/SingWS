@@ -118,6 +118,7 @@ class DetachedPainterTickerTests(unittest.TestCase):
             self.assertTrue(hasattr(ticker, "set_effects_enabled"))
             self.assertTrue(ticker._view.testAttribute(Qt.WidgetAttribute.WA_NativeWindow))
             self.assertTrue(ticker._view.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+            self.assertTrue(ticker._view.windowFlags() & Qt.WindowType.WindowTransparentForInput)
         finally:
             ticker.close()
             ticker.deleteLater()

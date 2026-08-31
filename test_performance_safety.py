@@ -519,7 +519,7 @@ class PerformanceSafetyTests(unittest.TestCase):
 
     def test_noop_server_sync_avoids_history_rebuild_and_repeat_request_diagnostics(self):
         history_merge = function_source("_merge_remote_singer_history")
-        self.assertIn("if local_song != remote_song:", history_merge)
+        self.assertIn("if merged_song != local_song:", history_merge)
         self.assertIn("if changed:", history_merge)
         self.assertIn('self._schedule_singer_history_refresh(reason="remote_merge")', history_merge)
         request_diag = function_source("_log_remote_request_diag")
@@ -563,6 +563,43 @@ class PerformanceSafetyTests(unittest.TestCase):
         meter.set_active(False)
         self.assertFalse(meter._timer.isActive())
         self.assertEqual(meter._heights, [0.0] * meter._n_bars)
+        meter.deleteLater()
+        app.processEvents()
+
+    def test_rotation_meter_animates_without_levels_and_settles_when_paused(self):
+        app = QApplication.instance() or QApplication([])
+        playing = [True]
+        meter = self.singws.BarLevelMeter(
+            level_provider=lambda: (None, None),
+            playback_provider=lambda: playing[0],
+        )
+        meter.set_active(True)
+        for _ in range(20):
+            meter._tick()
+        moving = list(meter._heights)
+        self.assertGreater(max(moving), 0.1)
+        meter._tick()
+        self.assertNotEqual(moving, meter._heights)
+        playing[0] = False
+        for _ in range(20):
+            meter._tick()
+        self.assertLess(max(meter._heights), 0.04)
+        meter.set_active(False)
+        self.assertFalse(meter._timer.isActive())
+        meter.deleteLater()
+        app.processEvents()
+
+    def test_rotation_meter_preserves_measured_silence_and_stale_sample_handling(self):
+        app = QApplication.instance() or QApplication([])
+        sample = [-60.0, self.singws.time.monotonic()]
+        meter = self.singws.BarLevelMeter(
+            level_provider=lambda: tuple(sample), playback_provider=lambda: True,
+        )
+        self.assertEqual(meter._sample_level(), 0.0)
+        sample[0] = -12.0
+        self.assertGreater(meter._sample_level(), 0.5)
+        sample[1] -= 2.0
+        self.assertEqual(meter._sample_level(), 0.0)
         meter.deleteLater()
         app.processEvents()
 
@@ -1353,6 +1390,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('settings.get("ticker_enabled", True)', guard)
         self.assertNotIn("_reassert_show_window_surface", guard)
         self.assertNotIn("orderFront", guard)
+        self.assertIn("QApplication.applicationState() != Qt.ApplicationState.ApplicationActive", guard)
         self.assertIn('reassert("video_window_show", delays=(0, 120, 400))', show_event)
         self.assertIn('reassert_window("video_window_show")', show_event)
         native_raise = function_source("_raise_ticker_surface")
@@ -1367,6 +1405,47 @@ class PerformanceSafetyTests(unittest.TestCase):
         parent_reassert = function_source("_reassert_show_window_surface")
         self.assertIn("orderFrontRegardless", parent_reassert)
         self.assertIn("_active_external_karafun", parent_reassert)
+
+    def test_background_ticker_guard_does_not_raise_or_hide_output(self):
+        qt = self.singws.Qt
+        fake = types.SimpleNamespace(
+            isVisible=lambda: True,
+            _external_owner=types.SimpleNamespace(settings={"ticker_enabled": True}),
+            ticker=types.SimpleNamespace(isVisible=lambda: True),
+            _raise_ticker_surface=mock.Mock(),
+        )
+        with mock.patch.object(self.singws.QApplication, "applicationState",
+                               return_value=qt.ApplicationState.ApplicationInactive):
+            self.singws.VideoWindow._tick_ticker_surface_guard(fake)
+        fake._raise_ticker_surface.assert_not_called()
+        with mock.patch.object(self.singws.QApplication, "applicationState",
+                               return_value=qt.ApplicationState.ApplicationActive):
+            self.singws.VideoWindow._tick_ticker_surface_guard(fake)
+        fake._raise_ticker_surface.assert_called_once()
+
+    def test_karafun_focus_restore_respects_other_foreground_apps(self):
+        qt = self.singws.Qt
+        frontmost = types.SimpleNamespace(localizedName=lambda: "Safari")
+        workspace = types.SimpleNamespace(sharedWorkspace=lambda: types.SimpleNamespace(
+            frontmostApplication=lambda: frontmost))
+        with mock.patch.object(self.singws.QApplication, "applicationState",
+                               return_value=qt.ApplicationState.ApplicationInactive), \
+             mock.patch.object(self.singws.sys, "platform", "darwin"), \
+             mock.patch.dict(sys.modules, {"AppKit": types.SimpleNamespace(NSWorkspace=workspace)}):
+            self.assertFalse(self.singws.KaraokeApp._can_restore_host_focus_after_karafun(None))
+            frontmost.localizedName = lambda: "KaraFun"
+            self.assertTrue(self.singws.KaraokeApp._can_restore_host_focus_after_karafun(None))
+
+    def test_delayed_focus_restore_does_not_activate_background_host(self):
+        fake = types.SimpleNamespace(
+            activateWindow=mock.Mock(),
+            _can_restore_host_focus_after_karafun=lambda: False,
+        )
+        with mock.patch.object(self.singws.QApplication, "applicationState",
+                               return_value=self.singws.Qt.ApplicationState.ApplicationInactive):
+            self.singws.KaraokeApp._activate_host_if_foreground(fake)
+            self.singws.KaraokeApp._activate_host_window_after_karafun(fake, attempt=1)
+        fake.activateWindow.assert_not_called()
 
     def test_rotation_announcement_is_separate_and_venue_scoped(self):
         ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")

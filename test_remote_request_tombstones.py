@@ -1868,7 +1868,7 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             songs = normalized["singers"]["john smith"]["songs"]
             self.assertEqual(list(songs.keys()), ["journey|dont stop believin"])
             song = songs["journey|dont stop believin"]
-            self.assertEqual(song["play_count"], 5)
+            self.assertEqual(song["play_count"], 4)  # Aliases are cumulative snapshots, not extra plays.
             self.assertEqual(song["last_performed_at"], 300)
             self.assertEqual(song["disc_id"], "KV-2")
 

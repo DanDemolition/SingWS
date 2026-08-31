@@ -830,6 +830,19 @@ def analyze_mp4_visual_offline(
     return analyze_video_tail_samples(samples, duration=total)
 
 
+def bgm_audio_window(record: TransitionAnalysis | None, duration: float) -> tuple[float, float]:
+    """Content bounds for background tracks only; preserve a small analysis margin."""
+    duration = max(0.0, _finite_float(duration, 0.0))
+    if record is None or not record.is_valid() or abs(record.duration - duration) > 1.0:
+        return 0.0, duration
+    margin = min(0.25, max(0.05, record.hop_seconds))
+    start = max(0.0, (record.audio_start or 0.0) - margin)
+    end = min(duration, record.audio_end + margin) if record.audio_end is not None else duration
+    if end <= start:
+        return 0.0, duration
+    return start, end
+
+
 def select_bgm_crossfade_seconds(
     record: TransitionAnalysis | None,
     *,
@@ -838,7 +851,7 @@ def select_bgm_crossfade_seconds(
     """Choose a bounded BGM crossfade from cached metadata only.
 
     This policy never analyzes or seeks media. Missing/old metadata keeps the
-    established five-second behavior. A verified dead tail advances promptly;
+    established five-second behavior. A verified dead tail keeps the overlap;
     a confident natural fade gets a longer overlap; a hard ending gets a short
     transition. The player remains responsible for generation cancellation.
     """
@@ -853,7 +866,9 @@ def select_bgm_crossfade_seconds(
         return fallback, "audio_boundary_unavailable"
     dead_tail = max(0.0, duration - audio_end)
     if dead_tail >= 1.0:
-        return 2.0, "verified_dead_tail"
+        # The player schedules against audio_end, not the padded file end.
+        # Shortening the fade here used to delay it even further into silence.
+        return fallback, "verified_dead_tail"
     if fade_start is not None and fade_confidence >= 0.8:
         fade_length = max(0.0, audio_end - fade_start)
         return max(4.0, min(8.0, fade_length)), "natural_fade"
