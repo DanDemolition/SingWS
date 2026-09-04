@@ -69,12 +69,24 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertIn("id: scrollEdgeGlint", source)
         self.assertIn("visible: root.effectsEnabled", source)
 
-    def test_complete_rotation_layout_has_burn_in_orbit(self):
+    def test_rotation_layout_has_no_burn_in_orbit(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertIn('"rotation_burn_in_shift_enabled": True', source)
-        self.assertIn("def _advance_burn_in_shift(self):", source)
-        self.assertIn("self._burn_in_shift_timer.start(20000)", source)
-        self.assertIn("self._burn_in_layout.setContentsMargins", source)
+        self.assertNotIn("rotation_burn_in_shift_enabled", source)
+        self.assertNotIn("def _advance_burn_in_shift(self):", source)
+        self.assertNotIn("_burn_in_shift_timer", source)
+
+    def test_rotation_uses_raw_cdg_backdrop_without_show_composite(self):
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn('"rotation_cdg_backdrop_enabled": True', source)
+        self.assertIn("class RotationCdgBackdrop(QWidget):", source)
+        self.assertIn("self._cdg_backdrop_timer.start(125)", source)
+        self.assertIn("central_layout.setCurrentWidget(safe_area)", source)
+        self.assertIn('== "cdg"', source)
+        self.assertIn('getattr(plugin, "grabFrame", None)', source)
+        self.assertIn("KeepAspectRatioByExpanding", source)
+        self.assertIn("painter.setOpacity(self._opacity)", source)
+        backdrop = source[source.index("class RotationCdgBackdrop"):source.index("class RotationView")]
+        self.assertNotIn("loadBackgroundVideo", backdrop)
 
     def test_vfx_stay_in_the_qt_quick_scene(self):
         source = mod.QML_ROTATION_RAIL_SOURCE

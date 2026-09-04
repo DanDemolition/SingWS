@@ -18,7 +18,6 @@ APP_NAME="SingWS"
 ENTRY="0.2.18.1.py"
 SPEC="SingWS-arm64.spec"
 PYTHON=".venv/bin/python"
-DMGBUILD=".venv/bin/dmgbuild"
 
 if [[ "$(uname -m)" != "arm64" ]]; then
     echo "This dedicated build must run natively on an Apple Silicon Mac."
@@ -26,7 +25,7 @@ if [[ "$(uname -m)" != "arm64" ]]; then
 fi
 
 for required in \
-    "$ENTRY" "$SPEC" "$PYTHON" "$DMGBUILD" \
+    "$ENTRY" "$SPEC" "$PYTHON" \
     mpv_karaoke_transport.py MoltenVK_icd.json constraints-macos12.txt \
     SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py \
     tools/verify_macos_min_version.py; do
@@ -171,7 +170,7 @@ codesign --force --deep --sign - \
 codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"
 
 rm -f "$DMG_NAME"
-SINGWS_DMG_APP_ROOT="$STAGING" "$DMGBUILD" \
+SINGWS_DMG_APP_ROOT="$STAGING" "$PYTHON" -m dmgbuild \
     -s dmg_settings.py "SingWS-${APP_VERSION}" "$DMG_NAME"
 hdiutil verify "$DMG_NAME"
 

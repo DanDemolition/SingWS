@@ -30,6 +30,7 @@ class KaraFunLifecycleTests(unittest.TestCase):
         dialog = host._active_external_karafun_dialog
         self.addCleanup(dialog.close)
         self.assertTrue(dialog.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating))
+        self.assertTrue(dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
         buttons = dialog.findChildren(QPushButton)
         for button in buttons:
             self.assertFalse(button.autoDefault())

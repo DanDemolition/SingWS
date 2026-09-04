@@ -425,15 +425,14 @@ static GLuint makeProgram(void) {
         // the framebuffer; relying on source alpha left an opaque palette
         // rectangle on some Intel OpenGL child surfaces.
         // libmpv has already scaled the 300x216 CDG into this texture, so
-        // edge texels around glyphs contain a substantial blend of the palette
-        // background. Key that full fringe, not only exact/near-exact blue.
-        // CDG foreground and outline palette colours remain well outside this
-        // distance on the tested blue, black, white and yellow combination.
-        // Title-card outlines can be a much darker interpolation of a blue or
-        // cyan background. Extend the key only along that low-red colour
-        // family; this removes the cyan tracing without swallowing the purple
-        // logo (r=.6), green artwork, white/yellow text, or black outlines.
-        "if(delta<0.42||(fg.r<0.20&&delta<0.75))discard;"
+        // The texture is rendered at CDG's native 300x216 resolution and the
+        // visible pass uses nearest filtering, so only a small tolerance is
+        // needed for the sampled palette background. The previous 0.42/0.75
+        // key swallowed muted pre-wipe lyric colours used by some Sound Choice
+        // discs: the highlight wipe appeared, but the words ahead of it did
+        // not. Preserve those palette entries and remove only the background
+        // plus its narrow interpolation fringe.
+        "if(delta<0.16||(fg.r<0.20&&delta<0.28))discard;"
         "color=vec4(fg.rgb,1.0);return;}"
         // Foreground composite mode. Feather only the CDG protected border
         // (6 of 300 columns); lyrics begin inside it and remain fully opaque.

@@ -27,7 +27,8 @@ class SingerHistoryCountTests(unittest.TestCase):
         php = shutil.which("php")
         if not php:
             self.skipTest("PHP with SQLite3 is required for the app/server integration test")
-        server = Path(__file__).resolve().parents[1] / "SingWS-Server"
+        # The app and server now share one consolidated SingWS workspace.
+        server = Path(__file__).resolve().parent / "SingWS-Server"
         # No endpoint/auth/tenant setup: require helper definitions, and operate
         # exclusively on a new SQLite file under TemporaryDirectory.
         code = r'''

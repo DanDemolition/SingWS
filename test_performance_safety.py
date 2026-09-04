@@ -753,6 +753,35 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("[self presentView:_outputView]", bridge)
         self.assertIn("singws_bridge_refresh_views", bridge)
 
+    def test_host_preview_show_and_resize_refresh_retained_mpv_views(self):
+        source = MAIN_SOURCE
+        start = source.index("class PreviewWindow(QWidget):")
+        preview = source[start:source.index("class PerformanceWaveformWidget", start)]
+        self.assertIn("self._mpv_surface_refresh_timer.setSingleShot(True)", preview)
+        self.assertIn("self._mpv_surface_refresh_timer.start(180)", preview)
+        self.assertIn('refresh("host_preview_show_or_resize")', preview)
+        self.assertIn("def showEvent(self, event):", preview)
+        self.assertIn("def resizeEvent(self, event):", preview)
+
+    def test_screen_topology_change_refreshes_native_video_views(self):
+        """Connecting or removing AirPlay must recover the host preview."""
+        watcher = function_source("_ensure_screen_change_watcher")
+        self.assertIn("surface_refresh_timer.setSingleShot(True)", watcher)
+        self.assertIn("surface_refresh_timer.setInterval(600)", watcher)
+        self.assertIn(
+            'self._refresh_mpv_video_views("screen_topology_change")', watcher
+        )
+        self.assertIn(
+            'app.screenAdded.connect(lambda s: _log("screen added", s, True))',
+            watcher,
+        )
+        self.assertIn(
+            'app.screenRemoved.connect(lambda s: _log("screen removed", s, True))',
+            watcher,
+        )
+        self.assertNotIn("karaoke_transport.stop", watcher)
+        self.assertNotIn("karaoke_transport.play", watcher)
+
     def test_cdg_fill_covers_real_host_without_stretching_lyrics(self):
         """The decorative layer covers any display; CDG remains aspect-fit."""
         bridge = pathlib.Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")

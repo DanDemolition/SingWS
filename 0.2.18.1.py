@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.6.7"
+APP_VERSION = "0.4.6.8"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -895,7 +895,7 @@ from PyQt6.QtWidgets import (
     QListView, QLineEdit, QFileDialog, QLabel, QComboBox, QHBoxLayout, QGridLayout,
     QSizePolicy, QDialog, QDialogButtonBox, QListWidgetItem, QStyledItemDelegate, QStyle,
     QInputDialog, QMessageBox, QFrame, QMainWindow, QToolButton, QStyleOptionViewItem,
-    QStackedWidget, QSpinBox, QTreeWidget, QTreeWidgetItem,
+    QStackedWidget, QStackedLayout, QSpinBox, QTreeWidget, QTreeWidgetItem,
     QTreeWidgetItemIterator, QProgressDialog,
     QTextEdit, QPlainTextEdit
 )
@@ -3424,7 +3424,7 @@ DEFAULTS = {
         "polaroid_drop",
     ],
     "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
-    "rotation_burn_in_shift_enabled": True, # slowly orbit the complete audience layout by a few pixels
+    "rotation_cdg_backdrop_enabled": True, # raw live CDG behind the audience rotation layout at 50% opacity
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "loudness_scan_holds_for_playback": True, # False = keep scanning under a live song (faster pass, risks GUI stalls)
@@ -14564,6 +14564,35 @@ class PreviewWindow(QWidget):
         self.video_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_area)
 
+        # The embedded host preview is a native mpv child during karaoke. Qt
+        # can replace or detach its Cocoa drawable when the Show page is hidden,
+        # shown, or resized while the audience view keeps playing normally.
+        # Rebind only after the layout settles; restarting playback is neither
+        # necessary nor safe in the middle of a song.
+        self._mpv_surface_refresh_timer = QTimer(self)
+        self._mpv_surface_refresh_timer.setSingleShot(True)
+        self._mpv_surface_refresh_timer.timeout.connect(self._refresh_mpv_surface)
+
+    def _schedule_mpv_surface_refresh(self):
+        try:
+            self._mpv_surface_refresh_timer.start(180)
+        except Exception:
+            pass
+
+    def _refresh_mpv_surface(self):
+        owner = getattr(self, "_external_owner", None)
+        refresh = getattr(owner, "_refresh_mpv_video_views", None) if owner is not None else None
+        if callable(refresh):
+            refresh("host_preview_show_or_resize")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_mpv_surface_refresh()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_mpv_surface_refresh()
+
     def winId(self):
         return self.video_area.winId()
 
@@ -17879,6 +17908,44 @@ class RotationAnnouncementTicker(QWidget):
         painter.restore()
 
 
+class RotationCdgBackdrop(QWidget):
+    """Cover-cropped raw CDG frame behind the audience rotation interface."""
+
+    def __init__(self, parent=None, opacity=0.5):
+        super().__init__(parent)
+        self._frame = QPixmap()
+        self._opacity = max(0.0, min(1.0, float(opacity)))
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_frame(self, image):
+        frame = QPixmap.fromImage(image) if image is not None and not image.isNull() else QPixmap()
+        self._frame = frame
+        self.update()
+
+    def clear_frame(self):
+        if self._frame.isNull():
+            return
+        self._frame = QPixmap()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#101012"))
+        if self._frame.isNull() or self.width() <= 0 or self.height() <= 0:
+            return
+        scaled = self._frame.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        painter.setOpacity(self._opacity)
+        painter.drawPixmap(
+            (self.width() - scaled.width()) // 2,
+            (self.height() - scaled.height()) // 2,
+            scaled,
+        )
+
+
 class RotationView(QMainWindow):
     class SingerItemDelegate(QStyledItemDelegate):
         # 34pt with 30px of chrome made each row 136px tall on the 720p
@@ -17944,11 +18011,7 @@ class RotationView(QMainWindow):
             QMainWindow {
                 background-color: #101012;
             }
-            QWidget#rotationCentral {
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-                    stop:0 #121217,
-                    stop:1 #0f1014);
-            }
+            QWidget#rotationCentral { background: transparent; }
             QWidget#rotationSafe {
                 background: transparent;
             }
@@ -18334,16 +18397,15 @@ class RotationView(QMainWindow):
 
         central = QWidget(self)
         central.setObjectName("rotationCentral")
-        central_layout = QVBoxLayout(central)
+        central_layout = QStackedLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        self._cdg_backdrop = RotationCdgBackdrop(central, opacity=0.5)
+        central_layout.addWidget(self._cdg_backdrop)
         central_layout.addWidget(safe_area)
-        self._burn_in_layout = central_layout
-        self._burn_in_orbit = (
-            (0, 0), (2, 0), (4, 0), (6, 0),
-            (6, 2), (6, 4), (6, 6), (4, 6),
-            (2, 6), (0, 6), (0, 4), (0, 2),
-        )
-        self._burn_in_orbit_index = 0
+        # StackAll raises its current widget. Keep the interactive rotation UI
+        # above the painter backdrop regardless of platform creation order.
+        central_layout.setCurrentWidget(safe_area)
         self.setCentralWidget(central)
         self.list_widget.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -18359,10 +18421,10 @@ class RotationView(QMainWindow):
         self.last_scroll_percent = 0.0
         settings = getattr(parent, "settings", {}) if parent is not None else {}
         self.set_effects_enabled(bool(settings.get("rotation_vfx_enabled", True)))
-        self._burn_in_shift_enabled = bool(settings.get("rotation_burn_in_shift_enabled", True))
-        self._burn_in_shift_timer = QTimer(self)
-        self._burn_in_shift_timer.timeout.connect(self._advance_burn_in_shift)
-        self._burn_in_shift_timer.start(20000)
+        self._cdg_backdrop_enabled = bool(settings.get("rotation_cdg_backdrop_enabled", True))
+        self._cdg_backdrop_timer = QTimer(self)
+        self._cdg_backdrop_timer.timeout.connect(self._refresh_cdg_backdrop)
+        self._cdg_backdrop_timer.start(125)
         self.set_announcement_ticker(
             bool(settings.get("rotation_announcement_enabled", False)),
             settings.get("rotation_announcement_message", ""),
@@ -18377,21 +18439,36 @@ class RotationView(QMainWindow):
 
     ROTATION_QR_SIZE = 118
 
-    def _advance_burn_in_shift(self):
-        """Move every static audience-screen element through a six-pixel orbit."""
+    def set_cdg_backdrop_enabled(self, enabled):
+        self._cdg_backdrop_enabled = bool(enabled)
+        if not self._cdg_backdrop_enabled:
+            self._cdg_backdrop.clear_frame()
+
+    def _refresh_cdg_backdrop(self):
+        """Sample the native raw CDG texture; never use its show-screen composite."""
         try:
-            if not self._burn_in_shift_enabled or not self.isVisible():
+            owner = self.parent()
+            active = bool(
+                self._cdg_backdrop_enabled
+                and self.isVisible()
+                and owner is not None
+                and getattr(owner, "karaoke_playing", False)
+                and str(getattr(owner, "_current_karaoke_mode", "") or "").lower() == "cdg"
+            )
+            if not active:
+                self._cdg_backdrop.clear_frame()
                 return
-            self._burn_in_orbit_index = (
-                self._burn_in_orbit_index + 1
-            ) % len(self._burn_in_orbit)
-            x, y = self._burn_in_orbit[self._burn_in_orbit_index]
-            # Opposing margins keep the usable size constant. That moves the
-            # complete widget/native-surface composition without reflowing it.
-            span = 6
-            self._burn_in_layout.setContentsMargins(x, y, span - x, span - y)
+            plugin = getattr(owner, "_mpv_playback", None)
+            grab = getattr(plugin, "grabFrame", None)
+            if not callable(grab):
+                self._cdg_backdrop.clear_frame()
+                return
+            image = grab()
+            if image is not None and not image.isNull():
+                self._cdg_backdrop.set_frame(image)
         except Exception as exc:
-            _diag(f"[ROTATION] burn-in shift failed: {exc}")
+            self._cdg_backdrop.clear_frame()
+            _diag(f"[ROTATION] CDG backdrop refresh failed: {exc}")
 
     def _tick_rotation_clock(self):
         """Wall clock for the audience screen: 11:28 PM over SAT MAY 17."""
@@ -26590,7 +26667,7 @@ class KaraokeApp(QWidget):
             _diag(f"[AUDIO] Soundboard output switch failed: {e}")
 
     def _ensure_screen_change_watcher(self):
-        """Log screen topology changes.
+        """Log screen topology changes and reconnect native video surfaces.
 
         A display appearing, vanishing, or being re-laid-out invalidates the
         native windows Qt is painting into, and flushing a repaint to one of
@@ -26607,7 +26684,15 @@ class KaraokeApp(QWidget):
             if app is None:
                 return
 
-            def _log(event: str, screen=None):
+            surface_refresh_timer = QTimer(self)
+            surface_refresh_timer.setSingleShot(True)
+            surface_refresh_timer.setInterval(600)
+            surface_refresh_timer.timeout.connect(
+                lambda: self._refresh_mpv_video_views("screen_topology_change")
+            )
+            self._screen_surface_refresh_timer = surface_refresh_timer
+
+            def _log(event: str, screen=None, refresh_video: bool = False):
                 try:
                     who = ""
                     if screen is not None:
@@ -26618,9 +26703,16 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
 
-            app.screenAdded.connect(lambda s: _log("screen added", s))
-            app.screenRemoved.connect(lambda s: _log("screen removed", s))
-            app.primaryScreenChanged.connect(lambda s: _log("primary screen changed", s))
+                # AirPlay display changes can replace the NSWindow backing the
+                # embedded host preview while playback and the audience view
+                # continue normally. Wait for the topology burst to settle,
+                # then rebind both native drawables to their current Qt hosts.
+                if refresh_video:
+                    surface_refresh_timer.start()
+
+            app.screenAdded.connect(lambda s: _log("screen added", s, True))
+            app.screenRemoved.connect(lambda s: _log("screen removed", s, True))
+            app.primaryScreenChanged.connect(lambda s: _log("primary screen changed", s, True))
             self._screen_watcher_installed = True
             _log("initial topology")
         except Exception as e:
@@ -27187,6 +27279,16 @@ class KaraokeApp(QWidget):
         )
         rotation_vfx_cb.setChecked(bool(self.settings.get("rotation_vfx_enabled", True)))
         v.addWidget(rotation_vfx_cb)
+
+        rotation_cdg_backdrop_cb = QCheckBox("Live CDG backdrop on Singer Rotation (50%)")
+        rotation_cdg_backdrop_cb.setToolTip(
+            "Shows the currently playing raw CDG behind the Singer Rotation layout. "
+            "This does not use the transparent background or background video from Show Karaoke."
+        )
+        rotation_cdg_backdrop_cb.setChecked(
+            bool(self.settings.get("rotation_cdg_backdrop_enabled", True))
+        )
+        v.addWidget(rotation_cdg_backdrop_cb)
 
         _quick_row = QHBoxLayout()
         _quick_row.addWidget(QLabel("Animated GPU ticker / transitions:"))
@@ -28206,6 +28308,15 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        def on_rotation_cdg_backdrop_toggled(checked: bool):
+            self.settings["rotation_cdg_backdrop_enabled"] = bool(checked)
+            self.save_settings()
+            try:
+                if self.rotation_view is not None:
+                    self.rotation_view.set_cdg_backdrop_enabled(bool(checked))
+            except Exception:
+                pass
+
         def on_ticker_vfx_toggled(checked: bool):
             self.settings["ticker_vfx_enabled"] = bool(checked)
             self.save_settings()
@@ -28390,6 +28501,7 @@ class KaraokeApp(QWidget):
         lyric_bg_opacity_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
         show_screen_vfx_cb.toggled.connect(on_show_screen_vfx_toggled)
         rotation_vfx_cb.toggled.connect(on_rotation_vfx_toggled)
+        rotation_cdg_backdrop_cb.toggled.connect(on_rotation_cdg_backdrop_toggled)
         ticker_vfx_cb.toggled.connect(on_ticker_vfx_toggled)
         perf_debug_cb.toggled.connect(on_perf_debug_toggled)
         auto_update_cb.toggled.connect(on_auto_update_toggled)
@@ -50114,8 +50226,8 @@ class KaraokeApp(QWidget):
                 'set frontmost of kf to true',
                 'tell kf',
                 '-- KaraFun lyrics use a separate Dual-Screen Display window.',
-                '-- Recreate that window on every handoff. Reusing its previous',
-                '-- fullscreen Space is what can move KaraFun to the wrong display.',
+                '-- Reuse an existing renderer after explicitly leaving its old',
+                '-- fullscreen Space. Recreating it costs 6-10 seconds after audio starts.',
                 'set mainWindow to missing value',
                 'set outputWindow to missing value',
                 'repeat with candidateWindow in windows',
@@ -50128,6 +50240,29 @@ class KaraokeApp(QWidget):
                 'end try',
                 'end repeat',
                 'if mainWindow is missing value then return "NOT_READY"',
+                '-- Fast start commonly finds the renderer already open. Move and',
+                '-- raise that window directly instead of toggling it closed and',
+                '-- waiting 6-10 seconds for KaraFun to create it again.',
+                'if outputWindow is not missing value then',
+                'try',
+                'set value of attribute "AXFullScreen" of outputWindow to false',
+                'end try',
+                'repeat 30 times',
+                'try',
+                'if value of attribute "AXFullScreen" of outputWindow is false then exit repeat',
+                'end try',
+                'delay 0.1',
+                'end repeat',
+                'try',
+                'set value of attribute "AXMinimized" of outputWindow to false',
+                'end try',
+                f'set position of outputWindow to {{{x}, {y}}}',
+                f'set size of outputWindow to {{{width}, {height}}}',
+                'perform action "AXRaise" of outputWindow',
+                'delay 0.1',
+                'perform action "AXRaise" of outputWindow',
+                'return "READY"',
+                'end if',
                 'try',
                 'set elems to entire contents of mainWindow',
                 'set wp to position of mainWindow',
@@ -50166,35 +50301,12 @@ class KaraokeApp(QWidget):
                 'end try',
                 'end repeat',
                 'if bestButton is missing value then return "NO_DUAL_BUTTON"',
-                '-- The Dual Renderer control is a toggle. If its named window',
-                '-- already exists, click exactly once and wait for it to close.',
-                'if outputWindow is not missing value then',
-                'try',
-                'click at {bestButtonX, bestButtonY}',
-                'end try',
-                'repeat 20 times',
-                'set dualStillOpen to false',
-                'repeat with candidateWindow in windows',
-                'try',
-                'if name of candidateWindow is "Dual Renderer" then set dualStillOpen to true',
-                'end try',
-                'end repeat',
-                'if dualStillOpen is false then exit repeat',
-                'delay 0.1',
-                'end repeat',
-                'if dualStillOpen then return "DUAL_DID_NOT_CLOSE"',
-                '-- KaraFun debounces this toggle after removing the renderer.',
-                '-- Reopening immediately can be ignored even though the window is gone.',
-                'delay 0.8',
-                'end if',
-                '-- Click the same toggle exactly once to create a fresh renderer.',
+                '-- No renderer exists, so click the toggle once to create it.',
                 'try',
                 'click at {bestButtonX, bestButtonY}',
                 'end try',
                 'end try',
-                '-- Renderer creation regularly takes 6-10 seconds on the show',
-                '-- Mac. Wait here instead of rerunning the entire toggle',
-                '-- close/recreate sequence against a late window.',
+                '-- Renderer creation can still take 6-10 seconds on the show Mac.',
                 'repeat 100 times',
                 'set outputWindow to missing value',
                 'repeat with candidateWindow in windows',
@@ -52137,6 +52249,11 @@ class KaraokeApp(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("KaraFun Active")
         dlg.setModal(False)
+        # KaraFun is brought to the foreground after this companion appears.
+        # Keep the explicit Complete/Return controls reachable on the host
+        # display throughout the song, without activating them or allowing the
+        # automation worker's Return key to trigger a button.
+        dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         dlg.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not activate)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         layout = QVBoxLayout(dlg)
