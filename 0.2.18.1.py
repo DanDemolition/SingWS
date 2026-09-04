@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.6.6"
+APP_VERSION = "0.4.6.7"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -24458,6 +24458,7 @@ class KaraokeApp(QWidget):
     RELAY_HOSTS = {"wskar.com", "www.wskar.com"}
     NETWORK_RECOVERY_TICK_MS = 2000
     RELAY_RECOVERY_FETCH_SEC = 10.0
+    TERMINAL_RETRY_DELAYS_SEC = (5.0, 15.0, 30.0, 60.0, 120.0, 300.0)
     RELAY_HEALTHY_RECOVERY_FETCH_SEC = 60.0
 
     @staticmethod
@@ -24789,10 +24790,20 @@ class KaraokeApp(QWidget):
             )
         except Exception:
             terminal_pending = 0
-        if terminal_pending:
-            _diag(
+        now_wall = time.time()
+        terminal_due = sum(
+            1 for item in ((tombstones or {}).get("requests", {}) or {}).values()
+            if isinstance(item, dict)
+            and item.get("request_id")
+            and not item.get("server_synced_at")
+            and self._remote_tombstone_retry_due(item, now=now_wall)
+        ) if terminal_pending else 0
+        if terminal_due:
+            _diag_rate_limited(
+                "terminal_retry_watchdog",
                 "[REQUEST-LIFECYCLE] terminal retry watchdog "
-                f"pending={terminal_pending} reason=network_watchdog"
+                f"pending={terminal_pending} due={terminal_due} reason=network_watchdog",
+                30.0,
             )
             self._sync_remote_removal_tombstones_async("network_watchdog")
 
@@ -53922,6 +53933,27 @@ class KaraokeApp(QWidget):
             return "request_not_found" in error or "not found" in error
         return False
 
+    def _remote_tombstone_retry_due(self, tombstone: dict, *, now: float | None = None) -> bool:
+        """Bound terminal retries while still guaranteeing eventual recovery.
+
+        The network watchdog runs every two seconds. Without a per-record due
+        time, every offline tombstone was posted on every tick; six records
+        generated almost two thousand failed requests during one short outage.
+        New terminal actions still send immediately via ``force=True``.
+        """
+        if not isinstance(tombstone, dict) or tombstone.get("server_synced_at"):
+            return False
+        try:
+            attempts = max(0, int(tombstone.get("sync_attempts") or 0))
+            last_attempt = float(tombstone.get("last_sync_attempt_at") or 0.0)
+        except Exception:
+            return True
+        if attempts <= 0 or last_attempt <= 0:
+            return True
+        delays = tuple(float(value) for value in self.TERMINAL_RETRY_DELAYS_SEC)
+        delay = delays[min(attempts - 1, len(delays) - 1)]
+        return float(time.time() if now is None else now) >= last_attempt + delay
+
     def _sync_remote_removal_tombstones_async(self, reason: str = "manual", *, force: bool = False) -> None:
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
@@ -53941,17 +53973,20 @@ class KaraokeApp(QWidget):
                     return
                 if bool(state.get("_remote_tombstone_sync_active", False)):
                     return
-                state["_remote_tombstone_sync_last_ts"] = now
                 state["_remote_tombstone_sync_active"] = True
         except Exception:
             if bool(state.get("_remote_tombstone_sync_active", False)):
                 return
             state["_remote_tombstone_sync_active"] = True
         data = self._ensure_remote_request_tombstones()
+        now = time.time()
         pending = [
             dict(item)
             for item in (data.get("requests") or {}).values()
-            if isinstance(item, dict) and item.get("request_id") and not item.get("server_synced_at")
+            if isinstance(item, dict)
+            and item.get("request_id")
+            and not item.get("server_synced_at")
+            and (force or self._remote_tombstone_retry_due(item, now=now))
         ]
         if not pending:
             try:
@@ -53959,6 +53994,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             return
+        state["_remote_tombstone_sync_last_ts"] = now
 
         import requests
 

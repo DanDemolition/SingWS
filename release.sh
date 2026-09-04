@@ -113,14 +113,17 @@ git add \
   vendor/pybind11 vendor/signalsmith-linear vendor/signalsmith-stretch \
   0.2.18.1.py \
   mpv_playback_iina.py mpv_karaoke_transport.py libmpv_media_jobs.py \
+  native/mpv_bridge/bridge.mm \
   media_helpers.py libmpv_background_engine.py bass_soundboard_engine.py \
   MoltenVK_icd.json \
   SingWS-x86_64.spec SingWS-arm64.spec \
   build_all.sh build_singws_mac_intel.sh build_singws_mac_arm64.sh \
   test_mpv_karaoke_transport.py test_karaoke_engine_selection.py \
+  test_performance_safety.py test_remote_request_tombstones.py \
   tools/verify_macos_min_version.py \
+  tools/probe_cdg_render.py tools/run_tests.sh \
   tools/write_manifest.py tools/release_version.py \
-  test_release_tools.py docs/index.html docs/release.json
+  test_release_tools.py docs/index.html docs/release.json HANDOFF.md release.sh
 git commit -m "Release $TAG"
 git tag "$TAG"
 git push origin "$TAG"

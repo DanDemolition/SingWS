@@ -429,8 +429,8 @@ class MpvPlaybackPlugin:
         path used by the retired painter transport. Under mpv the picture is a shared GL
         texture in a native NSView: there is no QImage, and the host's
         QWidget.grab() fallback cannot capture a native child surface, so the
-        preview was blank for the whole mpv path. This goes through libmpv's
-        screenshot-raw, which never touches the render path.
+        preview was blank for the whole mpv path. CDG capture reads the native
+        bridge's retained 300x216 texture; normal video uses screenshot-raw.
         """
         if not self._handle:
             return None
@@ -446,8 +446,8 @@ class MpvPlaybackPlugin:
             if not buf or w.value <= 0 or h.value <= 0 or stride.value <= 0:
                 return None
             raw = ctypes.string_at(buf, stride.value * h.value)
-            # screenshot-raw hands back BGRA premultiplied; copy() detaches the
-            # QImage from `raw` before the buffer is freed below.
+            # The bridge hands back top-down BGRA premultiplied pixels; copy()
+            # detaches the QImage from `raw` before the buffer is freed below.
             image = QImage(raw, w.value, h.value, stride.value,
                            QImage.Format.Format_ARGB32_Premultiplied).copy()
             return None if image.isNull() else image

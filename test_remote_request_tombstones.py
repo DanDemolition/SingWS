@@ -1788,6 +1788,49 @@ class RemoteRequestTombstoneTests(unittest.TestCase):
             self.assertEqual(saved["sync_attempts"], 1)
             self.assertEqual(saved["last_sync_error"], "")
 
+    def test_terminal_retry_uses_persisted_exponential_backoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            tombstone = app._record_remote_request_tombstone(
+                884,
+                entry={"artist": "Artist", "title": "Finished Song"},
+                singer_name="Ada",
+                reason="song_completed",
+                status="completed",
+            )
+            tombstone["sync_attempts"] = 1
+            tombstone["last_sync_attempt_at"] = 100.0
+            app._save_remote_request_tombstones()
+
+            with mock.patch.object(self.singws.time, "time", return_value=104.9):
+                with fake_network(self.singws) as net:
+                    app._sync_remote_removal_tombstones_async("network_watchdog")
+                self.assertEqual(net.posts, [])
+
+            with mock.patch.object(self.singws.time, "time", return_value=105.0):
+                with fake_network(self.singws) as net:
+                    app._sync_remote_removal_tombstones_async("network_watchdog")
+                posts = [p for p in net.posts if "complete_remote_request.php" in p["url"]]
+                self.assertEqual([int(p["data"]["request_id"]) for p in posts], [884])
+
+    def test_new_terminal_action_force_bypasses_retry_backoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)
+            tombstone = app._record_remote_request_tombstone(
+                885,
+                entry={"artist": "Artist", "title": "Finished Song"},
+                singer_name="Ada",
+                reason="song_completed",
+                status="completed",
+            )
+            tombstone["sync_attempts"] = 99
+            tombstone["last_sync_attempt_at"] = self.singws.time.time()
+
+            with fake_network(self.singws) as net:
+                app._sync_remote_removal_tombstones_async("song_completion", force=True)
+            posts = [p for p in net.posts if "complete_remote_request.php" in p["url"]]
+            self.assertEqual([int(p["data"]["request_id"]) for p in posts], [885])
+
     def test_unconfirmed_http_success_remains_pending_for_retry(self):
         with tempfile.TemporaryDirectory() as td:
             app = make_app(self.singws, Path(td) / "tombstones.json", settings=CONNECTED_SETTINGS)

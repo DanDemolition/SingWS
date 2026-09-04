@@ -1,6 +1,44 @@
 # SingWS handoff
 
-Updated 2026-08-31.
+Updated 2026-09-03.
+
+## Silicon CDG blanking / request retry fixes — source only, not built
+
+The 2026-09-02 Apple Silicon show logs and the exact 22 local MP3+G archives
+were exercised through the native bridge. Every archive produced a non-blank
+visible native surface, ruling out damaged CDG content. The bridge had no
+explicit completion dependency between the master OpenGL context that renders
+libmpv's shared texture and the two contexts that sample it. `bridge.mm` now
+publishes a GPU fence after each karaoke render and queues a server-side wait in
+each consumer context. This avoids the intermittent Apple Silicon stale/blank
+texture race without restoring the GUI-blocking `glFinish` removed previously.
+
+The same probe exposed a separate definite defect: libmpv `screenshot-raw`
+returned a uniform black image for CDG rendered into the caller-owned FBO, so
+DAW/show-screen snapshot capture was blank even while the room surface was
+correct. CDG capture now reads only the retained 300x216 texture; normal video
+keeps the non-invasive screenshot path. Before/after on exact `LG208 12 - ZZ
+Top - Blue Jean Blues.zip`: raw capture changed from one black color at every
+sample to 4–27 palette colors, while the visible surface remained non-blank.
+`tools/probe_cdg_render.py` is the reusable read-only exact-file probe.
+
+The logs also showed six durable terminal request records being posted every
+2–4 seconds during DNS failure, producing about 1,962 failures and reaching
+571 attempts. Terminal retries now use persisted 5/15/30/60/120/300-second
+backoff while a newly completed song still sends immediately. Watchdog logging
+is rate-limited. The server repository already contains the coordinated
+idempotent cross-store completion correction in `complete_remote_request.php`;
+it must be included in the server deployment paired with this app build.
+
+Verification: native x86_64 bridge compiles; exact-file native playback and
+capture pass; 81 tombstone tests, 33 focused renderer/queue tests, and the PHP
+pending-completion integration suite pass. Python compilation and
+`git diff --check` pass. The full runner is currently limited by the local Qt
+test environment (`minimal`/`offscreen` platform plugins are not discovered in
+subprocess tests); it reached 101 passing tests before that environment failure.
+Apple Silicon compilation/runtime and external-display hot-plug rehearsal still
+require the target machine. No app was built or installed and no server was
+deployed.
 
 ## Release 0.4.6.6 built and locally installed — 2026-08-31 12:03 PDT
 

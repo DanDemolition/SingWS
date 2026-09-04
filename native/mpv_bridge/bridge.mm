@@ -484,6 +484,11 @@ static GLuint makeProgram(void) {
     NSOpenGLPixelFormat *_format;
     NSOpenGLContext *_master;
     BridgeVideoView *_outputView, *_previewView;
+    // mpv renders into a texture owned by _master, then the output and preview
+    // contexts sample that shared texture.  A flush submits the producer work
+    // but does not make its completion visible to another GL context on Apple
+    // Silicon, so retain a GPU fence for the consumers to wait on.
+    GLsync _frameFence;
     GLuint _texture, _fbo, _cdgTexture, _cdgFbo, _backgroundTexture, _backgroundFbo;
     GLuint _previousBackgroundTexture, _program, _outVao, _prevVao;
     GLint _scaleUniform, _uvScaleUniform, _uvOffsetUniform, _textureUniform, _sidefillUniform;
@@ -552,6 +557,7 @@ static GLuint makeProgram(void) {
         _repeatedMpvLogCount=0;
         _desiredAudioDelay=0.0;
         _outputTransitioning=false; _transitionSerial=0;
+        _frameFence=nullptr;
         _pictureSpanX=(300.0/216.0)/((double)_width/_height); // CDG default
         _controlQueue=dispatch_queue_create("com.singws.mpv.control",
                                             DISPATCH_QUEUE_SERIAL);
@@ -944,13 +950,34 @@ static GLuint makeProgram(void) {
 // native child surface. The DAW preview was therefore blank for the whole mpv
 // path.
 //
-// screenshot-raw is used rather than glReadPixels on purpose: it runs through
-// libmpv's own command queue and never touches the render path or the GL
-// context the views present from, so a bad capture cannot disturb what the room
-// is watching. Caller owns the returned buffer and must pass it to
-// singws_bridge_free_frame.
+// libmpv's screenshot-raw returns a cleared black image for CDG when libmpv is
+// rendering into our caller-owned FBO. Read that tiny 300x216 retained texture
+// directly instead. Normal video keeps using screenshot-raw so DAW preview
+// cannot introduce a full-HD synchronous GPU readback during playback. Caller
+// owns the returned buffer and must pass it to singws_bridge_free_frame.
 - (void *)grabFrameWidth:(int *)width height:(int *)height stride:(int *)stride {
     if(!_mpv||_stopping.load())return nullptr;
+    if(_isCdg&&_hasFrame){
+        const int w=300,h=216,st=w*4;
+        unsigned char *out=(unsigned char *)malloc((size_t)st*h);
+        unsigned char *row=(unsigned char *)malloc((size_t)st);
+        if(!out||!row){free(out);free(row);return nullptr;}
+        [_master makeCurrentContext]; CGLLockContext(_master.CGLContextObj);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,_cdgFbo);
+        glPixelStorei(GL_PACK_ALIGNMENT,4);
+        glReadPixels(0,0,w,h,GL_BGRA,GL_UNSIGNED_BYTE,out);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,0);
+        CGLUnlockContext(_master.CGLContextObj);
+        // OpenGL rows start at the lower-left; QImage rows start at the top.
+        for(int y=0;y<h/2;y++){
+            unsigned char *top=out+(size_t)y*st;
+            unsigned char *bottom=out+(size_t)(h-1-y)*st;
+            memcpy(row,top,(size_t)st);memcpy(top,bottom,(size_t)st);memcpy(bottom,row,(size_t)st);
+        }
+        free(row);
+        if(width)*width=w;if(height)*height=h;if(stride)*stride=st;
+        return out;
+    }
     mpv_node result; memset(&result,0,sizeof(result));
     // "window" would include mpv's own OSD/letterboxing; "video" is the picture
     // as decoded, which is what the host scales for the preview.
@@ -1358,12 +1385,16 @@ static GLuint makeProgram(void) {
         glBindFramebuffer(GL_FRAMEBUFFER,renderFbo); glViewport(0,0,renderWidth,renderHeight);
         mpv_opengl_fbo target={(int)renderFbo,renderWidth,renderHeight,GL_RGBA8}; int flip=1;
         mpv_render_param p[]={{MPV_RENDER_PARAM_OPENGL_FBO,&target},{MPV_RENDER_PARAM_FLIP_Y,&flip},{MPV_RENDER_PARAM_INVALID,nullptr}};
-        // glFlush, not glFinish: this runs on the Qt GUI thread (see
-        // queueRender), so blocking until the GPU drains stalls the whole UI
-        // once per frame and shows up as choppy playback on integrated GPUs.
-        // The following presentView drawing is ordered against this work by the
-        // shared context, and each flushBuffer syncs before it swaps.
-        mpv_render_context_render(_render,p); glBindFramebuffer(GL_FRAMEBUFFER,0); glFlush();
+        // Keep the producer/consumer ordering on the GPU. glFlush alone only
+        // submits _master's work; it does not guarantee that a different
+        // shared context sees the finished texture. Intel drivers happened to
+        // tolerate that race, while Apple Silicon can intermittently present
+        // the cleared (blank) CDG texture. glWaitSync in presentView avoids the
+        // race without the GUI-thread stall caused by glFinish.
+        mpv_render_context_render(_render,p); glBindFramebuffer(GL_FRAMEBUFFER,0);
+        if(_frameFence)glDeleteSync(_frameFence);
+        _frameFence=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);
+        glFlush();
         CGLUnlockContext(_master.CGLContextObj);
         // A frame produced while a load is pending belongs to the OUTGOING
         // song. loadfile is asynchronous, so mpv keeps rendering the previous
@@ -1410,6 +1441,10 @@ static GLuint makeProgram(void) {
     // drawRect: calls back into presentView, so AppKit repaints from the
     // retained shared texture as soon as the view is on screen again.
     [ctx makeCurrentContext]; [ctx update]; CGLLockContext(ctx.CGLContextObj);
+    // The fence was inserted by the master producer context. This queues a
+    // server-side wait in each shared consumer context and returns immediately,
+    // preserving UI responsiveness while making the new CDG texture visible.
+    if(_frameFence)glWaitSync(_frameFence,0,GL_TIMEOUT_IGNORED);
     NSSize s=[view convertSizeToBacking:view.bounds.size]; int w=MAX(1,(int)s.width),h=MAX(1,(int)s.height);
     glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
     if(_hasFrame){
@@ -1538,6 +1573,7 @@ static GLuint makeProgram(void) {
     if(_backgroundMpv)mpv_set_wakeup_callback(_backgroundMpv,nullptr,nullptr);
     if(_render){[_master makeCurrentContext];mpv_render_context_free(_render);_render=nullptr;}
     if(_backgroundRender){[_master makeCurrentContext];mpv_render_context_free(_backgroundRender);_backgroundRender=nullptr;}
+    if(_frameFence){[_master makeCurrentContext];glDeleteSync(_frameFence);_frameFence=nullptr;}
     if(_mpv){mpv_terminate_destroy(_mpv);_mpv=nullptr;}
     if(_backgroundMpv){mpv_terminate_destroy(_backgroundMpv);_backgroundMpv=nullptr;}
     [_outputView removeFromSuperview]; [_previewView removeFromSuperview];

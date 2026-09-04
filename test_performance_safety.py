@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import QApplication
 
 
 MAIN_SOURCE = pathlib.Path("0.2.18.1.py").read_text(encoding="utf-8")
+BRIDGE_SOURCE = pathlib.Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
 
 def function_source(name: str) -> str:
     pattern = rf"(?ms)^    def {re.escape(name)}\(.*?^    def "
@@ -26,6 +27,18 @@ def function_source(name: str) -> str:
 
 
 class PerformanceSafetyTests(unittest.TestCase):
+    def test_native_bridge_synchronizes_shared_frame_without_blocking_gui(self):
+        render_start = BRIDGE_SOURCE.index("- (void)renderFrame")
+        render_end = BRIDGE_SOURCE.index("- (void)presentView", render_start)
+        render = BRIDGE_SOURCE[render_start:render_end]
+        present_start = render_end
+        present_end = BRIDGE_SOURCE.index("- (void)shutdown", present_start)
+        present = BRIDGE_SOURCE[present_start:present_end]
+
+        self.assertIn("glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0)", render)
+        self.assertIn("glWaitSync(_frameFence,0,GL_TIMEOUT_IGNORED)", present)
+        self.assertNotIn("glFinish(", render)
+
     def test_background_player_has_no_retired_gstreamer_path(self):
         start = MAIN_SOURCE.index("class BackgroundMusicPlayer(QObject)")
         end = MAIN_SOURCE.index("class BackgroundMusicManager", start)
@@ -701,8 +714,10 @@ class PerformanceSafetyTests(unittest.TestCase):
             capture.index('getattr(plugin, "grabFrame", None)'),
             capture.index("va.grab().toImage()"),
         )
-        # And the engine must actually expose it, through screenshot-raw rather
-        # than anything touching the render path.
+        # And the engine must actually expose it. CDG needs a read from the
+        # retained texture because libmpv screenshot-raw is blank for a
+        # caller-owned CDG FBO; normal full-resolution video stays on the
+        # non-invasive screenshot path.
         import pathlib
         iina = pathlib.Path("mpv_playback_iina.py").read_text(encoding="utf-8")
         self.assertIn("def grabFrame(self):", iina)
@@ -710,6 +725,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("singws_bridge_free_frame", iina)
         bridge = pathlib.Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
         self.assertIn("screenshot-raw", bridge)
+        self.assertIn("if(_isCdg&&_hasFrame)", bridge)
+        self.assertIn("glReadPixels(0,0,w,h,GL_BGRA,GL_UNSIGNED_BYTE,out)", bridge)
         self.assertIn("singws_bridge_grab_frame", bridge)
         # Freed exactly once, by the caller that owns it.
         self.assertIn("singws_bridge_free_frame(buf)", iina)

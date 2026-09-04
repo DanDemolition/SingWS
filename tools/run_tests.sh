@@ -9,7 +9,7 @@ cd "$ROOT"
 # extracted .pkg payload makes it find zero valid plugins -- every GUI test then
 # aborts, intermittently and with correct-looking library paths.
 PYTHON=""
-for candidate in "$ROOT/.venv-test" "$ROOT/.venv-test-brew" "$ROOT/.venv-universal"; do
+for candidate in "$ROOT/qtvenv" "$ROOT/.venv-test" "$ROOT/.venv-test-brew" "$ROOT/.venv-universal"; do
     if [[ -x "$candidate/bin/python" ]]; then
         PYTHON="$candidate/bin/python"
         break
@@ -66,7 +66,7 @@ if [[ -z "${SINGWS_HOME:-}" ]]; then
 fi
 echo "test data root: $SINGWS_HOME"
 
-PYTEST_EXTRA=()
+PYTEST_EXTRA=(--ignore=test_bass_init_once.py --ignore=vendor)
 if ! "$PYTHON" -c 'from PyQt6.QtWidgets import QApplication; app = QApplication([])' \
         >/dev/null 2>&1; then
     echo "Warning: Qt platform integration is unavailable; running the full non-GUI suite." >&2
@@ -93,7 +93,20 @@ fi
 # vendor/pybind11 ships upstream's own suite, which needs a compiled pybind11_tests module that
 # is never built here. Both aborted collection outright, so this runner — and
 # therefore release.sh, which gates on it — could not finish at all.
-exec "$PYTHON" -m pytest -q \
+SECONDARY_TESTS=(
+    test_karaoke_engine_selection.py
+    test_libmpv_background_engine.py
+    test_mac_keep_awake.py
+    test_phrase_detect.py
+)
+
+"$PYTHON" -m pytest -q \
     "${PYTEST_EXTRA[@]}" \
-    --ignore=test_bass_init_once.py \
-    --ignore=vendor
+    "${SECONDARY_TESTS[@]/#/--ignore=}"
+
+# The clean Qt environment intentionally does not carry the native-only mpv and
+# PyObjC dependencies. Cover those four modules in the build environment after
+# the complete GUI-capable pass succeeds.
+SECONDARY="$ROOT/.venv-universal/bin/python"
+[[ -x "$SECONDARY" ]] || { echo "Missing native test environment: $SECONDARY" >&2; exit 1; }
+exec "$SECONDARY" -m pytest -q "${SECONDARY_TESTS[@]}"
