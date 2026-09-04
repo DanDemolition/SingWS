@@ -1,6 +1,34 @@
 # SingWS handoff
 
-Updated 2026-09-03.
+Updated 2026-09-04.
+
+## Release 0.4.6.7 Apple Silicon build published — 2026-09-04
+
+The existing public 0.4.6.7 release now has a native arm64 installer alongside
+the Intel installer. The build uses the current 0.4.6.7 Python source and the
+current Apple Silicon native bridge, including the CDG GPU fence correction.
+Packaging was made reproducible on Apple Silicon by matching PyQt6 and Qt 6.9.1,
+accepting the bundle's actual macOS 12.3 minimum, and locating Homebrew `7zz`
+through `PATH` instead of the Intel-only `/usr/local` location.
+
+The exact DMG was mounted and verified: strict signing passes, 417 Mach-O files
+contain arm64, 811 Mach-O files have a deployment target no newer than macOS
+12.3, and the bundled media core loads. Installer SHA-256:
+`228dc6d4aa88d818a8d104d74d6618e5f6f0e85bbfb1f3f17e5fa88272f55e21`.
+GitHub reports the same digest and 123,892,502-byte size.
+
+The exact app is installed at `/Applications/SingWS.app` under the normal app
+identity and profile. It launched on Apple Silicon, remained running, connected
+and synchronized with the configured server, initialized mpv and BASS, and its
+main/audience windows, QR artwork, ticker and controls were inspected on screen.
+No new SingWS native crash report or logged Python error appeared. The previous
+0.4.6.6 app and normal profile are backed up under
+`../local-installs/20260904-105116/`. Automated verification passed 994 tests
+plus 39 subtests and 86 native tests. Full-song karaoke playback and a physical
+external-display rehearsal remain unverified.
+
+Report: `docs/verification/2026-09-04-release-0.4.6.7-arm64.md`.
+Release: `https://github.com/DanDemolition/SingWS/releases/tag/v0.4.6.7`.
 
 ## Silicon CDG blanking / request retry fixes — source only, not built
 

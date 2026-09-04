@@ -4,6 +4,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# A Python.org framework extracted for a portable build cannot live at its
+# installer path under /Library.  Carry the explicit shim through this shell;
+# macOS strips DYLD_* variables when launching protected system shells.
+if [[ -n "${SINGWS_DYLD_FRAMEWORK_PATH:-}" ]]; then
+    export DYLD_FRAMEWORK_PATH="$SINGWS_DYLD_FRAMEWORK_PATH"
+fi
+if [[ -n "${SINGWS_DYLD_LIBRARY_PATH:-}" ]]; then
+    export DYLD_LIBRARY_PATH="$SINGWS_DYLD_LIBRARY_PATH"
+fi
+
 APP_NAME="SingWS"
 ENTRY="0.2.18.1.py"
 SPEC="SingWS-arm64.spec"
@@ -117,10 +127,10 @@ for name in sys.argv[2:]:
 print(f"Bundled media core loads cleanly: {', '.join(sys.argv[2:])}")
 PYCHECK
 
-# The whole point of the pin set: nothing in the shipped bundle may require a
-# newer macOS than 12.0, or this build cannot replace the legacy edition.
+# Nothing in the shipped Apple Silicon bundle may require a newer macOS than
+# 12.3, which is the floor of the arm64 SciPy wheel used by this build.
 # Checks the real Mach-O load commands, not wheel tags or filenames.
-"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch arm64 --maximum 12.0
+"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch arm64 --maximum 12.3
 
 # Stage the bundle BEFORE signing, and sign the staged copy.
 #

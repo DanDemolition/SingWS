@@ -152,6 +152,8 @@ class PackagingSpecTests(unittest.TestCase):
         self.assertIn('"arm64" in result.stdout.split()', spec)
         self.assertIn("--runtime --require arm64", build)
         self.assertIn("--bundle \"$APP_PATH\" --require arm64", build)
+        self.assertIn("'LSMinimumSystemVersion': '12.3'", spec)
+        self.assertIn("--maximum 12.3", build)
         self.assertIn("libsingws_mpv_bridge.dylib", spec + build)
         self.assertIn("singws_libmpv.2.dylib", spec + build)
         self.assertNotIn("mpv_playback.py", spec + build)

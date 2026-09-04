@@ -1,9 +1,13 @@
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 import zipfile
 
 from tools.repack_deflate64_archives import repack_one
+
+
+SEVEN_ZIP = shutil.which("7zz") or "/usr/local/bin/7zz"
 
 
 class RepackDeflate64ArchivesTests(unittest.TestCase):
@@ -23,7 +27,7 @@ class RepackDeflate64ArchivesTests(unittest.TestCase):
                 archive,
                 library_root=root,
                 backup_root=backup_root,
-                seven_zip="/usr/local/bin/7zz",
+                seven_zip=SEVEN_ZIP,
                 temp_root=Path(td),
             )
 
@@ -50,7 +54,7 @@ class RepackDeflate64ArchivesTests(unittest.TestCase):
                 archive,
                 library_root=root,
                 backup_root=Path(td) / "backup",
-                seven_zip="/usr/local/bin/7zz",
+                seven_zip=SEVEN_ZIP,
                 temp_root=Path(td),
                 strip_macos_metadata=True,
             )
