@@ -38,7 +38,8 @@ for helper in (
 moltenvk_icd = project_root / "MoltenVK_icd.json"
 iina_frameworks = Path(os.environ.get("SINGWS_MPV_FRAMEWORKS", "") or
                        (project_root / "native_dual_view" / "Frameworks"))
-bridge_dylib = project_root / "native" / "mpv_bridge" / "libsingws_mpv_bridge.dylib"
+bridge_dylib = Path(os.environ.get("SINGWS_MPV_BRIDGE", "") or
+                    (project_root / "native" / "mpv_bridge" / "libsingws_mpv_bridge.dylib"))
 if not iina_frameworks.is_dir() or not bridge_dylib.is_file():
     raise SystemExit("Required bundled native mpv bridge/runtime is missing")
 iina_dylibs = sorted(iina_frameworks.glob("*.dylib"))

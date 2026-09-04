@@ -7,16 +7,15 @@ cd "$(dirname "$0")"
 APP_NAME="SingWS"
 ENTRY="0.2.18.1.py"
 SPEC="SingWS-x86_64.spec"
-PYTHON=".venv-universal/bin/python"
-DMGBUILD=".venv/bin/dmgbuild"
+PYTHON="${SINGWS_BUILD_PYTHON:-.venv-universal/bin/python}"
 
 if [[ "$(uname -m)" != "x86_64" ]]; then
-    echo "This dedicated build must run natively on an Intel Mac."
+    echo "Run in an x86_64 process (on Intel, or with arch -x86_64 /bin/bash)."
     exit 1
 fi
 
 for required in \
-    "$ENTRY" "$SPEC" "$PYTHON" "$DMGBUILD" \
+    "$ENTRY" "$SPEC" "$PYTHON" \
     mpv_karaoke_transport.py MoltenVK_icd.json constraints-macos12.txt \
     SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py \
     tools/verify_macos_min_version.py; do
@@ -29,9 +28,11 @@ done
 
 : "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
 export SINGWS_MPV_FRAMEWORKS
+: "${SINGWS_MPV_BRIDGE:=$(pwd)/native/mpv_bridge/libsingws_mpv_bridge.dylib}"
+export SINGWS_MPV_BRIDGE
 STACK_INPUTS=(
     mpv_playback_iina.py
-    native/mpv_bridge/libsingws_mpv_bridge.dylib
+    "$SINGWS_MPV_BRIDGE"
     "$SINGWS_MPV_FRAMEWORKS/singws_libmpv.2.dylib"
 )
 for required in "${STACK_INPUTS[@]}"; do
@@ -83,7 +84,7 @@ APP_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$ENTRY" | head -1)"
 DMG_NAME="SingWS-${APP_VERSION}-x86_64-installer.dmg"
 
 echo "Building $APP_NAME $APP_VERSION for Intel..."
-.venv/bin/python tools/make_dmg_assets.py --style-only
+"$PYTHON" tools/make_dmg_assets.py --style-only
 
 rm -rf build dist
 "$PYTHON" -m PyInstaller --noconfirm "$SPEC"
@@ -161,7 +162,7 @@ codesign --force --deep --sign - \
 codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"
 
 rm -f "$DMG_NAME"
-SINGWS_DMG_APP_ROOT="$STAGING" "$DMGBUILD" \
+SINGWS_DMG_APP_ROOT="$STAGING" "$PYTHON" -m dmgbuild \
     -s dmg_settings.py "SingWS-${APP_VERSION}" "$DMG_NAME"
 hdiutil verify "$DMG_NAME"
 
