@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.6.8"
+APP_VERSION = "0.4.6.9"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -3424,7 +3424,7 @@ DEFAULTS = {
         "polaroid_drop",
     ],
     "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
-    "rotation_cdg_backdrop_enabled": True, # raw live CDG behind the audience rotation layout at 50% opacity
+    "rotation_cdg_backdrop_enabled": True, # live CDG lyrics on black behind the audience rotation layout
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "loudness_scan_holds_for_playback": True, # False = keep scanning under a live song (faster pass, risks GUI stalls)
@@ -3465,6 +3465,7 @@ DEFAULTS = {
     "intro_loop_bars": 8,                   # bars to loop: 4 / 8 / 16
     "seamless_transitions_enabled": True,  # master safety switch; OFF preserves normal physical EOS behavior
     "karaoke_bgm_crossfade_enabled": False, # allow intentional karaoke -> BGM overlap at song end
+    "karaoke_trim_verified_tail": True,    # end promptly once the file scan confirms all audio has ended
     "karaoke_allow_early_silence_trim": False, # advanced: may end karaoke early after sustained trailing silence
     "end_silence_trim_enabled": False,     # CDG/ZIP/MP4: optional early trim; off to preserve complete endings
     "end_silence_trim_threshold_sec": 2.5, # sustained low audio before intelligent karaoke early-end
@@ -17357,7 +17358,7 @@ Rectangle {
             opacity: 0
             x: 24
             scale: 0.98
-            color: index === 0 ? "#241d3d" : "#181921"
+            color: "#20000000"
             border.width: 1
             border.color: index === 0 ? "#8f73ff" : "#2b2d38"
 
@@ -17911,15 +17912,36 @@ class RotationAnnouncementTicker(QWidget):
 class RotationCdgBackdrop(QWidget):
     """Cover-cropped raw CDG frame behind the audience rotation interface."""
 
-    def __init__(self, parent=None, opacity=0.5):
+    def __init__(self, parent=None, opacity=0.85):
         super().__init__(parent)
         self._frame = QPixmap()
         self._opacity = max(0.0, min(1.0, float(opacity)))
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def set_frame(self, image):
-        frame = QPixmap.fromImage(image) if image is not None and not image.isNull() else QPixmap()
-        self._frame = frame
+        if image is None or image.isNull():
+            self.clear_frame()
+            return
+        # CDG border and tile backgrounds can have different palette colours.
+        # Only replace exact colours agreed by at least three region corners;
+        # a broad colour key can erase the muted, not-yet-wiped lyrics.
+        import numpy as np
+        frame = image.convertToFormat(QImage.Format.Format_RGB32)
+        pixels = np.frombuffer(frame.bits().asstring(frame.sizeInBytes()), dtype=np.uint32).copy()
+        pixels = pixels.reshape(frame.height(), frame.bytesPerLine() // 4)
+        rgb = pixels[:, :frame.width()] & 0x00ffffff
+        background = np.zeros(rgb.shape, dtype=bool)
+        for left, right, top, bottom in ((3, 297, 6, 210), (12, 288, 18, 198)):
+            samples = [int(rgb[min(frame.height()-1, y*frame.height()//216),
+                               min(frame.width()-1, x*frame.width()//300)])
+                       for x, y in ((left, top), (right, top), (left, bottom), (right, bottom))]
+            colour = max(samples, key=samples.count)
+            if samples.count(colour) >= 3:
+                background |= rgb == colour
+        pixels[:, :frame.width()][background] = 0xff000000
+        black_backed = QImage(pixels.data, frame.width(), frame.height(),
+                             frame.bytesPerLine(), QImage.Format.Format_RGB32)
+        self._frame = QPixmap.fromImage(black_backed.copy())
         self.update()
 
     def clear_frame(self):
@@ -17930,7 +17952,7 @@ class RotationCdgBackdrop(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#101012"))
+        painter.fillRect(self.rect(), QColor("#000000"))
         if self._frame.isNull() or self.width() <= 0 or self.height() <= 0:
             return
         scaled = self._frame.scaled(
@@ -18009,7 +18031,7 @@ class RotationView(QMainWindow):
 
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #101012;
+                background-color: #000000;
             }
             QWidget#rotationCentral { background: transparent; }
             QWidget#rotationSafe {
@@ -18400,7 +18422,7 @@ class RotationView(QMainWindow):
         central_layout = QStackedLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
-        self._cdg_backdrop = RotationCdgBackdrop(central, opacity=0.5)
+        self._cdg_backdrop = RotationCdgBackdrop(central, opacity=0.85)
         central_layout.addWidget(self._cdg_backdrop)
         central_layout.addWidget(safe_area)
         # StackAll raises its current widget. Keep the interactive rotation UI
@@ -25863,8 +25885,10 @@ class KaraokeApp(QWidget):
             return False
 
     def _karaoke_early_silence_trim_enabled(self) -> bool:
-        """True only for the advanced legacy early-end silence trim path."""
+        """Verified file-tail trimming, or the conservative legacy end gate."""
         try:
+            if bool(self.settings.get("karaoke_trim_verified_tail", True)):
+                return True
             return (
                 bool(self.settings.get("seamless_transitions_enabled", True))
                 and
@@ -27280,9 +27304,9 @@ class KaraokeApp(QWidget):
         rotation_vfx_cb.setChecked(bool(self.settings.get("rotation_vfx_enabled", True)))
         v.addWidget(rotation_vfx_cb)
 
-        rotation_cdg_backdrop_cb = QCheckBox("Live CDG backdrop on Singer Rotation (50%)")
+        rotation_cdg_backdrop_cb = QCheckBox("Live CDG lyrics on Singer Rotation (85%, black background)")
         rotation_cdg_backdrop_cb.setToolTip(
-            "Shows the currently playing raw CDG behind the Singer Rotation layout. "
+            "Shows the current CDG lyrics at 85% opacity on black behind translucent singer rows. "
             "This does not use the transparent background or background video from Show Karaoke."
         )
         rotation_cdg_backdrop_cb.setChecked(
@@ -27697,9 +27721,9 @@ class KaraokeApp(QWidget):
         karaoke_bgm_crossfade_cb.setEnabled(seamless_transitions_cb.isChecked())
         v.addWidget(karaoke_bgm_crossfade_cb)
 
-        end_silence_cb = QCheckBox("Use verified silent tail for background-music handoff")
-        end_silence_cb.setToolTip("Never stops the karaoke song; background music may fade in after the file scan confirms its audio has ended.")
-        end_silence_cb.setChecked(bool(self.settings.get("karaoke_allow_early_silence_trim", False)))
+        end_silence_cb = QCheckBox("Skip verified silence at the end of karaoke songs")
+        end_silence_cb.setToolTip("Ends after the scanned final audible audio, without waiting for silent credits or a final graphics card. Unscanned songs play to their normal end.")
+        end_silence_cb.setChecked(bool(self.settings.get("karaoke_trim_verified_tail", True)))
         v.addWidget(end_silence_cb)
 
         end_threshold_row = QHBoxLayout()
@@ -28260,6 +28284,7 @@ class KaraokeApp(QWidget):
             self.save_settings()
 
         def on_end_silence_toggled(checked: bool):
+            self.settings["karaoke_trim_verified_tail"] = bool(checked)
             self.settings["karaoke_allow_early_silence_trim"] = bool(checked)
             self.settings["end_silence_trim_enabled"] = bool(checked)
             self.save_settings()
@@ -38129,6 +38154,23 @@ class KaraokeApp(QWidget):
                     f"(pos={elapsed:.2f}s db={'n/a' if meterless else f'{db:.1f}'})"
                 )
             return False
+
+        if bool(self.settings.get("karaoke_trim_verified_tail", True)):
+            # The scan covers the complete file, so a quiet passage earlier in
+            # the song cannot qualify. Allow 150ms for scan-frame rounding;
+            # do not add another multi-second silence timer or wait for credits.
+            if elapsed < float(audio_end) + 0.15:
+                return False
+            if not meterless and db > float(self._end_silence_db_threshold):
+                return False
+            self._end_silence_tail_handoff_started = True
+            self._end_silence_triggered = True
+            self._end_silence_last_reason = "verified_audio_tail"
+            self._end_silence_auto_advance_next = bool(self.settings.get("karaoke_auto_advance", False))
+            _diag(f"[END-SILENCE] skipping scanned silent tail at {elapsed:.2f}s "
+                  f"audio_end={float(audio_end):.2f}s remaining={remain:.2f}s")
+            QTimer.singleShot(0, lambda: self._handle_media_end_safe("verified_silent_tail"))
+            return True
 
         # The file scan has now proved that audible karaoke content is over.
         # Start the requested audio crossfade even when a conservative CDG scan
@@ -50063,10 +50105,16 @@ class KaraokeApp(QWidget):
                 'repeat 40 times',
                 'set matches to every application process whose name contains "KaraFun"',
                 'if (count of matches) > 0 then',
+                'set frontmost of item 1 of matches to true',
                 'tell item 1 of matches',
                 'repeat with candidateWindow in windows',
                 'try',
                 'if name of candidateWindow is "Dual Renderer" then',
+                'set value of attribute "AXMinimized" of candidateWindow to false',
+                'perform action "AXRaise" of candidateWindow',
+                'if not (value of attribute "AXFullScreen" of candidateWindow) then',
+                'set value of attribute "AXFullScreen" of candidateWindow to true',
+                'end if',
                 'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
                 'end if',
                 'end try',
@@ -50084,6 +50132,10 @@ class KaraokeApp(QWidget):
                     _diag("[KARAFUN] skipped stale true-fullscreen reveal")
                     return
                 verified = str(result or "").strip() == "FULLSCREEN"
+                if not verified:
+                    _finish_handoff_state(complete=False)
+                    _diag(f"[KARAFUN] renderer not verified; retaining show screen result={result!r}")
+                    return
                 try:
                     vw.setWindowOpacity(0.0)
                     _finish_handoff_state(complete=True)
@@ -50097,14 +50149,6 @@ class KaraokeApp(QWidget):
 
             def _enter_karafun_true_fullscreen(initial_state=""):
                 if not _handoff_is_current():
-                    return
-                if str(initial_state or "").strip() == "FULLSCREEN":
-                    _reveal_true_fullscreen("FULLSCREEN")
-                    return
-                center_x = x + (width // 2)
-                center_y = y + (height // 2)
-                if not self._macos_native_double_click(center_x, center_y):
-                    _reveal_true_fullscreen("CLICK_FAILED")
                     return
                 if not self._karafun_run_window_script(
                     fullscreen_verify,
@@ -50245,6 +50289,12 @@ class KaraokeApp(QWidget):
                 '-- waiting 6-10 seconds for KaraFun to create it again.',
                 'if outputWindow is not missing value then',
                 'try',
+                'if value of attribute "AXFullScreen" of outputWindow then',
+                f'if (position of outputWindow) is {{{x}, {y}}} then',
+                'perform action "AXRaise" of outputWindow',
+                'return "READY"',
+                'end if',
+                'end if',
                 'set value of attribute "AXFullScreen" of outputWindow to false',
                 'end try',
                 'repeat 30 times',
@@ -50357,11 +50407,17 @@ class KaraokeApp(QWidget):
                         'repeat 30 times',
                         'set matches to every application process whose name contains "KaraFun"',
                         'if (count of matches) > 0 then',
+                        'set frontmost of item 1 of matches to true',
                         'tell item 1 of matches',
                         'repeat with candidateWindow in windows',
                         'try',
                         'if name of candidateWindow is "Dual Renderer" then',
                         'set lastState to "WINDOWED"',
+                        'set value of attribute "AXMinimized" of candidateWindow to false',
+                        'perform action "AXRaise" of candidateWindow',
+                        'if not (value of attribute "AXFullScreen" of candidateWindow) then',
+                        'set value of attribute "AXFullScreen" of candidateWindow to true',
+                        'end if',
                         'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
                         'end if',
                         'end try',
@@ -50374,13 +50430,9 @@ class KaraokeApp(QWidget):
                         'end tell',
                     ]
 
-                    def _double_click_and_verify(click_attempt=0):
+                    def _enter_and_verify_fullscreen(click_attempt=0):
                         if not _handoff_is_current():
                             _diag("[KARAFUN] skipped stale Dual Renderer fullscreen click")
-                            return
-                        if not self._macos_native_double_click(center_x, center_y):
-                            _finish_handoff_state(complete=False)
-                            _diag(f"[KARAFUN] Dual Renderer fullscreen click failed attempt={click_attempt + 1}")
                             return
 
                         def _after_fullscreen_check(check_result=""):
@@ -50393,8 +50445,8 @@ class KaraokeApp(QWidget):
                                 _diag(f"[KARAFUN] Dual Renderer fullscreen verified attempt={click_attempt + 1}")
                                 return
                             if click_attempt < 1:
-                                _diag(f"[KARAFUN] Dual Renderer still windowed; retrying double-click state={check_outcome!r}")
-                                QTimer.singleShot(650, lambda: _double_click_and_verify(click_attempt + 1))
+                                _diag(f"[KARAFUN] Dual Renderer still windowed; retrying fullscreen request state={check_outcome!r}")
+                                QTimer.singleShot(650, lambda: _enter_and_verify_fullscreen(click_attempt + 1))
                                 return
                             _finish_handoff_state(complete=False)
                             _diag(f"[KARAFUN] Dual Renderer fullscreen verification failed state={check_outcome!r}")
@@ -50408,7 +50460,7 @@ class KaraokeApp(QWidget):
 
                     # Verification now polls through the renderer's temporary
                     # AX disappearance, so the first click can happen sooner.
-                    QTimer.singleShot(400, _double_click_and_verify)
+                    QTimer.singleShot(400, _enter_and_verify_fullscreen)
                     return
                 if outcome == "NO_DUAL_RENDERER":
                     if attempt < 1:

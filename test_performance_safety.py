@@ -3,6 +3,7 @@ import pathlib
 import re
 import sys
 import types
+import textwrap
 import unittest
 import importlib.util
 from unittest import mock
@@ -1296,10 +1297,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("trim suppressed; verified audio endpoint unavailable", trim)
         self.assertIn("return False", trim[unknown_guard:handoff])
 
-    def test_silence_trim_requires_verified_visual_endpoint(self):
+    def test_legacy_silence_trim_keeps_verified_visual_endpoint(self):
         trim = function_source("_maybe_trim_end_silence")
         visual_guard = trim.index("if visual_end is None or visual_confidence < 0.85:")
-        handoff = trim.index("self._end_silence_tail_handoff_started = True")
+        handoff = trim.rindex("self._end_silence_tail_handoff_started = True")
         self.assertLess(visual_guard, handoff)
         self.assertIn("visual endpoint unverified", trim)
         arm = function_source("_arm_visual_end_floor")
@@ -1312,6 +1313,35 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('QCheckBox("Seamless transitions")', MAIN_SOURCE)
         self.assertIn("using physical EOS fallback", MAIN_SOURCE)
         self.assertIn("threading.Thread", arm)
+
+    def test_scanned_tail_ends_promptly_without_waiting_for_graphics(self):
+        timer = mock.Mock()
+        namespace = {"time": __import__("time"), "NS_PER_SECOND": 1_000_000_000,
+                     "QTimer": timer, "_diag": lambda *args: None}
+        exec(textwrap.dedent(function_source("_maybe_trim_end_silence")), namespace)
+        trim = namespace["_maybe_trim_end_silence"]
+        host = types.SimpleNamespace(
+            settings={"karaoke_trim_verified_tail": True},
+            _karaoke_early_silence_trim_enabled=lambda: True,
+            _end_silence_mode="cdg", _end_silence_min_elapsed_s=20,
+            _end_silence_db_threshold=-38, _read_level_db=lambda: None,
+            _end_trim_threshold_sec=lambda: 2.5, _karaoke_audio_end_s=100.0,
+            _handle_media_end_safe=mock.Mock(),
+        )
+        ns = 1_000_000_000
+        self.assertFalse(trim(host, 115*ns, 99*ns))
+        self.assertFalse(trim(host, 115*ns, int(100.1*ns)))
+        host._karaoke_audio_end_s = None
+        self.assertFalse(trim(host, 115*ns, 101*ns))
+        host._karaoke_audio_end_s = 100.0
+        host._read_level_db = lambda: -15.0
+        self.assertFalse(trim(host, 115*ns, 101*ns))
+        host._read_level_db = lambda: None
+        self.assertTrue(trim(host, 115*ns, 101*ns))
+        self.assertFalse(trim(host, 115*ns, 102*ns))
+        timer.singleShot.assert_called_once()
+        timer.singleShot.call_args.args[1]()
+        host._handle_media_end_safe.assert_called_once_with("verified_silent_tail")
 
     def test_verified_audio_tail_can_crossfade_while_cdg_final_card_remains(self):
         trim = function_source("_maybe_trim_end_silence")

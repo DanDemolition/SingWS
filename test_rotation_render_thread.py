@@ -32,6 +32,31 @@ mod = load_main_module()
 
 
 class RenderThreadRotationTests(unittest.TestCase):
+    def test_cdg_backdrop_blacks_both_backgrounds_without_erasing_lyrics(self):
+        image = mod.QImage(300, 216, mod.QImage.Format.Format_RGB32)
+        image.fill(mod.QColor("#000080"))
+        painter = mod.QPainter(image)
+        painter.fillRect(6, 12, 288, 192, mod.QColor("#101020"))
+        # A near-background pre-wipe colour must survive an exact palette key.
+        painter.fillRect(90, 70, 50, 25, mod.QColor("#111121"))
+        painter.fillRect(150, 70, 50, 25, mod.QColor("#ffffff"))
+        painter.end()
+        backdrop = mod.RotationCdgBackdrop()
+        self.addCleanup(backdrop.close)
+        backdrop.set_frame(image)
+        result = backdrop._frame.toImage()
+        self.assertEqual(result.pixelColor(3, 6).name(), "#000000")
+        self.assertEqual(result.pixelColor(12, 18).name(), "#000000")
+        self.assertEqual(result.pixelColor(100, 80).name(), "#111121")
+        self.assertEqual(result.pixelColor(160, 80).name(), "#ffffff")
+        self.assertEqual(image.pixelColor(12, 18).name(), "#101020")
+
+    def test_empty_rotation_backdrop_is_black(self):
+        backdrop = mod.RotationCdgBackdrop()
+        self.addCleanup(backdrop.close)
+        backdrop.resize(300, 216)
+        self.assertEqual(backdrop.grab().toImage().pixelColor(150, 108).name(), "#000000")
+
     def test_now_singing_surface_has_live_motion(self):
         source = mod.QML_NOW_SINGING_SOURCE
         self.assertIn('text: "NOW SINGING  •  LIVE"', source)
