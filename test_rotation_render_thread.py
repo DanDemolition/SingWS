@@ -228,6 +228,18 @@ class RenderThreadRotationTests(unittest.TestCase):
         view.show()
         QTest.qWait(40)
         self.assertTrue(view.isVisible())
+        if view.rotation_rail is not None:
+            self.assertTrue(view.rotation_rail._root.property("effectsEnabled"))
+
+        view.hide()
+        QTest.qWait(40)
+        if view.rotation_rail is not None:
+            self.assertFalse(view.rotation_rail._root.property("effectsEnabled"))
+
+        view.show()
+        QTest.qWait(40)
+        if view.rotation_rail is not None:
+            self.assertTrue(view.rotation_rail._root.property("effectsEnabled"))
 
         owner._app_closing = True
         view.close()

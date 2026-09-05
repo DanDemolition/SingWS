@@ -20,7 +20,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.6.9"
+APP_VERSION = "0.4.7.0"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -18453,7 +18453,14 @@ class RotationView(QMainWindow):
         )
 
     def set_effects_enabled(self, enabled):
-        enabled = bool(enabled)
+        self._effects_enabled_requested = bool(enabled)
+        self._apply_effects_visibility()
+
+    def _apply_effects_visibility(self):
+        enabled = bool(
+            getattr(self, "_effects_enabled_requested", True)
+            and self.isVisible()
+        )
         if self.now_singing_surface is not None:
             self.now_singing_surface.set_effects_enabled(enabled)
         if self.rotation_rail is not None:
@@ -18797,9 +18804,14 @@ class RotationView(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._apply_effects_visibility()
         if self.rotation_rail is None:
             self._apply_scroll_cadence()
             self._last_scroll_ts = None
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._apply_effects_visibility()
 
     def _apply_scroll_cadence(self):
         """Use the ticker's display-aware 60-120 FPS repaint cadence."""

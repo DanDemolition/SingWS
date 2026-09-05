@@ -272,8 +272,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.6.9',
-        'CFBundleVersion': '0.4.6.9',
+        'CFBundleShortVersionString': '0.4.7.0',
+        'CFBundleVersion': '0.4.7.0',
         'LSMinimumSystemVersion': '12.3',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
