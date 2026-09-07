@@ -45,6 +45,7 @@ static void bridgeLog(const char *fmt, ...) {
 
 @interface BridgeVideoView : NSOpenGLView
 @property(nonatomic, weak) BridgeRenderer *renderer;
+@property(nonatomic) BOOL ignoresMouse;
 @end
 
 @interface BridgeRenderer : NSObject
@@ -80,6 +81,8 @@ static void bridgeLog(const char *fmt, ...) {
 - (void)nativeViewDidAttach:(BridgeVideoView *)view;
 - (void)refreshViewsOutput:(NSView *)output preview:(NSView *)preview;
 - (void)beginWindowTransition:(int)durationMs;
+- (void)setRotationHost:(NSView *)host enabled:(BOOL)enabled;
+- (void)setSpotlightHost:(NSView *)host enabled:(BOOL)enabled;
 - (void *)grabFrameWidth:(int *)width height:(int *)height stride:(int *)stride;
 @end
 
@@ -108,6 +111,9 @@ static void bridgeLog(const char *fmt, ...) {
         return;
     }
     [super mouseDown:event];
+}
+- (NSView *)hitTest:(NSPoint)point {
+    return self.ignoresMouse ? nil : [super hitTest:point];
 }
 @end
 
@@ -482,14 +488,17 @@ static GLuint makeProgram(void) {
 @implementation BridgeRenderer {
     NSOpenGLPixelFormat *_format;
     NSOpenGLContext *_master;
-    BridgeVideoView *_outputView, *_previewView;
+    BridgeVideoView *_outputView, *_previewView, *_rotationView, *_spotlightView;
+    __weak NSView *_spotlightHost;
+    uint64_t _spotlightRevision;
+    __weak NSView *_rotationHost;
     // mpv renders into a texture owned by _master, then the output and preview
     // contexts sample that shared texture.  A flush submits the producer work
     // but does not make its completion visible to another GL context on Apple
     // Silicon, so retain a GPU fence for the consumers to wait on.
     GLsync _frameFence;
     GLuint _texture, _fbo, _cdgTexture, _cdgFbo, _backgroundTexture, _backgroundFbo;
-    GLuint _previousBackgroundTexture, _program, _outVao, _prevVao;
+    GLuint _previousBackgroundTexture, _program, _outVao, _prevVao, _rotationVao, _spotlightVao;
     GLint _scaleUniform, _uvScaleUniform, _uvOffsetUniform, _textureUniform, _sidefillUniform;
     GLint _panelUniform, _backgroundTextureUniform, _backgroundOpacityUniform;
     GLint _previousBackgroundTextureUniform, _previousBackgroundOpacityUniform, _backgroundCrossfadeMixUniform;
@@ -504,7 +513,7 @@ static GLuint makeProgram(void) {
     // first measurement lands.
     std::atomic<double> _pictureSpanX;
     // Last presentView skip reason per view; -1 so the first pass always logs.
-    int _lastOutputSkip, _lastPreviewSkip;
+    int _lastOutputSkip, _lastPreviewSkip, _lastRotationSkip, _lastSpotlightSkip;
     // Atomic since the control queue moved off the GUI thread: the getters and
     // setPaused: read these from Qt's thread while the load runs.
     std::atomic_bool _loading, _playWhenLoaded;
@@ -521,6 +530,11 @@ static GLuint makeProgram(void) {
     unsigned int _repeatedMpvLogCount;
     std::atomic_bool _outputTransitioning;
     std::atomic<uint64_t> _transitionSerial;
+    // The rotation screen is an additional full-display consumer of the same
+    // retained karaoke texture. Keep its underlay fluid without making every
+    // 60/120 Hz source callback pay for another OpenGL flush; the main lyrics
+    // output remains uncapped and owns playback timing.
+    std::chrono::steady_clock::time_point _lastRotationPresentAt;
     mpv_handle *_mpv;
     mpv_render_context *_render;
     mpv_handle *_backgroundMpv;
@@ -528,7 +542,8 @@ static GLuint makeProgram(void) {
     std::atomic_bool _backgroundRenderQueued, _backgroundEventQueued;
     std::atomic_bool _backgroundHasFrame;
     std::atomic_bool _previousBackgroundHasFrame;
-    std::atomic_bool _backgroundAtEnd;
+    std::atomic_bool _backgroundAtEnd, _backgroundPaused;
+    std::atomic<int64_t> _backgroundPositionMs;
     std::atomic<double> _backgroundOpacity;
     std::atomic<double> _previousBackgroundOpacity;
     std::atomic<double> _backgroundCrossfadeMix;
@@ -548,9 +563,9 @@ static GLuint makeProgram(void) {
         _backgroundMpv=nullptr; _backgroundRender=nullptr;
         _backgroundRenderQueued=false; _backgroundEventQueued=false;
         _backgroundHasFrame=false; _previousBackgroundHasFrame=false;
-        _backgroundAtEnd=false; _backgroundOpacity=0.0;
+        _backgroundAtEnd=false; _backgroundPaused=false; _backgroundPositionMs=0; _backgroundOpacity=0.0;
         _previousBackgroundOpacity=0.0; _backgroundCrossfadeMix=1.0;
-        _lastOutputSkip=-1; _lastPreviewSkip=-1;
+        _lastOutputSkip=-1; _lastPreviewSkip=-1; _lastRotationSkip=-1; _lastSpotlightSkip=-1;
         _loading=false; _playWhenLoaded=false;
         _desiredTempoPercent=100; _desiredSemitones=0; _loadSerial=0;
         _repeatedMpvLogCount=0;
@@ -636,6 +651,30 @@ static GLuint makeProgram(void) {
     return view;
 }
 
+- (BridgeVideoView *)attachRotationBehind:(NSView *)host {
+    if(!host || !host.window)return nil;
+    // Qt paints the complete QWidget tree into the NSWindow content view. A GL
+    // child inside that tree is always above those pixels or hidden by an
+    // opaque native QWidget. Put the rotation renderer directly behind Qt's
+    // translucent content view instead: the same retained texture remains the
+    // background, while all Qt and QQuick controls compose normally above it.
+    NSView *content=host.window.contentView;
+    NSView *frame=content.superview;
+    if(!content || !frame)return nil;
+    BridgeVideoView *view=[[BridgeVideoView alloc] initWithFrame:content.frame pixelFormat:_format];
+    NSOpenGLContext *ctx=[[NSOpenGLContext alloc] initWithFormat:_format shareContext:_master];
+    [view setOpenGLContext:ctx]; view.renderer=self;
+    view.ignoresMouse=YES;
+    // The rotation screen is information-first. AppKit composites this shared
+    // native picture over the Qt/Qt Quick scene at a stable low opacity, so
+    // lyrics remain visible without obscuring singer names or requiring CPU
+    // screenshots/palette keying.
+    view.alphaValue=0.04;
+    view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+    [frame addSubview:view positioned:NSWindowAbove relativeTo:content];
+    return view;
+}
+
 - (BOOL)setOption:(const char *)name value:(const char *)value {
     int r=mpv_set_option_string(_mpv,name,value);
     if (r<0) bridgeLog("[bridge] option %s failed: %s",name,mpv_error_string(r));
@@ -650,11 +689,29 @@ static GLuint makeProgram(void) {
     _playWhenLoaded=false;
     _hasFrame=NO;
     _isCdg=[[video.pathExtension lowercaseString] isEqualToString:@"cdg"];
+    // CDG packets update tiles on a retained 300x216 canvas. Merely hiding the
+    // surface while loadfile replaces the media does not erase that canvas, so
+    // the first packets of the next song can reveal lyrics left by the previous
+    // song underneath them. Clear both retained karaoke targets before the new
+    // decoder is allowed to draw; the first real frame will install a new GPU
+    // fence for the consumer views as usual.
+    [_master makeCurrentContext];
+    CGLLockContext(_master.CGLContextObj);
+    glClearColor(0,0,0,1);
+    glBindFramebuffer(GL_FRAMEBUFFER,_cdgFbo);
+    glViewport(0,0,300,216);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER,_fbo);
+    glViewport(0,0,_width,_height);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+    glFlush();
+    CGLUnlockContext(_master.CGLContextObj);
     // Until FILE_LOADED reports the real dwidth/dheight, assume the format's
     // nominal geometry rather than carrying the previous song's over.
     _pictureSpanX=(_isCdg?(300.0/216.0):((double)_width/_height))
                   /((double)_width/_height);
-    [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES];
+    [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES]; [_rotationView setNeedsDisplay:YES];
 }
 
 - (BOOL)loadVideo:(NSString *)video audio:(NSString *)audio {
@@ -786,7 +843,7 @@ static GLuint makeProgram(void) {
         if(!self->_mpv)return;
         const char *cmd[]={"stop",nullptr}; mpv_command_async(self->_mpv,3,cmd);
     }];
-    _hasFrame=NO; [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES];
+    _hasFrame=NO; [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES]; [_rotationView setNeedsDisplay:YES];
 }
 - (void)seekMilliseconds:(int64_t)milliseconds {
     if(!_mpv)return;
@@ -1021,7 +1078,7 @@ static GLuint makeProgram(void) {
     _cdgSidefill=(mode<0?0:(mode>2?2:mode));
     bridgeLog("[bridge] cdg fill mode=%d (0 off, 1 background colour, 2 blur)",
             (int)_cdgSidefill.load());
-    [_outputView setNeedsDisplay:YES];
+    [_outputView setNeedsDisplay:YES]; [_rotationView setNeedsDisplay:YES];
 }
 
 - (void)nativeViewDidAttach:(BridgeVideoView *)view {
@@ -1071,9 +1128,9 @@ static GLuint makeProgram(void) {
         [ctx update];
     }
     [_outputView setNeedsDisplay:YES];
-    [_previewView setNeedsDisplay:YES];
+    [_previewView setNeedsDisplay:YES]; [_rotationView setNeedsDisplay:YES];
     [self presentView:_outputView];
-    [self presentView:_previewView];
+    [self presentView:_previewView]; [self presentView:_rotationView]; [self presentView:_spotlightView];
     bridgeLog("[bridge] retained views refresh requested output_window=%d preview_window=%d",
             _outputView.window?1:0,_previewView.window?1:0);
 }
@@ -1093,7 +1150,7 @@ static GLuint makeProgram(void) {
         // present the latest shared texture at settled geometry rather than
         // waiting for another mpv render callback.
         [self presentView:self->_outputView];
-        [self presentView:self->_previewView];
+        [self presentView:self->_previewView]; [self presentView:self->_rotationView]; [self presentView:self->_spotlightView];
         [self->_outputView setNeedsDisplay:YES];
         bridgeLog("[bridge] output transition released serial=%llu",
                 (unsigned long long)serial);
@@ -1134,7 +1191,7 @@ static GLuint makeProgram(void) {
         // CDG callback made the host preview update only when a lyric packet
         // changed, so its MP4 appeared to pause throughout static CDG spans.
         [self presentView:self->_outputView];
-        [self presentView:self->_previewView];
+        [self presentView:self->_previewView]; [self presentView:self->_rotationView]; [self presentView:self->_spotlightView];
     });
 }
 - (void)scheduleBackgroundEvents {
@@ -1146,7 +1203,18 @@ static GLuint makeProgram(void) {
         while(true){
             mpv_event *e=mpv_wait_event(self->_backgroundMpv,0);
             if(!e||e->event_id==MPV_EVENT_NONE)break;
-            if(e->event_id==MPV_EVENT_FILE_LOADED)
+            if(e->event_id==MPV_EVENT_PROPERTY_CHANGE){
+                mpv_event_property *p=(mpv_event_property *)e->data;
+                if(p && p->data){
+                    if(e->reply_userdata==101 && p->format==MPV_FORMAT_DOUBLE)
+                        self->_backgroundPositionMs=(int64_t)llround(*(double *)p->data*1000.0);
+                    else if(e->reply_userdata==102 && p->format==MPV_FORMAT_FLAG)
+                        self->_backgroundPaused=*(int *)p->data!=0;
+                    else if(e->reply_userdata==103 && p->format==MPV_FORMAT_FLAG)
+                        self->_backgroundAtEnd=*(int *)p->data!=0;
+                }
+            }
+            else if(e->event_id==MPV_EVENT_FILE_LOADED)
                 bridgeLog("[background] native animation loaded");
             else if(e->event_id==MPV_EVENT_END_FILE){
                 self->_backgroundAtEnd=true;
@@ -1178,6 +1246,7 @@ static GLuint makeProgram(void) {
     }
     _backgroundOpacity=std::max(0.0,std::min(1.0,opacity));
     _backgroundHasFrame=false; _backgroundAtEnd=false;
+    _backgroundPositionMs=0; _backgroundPaused=false;
     if(!_backgroundMpv){
         _backgroundMpv=mpv_create(); if(!_backgroundMpv)return NO;
         mpv_set_option_string(_backgroundMpv,"config","no");
@@ -1204,6 +1273,9 @@ static GLuint makeProgram(void) {
         mpv_set_option_string(_backgroundMpv,"idle","yes");
         mpv_set_wakeup_callback(_backgroundMpv,backgroundEventWake,(__bridge void *)self);
         if(mpv_initialize(_backgroundMpv)<0)return NO;
+        mpv_observe_property(_backgroundMpv,101,"time-pos",MPV_FORMAT_DOUBLE);
+        mpv_observe_property(_backgroundMpv,102,"pause",MPV_FORMAT_FLAG);
+        mpv_observe_property(_backgroundMpv,103,"eof-reached",MPV_FORMAT_FLAG);
         [_master makeCurrentContext];
         mpv_opengl_init_params init={.get_proc_address=getProc,.get_proc_address_ctx=nullptr};
         mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,(void *)MPV_RENDER_API_TYPE_OPENGL},{MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,&init},{MPV_RENDER_PARAM_INVALID,nullptr}};
@@ -1213,7 +1285,7 @@ static GLuint makeProgram(void) {
     // An EOF may leave pause asserted.  Every replacement animation must
     // explicitly resume without touching the karaoke/audio master core.
     int paused=0;
-    mpv_set_property(_backgroundMpv,"pause",MPV_FORMAT_FLAG,&paused);
+    mpv_set_property_async(_backgroundMpv,91,"pause",MPV_FORMAT_FLAG,&paused);
     const char *cmd[]={"loadfile",path.fileSystemRepresentation,"replace",nullptr};
     int r=mpv_command_async(_backgroundMpv,90,cmd);
     bridgeLog("[background] native animation queued file=%s opacity=%.2f",path.fileSystemRepresentation,(double)_backgroundOpacity.load());
@@ -1221,26 +1293,17 @@ static GLuint makeProgram(void) {
 }
 - (void)stopBackgroundVideo {
     _backgroundOpacity=0.0; _backgroundHasFrame=false; _backgroundAtEnd=false;
+    _backgroundPositionMs=0; _backgroundPaused=false;
     _previousBackgroundHasFrame=false; _previousBackgroundOpacity=0.0;
     _backgroundCrossfadeMix=1.0;
     if(_backgroundMpv){const char *cmd[]={"stop",nullptr};mpv_command_async(_backgroundMpv,92,cmd);}
     [_outputView setNeedsDisplay:YES];
 }
-- (BOOL)backgroundAtEnd {
-    if(_backgroundAtEnd.load())return YES;
-    if(!_backgroundMpv)return NO;
-    int eof=0;
-    return mpv_get_property(_backgroundMpv,"eof-reached",MPV_FORMAT_FLAG,&eof)>=0 && eof;
-}
-- (int64_t)backgroundPositionMilliseconds {
-    if(!_backgroundMpv)return 0; double seconds=0.0;
-    return mpv_get_property(_backgroundMpv,"time-pos",MPV_FORMAT_DOUBLE,&seconds)>=0
-        ? (int64_t)llround(seconds*1000.0) : 0;
-}
-- (BOOL)backgroundPaused {
-    if(!_backgroundMpv)return NO; int paused=0;
-    return mpv_get_property(_backgroundMpv,"pause",MPV_FORMAT_FLAG,&paused)>=0 && paused;
-}
+// UI timers read observed state; querying the decoder core synchronously can
+// block the main thread while a decorative animation opens or reaches EOF.
+- (BOOL)backgroundAtEnd { return _backgroundAtEnd.load(); }
+- (int64_t)backgroundPositionMilliseconds { return _backgroundPositionMs.load(); }
+- (BOOL)backgroundPaused { return _backgroundPaused.load(); }
 - (void)setBackgroundOpacity:(double)opacity {
     const double value=std::max(0.0,std::min(1.0,opacity));
     _backgroundOpacity=value;
@@ -1254,7 +1317,7 @@ static GLuint makeProgram(void) {
             _backgroundCrossfadeMix=1.0;
         }
     }
-    [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES];
+    [_outputView setNeedsDisplay:YES]; [_previewView setNeedsDisplay:YES]; [_rotationView setNeedsDisplay:YES];
 }
 // Measure where libmpv pillarboxed the picture inside the shared texture, from
 // its own dwidth/dheight. CDG is 300x216 (DAR 1.389), so a 4:3 assumption puts
@@ -1286,7 +1349,7 @@ static GLuint makeProgram(void) {
         dispatch_async(dispatch_get_main_queue(),^{
             if(self->_stopping.load())return;
             [self->_outputView setNeedsDisplay:YES];
-            [self->_previewView setNeedsDisplay:YES];
+            [self->_previewView setNeedsDisplay:YES]; [self->_rotationView setNeedsDisplay:YES];
         });
     }
     bridgeLog("[bridge] picture %lldx%lld span=%.5f panel=%.5f at %s",
@@ -1406,8 +1469,65 @@ static GLuint makeProgram(void) {
         // black and visualReady -- which is what the host gates the surface
         // reveal on -- stays false across the switch.
         if(!_loading.load()) _hasFrame=YES; }
-    [self presentView:_outputView]; [self presentView:_previewView];
+    [self presentView:_outputView];
+    [self presentView:_previewView];
+    const auto now=std::chrono::steady_clock::now();
+    if(_lastRotationPresentAt.time_since_epoch().count()==0 ||
+       now-_lastRotationPresentAt>=std::chrono::milliseconds(33)){
+        _lastRotationPresentAt=now;
+        [self presentView:_rotationView];
+    }
+    [self presentView:_spotlightView];
 }
+- (void)setRotationHost:(NSView *)host enabled:(BOOL)enabled {
+    if(_stopping.load())return;
+    if(!host){
+        _rotationView.hidden=YES;
+        return;
+    }
+    if(!_rotationView) _rotationView=[self attachRotationBehind:host];
+    else if(_rotationHost!=host){
+        [_rotationView removeFromSuperview];
+        _rotationView=nil;
+        _rotationView=[self attachRotationBehind:host];
+    }
+    _rotationHost=host;
+    if(!_rotationView)return;
+    _rotationView.hidden=!enabled;
+    if(enabled){
+        _lastRotationPresentAt={};
+        [_rotationView setNeedsDisplay:YES];
+        [self presentView:_rotationView]; [self presentView:_spotlightView];
+    }
+}
+
+- (void)setSpotlightHost:(NSView *)host enabled:(BOOL)enabled {
+    if(_stopping.load())return;
+    const uint64_t revision=++_spotlightRevision;
+    if(!host){ _spotlightView.hidden=YES; return; }
+    if(!_spotlightView || _spotlightHost!=host){
+        [_spotlightView removeFromSuperview];
+        _spotlightView=[self attachTo:host];
+        _spotlightView.ignoresMouse=YES;
+        _spotlightView.alphaValue=0;
+        _spotlightHost=host;
+    }
+    if(!_spotlightView)return;
+    if(enabled){
+        if(_spotlightView.hidden) _spotlightView.alphaValue=0;
+        _spotlightView.hidden=NO;
+        [self presentView:_spotlightView];
+    }
+    // AppKit owns this one opacity transition. Python only schedules the
+    // spotlight interval; it never paints, polls, or copies a video frame.
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context){
+        context.duration=0.35;
+        self->_spotlightView.animator.alphaValue=enabled?1.0:0.0;
+    } completionHandler:^{
+        if(!enabled && self->_spotlightRevision==revision) self->_spotlightView.hidden=YES;
+    }];
+}
+
 - (void)presentView:(BridgeVideoView *)view {
     if(!view)return;  // nil belongs to neither view; labelling it would mislead
     // Why a present was skipped is the whole question when one window goes
@@ -1424,13 +1544,13 @@ static GLuint makeProgram(void) {
     // before. Reported because "drawing, but there is no frame to draw" and
     // "not drawing at all" look identical on screen and have different causes.
     else if(!_hasFrame) state = 6;
-    int &last = isOutput ? _lastOutputSkip : _lastPreviewSkip;
+    int &last = isOutput ? _lastOutputSkip : (view==_rotationView ? _lastRotationSkip : (view==_spotlightView ? _lastSpotlightSkip : _lastPreviewSkip));
     if(state != last){
         last = state;
         static const char *why[]={"presenting","no-gl-context","window-transition",
                                   "view-hidden","no-window","window-not-visible",
                                   "no-frame (black)"};
-        bridgeLog("[bridge] %s view %s", isOutput?"output":"preview", why[state]);
+        bridgeLog("[bridge] %s view %s", isOutput?"output":(view==_rotationView?"rotation":(view==_spotlightView?"spotlight":"preview")), why[state]);
     }
     if(state && state != 6) return;
     NSOpenGLContext*ctx=view.openGLContext;
@@ -1454,7 +1574,7 @@ static GLuint makeProgram(void) {
         // MP4 karaoke deliberately fills every display edge. The core has
         // already stretched it into the shared 16:9 texture, so this remains
         // one retained-texture draw with no per-frame CPU scaling.
-        if(!_isCdg){sx=1;sy=1;}
+        if(!_isCdg && view!=_rotationView && view!=_spotlightView){sx=1;sy=1;}
         GLfloat uvx=1,uvy=1,uox=0,uoy=0;
         // Where libmpv actually pillarboxed the picture inside the shared 16:9
         // texture, measured from dwidth/dheight at FILE_LOADED. This was
@@ -1476,8 +1596,13 @@ static GLuint makeProgram(void) {
             const double ca=sa*span;  // the picture's own aspect
             if(va>ca)sx=(GLfloat)(ca/va); else sy=(GLfloat)(va/ca);
         }
-        int sidefill=(view==_outputView && _isCdg)?_cdgSidefill.load():0;
-        glUseProgram(_program); GLuint*vao=(view==_outputView)?&_outVao:&_prevVao;
+        // The information-heavy rotation screen always keeps the complete CDG
+        // picture at native aspect with black pillar bars. Decorative cover,
+        // blur and animation fills belong to the main audience lyrics screen;
+        // spreading them across the rotation table makes names hard to read.
+        int sidefill=(view!=_previewView && view!=_rotationView && view!=_spotlightView && _isCdg)
+            ?_cdgSidefill.load():0;
+        glUseProgram(_program); GLuint*vao=(view==_outputView)?&_outVao:(view==_rotationView?&_rotationVao:(view==_spotlightView?&_spotlightVao:&_prevVao));
         if(!*vao)glGenVertexArrays(1,vao); glBindVertexArray(*vao);
         glUniform2f(_panelUniform,panelL,panelR);
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,frameTexture); glUniform1i(_textureUniform,0);
@@ -1496,7 +1621,7 @@ static GLuint makeProgram(void) {
         // Preview must represent what the room sees. Previously this was
         // output-only, so the preview retained the raw blue CDG rectangle even
         // while the show window used the animation composite.
-        const bool backgroundActive=(_isCdg&&(
+        const bool backgroundActive=(view!=_rotationView&&view!=_spotlightView&&_isCdg&&(
             (_backgroundHasFrame.load()&&_backgroundOpacity.load()>0.0) ||
             (_previousBackgroundHasFrame.load()&&_previousBackgroundOpacity.load()>0.0)));
         if(backgroundActive){
@@ -1575,12 +1700,19 @@ static GLuint makeProgram(void) {
     if(_frameFence){[_master makeCurrentContext];glDeleteSync(_frameFence);_frameFence=nullptr;}
     if(_mpv){mpv_terminate_destroy(_mpv);_mpv=nullptr;}
     if(_backgroundMpv){mpv_terminate_destroy(_backgroundMpv);_backgroundMpv=nullptr;}
-    [_outputView removeFromSuperview]; [_previewView removeFromSuperview];
+    [_outputView removeFromSuperview]; [_previewView removeFromSuperview]; [_rotationView removeFromSuperview]; [_spotlightView removeFromSuperview];
     bridgeLog("[bridge] clean shutdown");
 }
 @end
 
 extern "C" {
+void singws_bridge_set_rotation_spotlight(void *h, uintptr_t host, int enabled) {
+    if(h)[(__bridge BridgeRenderer *)h setSpotlightHost:(__bridge NSView *)(void *)host enabled:enabled!=0];
+}
+void singws_bridge_set_rotation_host(void *h, uintptr_t host, int enabled) {
+    if(h)[(__bridge BridgeRenderer *)h setRotationHost:(__bridge NSView *)(void *)host enabled:enabled!=0];
+}
+
 void singws_bridge_set_log_callback(SingWSBridgeLogFn cb) { g_bridgeLog.store(cb); }
 
 void *singws_bridge_create(uintptr_t outputView, uintptr_t previewView,

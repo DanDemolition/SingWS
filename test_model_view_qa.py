@@ -472,9 +472,11 @@ class ModelBackedViewQATests(unittest.TestCase):
         lineups = []
         fake = SimpleNamespace(
             queue_items=[],
-            rotation_rail=SimpleNamespace(set_items=lambda items: rendered.extend(items)),
+            parent=lambda: None,
+            rotation_rail=SimpleNamespace(set_items=lambda items: rendered.extend(items),
+                                          _root=SimpleNamespace(celebrateSinger=lambda: None)),
             list_widget=SimpleNamespace(),
-            now_singing_label=SimpleNamespace(setText=lambda text: None),
+            now_singing_label=SimpleNamespace(setText=lambda text: None, text=lambda: ""),
             queue_count_label=SimpleNamespace(setText=counts.append),
             queue_title_label=SimpleNamespace(setText=lambda text: next_states.append(("title", text))),
             now_singing_surface=SimpleNamespace(

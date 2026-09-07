@@ -394,9 +394,13 @@ class RotationRequestQrGatingTests(unittest.TestCase):
     class _StubRotationView:
         def __init__(self):
             self.calls = []
+            self.accepting_calls = []
 
         def set_request_qr(self, pixmap, caption=""):
             self.calls.append((pixmap, caption))
+
+        def set_requests_accepting(self, accepting):
+            self.accepting_calls.append(bool(accepting))
 
     def make_app(self, *, enabled=True, accepting=True, caption=None,
                  url="https://x/tenants/t/"):
@@ -450,6 +454,7 @@ class RotationRequestQrGatingTests(unittest.TestCase):
         app, view = self.make_app(accepting=False)
         app._refresh_rotation_request_qr("test")
         self.assertEqual(view.calls[-1][0], None)
+        self.assertEqual(view.accepting_calls, [False])
 
     def test_cleared_when_disabled(self):
         app, view = self.make_app(enabled=False)
@@ -493,6 +498,7 @@ class RotationQrCardRenderTests(unittest.TestCase):
         view.qr_card = QFrame()
         view.qr_image_label = QLabel()
         view.qr_caption_label = QLabel()
+        view.scan_label = QLabel()
         return view
 
     def test_sets_pixmap_caption_and_shows_card(self):
@@ -504,7 +510,7 @@ class RotationQrCardRenderTests(unittest.TestCase):
         self.assertLessEqual(
             view.qr_image_label.pixmap().height(), mod.RotationView.ROTATION_QR_SIZE
         )
-        self.assertEqual(view.qr_caption_label.text(), "JOIN THE QUEUE!")
+        self.assertEqual(view.qr_caption_label.text(), "SCAN TO REQUEST\nA SONG")
         self.assertFalse(view.qr_card.isHidden())
 
     def test_none_hides_the_card(self):
@@ -515,6 +521,13 @@ class RotationQrCardRenderTests(unittest.TestCase):
         mod.RotationView.set_request_qr(view, None)
         self.assertTrue(view.qr_card.isHidden())
         self.assertTrue(view.qr_image_label.pixmap().isNull())
+
+    def test_signup_message_tracks_accepting_state(self):
+        view = self._view()
+        mod.RotationView.set_requests_accepting(view, False)
+        self.assertEqual(view.scan_label.text(), "FULL FOR\nTHE NIGHT")
+        mod.RotationView.set_requests_accepting(view, True)
+        self.assertEqual(view.scan_label.text(), "YOUR TURN\nSTARTS HERE")
 
 
 if __name__ == "__main__":

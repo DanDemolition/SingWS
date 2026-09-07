@@ -1140,6 +1140,8 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(queue_source.count("duration_seconds=current_song_dur"), 4)
         self.assertIn("duration_seconds=effective_duration", zip_source)
         self.assertIn("duration_seconds=duration_seconds", wrapper_source)
+        mpv_source = inspect.getsource(self.singws.KaraokeApp._start_mpv_karaoke_transport)
+        self.assertIn("self._arm_audio_end_floor(audio_path, duration_seconds)", mpv_source)
 
     def test_server_off_background_follows_waitlist_state(self):
         app = make_app(self.singws)

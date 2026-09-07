@@ -7,6 +7,7 @@ import sys
 import logging
 import logging.handlers
 from pathlib import Path
+from karafun_fullscreen import ensure_renderer_fullscreen
 
 # The BASS master/EQ processors run as Python DSP callbacks on the audio
 # thread, so producing sound needs the GIL -- unlike the old GStreamer pipeline,
@@ -20,7 +21,7 @@ from pathlib import Path
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.7.0"
+APP_VERSION = "0.4.7.1"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -131,7 +132,8 @@ try:
 except Exception:
     MutagenFile = None
 from datetime import datetime, timedelta
-import requests
+from network_lifecycle import ShutdownRequests
+requests = ShutdownRequests()
 import platform
 import threading
 import time
@@ -3424,7 +3426,8 @@ DEFAULTS = {
         "polaroid_drop",
     ],
     "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
-    "rotation_cdg_backdrop_enabled": True, # live CDG lyrics on black behind the audience rotation layout
+    "rotation_cdg_backdrop_enabled": True, # same native CDG/composite as the show screen
+    "rotation_native_cdg_backdrop": True, # retained shared texture; false keeps the legacy screenshot path
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "loudness_scan_holds_for_playback": True, # False = keep scanning under a live song (faster pass, risks GUI stalls)
@@ -17239,21 +17242,30 @@ Rectangle {
     // Table columns, as fractions of width. The pinned header and the scrolling
     // rows read the same numbers so they cannot drift apart.
     readonly property real colNumber: 0.035
-    readonly property real colSinger: 0.105
-    readonly property real colSong:   0.455
+    readonly property real colSinger: 0.265
+    readonly property real colSong:   0.98
     readonly property real colArtist: 0.775
-    readonly property real headerHeight: 34
+    readonly property real headerHeight: 0
     readonly property real listHeight: Math.max(0, height - headerHeight)
     // Single-line table rows rather than two-line cards: the whole point is
     // fitting more of the room on screen at once.
-    property real cardHeight: Math.max(52, Math.min(74, listHeight * 0.135))
-    property real cardGap: 6
+    property real cardHeight: Math.max(64, (listHeight - 4 * cardGap) / 5)
+    property real cardGap: 2
     property bool running: true
     property bool effectsEnabled: true
+    property int spotlightSerial: 0
     readonly property real cycleHeight: firstPass.height + cardGap
-    readonly property bool overflow: rotationModel.count > 1 && cycleHeight > listHeight
+    readonly property bool overflow: rotationModel.count > 1 && firstPass.height > listHeight + 0.5
 
     ListModel { id: rotationModel }
+    Text {
+        anchors.centerIn: parent
+        visible: rotationModel.count === 0
+        text: "THE STAGE IS YOURS"
+        color: "#ffffff"; font.bold: true
+        font.pixelSize: Math.max(24, root.width * 0.055)
+    }
+
 
     // Slow ambient stage lighting. These are scene-graph objects rather than
     // Python-painted effects, so they remain fluid while the host is busy.
@@ -17322,7 +17334,7 @@ Rectangle {
 
     function submitItems(payload, forceNow) {
         payload = payload || "[]"
-        if (forceNow || itemsJson === "[]") {
+        if (forceNow || !effectsEnabled || itemsJson === "[]") {
             loadItems(payload)
         } else if (payload !== itemsJson) {
             var oldCount = rotationModel.count
@@ -17335,6 +17347,15 @@ Rectangle {
             transitionJson = payload
             queueTransition.restart()
         }
+    }
+
+    function celebrateSinger() { if (effectsEnabled) changeSweepAnimation.restart() }
+
+    function spotlightNext() {
+        if (!effectsEnabled || rotationModel.count === 0) return
+        spotlightSerial += 1
+        changeSweepAnimation.restart()
+        spotlightHaloAnimation.restart()
     }
 
     function restartScroll() {
@@ -17353,16 +17374,19 @@ Rectangle {
             id: rotationCard
             width: firstPass.width
             height: root.cardHeight
-            radius: 18
+            radius: 2
             clip: true
             opacity: 0
             x: 24
             scale: 0.98
-            color: "#20000000"
-            border.width: 1
-            border.color: index === 0 ? "#8f73ff" : "#2b2d38"
+            color: index === 0 ? "#70371850" : "#b0100819"
+            border.width: 0
+            transformOrigin: Item.Left
 
-            Component.onCompleted: cardEntrance.start()
+            Component.onCompleted: {
+                if (root.effectsEnabled) cardEntrance.start()
+                else { opacity = 1; x = 0; scale = 1 }
+            }
             SequentialAnimation {
                 id: cardEntrance
                 PauseAnimation { duration: Math.max(0, Math.min(index, 8)) * 55 }
@@ -17370,6 +17394,26 @@ Rectangle {
                     OpacityAnimator { target: rotationCard; from: 0.0; to: 1.0; duration: 280; easing.type: Easing.OutCubic }
                     XAnimator { target: rotationCard; from: 24; to: 0; duration: 340; easing.type: Easing.OutCubic }
                     ScaleAnimator { target: rotationCard; from: 0.98; to: 1.0; duration: 340; easing.type: Easing.OutCubic }
+                }
+            }
+
+            Connections {
+                target: root
+                function onSpotlightSerialChanged() {
+                    if (root.effectsEnabled) nextUpPulse.restart()
+                }
+            }
+            SequentialAnimation {
+                id: nextUpPulse
+                PauseAnimation { duration: Math.max(0, Math.min(index, 7)) * 65 }
+                ParallelAnimation {
+                    NumberAnimation { target: rotationCard; property: "x"; to: index === 0 ? 14 : 7; duration: 230; easing.type: Easing.OutCubic }
+                    NumberAnimation { target: rotationCard; property: "scale"; to: index === 0 ? 1.10 : 1.025; duration: 260; easing.type: Easing.OutBack }
+                }
+                PauseAnimation { duration: index === 0 ? 720 : 180 }
+                ParallelAnimation {
+                    NumberAnimation { target: rotationCard; property: "x"; to: 0; duration: 360; easing.type: Easing.InOutCubic }
+                    NumberAnimation { target: rotationCard; property: "scale"; to: 1.0; duration: 420; easing.type: Easing.InOutCubic }
                 }
             }
 
@@ -17404,16 +17448,16 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.leftMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
-                color: index === 0 ? "#f6c945" : "#6954d9"
+                color: "#b783ff"
             }
 
             Text {
                 x: root.width * root.colNumber
                 width: root.width * (root.colSinger - root.colNumber) - 8
                 anchors.verticalCenter: parent.verticalCenter
-                text: model.number
-                color: index === 0 ? "#f6c945" : "#8e91a0"
-                font.pixelSize: Math.max(19, Math.min(27, root.cardHeight * 0.42))
+                text: String(model.number).length < 2 ? "0" + model.number : model.number
+                color: "#b783ff"
+                font.pixelSize: Math.max(24, root.cardHeight * 0.46)
                 font.bold: true
             }
 
@@ -17426,11 +17470,13 @@ Rectangle {
 
                 Text {
                     id: singerText
-                    width: Math.min(implicitWidth, singerCell.width - (duetBadge.visible ? duetBadge.width + singerCell.spacing : 0))
+                    width: singerCell.width - (duetBadge.visible ? duetBadge.width + singerCell.spacing : 0)
                     anchors.verticalCenter: parent.verticalCenter
                     text: model.singer
+                    fontSizeMode: Text.Fit
+                    minimumPixelSize: Math.max(20, root.cardHeight * 0.34)
                     color: "#ffffff"
-                    font.pixelSize: Math.max(21, Math.min(30, root.cardHeight * 0.46))
+                    font.pixelSize: Math.max(28, root.cardHeight * 0.70)
                     font.bold: true
                     elide: Text.ElideRight
                 }
@@ -17443,12 +17489,12 @@ Rectangle {
                     radius: 5
                     color: "transparent"
                     border.width: 1
-                    border.color: "#f6c945"
+                    border.color: "#adff2f"
                     Text {
                         id: duetLabel
                         anchors.centerIn: parent
                         text: "DUET"
-                        color: "#f6c945"
+                        color: "#adff2f"
                         font.pixelSize: Math.max(11, root.cardHeight * 0.19)
                         font.bold: true
                     }
@@ -17456,24 +17502,17 @@ Rectangle {
             }
 
             Text {
-                x: root.width * root.colSong
-                width: root.width * (root.colArtist - root.colSong) - 16
+                x: root.width * 0.125
                 anchors.verticalCenter: parent.verticalCenter
-                text: model.song
-                color: index === 0 ? "#efe9ff" : "#d3d5de"
-                font.pixelSize: Math.max(16, Math.min(23, root.cardHeight * 0.35))
-                font.italic: true
-                elide: Text.ElideRight
+                visible: index === 0
+                text: "UP NEXT"
+                color: "#b783ff"
+                font.pixelSize: Math.max(12, root.cardHeight * 0.17)
+                font.bold: true
             }
-
-            Text {
-                x: root.width * root.colArtist
-                width: root.width * (1.0 - root.colArtist) - 22
-                anchors.verticalCenter: parent.verticalCenter
-                text: model.artist ? model.artist : ""
-                color: index === 0 ? "#c8bdf0" : "#9a9dab"
-                font.pixelSize: Math.max(15, Math.min(21, root.cardHeight * 0.31))
-                elide: Text.ElideRight
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width; height: 1; color: "#45314f"
             }
 
             Rectangle {
@@ -17494,6 +17533,7 @@ Rectangle {
     // the same column fractions the delegate does.
     Item {
         id: headerRow
+        visible: false
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
@@ -17577,10 +17617,10 @@ Rectangle {
         id: scrollAnim
         target: strip
         easing.type: Easing.Linear
-        loops: 1
-        onFinished: {
-            root.restartScroll()
-        }
+        // Keep every wrap inside the scene-graph render thread. Calling back
+        // through restartScroll at the end of each pass introduced a visible
+        // one-frame hesitation when the Python GUI thread was busy.
+        loops: Animation.Infinite
     }
 
     SequentialAnimation {
@@ -17593,7 +17633,7 @@ Rectangle {
             }
         }
         OpacityAnimator { target: strip; from: 0.0; to: 1.0; duration: 240; easing.type: Easing.OutCubic }
-        ScriptAction { script: queuePopupAnimation.restart() }
+        ScriptAction { script: { queuePopupAnimation.restart(); changeSweepAnimation.restart() } }
     }
 
     Rectangle {
@@ -17608,7 +17648,7 @@ Rectangle {
         radius: 11
         color: "#f0251f43"
         border.width: 1
-        border.color: "#f6c945"
+        border.color: "#adff2f"
         opacity: 0
         transformOrigin: Item.Center
         Text {
@@ -17626,6 +17666,87 @@ Rectangle {
         OpacityAnimator { target: queuePopup; from: 0.0; to: 0.92; duration: 150; easing.type: Easing.OutCubic }
         PauseAnimation { duration: 700 }
         OpacityAnimator { target: queuePopup; from: 0.92; to: 0.0; duration: 260; easing.type: Easing.InQuad }
+    }
+
+    Rectangle {
+        id: changeSweep
+        z: 10; width: Math.max(36, root.width * 0.07); height: root.height * 1.3
+        y: -root.height * 0.15; rotation: 12; x: -width * 3
+        visible: root.effectsEnabled; opacity: 0.24
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0; color: "#00adff2f" }
+            GradientStop { position: 0.5; color: "#adff2f" }
+            GradientStop { position: 1; color: "#00adff2f" }
+        }
+    }
+    XAnimator {
+        id: changeSweepAnimation; target: changeSweep
+        from: -changeSweep.width * 3; to: root.width + changeSweep.width * 3
+        duration: 520; easing.type: Easing.OutCubic
+    }
+
+    Rectangle {
+        id: spotlightHalo
+        z: 11
+        x: 5
+        y: 3
+        width: root.width - 10
+        height: Math.max(1, root.cardHeight - 6)
+        radius: 8
+        color: "transparent"
+        border.width: 4
+        border.color: "#adff2f"
+        opacity: 0
+        scale: 0.96
+    }
+    SequentialAnimation {
+        id: spotlightHaloAnimation
+        ParallelAnimation {
+            OpacityAnimator { target: spotlightHalo; from: 0.0; to: 0.95; duration: 180; easing.type: Easing.OutCubic }
+            ScaleAnimator { target: spotlightHalo; from: 0.96; to: 1.015; duration: 380; easing.type: Easing.OutBack }
+        }
+        PauseAnimation { duration: 1000 }
+        ParallelAnimation {
+            OpacityAnimator { target: spotlightHalo; from: 0.95; to: 0.0; duration: 520; easing.type: Easing.InCubic }
+            ScaleAnimator { target: spotlightHalo; from: 1.015; to: 1.04; duration: 520; easing.type: Easing.InCubic }
+        }
+    }
+
+    Item {
+        id: spotlightParticles
+        z: 12
+        anchors.fill: parent
+        clip: true
+        Repeater {
+            model: 10
+            Rectangle {
+                required property int index
+                id: particle
+                width: 5 + (index % 3) * 2
+                height: width
+                radius: width / 2
+                x: root.width * 0.28
+                y: root.cardHeight * 0.50
+                color: index % 2 ? "#b783ff" : "#adff2f"
+                opacity: 0
+                Connections {
+                    target: root
+                    function onSpotlightSerialChanged() {
+                        if (root.effectsEnabled) particleBurst.restart()
+                    }
+                }
+                ParallelAnimation {
+                    id: particleBurst
+                    NumberAnimation { target: particle; property: "x"; from: root.width * 0.28; to: root.width * (0.12 + ((index * 17) % 42) / 100); duration: 850 + index * 28; easing.type: Easing.OutCubic }
+                    NumberAnimation { target: particle; property: "y"; from: root.cardHeight * 0.50; to: root.cardHeight * (0.10 + ((index * 29) % 80) / 100); duration: 850 + index * 28; easing.type: Easing.OutCubic }
+                    SequentialAnimation {
+                        OpacityAnimator { target: particle; from: 0.0; to: 0.9; duration: 120 }
+                        OpacityAnimator { target: particle; from: 0.9; to: 0.0; duration: 730 + index * 28; easing.type: Easing.InCubic }
+                    }
+                }
+            }
+        }
     }
 
     // One faint light ribbon reinforces the vertical direction without
@@ -17679,7 +17800,7 @@ Rectangle {
                 radius: width / 2
                 x: ((index * 83 + 41) % 97) / 100 * root.width
                 y: root.height + (index * 37 % 120)
-                color: index % 3 === 0 ? "#f6c945" : "#a895ff"
+                color: index % 3 === 0 ? "#adff2f" : "#a895ff"
                 opacity: 0.12 + (index % 3) * 0.05
                 YAnimator on y {
                     from: root.height + (index * 37 % 120)
@@ -17695,7 +17816,7 @@ Rectangle {
         id: topScrollFeather
         z: 8
         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-        height: Math.max(30, root.cardHeight * 0.34)
+        height: root.overflow ? 12 : 0
         gradient: Gradient {
             GradientStop { position: 0.0; color: "#ff121319" }
             GradientStop { position: 0.42; color: "#a8121319" }
@@ -17706,7 +17827,7 @@ Rectangle {
         id: bottomScrollFeather
         z: 8
         anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-        height: Math.max(42, root.cardHeight * 0.46)
+        height: root.overflow ? 20 : 0
         gradient: Gradient {
             GradientStop { position: 0.0; color: "#00121319" }
             GradientStop { position: 0.58; color: "#a8121319" }
@@ -17810,103 +17931,105 @@ def _rotation_quick_surfaces_supported() -> bool:
 
 
 class RotationAnnouncementTicker(QWidget):
-    """Lightweight, rotation-screen-only announcement marquee."""
-
-    SPEED_PX_PER_SEC = 72.0
-    GAP_PX = 90
+    """Rotation announcement driven by the audience ticker backend."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._message = ""
         self._enabled = False
-        self._offset = 0.0
-        self._last_tick = None
-        self.setMinimumHeight(68)
-        self.setMaximumHeight(68)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._timer.timeout.connect(self._advance)
+        callback = lambda: ([], self._message)
+        right_callback = lambda: ""
+        if _detached_quick_ticker_required():
+            backend_type = DetachedPainterTicker
+        elif _native_quick_ticker_supported():
+            backend_type = RenderThreadTicker
+        else:
+            backend_type = Ticker
+        self._backend = backend_type(
+            callback,
+            self,
+            get_time_left_callback=right_callback,
+        )
+        self._backend._external_settings_owner = parent
+        # The compact preset fits the rotation bottom rail while retaining the
+        # exact audience-ticker animation, subpixel motion and render backend.
+        self._backend.set_size_preset(3)
+        # Match the main audience ticker's saved px/sec speed instead of using
+        # a separate hardcoded rotation-screen pace.
+        ticker_speed = TICKER_SPEED_DEFAULT
+        try:
+            owner = parent.parent() if parent is not None else None
+            if owner is not None and hasattr(owner, "settings"):
+                ticker_speed = owner.settings.get(
+                    "ticker_speed_px_per_sec", TICKER_SPEED_DEFAULT)
+        except Exception:
+            pass
+        self._backend.set_scroll_speed(ticker_speed)
+        self._backend.set_color("#FFFFFF")
+        self._backend.set_bold(True)
+        ticker_surface = getattr(self._backend, "_view", self._backend) if isinstance(self._backend, DetachedPainterTicker) else self._backend
+        ticker_surface._announcement_mode = True
+        root = getattr(ticker_surface, "_root", None)
+        if root is not None:
+            root.setProperty("announcementMode", True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(0)
+        self.setStyleSheet("RotationAnnouncementTicker { background: #ADFF2F; }")
+        self.specials_badge = QLabel("SPECIALS", self)
+        self.specials_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.specials_badge.setStyleSheet("background: #ADFF2F; color: #09030E; font-size: 30px; font-weight: 900; padding: 0 22px;")
+        layout.addWidget(self.specials_badge)
+        layout.addWidget(self._backend, 1)
+        self.setFixedHeight(self._backend.height() + 4)
         self.hide()
 
     def set_announcement(self, enabled: bool, message: str):
+        normalized = " • ".join(str(message or "").splitlines()).strip()
+        if self._enabled == bool(enabled) and self._message == normalized:
+            return
         self._enabled = bool(enabled)
-        self._message = " • ".join(str(message or "").splitlines()).strip()
-        self._offset = 0.0
-        self._last_tick = None
+        self._message = normalized
         should_show = self._enabled and bool(self._message)
         self.setVisible(should_show)
-        if should_show and self.isVisible():
-            self._timer.start(33)
+        if should_show:
+            self._backend.force_refresh_now()
+            self._backend.update_right_text()
+            self._backend.start_scrolling()
         else:
-            self._timer.stop()
-        self.update()
+            self._backend.stop_scrolling()
 
     def showEvent(self, event):
         super().showEvent(event)
         if self._enabled and self._message:
-            self._last_tick = None
-            self._timer.start(33)
+            self._backend.force_refresh_now()
+            self._backend.start_scrolling()
 
     def hideEvent(self, event):
-        self._timer.stop()
-        self._last_tick = None
+        self._backend.stop_scrolling()
         super().hideEvent(event)
 
-    def _advance(self):
-        if not self.isVisible() or not self._message:
-            return
-        now = time.monotonic()
-        if self._last_tick is None:
-            self._last_tick = now
-            return
-        dt = min(0.1, max(0.0, now - self._last_tick))
-        self._last_tick = now
-        self._offset += self.SPEED_PX_PER_SEC * dt
-        self.update()
-
-    def paintEvent(self, event):
-        if not self._message:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        outer = QRectF(1, 1, max(0, self.width() - 2), max(0, self.height() - 2))
-        painter.setPen(QPen(QColor(246, 201, 69, 118), 1.5))
-        painter.setBrush(QColor(38, 29, 65, 245))
-        painter.drawRoundedRect(outer, 18, 18)
-
-        badge = QRectF(12, 11, 118, self.height() - 22)
-        painter.setPen(QPen(QColor(246, 201, 69, 180), 1))
-        painter.setBrush(QColor(246, 201, 69, 30))
-        painter.drawRoundedRect(badge, 12, 12)
-        badge_font = QFont()
-        badge_font.setPixelSize(12)
-        badge_font.setBold(True)
-        badge_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
-        painter.setFont(badge_font)
-        painter.setPen(QColor(246, 201, 69))
-        painter.drawText(badge.toRect(), Qt.AlignmentFlag.AlignCenter, "TONIGHT")
-
-        scroll_left = 148
-        scroll_width = max(0, self.width() - scroll_left - 18)
-        if scroll_width <= 0:
-            return
-        painter.save()
-        painter.setClipRect(QRect(scroll_left, 0, scroll_width, self.height()))
-        message_font = QFont()
-        message_font.setPixelSize(22)
-        message_font.setWeight(QFont.Weight.DemiBold)
-        painter.setFont(message_font)
-        painter.setPen(QColor(245, 242, 252))
-        metrics = QFontMetrics(message_font)
-        text_width = max(1, metrics.horizontalAdvance(self._message))
-        cycle = text_width + self.GAP_PX
-        self._offset %= cycle
-        first_x = scroll_left + scroll_width - int(self._offset)
-        baseline = (self.height() + metrics.ascent() - metrics.descent()) // 2
-        painter.drawText(first_x, baseline, self._message)
-        painter.drawText(first_x + cycle, baseline, self._message)
-        painter.restore()
+    def reassert_surface(self):
+        """Restore the ticker after AppKit restacks children on window changes."""
+        if not self.isVisible() or not self._enabled or not self._message:
+            return False
+        try:
+            self._backend.raise_()
+            container = getattr(self._backend, "_container", None)
+            if container is not None:
+                container.raise_()
+            sync = getattr(self._backend, "sync_surface_geometry", None)
+            if callable(sync):
+                sync()
+            self._backend.force_refresh_now()
+            self._backend.update()
+            return True
+        except Exception as exc:
+            _diag(f"[ROTATION-TICKER] surface reassert failed: {exc}")
+            return False
 
 
 class RotationCdgBackdrop(QWidget):
@@ -17953,6 +18076,11 @@ class RotationCdgBackdrop(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#000000"))
+        stage = getattr(self, "_stage_art", None)
+        if stage is not None and not stage.isNull():
+            image = stage.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                 Qt.TransformationMode.SmoothTransformation)
+            painter.drawPixmap((self.width()-image.width())//2, (self.height()-image.height())//2, image)
         if self._frame.isNull() or self.width() <= 0 or self.height() <= 0:
             return
         scaled = self._frame.scaled(
@@ -18046,7 +18174,7 @@ class RotationView(QMainWindow):
             QFrame#rotationShell {
                 background: rgba(255,255,255,0.018);
                 border: 1px solid rgba(255,255,255,0.04);
-                border-radius: 26px;
+                border-radius: 0px;
             }
             QFrame#rotationNowCard {
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
@@ -18056,7 +18184,7 @@ class RotationView(QMainWindow):
                 border-radius: 22px;
             }
             QLabel#rotationHeader {
-                color: #F6C945;
+                color: #ADFF2F;
                 font-size: 12px;
                 font-weight: 800;
             }
@@ -18088,7 +18216,7 @@ class RotationView(QMainWindow):
             QWidget#rotationSidebar {
                 background: rgba(255,255,255,0.028);
                 border: 1px solid rgba(255,255,255,0.05);
-                border-radius: 20px;
+                border-radius: 0px;
             }
             QLabel#rotationBrand {
                 color: #FFFFFF;
@@ -18103,7 +18231,7 @@ class RotationView(QMainWindow):
                 letter-spacing: 1px;
             }
             QLabel#rotationSideHead {
-                color: #F6C945;
+                color: #ADFF2F;
                 font-size: 12px;
                 font-weight: 800;
                 letter-spacing: 2px;
@@ -18122,13 +18250,13 @@ class RotationView(QMainWindow):
             }
             QLabel#rotationShowTitle {
                 color: #FFFFFF;
-                font-size: 40px;
+                font-size: 26px;
                 font-weight: 900;
                 letter-spacing: 2px;
             }
             QLabel#rotationClock {
                 color: #FFFFFF;
-                font-size: 22px;
+                font-size: 32px;
                 font-weight: 800;
             }
             QFrame#rotationNowPlayingBar {
@@ -18148,14 +18276,14 @@ class RotationView(QMainWindow):
             }
             QFrame#rotationQrCard {
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-                    stop:0 rgba(246,201,69,0.20),
-                    stop:1 rgba(246,201,69,0.06));
-                border: 1px solid rgba(246,201,69,0.42);
+                    stop:0 rgba(173,255,47,0.20),
+                    stop:1 rgba(173,255,47,0.06));
+                border: 1px solid rgba(173,255,47,0.42);
                 border-radius: 16px;
                 padding: 10px 12px 8px 12px;
             }
             QLabel#rotationQrCaption {
-                color: #F6C945;
+                color: #ADFF2F;
                 font-size: 15px;
                 font-weight: 800;
                 letter-spacing: 1px;
@@ -18323,23 +18451,21 @@ class RotationView(QMainWindow):
         self.sidebar.setObjectName("rotationSidebar")
         self.sidebar.setFixedWidth(300)
         side_layout = QVBoxLayout(self.sidebar)
-        side_layout.setContentsMargins(16, 14, 16, 14)
-        side_layout.setSpacing(8)
-        side_layout.addWidget(self.brand_label)
+        side_layout.setContentsMargins(18, 18, 18, 18)
+        side_layout.setSpacing(18)
+        side_layout.addStretch(1)
+        self.scan_label.setText("YOUR TURN\nSTARTS HERE")
+        self.scan_label.setStyleSheet("color: white; font-size: 30px; font-weight: 900;")
         side_layout.addWidget(self.scan_label)
         side_layout.addWidget(self.qr_card, 0, Qt.AlignmentFlag.AlignHCenter)
-        side_layout.addSpacing(4)
-        side_layout.addWidget(self.up_next_head)
-        side_layout.addWidget(self.up_next_singer)
-        side_layout.addWidget(self.up_next_detail)
-        side_layout.addSpacing(4)
-        side_layout.addWidget(self.on_deck_head)
-        side_layout.addWidget(self.on_deck_singer)
-        side_layout.addWidget(self.on_deck_detail)
         side_layout.addStretch(1)
+        for retired in (self.brand_label, self.up_next_head, self.up_next_singer,
+                        self.up_next_detail, self.on_deck_head, self.on_deck_singer,
+                        self.on_deck_detail):
+            retired.hide()
 
         # ---- Main column header: title + clock ----
-        self.show_title_label = QLabel("SHOW ROTATION", self)
+        self.show_title_label = QLabel("SingWS  |  SINGER ROTATION", self)
         self.show_title_label.setObjectName("rotationShowTitle")
         self.clock_label = QLabel("", self)
         self.clock_label.setObjectName("rotationClock")
@@ -18398,21 +18524,28 @@ class RotationView(QMainWindow):
         main_layout = QVBoxLayout(main_column)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(8)
-        main_layout.addLayout(title_row)
+        # Keep the top strip focused on the singer. The song video remains as
+        # the transparent full-screen underlay instead of appearing in a second
+        # animated preview window.
+        self.up_next_strip_label.hide()
+        self.now_playing_bar.setMinimumHeight(130)
+        self.now_playing_label.setWordWrap(True)
+        self.now_playing_label.setStyleSheet("color: white; font-size: 28px; font-weight: 800;")
+        main_layout.addWidget(self.now_playing_bar)
         if self.rotation_rail is not None:
             main_layout.addWidget(self.rotation_rail, 1)
         else:
-            main_layout.addLayout(queue_heading)
             main_layout.addWidget(self.list_widget, 1)
+        self.queue_title_label.hide()
+        self.queue_count_label.hide()
 
         body_row = QHBoxLayout()
         body_row.setContentsMargins(0, 0, 0, 0)
         body_row.setSpacing(14)
-        body_row.addWidget(self.sidebar)
         body_row.addWidget(main_column, 1)
-
+        body_row.addWidget(self.sidebar)
+        shell_layout.addLayout(title_row)
         shell_layout.addLayout(body_row, 1)
-        shell_layout.addWidget(self.now_playing_bar)
         shell_layout.addWidget(self.bottom_bar)
 
         safe_layout.addWidget(shell)
@@ -18423,6 +18556,18 @@ class RotationView(QMainWindow):
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
         self._cdg_backdrop = RotationCdgBackdrop(central, opacity=0.85)
+        self._cdg_backdrop._stage_art = QPixmap(get_resource_path("assets/rotation-stage-purple.png"))
+        # Give the raster labels their own native sibling above the GL host.
+        # Without it a native child view covers text painted in its parent.
+        self._cdg_backdrop.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+        self._cdg_backdrop.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        safe_area.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
+        safe_area.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self._rotation_foreground = safe_area
+        self._native_backdrop_plugin = None
+        self._native_backdrop_active = False
+        self._next_up_spotlight_started = None
+        self._next_up_spotlight_cycle = -1
         central_layout.addWidget(self._cdg_backdrop)
         central_layout.addWidget(safe_area)
         # StackAll raises its current widget. Keep the interactive rotation UI
@@ -18447,6 +18592,12 @@ class RotationView(QMainWindow):
         self._cdg_backdrop_timer = QTimer(self)
         self._cdg_backdrop_timer.timeout.connect(self._refresh_cdg_backdrop)
         self._cdg_backdrop_timer.start(125)
+        # macOS can reconnect the mpv and ticker surfaces after maximize or a
+        # display move. A low-frequency guard repairs a late restack without
+        # touching the rest of the rotation hierarchy.
+        self._ticker_surface_guard_timer = QTimer(self)
+        self._ticker_surface_guard_timer.timeout.connect(self._tick_ticker_surface_guard)
+        self._ticker_surface_guard_timer.start(1000)
         self.set_announcement_ticker(
             bool(settings.get("rotation_announcement_enabled", False)),
             settings.get("rotation_announcement_message", ""),
@@ -18466,15 +18617,14 @@ class RotationView(QMainWindow):
         if self.rotation_rail is not None:
             self.rotation_rail.set_effects_enabled(enabled)
 
-    ROTATION_QR_SIZE = 118
+    ROTATION_QR_SIZE = 250
 
     def set_cdg_backdrop_enabled(self, enabled):
         self._cdg_backdrop_enabled = bool(enabled)
-        if not self._cdg_backdrop_enabled:
-            self._cdg_backdrop.clear_frame()
+        self._refresh_cdg_backdrop()
 
     def _refresh_cdg_backdrop(self):
-        """Sample the native raw CDG texture; never use its show-screen composite."""
+        """Bind visibility only; native callbacks present frames at the source cadence."""
         try:
             owner = self.parent()
             active = bool(
@@ -18482,8 +18632,31 @@ class RotationView(QMainWindow):
                 and self.isVisible()
                 and owner is not None
                 and getattr(owner, "karaoke_playing", False)
-                and str(getattr(owner, "_current_karaoke_mode", "") or "").lower() == "cdg"
+                and str(getattr(owner, "_current_karaoke_mode", "") or "").lower() in {"cdg", "mp4", "video"}
             )
+            plugin = getattr(owner, "_mpv_playback", None) if owner is not None else None
+            self._refresh_next_up_spotlight(active)
+            native = bool(getattr(owner, "settings", {}).get("rotation_native_cdg_backdrop", True))
+            if native:
+                previous = self._native_backdrop_plugin
+                if previous is not None and previous is not plugin:
+                    previous.setRotationVideoHost(None, False)
+                    self._native_backdrop_active = False
+                    self._native_backdrop_plugin = None
+                bind = getattr(plugin, "setRotationVideoHost", None)
+                if callable(bind) and (plugin is not self._native_backdrop_plugin or active != self._native_backdrop_active):
+                    if bind(self._cdg_backdrop if active else None, active):
+                        self._native_backdrop_plugin = plugin
+                        self._native_backdrop_active = active
+                        if active:
+                            self._cdg_backdrop.stackUnder(self._rotation_foreground)
+                            self._rotation_foreground.raise_()
+                            self._schedule_ticker_surface_reassert()
+                return
+            if self._native_backdrop_plugin is not None:
+                self._native_backdrop_plugin.setRotationVideoHost(None, False)
+                self._native_backdrop_plugin = None
+                self._native_backdrop_active = False
             if not active:
                 self._cdg_backdrop.clear_frame()
                 return
@@ -18499,17 +18672,27 @@ class RotationView(QMainWindow):
             self._cdg_backdrop.clear_frame()
             _diag(f"[ROTATION] CDG backdrop refresh failed: {exc}")
 
+    def _refresh_next_up_spotlight(self, playing):
+        """Run one brief queue spotlight at each 30-second playback boundary."""
+        if not playing:
+            self._next_up_spotlight_started = None
+            self._next_up_spotlight_cycle = -1
+            return
+        now = time.monotonic()
+        if self._next_up_spotlight_started is None:
+            self._next_up_spotlight_started = now
+            self._next_up_spotlight_cycle = 0
+            return
+        cycle = int(max(0.0, now - self._next_up_spotlight_started) // 30.0)
+        if cycle <= 0 or cycle == self._next_up_spotlight_cycle:
+            return
+        self._next_up_spotlight_cycle = cycle
+        if self.rotation_rail is not None:
+            self.rotation_rail._root.spotlightNext()
+
     def _tick_rotation_clock(self):
-        """Wall clock for the audience screen: 11:28 PM over SAT MAY 17."""
-        try:
-            now = time.localtime()
-            self.clock_label.setText(
-                time.strftime("%I:%M %p", now).lstrip("0")
-                + "\n"
-                + time.strftime("%a %b %d", now).upper()
-            )
-        except Exception:
-            pass
+        """Audience wall clock, with no day or date."""
+        self.clock_label.setText(time.strftime("%I:%M %p").lstrip("0"))
 
     def set_now_playing_strip(self, now_text: str, next_text: str):
         """Bottom strip: what is on stage and who follows."""
@@ -18517,11 +18700,9 @@ class RotationView(QMainWindow):
             now_text = str(now_text or "").strip()
             next_text = str(next_text or "").strip()
             self.now_playing_label.setText(
-                f"NOW PLAYING   {now_text}" if now_text else ""
+                f"NOW SINGING\n{now_text}" if now_text else ""
             )
-            self.up_next_strip_label.setText(
-                f"Up Next:  {next_text}" if next_text else ""
-            )
+            self.up_next_strip_label.hide()
             self.now_playing_bar.setVisible(bool(now_text or next_text))
         except Exception:
             pass
@@ -18539,12 +18720,27 @@ class RotationView(QMainWindow):
                 singer_lbl.setText(singer)
                 detail_lbl.setText(detail)
                 for lbl in (singer_lbl, detail_lbl, head_lbl):
-                    lbl.setVisible(bool(singer))
+                    lbl.hide()
         except Exception:
             pass
 
     def set_announcement_ticker(self, enabled: bool, message: str):
         self.announcement_ticker.set_announcement(enabled, message)
+        self._schedule_ticker_surface_reassert()
+
+    def _schedule_ticker_surface_reassert(self, delays=(0, 120, 400, 900)):
+        for delay in delays:
+            QTimer.singleShot(delay, self._reassert_ticker_surface)
+
+    def _reassert_ticker_surface(self):
+        if not self.isVisible():
+            return False
+        return self.announcement_ticker.reassert_surface()
+
+    def _tick_ticker_surface_guard(self):
+        if QApplication.applicationState() != Qt.ApplicationState.ApplicationActive:
+            return
+        self._reassert_ticker_surface()
 
     def set_request_qr(self, pixmap, caption: str = ""):
         """Show (or hide with None) the request QR card at the bottom of the
@@ -18559,16 +18755,24 @@ class RotationView(QMainWindow):
         if pm.isNull():
             self.qr_card.hide()
             return
+        self._request_qr_source = pm
         self.qr_image_label.setPixmap(pm.scaled(
             self.ROTATION_QR_SIZE, self.ROTATION_QR_SIZE,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.FastTransformation,
         ))
         text = str(caption or "").strip() or str(
             DEFAULTS.get("rotation_request_qr_caption", "JOIN THE QUEUE!")
         )
-        self.qr_caption_label.setText(text)
+        self._request_qr_caption = text
+        self.qr_caption_label.setText("SCAN TO REQUEST\nA SONG" if text == "JOIN THE QUEUE!" else text)
         self.qr_card.show()
+
+    def set_requests_accepting(self, accepting: bool):
+        """Keep the room-facing signup message aligned with the host state."""
+        self.scan_label.setText(
+            "YOUR TURN\nSTARTS HERE" if accepting else "FULL FOR\nTHE NIGHT"
+        )
 
     def closeEvent(self, event):
         owner = self.parent()
@@ -18619,12 +18823,16 @@ class RotationView(QMainWindow):
         num = 1
         rotation_start_name = ""
         ready_singer_names = []
+        owner = self.parent()
+        active_id = str(getattr(owner, "_current_karaoke_singer_id", "") or "") if getattr(owner, "karaoke_playing", False) else ""
         for singer in queue:
             # The audience sees only singers with a song ready. Empty slots
             # remain in the host rotation but do not advertise a longer queue.
             if singer.get("skipped", False):
                 continue
             
+            if active_id and str(singer.get("singer_id", "")) == active_id:
+                continue
             # Find first non-skipped song
             first_active_song = None
             for song in singer.get("songs", []):
@@ -18690,10 +18898,12 @@ class RotationView(QMainWindow):
             if first_active_song is not None:
                 ready_singer_names.append(str(singer_display))
             if self.rotation_rail is None:
-                item = QListWidgetItem(text)
+                item = QListWidgetItem(f"{num:02d}    {singer_display}")
                 self.list_widget.addItem(item)
             num += 1
 
+        if now_singing_text != self.now_singing_label.text() and self.rotation_rail is not None:
+            self.rotation_rail._root.celebrateSinger()
         self.now_singing_label.setText(now_singing_text)
         count = len(display_items)
         self.queue_count_label.setText(f"{count} SINGER{'S' if count != 1 else ''}")
@@ -18746,6 +18956,9 @@ class RotationView(QMainWindow):
                 first_song = str((display_items[0] if display_items else {}).get("song", "") or "")
                 next_detail = lineup[0][1].split("\n")[0] if lineup[0][1] else ""
                 next_strip = f"{lineup[0][0]} - {next_detail}" if next_detail else lineup[0][0]
+            live_title = str(getattr(owner, "_current_karaoke_title", "") or "").strip()
+            if live_title and getattr(owner, "karaoke_playing", False):
+                now_strip = f"{now_singing_text} — {live_title}"
             self.set_now_playing_strip(now_strip, next_strip)
         except Exception as exc:
             _diag(f"[ROTATION] lineup panels failed: {exc}")
@@ -18798,13 +19011,36 @@ class RotationView(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if not hasattr(self, "sidebar"):
+            return
+        sidebar_width = max(210, min(440, int(self.width() * 0.28)))
+        self.sidebar.setFixedWidth(sidebar_width)
+        self.ROTATION_QR_SIZE = max(130, min(320, sidebar_width - 72))
+        qr = getattr(self, "_request_qr_source", None)
+        if qr is not None and not qr.isNull():
+            self.set_request_qr(qr, getattr(self, "_request_qr_caption", ""))
+        self.scan_label.setStyleSheet(f"color: white; font-size: {max(19, int(sidebar_width * .082))}px; font-weight: 900;")
+        self.now_playing_bar.setFixedHeight(max(130, int(self.height() * .18)))
+        self.now_playing_label.setStyleSheet(f"color: white; font-size: {max(20, int(self.height() * .031))}px; font-weight: 800;")
         if self.rotation_rail is None:
             self.list_widget.refresh_size_hints()
             self.check_autoscroll()
+        self._schedule_ticker_surface_reassert()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._schedule_ticker_surface_reassert()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.WindowStateChange, QEvent.Type.ActivationChange):
+            self._schedule_ticker_surface_reassert()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._apply_effects_visibility()
+        self._refresh_cdg_backdrop()
+        self._schedule_ticker_surface_reassert()
         if self.rotation_rail is None:
             self._apply_scroll_cadence()
             self._last_scroll_ts = None
@@ -18812,6 +19048,7 @@ class RotationView(QMainWindow):
     def hideEvent(self, event):
         super().hideEvent(event)
         self._apply_effects_visibility()
+        self._refresh_cdg_backdrop()
 
     def _apply_scroll_cadence(self):
         """Use the ticker's display-aware 60-120 FPS repaint cadence."""
@@ -18835,8 +19072,8 @@ class RotationView(QMainWindow):
         # Duplicating a single row for seamless autoscroll reads like a UI bug.
         # Only loop the list when there is enough rotation content to scan.
         if content_height > view_height and self.list_widget.count() > 1:
-            for text in self.queue_items:
-                self.list_widget.addItem(QListWidgetItem(text))
+            for i in range(self.list_widget.count()):
+                self.list_widget.addItem(QListWidgetItem(self.list_widget.item(i)))
             self.duplicate_count = len(self.queue_items)
             self.list_widget.refresh_size_hints()
             if not self.autoscroll_active:
@@ -23970,7 +24207,11 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             _diag(f"[VIDEO-OFFSET] mpv offset apply failed: {exc}")
         self._setup_end_silence_state(mode, None)
-        self._arm_audio_end_floor(audio_path)
+        # The queue already resolved the original ZIP's duration before this
+        # extracted MP3 was handed to playback. Reuse that authoritative hint:
+        # probing the randomized temporary filename is less reliable in frozen
+        # builds and previously disabled verified tail trimming for every MP3+G.
+        self._arm_audio_end_floor(audio_path, duration_seconds)
         self._arm_visual_end_floor(video_path, mode)
         self._update_karaoke_key_ui()
         _diag(
@@ -25015,7 +25256,7 @@ class KaraokeApp(QWidget):
             )
 
         try:
-            queue_ids = set(int(v) for v in self._queue_remote_request_ids())
+            queue_ids = set(int(v) for v in self._host_owned_remote_request_ids())
         except Exception:
             queue_ids = set()
         try:
@@ -25220,6 +25461,9 @@ class KaraokeApp(QWidget):
         if bool(getattr(self, "_network_transports_shutdown", False)):
             return
         self._network_transports_shutdown = True
+        begin_shutdown = getattr(requests, "begin_shutdown", None)
+        if callable(begin_shutdown):
+            begin_shutdown()
         if bool(getattr(self, "_app_closing", False)):
             try:
                 global _QT_APP_SHUTTING_DOWN
@@ -25263,16 +25507,17 @@ class KaraokeApp(QWidget):
                 w.stop()
             except Exception as e:
                 print("Poll worker stop failed:", e)
+        # Daemon HTTP workers can still be loading certificates while AppKit
+        # calls exit/OPENSSL_cleanup. Drain TLS users before Qt tears down.
+        wait_for_idle = getattr(requests, "wait_for_idle", None)
+        if callable(wait_for_idle):
+            wait_for_idle()
         if t is not None:
             try:
                 if t.isRunning():
                     t.requestInterruption()
                     t.quit()
-                    if not t.wait(3000):
-                        print("⚠️ Thread didn't quit gracefully, terminating...")
-                        t.terminate()
-                        if not t.wait(2000):
-                            print("⚠️ Thread termination failed")
+                    t.wait()
                 try:
                     t.deleteLater()
                 except Exception:
@@ -27316,10 +27561,10 @@ class KaraokeApp(QWidget):
         rotation_vfx_cb.setChecked(bool(self.settings.get("rotation_vfx_enabled", True)))
         v.addWidget(rotation_vfx_cb)
 
-        rotation_cdg_backdrop_cb = QCheckBox("Live CDG lyrics on Singer Rotation (85%, black background)")
+        rotation_cdg_backdrop_cb = QCheckBox("Live karaoke background on Singer Rotation")
         rotation_cdg_backdrop_cb.setToolTip(
-            "Shows the current CDG lyrics at 85% opacity on black behind translucent singer rows. "
-            "This does not use the transparent background or background video from Show Karaoke."
+            "Uses the same native CDG picture, transparency, background video, and side fill/blur "
+            "as Show Karaoke, behind the singer rows."
         )
         rotation_cdg_backdrop_cb.setChecked(
             bool(self.settings.get("rotation_cdg_backdrop_enabled", True))
@@ -29653,6 +29898,14 @@ class KaraokeApp(QWidget):
             self._sync_host_control_state_now()
 
     def _sync_host_control_state_now(self):
+        if bool(getattr(self, "_app_closing", False)) or bool(getattr(self, "_host_control_state_inflight", False)):
+            return
+        remaining = float(getattr(self, "_host_control_state_retry_at", 0.0) or 0.0) - time.monotonic()
+        if remaining > 0:
+            timer = getattr(self, "_host_control_state_timer", None)
+            if timer is not None:
+                timer.start(max(1, int(remaining * 1000)))
+            return
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = str(self.settings.get("api_key", "") or "").strip()
@@ -29662,12 +29915,13 @@ class KaraokeApp(QWidget):
         state_sig = json.dumps(state, sort_keys=True, separators=(",", ":"))
         if state_sig == getattr(self, "_last_host_control_state_sig", ""):
             return
-        self._last_host_control_state_sig = state_sig
+        self._host_control_state_inflight = True
 
         def send():
             started = time.monotonic()
+            succeeded = False
             try:
-                requests.post(
+                response = requests.post(
                     f"{base_url}/api/v1/host_commands.php",
                     data={
                         "user": tenant,
@@ -29677,11 +29931,33 @@ class KaraokeApp(QWidget):
                     headers={"X-API-Key": api_key},
                     timeout=3,
                 )
+                succeeded = 200 <= int(response.status_code) < 300
+                if not succeeded:
+                    _diag(f"[HOST-CONTROLS] state sync HTTP {response.status_code}; retry pending")
                 elapsed_ms = (time.monotonic() - started) * 1000.0
                 if elapsed_ms >= 200.0:
                     _perf_log_if_slow("server_sync", elapsed_ms)
             except Exception as e:
                 print(f"[HOST-CONTROLS] state sync failed: {e}")
+            finally:
+                def complete():
+                    self._host_control_state_inflight = False
+                    if bool(getattr(self, "_app_closing", False)):
+                        return
+                    if succeeded:
+                        self._last_host_control_state_sig = state_sig
+                        self._host_control_state_failures = 0
+                        self._host_control_state_retry_at = 0.0
+                        # Drain any state change coalesced while this POST ran.
+                        self._schedule_host_control_state_sync()
+                    else:
+                        failures = int(getattr(self, "_host_control_state_failures", 0) or 0) + 1
+                        self._host_control_state_failures = failures
+                        delay = min(30000, 1000 * 2 ** min(failures, 5))
+                        self._host_control_state_retry_at = time.monotonic() + delay / 1000.0
+                        self._schedule_host_control_state_sync()
+                        self._host_control_state_timer.start(delay)
+                self._run_on_ui_thread(complete)
 
         threading.Thread(target=send, daemon=True).start()
 
@@ -34882,9 +35158,12 @@ class KaraokeApp(QWidget):
         view = state.get("rotation_view")
         if view is None or not hasattr(view, "set_request_qr"):
             return
+        accepting = self._is_requests_accepting_cached()
+        if hasattr(view, "set_requests_accepting"):
+            view.set_requests_accepting(accepting)
         show = (
             bool(self.settings.get("rotation_request_qr_enabled", True))
-            and self._is_requests_accepting_cached()
+            and accepting
         )
         url = self._header_qr_url() if show else ""
         if not url:
@@ -36916,7 +37195,7 @@ class KaraokeApp(QWidget):
         payload = self._session_location_payload(allow_auto_detect=bool(active))
         if payload is None:
             return
-        import threading, requests
+        import threading
 
         def send():
             data = {
@@ -37588,7 +37867,7 @@ class KaraokeApp(QWidget):
         self._bg_prefire_silence_accum_s = 0.0
         self._bg_prefire_silence_last_ts = 0.0
 
-    def _arm_audio_end_floor(self, audio_path: str):
+    def _arm_audio_end_floor(self, audio_path: str, duration_hint=None):
         """Find where this file's audio really stops, in the background.
 
         Until the scan lands, ``_karaoke_audio_end_s`` stays None and silence
@@ -37606,11 +37885,15 @@ class KaraokeApp(QWidget):
             return
         if not self._karaoke_early_silence_trim_enabled():
             return
-        duration = 0.0
         try:
-            duration = float(self._get_duration_secs(audio_path) or 0.0)
+            duration = max(0.0, float(duration_hint or 0.0))
         except Exception:
             duration = 0.0
+        if duration <= 0.0:
+            try:
+                duration = float(self._get_duration_secs(audio_path) or 0.0)
+            except Exception:
+                duration = 0.0
         # Do NOT give up when the database has no duration. _get_duration_secs
         # is keyed on the library path, which for MP3+G is the .zip -- but
         # playback hands us the extracted mp3, so it returns None for the vast
@@ -42224,7 +42507,7 @@ class KaraokeApp(QWidget):
             return
         if not changed:
             return
-        import threading, requests, json as _json
+        import threading, json as _json
 
         def send():
             try:
@@ -42255,7 +42538,7 @@ class KaraokeApp(QWidget):
             since = int(self.settings.get("phrase_markers_synced_at", 0) or 0)
         except Exception:
             since = 0
-        import threading, requests
+        import threading
 
         def fetch():
             try:
@@ -42840,7 +43123,7 @@ class KaraokeApp(QWidget):
             _diag(f"[SINGER-RENAME] server push skipped (network not configured) old={old_name!r}")
             return
 
-        import threading, requests
+        import threading
 
         identity = singer_identity if isinstance(singer_identity, dict) else {}
         payload = {
@@ -44598,7 +44881,7 @@ class KaraokeApp(QWidget):
             "source": source,
         }
 
-        import threading, requests
+        import threading
 
         def send():
             headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/replace-track"}
@@ -50095,50 +50378,6 @@ class KaraokeApp(QWidget):
                 _diag(f"[KARAFUN] transparent show-screen handoff failed: {e}")
                 return
 
-            fullscreen_check = [
-                'tell application "System Events"',
-                'set matches to every application process whose name contains "KaraFun"',
-                'if (count of matches) is 0 then return "NO_APP"',
-                'tell item 1 of matches',
-                'repeat with candidateWindow in windows',
-                'try',
-                'if name of candidateWindow is "Dual Renderer" then',
-                'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
-                'return "WINDOWED"',
-                'end if',
-                'end try',
-                'end repeat',
-                'return "NO_DUAL_RENDERER"',
-                'end tell',
-                'end tell',
-            ]
-            fullscreen_verify = [
-                'tell application "System Events"',
-                'repeat 40 times',
-                'set matches to every application process whose name contains "KaraFun"',
-                'if (count of matches) > 0 then',
-                'set frontmost of item 1 of matches to true',
-                'tell item 1 of matches',
-                'repeat with candidateWindow in windows',
-                'try',
-                'if name of candidateWindow is "Dual Renderer" then',
-                'set value of attribute "AXMinimized" of candidateWindow to false',
-                'perform action "AXRaise" of candidateWindow',
-                'if not (value of attribute "AXFullScreen" of candidateWindow) then',
-                'set value of attribute "AXFullScreen" of candidateWindow to true',
-                'end if',
-                'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
-                'end if',
-                'end try',
-                'end repeat',
-                'end tell',
-                'end if',
-                'delay 0.1',
-                'end repeat',
-                'return "WINDOWED"',
-                'end tell',
-            ]
-
             def _reveal_true_fullscreen(result=""):
                 if not _handoff_is_current():
                     _diag("[KARAFUN] skipped stale true-fullscreen reveal")
@@ -50159,25 +50398,8 @@ class KaraokeApp(QWidget):
                     _finish_handoff_state(complete=False)
                     _diag(f"[KARAFUN] true-fullscreen reveal failed: {e}")
 
-            def _enter_karafun_true_fullscreen(initial_state=""):
-                if not _handoff_is_current():
-                    return
-                if not self._karafun_run_window_script(
-                    fullscreen_verify,
-                    on_complete=_reveal_true_fullscreen,
-                    timeout=6,
-                ):
-                    _reveal_true_fullscreen("VERIFY_START_FAILED")
-
             def _check_or_enter_true_fullscreen():
-                if not _handoff_is_current():
-                    return
-                if not self._karafun_run_window_script(
-                    fullscreen_check,
-                    on_complete=_enter_karafun_true_fullscreen,
-                    timeout=5,
-                ):
-                    _enter_karafun_true_fullscreen("CHECK_START_FAILED")
+                ensure_renderer_fullscreen(self, _reveal_true_fullscreen, _handoff_is_current)
 
             def _configure_auxiliary_window():
                 if not _handoff_is_current():
@@ -50411,68 +50633,17 @@ class KaraokeApp(QWidget):
                     return
                 outcome = str(result or "").strip()
                 if outcome == "READY":
-                    fullscreen_check = [
-                        'tell application "System Events"',
-                        '-- The renderer can temporarily disappear from AX while',
-                        '-- macOS moves it into or out of a fullscreen Space.',
-                        'set lastState to "NO_DUAL_RENDERER"',
-                        'repeat 30 times',
-                        'set matches to every application process whose name contains "KaraFun"',
-                        'if (count of matches) > 0 then',
-                        'set frontmost of item 1 of matches to true',
-                        'tell item 1 of matches',
-                        'repeat with candidateWindow in windows',
-                        'try',
-                        'if name of candidateWindow is "Dual Renderer" then',
-                        'set lastState to "WINDOWED"',
-                        'set value of attribute "AXMinimized" of candidateWindow to false',
-                        'perform action "AXRaise" of candidateWindow',
-                        'if not (value of attribute "AXFullScreen" of candidateWindow) then',
-                        'set value of attribute "AXFullScreen" of candidateWindow to true',
-                        'end if',
-                        'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
-                        'end if',
-                        'end try',
-                        'end repeat',
-                        'end tell',
-                        'end if',
-                        'delay 0.1',
-                        'end repeat',
-                        'return lastState',
-                        'end tell',
-                    ]
-
-                    def _enter_and_verify_fullscreen(click_attempt=0):
+                    def _after_fullscreen_check(check_result=""):
                         if not _handoff_is_current():
-                            _diag("[KARAFUN] skipped stale Dual Renderer fullscreen click")
                             return
+                        verified = str(check_result or "").strip() == "FULLSCREEN"
+                        _finish_handoff_state(complete=verified)
+                        if verified:
+                            _diag("[KARAFUN] Dual Renderer fullscreen verified")
+                        else:
+                            _diag(f"[KARAFUN] Dual Renderer fullscreen verification failed state={check_result!r}")
 
-                        def _after_fullscreen_check(check_result=""):
-                            if not _handoff_is_current():
-                                _diag("[KARAFUN] skipped stale Dual Renderer fullscreen verification")
-                                return
-                            check_outcome = str(check_result or "").strip()
-                            if check_outcome == "FULLSCREEN":
-                                _finish_handoff_state(complete=True)
-                                _diag(f"[KARAFUN] Dual Renderer fullscreen verified attempt={click_attempt + 1}")
-                                return
-                            if click_attempt < 1:
-                                _diag(f"[KARAFUN] Dual Renderer still windowed; retrying fullscreen request state={check_outcome!r}")
-                                QTimer.singleShot(650, lambda: _enter_and_verify_fullscreen(click_attempt + 1))
-                                return
-                            _finish_handoff_state(complete=False)
-                            _diag(f"[KARAFUN] Dual Renderer fullscreen verification failed state={check_outcome!r}")
-
-                        if not self._karafun_run_window_script(
-                            fullscreen_check,
-                            on_complete=_after_fullscreen_check,
-                            timeout=6,
-                        ):
-                            _after_fullscreen_check("CHECK_START_FAILED")
-
-                    # Verification now polls through the renderer's temporary
-                    # AX disappearance, so the first click can happen sooner.
-                    QTimer.singleShot(400, _enter_and_verify_fullscreen)
+                    ensure_renderer_fullscreen(self, _after_fullscreen_check, _handoff_is_current)
                     return
                 if outcome == "NO_DUAL_RENDERER":
                     if attempt < 1:
@@ -54177,7 +54348,6 @@ class KaraokeApp(QWidget):
             return
         state["_remote_tombstone_sync_last_ts"] = now
 
-        import requests
 
         def send():
             headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/removal-sync"}
@@ -54356,7 +54526,7 @@ class KaraokeApp(QWidget):
             _diag(f"[REMOTE-TOMBSTONE] queued unsynced request_id={request_id} reason=network_not_configured")
             return
 
-        import threading, requests
+        import threading
 
         def send():
             headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/remove-request"}
@@ -54449,7 +54619,7 @@ class KaraokeApp(QWidget):
             _diag(f"[REMOTE-MODIFIER] queued unsynced request_id={request_id} reason=network_not_configured")
             return
 
-        import threading, requests
+        import threading
 
         def send():
             headers = {"X-API-Key": api_key, "Accept": "application/json", "User-Agent": "SingWS/set-modifiers"}
@@ -54473,6 +54643,22 @@ class KaraokeApp(QWidget):
                 print(f"[REMOTE-MODIFIER] Failed to push modifiers for request {request_id}: {e}")
 
         threading.Thread(target=send, daemon=True).start()
+
+    def _host_owned_remote_request_ids(self) -> list[int]:
+        ids = self._queue_remote_request_ids()
+        # Playback removes the current entry from the singer's pending songs.
+        # Its permanent id still belongs to this host until completion/stop.
+        state = object.__getattribute__(self, "__dict__")
+        if bool(state.get("karaoke_playing", False)):
+            current = str(state.get("_current_karaoke_request_id", "") or "")
+            if current.startswith("remote:"):
+                try:
+                    rid = int(current.partition(":")[2])
+                    if rid > 0:
+                        ids.append(rid)
+                except ValueError:
+                    pass
+        return sorted(set(ids))
 
     def _queue_remote_request_ids(self) -> list[int]:
         ids = []
@@ -54833,7 +55019,7 @@ class KaraokeApp(QWidget):
             _diag(f"[REMOTE-CLEAR] skipped: network not configured reason={reason}")
             return
 
-        import threading, requests, json as _json
+        import threading, json as _json
 
         def send():
             headers = {
@@ -54943,7 +55129,7 @@ class KaraokeApp(QWidget):
         if not base_url or not tenant or not api_key:
             return
 
-        import threading, requests
+        import threading
 
         def send():
             try:
@@ -55282,7 +55468,7 @@ class KaraokeApp(QWidget):
             )
 
         desired_ids = {item["request_id"] for item in normalized}
-        existing_ids = set()
+        existing_ids = set(self._host_owned_remote_request_ids())
         unmatched_by_signature = {}
         for req in normalized:
             sig = (req["queue_singer"].lower(), req["artist"].lower(), req["title"].lower())
@@ -56338,7 +56524,7 @@ class KaraokeApp(QWidget):
         # ten seconds.
         self.sync_session_location_async("post_rotation")
 
-        import threading, requests, json as _json
+        import threading, json as _json
 
         def send():
             base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
@@ -57104,6 +57290,7 @@ Rectangle {
     property string displayText: ""
     property string pendingText: ""
     property string rightText: "--:--"
+    property bool announcementMode: false
     property string fontFamily: ""
     property real speedPxPerSec: 78
     property real rightMargin: 32
@@ -57123,7 +57310,7 @@ Rectangle {
 
     readonly property real timerWidth: Math.max(1, timerText.contentWidth + (timerPad * 2))
     readonly property real timerSeparation: effectsEnabled ? Math.max(gap, 30) : gap
-    readonly property real scrollAreaW: Math.max(0, width - timerWidth - rightMargin - timerSeparation)
+    readonly property real scrollAreaW: announcementMode ? width : Math.max(0, width - timerWidth - rightMargin - timerSeparation)
 
     function restartPass() {
         // Frozen for a native window transition (e.g. fullscreen toggle): do
@@ -57136,9 +57323,9 @@ Rectangle {
             nameText.x = root.scrollAreaW
             return
         }
-        var travel = root.scrollAreaW + nameText.contentWidth
-        anim.from = root.scrollAreaW
-        anim.to = -nameText.contentWidth
+        var travel = root.announcementMode ? nameText.contentWidth + 64 : root.scrollAreaW + nameText.contentWidth
+        anim.from = root.announcementMode ? 0 : root.scrollAreaW
+        anim.to = root.announcementMode ? -(nameText.contentWidth + 64) : -nameText.contentWidth
         anim.duration = Math.max(900, Math.round((travel / Math.max(1, root.speedPxPerSec)) * 1000))
         anim.start()
         if (root.churnHold) anim.paused = true
@@ -57254,13 +57441,23 @@ Rectangle {
             font.family: root.fontFamily
             x: root.scrollAreaW
             y: Math.round((leftClip.height - height) / 2)
+            Repeater {
+                model: root.announcementMode && nameText.contentWidth > 0 ? Math.ceil(root.scrollAreaW / (nameText.contentWidth + 64)) + 1 : 0
+                Text {
+                    required property int index
+                    x: (index + 1) * (nameText.contentWidth + 64)
+                    text: nameText.text
+                    font: nameText.font
+                    color: nameText.color
+                }
+            }
             onContentWidthChanged: root.scheduleRestart()
         }
     }
 
     Rectangle {
         id: timerPill
-        visible: root.effectsEnabled
+        visible: !root.announcementMode && root.effectsEnabled
         x: Math.max(0, root.width - root.timerWidth - root.rightMargin)
         y: Math.max(3, (root.height - height) / 2)
         width: root.timerWidth
@@ -57274,7 +57471,7 @@ Rectangle {
 
     Item {
         id: tickerLivePulse
-        visible: root.effectsEnabled
+        visible: !root.announcementMode && root.effectsEnabled
         x: Math.max(2, timerPill.x - 21)
         y: (root.height - height) / 2
         width: 6
@@ -57308,6 +57505,7 @@ Rectangle {
 
     Text {
         id: timerText
+        visible: !root.announcementMode
         z: 3
         text: root.rightText
         color: root.tickerColor
@@ -57721,6 +57919,8 @@ class RenderThreadTicker(QFrame):
 
 
 class Ticker(QFrame):
+    _announcement_mode = False
+
     """Fast in-process ticker: pre-rendered text strip + elapsed-time scrolling.
 
     This intentionally avoids QQuickWidget/QML and QPropertyAnimation. The text is
@@ -58029,9 +58229,11 @@ class Ticker(QFrame):
             self._active_width = 0
 
     def _scroll_area_right_edge(self):
-        return self.width() - self._right_width - self._right_margin - self._gap
+        return self.width() if getattr(self, "_announcement_mode", False) else self.width() - self._right_width - self._right_margin - self._gap
 
     def _scroll_start_x(self):
+        if getattr(self, "_announcement_mode", False):
+            return 0.0
         return float(max(0, self._scroll_area_right_edge()))
 
     def _reset_cycle(self, start_from_edge: bool = True):
@@ -58079,6 +58281,15 @@ class Ticker(QFrame):
         if dt > 0.25:
             dt = 0.25
         self._scroll_x -= float(self._scroll_speed_px_per_sec) * dt
+        if getattr(self, "_announcement_mode", False):
+            cycle = float(self._active_width) + 64.0
+            if self._scroll_x <= -cycle:
+                if self._pending_text:
+                    self._activate_pending_text()
+                self._scroll_x %= cycle
+                self._scroll_x -= cycle
+            self.update()
+            return
         if self._scroll_x <= -float(self._active_width):
             if self._pending_text != "":
                 self._activate_pending_text()
@@ -58244,7 +58455,9 @@ class Ticker(QFrame):
         right_rect = QRect(right_x, 0, self._right_width, self.height())
         left_clip = QRect(0, 0, max(0, right_x - self._gap), self.height())
 
-        if self._effects_enabled:
+        if getattr(self, "_announcement_mode", False):
+            left_clip = self.rect()
+        if self._effects_enabled and not getattr(self, "_announcement_mode", False):
             pulse_age = now - self._timer_pulse_started
             pulse_scale = 1.0
             if 0.0 <= pulse_age < 0.285:
@@ -58279,6 +58492,10 @@ class Ticker(QFrame):
             # rounding to whole pixels, which is what removes the jagged/jumpy
             # look on HD/fullscreen displays.
             painter.drawPixmap(QPointF(self._scroll_x, y_strip), self._active_strip)
+            if getattr(self, "_announcement_mode", False):
+                cycle = max(1, self._active_width + 64)
+                for repeat in range(1, int(self.width() / cycle) + 3):
+                    painter.drawPixmap(QPointF(self._scroll_x + repeat * cycle, y_strip), self._active_strip)
         painter.restore()
 
         painter.setPen(self._color)
@@ -58286,7 +58503,7 @@ class Ticker(QFrame):
         painter.drawText(
             right_rect.adjusted(self._timer_pad_px, 0, -self._timer_pad_px, 0),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            self._right_text,
+            "" if getattr(self, "_announcement_mode", False) else self._right_text,
         )
         if self._effects_enabled:
             edge = QLinearGradient(0, 0, self.width(), 0)

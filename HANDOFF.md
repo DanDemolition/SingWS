@@ -1,6 +1,16 @@
 # SingWS handoff
 
-Updated 2026-09-04.
+Updated 2026-09-06.
+
+## Release 0.4.7.1 candidate — 2026-09-06
+
+Intel was built and packaged first. Both architectures use the approved purple/neon-green rotation design. The later candidate removes the separate animated lyrics preview: live CDG/MP4 remains as the transparent full-screen underlay, while a brief neon sweep, particle burst, and staggered queue pulse spotlights the next singer every 30 seconds without covering the QR code or ticker.
+
+Intel: strict signing, x86_64 architecture, macOS 12 minimum, DMG verification, and clean Rosetta launch/exit passed. Apple Silicon: strict signing, arm64 architecture, macOS 12.3 minimum and DMG verification passed. Installed at `/Applications/SingWS.app` and launched with normal profile/server connection. Backup: `local-installs/20260906-release-0.4.7.1/backup/`. The system location permission prompt is left for the operator.
+
+Tests: initial Intel root suite 1085 passed; 22 failures were resolved by two test-fixture updates, rerunning the timing test without concurrent build load, and running native-media tests with their matching ARM source runtime. The revised queue spotlight passed 47 focused tests. Actual CDG animation screenshots are in `local-installs/20260907-queue-spotlight-qa/`. Physical Intel hardware and venue TV remain operator rehearsal checks.
+
+Build commands and detailed verification: `docs/verification/2026-09-06-rotation-release.md`.
 
 ## Release 0.4.6.7 Apple Silicon build published — 2026-09-04
 

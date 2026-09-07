@@ -1,3 +1,15 @@
+## 0.4.7.1 — 2026-09-06
+
+- Redesigned the audience rotation screen in purple and neon green, with larger singer names, QR code, and a continuous specials ticker.
+- Live CDG/MP4 video remains as a transparent full-screen underlay. Every 30 seconds, a brief neon sweep, particle burst, and staggered queue pulse spotlights the next singer without covering the QR code or ticker.
+- Rotation video shares the main native playback texture and clock, avoiding another decoder.
+- Rotation ticker reattaches and restores its native surface after maximize, restore, display moves, and late video-surface stacking changes.
+- Starting a new CDG song clears the retained lyric canvas before decoding, preventing text from the previous song from showing beneath the current lyrics on the rotation screen.
+- The rotation screen changes its signup prompt to “Full for the Night” when the host closes requests, then restores the normal prompt when requests reopen.
+- The rotation specials ticker now uses the main ticker’s configured speed, and the singer rail wraps continuously on the render thread without a per-loop hesitation.
+- The shared CDG/MP4 underlay on the rotation screen is capped at 30 FPS, reducing its extra full-screen GPU presentation load while leaving the main karaoke output and rotation text animations uncapped.
+- Improved host-authoritative request retry handling, network worker shutdown, and KaraFun fullscreen handling.
+
 ## 0.4.6.3 — 2026-08-29
 
 ### Changed

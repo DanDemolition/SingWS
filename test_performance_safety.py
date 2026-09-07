@@ -1408,6 +1408,15 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("* dt", step)
         self.assertNotIn("sb.value() + 1", step)
 
+    def test_rotation_gpu_rail_wraps_entirely_on_render_thread(self):
+        start = MAIN_SOURCE.index('QML_ROTATION_RAIL_SOURCE = r"""')
+        end = MAIN_SOURCE.index('class RenderThreadRotationRail', start)
+        qml = MAIN_SOURCE[start:end]
+        animator_start = qml.index("    YAnimator {\n        id: scrollAnim")
+        animator = qml[animator_start:qml.index("    SequentialAnimation {", animator_start)]
+        self.assertIn("loops: Animation.Infinite", animator)
+        self.assertNotIn("onFinished", animator)
+
     def test_rotation_open_reasserts_only_the_show_screen_ticker(self):
         opened = function_source("open_rotation_view")
         reassert = function_source("_reassert_show_ticker_after_rotation_open")
@@ -1533,7 +1542,13 @@ class PerformanceSafetyTests(unittest.TestCase):
         venue_start = MAIN_SOURCE.index("VENUE_SCOPED_SETTINGS = (")
         venue_end = MAIN_SOURCE.index("\n    )", venue_start)
         venue_settings = MAIN_SOURCE[venue_start:venue_end]
-        self.assertIn("time.monotonic()", ticker)
+        self.assertIn("backend_type = DetachedPainterTicker", ticker)
+        self.assertIn("backend_type = RenderThreadTicker", ticker)
+        self.assertIn("backend_type = Ticker", ticker)
+        self.assertIn("self._backend.force_refresh_now()", ticker)
+        self.assertIn('"ticker_speed_px_per_sec"', ticker)
+        self.assertNotIn("set_scroll_speed(72.0)", ticker)
+        self.assertNotIn("time.monotonic()", ticker)
         self.assertIn("self.announcement_ticker = RotationAnnouncementTicker(self)", view)
         self.assertIn("Show announcement ticker on Singer Rotation screen", configure)
         self.assertIn('"rotation_announcement_enabled"', venue_settings)

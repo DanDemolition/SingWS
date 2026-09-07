@@ -1,0 +1,120 @@
+"""Targeted fullscreen requests for KaraFun's separate audience renderer."""
+
+
+def renderer_fullscreen_script(*, request=True):
+    # Send the AX request once. Repeating it during a Space animation can
+    # restart that animation; some KaraFun versions reject it altogether.
+    return [
+        'tell application "System Events"',
+        'set requested to false',
+        'set lastState to "NO_DUAL_RENDERER"',
+        'repeat 30 times',
+        'set matches to every application process whose name contains "KaraFun"',
+        'if (count of matches) > 0 then',
+        'tell item 1 of matches',
+        'repeat with candidateWindow in windows',
+        'if name of candidateWindow is "Dual Renderer" then',
+        'try',
+        'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
+        'set lastState to "WINDOWED"',
+        'on error errText number errNumber',
+        'return "AX_STATE_ERROR|" & errNumber & "|" & errText',
+        'end try',
+        *([
+            'if not requested then',
+            'set requested to true',
+            'try',
+            'set frontmost to true',
+            'set value of attribute "AXMinimized" of candidateWindow to false',
+            'perform action "AXRaise" of candidateWindow',
+            'set value of attribute "AXFullScreen" of candidateWindow to true',
+            'end try',
+            'end if',
+        ] if request else []),
+        'end if',
+        'end repeat',
+        'end tell',
+        'end if',
+        'delay 0.1',
+        'end repeat',
+        'return lastState',
+        'end tell',
+    ]
+
+
+def renderer_click_target_script():
+    # Re-resolve immediately before the gesture. Never click an old display
+    # centre, the host window, or a renderer already entering fullscreen.
+    return [
+        'tell application "System Events"',
+        'set matches to every application process whose name contains "KaraFun"',
+        'if (count of matches) is 0 then return "NO_APP"',
+        'tell item 1 of matches',
+        'repeat with candidateWindow in windows',
+        'if name of candidateWindow is "Dual Renderer" then',
+        'if value of attribute "AXFullScreen" of candidateWindow then return "FULLSCREEN"',
+        'set frontmost to true',
+        'set value of attribute "AXMinimized" of candidateWindow to false',
+        'perform action "AXRaise" of candidateWindow',
+        'set p to position of candidateWindow',
+        'set s to size of candidateWindow',
+        'return "CLICK|" & ((item 1 of p) + ((item 1 of s) div 2)) & "|" & ((item 2 of p) + ((item 2 of s) div 2))',
+        'end if',
+        'end repeat',
+        'return "NO_DUAL_RENDERER"',
+        'end tell',
+        'end tell',
+    ]
+
+
+def ensure_renderer_fullscreen(host, on_complete, is_current):
+    """One AX request, at most one renderer gesture, then read-only verification."""
+    import threading
+
+    def deliver(result):
+        if is_current():
+            on_complete(result)
+
+    def verify_after_click():
+        if is_current():
+            if not host._karafun_run_window_script(
+                renderer_fullscreen_script(request=False), on_complete=deliver, timeout=6
+            ):
+                deliver("VERIFY_START_FAILED")
+
+    def target_ready(result):
+        if not is_current():
+            return
+        parts = str(result).split("|")
+        if len(parts) != 3 or parts[0] != "CLICK":
+            deliver(result)
+            return
+        try:
+            point = (int(parts[1]), int(parts[2]))
+        except ValueError:
+            deliver("INVALID_RENDERER_BOUNDS")
+            return
+
+        def click():
+            if not is_current():
+                return
+            ok = host._macos_native_double_click(*point)
+            host._run_on_ui_thread(verify_after_click if ok else lambda: deliver("CLICK_FAILED"))
+
+        threading.Thread(target=click, name="karafun-fullscreen-gesture", daemon=True).start()
+
+    def requested(result):
+        if not is_current():
+            return
+        if result != "WINDOWED":
+            deliver(result)
+            return
+        if not host._karafun_run_window_script(
+            renderer_click_target_script(), on_complete=target_ready, timeout=5
+        ):
+            deliver("TARGET_START_FAILED")
+
+    if is_current() and not host._karafun_run_window_script(
+        renderer_fullscreen_script(), on_complete=requested, timeout=6
+    ):
+        deliver("REQUEST_START_FAILED")

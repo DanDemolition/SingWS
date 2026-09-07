@@ -84,6 +84,17 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertIn("YAnimator {", mod.QML_ROTATION_RAIL_SOURCE)
         self.assertIn("easing.type: Easing.Linear", mod.QML_ROTATION_RAIL_SOURCE)
 
+    def test_specials_ticker_uses_the_audience_ticker_backend(self):
+        ticker = mod.RotationAnnouncementTicker()
+        self.addCleanup(ticker.close)
+        ticker.set_announcement(True, "Two-for-one drinks\nKitchen open late")
+        self.assertIn(
+            type(ticker._backend).__name__,
+            {"RenderThreadTicker", "DetachedPainterTicker", "Ticker"},
+        )
+        self.assertEqual(ticker._message, "Two-for-one drinks • Kitchen open late")
+        self.assertNotEqual(type(ticker._backend).__name__, "RotationAnnouncementTicker")
+
     def test_scroll_has_smooth_conveyor_depth_effects(self):
         source = mod.QML_ROTATION_RAIL_SOURCE
         self.assertNotIn("id: conveyorDrift", source)
@@ -100,18 +111,32 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertNotIn("def _advance_burn_in_shift(self):", source)
         self.assertNotIn("_burn_in_shift_timer", source)
 
-    def test_rotation_uses_raw_cdg_backdrop_without_show_composite(self):
-        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertIn('"rotation_cdg_backdrop_enabled": True', source)
-        self.assertIn("class RotationCdgBackdrop(QWidget):", source)
-        self.assertIn("self._cdg_backdrop_timer.start(125)", source)
-        self.assertIn("central_layout.setCurrentWidget(safe_area)", source)
-        self.assertIn('== "cdg"', source)
-        self.assertIn('getattr(plugin, "grabFrame", None)', source)
-        self.assertIn("KeepAspectRatioByExpanding", source)
-        self.assertIn("painter.setOpacity(self._opacity)", source)
-        backdrop = source[source.index("class RotationCdgBackdrop"):source.index("class RotationView")]
-        self.assertNotIn("loadBackgroundVideo", backdrop)
+    def test_rotation_native_backdrop_binds_once_without_cpu_frame_readback(self):
+        from types import SimpleNamespace
+        owner = mod.QWidget()
+        owner.settings = {"rotation_native_cdg_backdrop": True}
+        owner.karaoke_playing = True
+        owner._current_karaoke_mode = "cdg"
+        calls = []
+        owner._mpv_playback = SimpleNamespace(
+            setRotationVideoHost=lambda host, enabled: calls.append((host, enabled)) or True,
+            grabFrame=lambda: self.fail("native backdrop must not read pixels into Python"),
+        )
+        view = mod.RotationView(owner)
+        self.addCleanup(owner.close)
+        self.addCleanup(view.close)
+        view.show()
+        _APP.processEvents()
+        view._refresh_cdg_backdrop()
+        view._refresh_cdg_backdrop()
+        self.assertEqual(calls, [(view._cdg_backdrop, True)])
+        view.hide()
+        self.assertEqual(calls[-1], (None, False))
+        view.show()
+        self.assertEqual(calls[-1], (view._cdg_backdrop, True))
+        owner._current_karaoke_mode = "mp4"
+        view._refresh_cdg_backdrop()
+        self.assertEqual(calls[-1], (view._cdg_backdrop, True))
 
     def test_vfx_stay_in_the_qt_quick_scene(self):
         source = mod.QML_ROTATION_RAIL_SOURCE

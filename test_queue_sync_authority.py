@@ -205,6 +205,20 @@ class QueueSyncAuthorityTests(unittest.TestCase):
         del self.app.queue[singer_idx]["songs"][song_idx]
         self.app._sync_remote_singer_order(singer_idx, reason="host_remove_song")
 
+    def test_currently_singing_request_is_not_reinserted_from_stale_feed(self):
+        self.app.karaoke_playing = True
+        self.app._current_karaoke_request_id = "remote:901"
+        self.app.queue = [{"name": "Grace", "songs": []}]
+        row = {"request_id": 901, "singer": "Grace", "artist": "Artist",
+               "title": "Current song", "state": "pending", "key": 0, "tempo": 0}
+        with fake_network(self.singws):
+            self.app._reconcile_remote_requests([row])
+        self.assertEqual(self.app._host_owned_remote_request_ids(), [901])
+        self.assertEqual(self.app._queue_remote_request_ids(), [])
+        self.assertFalse(any(s.get("songs") for s in self.app.queue))
+        self.app.karaoke_playing = False
+        self.assertEqual(self.app._host_owned_remote_request_ids(), [])
+
     def test_replaced_song_and_host_reorder_survive_repeated_syncs(self):
         # Server added Song A (101); the app already imported it. Singer also
         # has a second server request Song C (102).

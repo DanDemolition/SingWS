@@ -105,6 +105,14 @@ class _BridgeApi:
         L.singws_bridge_refresh_views.argtypes = [
             ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t,
         ]
+        self.has_rotation_host = hasattr(L, "singws_bridge_set_rotation_host")
+        if self.has_rotation_host:
+            L.singws_bridge_set_rotation_host.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            L.singws_bridge_set_rotation_host.restype = None
+        self.has_rotation_spotlight = hasattr(L, "singws_bridge_set_rotation_spotlight")
+        if self.has_rotation_spotlight:
+            L.singws_bridge_set_rotation_spotlight.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            L.singws_bridge_set_rotation_spotlight.restype = None
         L.singws_bridge_begin_transition.argtypes = [ctypes.c_void_p, ctypes.c_int]
         L.singws_bridge_grab_frame.restype = ctypes.c_void_p
         L.singws_bridge_grab_frame.argtypes = [
@@ -422,6 +430,22 @@ class MpvPlaybackPlugin:
         if self._handle:
             self.api.lib.singws_bridge_set_background_opacity(
                 self._handle, max(0.0, min(1.0, float(opacity))))
+    def setRotationVideoHost(self, widget=None, enabled=True) -> bool:
+        """Present the same retained CDG/composite texture in an extra native view."""
+        if not self._handle or not getattr(self.api, "has_rotation_host", False):
+            return False
+        host_id = int(widget.winId()) if widget is not None else 0
+        self.api.lib.singws_bridge_set_rotation_host(self._handle, host_id, int(bool(enabled)))
+        return True
+
+    def setRotationSpotlightHost(self, widget=None, enabled=True) -> bool:
+        """An aspect-fit live preview sharing the existing native frame/clock."""
+        if not self._handle or not getattr(self.api, "has_rotation_spotlight", False):
+            return False
+        host_id = int(widget.winId()) if widget is not None else 0
+        self.api.lib.singws_bridge_set_rotation_spotlight(self._handle, host_id, int(bool(enabled)))
+        return True
+
     def grabFrame(self):
         """Current picture as a QImage, or None.
 

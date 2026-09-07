@@ -309,10 +309,41 @@ class NativeMpvDecodeTests(unittest.TestCase):
         # valid CDGs from reaching visual readiness.
         self.assertNotIn('[self setOption:"scale" value:"nearest"]', bridge)
 
+    def test_song_replacement_clears_retained_cdg_canvas_before_loading(self):
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        start = bridge.index("- (void)prepareForLoad:")
+        prepare = bridge[start:bridge.index("- (BOOL)loadVideo:", start)]
+        self.assertIn("glBindFramebuffer(GL_FRAMEBUFFER,_cdgFbo)", prepare)
+        self.assertIn("glBindFramebuffer(GL_FRAMEBUFFER,_fbo)", prepare)
+        self.assertGreaterEqual(prepare.count("glClear(GL_COLOR_BUFFER_BIT)"), 2)
+        self.assertLess(
+            start,
+            bridge.index('const char *cmd[]={"loadfile"', start),
+        )
+
+    def test_rotation_underlay_is_capped_without_throttling_main_output(self):
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
+        start = bridge.index("- (void)renderFrame")
+        render = bridge[start:bridge.index("- (void)setRotationHost:", start)]
+        output_present = render.index("[self presentView:_outputView]")
+        throttle = render.index("std::chrono::milliseconds(33)")
+        rotation_present = render.index("[self presentView:_rotationView]", throttle)
+        self.assertLess(output_present, throttle)
+        self.assertLess(throttle, rotation_present)
+        self.assertNotIn("milliseconds(33)", render[:output_present])
+
     def test_native_bridge_contract_is_muted_and_uses_a_separate_texture(self):
         bridge = Path("native/mpv_bridge/bridge.mm").read_text()
         compact = bridge.replace(" ", "")
         self.assertIn('mpv_set_option_string(_backgroundMpv,"ao","null")', compact)
+
+    def test_background_ui_queries_never_wait_for_decoder_core(self):
+        bridge = Path("native/mpv_bridge/bridge.mm").read_text()
+        start = bridge.index("- (BOOL)backgroundAtEnd {")
+        getters = bridge[start:bridge.index("- (void)setBackgroundOpacity:", start)]
+        self.assertNotIn("mpv_get_property", getters)
+        for prop in ("time-pos", "pause", "eof-reached"):
+            self.assertIn(f'"{prop}",MPV_FORMAT_', bridge)
 
     def test_background_frames_present_to_output_and_preview_without_cdg_activity(self):
         bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
@@ -328,7 +359,7 @@ class NativeMpvDecodeTests(unittest.TestCase):
         self.assertIn('mpv_set_option_string(_backgroundMpv,"hwdec","no")', compact)
         self.assertIn('mpv_set_option_string(_backgroundMpv,"keep-open","no")', compact)
         self.assertIn('mpv_set_option_string(_backgroundMpv,"idle","yes")', compact)
-        self.assertIn('mpv_set_property(_backgroundMpv,"pause",MPV_FORMAT_FLAG,&paused)', compact)
+        self.assertIn('mpv_set_property_async(_backgroundMpv,91,"pause",MPV_FORMAT_FLAG,&paused)', compact)
         self.assertIn("_backgroundTexture", bridge)
         self.assertIn("_backgroundFbo", bridge)
         self.assertIn("singws_bridge_load_background", bridge)
@@ -343,15 +374,16 @@ class NativeMpvDecodeTests(unittest.TestCase):
         self.assertIn("fg.r<0.20&&delta<0.28", bridge)
         self.assertNotIn("delta<0.42", bridge)
         self.assertNotIn("delta<0.75", bridge)
-        self.assertIn('mpv_get_property(_backgroundMpv,"eof-reached"', compact)
+        self.assertIn('mpv_observe_property(_backgroundMpv,103,"eof-reached"', compact)
         self.assertIn("[self presentView:self->_previewView]", bridge)
-        self.assertIn("const bool backgroundActive=(_isCdg", bridge)
+        self.assertIn("const bool backgroundActive=(view!=_rotationView&&view!=_spotlightView&&_isCdg", bridge)
+        self.assertIn("view!=_rotationView && view!=_spotlightView && _isCdg", bridge)
         active = bridge[bridge.index("if(backgroundActive){"):]
         active = active[:active.index("} else if(sidefill)")]
         self.assertIn("glUniform2f(_uvScaleUniform,1,1)", active)
         self.assertNotIn("backgroundAspect", active)
         self.assertIn('\"video-aspect-override\",_isCdg?\"no\":\"16:9\"', bridge)
-        self.assertIn("if(!_isCdg){sx=1;sy=1;}", bridge)
+        self.assertIn("if(!_isCdg && view!=_rotationView && view!=_spotlightView){sx=1;sy=1;}", bridge)
         self.assertIn("singws_bridge_set_background_opacity", bridge)
 
     def test_painted_background_fallback_stretches_without_scaled_pixmap(self):

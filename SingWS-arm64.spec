@@ -15,7 +15,7 @@ brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("
 # that framework was the single largest thing in the bundle (~315 MiB). `gi`
 # is in `excludes` below so PyInstaller cannot pull GStreamer back in.
 
-extra_datas = []
+extra_datas = [(str(project_root / "assets" / "rotation-stage-purple.png"), "assets")]
 binaries = []
 
 for helper in (
@@ -272,8 +272,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.7.0',
-        'CFBundleVersion': '0.4.7.0',
+        'CFBundleShortVersionString': '0.4.7.1',
+        'CFBundleVersion': '0.4.7.1',
         'LSMinimumSystemVersion': '12.3',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
