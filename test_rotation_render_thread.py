@@ -32,30 +32,20 @@ mod = load_main_module()
 
 
 class RenderThreadRotationTests(unittest.TestCase):
-    def test_cdg_backdrop_blacks_both_backgrounds_without_erasing_lyrics(self):
-        image = mod.QImage(300, 216, mod.QImage.Format.Format_RGB32)
-        image.fill(mod.QColor("#000080"))
-        painter = mod.QPainter(image)
-        painter.fillRect(6, 12, 288, 192, mod.QColor("#101020"))
-        # A near-background pre-wipe colour must survive an exact palette key.
-        painter.fillRect(90, 70, 50, 25, mod.QColor("#111121"))
-        painter.fillRect(150, 70, 50, 25, mod.QColor("#ffffff"))
-        painter.end()
-        backdrop = mod.RotationCdgBackdrop()
-        self.addCleanup(backdrop.close)
-        backdrop.set_frame(image)
-        result = backdrop._frame.toImage()
-        self.assertEqual(result.pixelColor(3, 6).name(), "#000000")
-        self.assertEqual(result.pixelColor(12, 18).name(), "#000000")
-        self.assertEqual(result.pixelColor(100, 80).name(), "#111121")
-        self.assertEqual(result.pixelColor(160, 80).name(), "#ffffff")
-        self.assertEqual(image.pixelColor(12, 18).name(), "#101020")
-
     def test_empty_rotation_backdrop_is_black(self):
-        backdrop = mod.RotationCdgBackdrop()
+        backdrop = mod.RotationAnimatedBackdrop()
         self.addCleanup(backdrop.close)
         backdrop.resize(300, 216)
         self.assertEqual(backdrop.grab().toImage().pixelColor(150, 108).name(), "#000000")
+
+    def test_rotation_backdrop_has_slow_continuous_photo_motion(self):
+        backdrop = mod.RotationAnimatedBackdrop()
+        self.addCleanup(backdrop.close)
+        self.assertEqual(backdrop.ANIMATION_SECONDS, 90.0)
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn("self._scaled_stage_art = self._stage_art.scaled(", source)
+        self.assertIn("self._backdrop_animation_timer.start(125)", source)
+        self.assertNotIn("rotation_cdg_backdrop_enabled", source)
 
     def test_now_singing_surface_has_live_motion(self):
         source = mod.QML_NOW_SINGING_SOURCE
@@ -111,32 +101,36 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertNotIn("def _advance_burn_in_shift(self):", source)
         self.assertNotIn("_burn_in_shift_timer", source)
 
-    def test_rotation_native_backdrop_binds_once_without_cpu_frame_readback(self):
-        from types import SimpleNamespace
+    def test_rotation_backdrop_does_not_bind_to_karaoke_video(self):
         owner = mod.QWidget()
-        owner.settings = {"rotation_native_cdg_backdrop": True}
+        owner.settings = {}
         owner.karaoke_playing = True
         owner._current_karaoke_mode = "cdg"
-        calls = []
-        owner._mpv_playback = SimpleNamespace(
-            setRotationVideoHost=lambda host, enabled: calls.append((host, enabled)) or True,
-            grabFrame=lambda: self.fail("native backdrop must not read pixels into Python"),
-        )
         view = mod.RotationView(owner)
         self.addCleanup(owner.close)
         self.addCleanup(view.close)
+        view._backdrop_animation_timer.stop()
         view.show()
         _APP.processEvents()
-        view._refresh_cdg_backdrop()
-        view._refresh_cdg_backdrop()
-        self.assertEqual(calls, [(view._cdg_backdrop, True)])
-        view.hide()
-        self.assertEqual(calls[-1], (None, False))
+        self.assertIsInstance(view._animated_backdrop, mod.RotationAnimatedBackdrop)
+        self.assertFalse(hasattr(view, "_native_backdrop_plugin"))
+        self.assertFalse(hasattr(view, "_cdg_backdrop"))
+
+    def test_show_transitions_use_a_top_rotation_overlay_without_video_frames(self):
+        owner = mod.QWidget()
+        owner.settings = {}
+        owner.karaoke_playing = True
+        view = mod.RotationView(owner)
+        self.addCleanup(owner.close)
+        self.addCleanup(view.close)
+        view._backdrop_animation_timer.stop()
         view.show()
-        self.assertEqual(calls[-1], (view._cdg_backdrop, True))
-        owner._current_karaoke_mode = "mp4"
-        view._refresh_cdg_backdrop()
-        self.assertEqual(calls[-1], (view._cdg_backdrop, True))
+        _APP.processEvents()
+        self.assertIsInstance(view.transition_overlay, mod.RenderThreadShowScreenVfx)
+        self.assertTrue(view.show_singer_start_vfx("Maya", "Halo", "Beyoncé", "camera_iris"))
+        self.assertTrue(view._transition_overlay_active())
+        self.assertFalse(view._reassert_ticker_surface())
+        self.assertTrue(view.show_song_outro_vfx("Maya", "Halo", "Beyoncé", "confetti_drop"))
 
     def test_vfx_stay_in_the_qt_quick_scene(self):
         source = mod.QML_ROTATION_RAIL_SOURCE

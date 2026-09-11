@@ -1,3 +1,17 @@
+## 0.4.7.3 — 2026-09-11
+
+- Replaced the third-screen live CDG/video background with a slowly animated,
+  cached stage photo so the rotation display stays lively without consuming an
+  additional karaoke-video presentation surface.
+- Prioritized the karaoke show screen by reducing third-screen background work
+  during songs and pausing continuous rotation decorations while playback is
+  active.
+- Fixed the third-screen specials ticker resetting to the beginning every
+  second when its native surface guard ran.
+- Added the singer 3-2-1 entrance and song-completion applause overlays to the
+  top of the third screen. These short event-driven animations remain idle
+  between transitions and never receive karaoke video frames.
+
 ## 0.4.7.1 — 2026-09-06
 
 - Redesigned the audience rotation screen in purple and neon green, with larger singer names, QR code, and a continuous specials ticker.

@@ -20,7 +20,7 @@ class RotationTvDesignTests(unittest.TestCase):
         owner.karaoke_playing = True
         owner._current_karaoke_mode = 'cdg'
         view = mod.RotationView(owner)
-        view._cdg_backdrop_timer.stop()
+        view._backdrop_animation_timer.stop()
         self.addCleanup(owner.close)
         self.addCleanup(view.hide)
         return owner, view
@@ -36,6 +36,19 @@ class RotationTvDesignTests(unittest.TestCase):
         self.assertGreaterEqual(view.ROTATION_QR_SIZE, 220)
         self.assertEqual(view.clock_label.text().count('\n'), 0)
         self.assertGreater(view.sidebar.x(), view.rotation_rail.x())
+
+    def test_decorative_rotation_effects_pause_during_karaoke(self):
+        owner, view = self.make_view()
+        view.set_effects_enabled(True)
+        view._tick_animated_backdrop()
+        self.assertEqual(view._backdrop_animation_timer.interval(), 250)
+        self.assertFalse(view.rotation_rail._root.property('effectsEnabled'))
+        self.assertFalse(view.now_singing_surface._root.property('effectsEnabled'))
+        owner.karaoke_playing = False
+        view._tick_animated_backdrop()
+        self.assertEqual(view._backdrop_animation_timer.interval(), 125)
+        self.assertTrue(view.rotation_rail._root.property('effectsEnabled'))
+        self.assertTrue(view.now_singing_surface._root.property('effectsEnabled'))
 
     def test_current_singer_uses_identity_and_preserves_same_named_other_singer(self):
         owner, view = self.make_view()
@@ -93,7 +106,7 @@ class RotationTvDesignTests(unittest.TestCase):
              patch.object(ticker._backend, 'force_refresh_now') as refresh:
             self.assertTrue(ticker.reassert_surface())
             sync.assert_called_once_with()
-            refresh.assert_called_once_with()
+            refresh.assert_not_called()
 
     def test_spotlight_does_not_reflow_queue(self):
         _, view = self.make_view()

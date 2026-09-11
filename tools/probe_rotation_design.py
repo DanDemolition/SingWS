@@ -60,7 +60,7 @@ def main():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     owner = QWidget()
-    owner.settings = {'rotation_native_cdg_backdrop': True, 'rotation_vfx_enabled': True,
+    owner.settings = {'rotation_vfx_enabled': True,
                       'rotation_announcement_enabled': True,
                       'rotation_announcement_message': '2-FOR-1 DRINKS  •  KITCHEN OPEN LATE'}
     owner.karaoke_playing = True
@@ -96,7 +96,7 @@ def main():
             capture(view, args.output / 'rotation-720-live.png')
             capture(output, args.output / 'main-video.png')
             view._next_up_spotlight_started = module.time.monotonic() - 31
-            view._refresh_cdg_backdrop()
+            view._tick_animated_backdrop()
             _wait(app, lambda: False, 0.25)
             capture(view, args.output / 'rotation-spotlight-rise.png')
             _wait(app, lambda: False, 0.85)

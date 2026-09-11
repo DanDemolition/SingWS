@@ -21,7 +21,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.7.2"
+APP_VERSION = "0.4.7.3"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -3426,8 +3426,6 @@ DEFAULTS = {
         "polaroid_drop",
     ],
     "rotation_vfx_enabled": True,    # rotation particles/glows/parallax; smooth core scroll remains when off
-    "rotation_cdg_backdrop_enabled": True, # same native CDG/composite as the show screen
-    "rotation_native_cdg_backdrop": True, # retained shared texture; false keeps the legacy screenshot path
     "karafun_provider_enabled": True, # Assisted external KaraFun references; no protected playback inside SingWS
     "karafun_include_online_search": False, # Opt-in: merge server CSV KaraFun catalog rows into desktop search
     "loudness_scan_holds_for_playback": True, # False = keep scanning under a live song (faster pass, risks GUI stalls)
@@ -18013,7 +18011,7 @@ class RotationAnnouncementTicker(QWidget):
         super().hideEvent(event)
 
     def reassert_surface(self):
-        """Restore the ticker after AppKit restacks children on window changes."""
+        """Restore native stacking without restarting the active marquee pass."""
         if not self.isVisible() or not self._enabled or not self._message:
             return False
         try:
@@ -18024,7 +18022,6 @@ class RotationAnnouncementTicker(QWidget):
             sync = getattr(self._backend, "sync_surface_geometry", None)
             if callable(sync):
                 sync()
-            self._backend.force_refresh_now()
             self._backend.update()
             return True
         except Exception as exc:
@@ -18032,68 +18029,53 @@ class RotationAnnouncementTicker(QWidget):
             return False
 
 
-class RotationCdgBackdrop(QWidget):
-    """Cover-cropped raw CDG frame behind the audience rotation interface."""
+class RotationAnimatedBackdrop(QWidget):
+    """Slowly pan and zoom the stage photo behind the audience rotation."""
 
-    def __init__(self, parent=None, opacity=0.85):
+    ANIMATION_SECONDS = 90.0
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._frame = QPixmap()
-        self._opacity = max(0.0, min(1.0, float(opacity)))
+        self._stage_art = QPixmap()
+        self._scaled_stage_art = QPixmap()
+        self._scaled_stage_size = QSize()
+        self._animation_started = time.monotonic()
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
-    def set_frame(self, image):
-        if image is None or image.isNull():
-            self.clear_frame()
-            return
-        # CDG border and tile backgrounds can have different palette colours.
-        # Only replace exact colours agreed by at least three region corners;
-        # a broad colour key can erase the muted, not-yet-wiped lyrics.
-        import numpy as np
-        frame = image.convertToFormat(QImage.Format.Format_RGB32)
-        pixels = np.frombuffer(frame.bits().asstring(frame.sizeInBytes()), dtype=np.uint32).copy()
-        pixels = pixels.reshape(frame.height(), frame.bytesPerLine() // 4)
-        rgb = pixels[:, :frame.width()] & 0x00ffffff
-        background = np.zeros(rgb.shape, dtype=bool)
-        for left, right, top, bottom in ((3, 297, 6, 210), (12, 288, 18, 198)):
-            samples = [int(rgb[min(frame.height()-1, y*frame.height()//216),
-                               min(frame.width()-1, x*frame.width()//300)])
-                       for x, y in ((left, top), (right, top), (left, bottom), (right, bottom))]
-            colour = max(samples, key=samples.count)
-            if samples.count(colour) >= 3:
-                background |= rgb == colour
-        pixels[:, :frame.width()][background] = 0xff000000
-        black_backed = QImage(pixels.data, frame.width(), frame.height(),
-                             frame.bytesPerLine(), QImage.Format.Format_RGB32)
-        self._frame = QPixmap.fromImage(black_backed.copy())
+    def set_stage_art(self, pixmap):
+        self._stage_art = QPixmap(pixmap) if pixmap is not None else QPixmap()
+        self._scaled_stage_art = QPixmap()
+        self._scaled_stage_size = QSize()
         self.update()
 
-    def clear_frame(self):
-        if self._frame.isNull():
+    def _ensure_scaled_stage_art(self):
+        target = QSize(max(1, int(self.width() * 1.16)), max(1, int(self.height() * 1.16)))
+        if target == self._scaled_stage_size and not self._scaled_stage_art.isNull():
             return
-        self._frame = QPixmap()
-        self.update()
+        self._scaled_stage_art = self._stage_art.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._scaled_stage_size = target
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#000000"))
-        stage = getattr(self, "_stage_art", None)
-        if stage is not None and not stage.isNull():
-            image = stage.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                 Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap((self.width()-image.width())//2, (self.height()-image.height())//2, image)
-        if self._frame.isNull() or self.width() <= 0 or self.height() <= 0:
+        if self._stage_art.isNull() or self.width() <= 0 or self.height() <= 0:
             return
-        scaled = self._frame.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        painter.setOpacity(self._opacity)
-        painter.drawPixmap(
-            (self.width() - scaled.width()) // 2,
-            (self.height() - scaled.height()) // 2,
-            scaled,
-        )
+        self._ensure_scaled_stage_art()
+        phase = ((time.monotonic() - self._animation_started) / self.ANIMATION_SECONDS) * (2.0 * math.pi)
+        image = self._scaled_stage_art
+        zoom = 1.025 + 0.015 * math.sin(phase)
+        source_w = min(image.width(), max(1, int(self.width() / zoom)))
+        source_h = min(image.height(), max(1, int(self.height() / zoom)))
+        travel_x = max(0, image.width() - source_w)
+        travel_y = max(0, image.height() - source_h)
+        x = -int(travel_x * (0.5 + 0.42 * math.sin(phase)))
+        y = -int(travel_y * (0.5 + 0.42 * math.cos(phase * 0.73)))
+        source = QRect(-x, -y, source_w, source_h)
+        painter.drawPixmap(self.rect(), image, source)
 
 
 class RotationView(QMainWindow):
@@ -18555,21 +18537,27 @@ class RotationView(QMainWindow):
         central_layout = QStackedLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
-        self._cdg_backdrop = RotationCdgBackdrop(central, opacity=0.85)
-        self._cdg_backdrop._stage_art = QPixmap(get_resource_path("assets/rotation-stage-purple.png"))
-        # Give the raster labels their own native sibling above the GL host.
-        # Without it a native child view covers text painted in its parent.
-        self._cdg_backdrop.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
-        self._cdg_backdrop.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self._animated_backdrop = RotationAnimatedBackdrop(central)
+        self._animated_backdrop.set_stage_art(QPixmap(get_resource_path("assets/rotation-stage-purple.png")))
         safe_area.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         safe_area.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self._rotation_foreground = safe_area
-        self._native_backdrop_plugin = None
-        self._native_backdrop_active = False
+        self.transition_overlay = None
         self._next_up_spotlight_started = None
         self._next_up_spotlight_cycle = -1
-        central_layout.addWidget(self._cdg_backdrop)
+        central_layout.addWidget(self._animated_backdrop)
         central_layout.addWidget(safe_area)
+        if _rotation_quick_surfaces_supported():
+            try:
+                self.transition_overlay = RenderThreadShowScreenVfx(central)
+                central_layout.addWidget(self.transition_overlay)
+                self.transition_overlay.show()
+                self.transition_overlay._root.activeChanged.connect(
+                    self._on_transition_overlay_active_changed
+                )
+            except Exception as exc:
+                self.transition_overlay = None
+                _diag(f"[ROTATION-VFX] transition overlay unavailable: {exc}")
         # StackAll raises its current widget. Keep the interactive rotation UI
         # above the painter backdrop regardless of platform creation order.
         central_layout.setCurrentWidget(safe_area)
@@ -18588,10 +18576,9 @@ class RotationView(QMainWindow):
         self.last_scroll_percent = 0.0
         settings = getattr(parent, "settings", {}) if parent is not None else {}
         self.set_effects_enabled(bool(settings.get("rotation_vfx_enabled", True)))
-        self._cdg_backdrop_enabled = bool(settings.get("rotation_cdg_backdrop_enabled", True))
-        self._cdg_backdrop_timer = QTimer(self)
-        self._cdg_backdrop_timer.timeout.connect(self._refresh_cdg_backdrop)
-        self._cdg_backdrop_timer.start(125)
+        self._backdrop_animation_timer = QTimer(self)
+        self._backdrop_animation_timer.timeout.connect(self._tick_animated_backdrop)
+        self._backdrop_animation_timer.start(125)
         # macOS can reconnect the mpv and ticker surfaces after maximize or a
         # display move. A low-frequency guard repairs a late restack without
         # touching the rest of the rotation hierarchy.
@@ -18608,9 +18595,13 @@ class RotationView(QMainWindow):
         self._apply_effects_visibility()
 
     def _apply_effects_visibility(self):
+        owner = self.parent()
+        karaoke_active = bool(owner is not None and getattr(owner, "karaoke_playing", False))
         enabled = bool(
             getattr(self, "_effects_enabled_requested", True)
             and self.isVisible()
+            and not karaoke_active
+            and not self._transition_overlay_active()
         )
         if self.now_singing_surface is not None:
             self.now_singing_surface.set_effects_enabled(enabled)
@@ -18619,58 +18610,17 @@ class RotationView(QMainWindow):
 
     ROTATION_QR_SIZE = 250
 
-    def set_cdg_backdrop_enabled(self, enabled):
-        self._cdg_backdrop_enabled = bool(enabled)
-        self._refresh_cdg_backdrop()
-
-    def _refresh_cdg_backdrop(self):
-        """Bind visibility only; native callbacks present frames at the source cadence."""
-        try:
-            owner = self.parent()
-            active = bool(
-                self._cdg_backdrop_enabled
-                and self.isVisible()
-                and owner is not None
-                and getattr(owner, "karaoke_playing", False)
-                and str(getattr(owner, "_current_karaoke_mode", "") or "").lower() in {"cdg", "mp4", "video"}
-            )
-            plugin = getattr(owner, "_mpv_playback", None) if owner is not None else None
-            self._refresh_next_up_spotlight(active)
-            native = bool(getattr(owner, "settings", {}).get("rotation_native_cdg_backdrop", True))
-            if native:
-                previous = self._native_backdrop_plugin
-                if previous is not None and previous is not plugin:
-                    previous.setRotationVideoHost(None, False)
-                    self._native_backdrop_active = False
-                    self._native_backdrop_plugin = None
-                bind = getattr(plugin, "setRotationVideoHost", None)
-                if callable(bind) and (plugin is not self._native_backdrop_plugin or active != self._native_backdrop_active):
-                    if bind(self._cdg_backdrop if active else None, active):
-                        self._native_backdrop_plugin = plugin
-                        self._native_backdrop_active = active
-                        if active:
-                            self._cdg_backdrop.stackUnder(self._rotation_foreground)
-                            self._rotation_foreground.raise_()
-                            self._schedule_ticker_surface_reassert()
-                return
-            if self._native_backdrop_plugin is not None:
-                self._native_backdrop_plugin.setRotationVideoHost(None, False)
-                self._native_backdrop_plugin = None
-                self._native_backdrop_active = False
-            if not active:
-                self._cdg_backdrop.clear_frame()
-                return
-            plugin = getattr(owner, "_mpv_playback", None)
-            grab = getattr(plugin, "grabFrame", None)
-            if not callable(grab):
-                self._cdg_backdrop.clear_frame()
-                return
-            image = grab()
-            if image is not None and not image.isNull():
-                self._cdg_backdrop.set_frame(image)
-        except Exception as exc:
-            self._cdg_backdrop.clear_frame()
-            _diag(f"[ROTATION] CDG backdrop refresh failed: {exc}")
+    def _tick_animated_backdrop(self):
+        playing = bool(self.isVisible() and getattr(self.parent(), "karaoke_playing", False))
+        # The photo moves over a 90-second cycle, so four repaints per second
+        # remain visually continuous while leaving more render time for lyrics.
+        desired_interval = 250 if playing else 125
+        if self._backdrop_animation_timer.interval() != desired_interval:
+            self._backdrop_animation_timer.start(desired_interval)
+        self._apply_effects_visibility()
+        self._refresh_next_up_spotlight(playing)
+        if self.isVisible() and not self._transition_overlay_active():
+            self._animated_backdrop.update()
 
     def _refresh_next_up_spotlight(self, playing):
         """Run one brief queue spotlight at each 30-second playback boundary."""
@@ -18728,12 +18678,56 @@ class RotationView(QMainWindow):
         self.announcement_ticker.set_announcement(enabled, message)
         self._schedule_ticker_surface_reassert()
 
+    def _transition_overlay_active(self):
+        overlay = getattr(self, "transition_overlay", None)
+        root = getattr(overlay, "_root", None) if overlay is not None else None
+        return bool(root is not None and root.property("active"))
+
+    def _on_transition_overlay_active_changed(self):
+        overlay = getattr(self, "transition_overlay", None)
+        if overlay is None:
+            return
+        if self._transition_overlay_active():
+            overlay.raise_()
+            container = getattr(overlay, "_container", None)
+            if container is not None:
+                container.raise_()
+        else:
+            self._rotation_foreground.raise_()
+            self._schedule_ticker_surface_reassert(delays=(0, 120))
+
+    def show_singer_start_vfx(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
+        overlay = getattr(self, "transition_overlay", None)
+        if overlay is None or not self.isVisible():
+            return False
+        try:
+            overlay.set_enabled(True)
+            overlay.show_singer_start(singer, title, artist, style)
+            self._on_transition_overlay_active_changed()
+            return True
+        except Exception as exc:
+            _diag(f"[ROTATION-VFX] singer-start failed: {exc}")
+            return False
+
+    def show_song_outro_vfx(self, singer: str, title: str = "", artist: str = "", style: str = "moving_spotlights"):
+        overlay = getattr(self, "transition_overlay", None)
+        if overlay is None or not self.isVisible():
+            return False
+        try:
+            overlay.set_enabled(True)
+            overlay.show_song_outro(singer, title, artist, style)
+            self._on_transition_overlay_active_changed()
+            return True
+        except Exception as exc:
+            _diag(f"[ROTATION-VFX] song-outro failed: {exc}")
+            return False
+
     def _schedule_ticker_surface_reassert(self, delays=(0, 120, 400, 900)):
         for delay in delays:
             QTimer.singleShot(delay, self._reassert_ticker_surface)
 
     def _reassert_ticker_surface(self):
-        if not self.isVisible():
+        if not self.isVisible() or self._transition_overlay_active():
             return False
         return self.announcement_ticker.reassert_surface()
 
@@ -19039,7 +19033,7 @@ class RotationView(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         self._apply_effects_visibility()
-        self._refresh_cdg_backdrop()
+        self._tick_animated_backdrop()
         self._schedule_ticker_surface_reassert()
         if self.rotation_rail is None:
             self._apply_scroll_cadence()
@@ -19048,7 +19042,7 @@ class RotationView(QMainWindow):
     def hideEvent(self, event):
         super().hideEvent(event)
         self._apply_effects_visibility()
-        self._refresh_cdg_backdrop()
+        self._tick_animated_backdrop()
 
     def _apply_scroll_cadence(self):
         """Use the ticker's display-aware 60-120 FPS repaint cadence."""
@@ -27561,16 +27555,6 @@ class KaraokeApp(QWidget):
         rotation_vfx_cb.setChecked(bool(self.settings.get("rotation_vfx_enabled", True)))
         v.addWidget(rotation_vfx_cb)
 
-        rotation_cdg_backdrop_cb = QCheckBox("Live karaoke background on Singer Rotation")
-        rotation_cdg_backdrop_cb.setToolTip(
-            "Uses the same native CDG picture, transparency, background video, and side fill/blur "
-            "as Show Karaoke, behind the singer rows."
-        )
-        rotation_cdg_backdrop_cb.setChecked(
-            bool(self.settings.get("rotation_cdg_backdrop_enabled", True))
-        )
-        v.addWidget(rotation_cdg_backdrop_cb)
-
         _quick_row = QHBoxLayout()
         _quick_row.addWidget(QLabel("Animated GPU ticker / transitions:"))
         quick_combo = QComboBox(dlg)
@@ -28590,15 +28574,6 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
-        def on_rotation_cdg_backdrop_toggled(checked: bool):
-            self.settings["rotation_cdg_backdrop_enabled"] = bool(checked)
-            self.save_settings()
-            try:
-                if self.rotation_view is not None:
-                    self.rotation_view.set_cdg_backdrop_enabled(bool(checked))
-            except Exception:
-                pass
-
         def on_ticker_vfx_toggled(checked: bool):
             self.settings["ticker_vfx_enabled"] = bool(checked)
             self.save_settings()
@@ -28783,7 +28758,6 @@ class KaraokeApp(QWidget):
         lyric_bg_opacity_spin.valueChanged.connect(on_cdg_black_cleanup_changed)
         show_screen_vfx_cb.toggled.connect(on_show_screen_vfx_toggled)
         rotation_vfx_cb.toggled.connect(on_rotation_vfx_toggled)
-        rotation_cdg_backdrop_cb.toggled.connect(on_rotation_cdg_backdrop_toggled)
         ticker_vfx_cb.toggled.connect(on_ticker_vfx_toggled)
         perf_debug_cb.toggled.connect(on_perf_debug_toggled)
         auto_update_cb.toggled.connect(on_auto_update_toggled)
@@ -39013,6 +38987,9 @@ class KaraokeApp(QWidget):
                 area = getattr(state.get(window_name), "video_area", None)
                 if area is not None and hasattr(area, "show_singer_start_vfx"):
                     shown = bool(area.show_singer_start_vfx(singer_display, title, artist, style)) or shown
+            rotation = state.get("rotation_view")
+            if rotation is not None and hasattr(rotation, "show_singer_start_vfx"):
+                shown = bool(rotation.show_singer_start_vfx(singer_display, title, artist, style)) or shown
             _diag(
                 f"[SHOW-VFX] singer-start shown={int(shown)} "
                 f"generation={generation!r} singer={str(singer_display or '')!r} style={style}"
@@ -39293,6 +39270,14 @@ class KaraokeApp(QWidget):
                 if area is None or not hasattr(area, "show_song_outro_vfx"):
                     continue
                 shown = bool(area.show_song_outro_vfx(
+                    singer,
+                    str(payload.get("title", "") or ""),
+                    str(payload.get("artist", "") or ""),
+                    style,
+                )) or shown
+            rotation = state.get("rotation_view")
+            if rotation is not None and hasattr(rotation, "show_song_outro_vfx"):
+                shown = bool(rotation.show_song_outro_vfx(
                     singer,
                     str(payload.get("title", "") or ""),
                     str(payload.get("artist", "") or ""),

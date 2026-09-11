@@ -578,12 +578,14 @@ class ShowCriticalRegressionTests(unittest.TestCase):
 
         area = type("Area", (), {"show_singer_start_vfx": _show_singer_start})()
         app.video_window = type("Window", (), {"video_area": area})()
+        app.rotation_view = type("Rotation", (), {"show_singer_start_vfx": _show_singer_start})()
         app._confirmed_singer_start_generation = 8
 
         self.assertFalse(app._trigger_show_screen_singer_start_vfx("Skipped", "A", "Old", generation=7))
         self.assertTrue(app._trigger_show_screen_singer_start_vfx("Current", "B", "New", generation=8))
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][:3], ("Current", "B", "New"))
+        self.assertEqual(calls[1][:3], ("Current", "B", "New"))
         self.assertIn(calls[0][3], self.singws.SHOW_TRANSITION_EFFECTS)
 
     def test_skip_invalidates_and_stops_an_unconfirmed_start(self):
