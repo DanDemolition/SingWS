@@ -1,0 +1,4 @@
+#!/bin/bash
+# macOS 27 Command Line Tools ship arm64-only support libraries. PyInstaller
+# runs under Rosetta for an Intel bundle, so force Apple's lipo back to native.
+exec /usr/bin/arch -arm64 /usr/bin/lipo "$@"

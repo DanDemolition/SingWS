@@ -8,14 +8,21 @@ APP_NAME="SingWS"
 ENTRY="0.2.18.1.py"
 SPEC="SingWS-x86_64.spec"
 PYTHON="${SINGWS_BUILD_PYTHON:-.venv-universal/bin/python}"
+NATIVE_PYTHON="$PYTHON"
 
+PYTHON_RUN=("$PYTHON")
 if [[ "$(uname -m)" != "x86_64" ]]; then
-    echo "Run in an x86_64 process (on Intel, or with arch -x86_64 /bin/bash)."
-    exit 1
+    # macOS 27's Command Line Tools are arm64-only, so the whole build shell can
+    # no longer run under Rosetta. Keep Apple tooling native and translate only
+    # Python/PyInstaller, which is what determines the bundle architecture.
+    PYTHON_RUN=(arch -x86_64 "$PYTHON")
+    NATIVE_PYTHON="${SINGWS_NATIVE_PYTHON:-.venv-repair/bin/python}"
+    export PATH="$(pwd)/tools/native-build-bin:$PATH"
 fi
 
 for required in \
     "$ENTRY" "$SPEC" "$PYTHON" \
+    "$NATIVE_PYTHON" \
     mpv_karaoke_transport.py MoltenVK_icd.json constraints-macos12.txt \
     SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py \
     tools/verify_macos_min_version.py; do
@@ -43,14 +50,14 @@ for required in "${STACK_INPUTS[@]}"; do
     fi
 done
 
-"$PYTHON" tools/verify_macos_arch.py --runtime --require x86_64
-"$PYTHON" -c "import PyQt6"
+"${PYTHON_RUN[@]}" -c 'import platform, sys; actual = platform.machine(); print(f"Python runtime architecture: {actual}"); sys.exit(0 if actual == "x86_64" else 1)'
+"${PYTHON_RUN[@]}" -c "import PyQt6"
 
 # This build is intended to cover macOS 12 and above, retiring the separate
 # legacy edition. PyQt6/Qt6 6.10+ raise the floor to macOS 13 while carrying a
 # "macosx_10_14" wheel tag, so the tag cannot be trusted -- check the installed
 # versions against the verified pin set instead.
-"$PYTHON" - <<'PYPINS'
+"${PYTHON_RUN[@]}" - <<'PYPINS'
 import re, sys
 from importlib.metadata import PackageNotFoundError, version
 wanted = {}
@@ -84,14 +91,14 @@ APP_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$ENTRY" | head -1)"
 DMG_NAME="SingWS-${APP_VERSION}-x86_64-installer.dmg"
 
 echo "Building $APP_NAME $APP_VERSION for Intel..."
-"$PYTHON" tools/make_dmg_assets.py --style-only
+"${PYTHON_RUN[@]}" tools/make_dmg_assets.py --style-only
 
 rm -rf build dist
-"$PYTHON" -m PyInstaller --noconfirm "$SPEC"
+"${PYTHON_RUN[@]}" -m PyInstaller --noconfirm "$SPEC"
 
 APP_PATH="dist/$APP_NAME.app"
 [[ -d "$APP_PATH" ]] || { echo "Build failed: $APP_PATH was not created"; exit 1; }
-"$PYTHON" tools/verify_macos_arch.py --bundle "$APP_PATH" --require x86_64
+"$NATIVE_PYTHON" tools/verify_macos_arch.py --bundle "$APP_PATH" --require x86_64
 
 REQUIRED_BUNDLED=(
     "$APP_PATH/Contents/Frameworks/singws_libmpv.2.dylib"
@@ -104,7 +111,7 @@ done
 
 # Prove the permanent bundled media core loads before this bundle goes any
 # further; there is no alternate karaoke engine to mask a broken runtime.
-"$PYTHON" - "$APP_PATH" "${LIBMPV_NAMES[@]}" <<'PYCHECK'
+"${PYTHON_RUN[@]}" - "$APP_PATH" "${LIBMPV_NAMES[@]}" <<'PYCHECK'
 import ctypes, pathlib, sys
 frameworks = pathlib.Path(sys.argv[1]) / "Contents" / "Frameworks"
 for name in sys.argv[2:]:
@@ -121,7 +128,7 @@ PYCHECK
 # The whole point of the pin set: nothing in the shipped bundle may require a
 # newer macOS than 12.0, or this build cannot replace the legacy edition.
 # Checks the real Mach-O load commands, not wheel tags or filenames.
-"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch x86_64 --maximum 12.0
+"$NATIVE_PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch x86_64 --maximum 12.0
 
 # Stage the bundle BEFORE signing, and sign the staged copy.
 #
@@ -162,7 +169,7 @@ codesign --force --deep --sign - \
 codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"
 
 rm -f "$DMG_NAME"
-SINGWS_DMG_APP_ROOT="$STAGING" "$PYTHON" -m dmgbuild \
+SINGWS_DMG_APP_ROOT="$STAGING" "$NATIVE_PYTHON" -m dmgbuild \
     -s dmg_settings.py "SingWS-${APP_VERSION}" "$DMG_NAME"
 hdiutil verify "$DMG_NAME"
 
