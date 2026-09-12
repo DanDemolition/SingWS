@@ -21,7 +21,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.7.3"
+APP_VERSION = "0.4.7.4"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
