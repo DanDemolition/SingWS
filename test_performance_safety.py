@@ -1534,9 +1534,10 @@ class PerformanceSafetyTests(unittest.TestCase):
 
     def test_rotation_announcement_is_separate_and_venue_scoped(self):
         ticker_start = MAIN_SOURCE.index("class RotationAnnouncementTicker(QWidget)")
-        view_start = MAIN_SOURCE.index("class RotationView(QMainWindow)", ticker_start)
+        ticker_end = MAIN_SOURCE.index("class RotationAnimatedBackdrop(QWidget)", ticker_start)
+        view_start = MAIN_SOURCE.index("class RotationView(QMainWindow)", ticker_end)
         view_end = MAIN_SOURCE.index("class SoundboardPad", view_start)
-        ticker = MAIN_SOURCE[ticker_start:view_start]
+        ticker = MAIN_SOURCE[ticker_start:ticker_end]
         view = MAIN_SOURCE[view_start:view_end]
         configure = function_source("configure_ticker")
         venue_start = MAIN_SOURCE.index("VENUE_SCOPED_SETTINGS = (")
