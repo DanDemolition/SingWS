@@ -117,6 +117,6 @@ SECONDARY_TESTS=(
 # The clean Qt environment intentionally does not carry the native-only mpv and
 # PyObjC dependencies. Cover those four modules in the build environment after
 # the complete GUI-capable pass succeeds.
-SECONDARY="$ROOT/.venv-universal/bin/python"
+SECONDARY="${SINGWS_SECONDARY_TEST_PYTHON:-$ROOT/.venv-universal/bin/python}"
 [[ -x "$SECONDARY" ]] || { echo "Missing native test environment: $SECONDARY" >&2; exit 1; }
 exec "$SECONDARY" -m pytest -q "${SECONDARY_TESTS[@]}"
