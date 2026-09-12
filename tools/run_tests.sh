@@ -8,11 +8,21 @@ cd "$ROOT"
 # platform plugins relative to the interpreter, and a venv hanging off an
 # extracted .pkg payload makes it find zero valid plugins -- every GUI test then
 # aborts, intermittently and with correct-looking library paths.
-PYTHON=""
+PYTHON="${SINGWS_TEST_PYTHON:-}"
+if [[ -n "$PYTHON" && ! -x "$PYTHON" ]]; then
+    echo "Configured test interpreter is not executable: $PYTHON" >&2
+    exit 1
+fi
 for candidate in "$ROOT/qtvenv" "$ROOT/.venv-test" "$ROOT/.venv-test-brew" "$ROOT/.venv-universal"; do
+    [[ -z "$PYTHON" ]] || break
     if [[ -x "$candidate/bin/python" ]]; then
         PYTHON="$candidate/bin/python"
-        break
+        # A copied venv can contain native wheels for the opposite CPU. Do not
+        # select it merely because its Python executable starts.
+        if "$PYTHON" -c 'import numpy; import PyQt6.QtCore' >/dev/null 2>&1; then
+            break
+        fi
+        PYTHON=""
     fi
 done
 if [[ -z "$PYTHON" ]]; then
