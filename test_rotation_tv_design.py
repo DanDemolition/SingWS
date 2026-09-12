@@ -39,6 +39,8 @@ class RotationTvDesignTests(unittest.TestCase):
 
     def test_decorative_rotation_effects_pause_during_karaoke(self):
         owner, view = self.make_view()
+        view.show()
+        QTest.qWait(20)
         view.set_effects_enabled(True)
         view._tick_animated_backdrop()
         self.assertEqual(view._backdrop_animation_timer.interval(), 250)
