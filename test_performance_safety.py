@@ -1295,6 +1295,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         handoff = trim.index("self._end_silence_tail_handoff_started = True")
         self.assertLess(unknown_guard, handoff)
         self.assertIn("trim suppressed; verified audio endpoint unavailable", trim)
+        self.assertIn('_end_audio_unknown_logged', trim)
         self.assertIn("return False", trim[unknown_guard:handoff])
 
     def test_legacy_silence_trim_keeps_verified_visual_endpoint(self):

@@ -16,7 +16,8 @@ def monitor_code():
 
 
 class MonitorReplay:
-    def __init__(self, events, *, duration=263, estimated=False, callbacks_immediate=True):
+    def __init__(self, events, *, duration=263, estimated=False, callbacks_immediate=True,
+                 controlled_start=False):
         self.now = 100.0
         self.events = iter(events)
         self.messages = []
@@ -29,6 +30,8 @@ class MonitorReplay:
                       "karafun_playback_assumed": True,
                       "karafun_handoff_timed_out_before_play": True,
                       "karafun_result_activation_point": (389, 217)}
+        if controlled_start:
+            self.entry["karafun_playback_clock_started_at"] = self.now
         self.active = {"entry": self.entry}
         self.host = SimpleNamespace(
             _active_external_karafun=self.active,
@@ -135,6 +138,13 @@ class KaraFunMonitorSafetyTests(unittest.TestCase):
             "complete", expected_active=r.active)
         self.assertEqual(len(r.scripts), 3)
         self.assertTrue(any("reason=karaFun_idle" in m for m in r.messages))
+
+    def test_controlled_start_does_not_shift_end_by_slow_probe_latency(self):
+        r = MonitorReplay([(10, "STATE|PLAYING"), (5, "STATE|PLAYING"),
+                           (248, "STATE|IDLE")], duration=245, controlled_start=True).run()
+        r.host._finish_external_karafun_playback.assert_called_once_with(
+            "complete", expected_active=r.active)
+        self.assertTrue(any("retained" in m for m in r.messages))
 
     def test_unknown_duration_idle_requires_manual_completion(self):
         for duration, estimated in [(0, False), (240, True)]:

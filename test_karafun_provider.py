@@ -181,9 +181,10 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('_schedule_early_handoff("after_result_activation")', source)
         self.assertIn("fullscreen audience handoff ready before play", source)
         self.assertLess(
-            source.index('if not self._macos_native_double_click(*activation_point):'),
             source.index('_schedule_early_handoff("after_result_activation")'),
+            source.index('pressed, press_error = self._karafun_press_play_control()'),
         )
+        self.assertIn("finish the renderer handoff, and only then press", source)
         handoff = source[source.index("def _handoff_show_screen_to_karafun"):]
         handoff = handoff[:handoff.index("def _restore_show_screen_from_karafun")]
         self.assertEqual(handoff.count("click at {bestButtonX, bestButtonY}"), 1)
@@ -349,26 +350,30 @@ class KaraFunProviderTests(unittest.TestCase):
         # verifies and presses play once if the assumption was wrong.
         self.assertIn('entry["karafun_playback_assumed"] = True', worker)
         self.assertIn('entry["karafun_handoff_timed_out_before_play"] = not handoff_ready', worker)
-        self.assertIn("fullscreen audience handoff continuing during playback", worker)
-        self.assertIn("arming accelerated playback verification", worker)
+        self.assertIn("fullscreen audience handoff not verified before play", worker)
+        self.assertIn("fullscreen audience handoff ready before play", worker)
+        self.assertLess(
+            worker.index('_schedule_early_handoff("after_result_activation")'),
+            worker.index("pressed, press_error = self._karafun_press_play_control()"),
+        )
         self.assertNotIn("handoff_deadline", worker)
         self.assertIn("playback verify attempt=", worker)
         self.assertIn("def _schedule_early_handoff", worker)
         self.assertIn("def _schedule_bgm_fade", worker)
-        self.assertIn('_schedule_bgm_fade("before_fullscreen_handoff")', worker)
+        self.assertIn('_schedule_bgm_fade("fullscreen_handoff_ready")', worker)
         self.assertIn("delayed BGM fade scheduled reason=", worker)
         self.assertLess(
-            worker.index('_schedule_bgm_fade("before_fullscreen_handoff")'),
-            worker.index("activating KaraFun result mode="),
+            worker.index('_schedule_early_handoff("after_result_activation")'),
+            worker.index('_schedule_bgm_fade("fullscreen_handoff_ready")'),
         )
         self.assertIn('_schedule_early_handoff("pre_click_playing")', worker)
         self.assertIn('_schedule_early_handoff("playback_verified")', worker)
         self.assertIn("self._handoff_show_screen_to_karafun() if _session_is_current() else None", worker)
         pre_play_handoff = worker[
-            worker.index('entry["karafun_result_activated_at"] = result_activated_at'):
+            worker.index('managed_handoff = bool(self.settings.get("karafun_manage_show_screen", True))'):
             worker.index('playback_probe_script = [')
         ]
-        self.assertIn('if bool(self.settings.get("karafun_manage_show_screen", True)):', pre_play_handoff)
+        self.assertIn("if managed_handoff:", pre_play_handoff)
         self.assertNotIn("if self._karafun_transparent_renderer_ready:", pre_play_handoff)
         self.assertIn('and initial_probe_state == "PLAYING" and not fast_start', worker)
         self.assertIn("if not verified_playing and not fast_start:", worker)

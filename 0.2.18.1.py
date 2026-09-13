@@ -19747,6 +19747,8 @@ class KaraokeApp(QWidget):
         self._bg_resume_timer.setSingleShot(True)
         self._bg_resume_timer.timeout.connect(self._on_bg_resume_timer)
         self._bg_resume_reason = "default"
+        self._bg_resume_verify_gen = 0
+        self._bg_resume_verify_retried = False
         self._media_end_handoff_active = False
         self._media_end_handoff_timer = QTimer(self)
         self._media_end_handoff_timer.setSingleShot(True)
@@ -37837,6 +37839,7 @@ class KaraokeApp(QWidget):
         self._end_visual_unknown_log_ts = 0.0
         self._end_audio_hold_log_ts = 0.0
         self._end_audio_unknown_log_ts = 0.0
+        self._end_audio_unknown_logged = False
         self._bg_crossfade_prefired = False  # reset per-song BG pre-start flag
         self._bg_prefire_silence_accum_s = 0.0
         self._bg_prefire_silence_last_ts = 0.0
@@ -38404,9 +38407,8 @@ class KaraokeApp(QWidget):
         audio_end = getattr(self, "_karaoke_audio_end_s", None)
         if audio_end is None:
             self._end_silence_accum_s = 0.0
-            last_log = float(getattr(self, "_end_audio_unknown_log_ts", 0.0) or 0.0)
-            if (now - last_log) >= 10.0:
-                self._end_audio_unknown_log_ts = now
+            if not bool(getattr(self, "_end_audio_unknown_logged", False)):
+                self._end_audio_unknown_logged = True
                 _diag(
                     f"[END-AUDIO] trim suppressed; verified audio endpoint unavailable "
                     f"(pos={elapsed:.2f}s remain={remain:.2f}s "
@@ -49732,6 +49734,42 @@ class KaraokeApp(QWidget):
     def _on_bg_resume_timer(self):
         self._start_bg_with_fade_safe("resume_timer")
 
+    def _verify_bg_resume_started(self, generation: int):
+        """Verify a requested idle resume produced real BASS playback; retry once."""
+        if int(generation) != int(getattr(self, "_bg_resume_verify_gen", 0)):
+            return
+        if bool(getattr(self, "karaoke_playing", False)):
+            return
+        bg = getattr(self, "bg_music", None)
+        if bg is None or not bool(getattr(bg, "playlist", None)):
+            return
+        if not bool(self.settings.get("bg_enabled", True)):
+            return
+        if not bool(self.settings.get("bg_autoplay_on_idle", True)):
+            return
+        try:
+            effective = bool(bg.is_effectively_playing())
+        except Exception:
+            effective = False
+        if effective:
+            _diag(f"[BG-HANDOFF] playback verified generation={generation}")
+            return
+        if bool(getattr(self, "_bg_resume_verify_retried", False)):
+            _diag(f"[BG-HANDOFF] playback still inactive after verified retry generation={generation}")
+            return
+        self._bg_resume_verify_retried = True
+        _diag(f"[BG-HANDOFF] playback verification failed; resetting deck and retrying generation={generation}")
+        try:
+            bg.stop()
+        except Exception:
+            pass
+        try:
+            bg.preload_current_track_paused()
+        except Exception:
+            pass
+        self._bg_resume_reason = "verified_retry"
+        self._start_bg_with_fade_safe("verified_retry")
+
     def _clear_media_end_handoff_guard(self):
         self._media_end_handoff_active = False
 
@@ -51711,32 +51749,51 @@ class KaraokeApp(QWidget):
                 else:
                     _diag(f"[KARAFUN-AUTO] selected exact KaraFun title+artist query={selected_query!r}")
 
-                # Finish the result double-click before the display handoff
-                # can move the pointer or raise another window. Running both
-                # mouse sequences concurrently can lose either activation.
+                # When SingWS owns the show display, select the result without
+                # starting it, finish the renderer handoff, and only then press
+                # Play. Starting from a double-click let audio/lyrics run for
+                # 6-10 seconds behind the fullscreen Space transition.
                 _require_current_session()
-                _schedule_bgm_fade("before_fullscreen_handoff")
                 _diag(f"[KARAFUN-AUTO] activating KaraFun result mode={parts[0]} x={parts[1]} y={parts[2]}")
                 activation_point = (int(float(parts[1])), int(float(parts[2])))
                 entry["karafun_result_activation_point"] = activation_point
                 _require_current_session()
-                if not self._macos_native_double_click(*activation_point):
-                    raise RuntimeError("Could not double-click the KaraFun result")
-                result_activated_at = time.monotonic()
-                entry["karafun_result_activated_at"] = result_activated_at
-                time.sleep(0.8)
-                _require_current_session()
-                if bool(self.settings.get("karafun_manage_show_screen", True)):
+                managed_handoff = bool(self.settings.get("karafun_manage_show_screen", True))
+                if managed_handoff:
+                    if not self._macos_native_mouse_click(*activation_point, clicks=1):
+                        raise RuntimeError("Could not select the KaraFun result")
                     _schedule_early_handoff("after_result_activation")
+                    handoff_wait_deadline = time.monotonic() + 15.0
+                    while (bool(getattr(self, "_karafun_handoff_in_progress", False))
+                           and time.monotonic() < handoff_wait_deadline):
+                        _require_current_session()
+                        time.sleep(0.1)
                     handoff_ready = bool(getattr(self, "_karafun_handoff_complete", False))
                     entry["karafun_handoff_timed_out_before_play"] = not handoff_ready
                     if handoff_ready:
                         _diag("[KARAFUN-AUTO] fullscreen audience handoff ready before play")
                     else:
                         _diag(
-                            "[KARAFUN-AUTO] fullscreen audience handoff continuing during playback; "
-                            "arming accelerated playback verification"
+                            "[KARAFUN-AUTO] fullscreen audience handoff not verified before play; "
+                            "continuing with guarded playback"
                         )
+                    _schedule_bgm_fade("fullscreen_handoff_ready")
+                    pressed, press_error = self._karafun_press_play_control()
+                    if not pressed:
+                        raise RuntimeError(f"Could not start selected KaraFun result: {press_error}")
+                    result_activated_at = time.monotonic()
+                    entry["karafun_result_activated_at"] = result_activated_at
+                    entry["karafun_playback_clock_started_at"] = result_activated_at
+                    entry["karafun_playback_assumed"] = True
+                    time.sleep(0.3)
+                else:
+                    _schedule_bgm_fade("before_result_activation")
+                    if not self._macos_native_double_click(*activation_point):
+                        raise RuntimeError("Could not double-click the KaraFun result")
+                    result_activated_at = time.monotonic()
+                    entry["karafun_result_activated_at"] = result_activated_at
+                    time.sleep(0.8)
+                _require_current_session()
 
 
                 playback_probe_script = [
@@ -51999,6 +52056,7 @@ class KaraokeApp(QWidget):
         # sing: the rotation advanced and background music came up over the
         # ending. Rebased at the first confirmed playback signal instead.
         playback_confirmed_at = None
+        playback_clock_origin = None
         # Fast start assumes the result double-click began playback and skips
         # the play click. When that assumption is wrong nothing recovered and
         # the song sat silent (2026-08-16 01:07, Los Enanitos Verdes: the KJ
@@ -52079,7 +52137,7 @@ class KaraokeApp(QWidget):
 
         def _monitor():
             nonlocal seen_playback, last_state, last_clock_candidates, idle_stop_count
-            nonlocal playback_confirmed_at, recovery_pressed, playing_hint_count, playback_hint_seen
+            nonlocal playback_confirmed_at, playback_clock_origin, recovery_pressed, playing_hint_count, playback_hint_seen
             nonlocal last_clock_remaining, last_clock_at
 
             def _confirm_playback():
@@ -52087,9 +52145,21 @@ class KaraokeApp(QWidget):
                 seen_playback = True
                 if playback_confirmed_at is None:
                     playback_confirmed_at = time.monotonic()
+                    confirmation_delay = max(0.0, playback_confirmed_at - started)
+                    # A selected result that SingWS explicitly started after a
+                    # completed fullscreen handoff has an authoritative start
+                    # timestamp. Do not move its end 10-15 seconds late merely
+                    # because the first Accessibility probe was slow. Preserve
+                    # the old rebase for launches whose start was not controlled.
+                    playback_clock_origin = (
+                        started
+                        if bool(entry.get("karafun_playback_clock_started_at"))
+                        else playback_confirmed_at
+                    )
                     _diag(
                         "[KARAFUN] playback confirmed; duration fallback rebased "
-                        f"(launch overhead {max(0.0, playback_confirmed_at - started):.1f}s excluded)"
+                        f"(launch overhead {confirmation_delay:.1f}s "
+                        f"{'retained' if playback_clock_origin == started else 'excluded'})"
                     )
             while True:
                 active = getattr(self, "_active_external_karafun", None)
@@ -52233,7 +52303,7 @@ class KaraokeApp(QWidget):
                 if fallback_duration > 0:
                     # Count from the first confirmed playback, not from the
                     # handoff: everything before that is KaraFun starting up.
-                    fallback_origin = playback_confirmed_at if playback_confirmed_at is not None else started
+                    fallback_origin = playback_clock_origin if playback_clock_origin is not None else started
                     fallback_remaining = fallback_duration - int(time.monotonic() - fallback_origin)
                 if remaining is None and fallback_remaining is not None:
                     remaining = fallback_remaining
@@ -57180,13 +57250,28 @@ class KaraokeApp(QWidget):
     def _start_bg_with_fade(self):
         """Start background music with fade in and update button"""
         _diag("_start_bg_with_fade called")
+        resume_reason = str(getattr(self, "_bg_resume_reason", "default") or "default")
+        # Both observed silent resumes happened while the Exitlude soundboard
+        # pad was still active. Avoid entering BASS background-engine calls in
+        # that overlap window; the pad's polling timer clears _playing when the
+        # clip ends, and this one-shot timer then resumes BGM normally.
+        try:
+            soundboard_active = any(
+                bool(getattr(pad, "_playing", False))
+                for pad in getattr(getattr(self, "soundboard_strip", None), "pads", [])
+            )
+        except Exception:
+            soundboard_active = False
+        if soundboard_active:
+            _diag(f"[BG-HANDOFF] resume deferred while soundboard active reason={resume_reason}")
+            self._schedule_bg_resume(250, reason=resume_reason)
+            return False
         # If a fade left BGM silently 'playing', repair before any early-out
         # below trusts the is_playing flag.
         try:
             self.bg_music.ensure_audible("bg_resume")
         except Exception:
             pass
-        resume_reason = str(getattr(self, "_bg_resume_reason", "default") or "default")
         # One-shot reason flag.
         self._bg_resume_reason = "default"
 
@@ -57244,12 +57329,22 @@ class KaraokeApp(QWidget):
         started = bool(getattr(self.bg_music, "is_playing", False))
         if not started:
             _diag(f"[BG-HANDOFF] fade_in did not start reason={resume_reason}")
+            self._bg_resume_verify_gen = int(getattr(self, "_bg_resume_verify_gen", 0)) + 1
+            verify_gen = int(self._bg_resume_verify_gen)
+            if resume_reason != "verified_retry":
+                self._bg_resume_verify_retried = False
+            QTimer.singleShot(250, lambda gen=verify_gen: self._verify_bg_resume_started(gen))
             return False
         
         # Update button state after fade starts
         QTimer.singleShot(100, self.update_bg_button_state)
         QTimer.singleShot(fade_in_ms + 100, self.update_bg_button_state)  # Also update after fade completes
         _diag(f"[BG-HANDOFF] fade_in started reason={resume_reason} duration_ms={fade_in_ms}")
+        self._bg_resume_verify_gen = int(getattr(self, "_bg_resume_verify_gen", 0)) + 1
+        verify_gen = int(self._bg_resume_verify_gen)
+        if resume_reason != "verified_retry":
+            self._bg_resume_verify_retried = False
+        QTimer.singleShot(1500, lambda gen=verify_gen: self._verify_bg_resume_started(gen))
         return True
 
     def _start_bg_with_fade_safe(self, source: str = "unknown"):

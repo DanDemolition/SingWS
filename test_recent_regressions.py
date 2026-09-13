@@ -1642,8 +1642,12 @@ class KaraFunCompletionClockTests(unittest.TestCase):
 
     def test_the_fallback_counts_from_confirmed_playback(self):
         self.assertIn("playback_confirmed_at", self.source)
-        self.assertIn("fallback_origin = playback_confirmed_at if playback_confirmed_at is not None else started",
+        self.assertIn("fallback_origin = playback_clock_origin if playback_clock_origin is not None else started",
                       self.source)
+
+    def test_an_explicit_post_handoff_play_keeps_its_exact_start_clock(self):
+        self.assertIn('if bool(entry.get("karafun_playback_clock_started_at"))', self.source)
+        self.assertIn("playback_clock_origin = (", self.source)
 
     def test_the_fallback_clock_cannot_rebase_itself(self):
         """The fallback's own countdown is not evidence that playback began."""
@@ -1675,6 +1679,32 @@ class KaraFunCompletionClockTests(unittest.TestCase):
         self.assertEqual(remaining_at(233.0, playback_confirmed_at), 47)
         # And it does still complete, 45s later.
         self.assertLessEqual(remaining_at(278.0, playback_confirmed_at), 5)
+
+
+class BackgroundMusicSoundboardHandoffTests(unittest.TestCase):
+    """An Exitlude pad overlapping EOS twice left BGM silent after the callback entered."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = load_main_module()
+        cls.source = inspect.getsource(cls.singws.KaraokeApp._start_bg_with_fade)
+
+    def test_resume_waits_until_the_soundboard_releases_bass(self):
+        self.assertIn("soundboard_active = any(", self.source)
+        self.assertIn('getattr(pad, "_playing", False)', self.source)
+        self.assertIn("self._schedule_bg_resume(250, reason=resume_reason)", self.source)
+        self.assertLess(self.source.index("if soundboard_active:"),
+                        self.source.index('self.bg_music.ensure_audible("bg_resume")'))
+
+    def test_successful_resume_arms_real_playback_verification(self):
+        self.assertIn("_bg_resume_verify_gen", self.source)
+        self.assertIn("self._verify_bg_resume_started(gen)", self.source)
+        verifier = inspect.getsource(self.singws.KaraokeApp._verify_bg_resume_started)
+        self.assertIn("bg.is_effectively_playing()", verifier)
+        self.assertIn("playback verification failed; resetting deck and retrying", verifier)
+        self.assertIn('self._bg_resume_reason = "verified_retry"', verifier)
+        self.assertIn('self._start_bg_with_fade_safe("verified_retry")', verifier)
+        self.assertIn("playback still inactive after verified retry", verifier)
 
 
 class TickerSurfaceReassertTests(unittest.TestCase):
