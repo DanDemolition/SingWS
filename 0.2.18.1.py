@@ -21,7 +21,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.7.5"
+APP_VERSION = "0.4.7.6"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -51140,6 +51140,44 @@ class KaraokeApp(QWidget):
             return False, "Could not click the KaraFun play control"
         return True, ""
 
+    def _karafun_activate_result_for_playback(self, activation_point) -> tuple[bool, str]:
+        """Raise the search-results window and double-click its matched row."""
+        try:
+            if not isinstance(activation_point, (tuple, list)) or len(activation_point) != 2:
+                return False, "KaraFun result position is unavailable"
+            x, y = int(activation_point[0]), int(activation_point[1])
+        except Exception:
+            return False, "KaraFun result position is invalid"
+        ok, result, script_error = self._run_karafun_applescript_sync(
+            [
+                'tell application "System Events"',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
+                'tell item 1 of matches',
+                'set frontmost to true',
+                'set mainWindow to missing value',
+                'repeat with candidateWindow in windows',
+                'try',
+                'if name of candidateWindow starts with "Results for " then',
+                'set mainWindow to candidateWindow',
+                'exit repeat',
+                'end if',
+                'end try',
+                'end repeat',
+                'if mainWindow is missing value then return "ERROR|KaraFun results window not found"',
+                'perform action "AXRaise" of mainWindow',
+                'return "READY"',
+                'end tell',
+                'end tell',
+            ],
+            timeout=8,
+        )
+        if not ok or str(result or "").strip() != "READY":
+            return False, str(script_error or result or "KaraFun results window is unavailable")
+        if not self._macos_native_double_click(x, y):
+            return False, "Could not double-click the KaraFun result"
+        return True, ""
+
     def _karafun_search_script(self, *, query: str, safe_title: str = "", safe_artist: str = "",
                                require_exact_title: bool = False):
         query_literal = self._karafun_applescript_literal(query)
@@ -51750,8 +51788,8 @@ class KaraokeApp(QWidget):
                     _diag(f"[KARAFUN-AUTO] selected exact KaraFun title+artist query={selected_query!r}")
 
                 # When SingWS owns the show display, select the result without
-                # starting it, finish the renderer handoff, and only then press
-                # Play. Starting from a double-click let audio/lyrics run for
+                # starting it, finish the renderer handoff, then reactivate the
+                # matched result row. Starting from a double-click let audio/lyrics run for
                 # 6-10 seconds behind the fullscreen Space transition.
                 _require_current_session()
                 _diag(f"[KARAFUN-AUTO] activating KaraFun result mode={parts[0]} x={parts[1]} y={parts[2]}")
@@ -51778,9 +51816,13 @@ class KaraokeApp(QWidget):
                             "continuing with guarded playback"
                         )
                     _schedule_bgm_fade("fullscreen_handoff_ready")
-                    pressed, press_error = self._karafun_press_play_control()
-                    if not pressed:
-                        raise RuntimeError(f"Could not start selected KaraFun result: {press_error}")
+                    activated, activation_error = self._karafun_activate_result_for_playback(
+                        activation_point
+                    )
+                    if not activated:
+                        raise RuntimeError(
+                            f"Could not start selected KaraFun result: {activation_error}"
+                        )
                     result_activated_at = time.monotonic()
                     entry["karafun_result_activated_at"] = result_activated_at
                     entry["karafun_playback_clock_started_at"] = result_activated_at
@@ -52184,6 +52226,17 @@ class KaraokeApp(QWidget):
                         'set matches to every application process whose name contains "KaraFun"',
                         'if (count of matches) is 0 then return ""',
                         'tell item 1 of matches',
+                        # The control window is hidden while Dual Renderer owns
+                        # a fullscreen Space, but KaraFun keeps its Playback
+                        # menu available. Its first item toggles between Play
+                        # and Pause and remains cheap to read in that state.
+                        'try',
+                        'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
+                        'ignoring case',
+                        'if playbackToggleName is "pause" then return "STATE|PLAYING"',
+                        'if playbackToggleName is "play" then return "STATE|IDLE"',
+                        'end ignoring',
+                        'end try',
                         'if (count of windows) is 0 then return ""',
                         'set mainWindow to missing value',
                         'repeat with candidateWindow in windows',
@@ -52290,7 +52343,7 @@ class KaraokeApp(QWidget):
                         idle_stop_count = 0
                     state_label = (
                         f"idle={int(idle_reported)} playing={int(playing_reported)} "
-                        f"playing_streak={playing_hint_count} remaining={remaining}"
+                        f"remaining={remaining}"
                     )
                     if state_label != last_state:
                         _diag(f"[KARAFUN] monitor state {state_label} idle_stop_count={idle_stop_count}")
@@ -52337,18 +52390,12 @@ class KaraokeApp(QWidget):
                     )
                     activation_point = entry.get("karafun_result_activation_point")
                     try:
-                        reactivated = bool(
-                            isinstance(activation_point, (tuple, list))
-                            and len(activation_point) == 2
-                            and self._macos_native_double_click(
-                                int(activation_point[0]), int(activation_point[1])
-                            )
+                        reactivated, press_error = (
+                            self._karafun_activate_result_for_playback(activation_point)
                         )
                     except Exception as exc:
                         reactivated = False
                         press_error = str(exc)
-                    else:
-                        press_error = ""
                     if reactivated:
                         entry["karafun_result_activated_at"] = time.monotonic()
                         _diag("[KARAFUN] recovery result activation sent")

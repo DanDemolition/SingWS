@@ -24,7 +24,7 @@ class KaraFunProviderTests(unittest.TestCase):
             KARAFUN_PLAYBACK_RECOVERY_DELAY_S=12,
             KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S=2,
             KARAFUN_PLAYBACK_ALERT_DELAY_S=40,
-            _macos_native_double_click=mock.Mock(return_value=True),
+            _karafun_activate_result_for_playback=mock.Mock(return_value=(True, "")),
             _set_karafun_entry_status=mock.Mock(),
             _karafun_clock_seconds=lambda value: None,
         )
@@ -51,7 +51,7 @@ class KaraFunProviderTests(unittest.TestCase):
         }
         exec(compile(ast.Module(body=[method], type_ignores=[]), "monitor-test", "exec"), namespace)
         namespace[method.name](host, entry)
-        host._macos_native_double_click.assert_called_once_with(303, 217)
+        host._karafun_activate_result_for_playback.assert_called_once_with((303, 217))
         host._set_karafun_entry_status.assert_not_called()
         self.assertGreater(entry["karafun_last_playing_ts"], 100)
         self.assertEqual(len(probes), 3)
@@ -163,6 +163,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('name of candidateWindow is "Dual Renderer"', source)
         self.assertNotIn("set outputWindow to last window", source)
         self.assertIn("def _macos_native_double_click", source)
+        self.assertIn("def _karafun_activate_result_for_playback", source)
         self.assertIn("CGEventSetIntegerValueField", source)
         self.assertIn("def _finish_handoff(result=\"\"):", source)
         self.assertIn('== "READY"', source)
@@ -182,9 +183,9 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("fullscreen audience handoff ready before play", source)
         self.assertLess(
             source.index('_schedule_early_handoff("after_result_activation")'),
-            source.index('pressed, press_error = self._karafun_press_play_control()'),
+            source.index('activated, activation_error = self._karafun_activate_result_for_playback('),
         )
-        self.assertIn("finish the renderer handoff, and only then press", source)
+        self.assertIn("finish the renderer handoff, then reactivate", source)
         handoff = source[source.index("def _handoff_show_screen_to_karafun"):]
         handoff = handoff[:handoff.index("def _restore_show_screen_from_karafun")]
         self.assertEqual(handoff.count("click at {bestButtonX, bestButtonY}"), 1)
@@ -354,7 +355,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("fullscreen audience handoff ready before play", worker)
         self.assertLess(
             worker.index('_schedule_early_handoff("after_result_activation")'),
-            worker.index("pressed, press_error = self._karafun_press_play_control()"),
+            worker.index("activated, activation_error = self._karafun_activate_result_for_playback("),
         )
         self.assertNotIn("handoff_deadline", worker)
         self.assertIn("playback verify attempt=", worker)
@@ -427,7 +428,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertNotIn("idle_stop_count >= 2", monitor)
         self.assertIn("waiting for a second full", monitor)
         self.assertIn("playing_hint_count >= 2", monitor)
-        self.assertIn("playing_streak={playing_hint_count}", monitor)
+        self.assertNotIn("playing_streak={playing_hint_count}", monitor)
         self.assertIn("KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S", monitor)
         self.assertIn('entry.get("karafun_handoff_timed_out_before_play", False)', monitor)
         self.assertNotIn("seen_playback = True\n                    else:", monitor)

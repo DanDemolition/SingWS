@@ -38,7 +38,7 @@ class MonitorReplay:
             _run_karafun_applescript_sync=self.probe,
             _karafun_clock_seconds=self.clock_seconds,
             _run_on_ui_thread=(lambda fn: fn()) if callbacks_immediate else self.callbacks.append,
-            _macos_native_double_click=mock.Mock(return_value=True),
+            _karafun_activate_result_for_playback=mock.Mock(return_value=(True, "")),
             _karafun_press_play_control=mock.Mock(return_value=(True, "")),
             _finish_external_karafun_playback=mock.Mock(),
             _set_karafun_entry_status=mock.Mock(),
@@ -90,25 +90,25 @@ class KaraFunMonitorSafetyTests(unittest.TestCase):
     def test_actual_show_readings_neither_retry_nor_complete_song_early(self):
         r = MonitorReplay([(10, ""), (5.2, "STATE|PLAYING"), (5.1, "STATE|PLAYING"),
                            (5.2, "STATE|PLAYING"), (4.9, "STATE|IDLE")]).run()
-        r.host._macos_native_double_click.assert_not_called()
+        r.host._karafun_activate_result_for_playback.assert_not_called()
         r.host._finish_external_karafun_playback.assert_not_called()
 
     def test_failed_and_unknown_probes_cannot_retry_or_complete_even_after_duration(self):
         for value in (None, ""):
             with self.subTest(value=value):
                 r = MonitorReplay([(400, value)]).run()
-                r.host._macos_native_double_click.assert_not_called()
+                r.host._karafun_activate_result_for_playback.assert_not_called()
                 r.host._finish_external_karafun_playback.assert_not_called()
 
     def test_explicit_idle_before_any_playback_still_gets_one_recovery(self):
         r = MonitorReplay([(15, "STATE|IDLE"), (15, "STATE|IDLE"),
                            (1, "STATE|PLAYING"), (1, "STATE|PLAYING")]).run()
-        r.host._macos_native_double_click.assert_called_once_with(389, 217)
+        r.host._karafun_activate_result_for_playback.assert_called_once_with((389, 217))
         r.host._finish_external_karafun_playback.assert_not_called()
 
     def test_one_playing_hint_prevents_later_idle_from_restarting_song(self):
         r = MonitorReplay([(2, "STATE|PLAYING"), (15, "STATE|IDLE")]).run()
-        r.host._macos_native_double_click.assert_not_called()
+        r.host._karafun_activate_result_for_playback.assert_not_called()
         r.host._finish_external_karafun_playback.assert_not_called()
 
     def test_repeated_early_idle_does_not_complete_a_known_long_song(self):

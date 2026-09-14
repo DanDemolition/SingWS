@@ -2108,14 +2108,33 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertIn('"PLAY|"', press)
         self.assertIn("_karafun_press_play_control()", self.automation)
 
+    def test_managed_handoff_starts_the_selected_result_not_the_disabled_player(self):
+        self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_activate_result_for_playback"))
+        activate = inspect.getsource(
+            self.singws.KaraokeApp._karafun_activate_result_for_playback
+        )
+        self.assertIn('starts with "Results for "', activate)
+        self.assertIn('perform action "AXRaise" of mainWindow', activate)
+        self.assertIn("_macos_native_double_click", activate)
+        self.assertIn("_karafun_activate_result_for_playback(", self.automation)
+
     def test_the_monitor_retries_the_matched_result_when_the_assumption_was_wrong(self):
         self.assertIn("playback_assumed", self.monitor)
         self.assertIn("recovery_pressed", self.monitor)
         self.assertIn("karafun_result_activation_point", self.automation)
         self.assertIn("karafun_result_activation_point", self.monitor)
-        self.assertIn("_macos_native_double_click", self.monitor)
+        self.assertIn("_karafun_activate_result_for_playback", self.monitor)
         self.assertIn("_karafun_press_play_control()", self.monitor)
         self.assertIn("playback never started after", self.monitor)
+
+    def test_monitor_reads_playback_menu_when_fullscreen_hides_control_window(self):
+        self.assertIn('menu bar item "Playback"', self.monitor)
+        self.assertIn('playbackToggleName is "pause"', self.monitor)
+        self.assertIn('return "STATE|PLAYING"', self.monitor)
+        self.assertLess(
+            self.monitor.index('menu bar item "Playback"'),
+            self.monitor.index('if (count of windows) is 0 then return ""'),
+        )
 
     def test_recovery_presses_only_once(self):
         """A repeated press would toggle play/pause and silence a playing song."""
