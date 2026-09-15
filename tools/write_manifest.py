@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Regenerate docs/release.json (the auto-update manifest) from built DMGs.
+"""Regenerate docs/release-2.0.json (the SingWS 2.0 auto-update manifest) from built DMGs.
+
+2.0 has its own channel: the manifest lives on the `2.0` branch and download URLs
+point at the exact release tag, never `releases/latest`, which belongs to 1.x.
 
 The desktop updater reads this file from GitHub Pages, compares ``version``
 against APP_VERSION, and verifies the download against the per-arch ``sha256``.
@@ -20,21 +23,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "DanDemolition/SingWS"
+CHANNEL = "2.0"
+MANIFEST_NAME = "release-2.0.json"
 
 ARCHES = [
-    ("mac_arm64", "Apple Silicon Mac", "arm64"),
-    ("mac_x86_64", "Intel Mac (macOS 12+)", "x86_64"),
+    ("mac_arm64", "Apple Silicon Mac (macOS 15+)", "arm64"),
 ]
 
 
 def _required_arch_keys() -> set[str]:
     """Arches whose absence must fail the release rather than be skipped.
 
-    Intel is the build produced on the release machine, so a missing Intel DMG
-    means the build silently failed. Override with SINGWS_REQUIRED_ARCHES (a
+    SingWS 2.0 ships Apple Silicon only, so a missing arm64 DMG means the build
+    silently failed. Override with SINGWS_REQUIRED_ARCHES (a
     comma-separated list of manifest keys) when releasing from a different host.
     """
-    raw = os.environ.get("SINGWS_REQUIRED_ARCHES", "mac_x86_64")
+    raw = os.environ.get("SINGWS_REQUIRED_ARCHES", "mac_arm64")
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
@@ -54,15 +58,12 @@ def build_manifest(version: str, dmg_dir: Path = ROOT, *, repo: str = REPO,
                    release_date: str | None = None) -> dict:
     version = version.lstrip("vV").strip()
     downloads = {}
-    # A missing DMG is skipped rather than fatal: arm64 cannot be cross-built on
-    # an Intel host (no universal2 numpy/scipy for CPython 3.14), so it is built
-    # natively on an Apple Silicon Mac and copied in, and a release may legitimately
-    # ship without it. Advertising a file that is not there is still forbidden --
+    # Only required DMGs are fatal when missing. Advertising a file that is not there is still forbidden --
     # clients would be offered a 404 -- so entries are only written for DMGs that
     # exist, and a manifest with nothing in it is an error.
     required = _required_arch_keys()
     for key, label, arch in ARCHES:
-        filename = f"SingWS-{version}-{arch}-installer.dmg"
+        filename = f"SingWS-Pro-{version}-{arch}-installer.dmg"
         path = dmg_dir / filename
         if not path.exists():
             if key in required:
@@ -72,18 +73,19 @@ def build_manifest(version: str, dmg_dir: Path = ROOT, *, repo: str = REPO,
         downloads[key] = {
             "label": label,
             "filename": filename,
-            "url": f"https://github.com/{repo}/releases/latest/download/{filename}",
+            "url": f"https://github.com/{repo}/releases/download/v{version}/{filename}",
             "size": human_size(path.stat().st_size),
             "sha256": sha256(path),
         }
     if not downloads:
         raise SystemExit(f"no DMGs found for {version} in {dmg_dir}")
     return {
-        "name": "SingWS",
+        "name": "SingWS Pro",
+        "channel": CHANNEL,
         "version": version,
         "release_date": release_date or datetime.date.today().isoformat(),
         "repository": repo,
-        "release_url": f"https://github.com/{repo}/releases/latest",
+        "release_url": f"https://github.com/{repo}/releases/tag/v{version}",
         "downloads": downloads,
     }
 
@@ -94,7 +96,7 @@ def main() -> None:
     version = sys.argv[1]
     dmg_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT
     manifest = build_manifest(version, dmg_dir)
-    out = ROOT / "docs" / "release.json"
+    out = ROOT / "docs" / MANIFEST_NAME
     out.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"wrote {out} (version {manifest['version']})")
 

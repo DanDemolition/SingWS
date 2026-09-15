@@ -3,9 +3,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_APP="$ROOT/dist/SingWS.app"
-DEST_APP="/Applications/SingWS.app"
-EXPECTED_BUNDLE_ID="com.singws.app"
+SOURCE_APP="$ROOT/dist/SingWS Pro.app"
+DEST_APP="/Applications/SingWS Pro.app"
+EXPECTED_BUNDLE_ID="com.singws.pro"
 BUILD=0
 RESET_ACCESSIBILITY=0
 
@@ -13,7 +13,7 @@ usage() {
     cat <<'EOF'
 Usage: ./install_dev_singws.sh [--build] [--reset-accessibility]
 
-  --build                 Build dist/SingWS.app with SingWS-arm64.spec first.
+  --build                 Build dist/SingWS Pro.app with SingWS-arm64.spec first.
   --reset-accessibility   Clear SingWS's stale Accessibility entry and open
                           the correct System Settings pane after installation.
 
@@ -50,7 +50,7 @@ if ((BUILD)); then
     .venv/bin/pyinstaller --noconfirm SingWS-arm64.spec
 fi
 
-if [[ ! -x "$SOURCE_APP/Contents/MacOS/SingWS" ]]; then
+if [[ ! -x "$SOURCE_APP/Contents/MacOS/SingWSPro" ]]; then
     echo "Missing build: $SOURCE_APP" >&2
     echo "Run with --build or build SingWS-arm64.spec first." >&2
     exit 1
@@ -66,20 +66,20 @@ echo ">>> Verifying source bundle"
 codesign --verify --deep --strict "$SOURCE_APP"
 
 echo ">>> Quitting installed SingWS"
-pkill -f '/Applications/SingWS.app/Contents/MacOS/SingWS' 2>/dev/null || true
+pkill -f '/Applications/SingWS Pro.app/Contents/MacOS/SingWSPro' 2>/dev/null || true
 for _ in {1..20}; do
-    if ! pgrep -f '/Applications/SingWS.app/Contents/MacOS/SingWS' >/dev/null; then
+    if ! pgrep -f '/Applications/SingWS Pro.app/Contents/MacOS/SingWSPro' >/dev/null; then
         break
     fi
     sleep 0.1
 done
 
-if pgrep -f '/Applications/SingWS.app/Contents/MacOS/SingWS' >/dev/null; then
+if pgrep -f '/Applications/SingWS Pro.app/Contents/MacOS/SingWSPro' >/dev/null; then
     echo "SingWS did not quit; installation stopped." >&2
     exit 1
 fi
 
-if [[ "$DEST_APP" != "/Applications/SingWS.app" ]]; then
+if [[ "$DEST_APP" != "/Applications/SingWS Pro.app" ]]; then
     echo "Refusing unsafe destination: $DEST_APP" >&2
     exit 1
 fi

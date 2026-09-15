@@ -7,20 +7,19 @@
 #
 #   ./build_bridge.sh [--arch x86_64|arm64|universal] [--frameworks DIR]
 #
-# Deployment target is pinned to 12.0 so the produced dylib can never be the
-# reason a build stops running on a legacy Intel Mac. Verify afterwards with:
-#   tools/verify_macos_min_version.py <out> --arch x86_64 --maximum 12.0
+# SingWS 2.0: Apple Silicon, macOS 15+. Verify afterwards with:
+#   tools/verify_macos_min_version.py <out> --arch arm64 --maximum 15.0
 set -euo pipefail
 cd "$(dirname "$0")"
 
-ARCH="x86_64"
-# Default matches build_singws_mac_intel.sh and SingWS-x86_64.spec: the stack
+ARCH="arm64"
+# Default matches build_singws_mac_arm64.sh and SingWS-arm64.spec: the stack
 # lives at native_dual_view/Frameworks in the repo root (gitignored, see
 # README.md). This used to default to ~/Downloads, where the stack first
 # arrived, which no longer exists and no other consumer looks at.
 FRAMEWORKS="${SINGWS_MPV_FRAMEWORKS:-$(cd ../.. && pwd)/native_dual_view/Frameworks}"
 OUT="libsingws_mpv_bridge.dylib"
-DEPLOYMENT_TARGET="12.0"
+DEPLOYMENT_TARGET="15.0"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

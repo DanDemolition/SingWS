@@ -10,9 +10,12 @@ Current engineering direction:
 - Keep the application as a Python/PyQt app.
 - Add native modules only where required for realtime audio performance.
 - For pitch/time processing, prefer open-source and free solutions.
-- Do not introduce paid/proprietary SDK dependencies.
+- Do not introduce paid/proprietary SDK dependencies. Built-in macOS frameworks (e.g. SoundAnalysis, AVAudioEngine, Core Audio, Core ML) are allowed.
 - Favor Signalsmith Stretch for realtime pitch/time DSP work.
 - Target macOS first unless the task explicitly says otherwise.
+- SingWS 2.0 targets Apple Silicon on macOS 15+ only; Intel and older macOS stay on 1.x.
+- 2.0 ships as **SingWS Pro**: `SingWS Pro.app`, bundle id `com.singws.pro`, data in `~/SingWSPro`, 4-part versions starting 2.0.0.x, update channel `2.0` branch `docs/release-2.0.json`. Never read or write `~/SingWS` except the one-time read-only import in `legacy_import.py`.
+- Intelligent Audio / vocal effects: the current plan is `docs/intelligent_audio/ROADMAP.md`. The copy in `SingWS_Intelligent_Audio_Package for SingWS 2.0/` is the original reference version (includes superseded Intel requirements) — do not follow it.
 
 ---
 
@@ -339,19 +342,28 @@ report in hand, leave it out.
 Facts about the development Mac that are not visible from the source tree, and
 that have each cost a session's worth of wrong reasoning at least once.
 
-### The dev Mac is Intel (x86_64)
+### Development machines
 
-arm64 binaries cannot execute here at all — `lipo`-thinning an arm64 python and
-running it gives "bad CPU type in executable". `SingWS-*-arm64-installer.dmg` can
-be produced (PyInstaller `target_arch='arm64'`) but never smoke-tested locally;
-only the x86_64 flavour actually launches. Since 0.4.4.0 arm64 is expected to be
-built natively on an Apple Silicon Mac and copied in.
+**SingWS 2.0** is developed and built on an **Apple Silicon** MacBook Pro and
+targets arm64, macOS 15+ only. Do not add Intel or pre-15 compatibility code to 2.0.
 
-`build_all.sh` reads as though the host were Apple Silicon — it calls the arm64
-flavour "(dev)" and labels Intel "the Intel test machine". Those comments are
-wrong about this machine. Nor does `verify_macos_arch.py --require arm64
---require x86_64` passing say anything about the host: it checks which slices a
-binary contains, not which one can run.
+**SingWS 1.x (0.4.7.x)** still ships Intel and older-macOS builds for about a
+year of bug fixes. The notes below about an Intel dev Mac apply to 1.x work only:
+
+arm64 binaries cannot execute on the Intel Mac — `lipo`-thinning an arm64 python
+gives "bad CPU type in executable". `build_all.sh` comments assume an Apple
+Silicon host. `verify_macos_arch.py --require arm64 --require x86_64` passing
+checks which slices a binary contains, not which one can run.
+
+**The Cowork linked shell is a Linux VM on the Mac, not macOS.** It can run
+pure-Python tests only (no PyQt6, mpv, BASS, or Core Audio). Full suites must
+run on macOS itself.
+
+### Soundcraft Ui mixer is not owned yet
+
+The 2.0 digital-mixer target is a Soundcraft Ui24R (network control + multichannel USB audio) that the operator
+does not have yet. Build and test against the virtual mixer simulator; never
+claim hardware verification for mixer features.
 
 ### Running the tests
 

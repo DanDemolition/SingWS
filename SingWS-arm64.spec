@@ -30,6 +30,7 @@ for helper in (
     "singws_eq.py",
     "singws_master_audio.py",
     "mac_keep_awake.py",
+    "legacy_import.py",
 ):
     helper_path = project_root / helper
     if helper_path.exists():
@@ -239,7 +240,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='SingWS',
+    name='SingWSPro',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -260,21 +261,22 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='SingWS',
+    name='SingWSPro',
 )
-# Bundle is named SingWS.app so it lands in /Applications as just "SingWS".
+# SingWS Pro (2.0) installs beside SingWS 1.x: separate bundle name and id,
+# so macOS permissions, preferences and /Applications entries never collide.
 # Version metadata is preserved in Info.plist via info_plist below.
 app = BUNDLE(
     coll,
-    name='SingWS.app',
+    name='SingWS Pro.app',
     icon=str(project_root / 'SingWS.icns'),
-    bundle_identifier='com.singws.app',
+    bundle_identifier='com.singws.pro',
     info_plist={
-        'CFBundleName': 'SingWS',
-        'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '0.4.7.7',
-        'CFBundleVersion': '0.4.7.7',
-        'LSMinimumSystemVersion': '12.3',
+        'CFBundleName': 'SingWS Pro',
+        'CFBundleDisplayName': 'SingWS Pro',
+        'CFBundleShortVersionString': '2.0.0.0',
+        'CFBundleVersion': '2.0.0.0',
+        'LSMinimumSystemVersion': '15.0',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
             "SingWS uses System Events to find, queue, and control songs in the KaraFun application."

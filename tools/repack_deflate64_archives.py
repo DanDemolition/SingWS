@@ -117,7 +117,7 @@ def repack_one(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cache", type=Path, default=Path.home() / "SingWS" / "loudness.json")
+    parser.add_argument("--cache", type=Path, default=Path.home() / "SingWSPro" / "loudness.json")
     parser.add_argument("--library-root", type=Path, required=True)
     parser.add_argument("--seven-zip", default=shutil.which("7zz") or "")
     parser.add_argument("--backup-root", type=Path)

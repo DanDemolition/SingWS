@@ -21,7 +21,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.7.7"
+APP_VERSION = "2.0.0.0"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -1158,6 +1158,27 @@ def _is_newer_version(remote: str, current: str) -> bool:
     return _version_key(remote) > _version_key(current)
 
 
+# SingWS 2.0 update channel. 1.x (0.4.7.x) clients read LEGACY_1X_UPDATE_MANIFEST_URL
+# from main; 2.0 reads its own manifest from the `2.0` branch so the two release
+# lines can never offer each other's installers.
+UPDATE_CHANNEL = "2.0"
+LEGACY_1X_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json"
+DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/DanDemolition/SingWS/2.0/docs/release-2.0.json"
+
+
+def _effective_update_manifest_url(configured: str) -> str:
+    """Return the 2.0 channel URL unless the operator set a custom manifest.
+
+    Settings files carried over from 1.x hold the legacy default; treat that
+    (and blank) as "use the 2.0 channel" so an upgraded install never keeps
+    polling the 1.x manifest.
+    """
+    value = str(configured or "").strip()
+    if not value or value == LEGACY_1X_UPDATE_MANIFEST_URL:
+        return DEFAULT_UPDATE_MANIFEST_URL
+    return value
+
+
 def _preferred_update_asset(assets: list) -> dict | None:
     dmg_assets = [a for a in (assets or []) if str(a.get("name", "")).lower().endswith(".dmg")]
     if not dmg_assets:
@@ -1201,7 +1222,7 @@ class GitHubUpdateWorker(QThread):
     def _default_download_dir(self) -> Path:
         if self.download_dir.strip():
             return Path(os.path.expanduser(self.download_dir.strip()))
-        return Path.home() / "Downloads" / "SingWS Updates"
+        return Path.home() / "Downloads" / "SingWS Pro Updates"
 
     def _fetch_latest_release(self) -> dict:
         repo = self.repo.strip().strip("/")
@@ -1795,13 +1816,19 @@ def fast_mp3_duration_from_zip(zip_path):
 
 print("🎤 SingWS starting…")
 
+# SingWS Pro (2.0) identity. It has its own data folder so it can run beside
+# SingWS 1.x (~/SingWS) without either app touching the other's files.
+APP_DISPLAY_NAME = "SingWS Pro"
+APP_DIRNAME = "SingWSPro"
+LEGACY_1X_USER_DIR = Path.home() / "SingWS"
+
 # SINGWS_HOME redirects the whole user-data root: logs, settings.json, the
 # queue, singer history. Importing this module for a test otherwise writes into
 # the live show's files -- on 2026-08-09 test runs added thousands of lines to
 # the very log being used to diagnose a fault, and anything reaching
 # save_settings() or save_data() would overwrite the operator's real settings
 # and queue mid-show. tools/run_tests.sh sets this; the app itself never does.
-APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / "SingWS"))
+APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / APP_DIRNAME))
 APP_USER_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Logs directory ---
@@ -1811,7 +1838,7 @@ LOGS_DIR.mkdir(exist_ok=True)
 DEFAULT_BG_IMAGE = "background_default.png"
 
 # --- APP USER DATA DIR ---
-APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / "SingWS"))
+APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / APP_DIRNAME))
 APP_USER_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_PATH = APP_USER_DIR / "settings.json"
 QUEUE_PATH = APP_USER_DIR / "queue.json"
@@ -3384,8 +3411,8 @@ DEFAULTS = {
     "auto_update_download": True,       # automatically download a newer DMG after an auto-check
     "auto_update_check_interval_hours": 12, # minimum hours between automatic GitHub checks
     "auto_update_repo": "DanDemolition/SingWS",
-    "auto_update_manifest_url": "https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json",
-    "auto_update_download_dir": "",     # blank = ~/Downloads/SingWS Updates
+    "auto_update_manifest_url": DEFAULT_UPDATE_MANIFEST_URL,
+    "auto_update_download_dir": "",     # blank = ~/Downloads/SingWS Pro Updates
     "auto_update_last_check": 0,
     "cdg_stretch_fill": False,       # CDG display mode: False=normal aspect, True=stretch to fill
     "cdg_display_mode": "fit",       # fit | sidefill | blur | stretch; cdg_stretch_fill kept for migration
@@ -27181,7 +27208,7 @@ class KaraokeApp(QWidget):
         custom = str(self.settings.get("auto_update_download_dir", "") or "").strip()
         if custom:
             return os.path.expanduser(custom)
-        return str(Path.home() / "Downloads" / "SingWS Updates")
+        return str(Path.home() / "Downloads" / "SingWS Pro Updates")
 
     def _set_update_status_text(self, text: str):
         self._last_update_status_text = str(text or "")
@@ -27209,7 +27236,7 @@ class KaraokeApp(QWidget):
         self._github_update_worker = GitHubUpdateWorker(
             repo=repo,
             current_version=APP_VERSION,
-            manifest_url=str(self.settings.get("auto_update_manifest_url", "") or ""),
+            manifest_url=_effective_update_manifest_url(self.settings.get("auto_update_manifest_url", "")),
             download_dir=self._update_download_dir(),
             download=bool(download),
         )
@@ -27276,7 +27303,7 @@ class KaraokeApp(QWidget):
             msg = QMessageBox(self)
             msg.setWindowTitle("Update Downloaded")
             msg.setText(f"SingWS {version} has been downloaded.")
-            msg.setInformativeText("Open the downloaded DMG, then drag SingWS.app to Applications to install it.")
+            msg.setInformativeText("Open the downloaded DMG, then drag SingWS Pro.app to Applications to install it.")
             open_btn = msg.addButton("Show in Finder", QMessageBox.ButtonRole.AcceptRole)
             msg.addButton("Later", QMessageBox.ButtonRole.RejectRole)
             msg.exec()
@@ -28748,9 +28775,9 @@ class KaraokeApp(QWidget):
             auto_update_cb.setChecked(True)
             auto_update_download_cb.setChecked(True)
             update_repo_edit.setText("DanDemolition/SingWS")
-            update_manifest_edit.setText("https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json")
+            update_manifest_edit.setText(DEFAULT_UPDATE_MANIFEST_URL)
             update_interval_spin.setValue(12)
-            update_dir_edit.setText(str(Path.home() / "Downloads" / "SingWS Updates"))
+            update_dir_edit.setText(str(Path.home() / "Downloads" / "SingWS Pro Updates"))
             cdg_display_combo.setCurrentIndex(cdg_display_combo.findData("fit"))
             cdg_black_cleanup_cb.setChecked(True)
             cdg_black_threshold_spin.setValue(10)
@@ -58977,6 +59004,55 @@ class ManageFoldersDialog(QDialog):
                 self._list.insertItem(r+1, it)
                 self._list.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
 
+
+def _legacy_1x_app_running() -> bool:
+    try:
+        r = subprocess.run(["/usr/bin/pgrep", "-f", "/SingWS.app/Contents/MacOS/SingWS"],
+                           capture_output=True, timeout=3)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _offer_legacy_1x_import():
+    """First launch only: offer to copy SingWS 1.x data into SingWS Pro.
+
+    ~/SingWS is only read. Declining (or any failure) starts SingWS Pro fresh and
+    is remembered, so the question is asked once.
+    """
+    try:
+        import legacy_import
+        if not legacy_import.needs_prompt(APP_USER_DIR, LEGACY_1X_USER_DIR):
+            return
+        text = (
+            "SingWS 1.x data was found on this Mac.\n\n"
+            "Copy your settings, singer history, library and analysis caches into "
+            "SingWS Pro? Your SingWS 1.x files are not changed, and both apps keep "
+            "separate data from now on."
+        )
+        if _legacy_1x_app_running():
+            text += "\n\nSingWS 1.x is running. Quit it first for a clean copy."
+        box = QMessageBox()
+        box.setWindowTitle("Import from SingWS 1.x")
+        box.setText(text)
+        import_btn = box.addButton("Import", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Start Fresh", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is import_btn:
+            count = legacy_import.import_legacy_data(LEGACY_1X_USER_DIR, APP_USER_DIR)
+            _diag(f"[IMPORT] copied {count} files from SingWS 1.x")
+        else:
+            legacy_import.record_decision(APP_USER_DIR, "declined")
+            _diag("[IMPORT] operator chose to start fresh")
+    except Exception as exc:
+        _diag(f"[IMPORT] legacy import skipped: {exc}")
+        try:
+            import legacy_import
+            legacy_import.record_decision(APP_USER_DIR, f"failed: {exc}")
+        except Exception:
+            pass
+
+
 if __name__ == "__main__" and "--singws-offline-analysis-worker" in sys.argv:
     from libmpv_media_jobs import run_isolated_analysis_worker
     raise SystemExit(run_isolated_analysis_worker())
@@ -59006,7 +59082,7 @@ if __name__ == "__main__":
     _install_single_buffered_widget_surfaces()
 
     app = QApplication([])
-    app.setApplicationName("SingWS")
+    app.setApplicationName(APP_DISPLAY_NAME)
     app.setApplicationVersion(APP_VERSION)
 
     # Single instance lock - prevents double-launching (Windows/Linux only, macOS handles this natively)
@@ -59034,6 +59110,7 @@ if __name__ == "__main__":
 
     configure_app_font(app, point_bump=5)
 
+    _offer_legacy_1x_import()
     window = KaraokeApp()
     try:
         window.setWindowIcon(QIcon(get_resource_path(APP_ICON_ICO)))

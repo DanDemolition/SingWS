@@ -18,7 +18,7 @@ import json, os, re, sqlite3, time
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Callable
 
-APP_DIRNAME = "SingWS"
+APP_DIRNAME = "SingWSPro"  # SingWS Pro (2.0); 1.x uses ~/SingWS
 
 def _perf_log_if_slow(name: str, ms: float, threshold_ms: float = 100.0):
     try:

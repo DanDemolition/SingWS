@@ -28,7 +28,7 @@ try:
     from song_index import user_singws_dir, normalize_text
 except Exception:  # pragma: no cover - fallback for standalone use
     def user_singws_dir() -> Path:
-        p = Path.home() / ".singws"
+        p = Path.home() / "SingWSPro"
         p.mkdir(parents=True, exist_ok=True)
         return p
 

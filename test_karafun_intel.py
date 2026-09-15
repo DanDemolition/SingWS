@@ -66,17 +66,11 @@ class KaraFunIntelRegressionTests(unittest.TestCase):
     def test_all_macos_packages_declare_and_entitle_apple_events(self):
         entitlement = Path("SingWS.entitlements").read_text(encoding="utf-8")
         self.assertIn("com.apple.security.automation.apple-events", entitlement)
-        for spec_name in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
+        for spec_name in ("SingWS-arm64.spec",):
             with self.subTest(spec=spec_name):
                 source = Path(spec_name).read_text(encoding="utf-8")
                 self.assertIn("NSAppleEventsUsageDescription", source)
                 self.assertIn("SingWS.entitlements", source)
-
-    def test_intel_spec_rejects_arm_only_dependencies(self):
-        source = Path("SingWS-x86_64.spec").read_text(encoding="utf-8")
-        self.assertIn("target_arch='x86_64'", source)
-        self.assertIn("def _keep_target_binary", source)
-        self.assertIn('"x86_64" in result.stdout.split()', source)
 
 
 if __name__ == "__main__":

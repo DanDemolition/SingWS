@@ -83,7 +83,7 @@ def main() -> int:
         "cache",
         nargs="?",
         type=Path,
-        default=Path.home() / "SingWS" / "loudness.json",
+        default=Path.home() / "SingWSPro" / "loudness.json",
     )
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()

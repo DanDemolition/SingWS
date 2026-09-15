@@ -27,7 +27,7 @@ class BumpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             entry = Path(d) / "0.2.18.1.py"
             entry.write_text('APP_VERSION = "0.2.18.1"\nprint("hi")\n')
-            spec = Path(d) / "SingWS-x86_64.spec"
+            spec = Path(d) / "SingWS-arm64.spec"
             spec.write_text(
                 "info_plist={\n"
                 "    'CFBundleShortVersionString': '0.2.18.1',\n"
@@ -51,9 +51,8 @@ class BumpTests(unittest.TestCase):
 
 class ManifestTests(unittest.TestCase):
     def _fake_dmgs(self, d: Path, version: str):
-        for arch, content in (("arm64", b"A" * 1000),
-                              ("x86_64", b"B" * 2000)):
-            (d / f"SingWS-{version}-{arch}-installer.dmg").write_bytes(content)
+        for arch, content in (("arm64", b"A" * 1000),):
+            (d / f"SingWS-Pro-{version}-{arch}-installer.dmg").write_bytes(content)
 
     def test_build_manifest_structure_and_hashes(self):
         import hashlib
@@ -64,10 +63,10 @@ class ManifestTests(unittest.TestCase):
             man = wm.build_manifest("v0.3.0", d, release_date="2026-06-07")
             self.assertEqual(man["version"], "0.3.0")  # 'v' stripped
             self.assertEqual(man["release_date"], "2026-06-07")
-            self.assertEqual(set(man["downloads"]), {"mac_arm64", "mac_x86_64"})
+            self.assertEqual(set(man["downloads"]), {"mac_arm64"})
             arm = man["downloads"]["mac_arm64"]
-            self.assertEqual(arm["filename"], "SingWS-0.3.0-arm64-installer.dmg")
-            self.assertIn("releases/latest/download/SingWS-0.3.0-arm64-installer.dmg", arm["url"])
+            self.assertEqual(arm["filename"], "SingWS-Pro-0.3.0-arm64-installer.dmg")
+            self.assertIn("releases/download/v0.3.0/SingWS-Pro-0.3.0-arm64-installer.dmg", arm["url"])
             self.assertEqual(arm["sha256"], hashlib.sha256(b"A" * 1000).hexdigest())
             # JSON-serializable.
             json.dumps(man)
@@ -78,51 +77,101 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 wm.build_manifest("0.9.9", Path(tmp))
 
-    def test_build_manifest_allows_intel_only_release(self):
-        # arm64 cannot be cross-built on an Intel host (no universal2
-        # numpy/scipy for py3.14), so a release may ship Intel-only.
+    def test_build_manifest_requires_arm64(self):
+        # SingWS 2.0 ships Apple Silicon only; a missing arm64 DMG is fatal.
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            (d / "SingWS-0.3.0-x86_64-installer.dmg").write_bytes(b"B" * 2000)
-            man = wm.build_manifest("0.3.0", d)
-            self.assertEqual(set(man["downloads"]), {"mac_x86_64"})
-
-    def test_build_manifest_still_requires_intel(self):
-        # A missing Intel DMG means the local build failed; that must be fatal
-        # rather than quietly publishing an arm64-only manifest.
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
-            (d / "SingWS-0.3.0-arm64-installer.dmg").write_bytes(b"A" * 1000)
+            (d / "SingWS-2.0.0-x86_64-installer.dmg").write_bytes(b"B" * 2000)
             with self.assertRaises(SystemExit):
-                wm.build_manifest("0.3.0", d)
+                wm.build_manifest("2.0.0", d)
+
+    def test_manifest_never_advertises_intel(self):
+        self.assertEqual([k for k, _l, _a in wm.ARCHES], ["mac_arm64"])
 
 
 class UpdateManifestDefaultsTests(unittest.TestCase):
-    def test_default_update_manifest_uses_live_raw_github_url(self):
+    CHANNEL_URL = "https://raw.githubusercontent.com/DanDemolition/SingWS/2.0/docs/release-2.0.json"
+    LEGACY_URL = "https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json"
+
+    def test_2_0_defaults_to_its_own_channel_manifest(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        expected = "https://raw.githubusercontent.com/DanDemolition/SingWS/main/docs/release.json"
-        self.assertIn(f'"auto_update_manifest_url": "{expected}"', source)
-        self.assertIn(f'update_manifest_edit.setText("{expected}")', source)
-        self.assertNotIn("https://dandemolition.github.io/SingWS/release.json", source)
+        self.assertIn(f'DEFAULT_UPDATE_MANIFEST_URL = "{self.CHANNEL_URL}"', source)
+        self.assertIn('"auto_update_manifest_url": DEFAULT_UPDATE_MANIFEST_URL', source)
+        self.assertIn("update_manifest_edit.setText(DEFAULT_UPDATE_MANIFEST_URL)", source)
+        self.assertIn('manifest_url=_effective_update_manifest_url(self.settings.get("auto_update_manifest_url", ""))', source)
+        # The 1.x URL appears only as the legacy constant used for migration.
+        self.assertEqual(source.count(self.LEGACY_URL), 1)
+
+    def test_effective_manifest_url_migrates_1x_default(self):
+        import ast
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        keep = [n for n in tree.body if (
+            isinstance(n, ast.Assign) and any(getattr(t, "id", "") in {
+                "LEGACY_1X_UPDATE_MANIFEST_URL", "DEFAULT_UPDATE_MANIFEST_URL"} for t in n.targets)
+        ) or (isinstance(n, ast.FunctionDef) and n.name == "_effective_update_manifest_url")]
+        ns = {}
+        exec(compile(ast.Module(body=keep, type_ignores=[]), "channel", "exec"), ns)
+        fn = ns["_effective_update_manifest_url"]
+        self.assertEqual(fn(""), self.CHANNEL_URL)
+        self.assertEqual(fn(None), self.CHANNEL_URL)
+        self.assertEqual(fn(self.LEGACY_URL), self.CHANNEL_URL)
+        self.assertEqual(fn("https://example.com/custom.json"), "https://example.com/custom.json")
+
+    def test_manifest_uses_tag_urls_and_channel(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "SingWS-Pro-2.0.0-arm64-installer.dmg").write_bytes(b"A" * 10)
+            man = wm.build_manifest("2.0.0", d)
+            self.assertEqual(man["channel"], "2.0")
+            url = man["downloads"]["mac_arm64"]["url"]
+            self.assertIn("/releases/download/v2.0.0/", url)
+            self.assertNotIn("latest", url + man["release_url"])
+            self.assertEqual(wm.MANIFEST_NAME, "release-2.0.json")
+
+    def test_placeholder_channel_manifest_offers_nothing(self):
+        man = json.loads(Path("docs/release-2.0.json").read_text(encoding="utf-8"))
+        self.assertEqual(man["channel"], "2.0")
+        self.assertEqual(man["downloads"], {})
+
+    def test_release_script_never_touches_1x_channel(self):
+        source = Path("release.sh").read_text(encoding="utf-8")
+        self.assertIn('"$BRANCH" != "2.0"', source)
+        self.assertIn("--prerelease", source)
+        self.assertIn("--latest=false", source)
+        self.assertNotIn("--latest\n", source)
+        self.assertNotIn("git push origin main", source)
+        self.assertNotIn(" docs/release.json ", source.split("git add", 1)[1].split("git commit", 1)[0])
+        self.assertIn('"$NEW_VER" != 2.*', source)
+        self.assertLess(source.index('"$BRANCH" != "2.0"'), source.index("gh auth status"))
 
 
 class PackagingSpecTests(unittest.TestCase):
-    def test_intel_release_defaults_to_macos12_iina_stack(self):
-        spec = Path("SingWS-x86_64.spec").read_text(encoding="utf-8")
-        build = Path("build_singws_mac_intel.sh").read_text(encoding="utf-8")
-        self.assertIn("Required bundled native mpv bridge/runtime is missing", spec)
-        self.assertIn("native/mpv_bridge/libsingws_mpv_bridge.dylib", build)
-        self.assertNotIn("SINGWS_MEDIA_STACK", spec + build)
-        self.assertIn("'LSMinimumSystemVersion': '12.0'", spec)
-        self.assertIn("--maximum 12.0", build)
+    def test_pro_installs_beside_1x(self):
+        spec = Path("SingWS-arm64.spec").read_text(encoding="utf-8")
+        self.assertIn("name='SingWS Pro.app'", spec)
+        self.assertIn("bundle_identifier='com.singws.pro'", spec)
+        self.assertNotIn("com.singws.app", spec)
+        self.assertIn('"legacy_import.py"', spec)
+        source = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertIn('APP_DIRNAME = "SingWSPro"', source)
+        self.assertIn('Path.home() / APP_DIRNAME', source)
+        self.assertNotIn('Path.home() / "SingWS")', source)
+        self.assertIn('APP_DIRNAME = "SingWSPro"', Path("song_index.py").read_text(encoding="utf-8"))
+        self.assertNotIn("/Applications/SingWS.app", Path("install_dev_singws.sh").read_text(encoding="utf-8"))
+
+    def test_intel_packaging_removed_from_2_0(self):
+        self.assertFalse(Path("SingWS-x86_64.spec").exists())
+        self.assertFalse(Path("build_singws_mac_intel.sh").exists())
+        self.assertNotIn("build_singws_mac_intel", Path("build_all.sh").read_text(encoding="utf-8"))
 
     def test_specs_bundle_no_gstreamer_and_exclude_gi(self):
         # GStreamer removal: specs must not set up a GST_REGISTRY, bundle the
         # plugin scanner/typelibs/framework, and must exclude gi so PyInstaller
         # cannot pull GStreamer back in transitively.
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
+        for spec in ("SingWS-arm64.spec",):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 # Matched on the list contents, not the whole assignment: the
@@ -139,7 +188,7 @@ class PackagingSpecTests(unittest.TestCase):
 
     def test_specs_do_not_bundle_legacy_media_executables(self):
         self.assertFalse(Path("singws_pyinstaller_runtime.py").exists())
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
+        for spec in ("SingWS-arm64.spec",):
             source = Path(spec).read_text(encoding="utf-8")
             self.assertNotIn('for ff_binary in ("ffmpeg", "ffprobe")', source)
             self.assertIn("'libmpv_media_jobs'", source)
@@ -152,8 +201,8 @@ class PackagingSpecTests(unittest.TestCase):
         self.assertIn('"arm64" in result.stdout.split()', spec)
         self.assertIn("--runtime --require arm64", build)
         self.assertIn("--bundle \"$APP_PATH\" --require arm64", build)
-        self.assertIn("'LSMinimumSystemVersion': '12.3'", spec)
-        self.assertIn("--maximum 12.3", build)
+        self.assertIn("'LSMinimumSystemVersion': '15.0'", spec)
+        self.assertIn("--maximum 15.0", build)
         self.assertIn("libsingws_mpv_bridge.dylib", spec + build)
         self.assertIn("singws_libmpv.2.dylib", spec + build)
         self.assertNotIn("mpv_playback.py", spec + build)
@@ -162,14 +211,14 @@ class PackagingSpecTests(unittest.TestCase):
     def test_release_specs_include_karafun_apple_events_authorization(self):
         entitlements = Path("SingWS.entitlements").read_text(encoding="utf-8")
         self.assertIn("com.apple.security.automation.apple-events", entitlements)
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
+        for spec in ("SingWS-arm64.spec",):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn("NSAppleEventsUsageDescription", source)
                 self.assertIn("entitlements_file=str(project_root / 'SingWS.entitlements')", source)
 
     def test_release_specs_bundle_requests_tls_support(self):
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
+        for spec in ("SingWS-arm64.spec",):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn("project_root = Path(SPECPATH)", source)
@@ -185,7 +234,7 @@ class PackagingSpecTests(unittest.TestCase):
             '"networkinformation"',
             '"tls"',
         )
-        for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
+        for spec in ("SingWS-arm64.spec",):
             with self.subTest(spec=spec):
                 source = Path(spec).read_text(encoding="utf-8")
                 self.assertIn('qt_plugins_root = (', source)

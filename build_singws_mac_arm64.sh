@@ -14,7 +14,8 @@ if [[ -n "${SINGWS_DYLD_LIBRARY_PATH:-}" ]]; then
     export DYLD_LIBRARY_PATH="$SINGWS_DYLD_LIBRARY_PATH"
 fi
 
-APP_NAME="SingWS"
+APP_NAME="SingWS Pro"
+EXE_NAME="SingWSPro"
 ENTRY="0.2.18.1.py"
 SPEC="SingWS-arm64.spec"
 PYTHON=".venv/bin/python"
@@ -89,7 +90,7 @@ PYPINS
 
 APP_VERSION="$(sed -n 's/^APP_VERSION = "\([^"]*\)"/\1/p' "$ENTRY" | head -1)"
 [[ -n "$APP_VERSION" ]] || { echo "APP_VERSION is missing from $ENTRY"; exit 1; }
-DMG_NAME="SingWS-${APP_VERSION}-arm64-installer.dmg"
+DMG_NAME="SingWS-Pro-${APP_VERSION}-arm64-installer.dmg"
 
 echo "Building $APP_NAME $APP_VERSION for Apple Silicon..."
 .venv/bin/python tools/make_dmg_assets.py --style-only
@@ -126,10 +127,10 @@ for name in sys.argv[2:]:
 print(f"Bundled media core loads cleanly: {', '.join(sys.argv[2:])}")
 PYCHECK
 
-# Nothing in the shipped Apple Silicon bundle may require a newer macOS than
-# 12.3, which is the floor of the arm64 SciPy wheel used by this build.
+# SingWS 2.0 supports Apple Silicon on macOS 15+ only. Nothing in the shipped
+# bundle may require a newer macOS than 15.0.
 # Checks the real Mach-O load commands, not wheel tags or filenames.
-"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch arm64 --maximum 12.3
+"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch arm64 --maximum 15.0
 
 # Stage the bundle BEFORE signing, and sign the staged copy.
 #
@@ -171,10 +172,10 @@ codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"
 
 rm -f "$DMG_NAME"
 SINGWS_DMG_APP_ROOT="$STAGING" "$PYTHON" -m dmgbuild \
-    -s dmg_settings.py "SingWS-${APP_VERSION}" "$DMG_NAME"
+    -s dmg_settings.py "SingWS Pro ${APP_VERSION}" "$DMG_NAME"
 hdiutil verify "$DMG_NAME"
 
 echo "Apple Silicon build complete:"
 echo "  App: $(pwd)/$APP_PATH"
 echo "  DMG: $(pwd)/$DMG_NAME"
-shasum -a 256 "$APP_PATH/Contents/MacOS/$APP_NAME" "$DMG_NAME"
+shasum -a 256 "$APP_PATH/Contents/MacOS/$EXE_NAME" "$DMG_NAME"
