@@ -93,8 +93,10 @@ DMG_NAME="SingWS-${APP_VERSION}-x86_64-installer.dmg"
 echo "Building $APP_NAME $APP_VERSION for Intel..."
 "${PYTHON_RUN[@]}" tools/make_dmg_assets.py --style-only
 
-rm -rf build dist
-"${PYTHON_RUN[@]}" -m PyInstaller --noconfirm "$SPEC"
+PYINSTALLER_WORKPATH="${SINGWS_PYINSTALLER_WORKPATH:-build}"
+rm -rf "$PYINSTALLER_WORKPATH" dist
+"${PYTHON_RUN[@]}" -m PyInstaller --noconfirm \
+    --workpath "$PYINSTALLER_WORKPATH" "$SPEC"
 
 APP_PATH="dist/$APP_NAME.app"
 [[ -d "$APP_PATH" ]] || { echo "Build failed: $APP_PATH was not created"; exit 1; }
