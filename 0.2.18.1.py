@@ -21,7 +21,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "0.4.7.6"
+APP_VERSION = "0.4.7.7"
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -3377,6 +3377,7 @@ DEFAULTS = {
     # 2026-08-09. Stall timing does not need this and stays on; enable only to
     # chase a specific stall, on a machine that is not running a show.
     "stall_stack_capture": False,
+    "show_safe_stall_diagnostics_migrated": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
     "auto_update_enabled": True,        # check GitHub Releases in the background at startup
@@ -4503,7 +4504,15 @@ class BackgroundMusicPlayer(QObject):
         """Best-effort path for the track currently sounding from the live engine."""
         if self._bass_ready():
             try:
-                deck = self._bass_engine.secondary or self._bass_engine.primary
+                # A secondary deck can be preloaded and attached at zero gain
+                # well before a crossfade starts.  It is not the audible track
+                # until the crossfade is active; reporting it here makes
+                # playlist edits/shuffles preserve the wrong row.
+                deck = (
+                    self._bass_engine.secondary
+                    if self.crossfade_active and self._bass_engine.secondary is not None
+                    else self._bass_engine.primary
+                )
                 if deck is not None:
                     return str(deck.path)
             except Exception:
@@ -17913,6 +17922,10 @@ class RenderThreadRotationRail(QFrame):
             speed = 34.0
         self._root.setProperty("speedPxPerSec", speed)
 
+    def set_running(self, running):
+        """Freeze/resume the rail without hiding its current singer rows."""
+        self._root.setProperty("running", bool(running))
+
     def set_effects_enabled(self, enabled):
         self._root.setProperty("effectsEnabled", bool(enabled))
 
@@ -18607,19 +18620,39 @@ class RotationView(QMainWindow):
             self.now_singing_surface.set_effects_enabled(enabled)
         if self.rotation_rail is not None:
             self.rotation_rail.set_effects_enabled(enabled)
+            # With a third display attached, this continuous QQuick animation
+            # competes with the karaoke surface for render/GPU time. Keep the
+            # rotation readable and live, but freeze its decorative movement
+            # for the duration of the song.
+            self.rotation_rail.set_running(not karaoke_active)
+        elif karaoke_active:
+            self.scroll_timer.stop()
+            self.autoscroll_active = False
+            self._last_scroll_ts = None
+
+        previous = getattr(self, "_show_priority_karaoke_active", None)
+        if previous is None or bool(previous) != karaoke_active:
+            self._show_priority_karaoke_active = karaoke_active
+            _diag(
+                f"[SHOW-PRIORITY] rotation animation "
+                f"{'paused' if karaoke_active else 'resumed'} karaoke_active={int(karaoke_active)}"
+            )
+            if not karaoke_active and self.rotation_rail is None:
+                self.check_autoscroll()
 
     ROTATION_QR_SIZE = 250
 
     def _tick_animated_backdrop(self):
         playing = bool(self.isVisible() and getattr(self.parent(), "karaoke_playing", False))
-        # The photo moves over a 90-second cycle, so four repaints per second
-        # remain visually continuous while leaving more render time for lyrics.
-        desired_interval = 250 if playing else 125
+        # During playback the show video is the priority. A one-second state
+        # check is enough to resume after the song; do not repaint this optional
+        # third-screen backdrop while lyrics are moving.
+        desired_interval = 1000 if playing else 125
         if self._backdrop_animation_timer.interval() != desired_interval:
             self._backdrop_animation_timer.start(desired_interval)
         self._apply_effects_visibility()
         self._refresh_next_up_spotlight(playing)
-        if self.isVisible() and not self._transition_overlay_active():
+        if self.isVisible() and not playing and not self._transition_overlay_active():
             self._animated_backdrop.update()
 
     def _refresh_next_up_spotlight(self, playing):
@@ -19980,6 +20013,16 @@ class KaraokeApp(QWidget):
             if bool(self.settings.get("performance_debug_enabled", True)):
                 self.settings["performance_debug_enabled"] = False
             self.settings["performance_debug_default_migrated"] = True
+            changed = True
+        if not bool(self.settings.get("show_safe_stall_diagnostics_migrated", False)):
+            # These two probes are unsafe for live-show use even when an old
+            # profile has them persisted on: event attribution sends every Qt
+            # paint/timer through Python, while cross-thread stack capture has
+            # previously crashed in frame_back_get. Keep the lightweight stall
+            # timer, but retire both costly probes once on upgrade.
+            self.settings["stall_event_attribution"] = False
+            self.settings["stall_stack_capture"] = False
+            self.settings["show_safe_stall_diagnostics_migrated"] = True
             changed = True
         if not bool(self.settings.get("ffmpeg_cdg_timing_migrated", False)):
             # GStreamer used a zero-offset pipeline clock. FFmpeg CDG playback
@@ -35856,6 +35899,11 @@ class KaraokeApp(QWidget):
         _perf_t0 = time.perf_counter()
         try:
             if not hasattr(self, "video_window") or self.video_window is None:
+                return
+            # KaraFun deliberately leaves SingWS's idle surface behind its
+            # renderer. Do not decode/scale slideshow images there while the
+            # external karaoke video needs the display/GPU budget.
+            if bool(getattr(self, "karaoke_playing", False)):
                 return
             if not bool(getattr(self.video_window, "idle", False)):
                 return

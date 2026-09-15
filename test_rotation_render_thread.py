@@ -158,6 +158,16 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertEqual(card._root.property("singerText"), "Jordan")
         self.assertEqual(int(card._root.property("singerBurstSerial") or 0), before)
 
+    def test_rotation_rail_can_freeze_without_hiding_rows(self):
+        rail = mod.RenderThreadRotationRail()
+        self.addCleanup(rail.close)
+        rail.set_items([{"number": "1", "singer": "Alice", "song": "Song"}], force=True)
+        rail.set_running(False)
+        self.assertFalse(rail._root.property("running"))
+        self.assertEqual(len(json.loads(rail._root.property("itemsJson"))), 1)
+        rail.set_running(True)
+        self.assertTrue(rail._root.property("running"))
+
     def test_structured_items_are_sent_to_qml(self):
         rail = mod.RenderThreadRotationRail()
         self.addCleanup(rail.close)

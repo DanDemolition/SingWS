@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 import bass_background_engine as bbe
@@ -277,6 +278,32 @@ class BackgroundTrackCrossfadeTests(unittest.TestCase):
         player.previous_track()
         self.assertEqual(player.targets, [0])
         self.assertEqual(player.current_index, 1)
+
+    def test_active_track_ignores_silent_secondary_preload(self):
+        player = self.singws.BackgroundMusicPlayer.__new__(self.singws.BackgroundMusicPlayer)
+        player.playlist = ["/audible.mp3", "/next.mp3"]
+        player.current_index = 0
+        player.crossfade_active = False
+        player._bass_ready = lambda: True
+        player._bass_engine = SimpleNamespace(
+            primary=SimpleNamespace(path="/audible.mp3"),
+            secondary=SimpleNamespace(path="/next.mp3"),
+        )
+
+        self.assertEqual(player.get_active_track_path(), "/audible.mp3")
+
+    def test_active_track_reports_incoming_deck_during_crossfade(self):
+        player = self.singws.BackgroundMusicPlayer.__new__(self.singws.BackgroundMusicPlayer)
+        player.playlist = ["/outgoing.mp3", "/incoming.mp3"]
+        player.current_index = 0
+        player.crossfade_active = True
+        player._bass_ready = lambda: True
+        player._bass_engine = SimpleNamespace(
+            primary=SimpleNamespace(path="/outgoing.mp3"),
+            secondary=SimpleNamespace(path="/incoming.mp3"),
+        )
+
+        self.assertEqual(player.get_active_track_path(), "/incoming.mp3")
 
 
 class BassSecondaryPreloadContractTests(unittest.TestCase):

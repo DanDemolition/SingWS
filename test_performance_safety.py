@@ -841,6 +841,15 @@ class PerformanceSafetyTests(unittest.TestCase):
         # Stall stacks themselves must survive with attribution off.
         self.assertIn("sys._current_frames()", watchdog)
 
+    def test_legacy_stall_probes_are_disabled_once_for_show_safety(self):
+        self.assertIn('"show_safe_stall_diagnostics_migrated": False', MAIN_SOURCE)
+        migration = MAIN_SOURCE[
+            MAIN_SOURCE.index('if not bool(self.settings.get("show_safe_stall_diagnostics_migrated", False))'):
+        ]
+        self.assertIn('self.settings["stall_event_attribution"] = False', migration)
+        self.assertIn('self.settings["stall_stack_capture"] = False', migration)
+        self.assertIn('self.settings["show_safe_stall_diagnostics_migrated"] = True', migration)
+
     def test_tracks_json_is_parsed_off_the_gui_thread(self):
         # ~134k rows is ~800ms of JSON parse, and it ran inside __init__ before
         # the window could paint. Nothing in startup needs it.

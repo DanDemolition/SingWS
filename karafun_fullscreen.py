@@ -75,10 +75,26 @@ def ensure_renderer_fullscreen(host, on_complete, is_current):
         if is_current():
             on_complete(result)
 
-    def verify_after_click():
+    def verify_after_click(attempt=0):
         if is_current():
+            def verified(result):
+                # macOS can report WINDOWED for a short period after the
+                # fullscreen gesture while the window is moving into its
+                # Space.  Confirm once more without sending another gesture;
+                # otherwise a slow three-display transition is misreported as
+                # a failure even when it finishes normally.
+                if str(result or "").strip() == "WINDOWED" and attempt == 0 and is_current():
+                    timer = threading.Timer(
+                        1.0,
+                        lambda: host._run_on_ui_thread(lambda: verify_after_click(1)),
+                    )
+                    timer.daemon = True
+                    timer.start()
+                    return
+                deliver(result)
+
             if not host._karafun_run_window_script(
-                renderer_fullscreen_script(request=False), on_complete=deliver, timeout=6
+                renderer_fullscreen_script(request=False), on_complete=verified, timeout=6
             ):
                 deliver("VERIFY_START_FAILED")
 
