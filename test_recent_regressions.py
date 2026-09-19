@@ -1688,13 +1688,23 @@ class BackgroundMusicSoundboardHandoffTests(unittest.TestCase):
     def setUpClass(cls):
         cls.singws = load_main_module()
         cls.source = inspect.getsource(cls.singws.KaraokeApp._start_bg_with_fade)
+        cls.media_end = inspect.getsource(cls.singws.KaraokeApp._finish_media_end_cleanup)
 
     def test_resume_waits_until_the_soundboard_releases_bass(self):
-        self.assertIn("soundboard_active = any(", self.source)
+        self.assertIn("pad._channel.is_playing()", self.source)
         self.assertIn('getattr(pad, "_playing", False)', self.source)
+        self.assertIn("pad._stop_channel()", self.source)
+        self.assertIn("cleared stale soundboard state", self.source)
         self.assertIn("self._schedule_bg_resume(250, reason=resume_reason)", self.source)
         self.assertLess(self.source.index("if soundboard_active:"),
                         self.source.index('self.bg_music.ensure_audible("bg_resume")'))
+
+    def test_soundboard_release_gets_a_separate_settling_callback(self):
+        self.assertIn('self._bg_soundboard_defer_active = True', self.source)
+        self.assertIn('if bool(getattr(self, "_bg_soundboard_defer_active", False)):', self.source)
+        self.assertIn("soundboard released; settling before background resume", self.source)
+        release = self.source.index("soundboard released; settling before background resume")
+        self.assertLess(release, self.source.index('self.bg_music.ensure_audible("bg_resume")'))
 
     def test_successful_resume_arms_real_playback_verification(self):
         self.assertIn("_bg_resume_verify_gen", self.source)
@@ -1705,6 +1715,12 @@ class BackgroundMusicSoundboardHandoffTests(unittest.TestCase):
         self.assertIn('self._bg_resume_reason = "verified_retry"', verifier)
         self.assertIn('self._start_bg_with_fade_safe("verified_retry")', verifier)
         self.assertIn("playback still inactive after verified retry", verifier)
+
+    def test_prestarted_overlap_also_arms_verification_at_song_end(self):
+        self.assertIn("if has_bg and has_playlist and effective_playing:", self.media_end)
+        self.assertIn("overlap already active at karaoke end", self.media_end)
+        self.assertIn("self._bg_resume_verify_retried = False", self.media_end)
+        self.assertIn("self._verify_bg_resume_started(gen)", self.media_end)
 
 
 class TickerSurfaceReassertTests(unittest.TestCase):
@@ -2098,7 +2114,7 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
 
     def test_fast_start_records_that_playback_was_only_assumed(self):
         self.assertIn('entry["karafun_playback_assumed"] = True', self.automation)
-        self.assertIn("assumed playback", self.automation)
+        self.assertIn("monitor will verify", self.automation)
 
     def test_the_play_control_is_shared_not_inlined(self):
         """The monitor needs the same press the automation path uses."""
@@ -2117,6 +2133,27 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertIn('perform action "AXRaise" of mainWindow', activate)
         self.assertIn("_macos_native_double_click", activate)
         self.assertIn("_karafun_activate_result_for_playback(", self.automation)
+
+    def test_managed_start_verifies_the_click_and_retries_only_while_idle(self):
+        self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_playback_menu_state"))
+        state_probe = inspect.getsource(
+            self.singws.KaraokeApp._karafun_playback_menu_state
+        )
+        self.assertIn('menu bar item "Playback"', state_probe)
+        self.assertIn('playbackToggleName is "pause"', state_probe)
+        self.assertIn('playbackToggleName is "play"', state_probe)
+        self.assertIn('managed_start_state = self._karafun_playback_menu_state()', self.automation)
+        self.assertIn('if managed_start_state == "IDLE":', self.automation)
+        self.assertIn("result activation left KaraFun idle", self.automation)
+        self.assertIn("idle result loaded; explicit Play sent", self.automation)
+
+    def test_fast_start_does_not_replace_observed_managed_state_with_playing(self):
+        self.assertIn(
+            'managed_start_state if managed_handoff else "PLAYING"',
+            self.automation,
+        )
+        self.assertIn('initial_probe_state == "UNKNOWN"', self.automation)
+        self.assertIn("managed playback state unknown; deferring to monitor", self.automation)
 
     def test_the_monitor_retries_the_matched_result_when_the_assumption_was_wrong(self):
         self.assertIn("playback_assumed", self.monitor)

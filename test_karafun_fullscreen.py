@@ -1,4 +1,5 @@
 import unittest
+import threading
 from unittest.mock import patch
 
 from karafun_fullscreen import ensure_renderer_fullscreen
@@ -23,12 +24,21 @@ class Host:
         callback()
 
 
-class InlineThread:
-    def __init__(self, target, **kwargs):
-        self.target = target
+class InlineThread(threading.Thread):
+    def __init__(self, group=None, target=None, **kwargs):
+        super().__init__(group=group, target=target, **kwargs)
 
     def start(self):
-        self.target()
+        self.run()
+
+
+class InlineTimer:
+    def __init__(self, _interval, function, **_kwargs):
+        self.function = function
+        self.daemon = False
+
+    def start(self):
+        self.function()
 
 
 class FullscreenTests(unittest.TestCase):
@@ -61,9 +71,10 @@ class FullscreenTests(unittest.TestCase):
         ensure_renderer_fullscreen(host, self.fail, lambda: False)
         self.assertEqual(host.scripts, [])
 
+    @patch("threading.Timer", InlineTimer)
     @patch("threading.Thread", InlineThread)
     def test_failed_verification_does_not_claim_success_or_click_again(self):
-        host = Host(["WINDOWED", "CLICK|400|300", "WINDOWED"])
+        host = Host(["WINDOWED", "CLICK|400|300", "WINDOWED", "WINDOWED"])
         results = []
         ensure_renderer_fullscreen(host, results.append, lambda: True)
         self.assertEqual(results, ["WINDOWED"])

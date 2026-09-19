@@ -139,6 +139,10 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertNotIn("OpacityAnimator { target: leadGlow", source)
         self.assertIn("id: sheen", source)
         self.assertIn("model: 4", source)
+        # Invisible decoration must not keep consuming render frames while the
+        # singer rail remains active during karaoke playback.
+        ribbons = source[source.index("id: scrollLightRibbons"):]
+        self.assertGreaterEqual(ribbons.count("running: root.effectsEnabled"), 2)
 
     def test_rotation_vfx_can_be_disabled_without_disabling_scroll(self):
         rail = mod.RenderThreadRotationRail()

@@ -1418,6 +1418,24 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("* dt", step)
         self.assertNotIn("sb.value() + 1", step)
 
+    def test_rotation_priority_keeps_singer_names_scrolling(self):
+        apply_visibility = function_source("_apply_effects_visibility")
+        self.assertIn("self.rotation_rail.set_running(True)", apply_visibility)
+        self.assertNotIn("set_running(not karaoke_active)", apply_visibility)
+        self.assertNotIn("self.scroll_timer.stop()", apply_visibility)
+
+        start = MAIN_SOURCE.index('QML_ROTATION_RAIL_SOURCE = r"""')
+        end = MAIN_SOURCE.index('class RenderThreadRotationRail', start)
+        qml = MAIN_SOURCE[start:end]
+        decorations = qml[qml.index("id: scrollLightRibbons"):]
+        self.assertGreaterEqual(
+            decorations.count("running: root.effectsEnabled"), 2
+        )
+        self.assertIn(
+            "layer.enabled: !root.effectsEnabled && rotationModel.count > 1 && rotationModel.count <= 40",
+            qml,
+        )
+
     def test_rotation_gpu_rail_wraps_entirely_on_render_thread(self):
         start = MAIN_SOURCE.index('QML_ROTATION_RAIL_SOURCE = r"""')
         end = MAIN_SOURCE.index('class RenderThreadRotationRail', start)

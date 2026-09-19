@@ -17601,6 +17601,13 @@ Rectangle {
             id: strip
             width: root.width
             height: firstPass.height + (root.overflow ? root.cardGap + secondPass.height : 0)
+            // During karaoke the cards are visually static and only this
+            // parent moves. Cache a normal-sized rotation as one texture so
+            // each scroll frame moves one scene-graph node instead of every
+            // card, label and border. Avoid oversized textures for unusually
+            // large queues and avoid recaching live decorative effects.
+            layer.enabled: !root.effectsEnabled && rotationModel.count > 1 && rotationModel.count <= 40
+            layer.smooth: true
 
             Column {
                 id: firstPass
@@ -17783,6 +17790,7 @@ Rectangle {
                     GradientStop { position: 1.0; color: "#00a895ff" }
                 }
                 YAnimator on y {
+                    running: root.effectsEnabled
                     from: root.height + index * 75
                     to: -60
                     duration: 4200
@@ -17810,6 +17818,7 @@ Rectangle {
                 color: index % 3 === 0 ? "#adff2f" : "#a895ff"
                 opacity: 0.12 + (index % 3) * 0.05
                 YAnimator on y {
+                    running: root.effectsEnabled
                     from: root.height + (index * 37 % 120)
                     to: -18
                     duration: 7200 + (index % 4) * 1300
@@ -18620,24 +18629,22 @@ class RotationView(QMainWindow):
             self.now_singing_surface.set_effects_enabled(enabled)
         if self.rotation_rail is not None:
             self.rotation_rail.set_effects_enabled(enabled)
-            # With a third display attached, this continuous QQuick animation
-            # competes with the karaoke surface for render/GPU time. Keep the
-            # rotation readable and live, but freeze its decorative movement
-            # for the duration of the song.
-            self.rotation_rail.set_running(not karaoke_active)
-        elif karaoke_active:
-            self.scroll_timer.stop()
-            self.autoscroll_active = False
-            self._last_scroll_ts = None
+            # Singer movement is functional information, not a decorative
+            # effect. Keep the rail scrolling through singer transitions and
+            # karaoke playback; only the lighting/backdrop effects yield GPU
+            # time to the lyric surface.
+            self.rotation_rail.set_running(True)
 
         previous = getattr(self, "_show_priority_karaoke_active", None)
         if previous is None or bool(previous) != karaoke_active:
             self._show_priority_karaoke_active = karaoke_active
             _diag(
-                f"[SHOW-PRIORITY] rotation animation "
+                f"[SHOW-PRIORITY] rotation decorative effects "
                 f"{'paused' if karaoke_active else 'resumed'} karaoke_active={int(karaoke_active)}"
             )
-            if not karaoke_active and self.rotation_rail is None:
+            if self.rotation_rail is None:
+                # The QWidget fallback follows the same rule as the Quick
+                # rail: changing karaoke state must not stop its name scroll.
                 self.check_autoscroll()
 
     ROTATION_QR_SIZE = 250
@@ -26360,6 +26367,26 @@ class KaraokeApp(QWidget):
                     f"Cannot start background music: has_bg_music={has_bg}, has_playlist={has_playlist}, "
                     f"is_playing={raw_playing}, effective_playing={effective_playing}"
                 )
+                if has_bg and has_playlist and effective_playing:
+                    # The overlap/pre-start deck can report active during EOS
+                    # and then fall silent as the karaoke teardown completes.
+                    # Previously this early-return path never armed the same
+                    # verifier used by a normal fade-in, so Skip + Play was the
+                    # only recovery. Verify after teardown settles and reuse
+                    # the existing one-shot reset/retry path if it stalled.
+                    self._bg_resume_verify_gen = int(
+                        getattr(self, "_bg_resume_verify_gen", 0)
+                    ) + 1
+                    verify_gen = int(self._bg_resume_verify_gen)
+                    self._bg_resume_verify_retried = False
+                    _diag(
+                        "[BG-HANDOFF] overlap already active at karaoke end; "
+                        f"verification armed generation={verify_gen}"
+                    )
+                    QTimer.singleShot(
+                        1500,
+                        lambda gen=verify_gen: self._verify_bg_resume_started(gen),
+                    )
         finally:
             try:
                 self._media_end_cleanup_timer.stop()
@@ -50756,7 +50783,7 @@ class KaraokeApp(QWidget):
                 pass
         return False
 
-    def _activate_host_window_after_karafun(self, attempt: int = 0):
+    def _activate_host_window_after_karafun(self, attempt: int = 0, *, force: bool = False):
         """Return keyboard focus to the main host window after KaraFun exits.
 
         The audience window is restored separately. On macOS, closing KaraFun's
@@ -50765,7 +50792,7 @@ class KaraokeApp(QWidget):
         """
         if isinstance(getattr(self, "_active_external_karafun", None), dict):
             return
-        if not self._can_restore_host_focus_after_karafun():
+        if not force and not self._can_restore_host_focus_after_karafun():
             return
         try:
             state = self.windowState()
@@ -50779,11 +50806,19 @@ class KaraokeApp(QWidget):
                 pass
             self.raise_()
             self.activateWindow()
-            _diag(f"[KARAFUN] activated SingWS host window attempt={attempt + 1}")
+            _diag(
+                f"[KARAFUN] activated SingWS host window attempt={attempt + 1} "
+                f"force={int(bool(force))}"
+            )
         except Exception as e:
             _diag(f"[KARAFUN] host window activation failed attempt={attempt + 1}: {e}")
         if attempt < 1:
-            QTimer.singleShot(350, lambda: self._activate_host_window_after_karafun(attempt + 1))
+            QTimer.singleShot(
+                350,
+                lambda: self._activate_host_window_after_karafun(
+                    attempt + 1, force=force
+                ),
+            )
 
     def _restore_show_screen_from_karafun(self):
         """Restore the SingWS audience output after external KaraFun playback."""
@@ -50853,10 +50888,10 @@ class KaraokeApp(QWidget):
                         f"[KARAFUN] restored SingWS show screen opacity={opacity:.2f} "
                         f"fullscreen={int(vw.isFullScreen())} reason={reason}"
                     )
-                    self._activate_host_window_after_karafun()
+                    self._activate_host_window_after_karafun(force=True)
                 except Exception as e:
                     _diag(f"[KARAFUN] transparent show-screen restore failed: {e}")
-                    self._activate_host_window_after_karafun()
+                    self._activate_host_window_after_karafun(force=True)
 
             def _after_transparent_karafun_hidden(result=""):
                 if getattr(self, "_karafun_restore_token", None) != restore_token:
@@ -50972,7 +51007,7 @@ class KaraokeApp(QWidget):
                 if not was_visible:
                     vw.hide()
                     _diag("[KARAFUN] restored SingWS show screen hidden")
-                    self._activate_host_window_after_karafun()
+                    self._activate_host_window_after_karafun(force=True)
                     return
                 if not restore_fullscreen:
                     vw.showNormal()
@@ -50982,7 +51017,7 @@ class KaraokeApp(QWidget):
                     # used to be the only repair.
                     self._schedule_show_ticker_reassert("karafun_restore")
                     _diag("[KARAFUN] restored SingWS show screen fullscreen=0")
-                    self._activate_host_window_after_karafun()
+                    self._activate_host_window_after_karafun(force=True)
                     return
 
                 def _enter_singws_fullscreen(attempt=0):
@@ -51014,10 +51049,10 @@ class KaraokeApp(QWidget):
                         _diag(f"[KARAFUN] fullscreen retry failed: {e}")
 
                 _enter_singws_fullscreen()
-                self._activate_host_window_after_karafun()
+                self._activate_host_window_after_karafun(force=True)
             except Exception as e:
                 _diag(f"[KARAFUN] show-screen restore failed: {e}")
-                self._activate_host_window_after_karafun()
+                self._activate_host_window_after_karafun(force=True)
 
         def _after_karafun_hidden(_result=""):
             if getattr(self, "_karafun_restore_token", None) != restore_token:
@@ -51187,6 +51222,30 @@ class KaraokeApp(QWidget):
         if not self._macos_native_mouse_click(int(float(play_parts[1])), int(float(play_parts[2])), clicks=1):
             return False, "Could not click the KaraFun play control"
         return True, ""
+
+    def _karafun_playback_menu_state(self) -> str:
+        """Return PLAYING, IDLE, or UNKNOWN from KaraFun's cheap menu state."""
+        ok, result, _error = self._run_karafun_applescript_sync(
+            [
+                'tell application "System Events"',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) is 0 then return "UNKNOWN"',
+                'tell item 1 of matches',
+                'try',
+                'set playbackToggleName to name of menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1 as text',
+                'ignoring case',
+                'if playbackToggleName is "pause" then return "PLAYING"',
+                'if playbackToggleName is "play" then return "IDLE"',
+                'end ignoring',
+                'end try',
+                'return "UNKNOWN"',
+                'end tell',
+                'end tell',
+            ],
+            timeout=4,
+        )
+        state = str(result or "").strip().upper() if ok else "UNKNOWN"
+        return state if state in {"PLAYING", "IDLE"} else "UNKNOWN"
 
     def _karafun_activate_result_for_playback(self, activation_point) -> tuple[bool, str]:
         """Raise the search-results window and double-click its matched row."""
@@ -51606,6 +51665,7 @@ class KaraokeApp(QWidget):
         def _worker():
             result = {"ok": False, "message": "KaraFun automation did not complete."}
             handoff_scheduled = False
+            handoff_dispatched = threading.Event()
             bgm_fade_scheduled = False
 
             def _schedule_bgm_fade(reason: str):
@@ -51622,7 +51682,18 @@ class KaraokeApp(QWidget):
                     return
                 handoff_scheduled = True
                 _diag(f"[KARAFUN] early show-screen handoff scheduled reason={reason}")
-                self._run_on_ui_thread(lambda: self._handoff_show_screen_to_karafun() if _session_is_current() else None)
+
+                def _dispatch_handoff():
+                    try:
+                        if _session_is_current():
+                            self._handoff_show_screen_to_karafun()
+                    finally:
+                        # Set only after the UI method has established its
+                        # in-progress/complete state. The worker previously
+                        # checked too early and skipped the entire wait.
+                        handoff_dispatched.set()
+
+                self._run_on_ui_thread(_dispatch_handoff)
 
             try:
                 _require_current_session()
@@ -51845,11 +51916,18 @@ class KaraokeApp(QWidget):
                 entry["karafun_result_activation_point"] = activation_point
                 _require_current_session()
                 managed_handoff = bool(self.settings.get("karafun_manage_show_screen", True))
+                managed_start_state = "UNKNOWN"
                 if managed_handoff:
                     if not self._macos_native_mouse_click(*activation_point, clicks=1):
                         raise RuntimeError("Could not select the KaraFun result")
                     _schedule_early_handoff("after_result_activation")
-                    handoff_wait_deadline = time.monotonic() + 15.0
+                    if not handoff_dispatched.wait(timeout=3.0):
+                        _diag("[KARAFUN-AUTO] fullscreen handoff UI dispatch timed out")
+                    # The 2026-09-17 show needed 24-31 seconds to move KaraFun's
+                    # Dual Renderer into the audience fullscreen Space. Wait
+                    # long enough for that observed transition before starting
+                    # lyrics behind SingWS's still-opaque audience window.
+                    handoff_wait_deadline = time.monotonic() + 35.0
                     while (bool(getattr(self, "_karafun_handoff_in_progress", False))
                            and time.monotonic() < handoff_wait_deadline):
                         _require_current_session()
@@ -51875,7 +51953,42 @@ class KaraokeApp(QWidget):
                     entry["karafun_result_activated_at"] = result_activated_at
                     entry["karafun_playback_clock_started_at"] = result_activated_at
                     entry["karafun_playback_assumed"] = True
-                    time.sleep(0.3)
+                    # A successful CGEvent only proves that macOS accepted the
+                    # click. During a fullscreen Space transition KaraFun can
+                    # raise its Results window without accepting the row's
+                    # double-click. Verify the cheap Playback menu before the
+                    # fast-start path is allowed to assume success, retry the
+                    # already-matched result once while its window is raised,
+                    # then use Play only when KaraFun explicitly reports idle.
+                    time.sleep(0.5)
+                    managed_start_state = self._karafun_playback_menu_state()
+                    if managed_start_state == "IDLE":
+                        _diag("[KARAFUN-AUTO] result activation left KaraFun idle; retrying matched result")
+                        activated, activation_error = self._karafun_activate_result_for_playback(
+                            activation_point
+                        )
+                        if not activated:
+                            raise RuntimeError(
+                                f"Could not retry selected KaraFun result: {activation_error}"
+                            )
+                        result_activated_at = time.monotonic()
+                        entry["karafun_result_activated_at"] = result_activated_at
+                        entry["karafun_playback_clock_started_at"] = result_activated_at
+                        time.sleep(0.7)
+                        managed_start_state = self._karafun_playback_menu_state()
+                    if managed_start_state == "IDLE":
+                        pressed, press_error = self._karafun_press_play_control()
+                        if not pressed:
+                            raise RuntimeError(press_error or "KaraFun play automation failed")
+                        entry["karafun_playback_clock_started_at"] = time.monotonic()
+                        # This is a command acknowledgement rather than a
+                        # playback observation; the monitor still confirms it.
+                        # Mark it PLAYING here only to prevent the legacy
+                        # pre-click branch below from toggling Play a second time.
+                        managed_start_state = "PLAYING"
+                        _diag("[KARAFUN-AUTO] idle result loaded; explicit Play sent")
+                    else:
+                        _diag(f"[KARAFUN-AUTO] post-activation playback state={managed_start_state}")
                 else:
                     _schedule_bgm_fade("before_result_activation")
                     if not self._macos_native_double_click(*activation_point):
@@ -51948,20 +52061,34 @@ class KaraokeApp(QWidget):
                     # 2026-08-16 at 01:07 the song sat silent until the operator
                     # pressed play by hand. The completion monitor now actually
                     # performs the verification promised here.
-                    ok, initial_probe_state = True, "PLAYING"
+                    ok = True
+                    initial_probe_state = (
+                        managed_start_state if managed_handoff else "PLAYING"
+                    )
                     entry["karafun_playback_assumed"] = True
-                    _diag("[KARAFUN-AUTO] fast start assumed playback from activated result; monitor will verify")
+                    _diag(
+                        "[KARAFUN-AUTO] fast start continuing after result activation "
+                        f"state={initial_probe_state}; monitor will verify"
+                    )
                 else:
                     ok, initial_probe, initial_probe_error = _run_session_script(playback_probe_script, timeout=5)
                     initial_probe_state = str(initial_probe or initial_probe_error or "").strip()
                 _diag(f"[KARAFUN-AUTO] playback pre-click state={initial_probe_state!r}")
                 if ok and initial_probe_state == "PLAYING":
                     _schedule_early_handoff("pre_click_playing")
-                if not (ok and initial_probe_state == "PLAYING"):
+                managed_state_unknown = bool(
+                    fast_start and managed_handoff and initial_probe_state == "UNKNOWN"
+                )
+                if not (ok and initial_probe_state == "PLAYING") and not managed_state_unknown:
                     pressed, press_error = self._karafun_press_play_control()
                     if not pressed:
                         raise RuntimeError(press_error or "KaraFun play automation failed")
                     entry["karafun_playback_clock_started_at"] = time.monotonic()
+                elif managed_state_unknown:
+                    # UNKNOWN is not permission to toggle Play: the result
+                    # double-click may already have started the song. Let the
+                    # monitor retry only after it positively observes IDLE.
+                    _diag("[KARAFUN-AUTO] managed playback state unknown; deferring to monitor")
                 else:
                     entry["karafun_playback_clock_started_at"] = result_activated_at
                     _diag("[KARAFUN-AUTO] play click skipped already playing")
@@ -57350,15 +57477,43 @@ class KaraokeApp(QWidget):
         # pad was still active. Avoid entering BASS background-engine calls in
         # that overlap window; the pad's polling timer clears _playing when the
         # clip ends, and this one-shot timer then resumes BGM normally.
+        soundboard_active = False
         try:
-            soundboard_active = any(
-                bool(getattr(pad, "_playing", False))
-                for pad in getattr(getattr(self, "soundboard_strip", None), "pads", [])
-            )
+            for pad in getattr(getattr(self, "soundboard_strip", None), "pads", []):
+                if not bool(getattr(pad, "_playing", False)):
+                    continue
+                # _playing is UI state and can remain stale if its 80ms timer
+                # misses the BASS end transition. Ask the native channel before
+                # holding BGM off, and let the pad clear stale state itself.
+                try:
+                    channel_active = bool(pad._channel.is_playing())
+                except Exception:
+                    channel_active = True
+                if channel_active:
+                    soundboard_active = True
+                else:
+                    pad._stop_channel()
+                    _diag(
+                        f"[BG-HANDOFF] cleared stale soundboard state "
+                        f"slot={getattr(pad, 'slot_index', '?')}"
+                    )
         except Exception:
             soundboard_active = False
         if soundboard_active:
-            _diag(f"[BG-HANDOFF] resume deferred while soundboard active reason={resume_reason}")
+            self._bg_soundboard_defer_active = True
+            now = time.monotonic()
+            last_log = float(getattr(self, "_bg_soundboard_defer_log_at", 0.0) or 0.0)
+            if (now - last_log) >= 2.0:
+                self._bg_soundboard_defer_log_at = now
+                _diag(f"[BG-HANDOFF] resume deferred while soundboard active reason={resume_reason}")
+            self._schedule_bg_resume(250, reason=resume_reason)
+            return False
+        if bool(getattr(self, "_bg_soundboard_defer_active", False)):
+            # Do not enter background-engine BASS calls in the same callback
+            # that observes the soundboard stream ending. The 2026-09-18 show
+            # log stopped at exactly that boundary and BGM never faded in.
+            self._bg_soundboard_defer_active = False
+            _diag("[BG-HANDOFF] soundboard released; settling before background resume")
             self._schedule_bg_resume(250, reason=resume_reason)
             return False
         # If a fade left BGM silently 'playing', repair before any early-out

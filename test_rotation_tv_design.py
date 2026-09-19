@@ -46,11 +46,26 @@ class RotationTvDesignTests(unittest.TestCase):
         self.assertEqual(view._backdrop_animation_timer.interval(), 250)
         self.assertFalse(view.rotation_rail._root.property('effectsEnabled'))
         self.assertFalse(view.now_singing_surface._root.property('effectsEnabled'))
+        self.assertTrue(view.rotation_rail._root.property('running'))
         owner.karaoke_playing = False
         view._tick_animated_backdrop()
         self.assertEqual(view._backdrop_animation_timer.interval(), 125)
         self.assertTrue(view.rotation_rail._root.property('effectsEnabled'))
         self.assertTrue(view.now_singing_surface._root.property('effectsEnabled'))
+        self.assertTrue(view.rotation_rail._root.property('running'))
+
+    def test_between_singer_animation_never_stops_name_scroll(self):
+        owner, view = self.make_view()
+        view.show()
+        QTest.qWait(20)
+        view.show_song_outro_vfx('Maya', 'Halo', 'Beyoncé', 'confetti_drop')
+        view._apply_effects_visibility()
+        self.assertTrue(view._transition_overlay_active())
+        self.assertTrue(view.rotation_rail._root.property('running'))
+
+        owner.karaoke_playing = False
+        view._apply_effects_visibility()
+        self.assertTrue(view.rotation_rail._root.property('running'))
 
     def test_current_singer_uses_identity_and_preserves_same_named_other_singer(self):
         owner, view = self.make_view()

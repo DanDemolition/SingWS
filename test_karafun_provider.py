@@ -135,11 +135,12 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("native_window.setStyleMask_", source)
         self.assertIn("native_window.setCollectionBehavior_", source)
         self.assertIn("NSApplication.sharedApplication().activateIgnoringOtherApps_(True)", source)
-        self.assertIn("def _activate_host_window_after_karafun(self, attempt: int = 0):", source)
+        self.assertIn("def _activate_host_window_after_karafun(self, attempt: int = 0, *, force: bool = False):", source)
+        self.assertIn("if not force and not self._can_restore_host_focus_after_karafun():", source)
         self.assertIn("self.raise_()", source)
         self.assertIn("self.activateWindow()", source)
-        self.assertIn("self._activate_host_window_after_karafun(attempt + 1)", source)
-        self.assertGreaterEqual(source.count("self._activate_host_window_after_karafun()"), 5)
+        self.assertIn("attempt + 1, force=force", source)
+        self.assertGreaterEqual(source.count("self._activate_host_window_after_karafun(force=True)"), 5)
         self.assertIn('_restore_transparent_singws("karafun_hidden")', source)
         self.assertIn('_restore_transparent_singws("fallback_timeout")', source)
         self.assertIn("revealed KaraFun true_fullscreen=", source)
@@ -184,6 +185,10 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("skipped stale show-screen handoff result", source)
         self.assertIn('_schedule_early_handoff("after_result_activation")', source)
         self.assertIn("fullscreen audience handoff ready before play", source)
+        self.assertIn("handoff_dispatched = threading.Event()", source)
+        self.assertIn("handoff_dispatched.set()", source)
+        self.assertIn("handoff_dispatched.wait(timeout=3.0)", source)
+        self.assertIn("time.monotonic() + 35.0", source)
         self.assertLess(
             source.index('_schedule_early_handoff("after_result_activation")'),
             source.index('activated, activation_error = self._karafun_activate_result_for_playback('),
@@ -264,7 +269,7 @@ class KaraFunProviderTests(unittest.TestCase):
         worker = worker[:worker.index("def _karafun_clock_seconds")]
         self.assertLess(worker.index("_ensure_karafun_audio_output()"), worker.index("search attempt="))
         self.assertIn("fast start skipped unreliable transparent renderer preflight", worker)
-        self.assertIn("fast start assumed playback from activated result; monitor will verify", worker)
+        self.assertIn("fast start continuing after result activation", worker)
         self.assertIn("KaraFun audio safety check failed", worker)
         target = source[source.index("def _karafun_target_audio_output_name"):]
         target = target[:target.index("def _ensure_karafun_audio_output")]
@@ -372,7 +377,9 @@ class KaraFunProviderTests(unittest.TestCase):
         )
         self.assertIn('_schedule_early_handoff("pre_click_playing")', worker)
         self.assertIn('_schedule_early_handoff("playback_verified")', worker)
-        self.assertIn("self._handoff_show_screen_to_karafun() if _session_is_current() else None", worker)
+        self.assertIn("def _dispatch_handoff():", worker)
+        self.assertIn("if _session_is_current():", worker)
+        self.assertIn("self._handoff_show_screen_to_karafun()", worker)
         pre_play_handoff = worker[
             worker.index('managed_handoff = bool(self.settings.get("karafun_manage_show_screen", True))'):
             worker.index('playback_probe_script = [')
