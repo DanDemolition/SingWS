@@ -1143,6 +1143,23 @@ class RecentRegressionTests(unittest.TestCase):
         mpv_source = inspect.getsource(self.singws.KaraokeApp._start_mpv_karaoke_transport)
         self.assertIn("self._arm_audio_end_floor(audio_path, duration_seconds)", mpv_source)
 
+    def test_extracted_mp3_reuses_original_library_audio_endpoint(self):
+        app = make_app(self.singws)
+        app._current_karaoke_song_path = "/library/SC1234-01.zip"
+        app._karaoke_early_silence_trim_enabled = lambda: True
+        app._apply_audio_end_floor = mock.Mock()
+        record = SimpleNamespace(duration=240.0, audio_end=229.5)
+
+        with mock.patch.object(
+            self.singws, "transition_analysis_cached", return_value=record
+        ), mock.patch.object(self.singws.threading, "Thread") as worker:
+            app._arm_audio_end_floor("/tmp/random_extracted.mp3", 240.0)
+
+        app._apply_audio_end_floor.assert_called_once_with(
+            "/tmp/random_extracted.mp3", 240.0, 10.5, "library-cache"
+        )
+        worker.assert_not_called()
+
     def test_server_off_background_follows_waitlist_state(self):
         app = make_app(self.singws)
         app._is_requests_accepting_cached = lambda: bool(app.settings["requests_accepting"])

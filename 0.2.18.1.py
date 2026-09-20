@@ -38226,6 +38226,26 @@ class KaraokeApp(QWidget):
         # [END-AUDIO] lines across a full show). The worker probes the file
         # itself when the database cannot answer.
 
+        # Full-library analysis is keyed by the permanent library path. ZIP
+        # playback, however, hands this method a random extracted MP3 path.
+        # Reuse the original record's verified audio edge before launching a
+        # redundant live scan of that temporary filename.
+        library_path = str(getattr(self, "_current_karaoke_song_path", "") or "")
+        if library_path:
+            try:
+                record = transition_analysis_cached(library_path)
+                record_duration = float(getattr(record, "duration", 0.0) or 0.0)
+                record_audio_end = getattr(record, "audio_end", None)
+                if record_audio_end is not None and record_duration > 0.0:
+                    cached_tail = max(0.0, record_duration - float(record_audio_end))
+                    if cached_tail >= 0.3 and duration > 0.0:
+                        self._apply_audio_end_floor(
+                            str(audio_path), duration, cached_tail, "library-cache"
+                        )
+                        return
+            except Exception as exc:
+                _diag(f"[END-AUDIO] library transition cache unavailable: {exc}")
+
         cached = trailing_silence_cached(audio_path)
         if cached is not None and duration > 0.0:
             self._apply_audio_end_floor(audio_path, duration, float(cached), "cache")

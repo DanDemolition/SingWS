@@ -311,10 +311,17 @@ class DetectTrailingSilenceTests(ToneWavFixture, unittest.TestCase):
         self.assertEqual(pd.detect_trailing_silence("/nonexistent/file.mp3"), 0.0)
 
     def test_noise_floor_above_threshold_reports_no_silence(self):
-        # Analogue-sourced karaoke tracks often have a hissy tail. Reporting no
-        # trailing silence makes the song play to full duration -- the safe way
-        # to be wrong.
+        # Analogue-sourced karaoke tracks often have a long, steady hissy tail.
+        # It is dead air even though it sits above the strict -55 dBFS floor.
         path = self._write_wav((1.0, 0.5), (2.0, 0.01))
+        self.assertAlmostEqual(pd.detect_trailing_silence(path), 0.0, delta=0.15)
+
+    def test_long_stable_analogue_noise_floor_counts_as_dead_tail(self):
+        path = self._write_wav((2.0, 0.5), (4.0, 0.01))
+        self.assertAlmostEqual(pd.detect_trailing_silence(path), 4.0, delta=0.15)
+
+    def test_long_quiet_musical_outro_is_not_treated_as_dead_tail(self):
+        path = self._write_wav((2.0, 0.5), (4.0, 0.02))
         self.assertEqual(pd.detect_trailing_silence(path), 0.0)
 
 

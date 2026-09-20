@@ -171,7 +171,39 @@ def detect_trailing_silence(
         decoded_s = float(n_windows) * window_s
         # +1 window: silence starts at the END of the last loud window.
         trailing = decoded_s - ((float(loud[-1]) + 1.0) * window_s)
-        return max(0.0, trailing)
+        if trailing > 0.0:
+            return max(0.0, trailing)
+
+        # Analogue-mastered karaoke discs commonly end in a steady encoded
+        # hiss around -50..-40 dBFS.  A fixed -55 dBFS gate therefore calls
+        # ten seconds of obvious dead air "audio" and defeats the handoff for
+        # exactly the Sound Choice-era material that needs it most.
+        #
+        # Admit a second, deliberately narrow case: at least three seconds of
+        # a stable terminal floor, itself no louder than -38 dBFS, following
+        # materially louder programme audio.  The relative threshold stops at
+        # the beginning of that floor.  Short pauses, quiet musical outros and
+        # active fades do not satisfy all three conditions.
+        floor_windows = max(1, int(round(2.0 / window_s)))
+        minimum_tail_windows = max(1, int(round(3.0 / window_s)))
+        if rms_db.size <= floor_windows + minimum_tail_windows:
+            return 0.0
+        terminal = rms_db[-floor_windows:]
+        floor_db = float(np.median(terminal))
+        floor_spread = float(np.percentile(terminal, 90) - np.percentile(terminal, 10))
+        if floor_db > -38.0 or floor_spread > 3.0:
+            return 0.0
+        programme_peak = float(np.percentile(rms_db[:-floor_windows], 95))
+        if programme_peak < floor_db + 12.0:
+            return 0.0
+        adaptive_threshold = min(-32.0, floor_db + 6.0)
+        meaningful = np.flatnonzero(rms_db > adaptive_threshold)
+        if meaningful.size == 0:
+            return 0.0
+        adaptive_trailing_windows = n_windows - (int(meaningful[-1]) + 1)
+        if adaptive_trailing_windows < minimum_tail_windows:
+            return 0.0
+        return float(adaptive_trailing_windows) * window_s
     except Exception:
         return 0.0
 
