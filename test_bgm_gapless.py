@@ -267,6 +267,49 @@ class BackgroundTransitionSchedulingTests(unittest.TestCase):
                     engine.install_prepared_secondary.assert_not_called()
                     engine.discard_prepared_primary.assert_called_once_with(prepared)
 
+    def test_permanent_preload_failure_bypasses_track_and_prepares_following_track(self):
+        p = self.player()
+        p.playlist = ["old.wav", "missing.wav", "good.wav"]
+        finishes = []
+        timers = []
+        host = SimpleNamespace(_run_on_ui_thread=finishes.append)
+        p.parent = lambda: host
+        p._bg_norm_factor_for_path = lambda _: (1.0, None)
+        p._bg_unplayable_signatures = {}
+        engine = p._bass_engine
+        engine.prepare_primary = Mock(side_effect=[RuntimeError("BASS error 2"), object()])
+        engine.install_prepared_secondary = Mock()
+        engine.invalidate_secondary_preload = Mock()
+        engine.discard_prepared_primary = Mock()
+
+        with patch.object(self.app.threading, "Thread") as thread, \
+                patch.object(self.app.QTimer, "singleShot", side_effect=lambda _ms, fn: timers.append(fn)):
+            self.app.BackgroundMusicPlayer._prepare_next_background_track(p)
+            thread.call_args.kwargs["target"]()
+            finishes.pop()()
+            self.assertTrue(p._bg_track_is_unplayable("missing.wav"))
+            self.assertEqual(p._next_playable_bg_index(), 2)
+
+            # Drive the retry directly; the production path queues this on the
+            # UI event loop so it cannot recurse through the worker callback.
+            self.app.BackgroundMusicPlayer._prepare_next_background_track(p)
+            thread.call_args.kwargs["target"]()
+            finishes.pop()()
+
+        self.assertEqual(engine.prepare_primary.call_args_list[1].args[0], "good.wav")
+        engine.install_prepared_secondary.assert_called_once()
+
+    def test_changed_file_clears_unplayable_marker(self):
+        p = self.player()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "track.wav"
+            path.write_bytes(b"bad")
+            signature = p._bg_track_signature(path)
+            p._bg_unplayable_signatures = {signature[0]: signature}
+            self.assertTrue(p._bg_track_is_unplayable(path))
+            path.write_bytes(b"replaced file")
+            self.assertFalse(p._bg_track_is_unplayable(path))
+
     def test_player_and_native_mixer_cross_silent_padding_without_dead_air(self):
         fixture = NativeBackgroundCrossfadeTests()
         fixture.setUp()

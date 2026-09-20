@@ -1695,16 +1695,31 @@ class BackgroundMusicSoundboardHandoffTests(unittest.TestCase):
         self.assertIn('getattr(pad, "_playing", False)', self.source)
         self.assertIn("pad._stop_channel()", self.source)
         self.assertIn("cleared stale soundboard state", self.source)
-        self.assertIn("self._schedule_bg_resume(250, reason=resume_reason)", self.source)
+        self.assertIn("self._bg_soundboard_resume_pending_reason = resume_reason", self.source)
+        self.assertNotIn("self._schedule_bg_resume(250, reason=resume_reason)", self.source)
         self.assertLess(self.source.index("if soundboard_active:"),
                         self.source.index('self.bg_music.ensure_audible("bg_resume")'))
 
-    def test_soundboard_release_gets_a_separate_settling_callback(self):
-        self.assertIn('self._bg_soundboard_defer_active = True', self.source)
-        self.assertIn('if bool(getattr(self, "_bg_soundboard_defer_active", False)):', self.source)
-        self.assertIn("soundboard released; settling before background resume", self.source)
-        release = self.source.index("soundboard released; settling before background resume")
-        self.assertLess(release, self.source.index('self.bg_music.ensure_audible("bg_resume")'))
+    def test_soundboard_release_consumes_one_deferred_intention(self):
+        callback = inspect.getsource(self.singws.KaraokeApp._on_soundboard_inactive)
+        self.assertIn('self._bg_soundboard_resume_pending_reason = ""', callback)
+        self.assertIn("self._schedule_bg_resume(250, reason=reason)", callback)
+        self.assertNotIn("singleShot", callback)
+        strip = inspect.getsource(self.singws.SoundboardStrip._on_pad_stopped)
+        self.assertIn("if not any", strip)
+        self.assertIn("self.became_inactive.emit()", strip)
+
+        app = SimpleNamespace(
+            _bg_soundboard_resume_pending_reason="karaoke_end",
+            karaoke_playing=False,
+            scheduled=[],
+        )
+        app._schedule_bg_resume = lambda delay, reason: app.scheduled.append((delay, reason))
+        callback_fn = self.singws.KaraokeApp._on_soundboard_inactive
+        callback_fn(app)
+        callback_fn(app)
+        self.assertEqual(app.scheduled, [(250, "karaoke_end")])
+        self.assertEqual(app._bg_soundboard_resume_pending_reason, "")
 
     def test_successful_resume_arms_real_playback_verification(self):
         self.assertIn("_bg_resume_verify_gen", self.source)
@@ -1715,11 +1730,54 @@ class BackgroundMusicSoundboardHandoffTests(unittest.TestCase):
         self.assertIn('self._bg_resume_reason = "verified_retry"', verifier)
         self.assertIn('self._start_bg_with_fade_safe("verified_retry")', verifier)
         self.assertIn("playback still inactive after verified retry", verifier)
+        self.assertIn("bg.recover_failed_resume()", verifier)
+        self.assertIn('self._bg_resume_reason = "verified_recovery"', verifier)
+        self.assertIn('self._start_bg_with_fade_safe("verified_recovery")', verifier)
+        self.assertIn("playback still inactive after bounded recovery", verifier)
+
+    def test_failed_verified_retry_has_one_bounded_deck_recovery(self):
+        recovery = inspect.getsource(self.singws.BackgroundMusicPlayer.recover_failed_resume)
+        self.assertIn("len(self.playlist) > 1", recovery)
+        self.assertIn("self.current_index", recovery)
+        self.assertIn("self.preload_current_track_paused()", recovery)
+        self.assertIn("self.stop()", recovery)
+        verifier = inspect.getsource(self.singws.KaraokeApp._verify_bg_resume_started)
+        self.assertIn('_bg_resume_verify_recovered", False', verifier)
+        self.assertLess(
+            verifier.index('_bg_resume_verify_recovered", False'),
+            verifier.index("bg.recover_failed_resume()"),
+        )
+
+        class FakePlayer:
+            def __init__(self, playlist):
+                self.playlist = playlist
+                self.current_index = 0
+                self.stops = 0
+                self.preloads = 0
+
+            def stop(self):
+                self.stops += 1
+
+            def preload_current_track_paused(self):
+                self.preloads += 1
+                return True
+
+            def parent(self):
+                return None
+
+        multiple = FakePlayer(["/tmp/failed.mp3", "/tmp/next.mp3"])
+        self.assertTrue(self.singws.BackgroundMusicPlayer.recover_failed_resume(multiple))
+        self.assertEqual((multiple.current_index, multiple.stops, multiple.preloads), (1, 1, 1))
+
+        single = FakePlayer(["/tmp/only.mp3"])
+        self.assertTrue(self.singws.BackgroundMusicPlayer.recover_failed_resume(single))
+        self.assertEqual((single.current_index, single.stops, single.preloads), (0, 1, 1))
 
     def test_prestarted_overlap_also_arms_verification_at_song_end(self):
         self.assertIn("if has_bg and has_playlist and effective_playing:", self.media_end)
         self.assertIn("overlap already active at karaoke end", self.media_end)
         self.assertIn("self._bg_resume_verify_retried = False", self.media_end)
+        self.assertIn("self._bg_resume_verify_recovered = False", self.media_end)
         self.assertIn("self._verify_bg_resume_started(gen)", self.media_end)
 
 
@@ -1902,6 +1960,10 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
             self.singws._loudness_cache[self.path]["failure_version"],
             self.singws._LOUDNESS_FAILURE_CACHE_VERSION,
         )
+        self.assertTrue(self.singws._loudness_cache[self.path]["operator_review"])
+        self.assertEqual(
+            self.singws._loudness_cache[self.path]["review_status"], "needs_review"
+        )
 
     def test_a_replaced_file_is_retried(self):
         self.singws._loudness_mark_failed(self.path, "no decodable audio")
@@ -1934,6 +1996,27 @@ class LoudnessFailureMemoryTests(unittest.TestCase):
         self.assertIn("loudness_failed_cached(cache_key)", source)
         self.assertIn("skipped += 1", source)
         self.assertIn("_loudness_mark_failed", source)
+
+    def test_single_file_analysis_skips_an_unchanged_failure(self):
+        self.singws._loudness_mark_failed(self.path, "no decodable audio")
+        with mock.patch.object(self.singws, "_measure_loudness_lufs") as measure, \
+             mock.patch.object(self.singws.threading, "Thread") as thread:
+            self.singws.analyze_loudness_async(self.path)
+        measure.assert_not_called()
+        thread.assert_not_called()
+
+    def test_batch_worker_reports_operator_review_count(self):
+        self.singws._loudness_mark_failed(self.path, "no decodable audio")
+        worker = self.singws.AnalyzeLibraryWorker([
+            ("Karaoke", self.path, "Broken", self.path, self.path),
+        ])
+        counts = []
+        worker.review_required.connect(counts.append)
+        worker.run()
+        self.assertEqual(counts, [1])
+        ui_source = inspect.getsource(self.singws.KaraokeApp._start_analyze_library_items)
+        self.assertIn("worker.review_required.connect", ui_source)
+        self.assertIn("need operator review", ui_source)
 
     def test_the_zip_is_blacklisted_rather_than_its_temp_extraction(self):
         """For a ZIP, the measured path is a temp file that is deleted after."""

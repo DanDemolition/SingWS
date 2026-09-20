@@ -360,9 +360,16 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('entry["karafun_playback_assumed"] = True', worker)
         self.assertIn('entry["karafun_handoff_timed_out_before_play"] = not handoff_ready', worker)
         self.assertIn("fullscreen audience handoff not verified before play", worker)
+        self.assertIn("playback blocked to protect the show screen", worker)
+        self.assertIn("KaraFun audience screen could not be verified", worker)
+        self.assertNotIn("continuing with guarded playback", worker)
         self.assertIn("fullscreen audience handoff ready before play", worker)
         self.assertLess(
             worker.index('_schedule_early_handoff("after_result_activation")'),
+            worker.index("activated, activation_error = self._karafun_activate_result_for_playback("),
+        )
+        self.assertLess(
+            worker.index("KaraFun audience screen could not be verified"),
             worker.index("activated, activation_error = self._karafun_activate_result_for_playback("),
         )
         self.assertNotIn("handoff_deadline", worker)

@@ -4,8 +4,10 @@ import os
 import queue
 import re
 import sys
+import uuid
 import logging
 import logging.handlers
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from karafun_fullscreen import ensure_renderer_fullscreen
 
@@ -22,6 +24,8 @@ sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
 APP_VERSION = "0.4.7.7"
+PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
 KARAFUN_ESTIMATED_DURATION_SECONDS = 4 * 60
 
@@ -131,13 +135,11 @@ try:
     from mutagen import File as MutagenFile
 except Exception:
     MutagenFile = None
-from datetime import datetime, timedelta
 from network_lifecycle import ShutdownRequests
 requests = ShutdownRequests()
 import platform
 import threading
 import time
-import uuid
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from array import array
@@ -953,7 +955,8 @@ class SongSearchThread(QThread):
     results_ready = pyqtSignal(int, list)
 
     def __init__(self, job_id: int, query: str, limit: int = 500, fuzzy: bool = True,
-                 karafun_search_url: str = "", karafun_tenant: str = ""):
+                 karafun_search_url: str = "", karafun_tenant: str = "",
+                 network_allowed=None, network_failure=None, network_success=None):
         super().__init__()
         self.job_id = job_id
         self.query = query
@@ -961,9 +964,14 @@ class SongSearchThread(QThread):
         self.fuzzy = bool(fuzzy)
         self.karafun_search_url = str(karafun_search_url or "").strip()
         self.karafun_tenant = str(karafun_tenant or "").strip()
+        self.network_allowed = network_allowed
+        self.network_failure = network_failure
+        self.network_success = network_success
 
     def _karafun_rows(self, local_rows: list) -> list:
         if not self.karafun_search_url or not self.karafun_tenant or self.isInterruptionRequested():
+            return []
+        if callable(self.network_allowed) and not self.network_allowed("karafun_search"):
             return []
         try:
             response = requests.get(
@@ -972,8 +980,12 @@ class SongSearchThread(QThread):
                 timeout=4,
             )
             response.raise_for_status()
+            if callable(self.network_success):
+                self.network_success("karafun_search")
             payload = response.json()
         except Exception as e:
+            if callable(self.network_failure):
+                self.network_failure(e, "karafun_search")
             _diag(f"[KARAFUN-SEARCH] catalog lookup unavailable: {e}")
             return []
         local_keys = {
@@ -2090,6 +2102,8 @@ def _loudness_mark_failed(audio_path: str, reason: str = ""):
     entry = {
             "failed": True,
             "failure_version": _LOUDNESS_FAILURE_CACHE_VERSION,
+            "operator_review": True,
+            "review_status": "needs_review",
             "reason": str(reason or "")[:200],
             "mtime": sig[0],
             "size": sig[1],
@@ -2297,6 +2311,15 @@ def analyze_loudness_async(audio_path: str):
     if loudness_gain_db_cached(audio_path) is not None:
         try:
             _diag(f"[LOUDNESS] analysis skipped reason=cache_hit file={os.path.basename(audio_path)}")
+        except Exception:
+            pass
+        return
+    if loudness_failed_cached(audio_path):
+        try:
+            _diag(
+                f"[LOUDNESS] analysis skipped reason=unchanged_failure_needs_review "
+                f"file={os.path.basename(audio_path)}"
+            )
         except Exception:
             pass
         return
@@ -2636,6 +2659,61 @@ def setup_logging():
 
 # Initialize logging
 logger = setup_logging()
+
+
+def _executable_sha256(executable_path: str) -> str:
+    """Hash the exact running executable without loading it into memory."""
+    digest = hashlib.sha256()
+    try:
+        with open(executable_path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception as exc:
+        return f"unavailable:{type(exc).__name__}"
+
+
+def _application_build_identifier(executable_path: str) -> str:
+    """Read the packaged build identifier, with an explicit dev fallback."""
+    override = str(os.environ.get("SINGWS_BUILD_ID", "") or "").strip()
+    if override:
+        return override
+    try:
+        import plistlib
+        executable = Path(executable_path).resolve()
+        plist_path = executable.parent.parent / "Info.plist"
+        if plist_path.is_file():
+            with plist_path.open("rb") as handle:
+                info = plistlib.load(handle)
+            build = str(info.get("CFBundleVersion") or "").strip()
+            if build:
+                return build
+    except Exception:
+        pass
+    return f"dev-{APP_VERSION}"
+
+
+def _log_launch_identity() -> dict:
+    """Log immutable identity for this process before application startup."""
+    executable = str(getattr(sys, "executable", "") or "")
+    identity = {
+        "version": APP_VERSION,
+        "build_id": _application_build_identifier(executable),
+        "executable": executable,
+        "executable_sha256": _executable_sha256(executable),
+        "startup_utc": PROCESS_STARTUP_UTC,
+        "session_uuid": PROCESS_SESSION_UUID,
+        "frozen": bool(getattr(sys, "frozen", False)),
+    }
+    try:
+        logging.info("[LAUNCH] %s", json.dumps(identity, sort_keys=True, separators=(",", ":")))
+        flush_log_queue()
+    except Exception:
+        pass
+    return identity
 
 _MAC_LOCATION_DELEGATE_CLASS = None
 _DIAG_RATE_LIMIT_LAST = {}
@@ -4139,6 +4217,10 @@ class BackgroundMusicPlayer(QObject):
         self._startup_preload_resume_request = None
         self._next_preload_in_progress = False
         self._next_preload_attempt = None
+        # Files that BASS cannot open are bypassed for automatic transitions.
+        # The signature makes an edited/replaced file eligible again without
+        # requiring an application restart.
+        self._bg_unplayable_signatures = {}
         self._init_bass_engine()
 
     def _platform_audio_label(self) -> str:
@@ -4840,6 +4922,63 @@ class BackgroundMusicPlayer(QObject):
             record, duration if duration is not None else getattr(record, "duration", 0.0),
         )
 
+    @staticmethod
+    def _bg_track_signature(path):
+        normalized = os.path.abspath(str(path))
+        try:
+            stat = os.stat(normalized)
+            return normalized, int(stat.st_size), int(stat.st_mtime_ns)
+        except OSError:
+            return normalized, None, None
+
+    @staticmethod
+    def _bg_load_failure_is_permanent(path, error) -> bool:
+        """Identify file failures that retrying the same bytes cannot repair."""
+        if not os.path.isfile(str(path)):
+            return True
+        message = str(error).lower()
+        return "bass error 2" in message or "bass_error_fileopen" in message
+
+    def _mark_bg_track_unplayable(self, path, error) -> bool:
+        if not self._bg_load_failure_is_permanent(path, error):
+            return False
+        signatures = getattr(self, "_bg_unplayable_signatures", None)
+        if not isinstance(signatures, dict):
+            signatures = {}
+            self._bg_unplayable_signatures = signatures
+        signature = self._bg_track_signature(path)
+        if signatures.get(signature[0]) != signature:
+            signatures[signature[0]] = signature
+            _diag(
+                f"[BG-BASS] bypassing unopenable track until file changes "
+                f"track={Path(path).name!r} error={str(error)[:160]!r}"
+            )
+        return True
+
+    def _bg_track_is_unplayable(self, path) -> bool:
+        signatures = getattr(self, "_bg_unplayable_signatures", {})
+        if not isinstance(signatures, dict):
+            return False
+        signature = self._bg_track_signature(path)
+        saved = signatures.get(signature[0])
+        if saved is None:
+            return False
+        if saved != signature:
+            signatures.pop(signature[0], None)
+            _diag(f"[BG-BASS] changed file eligible again track={Path(path).name!r}")
+            return False
+        return True
+
+    def _next_playable_bg_index(self, step=1):
+        if not self.playlist:
+            return None
+        direction = 1 if int(step) >= 0 else -1
+        for offset in range(1, len(self.playlist) + 1):
+            index = (int(self.current_index) + direction * offset) % len(self.playlist)
+            if not self._bg_track_is_unplayable(self.playlist[index]):
+                return index
+        return None
+
     def _prepare_next_background_track(self):
         """Prescan one next BASS source off the UI thread; attach only if still next."""
         engine = self._bass_engine
@@ -4849,7 +4988,10 @@ class BackgroundMusicPlayer(QObject):
                 or host is None or not hasattr(host, "_run_on_ui_thread")
                 or getattr(self, "_next_preload_in_progress", False)):
             return
-        path = str(self.playlist[(self.current_index + 1) % len(self.playlist)])
+        next_index = self._next_playable_bg_index()
+        if next_index is None:
+            return
+        path = str(self.playlist[next_index])
         primary = engine.primary
         attempt = (id(engine), id(primary), path)
         if getattr(self, "_next_preload_attempt", None) == attempt:
@@ -4873,13 +5015,17 @@ class BackgroundMusicPlayer(QObject):
                 still_next = (
                     engine is self._bass_engine and primary is engine.primary
                     and not self.crossfade_active and bool(self.playlist)
-                    and path == str(self.playlist[(self.current_index + 1) % len(self.playlist)])
+                    and next_index == self._next_playable_bg_index()
+                    and path == str(self.playlist[next_index])
                 )
                 if not still_next or prepared is None:
                     if prepared is not None:
                         engine.discard_prepared_primary(prepared)
                     if error:
                         _diag(f"[BG-BASS] next preload unavailable track={Path(path).name!r} error={error[:160]!r}")
+                        if self._mark_bg_track_unplayable(path, error):
+                            self._next_preload_attempt = None
+                            QTimer.singleShot(0, self._prepare_next_background_track)
                     return
                 try:
                     engine.install_prepared_secondary(prepared)
@@ -4955,8 +5101,11 @@ class BackgroundMusicPlayer(QObject):
             next_index = (
                 int(target_index) % len(self.playlist)
                 if target_index is not None
-                else (self.current_index + 1) % len(self.playlist)
+                else self._next_playable_bg_index()
             )
+            if next_index is None:
+                _diag("[BG-BASS] no playable background track available for crossfade")
+                return False
             next_file = self.playlist[next_index]
             selected_duration_ms = max(100, min(8000, int(
                 self.crossfade_duration_ms if duration_ms is None else duration_ms
@@ -4990,6 +5139,7 @@ class BackgroundMusicPlayer(QObject):
                 return True
             except Exception as e:
                 print(f"Failed to start BASSmix crossfade: {e}")
+                self._mark_bg_track_unplayable(next_file, e)
                 return False
         return False
     
@@ -5054,6 +5204,34 @@ class BackgroundMusicPlayer(QObject):
                 print(f"[BG-BASS] Preload exception: {e}")
                 return False
         return False
+
+    def recover_failed_resume(self) -> bool:
+        """Rebuild a failed primary deck, advancing once when another track exists."""
+        if not self.playlist:
+            return False
+        try:
+            self.stop()
+            if len(self.playlist) > 1:
+                self.current_index = (int(self.current_index) + 1) % len(self.playlist)
+                action = "advanced"
+            else:
+                action = "rebuilt"
+            loaded = bool(self.preload_current_track_paused())
+            try:
+                parent = self.parent()
+                if parent is not None and hasattr(parent, "update_bg_track_display"):
+                    parent.update_bg_track_display()
+            except Exception:
+                pass
+            track = Path(self.playlist[self.current_index]).name
+            _diag(
+                f"[BG-HANDOFF] failed-resume recovery action={action} "
+                f"track={track!r} preloaded={int(loaded)}"
+            )
+            return loaded
+        except Exception as exc:
+            _diag(f"[BG-HANDOFF] failed-resume recovery failed err={exc}")
+            return False
 
     def preload_current_track_paused_async(self) -> bool:
         """Prescan the startup BGM source off the GUI thread, then attach it."""
@@ -5286,12 +5464,17 @@ class BackgroundMusicPlayer(QObject):
         if was_playing:
             if self.crossfade_active:
                 return
-            target_index = (self.current_index + 1) % len(self.playlist)
-            if self._start_crossfade(target_index=target_index):
+            target_index = self._next_playable_bg_index()
+            if target_index is not None and self._start_crossfade(target_index=target_index):
                 return
         
         # IMMEDIATE UI UPDATE - Update index and display BEFORE audio processing
-        self.current_index = (self.current_index + 1) % len(self.playlist)
+        target_index = self._next_playable_bg_index()
+        if target_index is None:
+            _diag("[BG-BASS] next requested but no playable background track is available")
+            self.stop()
+            return
+        self.current_index = target_index
         
         # Update UI instantly - don't wait for audio
         if hasattr(self.parent(), 'update_bg_track_display'):
@@ -13496,6 +13679,7 @@ class AnalyzeLibraryWorker(QObject):
     holding = pyqtSignal(bool)             # paused because karaoke is playing
     stage = pyqtSignal(str)                # slower substage detail for the dialog
     analysis_error = pyqtSignal(str)       # abort the whole batch without poisoning media
+    review_required = pyqtSignal(int)      # unchanged/permanent failures needing operator review
 
     # Poll interval while holding off for playback.  Short enough that the scan
     # resumes promptly between songs, long enough to cost nothing.
@@ -13560,6 +13744,7 @@ class AnalyzeLibraryWorker(QObject):
         analyzed = 0
         failed = 0
         skipped = 0
+        review_required = 0
         last_progress_emit = 0.0
         try:
             from libmpv_media_jobs import AnalysisHelperError, AnalysisTrackError, IsolatedLoudnessSession
@@ -13588,6 +13773,7 @@ class AnalyzeLibraryWorker(QObject):
             # show; the record clears itself if the file is ever replaced.
             if loudness_failed_cached(cache_key):
                 skipped += 1
+                review_required += 1
                 continue
             extracted_audio = ""
             try:
@@ -13760,6 +13946,7 @@ class AnalyzeLibraryWorker(QObject):
                     failed += 1
                     if not self.is_cancelled():
                         _loudness_mark_failed(cache_key, "no measurable loudness")
+                        review_required += 1
             except Exception as e:
                 if isinstance(e, AnalysisTrackError):
                     failed += 1
@@ -13790,6 +13977,7 @@ class AnalyzeLibraryWorker(QObject):
                     # Covers the structural failures too, e.g. a ZIP with no
                     # readable MP3 inside.
                     _loudness_mark_failed(cache_key, str(e))
+                    review_required += 1
             finally:
                 if extracted_audio:
                     try:
@@ -13819,6 +14007,7 @@ class AnalyzeLibraryWorker(QObject):
             f"[LOUDNESS-LIB] pass_complete mode={self.mode} attempted={done} "
             f"cached={analyzed} failed={failed} cancelled={int(self.is_cancelled())}"
         )
+        self.review_required.emit(review_required)
         self.finished.emit(analyzed, total)
 
 
@@ -19198,6 +19387,7 @@ class RotationView(QMainWindow):
 
 class SoundboardPad(QPushButton):
     cleared = pyqtSignal(int)  # emitted when the pad's clip changes; carries slot id
+    stopped = pyqtSignal(int)  # emitted once when an active clip becomes inactive
 
     def __init__(self, slot_index: int, parent=None, pad_height: int = 58):
         super().__init__(parent)
@@ -19321,10 +19511,13 @@ class SoundboardPad(QPushButton):
         return getattr(bg_music, "_bass_engine", None)
 
     def _stop_channel(self, release: bool = False):
+        was_playing = bool(getattr(self, "_playing", False))
         self._playing = False
         self._stop_channel_polling()
         self._channel.stop(release=release)
         self._refresh_face()
+        if was_playing:
+            self.stopped.emit(self.slot_index)
 
     def _play_from_start(self):
         self._stop_channel()
@@ -19578,6 +19771,7 @@ class SoundboardStrip(QWidget):
     """Horizontal row of N soundboard pads, persisted via parent settings."""
 
     changed = pyqtSignal()
+    became_inactive = pyqtSignal()
 
     def __init__(self, pad_count: int = 8, parent=None, pad_height: int = 58):
         super().__init__(parent)
@@ -19597,12 +19791,17 @@ class SoundboardStrip(QWidget):
         for i in range(pad_count):
             pad = SoundboardPad(i, self, pad_height=pad_height)
             pad.cleared.connect(lambda _i: self.changed.emit())
+            pad.stopped.connect(self._on_pad_stopped)
             self.pads.append(pad)
             r, c = divmod(i, cols)
             grid.addWidget(pad, r, c)
         # Equal column stretch so the pads stay evenly spaced at any strip width.
         for c in range(cols):
             grid.setColumnStretch(c, 1)
+
+    def _on_pad_stopped(self, _slot_index: int):
+        if not any(bool(getattr(pad, "_playing", False)) for pad in self.pads):
+            self.became_inactive.emit()
 
     def to_list(self) -> list[dict]:
         return [pad.to_dict() for pad in self.pads]
@@ -19787,8 +19986,10 @@ class KaraokeApp(QWidget):
         self._bg_resume_timer.setSingleShot(True)
         self._bg_resume_timer.timeout.connect(self._on_bg_resume_timer)
         self._bg_resume_reason = "default"
+        self._bg_soundboard_resume_pending_reason = ""
         self._bg_resume_verify_gen = 0
         self._bg_resume_verify_retried = False
+        self._bg_resume_verify_recovered = False
         self._media_end_handoff_active = False
         self._media_end_handoff_timer = QTimer(self)
         self._media_end_handoff_timer.setSingleShot(True)
@@ -20435,6 +20636,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self.soundboard_strip.changed.connect(self._on_soundboard_changed)
+        self.soundboard_strip.became_inactive.connect(self._on_soundboard_inactive)
         row_controls.addWidget(self.soundboard_strip)
 
         # Karaoke tempo/key controls (karaoke-only; never touches BG music).
@@ -23913,6 +24115,7 @@ class KaraokeApp(QWidget):
                 _diag(f"[TICKER] surface reassert scheduling failed reason={reason}: {exc}")
 
     def _reassert_show_ticker_surface(self, reason: str, phase: str = ""):
+        started = time.perf_counter()
         try:
             if not bool(self.settings.get("ticker_enabled", True)):
                 return
@@ -23929,6 +24132,8 @@ class KaraokeApp(QWidget):
             )
         except Exception as exc:
             _diag(f"[TICKER] surface reassert failed reason={reason}: {exc}")
+        finally:
+            _perf_log_if_slow("ui_native_surface_raise_ticker", (time.perf_counter() - started) * 1000.0)
 
     def _reassert_show_window_surface(self, reason: str):
         """Order the macOS audience parent forward without taking focus."""
@@ -23939,6 +24144,7 @@ class KaraokeApp(QWidget):
         video_window = getattr(self, "video_window", None)
         if video_window is None or not video_window.isVisible():
             return
+        started = time.perf_counter()
         try:
             import objc
             native_view = objc.objc_object(c_void_p=int(QWidget.winId(video_window)))
@@ -23949,6 +24155,8 @@ class KaraokeApp(QWidget):
             _diag(f"[SHOW-SURFACE] audience window reasserted reason={reason}")
         except Exception as exc:
             _diag(f"[SHOW-SURFACE] audience window reassert failed reason={reason}: {exc}")
+        finally:
+            _perf_log_if_slow("ui_native_surface_raise_audience", (time.perf_counter() - started) * 1000.0)
 
     def _refresh_mpv_video_views(self, reason: str = ""):
         """Re-present libmpv's retained texture after the show window returns."""
@@ -24805,6 +25013,53 @@ class KaraokeApp(QWidget):
         # Must have both URL and user ID, and URL must start with http
         return bool(base_url and user_id and base_url.startswith("http"))
 
+    NETWORK_CIRCUIT_DELAYS_SEC = (5.0, 15.0, 30.0, 60.0, 120.0, 300.0)
+
+    def _network_circuit_allows(self, operation: str = "") -> bool:
+        state = object.__getattribute__(self, "__dict__")
+        remaining = float(state.get("_network_circuit_open_until", 0.0) or 0.0) - time.monotonic()
+        if remaining <= 0:
+            return True
+        _diag_rate_limited(
+            f"network_circuit_skip:{operation}",
+            f"[NETWORK-CIRCUIT] skipped operation={operation or 'network'} retry_in_sec={remaining:.1f}",
+            30.0,
+        )
+        return False
+
+    def _network_circuit_failure(self, error, operation: str = "") -> bool:
+        text = str(error or "").lower()
+        outage_markers = (
+            "nameresolutionerror", "failed to resolve", "name or service not known",
+            "nodename nor servname", "temporary failure in name resolution",
+            "network is unreachable", "no route to host",
+        )
+        if not any(marker in text for marker in outage_markers):
+            return False
+        state = object.__getattribute__(self, "__dict__")
+        failures = int(state.get("_network_circuit_failures", 0) or 0) + 1
+        delay = float(self.NETWORK_CIRCUIT_DELAYS_SEC[min(failures - 1, len(self.NETWORK_CIRCUIT_DELAYS_SEC) - 1)])
+        state["_network_circuit_failures"] = failures
+        state["_network_circuit_open_until"] = max(
+            float(state.get("_network_circuit_open_until", 0.0) or 0.0),
+            time.monotonic() + delay,
+        )
+        _diag_rate_limited(
+            "network_circuit_open",
+            f"[NETWORK-CIRCUIT] open operation={operation or 'network'} failures={failures} retry_in_sec={delay:.1f}",
+            5.0,
+        )
+        return True
+
+    def _network_circuit_success(self, operation: str = "") -> bool:
+        state = object.__getattribute__(self, "__dict__")
+        was_open = bool(state.get("_network_circuit_failures", 0))
+        state["_network_circuit_failures"] = 0
+        state["_network_circuit_open_until"] = 0.0
+        if was_open:
+            _diag(f"[NETWORK-CIRCUIT] closed operation={operation or 'network'}; recovery confirmed")
+        return was_open
+
     def _start_configured_network_transport(self) -> bool:
         """Start an auto-recovering transport without gating on a point-in-time probe."""
         if not self.is_network_configured():
@@ -25082,6 +25337,8 @@ class KaraokeApp(QWidget):
         if bool(getattr(self, "_relay_fetch_in_flight", False)):
             self._relay_fetch_queued = True
             return
+        if not self._network_circuit_allows("request_refresh"):
+            return
         self._relay_fetch_in_flight = True
 
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
@@ -25107,6 +25364,7 @@ class KaraokeApp(QWidget):
                 else:
                     print(f"[REQUESTS] v2 fetch failed: HTTP {resp.status_code} - {(resp.text or '')[:160]!r}")
             except Exception as e:
+                self._network_circuit_failure(e, "request_refresh")
                 print(f"[REQUESTS] v2 fetch failed: {e}")
             finally:
                 fetched = rows
@@ -25118,6 +25376,7 @@ class KaraokeApp(QWidget):
         self._relay_fetch_in_flight = False
         try:
             if rows is not None:
+                self._network_circuit_success("request_refresh")
                 self._relay_last_successful_fetch_at = time.monotonic()
                 _diag_rate_limited(
                     "network_recovery_success",
@@ -25166,6 +25425,8 @@ class KaraokeApp(QWidget):
         """Retry pending sends and periodically recover missed relay notices."""
         state = object.__getattribute__(self, "__dict__")
         if bool(state.get("_app_closing", False)) or not self.is_network_configured():
+            return
+        if not self._network_circuit_allows("network_watchdog"):
             return
 
         try:
@@ -26379,6 +26640,7 @@ class KaraokeApp(QWidget):
                     ) + 1
                     verify_gen = int(self._bg_resume_verify_gen)
                     self._bg_resume_verify_retried = False
+                    self._bg_resume_verify_recovered = False
                     _diag(
                         "[BG-HANDOFF] overlap already active at karaoke end; "
                         f"verification armed generation={verify_gen}"
@@ -29435,6 +29697,8 @@ class KaraokeApp(QWidget):
             self._daw_preview_log_transition("producer_state", f"producer skipped missing_config reason={reason}")
             return
 
+        if not self._network_circuit_allows("daw_viewer_check"):
+            return
         self._daw_snapshot_inflight = True
         self._daw_preview_log_transition("producer_state", f"preview producer started reason={reason} playing={int(playing)}")
 
@@ -29448,6 +29712,7 @@ class KaraokeApp(QWidget):
                     timeout=2,
                 )
                 if resp.status_code == 200:
+                    self._network_circuit_success("daw_viewer_check")
                     self._record_daw_preview_server_success()
                     payload = resp.json()
                     viewer_seen_at = int((payload or {}).get("viewer_seen_at") or 0)
@@ -29468,6 +29733,7 @@ class KaraokeApp(QWidget):
                     self._record_daw_preview_server_failure(reason=reason, error=f"HTTP {resp.status_code}")
                     self._daw_preview_log(f"viewer check HTTP {resp.status_code} reason={reason}")
             except Exception as e:
+                self._network_circuit_failure(e, "daw_viewer_check")
                 self._record_daw_preview_server_failure(reason=reason, error=str(e))
                 self._daw_preview_log(f"viewer check failed reason={reason}: {e}")
             if should_capture:
@@ -29495,6 +29761,7 @@ class KaraokeApp(QWidget):
         return "idle"
 
     def _capture_daw_singer_screen_snapshot(self, *, reason: str = "timer", preferred_image: QImage | None = None):
+        started = time.perf_counter()
         try:
             if not self._daw_singer_screen_preview_enabled() or bool(getattr(self, "_app_closing", False)):
                 self._daw_snapshot_inflight = False
@@ -29582,6 +29849,8 @@ class KaraokeApp(QWidget):
                 reason=reason,
                 generation=int(getattr(self, "_daw_snapshot_generation", 0) or 0),
             )
+        finally:
+            _perf_log_if_slow("ui_preview_snapshot_capture", (time.perf_counter() - started) * 1000.0)
 
     def _maybe_send_daw_snapshot_from_frame(self, image: QImage | None, *, reason: str = "frame") -> None:
         try:
@@ -32370,6 +32639,9 @@ class KaraokeApp(QWidget):
                     else ""
                 ),
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
+                network_allowed=self._network_circuit_allows,
+                network_failure=self._network_circuit_failure,
+                network_success=self._network_circuit_success,
             )
             thread.results_ready.connect(on_results)
             search_state["thread"] = thread
@@ -35338,6 +35610,7 @@ class KaraokeApp(QWidget):
     def _set_server_connection_status(self, connected: bool, message: str = ""):
         msg = str(message or "").strip()
         if connected:
+            self._network_circuit_success("relay_connection")
             self._server_connection_state = "Connected"
             self._last_server_error = ""
         else:
@@ -38918,6 +39191,7 @@ class KaraokeApp(QWidget):
             return self._display_name_cache[cache_key]
         
         # OPTIMIZED: Try DB lookup first (much faster than iterating)
+        db_started = time.perf_counter()
         try:
             track = song_index.find_by_path(song_path)
             if track:
@@ -39032,6 +39306,8 @@ class KaraokeApp(QWidget):
                 pass
         except Exception:
             pass
+        finally:
+            _perf_log_if_slow("db_display_name_lookup", (time.perf_counter() - db_started) * 1000.0)
 
     def _trigger_show_screen_singer_start_vfx(
         self,
@@ -39407,6 +39683,7 @@ class KaraokeApp(QWidget):
         payload = payload if isinstance(payload, dict) else self._next_up_transition_payload_from_queue()
         if not isinstance(payload, dict) or not str(payload.get("singer", "") or "").strip():
             return False
+        started = time.perf_counter()
         try:
             area = getattr(getattr(self, "video_window", None), "video_area", None)
             if area is None or not hasattr(area, "show_next_up_overlay"):
@@ -39432,8 +39709,11 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[NEXT-UP-OVERLAY] show failed reason={reason}: {e}")
             return False
+        finally:
+            _perf_log_if_slow("ui_transition_overlay_show", (time.perf_counter() - started) * 1000.0)
 
     def _hide_next_up_transition_overlay(self, *, reason: str = "unknown", immediate: bool = True) -> None:
+        started = time.perf_counter()
         try:
             for window_name in ("video_window", "preview_window"):
                 area = getattr(getattr(self, window_name, None), "video_area", None)
@@ -39442,6 +39722,8 @@ class KaraokeApp(QWidget):
             _diag(f"[NEXT-UP-OVERLAY] app hide reason={reason} immediate={int(bool(immediate))}")
         except Exception as e:
             _diag(f"[NEXT-UP-OVERLAY] app hide failed reason={reason}: {e}")
+        finally:
+            _perf_log_if_slow("ui_transition_overlay_hide", (time.perf_counter() - started) * 1000.0)
 
     @staticmethod
     def _split_duet_for_html(value: str):
@@ -40029,6 +40311,7 @@ class KaraokeApp(QWidget):
                 return True
         except Exception:
             pass
+        snapshot_started = time.perf_counter()
         try:
             import copy as _copy
             queue_snapshot = _copy.deepcopy(getattr(self, "queue", []))
@@ -40036,6 +40319,8 @@ class KaraokeApp(QWidget):
             prefs_snapshot = _copy.deepcopy(getattr(self, "singer_preferences", {}))
         except Exception:
             return False
+        finally:
+            _perf_log_if_slow("json_save_snapshot", (time.perf_counter() - snapshot_started) * 1000.0)
 
         self._save_data_worker_inflight = True
         self._save_data_worker_pending = False
@@ -40043,13 +40328,25 @@ class KaraokeApp(QWidget):
         def worker():
             started = time.perf_counter()
             try:
-                _save_json_atomic(QUEUE_PATH, queue_snapshot)
+                step_started = time.perf_counter()
                 try:
-                    _save_json_atomic(SINGER_HISTORY_PATH, history_snapshot)
+                    _save_json_atomic(QUEUE_PATH, queue_snapshot)
+                finally:
+                    _perf_log_if_slow("json_save_queue", (time.perf_counter() - step_started) * 1000.0)
+                try:
+                    step_started = time.perf_counter()
+                    try:
+                        _save_json_atomic(SINGER_HISTORY_PATH, history_snapshot)
+                    finally:
+                        _perf_log_if_slow("json_save_history", (time.perf_counter() - step_started) * 1000.0)
                 except Exception:
                     pass
                 try:
-                    _save_json_atomic(SINGER_PREFS_PATH, prefs_snapshot)
+                    step_started = time.perf_counter()
+                    try:
+                        _save_json_atomic(SINGER_PREFS_PATH, prefs_snapshot)
+                    finally:
+                        _perf_log_if_slow("json_save_preferences", (time.perf_counter() - step_started) * 1000.0)
                 except Exception:
                     pass
             finally:
@@ -40195,6 +40492,8 @@ class KaraokeApp(QWidget):
         pending = list(state.get("_host_request_sync_ops", []) or [])
         if not pending or not self.is_network_configured():
             return 0
+        if not self._network_circuit_allows("host_request_sync"):
+            return 0
         inflight = state.get("_host_request_sync_inflight")
         if not isinstance(inflight, set):
             inflight = set()
@@ -40240,6 +40539,7 @@ class KaraokeApp(QWidget):
                         error = str(body.get("error") or f"HTTP {resp.status_code}")
                 except Exception as exc:
                     error = str(exc)
+                    self._network_circuit_failure(exc, "host_request_sync")
                 self._run_on_ui_thread(
                     lambda: self._finish_host_request_sync(op_key, ok, request_id, singer_session_id, error)
                 )
@@ -40254,6 +40554,7 @@ class KaraokeApp(QWidget):
             inflight.discard(key)
         matched_singer_idx = -1
         if ok and request_id > 0:
+            self._network_circuit_success("host_request_sync")
             for singer_idx, singer in enumerate(self.queue or []):
                 for entry in (singer or {}).get("songs", []) or []:
                     if str((entry or {}).get("host_request_key") or "") != key:
@@ -42417,7 +42718,7 @@ class KaraokeApp(QWidget):
         threads = []
         workers = []
         progress_by_worker = [0] * worker_count
-        finished_state = {"count": 0, "analyzed": 0, "error": ""}
+        finished_state = {"count": 0, "analyzed": 0, "review_required": 0, "error": ""}
 
         def _on_progress(index, done, _subtotal, name):
             progress_by_worker[index] = done
@@ -42456,6 +42757,9 @@ class KaraokeApp(QWidget):
             coordinator.cancel()
             _on_stage(f"Scan stopped: {message}\nSaving completed results…")
 
+        def _on_review_required(count):
+            finished_state["review_required"] += max(0, int(count or 0))
+
         def _on_worker_finished(index, analyzed, subtotal):
             progress_by_worker[index] = subtotal
             finished_state["count"] += 1
@@ -42477,12 +42781,19 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             analyzed_total = finished_state["analyzed"]
+            review_total = finished_state["review_required"]
             if finished_state["error"]:
                 self._set_processing_text(f"Scan stopped: {finished_state['error']}. Saved {analyzed_total} measurements; unmeasured tracks will retry.")
             elif cancelled:
                 self._set_processing_text(f"Cancelled {scan_name.lower()} {scan_subject} after {analyzed_total} of {len(items)} track(s).")
             else:
-                self._set_processing_text(f"{scan_name} {scan_subject} cached {analyzed_total} of {len(items)} track(s).")
+                suffix = (
+                    f" {review_total} unchanged failure(s) need operator review."
+                    if review_total else ""
+                )
+                self._set_processing_text(
+                    f"{scan_name} {scan_subject} cached {analyzed_total} of {len(items)} track(s).{suffix}"
+                )
 
         for index, partition in enumerate(partitions):
             thread = QThread(self)
@@ -42499,6 +42810,7 @@ class KaraokeApp(QWidget):
             worker.holding.connect(_on_holding)
             worker.stage.connect(_on_stage)
             worker.analysis_error.connect(_on_analysis_error)
+            worker.review_required.connect(_on_review_required)
             worker.finished.connect(
                 lambda analyzed, total, i=index: _on_worker_finished(i, analyzed, total)
             )
@@ -45144,6 +45456,9 @@ class KaraokeApp(QWidget):
                     else ""
                 ),
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
+                network_allowed=self._network_circuit_allows,
+                network_failure=self._network_circuit_failure,
+                network_success=self._network_circuit_success,
             )
             thread.results_ready.connect(on_results)
             search_state["thread"] = thread
@@ -47703,6 +48018,9 @@ class KaraokeApp(QWidget):
                 if bool(self.settings.get("karafun_include_online_search", False)) else ""
             ),
             karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
+            network_allowed=self._network_circuit_allows,
+            network_failure=self._network_circuit_failure,
+            network_success=self._network_circuit_success,
         )
         self._search_thread.results_ready.connect(self._apply_db_search_results)
         # The coalesced query must also drain when the worker simply exits.
@@ -48048,6 +48366,9 @@ class KaraokeApp(QWidget):
                     if bool(self.settings.get("karafun_include_online_search", False)) else ""
                 ),
                 karafun_tenant=str(self.settings.get("user", self.settings.get("tenant", "")) or ""),
+                network_allowed=self._network_circuit_allows,
+                network_failure=self._network_circuit_failure,
+                network_success=self._network_circuit_success,
             )
             self._search_thread.results_ready.connect(self._apply_db_search_results)
             self._search_thread.finished.connect(
@@ -49157,16 +49478,22 @@ class KaraokeApp(QWidget):
             if has_songs and not is_singer_skipped and not is_current_singer:
                 queue_wait_secs += self._queue_entry_duration_for_display(first_active_entry) + pad_per_singer
 
+        model_sync_started = time.perf_counter()
         try:
             model = getattr(self, "queue_display_model", None)
             if isinstance(model, QueueListModel):
                 model.syncRows(model_rows)
         except Exception:
             pass
+        finally:
+            _perf_log_if_slow("ui_queue_refresh_model_sync", (time.perf_counter() - model_sync_started) * 1000.0)
+        selection_started = time.perf_counter()
         try:
             self._restore_queue_selection_after_rebuild(selected_identity)
         except Exception:
             pass
+        finally:
+            _perf_log_if_slow("ui_queue_refresh_selection_restore", (time.perf_counter() - selection_started) * 1000.0)
         if queue_updates_suspended:
             try:
                 self.queue_display.setUpdatesEnabled(True)
@@ -49194,19 +49521,34 @@ class KaraokeApp(QWidget):
                 return
         except Exception:
             pass
-        self.update_rotation_view()
+        step_started = time.perf_counter()
+        try:
+            self.update_rotation_view()
+        finally:
+            _perf_log_if_slow("ui_queue_refresh_rotation_view", (time.perf_counter() - step_started) * 1000.0)
         try:
             timer = getattr(self, "rotation_post_timer", None)
             if timer is not None and QThread.currentThread() == timer.thread():
                 timer.start(10000)  # 10,000 ms = 10 seconds debounce
         except Exception:
             pass
-        self.schedule_ticker_update()  # Debounce ticker
+        step_started = time.perf_counter()
+        try:
+            self.schedule_ticker_update()  # Debounce ticker
+        finally:
+            _perf_log_if_slow("ui_queue_refresh_ticker_schedule", (time.perf_counter() - step_started) * 1000.0)
+        step_started = time.perf_counter()
         try:
             self._schedule_host_control_state_sync()
         except Exception:
             pass
-        self._schedule_next_up_prescan()
+        finally:
+            _perf_log_if_slow("ui_queue_refresh_host_state_schedule", (time.perf_counter() - step_started) * 1000.0)
+        step_started = time.perf_counter()
+        try:
+            self._schedule_next_up_prescan()
+        finally:
+            _perf_log_if_slow("ui_queue_refresh_prescan_schedule", (time.perf_counter() - step_started) * 1000.0)
 
     def eventFilter(self, obj, event):
         """Event filter:
@@ -49772,6 +50114,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         self._bg_resume_reason = "default"
+        self._bg_soundboard_resume_pending_reason = ""
 
     def _run_bg_transition_fade(self):
         if int(getattr(self, "_bg_transition_fade_gen", -1)) != int(getattr(self, "_bg_transition_gen", 0)):
@@ -49809,6 +50152,20 @@ class KaraokeApp(QWidget):
     def _on_bg_resume_timer(self):
         self._start_bg_with_fade_safe("resume_timer")
 
+    def _on_soundboard_inactive(self):
+        """Consume one deferred BGM resume after the final soundboard clip stops."""
+        reason = str(getattr(self, "_bg_soundboard_resume_pending_reason", "") or "")
+        if not reason:
+            return
+        self._bg_soundboard_resume_pending_reason = ""
+        if bool(getattr(self, "karaoke_playing", False)):
+            _diag(f"[BG-HANDOFF] deferred soundboard resume cancelled; karaoke active reason={reason}")
+            return
+        _diag(f"[BG-HANDOFF] soundboard inactive; consuming deferred resume reason={reason}")
+        # Let the native soundboard stream release its BASS resources before
+        # entering the background engine, without polling or repeated logging.
+        self._schedule_bg_resume(250, reason=reason)
+
     def _verify_bg_resume_started(self, generation: int):
         """Verify a requested idle resume produced real BASS playback; retry once."""
         if int(generation) != int(getattr(self, "_bg_resume_verify_gen", 0)):
@@ -49830,7 +50187,23 @@ class KaraokeApp(QWidget):
             _diag(f"[BG-HANDOFF] playback verified generation={generation}")
             return
         if bool(getattr(self, "_bg_resume_verify_retried", False)):
-            _diag(f"[BG-HANDOFF] playback still inactive after verified retry generation={generation}")
+            if bool(getattr(self, "_bg_resume_verify_recovered", False)):
+                _diag(f"[BG-HANDOFF] playback still inactive after bounded recovery generation={generation}")
+                return
+            self._bg_resume_verify_recovered = True
+            _diag(
+                f"[BG-HANDOFF] playback still inactive after verified retry; "
+                f"advancing or rebuilding deck generation={generation}"
+            )
+            try:
+                recovered = bool(bg.recover_failed_resume())
+            except Exception:
+                recovered = False
+            if not recovered:
+                _diag(f"[BG-HANDOFF] bounded deck recovery failed generation={generation}")
+                return
+            self._bg_resume_reason = "verified_recovery"
+            self._start_bg_with_fade_safe("verified_recovery")
             return
         self._bg_resume_verify_retried = True
         _diag(f"[BG-HANDOFF] playback verification failed; resetting deck and retrying generation={generation}")
@@ -49867,6 +50240,7 @@ class KaraokeApp(QWidget):
         preview = getattr(self, "preview_window", None)
         if sink is None or preview is None:
             return
+        started = time.perf_counter()
         try:
             recreate_surface = bool(getattr(self, "_preview_overlay_refresh_recreate", False))
             self._preview_overlay_refresh_recreate = False
@@ -49913,6 +50287,8 @@ class KaraokeApp(QWidget):
             )
         except Exception:
             pass
+        finally:
+            _perf_log_if_slow("ui_preview_overlay_binding", (time.perf_counter() - started) * 1000.0)
 
     def _cancel_pending_media_end_cleanup(self, reason: str = "unknown", clear_handoff: bool = True):
         """Invalidate delayed media-end cleanup so stale callbacks cannot fire later."""
@@ -51939,7 +52315,11 @@ class KaraokeApp(QWidget):
                     else:
                         _diag(
                             "[KARAFUN-AUTO] fullscreen audience handoff not verified before play; "
-                            "continuing with guarded playback"
+                            "playback blocked to protect the show screen"
+                        )
+                        raise RuntimeError(
+                            "KaraFun audience screen could not be verified. "
+                            "The song was selected but was not started."
                         )
                     _schedule_bgm_fade("fullscreen_handoff_ready")
                     activated, activation_error = self._karafun_activate_result_for_playback(
@@ -54589,6 +54969,8 @@ class KaraokeApp(QWidget):
         api_key = str(self.settings.get("api_key", "") or "").strip()
         if not base_url or not tenant or not api_key:
             return
+        if not self._network_circuit_allows("terminal_sync"):
+            return
         import threading
         state = object.__getattribute__(self, "__dict__")
         try:
@@ -54665,6 +55047,7 @@ class KaraokeApp(QWidget):
                             timeout=6,
                         )
                     except Exception as exc:
+                        self._network_circuit_failure(exc, "terminal_sync")
                         failures[rid] = str(exc)
                         _diag(
                             f"[REQUEST-LIFECYCLE] terminal push failed request_id={rid} "
@@ -54699,6 +55082,7 @@ class KaraokeApp(QWidget):
                             f"okj_confirmed={int(bool(body.get('okj_confirmed')))}"
                         )
                     if acknowledged:
+                        self._network_circuit_success("terminal_sync")
                         synced.append(rid)
                         _diag(
                             f"[REQUEST-LIFECYCLE] server confirmed terminal state "
@@ -57500,21 +57884,9 @@ class KaraokeApp(QWidget):
         except Exception:
             soundboard_active = False
         if soundboard_active:
-            self._bg_soundboard_defer_active = True
-            now = time.monotonic()
-            last_log = float(getattr(self, "_bg_soundboard_defer_log_at", 0.0) or 0.0)
-            if (now - last_log) >= 2.0:
-                self._bg_soundboard_defer_log_at = now
+            if not str(getattr(self, "_bg_soundboard_resume_pending_reason", "") or ""):
                 _diag(f"[BG-HANDOFF] resume deferred while soundboard active reason={resume_reason}")
-            self._schedule_bg_resume(250, reason=resume_reason)
-            return False
-        if bool(getattr(self, "_bg_soundboard_defer_active", False)):
-            # Do not enter background-engine BASS calls in the same callback
-            # that observes the soundboard stream ending. The 2026-09-18 show
-            # log stopped at exactly that boundary and BGM never faded in.
-            self._bg_soundboard_defer_active = False
-            _diag("[BG-HANDOFF] soundboard released; settling before background resume")
-            self._schedule_bg_resume(250, reason=resume_reason)
+            self._bg_soundboard_resume_pending_reason = resume_reason
             return False
         # If a fade left BGM silently 'playing', repair before any early-out
         # below trusts the is_playing flag.
@@ -57581,8 +57953,9 @@ class KaraokeApp(QWidget):
             _diag(f"[BG-HANDOFF] fade_in did not start reason={resume_reason}")
             self._bg_resume_verify_gen = int(getattr(self, "_bg_resume_verify_gen", 0)) + 1
             verify_gen = int(self._bg_resume_verify_gen)
-            if resume_reason != "verified_retry":
+            if resume_reason not in ("verified_retry", "verified_recovery"):
                 self._bg_resume_verify_retried = False
+                self._bg_resume_verify_recovered = False
             QTimer.singleShot(250, lambda gen=verify_gen: self._verify_bg_resume_started(gen))
             return False
         
@@ -57592,8 +57965,9 @@ class KaraokeApp(QWidget):
         _diag(f"[BG-HANDOFF] fade_in started reason={resume_reason} duration_ms={fade_in_ms}")
         self._bg_resume_verify_gen = int(getattr(self, "_bg_resume_verify_gen", 0)) + 1
         verify_gen = int(self._bg_resume_verify_gen)
-        if resume_reason != "verified_retry":
+        if resume_reason not in ("verified_retry", "verified_recovery"):
             self._bg_resume_verify_retried = False
+            self._bg_resume_verify_recovered = False
         QTimer.singleShot(1500, lambda gen=verify_gen: self._verify_bg_resume_started(gen))
         return True
 
@@ -59142,6 +59516,8 @@ if __name__ == "__main__":
     from PyQt6.QtCore import Qt, QSharedMemory
     import sys
     import gc
+
+    _log_launch_identity()
 
     # Audio resilience: raise Python's GC thresholds so the cyclic
     # collector runs much less often during normal use.  The default

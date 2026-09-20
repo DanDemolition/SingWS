@@ -254,6 +254,7 @@ class BackgroundTrackCrossfadeTests(unittest.TestCase):
         player.current_index = 1
         player.is_playing = True
         player.crossfade_active = False
+        player._bg_unplayable_signatures = {}
         player.targets = []
         player._start_crossfade = lambda target_index=None: player.targets.append(target_index) or True
         player.stop = lambda: self.fail("playing track navigation must not hard-stop audio")

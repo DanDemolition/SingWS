@@ -822,6 +822,26 @@ class PerformanceSafetyTests(unittest.TestCase):
         # Stall detection and recovery timing must survive with capture off.
         self.assertIn("GUI thread recovered after", watchdog)
 
+    def test_transition_steps_have_narrow_timing_without_stack_capture(self):
+        expected_timers = (
+            "ui_queue_refresh_model_sync",
+            "ui_queue_refresh_rotation_view",
+            "ui_preview_snapshot_capture",
+            "ui_preview_overlay_binding",
+            "ui_transition_overlay_show",
+            "ui_transition_overlay_hide",
+            "ui_native_surface_raise_ticker",
+            "ui_native_surface_raise_audience",
+            "json_save_snapshot",
+            "json_save_queue",
+            "json_save_history",
+            "json_save_preferences",
+            "db_display_name_lookup",
+        )
+        for timer_name in expected_timers:
+            self.assertIn(f'_perf_log_if_slow("{timer_name}"', MAIN_SOURCE)
+        self.assertIn('"stall_stack_capture": False', MAIN_SOURCE)
+
     def test_stall_event_attribution_is_separately_opt_in(self):
         # An application-wide Python event filter makes every Paint/Timer in the
         # app cross the C++/Python boundary. Enabling it alongside ordinary
@@ -940,6 +960,21 @@ class PerformanceSafetyTests(unittest.TestCase):
             MAIN_SOURCE.index("def prepare_log_email_package"):MAIN_SOURCE.index("def send_log_package_via_smtp")
         ]
         self.assertIn("flush_log_queue()", package)
+
+    def test_every_app_launch_logs_immutable_build_identity(self):
+        launch = MAIN_SOURCE[
+            MAIN_SOURCE.index("def _log_launch_identity"):MAIN_SOURCE.index("_MAC_LOCATION_DELEGATE_CLASS")
+        ]
+        for field in (
+            '"version"', '"build_id"', '"executable"', '"executable_sha256"',
+            '"startup_utc"', '"session_uuid"', '"frozen"',
+        ):
+            self.assertIn(field, launch)
+        self.assertIn("hashlib.sha256()", MAIN_SOURCE)
+        self.assertIn("CFBundleVersion", MAIN_SOURCE)
+        self.assertIn("flush_log_queue()", launch)
+        main_guard = MAIN_SOURCE[MAIN_SOURCE.rindex('if __name__ == "__main__":'):]
+        self.assertIn("_log_launch_identity()", main_guard)
 
     def test_singer_history_song_list_uses_model_backed_view(self):
         self.assertIn("class SingerHistorySongListModel(QAbstractListModel)", MAIN_SOURCE)

@@ -206,6 +206,33 @@ class FetchOverlapTests(unittest.TestCase):
 
 
 class NetworkRecoveryWatchdogTests(unittest.TestCase):
+    def test_dns_failure_opens_shared_circuit_and_success_closes_it(self):
+        app = make_app()
+        with mock.patch.object(MAIN.time, "monotonic", return_value=100.0):
+            self.assertTrue(app._network_circuit_failure(
+                "NameResolutionError: Failed to resolve wskar.com", "request_refresh"
+            ))
+            self.assertFalse(app._network_circuit_allows("daw_viewer_check"))
+
+        with mock.patch.object(MAIN.time, "monotonic", return_value=106.0):
+            self.assertTrue(app._network_circuit_allows("network_watchdog"))
+            self.assertTrue(app._network_circuit_success("request_refresh"))
+            self.assertTrue(app._network_circuit_allows("karafun_search"))
+
+    def test_non_connectivity_failure_does_not_open_circuit(self):
+        app = make_app()
+        self.assertFalse(app._network_circuit_failure("HTTP 500", "request_refresh"))
+        self.assertTrue(app._network_circuit_allows("request_refresh"))
+
+    def test_open_circuit_preserves_durable_queues_without_sending(self):
+        app = make_app()
+        app._host_request_sync_ops = [{"key": "one", "payload": {}}]
+        app._network_circuit_failures = 1
+        app._network_circuit_open_until = 200.0
+        with mock.patch.object(MAIN.time, "monotonic", return_value=100.0):
+            self.assertEqual(app._flush_host_request_sync_ops(), 0)
+        self.assertEqual(len(app._host_request_sync_ops), 1)
+
     def test_relay_watchdog_fetches_pending_requests_without_network_screen(self):
         app = make_app()
         app.relay_worker = object()
