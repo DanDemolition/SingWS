@@ -7865,7 +7865,19 @@ class VideoAreaWidget(QWidget):
         overlay = getattr(self, "_show_vfx_overlay", None)
         if overlay is not None:
             overlay.setGeometry(self.rect())
-            overlay.raise_()
+            # A Qt Quick window container is a native sibling of the mpv
+            # preview. Raising it unconditionally after every resize leaves
+            # the now-transparent countdown surface above mpv once the effect
+            # has finished, which looks exactly like a black preview. Reapply
+            # the effect's authoritative plane instead: active stays above;
+            # inactive is lowered beneath the retained video surface. The
+            # bounded retry covers AppKit's deferred native-child restack.
+            reassert_plane = getattr(overlay, "_update_surface_plane", None)
+            if callable(reassert_plane):
+                QTimer.singleShot(0, reassert_plane)
+                QTimer.singleShot(120, reassert_plane)
+            else:
+                overlay.raise_()
 
     def _cdg_near_black_settings(self) -> tuple[bool, int]:
         try:

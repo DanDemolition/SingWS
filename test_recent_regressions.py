@@ -78,6 +78,12 @@ class RecentRegressionTests(unittest.TestCase):
     def test_defaults_keep_simple_audio_and_ticker_speed(self):
         self.assertTrue(self.singws.DEFAULTS["simple_audio_mode"])
         self.assertIn("ticker_speed_px_per_sec", self.singws.DEFAULTS)
+
+    def test_video_area_resize_restores_transition_surface_plane(self):
+        source = inspect.getsource(self.singws.VideoAreaWidget.resizeEvent)
+        self.assertIn("_update_surface_plane", source)
+        self.assertIn("QTimer.singleShot(120, reassert_plane)", source)
+        self.assertIn("if callable(reassert_plane):", source)
         self.assertGreater(float(self.singws.DEFAULTS["ticker_speed_px_per_sec"]), 0)
         self.assertEqual(int(self.singws.DEFAULTS["video_timing_offset_ms"]), 0)
         self.assertFalse(self.singws.DEFAULTS["next_up_overlay_enabled"])
