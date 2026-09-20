@@ -31,6 +31,7 @@ class CurrentSingerPresentationTests(unittest.TestCase):
         app.karaoke_playing = True
         app._current_karaoke_singer_id = "singer-b"
         app._current_karaoke_request_id = "local:req-b"
+        app._current_playback_detached_from_rotation = False
         app.queue = [
             singer("singer-a", "Alex", "req-a"),
             singer("singer-b", "Alex", "req-b"),  # duplicate display name is intentional
@@ -65,6 +66,22 @@ class CurrentSingerPresentationTests(unittest.TestCase):
         current, _next_up, warning = self.indices(app)
         self.assertEqual(current, -1)
         self.assertTrue(warning)
+
+    def test_deliberate_host_removal_is_not_a_mapping_warning(self):
+        app = self.app()
+        app.queue.pop(1)
+        app._current_playback_detached_from_rotation = True
+        current, next_up, warning = self.indices(app)
+        self.assertEqual(current, -1)
+        self.assertEqual(next_up, 0)
+        self.assertFalse(warning)
+
+    def test_now_singing_timing_cleanup_never_references_lookup_timer(self):
+        # A misplaced performance-timing finally block used to raise a
+        # NameError here after the UI update had otherwise succeeded.
+        self.module.KaraokeApp._set_now_singing_3line(
+            SimpleNamespace(), "Singer", "Artist", "Title"
+        )
 
     def test_next_up_never_reuses_current_singer(self):
         app = self.app()

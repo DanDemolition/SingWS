@@ -20962,6 +20962,7 @@ class KaraokeApp(QWidget):
         self._current_karaoke_singer_display = ""
         self._current_karaoke_singer_id = ""
         self._current_karaoke_request_id = ""
+        self._current_playback_detached_from_rotation = False
         self._current_karaoke_song_path = ""
         self._current_karaoke_artist = ""
         self._current_karaoke_title = ""
@@ -23076,7 +23077,13 @@ class KaraokeApp(QWidget):
                             break
                     if current_idx >= 0:
                         break
-            warning = current_idx < 0
+            # A host may deliberately remove the current singer/song while the
+            # media keeps playing. That is a normal detached-playback state,
+            # not an identity failure. Preserve the warning for unexpected
+            # sync/mapping loss, where it remains useful and safety-critical.
+            warning = current_idx < 0 and not bool(
+                getattr(self, "_current_playback_detached_from_rotation", False)
+            )
         for idx, singer in enumerate(self.queue or []):
             if idx == current_idx or singer.get("skipped", False):
                 continue
@@ -37797,6 +37804,7 @@ class KaraokeApp(QWidget):
             self._current_karaoke_singer_display = ""
             self._current_karaoke_singer_id = ""
             self._current_karaoke_request_id = ""
+            self._current_playback_detached_from_rotation = False
             try:
                 self._update_last_sung_card()
             except Exception:
@@ -39263,6 +39271,7 @@ class KaraokeApp(QWidget):
     
     def _set_now_singing_3line(self, singer_display: str, artist: str, title: str):
         """Render the 3-line Now Singing block (singer / artist / title) with proper eliding."""
+        started = time.perf_counter()
         try:
             # Persist raw parts so we can re-elide on resize
             self._now_singing_parts = (singer_display or "", artist or "", title or "")
@@ -39327,7 +39336,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         finally:
-            _perf_log_if_slow("db_display_name_lookup", (time.perf_counter() - db_started) * 1000.0)
+            _perf_log_if_slow("ui_now_singing_update", (time.perf_counter() - started) * 1000.0)
 
     def _trigger_show_screen_singer_start_vfx(
         self,
@@ -49839,6 +49848,21 @@ class KaraokeApp(QWidget):
             singer_idx = self._queue_item_singer_index(item, index)
             if singer_idx != -1:
                 try:
+                    removed_singer_id = str(self.queue[singer_idx].get("singer_id") or "").strip()
+                    current_singer_id = str(
+                        getattr(self, "_current_karaoke_singer_id", "") or ""
+                    ).strip()
+                    if bool(getattr(self, "karaoke_playing", False)) and (
+                        removed_singer_id and removed_singer_id == current_singer_id
+                    ):
+                        self._current_playback_detached_from_rotation = True
+                        _diag(
+                            "[ROTATION] current playback detached by host singer removal; "
+                            "media continues normally"
+                        )
+                except Exception:
+                    pass
+                try:
                     singer = self.queue[singer_idx]
                     for entry in list(singer.get("songs", []) or []):
                         remote_request_id = self._queue_entry_remote_request_id(entry)
@@ -49856,6 +49880,22 @@ class KaraokeApp(QWidget):
         elif item_kind == "song":
             singer_idx, song_idx = self._queue_item_song_indices(item, index)
             if singer_idx != -1 and song_idx != -1:
+                try:
+                    removed_entry = self.queue[singer_idx]["songs"][song_idx]
+                    removed_request_id = self._ensure_queue_entry_id(removed_entry)
+                    current_request_id = str(
+                        getattr(self, "_current_karaoke_request_id", "") or ""
+                    ).strip()
+                    if bool(getattr(self, "karaoke_playing", False)) and (
+                        removed_request_id and removed_request_id == current_request_id
+                    ):
+                        self._current_playback_detached_from_rotation = True
+                        _diag(
+                            "[ROTATION] current playback detached by host song removal; "
+                            "media continues normally"
+                        )
+                except Exception:
+                    pass
                 try:
                     entry = self.queue[singer_idx]["songs"][song_idx]
                     remote_request_id = self._queue_entry_remote_request_id(entry)
@@ -53099,6 +53139,7 @@ class KaraokeApp(QWidget):
         self._current_karaoke_singer_display = str(singer_display or "")
         self._current_karaoke_singer_id = self._ensure_singer_id(singer)
         self._current_karaoke_request_id = self._ensure_queue_entry_id(entry)
+        self._current_playback_detached_from_rotation = False
         self._current_karaoke_song_path = str(self._song_info_primary_path(song_info) or "")
         self._current_karaoke_artist = str(artist or "")
         self._current_karaoke_title = str(title or "")
@@ -54010,6 +54051,7 @@ class KaraokeApp(QWidget):
             self._current_karaoke_singer_display = str(singer_display or "")
             self._current_karaoke_singer_id = singer_id
             self._current_karaoke_request_id = request_id
+            self._current_playback_detached_from_rotation = False
             self._current_karaoke_song_path = str(song_path_display or "")
             self._current_karaoke_artist = str(artist or "")
             self._current_karaoke_title = str(title or "")

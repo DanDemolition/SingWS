@@ -1109,12 +1109,16 @@ static GLuint makeProgram(void) {
         [output addSubview:_outputView positioned:NSWindowBelow relativeTo:nil];
         bridgeLog("[bridge] output view reparented to current host");
     }
+    if(output && _outputView.superview==output)
+        _outputView.frame=output.bounds;
     if(preview && _previewView.superview!=preview){
         [_previewView removeFromSuperview];
         _previewView.frame=preview.bounds;
         [preview addSubview:_previewView positioned:NSWindowBelow relativeTo:nil];
         bridgeLog("[bridge] preview view reparented to current host");
     }
+    if(preview && _previewView.superview==preview)
+        _previewView.frame=preview.bounds;
     // Re-showing a Qt top-level can give its native children a new Cocoa
     // drawable even though the NSView objects survive. update alone leaves the
     // context bound to the retired drawable after a few hide/show cycles.
@@ -1123,8 +1127,16 @@ static GLuint makeProgram(void) {
     for(BridgeVideoView *view in @[_outputView,_previewView]){
         NSOpenGLContext *ctx=view.openGLContext;
         if(!ctx || !view.window)continue;
-        [ctx clearDrawable];
-        [ctx setView:view];
+        // A resize does not replace the drawable. Clearing it on every
+        // debounced resize pass briefly disconnects the preview, and CDG may
+        // not emit another graphics packet to make that view visible again.
+        // viewDidMoveToWindow/nativeViewDidAttach owns real window changes;
+        // only bind here when the context is not already attached to this
+        // retained view.
+        if(ctx.view!=view){
+            [ctx clearDrawable];
+            [ctx setView:view];
+        }
         [ctx update];
     }
     [_outputView setNeedsDisplay:YES];
