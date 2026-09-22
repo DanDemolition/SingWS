@@ -43,7 +43,7 @@ class RotationTvDesignTests(unittest.TestCase):
         QTest.qWait(20)
         view.set_effects_enabled(True)
         view._tick_animated_backdrop()
-        self.assertEqual(view._backdrop_animation_timer.interval(), 250)
+        self.assertEqual(view._backdrop_animation_timer.interval(), 1000)
         self.assertFalse(view.rotation_rail._root.property('effectsEnabled'))
         self.assertFalse(view.now_singing_surface._root.property('effectsEnabled'))
         self.assertTrue(view.rotation_rail._root.property('running'))

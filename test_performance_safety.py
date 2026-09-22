@@ -836,7 +836,7 @@ class PerformanceSafetyTests(unittest.TestCase):
             "json_save_queue",
             "json_save_history",
             "json_save_preferences",
-            "db_display_name_lookup",
+            "ui_now_singing_update",
         )
         for timer_name in expected_timers:
             self.assertIn(f'_perf_log_if_slow("{timer_name}"', MAIN_SOURCE)
