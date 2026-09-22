@@ -2,7 +2,9 @@ import unittest
 import threading
 from unittest.mock import patch
 
-from karafun_fullscreen import ensure_renderer_fullscreen
+from karafun_fullscreen import (
+    ensure_renderer_fullscreen, renderer_fullscreen_script, renderer_click_target_script,
+)
 
 
 class Host:
@@ -42,6 +44,24 @@ class InlineTimer:
 
 
 class FullscreenTests(unittest.TestCase):
+    def test_player_menu_precedes_generic_fullscreen_and_requires_audience_window(self):
+        script = "\n".join(renderer_fullscreen_script())
+        menu_click = 'click menu item "Expand Player to Full Screen" of playerMenu'
+        self.assertLess(script.index('if name of candidateWindow is "Dual Renderer"'),
+                        script.index(menu_click))
+        self.assertLess(script.index('if exists menu item "Exit Player Full Screen"'),
+                        script.index(menu_click))
+        self.assertLess(script.index(menu_click),
+                        script.index('set value of attribute "AXFullScreen"'))
+        self.assertIn('if not requested and', script)
+
+    def test_verification_and_gesture_guard_recognize_player_fullscreen_without_toggling(self):
+        script = "\n".join(renderer_fullscreen_script(request=False))
+        self.assertIn('Exit Player Full Screen', script)
+        self.assertNotIn('click menu item', script)
+        self.assertNotIn('set value of attribute "AXFullScreen"', script)
+        self.assertIn('Exit Player Full Screen', "\n".join(renderer_click_target_script()))
+
     @patch("threading.Thread", InlineThread)
     def test_windowed_uses_current_renderer_bounds_once_then_only_verifies(self):
         host = Host(["WINDOWED", "CLICK|-500|400", "FULLSCREEN"])

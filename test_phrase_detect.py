@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -285,6 +286,30 @@ class DetectTrailingSilenceTests(ToneWavFixture, unittest.TestCase):
     def test_measures_trailing_silence(self):
         path = self._write_wav((2.0, 0.5), (1.5, 0.0))
         self.assertAlmostEqual(pd.detect_trailing_silence(path), 1.5, delta=0.15)
+
+    def test_known_duration_rescues_missing_metadata(self):
+        path = self._write_wav((2.0, 0.5), (1.5, 0.0))
+        with patch.object(pd, "probe_duration_seconds", return_value=0.0):
+            self.assertAlmostEqual(pd.detect_trailing_silence(
+                path, duration_hint=3.5, raise_on_error=True), 1.5, delta=0.15)
+
+    def test_metadata_duration_takes_precedence_over_library_hint(self):
+        path = self._write_wav((2.0, 0.5), (1.5, 0.0))
+        self.assertAlmostEqual(pd.detect_trailing_silence(
+            path, duration_hint=300.0, raise_on_error=True), 1.5, delta=0.15)
+
+    def test_strict_scan_exposes_decode_failure(self):
+        path = self._write_wav((1.0, 0.5))
+        with patch.object(pd, "_decode_pcm", side_effect=RuntimeError("decoder unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "decoder unavailable"):
+                pd.detect_trailing_silence(path, raise_on_error=True)
+            self.assertEqual(pd.detect_trailing_silence(path), 0.0)
+
+    def test_strict_scan_exposes_unknown_duration(self):
+        path = self._write_wav((1.0, 0.5))
+        with patch.object(pd, "probe_duration_seconds", return_value=0.0):
+            with self.assertRaisesRegex(ValueError, "duration unavailable"):
+                pd.detect_trailing_silence(path, raise_on_error=True)
 
     def test_tone_to_the_end_returns_zero(self):
         path = self._write_wav((2.0, 0.5))

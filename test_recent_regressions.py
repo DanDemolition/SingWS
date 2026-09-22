@@ -461,19 +461,27 @@ class RecentRegressionTests(unittest.TestCase):
             try:
                 recent = Path(td) / "singws_recent.log"
                 recent.write_text("api_key=secret token=abc password: hunter2 ok", encoding="utf-8")
+                rotated = Path(td) / "singws_2026-09-20.log.2026-09-20"
+                rotated.write_text("[22:00:00] token=evening-secret", encoding="utf-8")
+                (Path(td) / "settings.json").write_text("private state", encoding="utf-8")
+                old_rotated = Path(td) / "singws_2026-09-10.log.2026-09-10"
+                old_rotated.write_text("old evening", encoding="utf-8")
                 old = Path(td) / "singws_old.log"
                 old.write_text("old secret", encoding="utf-8")
                 old_time = time.time() - (5 * 86400)
                 old.touch()
                 import os
                 os.utime(old, (old_time, old_time))
+                os.utime(old_rotated, (old_time, old_time))
 
                 package, files, error = self.singws.prepare_log_email_package(days=3)
                 self.assertEqual(error, "")
                 self.assertIsNotNone(package)
-                self.assertEqual([p.name for p in files], ["singws_recent.log"])
+                self.assertEqual([p.name for p in files], [rotated.name, "singws_recent.log"])
                 with zipfile.ZipFile(package, "r") as zf:
                     text = zf.read("singws_recent.log").decode("utf-8")
+                    self.assertEqual(zf.read(rotated.name).decode("utf-8"),
+                                     "[22:00:00] token=***")
                 self.assertNotIn("secret", text)
                 self.assertNotIn("hunter2", text)
                 self.assertIn("api_key=***", text)
@@ -481,6 +489,20 @@ class RecentRegressionTests(unittest.TestCase):
                 self.assertIn("password: ***", text)
             finally:
                 self.singws.LOGS_DIR = old_logs_dir
+
+    def test_failed_tail_scan_is_not_cached_and_can_recover(self):
+        with mock.patch.object(self.singws, "_TRAILING_SILENCE_CACHE", {}), \
+             mock.patch.object(self.singws.phrase_detect, "detect_trailing_silence",
+                               side_effect=[RuntimeError("decode failed"), 9.7]) as scan:
+            with self.assertRaisesRegex(RuntimeError, "decode failed"):
+                self.singws.detect_trailing_silence(
+                    "track.mp3", duration_hint=320.0, raise_on_error=True)
+            self.assertIsNone(self.singws.trailing_silence_cached("track.mp3"))
+            self.assertEqual(self.singws.detect_trailing_silence(
+                "track.mp3", duration_hint=320.0, raise_on_error=True), 9.7)
+            self.assertEqual(self.singws.trailing_silence_cached("track.mp3"), 9.7)
+            scan.assert_called_with("track.mp3", noise_db=-55.0,
+                                    duration_hint=320.0, raise_on_error=True)
 
     def test_rotation_data_omits_empty_singer_and_keeps_active_numbers_contiguous(self):
         app = make_app(self.singws)

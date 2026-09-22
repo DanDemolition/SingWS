@@ -2398,7 +2398,12 @@ def _recent_log_files(days: int = 3, *, now: float | None = None) -> list[Path]:
         for path in LOGS_DIR.glob("*"):
             if not path.is_file():
                 continue
-            if path.suffix.lower() not in {".log", ".txt"}:
+            # Midnight rotation appends a date after .log. These files hold
+            # the pre-midnight portion of a show and must travel with the log.
+            rotated_log = re.fullmatch(
+                r"singws_\d{4}-\d{2}-\d{2}\.log\.\d{4}-\d{2}-\d{2}", path.name
+            )
+            if path.suffix.lower() not in {".log", ".txt"} and not rotated_log:
                 continue
             try:
                 if path.stat().st_mtime >= cutoff:
@@ -4123,7 +4128,7 @@ _TRAILING_SILENCE_CACHE: dict[str, float] = {}
 _TRAILING_SILENCE_LOCK = threading.Lock()
 
 
-def detect_trailing_silence(path, noise_db=-55.0) -> float:
+def detect_trailing_silence(path, noise_db=-55.0, *, duration_hint=0.0, raise_on_error=False) -> float:
     """Trailing-silence length for `path`, cached per resolved audio file.
 
     The live meter cannot distinguish a quiet outro, a fade, or a reverb tail
@@ -4141,9 +4146,15 @@ def detect_trailing_silence(path, noise_db=-55.0) -> float:
     if hit is not None:
         return float(hit)
     try:
-        value = float(phrase_detect.detect_trailing_silence(key, noise_db=noise_db))
-    except Exception:
-        value = 0.0
+        value = float(phrase_detect.detect_trailing_silence(
+            key, noise_db=noise_db, duration_hint=duration_hint, raise_on_error=True,
+        ))
+    except Exception as exc:
+        # A failed scan is not a verified zero-length tail. Do not cache it.
+        if raise_on_error:
+            raise
+        _diag(f"[END-AUDIO] scan failed file={os.path.basename(key)} error={exc!r}")
+        return 0.0
     with _TRAILING_SILENCE_LOCK:
         _TRAILING_SILENCE_CACHE[key] = value
     return value
@@ -38283,7 +38294,16 @@ class KaraokeApp(QWidget):
                     f"file={os.path.basename(scan_path)}"
                 )
                 return
-            trailing = detect_trailing_silence(scan_path)
+            try:
+                trailing = detect_trailing_silence(
+                    scan_path, duration_hint=scan_duration, raise_on_error=True,
+                )
+            except Exception as exc:
+                _diag(
+                    f"[END-AUDIO] scan failed; retaining normal end-of-file "
+                    f"file={os.path.basename(scan_path)} error={exc!r}"
+                )
+                return
             # _run_on_ui_thread, NOT QTimer.singleShot: a two-argument
             # singleShot called from a worker starts a timer on a thread with
             # no event loop, so the callback never runs. The scan completed and

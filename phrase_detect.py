@@ -117,6 +117,9 @@ def detect_trailing_silence(
     noise_db: float = -55.0,
     max_scan_seconds: float = 60.0,
     sr: int = 16000,
+    *,
+    duration_hint: float = 0.0,
+    raise_on_error: bool = False,
 ) -> float:
     """Length of the trailing silence (seconds) at the end of `path`.
 
@@ -130,33 +133,35 @@ def detect_trailing_silence(
     Only the last `max_scan_seconds` are decoded by libmpv, so cost
     does not grow with song length.
 
-    Returns 0.0 on any decode error, on a fully silent scan, and -- crucially
-    -- whenever the tail never drops below the threshold. Every failure mode
-    reports "no trailing silence", which makes the caller play the file to its
-    full duration rather than risk clipping a final note.
+    Uses duration_hint only if metadata cannot provide a duration. By default,
+    errors return 0.0 for compatibility; raise_on_error lets playback distinguish
+    a failed scan from verified absence of trailing silence and avoid caching it.
+    Fully silent scans and tails above the threshold return 0.0 conservatively.
     """
     try:
         import os
 
         if not path or not os.path.exists(str(path)):
-            return 0.0
+            raise FileNotFoundError(str(path))
         noise_db = float(noise_db)
         sr = max(1000, int(sr))
         scan = max(1.0, float(max_scan_seconds))
         duration = probe_duration_seconds(path)
         if duration <= 0:
-            return 0.0
+            duration = max(0.0, float(duration_hint or 0.0))
+        if not np.isfinite(duration) or duration <= 0:
+            raise ValueError("audio duration unavailable")
         samples = _decode_pcm(
             path, sr=sr, channels=2,
             start_seconds=max(0.0, duration - scan), timeout=20)
         frames = samples.size // 2
         if frames <= 0:
-            return 0.0
+            raise ValueError("tail decode produced no audio frames")
         stereo = samples[: frames * 2].reshape(-1, 2)
         window = max(1, sr // 10)  # 100 ms windows, matching the lead scan
         n_windows = frames // window
         if n_windows <= 0:
-            return 0.0
+            raise ValueError("tail decode shorter than one analysis window")
         blocks = stereo[: n_windows * window].reshape(n_windows, window, 2)
         rms = np.sqrt(np.mean(np.square(blocks.astype(np.float64)), axis=1))
         rms_db = 20.0 * np.log10(np.maximum(rms.max(axis=1), 1e-9))
@@ -205,6 +210,8 @@ def detect_trailing_silence(
             return 0.0
         return float(adaptive_trailing_windows) * window_s
     except Exception:
+        if raise_on_error:
+            raise
         return 0.0
 
 
