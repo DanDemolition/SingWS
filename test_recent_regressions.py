@@ -2257,8 +2257,10 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         activate = inspect.getsource(
             self.singws.KaraokeApp._karafun_activate_result_for_playback
         )
-        self.assertIn('starts with "Results for "', activate)
-        self.assertIn('perform action "AXRaise" of mainWindow', activate)
+        resolver = inspect.getsource(self.singws.KaraokeApp._karafun_search_script)
+        self.assertIn("resolve_only=True", activate)
+        self.assertIn('starts with "Results for "', resolver)
+        self.assertIn('perform action "AXRaise" of mainWindow', resolver)
         self.assertIn("_macos_native_double_click", activate)
         self.assertIn("_karafun_activate_result_for_playback(", self.automation)
 
