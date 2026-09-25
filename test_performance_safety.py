@@ -1359,7 +1359,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("using physical EOS fallback", MAIN_SOURCE)
         self.assertIn("threading.Thread", arm)
 
-    def test_scanned_tail_ends_promptly_without_waiting_for_graphics(self):
+    def test_scanned_tail_respects_hold_and_lyrics_before_completion(self):
         timer = mock.Mock()
         namespace = {"time": __import__("time"), "NS_PER_SECOND": 1_000_000_000,
                      "QTimer": timer, "_diag": lambda *args: None}
@@ -1372,6 +1372,8 @@ class PerformanceSafetyTests(unittest.TestCase):
             _end_silence_db_threshold=-38, _read_level_db=lambda: None,
             _end_trim_threshold_sec=lambda: 2.5, _karaoke_audio_end_s=100.0,
             _handle_media_end_safe=mock.Mock(),
+            _karaoke_visual_end_s=100.0, _karaoke_visual_end_confidence=1.0,
+            karaoke_transport=types.SimpleNamespace(cdg_lyrics_finished=lambda: True),
         )
         ns = 1_000_000_000
         self.assertFalse(trim(host, 115*ns, 99*ns))
@@ -1382,8 +1384,30 @@ class PerformanceSafetyTests(unittest.TestCase):
         host._read_level_db = lambda: -15.0
         self.assertFalse(trim(host, 115*ns, 101*ns))
         host._read_level_db = lambda: None
-        self.assertTrue(trim(host, 115*ns, 101*ns))
         self.assertFalse(trim(host, 115*ns, 102*ns))
+        self.assertFalse(trim(host, 115*ns, int(102.49*ns)))
+        host._karaoke_visual_end_s = None
+        self.assertFalse(trim(host, 115*ns, 103*ns))
+        host._karaoke_visual_end_s = 104.0
+        self.assertFalse(trim(host, 115*ns, 103*ns))
+        host._karaoke_visual_end_s = 100.0
+        host._karaoke_visual_end_confidence = 0.5
+        self.assertFalse(trim(host, 115*ns, 103*ns))
+        host._karaoke_visual_end_confidence = 1.0
+        host.karaoke_transport.cdg_lyrics_finished = lambda: False
+        self.assertFalse(trim(host, 115*ns, 103*ns))
+        host.karaoke_transport.cdg_lyrics_finished = mock.Mock(side_effect=RuntimeError("unavailable"))
+        self.assertFalse(trim(host, 115*ns, 103*ns))
+        host.karaoke_transport.cdg_lyrics_finished = None
+        self.assertFalse(trim(host, 115*ns, 103*ns))
+        host.karaoke_transport.cdg_lyrics_finished = lambda: True
+        host._read_level_db = lambda: -15.0
+        self.assertFalse(trim(host, 115*ns, 103*ns))
+        host._read_level_db = lambda: None
+        host._end_trim_threshold_sec = lambda: 5.0
+        self.assertFalse(trim(host, 115*ns, 104*ns))
+        self.assertTrue(trim(host, 115*ns, 105*ns))
+        self.assertFalse(trim(host, 115*ns, 106*ns))
         timer.singleShot.assert_called_once()
         timer.singleShot.call_args.args[1]()
         host._handle_media_end_safe.assert_called_once_with("verified_silent_tail")
@@ -1391,7 +1415,7 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_verified_audio_tail_can_crossfade_while_cdg_final_card_remains(self):
         trim = function_source("_maybe_trim_end_silence")
         audio_crossfade = trim.index("self._prefire_bgm_at_verified_audio_end()")
-        visual_guard = trim.index("if visual_end is None or visual_confidence < 0.85:")
+        visual_guard = trim.index("if visual_end is None or visual_confidence < 0.85:", audio_crossfade)
         self.assertLess(audio_crossfade, visual_guard)
 
         prefire = function_source("_prefire_bgm_at_verified_audio_end")

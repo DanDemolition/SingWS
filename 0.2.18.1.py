@@ -9,7 +9,7 @@ import logging
 import logging.handlers
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from karafun_fullscreen import ensure_renderer_fullscreen
+from karafun_fullscreen import ensure_renderer_fullscreen, renderer_raise_script, renderer_windowed_script
 
 # The BASS master/EQ processors run as Python DSP callbacks on the audio
 # thread, so producing sound needs the GIL -- unlike the old GStreamer pipeline,
@@ -3516,6 +3516,7 @@ DEFAULTS = {
     "karafun_open_automatically": True, # Focus/open KaraFun when an external KaraFun queue item becomes active
     "karafun_manage_show_screen": True, # macOS: hand the show display to KaraFun, then restore SingWS on completion
     "karafun_transparent_handoff": True, # Reveal an already-positioned KaraFun renderer through the SingWS show window
+    "karafun_windowed_reveal": False, # opt-in: reveal a display-sized renderer without a KaraFun fullscreen Space
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
     "karafun_accessibility_prompt_requested": False, # macOS trust prompt is requested once for an automation-enabled install
     "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
@@ -28327,7 +28328,7 @@ class KaraokeApp(QWidget):
         v.addWidget(karaoke_bgm_crossfade_cb)
 
         end_silence_cb = QCheckBox("Skip verified silence at the end of karaoke songs")
-        end_silence_cb.setToolTip("Ends after the scanned final audible audio, without waiting for silent credits or a final graphics card. Unscanned songs play to their normal end.")
+        end_silence_cb.setToolTip("Ends after the scanned audio endpoint plus the verified tail hold, once lyrics are confirmed finished. Unverified endings play to their normal end.")
         end_silence_cb.setChecked(bool(self.settings.get("karaoke_trim_verified_tail", True)))
         v.addWidget(end_silence_cb)
 
@@ -28337,7 +28338,7 @@ class KaraokeApp(QWidget):
         end_threshold_spin.setRange(0.5, 60.0)
         end_threshold_spin.setDecimals(1)
         end_threshold_spin.setSingleStep(0.5)
-        end_threshold_spin.setToolTip("How long the verified silent tail must remain quiet before background music may fade in.")
+        end_threshold_spin.setToolTip("Minimum playback time after the scanned audio endpoint before early completion. Background crossfade is controlled separately.")
         try:
             end_threshold_spin.setValue(max(0.5, min(60.0, float(self.settings.get("end_silence_trim_threshold_sec", 2.5)))))
         except Exception:
@@ -36789,6 +36790,16 @@ class KaraokeApp(QWidget):
             )
             v.addWidget(karafun_transparent_cb)
 
+            karafun_windowed_cb = QCheckBox("Reveal KaraFun without switching fullscreen Spaces (experimental)")
+            karafun_windowed_cb.setChecked(bool(self.settings.get("karafun_windowed_reveal", False)))
+            karafun_windowed_cb.setEnabled(karafun_transparent_cb.isChecked())
+            karafun_transparent_cb.toggled.connect(karafun_windowed_cb.setEnabled)
+            karafun_windowed_cb.setToolTip(
+                "Positions KaraFun's lyric window on the show display, then makes SingWS transparent "
+                "and lets clicks pass through. Rehearse on your two-screen setup before a show."
+            )
+            v.addWidget(karafun_windowed_cb)
+
             karafun_audio_follow_cb = QCheckBox("Always route KaraFun to SingWS's saved audio output")
             karafun_audio_follow_cb.setChecked(bool(self.settings.get("karafun_audio_output_follow_singws", True)))
             karafun_audio_follow_cb.setToolTip(
@@ -37195,6 +37206,7 @@ class KaraokeApp(QWidget):
                 self.settings["host_controls_pin"] = host_pin_edit.text().strip()
                 self.settings["karafun_auto_queue_enabled"] = bool(karafun_enable_cb.isChecked())
                 self.settings["karafun_transparent_handoff"] = bool(karafun_transparent_cb.isChecked())
+                self.settings["karafun_windowed_reveal"] = bool(karafun_windowed_cb.isChecked())
                 self.settings["karafun_audio_output_follow_singws"] = bool(karafun_audio_follow_cb.isChecked())
                 self.settings["karafun_audio_output_name"] = karafun_audio_edit.text().strip()
                 self._karafun_audio_route_cache = None
@@ -38835,13 +38847,27 @@ class KaraokeApp(QWidget):
             return False
 
         if bool(self.settings.get("karaoke_trim_verified_tail", True)):
-            # The scan covers the complete file, so a quiet passage earlier in
-            # the song cannot qualify. Allow 150ms for scan-frame rounding;
-            # do not add another multi-second silence timer or wait for credits.
-            if elapsed < float(audio_end) + 0.15:
+            # A scanned endpoint is an estimate. Preserve the host's hold in
+            # media time, including when mpv has no live meter to confirm it.
+            if elapsed < float(audio_end) + threshold_s:
                 return False
             if not meterless and db > float(self._end_silence_db_threshold):
                 return False
+            visual_end = getattr(self, "_karaoke_visual_end_s", None)
+            visual_confidence = float(getattr(self, "_karaoke_visual_end_confidence", 0.0) or 0.0)
+            if visual_end is None or visual_confidence < 0.85:
+                return False
+            if elapsed < float(visual_end):
+                return False
+            if getattr(self, "_end_silence_mode", "") == "cdg":
+                gate = getattr(getattr(self, "karaoke_transport", None), "cdg_lyrics_finished", None)
+                if not callable(gate):
+                    return False
+                try:
+                    if not gate():
+                        return False
+                except Exception:
+                    return False
             self._end_silence_tail_handoff_started = True
             self._end_silence_triggered = True
             self._end_silence_last_reason = "verified_audio_tail"
@@ -50897,7 +50923,10 @@ class KaraokeApp(QWidget):
             _diag("[KARAFUN] show-screen handoff already in progress; duplicate ignored")
             return
         if bool(getattr(self, "_karafun_handoff_complete", False)):
-            _diag("[KARAFUN] show-screen handoff already complete; duplicate ignored")
+            # Starting a result raises KaraFun's control window after the
+            # initial handoff. Re-raise the renderer without another toggle.
+            if isinstance(getattr(self, "_active_external_karafun", None), dict):
+                self._karafun_run_window_script(renderer_raise_script(), timeout=5)
             return
         vw = getattr(self, "video_window", None)
         if vw is None:
@@ -50918,6 +50947,13 @@ class KaraokeApp(QWidget):
                 return
             self._karafun_handoff_in_progress = False
             self._karafun_handoff_complete = bool(complete)
+
+        if (bool(self.settings.get("karafun_transparent_handoff", True))
+                and bool(self.settings.get("karafun_windowed_reveal", False))
+                and not bool(getattr(self, "_karafun_transparent_renderer_ready", False))):
+            _finish_handoff_state(complete=False)
+            _diag("[KARAFUN] windowed reveal blocked; audience renderer unavailable")
+            return
 
         if (
             bool(self.settings.get("karafun_transparent_handoff", True))
@@ -50944,13 +50980,23 @@ class KaraokeApp(QWidget):
                 _diag(f"[KARAFUN] transparent show-screen handoff failed: {e}")
                 return
 
+            windowed_reveal = bool(self.settings.get("karafun_windowed_reveal", False))
+            state["windowed_reveal"] = windowed_reveal
+
             def _reveal_true_fullscreen(result=""):
                 if not _handoff_is_current():
                     _diag("[KARAFUN] skipped stale true-fullscreen reveal")
                     return
-                verified = str(result or "").strip() == "FULLSCREEN"
+                expected_state = "WINDOWED_READY" if windowed_reveal else "FULLSCREEN"
+                verified = str(result or "").strip() == expected_state
                 if not verified:
                     _finish_handoff_state(complete=False)
+                    # The alternate path must not leave the host's opaque
+                    # audience window click-through when placement fails.
+                    if windowed_reveal:
+                        native_window = state.get("native_window")
+                        if native_window is not None:
+                            native_window.setIgnoresMouseEvents_(bool(state.get("native_ignores_mouse", False)))
                     _diag(f"[KARAFUN] renderer not verified; retaining show screen result={result!r}")
                     return
                 try:
@@ -50958,14 +51004,26 @@ class KaraokeApp(QWidget):
                     _finish_handoff_state(complete=True)
                     _diag(
                         f"[KARAFUN] SingWS show screen opacity=0; "
-                        f"revealed KaraFun true_fullscreen={int(verified)}"
+                        f"revealed KaraFun true_fullscreen={int(not windowed_reveal)} "
+                        f"mode={'windowed' if windowed_reveal else 'fullscreen'}"
                     )
                 except Exception as e:
                     _finish_handoff_state(complete=False)
+                    if windowed_reveal and state.get("native_window") is not None:
+                        state["native_window"].setIgnoresMouseEvents_(bool(state.get("native_ignores_mouse", False)))
                     _diag(f"[KARAFUN] true-fullscreen reveal failed: {e}")
 
             def _check_or_enter_true_fullscreen():
-                ensure_renderer_fullscreen(self, _reveal_true_fullscreen, _handoff_is_current)
+                if not _handoff_is_current():
+                    return
+                if windowed_reveal:
+                    if not self._karafun_run_window_script(
+                        renderer_windowed_script(x, y, width, height),
+                        on_complete=_reveal_true_fullscreen, timeout=8,
+                    ):
+                        _reveal_true_fullscreen("WINDOWED_START_FAILED")
+                else:
+                    ensure_renderer_fullscreen(self, _reveal_true_fullscreen, _handoff_is_current)
 
             def _configure_auxiliary_window():
                 if not _handoff_is_current():
@@ -50988,6 +51046,7 @@ class KaraokeApp(QWidget):
                     native_window = native_view.window()
                     if native_window is None:
                         raise RuntimeError("SingWS native audience window unavailable")
+                    state["native_window"] = native_window
                     if "native_style_mask" not in state:
                         state["native_style_mask"] = int(native_window.styleMask())
                         state["native_collection_behavior"] = int(native_window.collectionBehavior())
@@ -51321,13 +51380,15 @@ class KaraokeApp(QWidget):
                     opacity = max(0.0, min(1.0, opacity))
                     native_window = state.get("native_window")
                     if native_window is not None:
-                        native_window.setIgnoresMouseEvents_(False)
+                        native_window.setIgnoresMouseEvents_(bool(state.get("native_ignores_mouse", False)))
                         if "native_style_mask" in state:
                             native_window.setStyleMask_(int(state["native_style_mask"]))
                         if "native_collection_behavior" in state:
                             native_window.setCollectionBehavior_(int(state["native_collection_behavior"]))
                         if "native_level" in state:
                             native_window.setLevel_(int(state["native_level"]))
+                    self._karafun_auxiliary_show_screen = False
+                    vw.setWindowOpacity(opacity)
                     was_visible = bool(state.get("visible", True))
                     if not was_visible:
                         vw.hide()
@@ -51716,45 +51777,41 @@ class KaraokeApp(QWidget):
         return state if state in {"PLAYING", "IDLE"} else "UNKNOWN"
 
     def _karafun_activate_result_for_playback(self, activation_point) -> tuple[bool, str]:
-        """Raise the search-results window and double-click its matched row."""
-        try:
-            if not isinstance(activation_point, (tuple, list)) or len(activation_point) != 2:
-                return False, "KaraFun result position is unavailable"
-            x, y = int(activation_point[0]), int(activation_point[1])
-        except Exception:
-            return False, "KaraFun result position is invalid"
+        """Resolve the matched row again after fullscreen movement, then start it."""
+        active = getattr(self, "_active_external_karafun", None)
+        if not isinstance(active, dict):
+            return False, "KaraFun playback session is no longer active"
+        entry = active.get("entry")
+        if not isinstance(entry, dict):
+            return False, "KaraFun song is unavailable"
+        artist, title = self._karafun_entry_artist_title(entry)
+        if not title:
+            return False, "KaraFun song title is unavailable"
+        # activation_point predates the fullscreen handoff. Never click that
+        # stale coordinate: the result window may have moved to another Space.
         ok, result, script_error = self._run_karafun_applescript_sync(
-            [
-                'tell application "System Events"',
-                'set matches to every application process whose name contains "KaraFun"',
-                'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
-                'tell item 1 of matches',
-                'set frontmost to true',
-                'set mainWindow to missing value',
-                'repeat with candidateWindow in windows',
-                'try',
-                'if name of candidateWindow starts with "Results for " then',
-                'set mainWindow to candidateWindow',
-                'exit repeat',
-                'end if',
-                'end try',
-                'end repeat',
-                'if mainWindow is missing value then return "ERROR|KaraFun results window not found"',
-                'perform action "AXRaise" of mainWindow',
-                'return "READY"',
-                'end tell',
-                'end tell',
-            ],
+            self._karafun_search_script(
+                query="", safe_title=title, safe_artist=artist,
+                require_exact_title=True, resolve_only=True,
+            ),
             timeout=8,
         )
-        if not ok or str(result or "").strip() != "READY":
-            return False, str(script_error or result or "KaraFun results window is unavailable")
+        if getattr(self, "_active_external_karafun", None) is not active:
+            return False, "KaraFun playback session changed during activation"
+        parts = str(result or "").strip().split("|")
+        if not ok or len(parts) < 3 or parts[0] != "FOUND":
+            return False, str(script_error or "Matched KaraFun song could not be verified after screen handoff")
+        try:
+            x, y = int(float(parts[1])), int(float(parts[2]))
+        except (ValueError, OverflowError):
+            return False, "KaraFun result position is invalid"
+        entry["karafun_result_activation_point"] = (x, y)
         if not self._macos_native_double_click(x, y):
             return False, "Could not double-click the KaraFun result"
         return True, ""
 
     def _karafun_search_script(self, *, query: str, safe_title: str = "", safe_artist: str = "",
-                               require_exact_title: bool = False):
+                               require_exact_title: bool = False, resolve_only: bool = False):
         query_literal = self._karafun_applescript_literal(query)
         safe_title_literal = self._karafun_applescript_literal(safe_title)
         safe_artist_literal = self._karafun_applescript_literal(safe_artist)
@@ -51829,6 +51886,27 @@ class KaraokeApp(QWidget):
             'key code 36',
             'delay 3',
         ]
+        if resolve_only:
+            # Do not type a new search during recovery. Raise the existing
+            # results window, allow focus to settle, then read fresh row bounds.
+            lines = [
+                'tell application "System Events"',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
+                'tell item 1 of matches',
+                'set frontmost to true',
+                'set mainWindow to missing value',
+                'repeat with candidateWindow in windows',
+                'if name of candidateWindow starts with "Results for " then',
+                'set mainWindow to candidateWindow',
+                'exit repeat',
+                'end if',
+                'end repeat',
+                'if mainWindow is missing value then return "ERROR|KaraFun results window not found"',
+                'set value of attribute "AXMinimized" of mainWindow to false',
+                'perform action "AXRaise" of mainWindow',
+                'delay 0.3',
+            ]
         if require_exact_title and safe_title:
             lines.extend([
                 'try',
@@ -52123,7 +52201,8 @@ class KaraokeApp(QWidget):
                 if vw is not None:
                     frame = vw.frameGeometry()
                     screen = QApplication.screenAt(frame.center()) or vw.screen() or QApplication.primaryScreen()
-                    rect = screen.availableGeometry() if screen is not None else frame
+                    rect = (screen.geometry() if self.settings.get("karafun_windowed_reveal", False)
+                            else screen.availableGeometry()) if screen is not None else frame
                     transparent_renderer_bounds = (
                         int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
                     )
@@ -52179,7 +52258,8 @@ class KaraokeApp(QWidget):
                 self._karafun_transparent_renderer_ready = False
                 if (
                     transparent_renderer_bounds is not None
-                    and not bool(self.settings.get("karafun_fast_start_enabled", True))
+                    and (bool(self.settings.get("karafun_windowed_reveal", False))
+                         or not bool(self.settings.get("karafun_fast_start_enabled", True)))
                 ):
                     rx, ry, rw, rh = transparent_renderer_bounds
                     prepare_renderer_script = [

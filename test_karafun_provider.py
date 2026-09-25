@@ -128,7 +128,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("NSWindowCollectionBehaviorFullScreenPrimary", source)
         self.assertIn("NSWindowStyleMaskBorderless", source)
         self.assertIn("native_window.setIgnoresMouseEvents_(True)", source)
-        self.assertIn("native_window.setIgnoresMouseEvents_(False)", source)
+        self.assertIn('native_window.setIgnoresMouseEvents_(bool(state.get("native_ignores_mouse", False)))', source)
         self.assertIn("def _after_transparent_karafun_hidden", source)
         self.assertIn('return "MINIMIZED"', source)
         self.assertIn('return "MINIMIZE_FAILED"', source)
