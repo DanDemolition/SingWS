@@ -23,7 +23,7 @@ REPO = "DanDemolition/SingWS"
 
 ARCHES = [
     ("mac_arm64", "Apple Silicon Mac", "arm64"),
-    ("mac_x86_64", "Intel Mac (macOS 12+)", "x86_64"),
+    ("mac_x86_64", "Intel Mac (macOS 12.3+)", "x86_64"),
 ]
 
 

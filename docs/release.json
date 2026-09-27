@@ -13,7 +13,7 @@
       "sha256": "562a2a1f5ff482d50700f5bda77b8749fa45a6d42bd008663243147e2b0d13b5"
     },
     "mac_x86_64": {
-      "label": "Intel Mac (macOS 12+)",
+      "label": "Intel Mac (macOS 12.3+)",
       "filename": "SingWS-1.0.0.2-x86_64-installer.dmg",
       "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-1.0.0.2-x86_64-installer.dmg",
       "size": "144 MB",
