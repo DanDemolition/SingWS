@@ -33,11 +33,8 @@ for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
 
-# Command Line Tools on an Apple Silicon host cannot link the Intel Swift
-# compatibility runtime. Native Intel builds can include the capture bridge.
-if [[ "$(uname -m)" == "x86_64" ]]; then
-    zsh native/karafun_capture/build_capture.sh x86_64
-fi
+# Build the Intel ScreenCaptureKit bridge before packaging the app.
+zsh native/karafun_capture/build_capture.sh x86_64
 
 : "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
 export SINGWS_MPV_FRAMEWORKS
@@ -133,10 +130,9 @@ for name in sys.argv[2:]:
 print(f"Bundled media core loads cleanly: {', '.join(sys.argv[2:])}")
 PYCHECK
 
-# The whole point of the pin set: nothing in the shipped bundle may require a
-# newer macOS than 12.0, or this build cannot replace the legacy edition.
-# Checks the real Mach-O load commands, not wheel tags or filenames.
-"$NATIVE_PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch x86_64 --maximum 12.0
+# ScreenCaptureKit's Dual Renderer bridge requires macOS 12.3. Check the real
+# Mach-O load commands, not wheel tags or filenames.
+"$NATIVE_PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch x86_64 --maximum 12.3
 
 # Stage the bundle BEFORE signing, and sign the staged copy.
 #

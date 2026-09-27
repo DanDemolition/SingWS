@@ -109,14 +109,14 @@ class UpdateManifestDefaultsTests(unittest.TestCase):
 
 
 class PackagingSpecTests(unittest.TestCase):
-    def test_intel_release_defaults_to_macos12_iina_stack(self):
+    def test_intel_release_targets_macos123_iina_stack(self):
         spec = Path("SingWS-x86_64.spec").read_text(encoding="utf-8")
         build = Path("build_singws_mac_intel.sh").read_text(encoding="utf-8")
         self.assertIn("Required bundled native mpv bridge/runtime is missing", spec)
         self.assertIn("native/mpv_bridge/libsingws_mpv_bridge.dylib", build)
         self.assertNotIn("SINGWS_MEDIA_STACK", spec + build)
-        self.assertIn("'LSMinimumSystemVersion': '12.0'", spec)
-        self.assertIn("--maximum 12.0", build)
+        self.assertIn("'LSMinimumSystemVersion': '12.3'", spec)
+        self.assertIn("--maximum 12.3", build)
 
     def test_specs_bundle_no_gstreamer_and_exclude_gi(self):
         # GStreamer removal: specs must not set up a GST_REGISTRY, bundle the
