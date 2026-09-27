@@ -17,7 +17,7 @@ def monitor_code():
 
 class MonitorReplay:
     def __init__(self, events, *, duration=263, estimated=False, callbacks_immediate=True,
-                 controlled_start=False):
+                 controlled_start=False, capture=False):
         self.now = 100.0
         self.events = iter(events)
         self.messages = []
@@ -35,6 +35,7 @@ class MonitorReplay:
         self.active = {"entry": self.entry}
         self.host = SimpleNamespace(
             _active_external_karafun=self.active,
+            _karafun_capture_session=capture,
             _run_karafun_applescript_sync=self.probe,
             _karafun_clock_seconds=self.clock_seconds,
             _run_on_ui_thread=(lambda fn: fn()) if callbacks_immediate else self.callbacks.append,
@@ -103,7 +104,8 @@ class KaraFunMonitorSafetyTests(unittest.TestCase):
     def test_explicit_idle_before_any_playback_still_gets_one_recovery(self):
         r = MonitorReplay([(15, "STATE|IDLE"), (15, "STATE|IDLE"),
                            (1, "STATE|PLAYING"), (1, "STATE|PLAYING")]).run()
-        r.host._karafun_activate_result_for_playback.assert_called_once_with((389, 217))
+        r.host._karafun_activate_result_for_playback.assert_not_called()
+        r.host._karafun_press_play_control.assert_called_once_with()
         r.host._finish_external_karafun_playback.assert_not_called()
 
     def test_one_playing_hint_prevents_later_idle_from_restarting_song(self):
@@ -115,6 +117,19 @@ class KaraFunMonitorSafetyTests(unittest.TestCase):
         r = MonitorReplay([(5, "STATE|PLAYING"), (5, "STATE|PLAYING"),
                            (5, "STATE|IDLE"), (5, "STATE|IDLE"), (5, "STATE|IDLE")]).run()
         r.host._finish_external_karafun_playback.assert_not_called()
+
+    def test_capture_explicit_end_completes_before_estimated_time(self):
+        r = MonitorReplay([(5, "STATE|PLAYING"), (5, "STATE|PLAYING"),
+                           (5, "STATE|ENDED")], capture=True).run()
+        r.host._finish_external_karafun_playback.assert_called_once_with(
+            "complete", expected_active=r.active)
+
+    def test_capture_pause_or_unknown_state_does_not_complete_early(self):
+        for ending in ("STATE|IDLE", ""):
+            with self.subTest(ending=ending):
+                r = MonitorReplay([(5, "STATE|PLAYING"), (5, "STATE|PLAYING"),
+                                   (5, ending)], capture=True).run()
+                r.host._finish_external_karafun_playback.assert_not_called()
 
     def test_playing_at_duration_end_never_completes_until_explicit_idle(self):
         r = MonitorReplay([(5, "STATE|PLAYING"), (5, "STATE|PLAYING"),

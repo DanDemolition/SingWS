@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import uuid
 
 from karafun_fullscreen import renderer_raise_script, renderer_fullscreen_script
 
@@ -103,6 +104,51 @@ class StartupTests(unittest.TestCase):
         verification = '\n'.join(renderer_fullscreen_script(request=False))
         self.assertNotIn('AXRaise', verification)
         self.assertNotIn('set frontmost', verification)
+
+    def test_verified_fullscreen_handoff(self):
+        rect = SimpleNamespace(x=lambda: 1680, y=lambda: 0, center=lambda: (2640, 540),
+                               width=lambda: 1920, height=lambda: 1080)
+        screen = SimpleNamespace(geometry=lambda: rect)
+        window = SimpleNamespace(
+            frameGeometry=lambda: rect, geometry=lambda: rect,
+            isFullScreen=lambda: True, isMaximized=lambda: False,
+            isVisible=lambda: True, setWindowState=mock.Mock(),
+            showNormal=mock.Mock(), hide=mock.Mock(),
+        )
+        calls = []
+        def run_script(lines, on_complete=None, **kwargs):
+            calls.append(lines)
+            if on_complete:
+                on_complete('READY')
+            return True
+        host = SimpleNamespace(
+            settings={'karafun_manage_show_screen': True},
+            _active_external_karafun={'entry': {}},
+            video_window=window, _karafun_run_window_script=run_script,
+        )
+        diagnostics = []
+        namespace = {'sys': SimpleNamespace(platform='darwin'), 'uuid': uuid,
+                     '_diag': lambda *args: diagnostics.append(args),
+                     'renderer_raise_script': renderer_raise_script,
+                     'QApplication': SimpleNamespace(screenAt=lambda _: screen),
+                     'Qt': SimpleNamespace(WindowState=SimpleNamespace(WindowNoState=0)),
+                     'QTimer': SimpleNamespace(singleShot=lambda _, fn: fn()),
+                     'ensure_renderer_fullscreen': lambda _, done, current: done('FULLSCREEN')}
+        node = next(n for n in ast.walk(ast.parse(Path('0.2.18.1.py').read_text()))
+                    if isinstance(n, ast.FunctionDef) and n.name == '_handoff_show_screen_to_karafun')
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'handoff-test', 'exec'), namespace)
+        namespace['_handoff_show_screen_to_karafun'](host)
+        self.assertTrue(host._karafun_handoff_complete, diagnostics)
+        window.hide.assert_called_once()
+        self.assertEqual(len(calls), 1)
+
+    def test_result_activation_raises_renderer_before_playback_probe(self):
+        source = Path('0.2.18.1.py').read_text()
+        start = source.index('def _automate_karafun_search_and_play(')
+        end = source.index('def _karafun_clock_seconds(', start)
+        worker = source[start:end]
+        self.assertLess(worker.index('self._karafun_run_window_script(renderer_raise_script(), timeout=5)'),
+                        worker.index('managed_start_state = self._karafun_playback_menu_state()'))
 
 
 if __name__ == '__main__':

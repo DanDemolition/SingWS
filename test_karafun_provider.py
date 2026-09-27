@@ -25,6 +25,7 @@ class KaraFunProviderTests(unittest.TestCase):
             KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S=2,
             KARAFUN_PLAYBACK_ALERT_DELAY_S=40,
             _karafun_activate_result_for_playback=mock.Mock(return_value=(True, "")),
+            _karafun_press_play_control=mock.Mock(return_value=(True, "")),
             _set_karafun_entry_status=mock.Mock(),
             _karafun_clock_seconds=lambda value: None,
         )
@@ -51,7 +52,8 @@ class KaraFunProviderTests(unittest.TestCase):
         }
         exec(compile(ast.Module(body=[method], type_ignores=[]), "monitor-test", "exec"), namespace)
         namespace[method.name](host, entry)
-        host._karafun_activate_result_for_playback.assert_called_once_with((303, 217))
+        host._karafun_activate_result_for_playback.assert_not_called()
+        host._karafun_press_play_control.assert_called_once_with()
         host._set_karafun_entry_status.assert_not_called()
         self.assertGreater(entry["karafun_last_playing_ts"], 100)
         self.assertEqual(len(probes), 3)
@@ -117,34 +119,19 @@ class KaraFunProviderTests(unittest.TestCase):
     def test_assisted_workflow_manages_the_macos_show_screen(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"karafun_manage_show_screen": True', source)
-        self.assertIn('"karafun_transparent_handoff": True', source)
         self.assertIn("def _handoff_show_screen_to_karafun(self):", source)
-        self.assertIn("vw.setWindowOpacity(0.0)", source)
-        self.assertIn('_karafun_transparent_renderer_ready", False', source)
-        self.assertIn('state.get("mode") == "transparent"', source)
-        self.assertIn('state.get("window_opacity", 1.0)', source)
-        self.assertIn("NSWindowCollectionBehaviorFullScreenAuxiliary", source)
-        self.assertIn("NSWindowCollectionBehaviorCanJoinAllSpaces", source)
-        self.assertIn("NSWindowCollectionBehaviorFullScreenPrimary", source)
-        self.assertIn("NSWindowStyleMaskBorderless", source)
-        self.assertIn("native_window.setIgnoresMouseEvents_(True)", source)
-        self.assertIn('native_window.setIgnoresMouseEvents_(bool(state.get("native_ignores_mouse", False)))', source)
-        self.assertIn("def _after_transparent_karafun_hidden", source)
-        self.assertIn('return "MINIMIZED"', source)
-        self.assertIn('return "MINIMIZE_FAILED"', source)
-        self.assertIn("native_window.setStyleMask_", source)
-        self.assertIn("native_window.setCollectionBehavior_", source)
+        self.assertIn('"karafun_transparent_handoff",', source)
+        self.assertIn('"karafun_windowed_reveal",', source)
+        self.assertNotIn('self.settings.get("karafun_transparent_handoff"', source)
+        self.assertNotIn('self.settings.get("karafun_windowed_reveal"', source)
+        self.assertNotIn("vw.setWindowOpacity(0.0)", source)
         self.assertIn("NSApplication.sharedApplication().activateIgnoringOtherApps_(True)", source)
         self.assertIn("def _activate_host_window_after_karafun(self, attempt: int = 0, *, force: bool = False):", source)
         self.assertIn("if not force and not self._can_restore_host_focus_after_karafun():", source)
         self.assertIn("self.raise_()", source)
         self.assertIn("self.activateWindow()", source)
         self.assertIn("attempt + 1, force=force", source)
-        self.assertGreaterEqual(source.count("self._activate_host_window_after_karafun(force=True)"), 5)
-        self.assertIn('_restore_transparent_singws("karafun_hidden")', source)
-        self.assertIn('_restore_transparent_singws("fallback_timeout")', source)
-        self.assertIn("revealed KaraFun true_fullscreen=", source)
-        self.assertIn("fullscreen auxiliary", source)
+        self.assertGreaterEqual(source.count("self._activate_host_window_after_karafun(force=True)"), 4)
         self.assertIn("vw.setWindowState(Qt.WindowState.WindowNoState)", source)
         self.assertIn("vw.showNormal()", source)
         self.assertIn("vw.hide()", source)
@@ -169,7 +156,6 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("def _finish_handoff(result=\"\"):", source)
         self.assertIn('== "READY"', source)
         self.assertIn("ensure_renderer_fullscreen(self, _after_fullscreen_check, _handoff_is_current)", source)
-        self.assertIn("ensure_renderer_fullscreen(self, _reveal_true_fullscreen, _handoff_is_current)", source)
         self.assertIn("Dual Renderer fullscreen verified", source)
         self.assertIn("Dual Renderer unavailable; retrying recreation", source)
         fullscreen_helper = Path("karafun_fullscreen.py").read_text(encoding="utf-8")
@@ -198,7 +184,12 @@ class KaraFunProviderTests(unittest.TestCase):
         handoff = handoff[:handoff.index("def _restore_show_screen_from_karafun")]
         self.assertEqual(handoff.count("click at {bestButtonX, bestButtonY}"), 1)
         self.assertIn('if outputWindow is not missing value then', handoff)
-        self.assertIn("Reuse an existing renderer", handoff)
+        self.assertIn("Preserve an existing fullscreen renderer in place", handoff)
+        existing_renderer = handoff[handoff.index("'if outputWindow is not missing value then',"):]
+        existing_renderer = existing_renderer[:existing_renderer.index("'set value of attribute \"AXFullScreen\" of outputWindow to false',")]
+        self.assertIn('menu item "Exit Player Full Screen"', existing_renderer)
+        self.assertIn('if value of attribute "AXFullScreen" of outputWindow then', existing_renderer)
+        self.assertNotIn('position of outputWindow', existing_renderer)
         self.assertIn('set value of attribute "AXFullScreen" of outputWindow to false', handoff)
         self.assertIn('set position of outputWindow to', handoff)
         self.assertIn('perform action "AXRaise" of outputWindow', handoff)
@@ -244,11 +235,11 @@ class KaraFunProviderTests(unittest.TestCase):
         finish = finish[:finish.index("def play_next_file")]
         self.assertIn("self._restore_show_screen_from_karafun()", finish)
 
-    def test_network_settings_keep_karafun_link_machine_local(self):
+    def test_main_settings_keep_karafun_link_machine_local(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"karafun_request_url": ""', source)
-        self.assertIn('QLabel("KaraFun Integration")', source)
-        self.assertIn('QCheckBox("Enable automatic KaraFun queueing on this Mac")', source)
+        self.assertIn('_make_settings_tab("KaraFun")', source)
+        self.assertIn('QCheckBox("Automatically search and start KaraFun songs")', source)
         self.assertIn('self.settings["karafun_request_url"] = karafun_url_edit.text().strip()', source)
         self.assertIn("karafun_url_edit.setEchoMode(QLineEdit.EchoMode.Password)", source)
         self.assertNotIn('"karafun_request_url": "https://', source)
@@ -268,7 +259,6 @@ class KaraFunProviderTests(unittest.TestCase):
         worker = source[source.index("def _automate_karafun_search_and_play"):]
         worker = worker[:worker.index("def _karafun_clock_seconds")]
         self.assertLess(worker.index("_ensure_karafun_audio_output()"), worker.index("search attempt="))
-        self.assertIn("fast start skipped unreliable transparent renderer preflight", worker)
         self.assertIn("fast start continuing after result activation", worker)
         self.assertIn("KaraFun audio safety check failed", worker)
         target = source[source.index("def _karafun_target_audio_output_name"):]
@@ -345,19 +335,13 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertNotIn('return "PLAY_NEXT|"', press)
         self.assertIn("_macos_native_mouse_click", press)
         self.assertIn("playback pre-click state=", worker)
-        self.assertIn("prepare_renderer_script", worker)
-        self.assertIn("set frontmost of kf to true", worker)
-        self.assertIn('descriptionText contains "Dual Renderer"', worker)
-        self.assertIn('helpText contains "Dual-Screen Display"', worker)
-        self.assertIn('if value of attribute "AXFullScreen" of outputWindow then return "READY"', worker)
-        self.assertIn('self._karafun_transparent_renderer_ready = True', worker)
-        self.assertIn("using legacy show-screen handoff", worker)
+        self.assertNotIn("prepare_renderer_script", worker)
         self.assertIn('controlDescription is "pause" or controlDescription is "stop"', worker)
         self.assertLess(worker.index('if playingHintFound then return "PLAYING"'), worker.index('if idleTextFound then return "IDLE"'))
         self.assertIn("play click skipped already playing", worker)
         # Fast start does not observe playback, it assumes it; the monitor
         # verifies and presses play once if the assumption was wrong.
-        self.assertIn('entry["karafun_playback_assumed"] = True', worker)
+        self.assertIn('entry["karafun_playback_assumed"] = not bool(', worker)
         self.assertIn('entry["karafun_handoff_timed_out_before_play"] = not handoff_ready', worker)
         self.assertIn("fullscreen audience handoff not verified before play", worker)
         self.assertIn("playback blocked to protect the show screen", worker)
@@ -392,7 +376,6 @@ class KaraFunProviderTests(unittest.TestCase):
             worker.index('playback_probe_script = [')
         ]
         self.assertIn("if managed_handoff:", pre_play_handoff)
-        self.assertNotIn("if self._karafun_transparent_renderer_ready:", pre_play_handoff)
         self.assertIn('and initial_probe_state == "PLAYING" and not fast_start', worker)
         self.assertIn("if not verified_playing and not fast_start:", worker)
         self.assertEqual(worker.count("if not verified_playing and not fast_start:"), 2)
@@ -434,10 +417,10 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("current, total = clocks[i], clocks[i + 1]", monitor)
         self.assertIn("last_clock_remaining <= 5", monitor)
         self.assertIn("fallback_remaining <= 5", monitor)
-        self.assertIn("and (clock_near_end or expected_end_reached)", monitor)
+        self.assertIn("ended_reported and bool(getattr(self, \"_karafun_capture_session\", False))", monitor)
         self.assertNotIn('n contains "your queue is empty"', monitor)
         self.assertIn("STATE|IDLE", monitor)
-        self.assertIn('if idleTextFound and not playingHintFound then set out to out & "STATE|IDLE"', monitor)
+        self.assertIn('if idleTextFound and not playingHintFound then set out to out & "STATE|ENDED"', monitor)
         self.assertIn('if playingHintFound then set out to out & "STATE|PLAYING"', monitor)
         self.assertIn("idle_stop_count = 0", monitor)
         self.assertIn("idle_stop_count += 1", monitor)
@@ -452,7 +435,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('entry.get("karafun_playback_clock_started_at")', monitor)
         self.assertIn("fallback_duration={fallback_duration} clock_age=", monitor)
         self.assertIn("remaining_from_fallback = True", monitor)
-        self.assertIn('reason = "karaFun_idle_clock_end" if clock_near_end else "karaFun_idle_expected_end"', monitor)
+        self.assertIn('"karaFun_explicit_end" if ended_reported', monitor)
         self.assertIn("completion event received reason=", monitor)
         self.assertIn("NSAppleScript calls into KaraFun are not safely concurrent", monitor)
         self.assertIn('if bool(getattr(self, "_karafun_handoff_in_progress", False)):', monitor)
@@ -564,8 +547,8 @@ class KaraFunProviderTests(unittest.TestCase):
     def test_online_catalog_search_is_opt_in_and_badged(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"karafun_include_online_search": False', source)
-        self.assertIn('QCheckBox("Include online KaraFun catalog results in SingWS search")', source)
-        self.assertIn('self.settings["karafun_include_online_search"]', source)
+        self.assertIn('QCheckBox("Include KaraFun catalog results in search")', source)
+        self.assertIn('_save_karafun_choice("karafun_include_online_search", checked)', source)
         self.assertIn("def _karafun_rows(self, local_rows: list)", source)
         self.assertIn('str(row.get("source") or "").strip().lower() != "karafun"', source)
         self.assertIn('"karafun_catalog_only": True', source)

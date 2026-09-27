@@ -17,6 +17,9 @@ brew_root = Path("/opt/homebrew") if machine in {"arm64", "aarch64"} else Path("
 
 extra_datas = [(str(project_root / "assets" / "rotation-stage-purple.png"), "assets")]
 binaries = []
+capture_dylib = project_root / "native" / "karafun_capture" / "libsingws_karafun_capture.dylib"
+if capture_dylib.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{capture_dylib}'"):
+    binaries.append((str(capture_dylib), "."))
 
 for helper in (
     "media_helpers.py",
@@ -30,6 +33,7 @@ for helper in (
     "singws_eq.py",
     "singws_master_audio.py",
     "mac_keep_awake.py",
+    "karafun_capture.py",
 ):
     helper_path = project_root / helper
     if helper_path.exists():
@@ -272,12 +276,15 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '1.0.0.1',
-        'CFBundleVersion': '1.0.0.1',
+        'CFBundleShortVersionString': '1.0.0.2',
+        'CFBundleVersion': '1.0.0.2',
         'LSMinimumSystemVersion': '12.3',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (
             "SingWS uses System Events to find, queue, and control songs in the KaraFun application."
+        ),
+        'NSScreenCaptureUsageDescription': (
+            "SingWS captures KaraFun's Dual Renderer to show lyrics within the audience display."
         ),
         'NSLocationWhenInUseUsageDescription': (
             "SingWS uses this Mac's location to set venue coordinates for request signups."

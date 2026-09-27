@@ -33,6 +33,12 @@ for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
 
+# Command Line Tools on an Apple Silicon host cannot link the Intel Swift
+# compatibility runtime. Native Intel builds can include the capture bridge.
+if [[ "$(uname -m)" == "x86_64" ]]; then
+    zsh native/karafun_capture/build_capture.sh x86_64
+fi
+
 : "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
 export SINGWS_MPV_FRAMEWORKS
 : "${SINGWS_MPV_BRIDGE:=$(pwd)/native/mpv_bridge/libsingws_mpv_bridge.dylib}"

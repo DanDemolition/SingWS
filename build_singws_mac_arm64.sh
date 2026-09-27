@@ -36,6 +36,9 @@ for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
 
+# Bundle the optional ScreenCaptureKit renderer bridge with this build.
+zsh native/karafun_capture/build_capture.sh arm64
+
 : "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
 export SINGWS_MPV_FRAMEWORKS
 STACK_INPUTS=(

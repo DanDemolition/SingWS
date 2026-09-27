@@ -2241,7 +2241,7 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         cls.automation = inspect.getsource(cls.singws.KaraokeApp._automate_karafun_search_and_play)
 
     def test_fast_start_records_that_playback_was_only_assumed(self):
-        self.assertIn('entry["karafun_playback_assumed"] = True', self.automation)
+        self.assertIn('entry["karafun_playback_assumed"] = not bool(', self.automation)
         self.assertIn("monitor will verify", self.automation)
 
     def test_the_play_control_is_shared_not_inlined(self):
@@ -2264,7 +2264,7 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertIn("_macos_native_double_click", activate)
         self.assertIn("_karafun_activate_result_for_playback(", self.automation)
 
-    def test_managed_start_verifies_the_click_and_retries_only_while_idle(self):
+    def test_managed_start_verifies_idle_without_repeating_result_click(self):
         self.assertTrue(hasattr(self.singws.KaraokeApp, "_karafun_playback_menu_state"))
         state_probe = inspect.getsource(
             self.singws.KaraokeApp._karafun_playback_menu_state
@@ -2274,7 +2274,7 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertIn('playbackToggleName is "play"', state_probe)
         self.assertIn('managed_start_state = self._karafun_playback_menu_state()', self.automation)
         self.assertIn('if managed_start_state == "IDLE":', self.automation)
-        self.assertIn("result activation left KaraFun idle", self.automation)
+        self.assertEqual(self.automation.count('_karafun_activate_result_for_playback('), 1)
         self.assertIn("idle result loaded; explicit Play sent", self.automation)
 
     def test_fast_start_does_not_replace_observed_managed_state_with_playing(self):
@@ -2285,12 +2285,11 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertIn('initial_probe_state == "UNKNOWN"', self.automation)
         self.assertIn("managed playback state unknown; deferring to monitor", self.automation)
 
-    def test_the_monitor_retries_the_matched_result_when_the_assumption_was_wrong(self):
+    def test_the_monitor_recovers_without_restarting_the_matched_result(self):
         self.assertIn("playback_assumed", self.monitor)
         self.assertIn("recovery_pressed", self.monitor)
         self.assertIn("karafun_result_activation_point", self.automation)
-        self.assertIn("karafun_result_activation_point", self.monitor)
-        self.assertIn("_karafun_activate_result_for_playback", self.monitor)
+        self.assertNotIn("_karafun_activate_result_for_playback", self.monitor)
         self.assertIn("_karafun_press_play_control()", self.monitor)
         self.assertIn("playback never started after", self.monitor)
 

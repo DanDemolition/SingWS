@@ -61,7 +61,7 @@ class KaraFunLifecycleTests(unittest.TestCase):
         callbacks = []
         workers = []
         host = types.SimpleNamespace(
-            settings={"karafun_auto_queue_enabled": True, "karafun_transparent_handoff": False},
+            settings={"karafun_auto_queue_enabled": True},
             _active_external_karafun=active,
             _karafun_entry_artist_title=lambda e: ("Sugarcult", "Memory"),
             _ensure_queue_entry_id=lambda e: "request-1",

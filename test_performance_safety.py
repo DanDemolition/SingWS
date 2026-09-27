@@ -1372,6 +1372,7 @@ class PerformanceSafetyTests(unittest.TestCase):
             _end_silence_db_threshold=-38, _read_level_db=lambda: None,
             _end_trim_threshold_sec=lambda: 2.5, _karaoke_audio_end_s=100.0,
             _handle_media_end_safe=mock.Mock(),
+            _prefire_bgm_at_verified_audio_end=mock.Mock(),
             _karaoke_visual_end_s=100.0, _karaoke_visual_end_confidence=1.0,
             karaoke_transport=types.SimpleNamespace(cdg_lyrics_finished=lambda: True),
         )
@@ -1386,8 +1387,11 @@ class PerformanceSafetyTests(unittest.TestCase):
         host._read_level_db = lambda: None
         self.assertFalse(trim(host, 115*ns, 102*ns))
         self.assertFalse(trim(host, 115*ns, int(102.49*ns)))
+        host._prefire_bgm_at_verified_audio_end.assert_not_called()
         host._karaoke_visual_end_s = None
         self.assertFalse(trim(host, 115*ns, 103*ns))
+        host._prefire_bgm_at_verified_audio_end.assert_called_once()
+        host._handle_media_end_safe.assert_not_called()
         host._karaoke_visual_end_s = 104.0
         self.assertFalse(trim(host, 115*ns, 103*ns))
         host._karaoke_visual_end_s = 100.0
