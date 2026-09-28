@@ -118,6 +118,9 @@ git add \
   MoltenVK_icd.json \
   SingWS-x86_64.spec SingWS-arm64.spec \
   build_all.sh build_singws_mac_intel.sh build_singws_mac_arm64.sh \
+  dmg_settings.py installer/Open\ Me\ First.command \
+  installer/READ\ ME\ -\ Permissions.txt \
+  tools/make_dmg_assets.py design/dmg_background_helper.tiff \
   test_mpv_karaoke_transport.py test_karaoke_engine_selection.py \
   test_performance_safety.py test_remote_request_tombstones.py \
   tools/verify_macos_min_version.py \

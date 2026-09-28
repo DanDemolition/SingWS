@@ -51230,7 +51230,7 @@ class KaraokeApp(QWidget):
                 outcome = str(result or "").strip()
                 if outcome == "WINDOWED":
                     _begin_capture()
-                elif outcome == "EXITING_FULLSCREEN" and attempt < 20:
+                elif outcome in {"EXITING_FULLSCREEN", "NO_DUAL_RENDERER"} and attempt < 40:
                     QTimer.singleShot(250, lambda: _ensure_renderer_windowed(attempt + 1))
                 else:
                     _diag(f"[KARAFUN-CAPTURE] renderer must stay windowed: {outcome!r}")
@@ -51284,7 +51284,7 @@ class KaraokeApp(QWidget):
                 if vw is None or preview is None or frame.isNull():
                     raise RuntimeError("KaraFun video surfaces unavailable")
                 vw.idle = False
-                vw.video_area.set_karaoke_frame(frame)
+                vw.video_area.set_karaoke_frame(frame, stretch_fill=True)
                 preview.force_black = False
                 preview.video_area.set_karaoke_frame(frame)
                 if not self._karafun_handoff_complete:
@@ -51754,8 +51754,35 @@ class KaraokeApp(QWidget):
         except (ValueError, OverflowError):
             return False, "KaraFun result position is invalid"
         entry["karafun_result_activation_point"] = (x, y)
-        if not self._macos_native_double_click(x, y):
-            return False, "Could not double-click the KaraFun result"
+        # Use KaraFun's accessibility process for the actual double-click.
+        # CGEvent accepted both events on Retina displays but KaraFun often
+        # observed only a selection, leaving its transport disabled. A pair of
+        # process-scoped clicks is the same path that reliably opens KaraFun's
+        # Dual Renderer button and survives mixed display scale factors.
+        click_ok, click_result, click_error = self._run_karafun_applescript_sync(
+            [
+                'tell application "System Events"',
+                'set matches to every application process whose name contains "KaraFun"',
+                'if (count of matches) is 0 then return "ERROR|KaraFun is not running"',
+                'tell item 1 of matches',
+                'set frontmost to true',
+                f'click at {{{x}, {y}}}',
+                'delay 0.12',
+                f'click at {{{x}, {y}}}',
+                'return "DOUBLE_CLICKED"',
+                'end tell',
+                'end tell',
+            ],
+            timeout=5,
+        )
+        if not click_ok or str(click_result or "").strip() != "DOUBLE_CLICKED":
+            # Keep the native event path as a fallback for unusual KaraFun AX
+            # trees, but never report success unless at least one method ran.
+            if not self._macos_native_double_click(x, y):
+                return False, str(click_error or "Could not double-click the KaraFun result")
+            _diag("[KARAFUN-AUTO] accessibility double-click failed; native fallback sent")
+        else:
+            _diag(f"[KARAFUN-AUTO] result double-click sent through accessibility x={x} y={y}")
         return True, ""
 
     def _karafun_search_script(self, *, query: str, safe_title: str = "", safe_artist: str = "",
@@ -52131,6 +52158,7 @@ class KaraokeApp(QWidget):
         except Exception:
             requested_tempo = 100
         adjustment_signature = f"key={requested_key};tempo={requested_tempo}"
+        needs_adjustment = requested_key != 0 or requested_tempo != 100
         entry["karafun_submission_state"] = "karafun_pending"
         entry["karafun_pending_at"] = time.time()
         entry.pop("karafun_explicit_play_sent", None)
@@ -52274,6 +52302,83 @@ class KaraokeApp(QWidget):
                 else:
                     _diag(f"[KARAFUN-AUTO] selected exact KaraFun title+artist query={selected_query!r}")
 
+                queued_for_adjustment = False
+                if needs_adjustment:
+                    # KaraFun disables Key Up/Down and Tempo Up/Down for a bare
+                    # search-result selection. Put the exact match in KaraFun's
+                    # queue so those controls become usable, then let the
+                    # operator release playback with Ready. KaraFun immediately
+                    # starts the first item added to an empty queue, so pause it
+                    # in the same automation pass before showing the prompt.
+                    activation_point = (int(float(parts[1])), int(float(parts[2])))
+                    entry["karafun_result_activation_point"] = activation_point
+                    if not self._macos_native_mouse_click(*activation_point, clicks=1):
+                        raise RuntimeError("Could not select the KaraFun result for key/tempo setup")
+                    queued_ok, queued_result, queued_error = _run_session_script([
+                        'tell application "System Events"',
+                        'tell application process "KaraFun"',
+                        'set frontmost to true',
+                        'click menu bar item "Song" of menu bar 1',
+                        'delay 0.15',
+                        'set addItem to menu item "Add to Queue" of menu 1 of menu bar item "Song" of menu bar 1',
+                        'if not enabled of addItem then return "ADD_DISABLED"',
+                        'click addItem',
+                        '-- An empty KaraFun queue auto-starts its first item.',
+                        '-- Pause that implicit start immediately; Ready will',
+                        '-- resume this prepared item after the host adjusts it.',
+                        'repeat 20 times',
+                        'delay 0.05',
+                        'try',
+                        'set playbackItem to menu item 1 of menu 1 of menu bar item "Playback" of menu bar 1',
+                        'set playbackName to name of playbackItem as text',
+                        'ignoring case',
+                        'if playbackName is "pause" then',
+                        'click playbackItem',
+                        'return "QUEUED_PAUSED"',
+                        'end if',
+                        'end ignoring',
+                        'end try',
+                        'end repeat',
+                        'return "QUEUED_NOT_PAUSED"',
+                        'end tell',
+                        'end tell',
+                    ], timeout=5)
+                    if not queued_ok or str(queued_result or "").strip() != "QUEUED_PAUSED":
+                        raise RuntimeError(
+                            "Could not prepare and pause the KaraFun result for key/tempo setup: "
+                            f"{str(queued_error or queued_result or 'unknown error')[:180]}"
+                        )
+                    _diag("[KARAFUN-AUTO] adjustment result queued and paused before Ready")
+                    queued_for_adjustment = True
+                    entry["karafun_queued_for_adjustment"] = True
+                    entry["karafun_submission_state"] = "karafun_waiting_for_adjustment"
+                    self._set_karafun_entry_status(
+                        entry,
+                        "adjustment",
+                        message="Waiting for the host to set KaraFun key/tempo and press Ready.",
+                    )
+                    self._run_on_ui_thread(
+                        lambda: self._set_external_karafun_adjustment_waiting(
+                            active_session, requested_key, requested_tempo
+                        )
+                    )
+                    _diag(
+                        "[KARAFUN-AUTO] waiting for manual adjustment "
+                        f"key={requested_key:+d} tempo={requested_tempo}% bgm_continues=1"
+                    )
+                    ready_event = active_session.get("adjustment_ready_event")
+                    while isinstance(ready_event, threading.Event) and not ready_event.wait(0.2):
+                        _require_current_session()
+                    _require_current_session()
+                    entry["karafun_adjustment_applied"] = adjustment_signature
+                    self._run_on_ui_thread(
+                        lambda: self._set_external_karafun_adjustment_released(active_session)
+                    )
+                    _diag(
+                        "[KARAFUN-AUTO] manual adjustment ready; playback released "
+                        f"key={requested_key:+d} tempo={requested_tempo}%"
+                    )
+
                 # When SingWS owns the show display, select the result without
                 # starting it, finish the renderer handoff, then reactivate the
                 # matched result row. Starting from a double-click let audio/lyrics run for
@@ -52283,9 +52388,26 @@ class KaraokeApp(QWidget):
                 activation_point = (int(float(parts[1])), int(float(parts[2])))
                 entry["karafun_result_activation_point"] = activation_point
                 _require_current_session()
-                managed_handoff = bool(self.settings.get("karafun_manage_show_screen", True))
+                capture_handoff = bool(self.settings.get("karafun_dual_renderer_capture", False))
+                # KaraFun does not create its Dual Renderer window until a
+                # track begins playing. Capture mode therefore has to start
+                # the selected result first and attach as soon as that window
+                # appears; waiting for capture before playback deadlocks.
+                managed_handoff = bool(self.settings.get("karafun_manage_show_screen", True)) and not capture_handoff
                 managed_start_state = "UNKNOWN"
-                if managed_handoff:
+                if queued_for_adjustment:
+                    _schedule_bgm_fade("before_adjusted_queue_play")
+                    pressed, press_error = self._karafun_press_play_control()
+                    if not pressed:
+                        raise RuntimeError(press_error or "KaraFun queued song could not be started")
+                    result_activated_at = time.monotonic()
+                    entry["karafun_result_activated_at"] = result_activated_at
+                    entry["karafun_playback_clock_started_at"] = result_activated_at
+                    entry["karafun_playback_assumed"] = True
+                    entry["karafun_explicit_play_sent"] = True
+                    _schedule_early_handoff("after_adjusted_queue_playback_started")
+                    time.sleep(0.8)
+                elif managed_handoff:
                     if not self._macos_native_mouse_click(*activation_point, clicks=1):
                         raise RuntimeError("Could not select the KaraFun result")
                     _schedule_early_handoff("after_result_activation")
@@ -52393,10 +52515,19 @@ class KaraokeApp(QWidget):
                         _diag(f"[KARAFUN-AUTO] post-activation playback state={managed_start_state}")
                 else:
                     _schedule_bgm_fade("before_result_activation")
-                    if not self._macos_native_double_click(*activation_point):
-                        raise RuntimeError("Could not double-click the KaraFun result")
+                    activated, activation_error = self._karafun_activate_result_for_playback(
+                        activation_point
+                    )
+                    if not activated:
+                        raise RuntimeError(
+                            f"Could not start selected KaraFun result: {activation_error}"
+                        )
                     result_activated_at = time.monotonic()
                     entry["karafun_result_activated_at"] = result_activated_at
+                    entry["karafun_playback_clock_started_at"] = result_activated_at
+                    entry["karafun_playback_assumed"] = True
+                    if capture_handoff:
+                        _schedule_early_handoff("after_capture_playback_started")
                     time.sleep(0.8)
                 _require_current_session()
 
@@ -52482,17 +52613,24 @@ class KaraokeApp(QWidget):
                 else:
                     ok, initial_probe, initial_probe_error = _run_session_script(playback_probe_script, timeout=5)
                     initial_probe_state = str(initial_probe or initial_probe_error or "").strip()
+                    if initial_probe_state.startswith("ERROR|KaraFun control window not found"):
+                        initial_probe_state = self._karafun_playback_menu_state()
+                        ok = initial_probe_state != "UNKNOWN"
                 _diag(f"[KARAFUN-AUTO] playback pre-click state={initial_probe_state!r}")
                 if ok and initial_probe_state == "PLAYING":
                     _schedule_early_handoff("pre_click_playing")
                 managed_state_unknown = bool(
                     fast_start and managed_handoff and initial_probe_state == "UNKNOWN"
                 )
-                if not (ok and initial_probe_state == "PLAYING") and not managed_state_unknown:
+                if (not (ok and initial_probe_state == "PLAYING")
+                        and not managed_state_unknown
+                        and not entry.get("karafun_explicit_play_sent")):
                     pressed, press_error = self._karafun_press_play_control()
                     if not pressed:
                         raise RuntimeError(press_error or "KaraFun play automation failed")
                     entry["karafun_playback_clock_started_at"] = time.monotonic()
+                elif entry.get("karafun_explicit_play_sent"):
+                    _diag("[KARAFUN-AUTO] play click skipped; explicit Play already sent")
                 elif managed_state_unknown:
                     # UNKNOWN is not permission to toggle Play: the result
                     # double-click may already have started the song. Let the
@@ -52522,6 +52660,9 @@ class KaraokeApp(QWidget):
                         time.sleep(1.0)
                         ok, probe_result, probe_error = _run_session_script(playback_probe_script, timeout=5)
                         last_playback_probe = str(probe_result or probe_error or "").strip()
+                        if last_playback_probe in {"UNKNOWN", "ERROR|KaraFun control window not found"}:
+                            last_playback_probe = self._karafun_playback_menu_state()
+                            ok = last_playback_probe != "UNKNOWN"
                         _diag(f"[KARAFUN-AUTO] playback verify attempt={probe_attempt + 1} state={last_playback_probe!r}")
                         if ok and last_playback_probe == "PLAYING":
                             _schedule_early_handoff("playback_verified")
@@ -52539,7 +52680,6 @@ class KaraokeApp(QWidget):
 
                 # Discover named controls at runtime. Never set an unidentified slider.
                 adjusted = "ADJUSTED|false|false"
-                needs_adjustment = requested_key != 0 or requested_tempo != 100
                 adjustment_already_applied = str(entry.get("karafun_adjustment_applied") or "") == adjustment_signature
                 if needs_adjustment and not adjustment_already_applied:
                     handoff_wait_deadline = time.monotonic() + 15.0
@@ -53089,6 +53229,8 @@ class KaraokeApp(QWidget):
             "duet_display": duet_display,
             "marker_was_top": bool(marker_was_top),
             "started_at": time.time(),
+            "needs_manual_adjustment": False,
+            "adjustment_ready_event": threading.Event(),
         }
         self._stop_lyrics_background_video("karafun_start")
         # play_next_file popped this singer, and a KaraFun song plays for minutes
@@ -53195,34 +53337,75 @@ class KaraokeApp(QWidget):
         song_label.setStyleSheet(f"color:{_v('text')}; font-size:14px; font-weight:700;")
         layout.addWidget(song_label)
         note = QLabel("SingWS is controlling KaraFun and will advance automatically when playback ends.")
+        note.setObjectName("karafunActiveNote")
         note.setWordWrap(True)
         note.setStyleSheet(section_meta_css())
         layout.addWidget(note)
         actions = QHBoxLayout()
+        ready_btn = QPushButton("Ready — Start Song")
+        ready_btn.setObjectName("karafunReadyButton")
+        ready_btn.setVisible(False)
         complete_btn = QPushButton("Complete")
         open_btn = QPushButton("Open KaraFun")
         copy_btn = QPushButton("Copy Info")
         return_btn = QPushButton("Return to Queue")
-        for btn in (complete_btn, open_btn, copy_btn, return_btn):
+        for btn in (ready_btn, complete_btn, open_btn, copy_btn, return_btn):
             btn.setMinimumHeight(34)
             # Search automation sends Return. It must never activate Complete
             # or Return to Queue if focus briefly lands on this dialog.
             btn.setAutoDefault(False)
             btn.setDefault(False)
         complete_btn.setStyleSheet(button_css(padding="7px 10px", radius=8))
+        ready_btn.setStyleSheet(
+            "QPushButton { background:#ffd400; color:#15120a; border:2px solid #fff176; "
+            "border-radius:8px; padding:8px 12px; font-size:14px; font-weight:900; } "
+            "QPushButton:hover { background:#ffe34d; }"
+        )
         open_btn.setStyleSheet(subtle_button_css(padding="7px 10px", radius=8))
         copy_btn.setStyleSheet(subtle_button_css(padding="7px 10px", radius=8))
         return_btn.setStyleSheet(warning_button_css(padding="7px 10px", radius=8))
+        actions.addWidget(ready_btn)
         actions.addWidget(complete_btn)
         actions.addWidget(open_btn)
         actions.addWidget(copy_btn)
         actions.addWidget(return_btn)
         layout.addLayout(actions)
+        ready_btn.clicked.connect(lambda: self._release_external_karafun_adjustment(active))
         complete_btn.clicked.connect(lambda: self._finish_external_karafun_playback("complete", expected_active=active))
         open_btn.clicked.connect(lambda: self._open_karafun_for_entry(entry))
         copy_btn.clicked.connect(lambda: self._copy_karafun_lookup_text(entry))
         return_btn.clicked.connect(lambda: self._finish_external_karafun_playback("return_to_queue", expected_active=active))
         self._active_external_karafun_dialog = dlg
+        active["adjustment_note"] = note
+        active["adjustment_ready_button"] = ready_btn
+        active["complete_button"] = complete_btn
+        try:
+            requested_key = int(active.get("key") or 0)
+        except Exception:
+            requested_key = 0
+        try:
+            requested_tempo = int(active.get("tempo_percent") or 100)
+        except Exception:
+            requested_tempo = 100
+        if requested_key != 0 or requested_tempo != 100:
+            requested = []
+            if requested_key != 0:
+                requested.append(f"KEY {requested_key:+d}")
+            if requested_tempo != 100:
+                requested.append(f"TEMPO {requested_tempo}%")
+            note.setText(
+                f"MANUAL KARAFUN CHANGE REQUIRED: {'  •  '.join(requested)}\n"
+                "SingWS is finding the song. BGM will keep playing. Set these values in KaraFun, "
+                "then press Ready when it becomes available."
+            )
+            note.setStyleSheet(
+                "QLabel { background:#b00020; color:#ffffff; border:2px solid #ff526f; "
+                "border-radius:8px; padding:10px; font-size:15px; font-weight:900; }"
+            )
+            ready_btn.setText("Finding Song…")
+            ready_btn.setVisible(True)
+            ready_btn.setEnabled(False)
+            complete_btn.setEnabled(False)
         try:
             dlg.resize(520, dlg.sizeHint().height())
         except Exception:
@@ -53231,6 +53414,69 @@ class KaraokeApp(QWidget):
         if activate:
             dlg.raise_()
             dlg.activateWindow()
+
+    def _set_external_karafun_adjustment_waiting(self, active, key: int, tempo_percent: int):
+        if self._active_external_karafun is not active or not isinstance(active, dict):
+            return
+        active["needs_manual_adjustment"] = True
+        requested = []
+        if int(key or 0) != 0:
+            requested.append(f"KEY {int(key):+d}")
+        if int(tempo_percent or 100) != 100:
+            requested.append(f"TEMPO {int(tempo_percent)}%")
+        request_text = "  •  ".join(requested)
+        note = active.get("adjustment_note")
+        ready_btn = active.get("adjustment_ready_button")
+        complete_btn = active.get("complete_button")
+        if note is not None:
+            note.setText(
+                f"MANUAL KARAFUN CHANGE REQUIRED: {request_text}\n"
+                "Set these values in KaraFun now. BGM will continue and the song will not start "
+                "until you press Ready."
+            )
+            note.setStyleSheet(
+                "QLabel { background:#b00020; color:#ffffff; border:2px solid #ff526f; "
+                "border-radius:8px; padding:10px; font-size:15px; font-weight:900; }"
+            )
+        if ready_btn is not None:
+            ready_btn.setText("Ready — Start Song")
+            ready_btn.setVisible(True)
+            ready_btn.setEnabled(True)
+        if complete_btn is not None:
+            complete_btn.setEnabled(False)
+        dlg = getattr(self, "_active_external_karafun_dialog", None)
+        if dlg is not None:
+            dlg.adjustSize()
+            dlg.raise_()
+        _diag(f"[KARAFUN] manual adjustment prompt shown requested={request_text!r}")
+
+    def _release_external_karafun_adjustment(self, expected_active):
+        active = self._active_external_karafun
+        if active is not expected_active or not isinstance(active, dict):
+            return
+        event = active.get("adjustment_ready_event")
+        if isinstance(event, threading.Event):
+            event.set()
+        button = active.get("adjustment_ready_button")
+        if button is not None:
+            button.setEnabled(False)
+            button.setText("Starting…")
+        _diag("[KARAFUN] operator pressed Ready after manual key/tempo adjustment")
+
+    def _set_external_karafun_adjustment_released(self, active):
+        if self._active_external_karafun is not active or not isinstance(active, dict):
+            return
+        active["needs_manual_adjustment"] = False
+        note = active.get("adjustment_note")
+        ready_btn = active.get("adjustment_ready_button")
+        complete_btn = active.get("complete_button")
+        if note is not None:
+            note.setText("Starting KaraFun. SingWS will advance automatically when playback ends.")
+            note.setStyleSheet(section_meta_css())
+        if ready_btn is not None:
+            ready_btn.setVisible(False)
+        if complete_btn is not None:
+            complete_btn.setEnabled(True)
 
     def _finish_external_karafun_playback(self, action: str, *, expected_active=None):
         active = self._active_external_karafun

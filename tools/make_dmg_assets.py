@@ -191,10 +191,18 @@ def build_background():
         (" below — you only do this once.", _font(14), SOFT),
     ])
 
-    # Down-chevron in brand magenta, pointing at the helper icon.
+    # The lower strip contains two Finder items. Bake their labels into the
+    # background because Finder may render icon labels too dark to read here.
+    helper_cx = 235 * S
+    guide_cx = 430 * S
+    _rich_center(d, guide_cx, py(482), [
+        ("Permissions Guide", _font(14, bold=True), CYAN),
+    ])
+
+    # Down-chevron in brand magenta, pointing at Open Me First.
     ay = py(486)
-    d.line([(cx - 14 * S, ay), (cx, ay + 14 * S)], fill=(*MAGENTA, 255), width=4 * S)
-    d.line([(cx + 14 * S, ay), (cx, ay + 14 * S)], fill=(*MAGENTA, 255), width=4 * S)
+    d.line([(helper_cx - 14 * S, ay), (helper_cx, ay + 14 * S)], fill=(*MAGENTA, 255), width=4 * S)
+    d.line([(helper_cx + 14 * S, ay), (helper_cx, ay + 14 * S)], fill=(*MAGENTA, 255), width=4 * S)
 
     out = new.convert("RGB")
     out.save(OUT_BG, dpi=(72 * S, 72 * S))   # 144 dpi -> crisp at the 600pt logical width

@@ -18,6 +18,7 @@ APP_NAME="SingWS"
 ENTRY="0.2.18.1.py"
 SPEC="SingWS-arm64.spec"
 PYTHON=".venv/bin/python"
+CODE_SIGN_IDENTITY="${SINGWS_CODESIGN_IDENTITY:-SingWS Local Code Signing}"
 
 if [[ "$(uname -m)" != "arm64" ]]; then
     echo "This dedicated build must run natively on an Apple Silicon Mac."
@@ -35,6 +36,13 @@ done
 for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
+
+security find-identity -v -p codesigning | grep -Fq "\"$CODE_SIGN_IDENTITY\"" || {
+    echo "Missing valid code-signing identity: $CODE_SIGN_IDENTITY"
+    echo "Import its certificate and private key into the login keychain, or set"
+    echo "SINGWS_CODESIGN_IDENTITY to another stable code-signing identity."
+    exit 1
+}
 
 # Bundle the optional ScreenCaptureKit renderer bridge with this build.
 zsh native/karafun_capture/build_capture.sh arm64
@@ -168,9 +176,10 @@ if find -L "$STAGING/dist/$APP_NAME.app" -type l -print -quit | grep -q .; then
     exit 1
 fi
 
-codesign --force --deep --sign - \
+codesign --force --deep --sign "$CODE_SIGN_IDENTITY" \
     --entitlements SingWS.entitlements "$STAGING/dist/$APP_NAME.app"
 codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"
+codesign -dvv "$STAGING/dist/$APP_NAME.app" 2>&1 | grep -F "Authority=$CODE_SIGN_IDENTITY"
 
 rm -f "$DMG_NAME"
 SINGWS_DMG_APP_ROOT="$STAGING" "$PYTHON" -m dmgbuild \

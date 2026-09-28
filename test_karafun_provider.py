@@ -339,6 +339,10 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('controlDescription is "pause" or controlDescription is "stop"', worker)
         self.assertLess(worker.index('if playingHintFound then return "PLAYING"'), worker.index('if idleTextFound then return "IDLE"'))
         self.assertIn("play click skipped already playing", worker)
+        self.assertIn('and not entry.get("karafun_explicit_play_sent")', worker)
+        self.assertIn("play click skipped; explicit Play already sent", worker)
+        self.assertIn('if initial_probe_state.startswith("ERROR|KaraFun control window not found"):', worker)
+        self.assertIn('last_playback_probe = self._karafun_playback_menu_state()', worker)
         # Fast start does not observe playback, it assumes it; the monitor
         # verifies and presses play once if the assumption was wrong.
         self.assertIn('entry["karafun_playback_assumed"] = not bool(', worker)
@@ -383,6 +387,32 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("KaraFun did not report active playback after Play", worker)
         self.assertIn('adjustment_signature = f"key={requested_key};tempo={requested_tempo}"', source)
         self.assertIn("needs_adjustment = requested_key != 0 or requested_tempo != 100", worker)
+        self.assertIn('entry["karafun_submission_state"] = "karafun_waiting_for_adjustment"', worker)
+        self.assertIn('menu item "Add to Queue"', worker)
+        self.assertIn('entry["karafun_queued_for_adjustment"] = True', worker)
+        self.assertIn('if playbackName is "pause" then', worker)
+        self.assertIn('return "QUEUED_PAUSED"', worker)
+        self.assertIn('str(queued_result or "").strip() != "QUEUED_PAUSED"', worker)
+        self.assertIn("self._set_external_karafun_adjustment_waiting(", worker)
+        self.assertIn('active_session.get("adjustment_ready_event")', worker)
+        self.assertIn("manual adjustment ready; playback released", worker)
+        adjusted_start = worker[worker.index("if queued_for_adjustment:"):]
+        adjusted_start = adjusted_start[:adjusted_start.index("elif managed_handoff:")]
+        self.assertIn("self._karafun_press_play_control()", adjusted_start)
+        self.assertNotIn("_karafun_activate_result_for_playback", adjusted_start)
+        self.assertIn('_schedule_early_handoff("after_adjusted_queue_playback_started")', adjusted_start)
+        self.assertLess(
+            worker.index("waiting for manual adjustment"),
+            worker.index('_schedule_bgm_fade("before_result_activation")'),
+        )
+        self.assertIn('QPushButton("Ready — Start Song")', source)
+        self.assertIn("MANUAL KARAFUN CHANGE REQUIRED", source)
+        self.assertIn("BGM will continue and the song will not start", source)
+        activator = source[source.index("def _karafun_activate_result_for_playback"):]
+        activator = activator[:activator.index("def _karafun_search_script")]
+        self.assertIn("DOUBLE_CLICKED", activator)
+        self.assertIn("result double-click sent through accessibility", activator)
+        self.assertIn("self._macos_native_double_click(x, y)", activator)
         self.assertIn('entry.get("karafun_adjustment_applied")', worker)
         self.assertIn('entry["karafun_adjustment_applied"] = adjustment_signature', worker)
         self.assertIn("adjustment skipped already applied", worker)

@@ -28,7 +28,8 @@ size = None  # let dmgbuild size it automatically
 # "Open Me First.command" strips the macOS quarantine flag from the installed
 # app (unsigned/un-notarized builds get flagged on download) and launches it.
 HELPER_PATH = ROOT / "installer" / "Open Me First.command"
-files = [str(APP_PATH), str(HELPER_PATH)]
+PERMISSIONS_README = ROOT / "installer" / "READ ME - Permissions.txt"
+files = [str(APP_PATH), str(HELPER_PATH), str(PERMISSIONS_README)]
 symlinks = {"Applications": "/Applications"}
 
 # Volume icon (shown when the DMG mounts)
@@ -68,7 +69,8 @@ icon_locations = {
     "Applications": (450, 265),
     # Helper lives in the strip below the original art (clear of the logo),
     # under the baked-in "First time?" instruction + arrow.
-    "Open Me First.command": (300, 558),
+    "Open Me First.command": (235, 558),
+    "READ ME - Permissions.txt": (430, 558),
 }
 
 # Volume properties

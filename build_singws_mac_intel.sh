@@ -9,6 +9,7 @@ ENTRY="0.2.18.1.py"
 SPEC="SingWS-x86_64.spec"
 PYTHON="${SINGWS_BUILD_PYTHON:-.venv-universal/bin/python}"
 NATIVE_PYTHON="$PYTHON"
+CODE_SIGN_IDENTITY="${SINGWS_CODESIGN_IDENTITY:-SingWS Local Code Signing}"
 
 PYTHON_RUN=("$PYTHON")
 if [[ "$(uname -m)" != "x86_64" ]]; then
@@ -32,6 +33,13 @@ done
 for command in hdiutil codesign file otool shasum; do
     command -v "$command" >/dev/null || { echo "Missing command: $command"; exit 1; }
 done
+
+security find-identity -v -p codesigning | grep -Fq "\"$CODE_SIGN_IDENTITY\"" || {
+    echo "Missing valid code-signing identity: $CODE_SIGN_IDENTITY"
+    echo "Import its certificate and private key into the login keychain, or set"
+    echo "SINGWS_CODESIGN_IDENTITY to another stable code-signing identity."
+    exit 1
+}
 
 # Build the Intel ScreenCaptureKit bridge before packaging the app.
 zsh native/karafun_capture/build_capture.sh x86_64
@@ -168,9 +176,10 @@ if find -L "$STAGING/dist/$APP_NAME.app" -type l -print -quit | grep -q .; then
     exit 1
 fi
 
-codesign --force --deep --sign - \
+codesign --force --deep --sign "$CODE_SIGN_IDENTITY" \
     --entitlements SingWS.entitlements "$STAGING/dist/$APP_NAME.app"
 codesign --verify --deep --strict "$STAGING/dist/$APP_NAME.app"
+codesign -dvv "$STAGING/dist/$APP_NAME.app" 2>&1 | grep -F "Authority=$CODE_SIGN_IDENTITY"
 
 rm -f "$DMG_NAME"
 SINGWS_DMG_APP_ROOT="$STAGING" "$NATIVE_PYTHON" -m dmgbuild \
