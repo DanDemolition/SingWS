@@ -29,7 +29,7 @@ Release https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.4 (commit `3
 on Pages with the download page. Installed on this Mac: exe `0fd53a23...`, backup in `local-installs/20260929-location-fix/`.
 Remaining: 4 non-code server files (.gitignore, config.inc.example, two tools/run_*.py) differ live vs repo (deploy with
 `scripts/deploy-wskar-rsync.sh --apply` from a clean `git archive` export, not the private checkout); "Test" singer
-history (17 plays) left in place; phone-requested song with key/tempo untested.
+history removed 2026-09-29 (see incident note); phone-requested song with key/tempo: operator confirmed working 2026-09-29.
 
 ## Previously: 1.0.0.3 (superseded)
 
