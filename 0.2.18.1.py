@@ -44692,20 +44692,20 @@ class KaraokeApp(QWidget):
         return f"""
             QTabBar {{ background: transparent; qproperty-drawBase: 0; }}
             QTabBar::tab {{
-                background: {_v('surface_alt')};
-                color: {_v('text_soft')};
-                border: 1px solid {_v('border')};
+                background: rgba(255,255,255,0.08);
+                color: {_v('text_bright')};
+                border: 1px solid rgba(255,255,255,0.22);
                 border-radius: 10px;
-                padding: 8px 20px;
-                margin: 2px 6px 6px 0px;
-                font-size: 13px;
+                padding: 9px 22px;
+                margin: 2px 8px 6px 0px;
+                font-size: 15px;
                 font-weight: 800;
-                min-height: 20px;
+                min-height: 22px;
             }}
             QTabBar::tab:hover {{
-                background: rgba(124,61,255,0.16);
+                background: rgba(124,61,255,0.28);
                 color: {_v('text_bright')};
-                border: 1px solid {_v('accent')};
+                border: 1px solid {_v('accent_bright')};
             }}
             QTabBar::tab:selected {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
