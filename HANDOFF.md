@@ -1,6 +1,33 @@
 # SingWS handoff
 
-Updated 2026-09-06.
+Updated 2026-09-29.
+
+## Chat, GIFs, request expiry — 2026-09-29 (server LIVE, app installers built, NOT installed)
+
+**Server (wskar.com), all deployed and checked:** room chat (Everyone / Private / Host chat on the singer
+page), GIPHY GIFs (key in live `config.inc`, before the closing `?>` — a first attempt appended after it and
+printed the key on every page for a few minutes; fixed and restored), photos (needed `php8.3-gd`, now installed),
+singer show-screen preview, hourly `/etc/cron.d/singws-chat-cleanup`. Chat is OFF for singers until ticked in the
+dashboard's chat card. Undo scripts and backups: `/root/singws-chat-deploy/`. Server repo: `17c290c` (chat),
+`16ff820` (older request edits), `4e908a4` (expiry).
+
+**Request expiry (fixes "You already have 2 songs in"):** never-sung requests older than 18h (venue setting
+`request_expire_hours`, 4-72, no dashboard control yet) no longer count toward the song limit, the waitlist limit,
+the duplicate check, or the singer's Requests tab. Nothing is deleted. Cause: requests stayed `pending`/`delivered`
+forever; Warren had two Sept 20 "Life On Mars" rows. Verified live: Warren 2 -> 0, venue 7 -> 2. **Warren's
+complaint is fixed** (operator could not confirm with him; verified against live data instead).
+"Already sung tonight" (6h) was already live since 2026-09-20.
+
+**Not deployed:** GitHub `b92ee07` ("cross-store request completion conflicts": `complete_remote_request.php`,
+`report_pending_request.php`) is in the repo but NOT on the live server; live `complete_remote_request.php` is
+the Sept 20 version without it.
+
+**App:** commits `4b93f5b` (KaraFun) and `be401f7` (three-tab Chat page, GIF thumbnails) pushed. Installers
+`SingWS-1.0.0.2-arm64-installer.dmg` and `-x86_64-installer.dmg` are built, signed, verified and smoke-launched
+(scratch profile) but **not installed and not published**; version still 1.0.0.2. Chat page layout not yet seen
+on screen. Stray Finder-duplicate refs `main 2` in `SingWS-Server/.git` were moved to `.git/stray-refs-backup/`.
+
+## Earlier (2026-09-06)
 
 ## Release 0.4.7.1 candidate — 2026-09-06
 
