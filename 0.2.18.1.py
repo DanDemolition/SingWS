@@ -2721,6 +2721,61 @@ def _log_launch_identity() -> dict:
     return identity
 
 _MAC_LOCATION_DELEGATE_CLASS = None
+
+
+class LocationFixCollector:
+    """Decides when a CoreLocation search is finished, without any macOS objects.
+
+    Wi-Fi-only Macs (every Intel Mac, no GPS) take longer and give coarser fixes than an
+    Apple Silicon laptop, and macOS reports a momentary "location unknown" error while it is
+    still working. So: ignore cached (old) fixes, keep the most accurate fresh one, wait through
+    transient errors, stop early only on a good fix, and at the deadline accept a rough one.
+    """
+    GOOD_ACCURACY_M = 100.0       # stop waiting as soon as we have this
+    USABLE_ACCURACY_M = 3000.0    # at the deadline, anything better than this is accepted
+    MAX_AGE_S = 30.0              # older fixes are macOS handing back its last known place
+    TRANSIENT_ERROR_CODES = (0, 2)   # kCLErrorLocationUnknown, kCLErrorNetwork: keep waiting
+
+    def __init__(self):
+        self.best = None
+        self.best_accuracy = None
+        self.transient_error = ""
+        self.fatal_error = ""
+
+    def add_fix(self, obj, accuracy, age_seconds):
+        """Returns True when the search can stop now (a good fix)."""
+        try:
+            accuracy = float(accuracy)
+            age = float(age_seconds)
+        except (TypeError, ValueError):
+            return False
+        if accuracy < 0 or age > self.MAX_AGE_S:
+            return False              # invalid or stale
+        if self.best is None or accuracy < self.best_accuracy:
+            self.best, self.best_accuracy = obj, accuracy
+        return self.best_accuracy <= self.GOOD_ACCURACY_M
+
+    def add_error(self, code, text):
+        """Returns True when the error is final."""
+        try:
+            transient = int(code) in self.TRANSIENT_ERROR_CODES
+        except (TypeError, ValueError):
+            transient = False
+        if transient:
+            self.transient_error = str(text)
+            return False
+        self.fatal_error = str(text)
+        return True
+
+    def result(self):
+        """(fix, error_text). A rough fix is accepted at the deadline; nothing usable gives a reason."""
+        if self.best is not None and self.best_accuracy <= self.USABLE_ACCURACY_M:
+            return self.best, ""
+        if self.fatal_error:
+            return None, self.fatal_error
+        if self.best is not None:
+            return None, f"Only a rough location was available (about {int(self.best_accuracy)} m)."
+        return None, self.transient_error or "Timed out waiting for device location."
 _DIAG_RATE_LIMIT_LAST = {}
 
 def _diag(msg: str):
@@ -36813,7 +36868,7 @@ class KaraokeApp(QWidget):
                 else:
                     loc_status_label.setText("No active venue coordinates saved yet.")
 
-            def detect_location_now(show_result=True, timeout_sec=12.0):
+            def detect_location_now(show_result=True, timeout_sec=25.0):
                 update_location_status("Detecting current device location...")
                 loc, err = self._detect_current_device_location(timeout_sec=timeout_sec)
                 if loc:
@@ -37354,7 +37409,7 @@ class KaraokeApp(QWidget):
             return permission_msg
         return raw
 
-    def _detect_current_device_location(self, timeout_sec: float = 12.0):
+    def _detect_current_device_location(self, timeout_sec: float = 20.0):
         if sys.platform != "darwin":
             return None, "Auto-detect is currently supported on macOS only."
         try:
@@ -37376,13 +37431,20 @@ class KaraokeApp(QWidget):
                         return None
                     self._holder = None
                     self._event = None
+                    self._collector = None
                     return self
 
                 def locationManager_didUpdateLocations_(self, manager, locations):
                     try:
-                        if locations and len(locations) > 0 and self._holder is not None and self._event is not None:
-                            self._holder["location"] = locations[-1]
-                            self._event.set()
+                        if self._collector is None or not locations:
+                            return
+                        for loc in locations:
+                            try:
+                                age = time.time() - float(loc.timestamp().timeIntervalSince1970())
+                            except Exception:
+                                age = 0.0
+                            if self._collector.add_fix(loc, loc.horizontalAccuracy(), age) and self._event is not None:
+                                self._event.set()
                     except Exception as e:
                         if self._holder is not None:
                             self._holder["error"] = str(e)
@@ -37390,10 +37452,20 @@ class KaraokeApp(QWidget):
                             self._event.set()
 
                 def locationManager_didFailWithError_(self, manager, error):
-                    if self._holder is not None:
-                        self._holder["error"] = str(error)
-                    if self._event is not None:
-                        self._event.set()
+                    # "Location unknown" is momentary while macOS is still searching: keep waiting.
+                    try:
+                        code = int(error.code())
+                    except Exception:
+                        code = -1
+                    if self._collector is not None:
+                        final = self._collector.add_error(code, str(error))
+                    else:
+                        final = True
+                    if final:
+                        if self._holder is not None:
+                            self._holder["error"] = str(error)
+                        if self._event is not None:
+                            self._event.set()
 
                 def locationManagerDidChangeAuthorization_(self, manager):
                     try:
@@ -37411,8 +37483,10 @@ class KaraokeApp(QWidget):
         try:
             manager = CLLocationManager.alloc().init()
             delegate = _MAC_LOCATION_DELEGATE_CLASS.alloc().init()
+            collector = LocationFixCollector()
             delegate._holder = holder
             delegate._event = event
+            delegate._collector = collector
             manager.setDelegate_(delegate)
             manager.setDesiredAccuracy_(kCLLocationAccuracyBest)
             try:
@@ -37468,15 +37542,21 @@ class KaraokeApp(QWidget):
 
             manager.stopUpdatingLocation()
 
-            loc = holder.get("location")
+            loc, fix_error = collector.result()
+            if holder.get("error") and loc is None:
+                fix_error = holder["error"]
             if loc is None:
                 _diag(
                     "[SESSION-LOCATION] detection failed "
-                    f"authorization_status={status} error={holder.get('error') or 'timeout'}"
+                    f"authorization_status={status} error={fix_error or 'timeout'}"
                 )
                 return None, self._friendly_location_detection_error(
-                    holder.get("error") or "Timed out waiting for device location."
+                    fix_error or "Timed out waiting for device location."
                 )
+            _diag(
+                f"[SESSION-LOCATION] detected accuracy_m={collector.best_accuracy:.0f} "
+                f"waited_s={time.time() - (deadline - max(2.0, float(timeout_sec))):.1f}"
+            )
 
             coord = loc.coordinate()
             accuracy = None
@@ -37523,7 +37603,7 @@ class KaraokeApp(QWidget):
                     300.0,
                 )
             if should_refresh:
-                detected, err = self._detect_current_device_location(timeout_sec=10.0)
+                detected, err = self._detect_current_device_location(timeout_sec=15.0)
                 if detected:
                     runtime_state["_session_location_failure_count"] = 0
                     runtime_state["_session_location_retry_after"] = 0.0
