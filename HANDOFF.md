@@ -2,6 +2,18 @@
 
 Updated 2026-09-29.
 
+## VERSION POLICY (operator instruction, 2026-09-29)
+
+**Do not bump the version for test builds.** Source is set to **1.0.0.5**, which is the *next release* (1.0.0.4 is the latest
+published; 1.0.0.5/1.0.0.6 were unpublished test labels and no v1.0.0.5 tag or release exists). Rebuild for testing without
+changing it; bump only when actually releasing. The Apple Silicon app installed on the operator's Mac is a test build labelled
+1.0.0.6 (exe `cdcb9dcb...`); it contains the 1.0.0.5 fixes below. Unreleased since 1.0.0.4: KaraFun end detection now reads only
+the player panel (was 11-31 s late, silent BGM gap); key/tempo readback only overwrites the display when a disagreeing read repeats
+(fixes the panel flipping to 100% while KaraFun stayed at -5%). Operator confirmed play/pause, key change and speed change work.
+Also learned: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make fileproviderd/cloudd/bird
+saturate the Mac (load average >50) and cause video slowdowns; the video capture itself logs a steady 29 fps. Do not build while the
+operator is testing playback.
+
 ## INCIDENT 2026-09-29 04:23 — singer history deletions by mistake (fully restored)
 
 While removing the "Test" singer from Singer History by scripting the UI (System Events), a position click on the
