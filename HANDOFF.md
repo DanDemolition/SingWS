@@ -2,7 +2,7 @@
 
 Updated 2026-09-29.
 
-## Chat, GIFs, request expiry — 2026-09-29 (server LIVE, app installers built, NOT installed)
+## Chat, GIFs, request expiry — 2026-09-29 (server LIVE and tested, app installers built, NOT installed)
 
 **Server (wskar.com), all deployed and checked:** room chat (Everyone / Private / Host chat on the singer
 page), GIPHY GIFs (key in live `config.inc`, before the closing `?>` — a first attempt appended after it and
@@ -18,9 +18,11 @@ forever; Warren had two Sept 20 "Life On Mars" rows. Verified live: Warren 2 -> 
 complaint is fixed** (operator could not confirm with him; verified against live data instead).
 "Already sung tonight" (6h) was already live since 2026-09-20.
 
-**Not deployed:** GitHub `b92ee07` ("cross-store request completion conflicts": `complete_remote_request.php`,
-`report_pending_request.php`) is in the repo but NOT on the live server; live `complete_remote_request.php` is
-the Sept 20 version without it.
+**Also deployed later 2026-09-29:** GitHub `b92ee07` (cross-store request completion conflicts:
+`complete_remote_request.php`, `report_pending_request.php`) and a dashboard control for the expiry window
+("Old requests clear themselves after (hours)", server commit `efb5b26`). All six changed server files verified
+live by hash. Chat was switched on in the dashboard and confirmed working end to end with two phones
+(text, GIF, photo, host moderation).
 
 **App:** commits `4b93f5b` (KaraFun) and `be401f7` (three-tab Chat page, GIF thumbnails) pushed. Installers
 `SingWS-1.0.0.2-arm64-installer.dmg` and `-x86_64-installer.dmg` are built, signed, verified and smoke-launched
