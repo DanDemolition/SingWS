@@ -2723,6 +2723,24 @@ def _log_launch_identity() -> dict:
 _MAC_LOCATION_DELEGATE_CLASS = None
 
 
+def karafun_confirmed_readback(known, first, second):
+    """Decide whether a key/tempo read back from KaraFun's Personalize panel may overwrite SingWS's display.
+
+    SingWS drives KaraFun's key/tempo itself, so a read that agrees with what it set changes nothing. A read
+    that DISAGREES is only believed when a second, later read says exactly the same: on 2026-09-29 one read
+    caught the sliders before they had loaded (0% = tempo 100), flipped the panel to 100 while KaraFun stayed
+    at 95, and the wrong value was then used as the base for the next press. Returns (key, tempo) to show, or
+    None to leave the display alone.
+    """
+    if first is None:
+        return None
+    if known is not None and tuple(first) == tuple(known):
+        return None                   # nothing changed
+    if second is None:
+        return None                   # a lone disagreeing read is not enough
+    return tuple(first) if tuple(first) == tuple(second) else None
+
+
 class LocationFixCollector:
     """Decides when a CoreLocation search is finished, without any macOS objects.
 
@@ -52628,15 +52646,30 @@ class KaraokeApp(QWidget):
             'delay 0.6',
             'set keyV to ""',
             'set tempoV to ""',
+            'set keySlider to missing value',
+            'set tempoSlider to missing value',
             'set elems2 to entire contents of mainWindow',
             'repeat with e in elems2',
             'try',
             'if role of e is "AXSlider" then',
             'set d to (description of e as text)',
-            'if d is "Key" then set keyV to (value of e as text)',
-            'if d is "Tempo" then set tempoV to (value of e as text)',
+            'if d is "Key" then set keySlider to e',
+            'if d is "Tempo" then set tempoSlider to e',
             'end if',
             'end try',
+            'end repeat',
+            # The sliders can be read before they show the real value (defaults to 0),
+            # so poll them until two reads in a row agree and are non-empty.
+            'set lastPair to ""',
+            'repeat 8 times',
+            'try',
+            'if keySlider is not missing value then set keyV to (value of keySlider as text)',
+            'if tempoSlider is not missing value then set tempoV to (value of tempoSlider as text)',
+            'end try',
+            'set pairNow to keyV & "|" & tempoV',
+            'if keyV is not "" and tempoV is not "" and pairNow is lastPair then exit repeat',
+            'set lastPair to pairNow',
+            'delay 0.4',
             'end repeat',
             'try',
             'perform action "AXPress" of pbtn',
@@ -54527,7 +54560,18 @@ class KaraokeApp(QWidget):
 
                         def _read_kt():
                             try:
-                                values = self._karafun_read_key_tempo()
+                                first = self._karafun_read_key_tempo()
+                                known = (int(entry.get("karafun_key_current", 0) or 0),
+                                         int(entry.get("karafun_tempo_current", 100) or 100))
+                                second = None
+                                if first is not None and tuple(first) != known and not entry.get("karafun_kt_dirty"):
+                                    time.sleep(2.0)             # a disagreeing read must repeat before it is believed
+                                    second = self._karafun_read_key_tempo()
+                                values = karafun_confirmed_readback(known, first, second)
+                                _diag(
+                                    f"[KARAFUN] key/tempo readback first={first} second={second} known={known} "
+                                    f"-> {'applied ' + str(values) if values else 'display unchanged'}"
+                                )
                             except Exception:
                                 values = None
                             entry["karafun_kt_busy"] = False
