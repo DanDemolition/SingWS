@@ -2748,6 +2748,7 @@ def karafun_dual_renderer_windows(_source=None):
                 "onscreen": bool(w.get("kCGWindowIsOnscreen", False)),
                 "layer": int(w.get("kCGWindowLayer", 0)),
                 "width": int(b.get("Width", 0)), "height": int(b.get("Height", 0)),
+                "x": int(b.get("X", 0)), "y": int(b.get("Y", 0)),
             })
         return out
     except Exception:
@@ -38217,6 +38218,14 @@ class KaraokeApp(QWidget):
         self._karaoke_seek_dragging = True
 
     def _on_karaoke_seek_released(self):
+        karafun_times = self._karafun_display_times() if self._karafun_active_entry() is not None else None
+        if karafun_times is not None:
+            try:
+                self._karafun_seek_to((self.karaoke_seek_slider.value() / 1000.0) * karafun_times[1])
+            except Exception as exc:
+                _diag(f"[KARAFUN] seek failed: {exc}")
+            self._karaoke_seek_dragging = False
+            return
         try:
             dur, _pos = self._gst_query_times()
             if dur is not None and dur > 0:
@@ -38236,6 +38245,9 @@ class KaraokeApp(QWidget):
             return
         try:
             dur, _pos = self._gst_query_times()
+            karafun_times = self._karafun_display_times() if self._karafun_active_entry() is not None else None
+            if karafun_times is not None:
+                dur = int(karafun_times[1] * NS_PER_SECOND)
             if dur is not None and dur > 0:
                 dur_sec = dur / NS_PER_SECOND
                 preview = (int(value) / 1000.0) * dur_sec
@@ -52045,7 +52057,14 @@ class KaraokeApp(QWidget):
                 outcome = str(result or "").strip()
                 if outcome == "WINDOWED":
                     _begin_capture()
-                elif outcome in {"EXITING_FULLSCREEN", "NO_DUAL_RENDERER"} and attempt < 160 and not _renderer_give_up(outcome):
+                elif outcome == "NO_DUAL_RENDERER" and karafun_dual_renderer_windows():
+                    # System Events only lists windows in the current Space, but
+                    # CoreGraphics sees the renderer in every Space and the capture
+                    # addresses the window itself. 2026-09-29: giving up here on the
+                    # AX blind spot left the preview black for the whole song.
+                    _diag("[KARAFUN-CAPTURE] renderer exists in another Space; starting capture")
+                    _begin_capture()
+                elif outcome in {"EXITING_FULLSCREEN", "NO_DUAL_RENDERER"} and attempt < 160:
                     # 2026-09-27: KaraFun creates the renderer only once the
                     # track is playing, and the single AXPress from the opener
                     # did not open it, so the operator had to click KaraFun's
@@ -52084,14 +52103,9 @@ class KaraokeApp(QWidget):
                     QTimer.singleShot(250, lambda: _ensure_renderer_windowed(attempt + 1))
                 else:
                     _diag(f"[KARAFUN-CAPTURE] renderer must stay windowed: {outcome!r}")
+                    # Operator decision 2026-09-29: capture is the only path. The old
+                    # fullscreen-handoff fallback is gone; it was unreliable.
                     self._stop_karafun_dual_renderer_capture()
-                    # Never leave the audience screen on black: fall back to the
-                    # older fullscreen handoff for this song.
-                    if outcome == "NO_DUAL_RENDERER" and isinstance(
-                            getattr(self, "_active_external_karafun", None), dict):
-                        _diag("[KARAFUN-CAPTURE] capture unavailable; falling back to fullscreen handoff")
-                        self._karafun_capture_session = False
-                        self._handoff_show_screen_to_karafun(force_managed=True)
 
             if not self._karafun_run_window_script(window_script, on_complete=_checked, timeout=8):
                 self._stop_karafun_dual_renderer_capture()
@@ -52178,6 +52192,15 @@ class KaraokeApp(QWidget):
         timer.start()
 
         self._set_show_window_capture_level(True)
+        try:
+            # Evidence for on-TV rehearsals: where KaraFun's renderer is and where the audience window is.
+            vw = getattr(self, "video_window", None)
+            geo = vw.geometry() if vw is not None else None
+            _diag(f"[KARAFUN-CAPTURE] placement renderer={karafun_dual_renderer_windows()} "
+                  f"audience={(geo.x(), geo.y(), geo.width(), geo.height()) if geo is not None else None} "
+                  f"same_screen_as_host={bool(vw is not None and vw.screen() == self.screen())}")
+        except Exception:
+            pass
         self._reassert_show_window_surface("karafun_capture_start", force=True)
         self._schedule_show_ticker_reassert("karafun_capture_start")
 
@@ -52851,6 +52874,68 @@ class KaraokeApp(QWidget):
             self._run_on_ui_thread(_done)
 
         threading.Thread(target=_work, daemon=True, name="karafun-key-tempo").start()
+
+    def _karafun_seek_to(self, target_sec: float) -> bool:
+        """Move KaraFun to about `target_sec` with Playback > Skip Forward/Back 10s.
+
+        KaraFun's progress bar is custom-drawn and not in the accessibility tree,
+        so the only handle on it is the menu: one click is 10 seconds, so the
+        result lands within 5 seconds of the drop point. The target is kept clear
+        of the very end so a seek can never finish the song by itself.
+        """
+        entry = self._karafun_active_entry()
+        times = self._karafun_display_times()
+        if entry is None or times is None or getattr(self, "_karafun_seek_running", False):
+            return False
+        elapsed, duration = times
+        target = max(0.0, min(float(target_sec), float(duration) - 8.0))
+        steps = max(-60, min(60, int(round((target - elapsed) / 10.0))))
+        if steps == 0:
+            return False
+        item = "Skip Forward 10s" if steps > 0 else "Skip Back 10s"
+        count = abs(steps)
+        self._karafun_seek_running = True
+
+        def _work():
+            done = 0
+            try:
+                ok, result, _error = self._run_karafun_applescript_sync([
+                    'tell application "System Events"',
+                    'tell application process "KaraFun"',
+                    'set n to 0',
+                    f'repeat {count} times',
+                    'try',
+                    f'click menu item "{item}" of menu 1 of menu bar item "Playback" of menu bar 1',
+                    'set n to n + 1',
+                    'end try',
+                    'delay 0.12',
+                    'end repeat',
+                    'return "SEEKED|" & n',
+                    'end tell',
+                    'end tell',
+                ], timeout=10 + count * 0.4)
+                match = re.match(r"SEEKED\|(\d+)", str(result or "")) if ok else None
+                done = int(match.group(1)) if match else 0
+            except Exception as exc:
+                _diag(f"[KARAFUN] seek failed: {exc}")
+
+            def _apply():
+                self._karafun_seek_running = False
+                if self._karafun_active_entry() is not entry:
+                    return
+                moved = done * 10.0 * (1 if steps > 0 else -1)
+                started = entry.get("karafun_display_started_at")
+                if started and done:
+                    # elapsed = now - started, so a skip forward moves the origin back.
+                    reference = float(entry.get("karafun_paused_at") or time.monotonic())
+                    entry["karafun_display_started_at"] = min(float(started) - moved, reference)
+                _diag(f"[KARAFUN] seek from={elapsed:.0f}s to={target:.0f}s "
+                      f"clicks={done}/{count} moved={moved:+.0f}s")
+
+            self._run_on_ui_thread(_apply)
+
+        threading.Thread(target=_work, daemon=True, name="karafun-seek").start()
+        return True
 
     def _toggle_karafun_playback(self):
         """Play/Pause button while a KaraFun song is active: toggle KaraFun itself."""

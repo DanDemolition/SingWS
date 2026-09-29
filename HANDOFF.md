@@ -18,6 +18,36 @@ Also learned: iCloud "Desktop & Documents" sync is ON and the project folder is 
 saturate the Mac (load average >50) and cause video slowdowns; the video capture itself logs a steady 29 fps. Do not build while the
 operator is testing playback.
 
+## INSTALLED 2026-09-29 12:02 — capture-only KaraFun video + seek (UNCOMMITTED source, label 1.0.0.5, arm64, unpublished)
+
+Installed exe `3305f3e5...` (DMG verified, signature ok, identical to installer). Backups of the previous app + profile:
+`local-installs/20260929-*` (private). Three changes over commit `170b68e`, all in `0.2.18.1.py`, **not committed yet**:
+1. **Fullscreen-handoff fallback removed** (operator: "no failsafe anymore that is too broken"). In `_ensure_renderer_windowed`, when
+   System Events cannot see the renderer but CoreGraphics lists it in any Space, capture starts immediately
+   (`renderer exists in another Space; starting capture`). If the window never appears the capture just stops (black preview).
+   The old `_renderer_give_up` helper and the `fallback` decision in `karafun_renderer_press_decision` are now dead code.
+   Real-song results: cold start pressed the video button once, first frame 7 s after play, looked smooth; regular start
+   pressed nothing, 29 fps. The earlier black screen (renderer absent, capture gave up after 8 s and never restarted) is fixed.
+2. **Placement log** at capture start: `[KARAFUN-CAPTURE] placement renderer=[...] audience=(x,y,w,h) same_screen_as_host=..`.
+   On the virtual test screen KaraFun's window lands on the same screen as the audience window (x=1728). The existing guard
+   (`_set_show_window_capture_level` floating level + 2 s `karafun_capture_guard` reassert) keeps the audience window above it,
+   but is skipped when host and audience share a screen. **Not yet rehearsed on the real TV: watch for KaraFun's window over it.**
+3. **KaraFun seek** (`_karafun_seek_to`): dropping the SingWS seek bar clicks Playback > Skip Forward/Back 10s (KaraFun's progress
+   bar is not in the accessibility tree), so it lands within ~5 s of the drop, never within 8 s of the end, max 60 clicks. Verified
+   on a real song 12:03: +30s, -30s, +150s all clicked fully; end-of-song followed correctly; operator: "seemed perfect".
+Tests: 303 related tests pass (`test_karafun_seek.py` is new; source-guard style). Music fade in/out confirmed perfect.
+
+## Earlier today 11:12 — KaraFun black-screen fix (commit `170b68e`, label 1.0.0.5, arm64 only, unpublished)
+
+Black screen at song start was caused by blind toggling of KaraFun's video button. `_ensure_renderer_windowed` now lists
+"Dual Renderer" windows across all Spaces (`karafun_dual_renderer_windows`) and presses at most twice, only when the
+renderer is absent everywhere (`karafun_renderer_press_decision`; 11 tests in `test_karafun_renderer.py`). Installed exe
+`04748d95...` (identical to the DMG; strict signature ok; marker present). Backup of previous app + profile:
+`local-installs/20260929-renderer-fix/backup/` (private). NOT yet tested on a real song: watch the log for
+`renderer absent in every Space; pressing video button (n/2)` (at most once per song, no black screen).
+Operator-confirmed 11:14: a KaraFun cold-start song (Test / Bruno Mars / Dirty Diana) looked right with no slowdowns; renderer
+was already present (no presses), capture steady at 29 fps. The renderer-absent case is still untested on real hardware.
+
 ## INCIDENT 2026-09-29 04:23 — singer history deletions by mistake (fully restored)
 
 While removing the "Test" singer from Singer History by scripting the UI (System Events), a position click on the
