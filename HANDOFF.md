@@ -10,6 +10,10 @@ changing it; bump only when actually releasing. The Apple Silicon app installed 
 1.0.0.6 (exe `cdcb9dcb...`); it contains the 1.0.0.5 fixes below. Unreleased since 1.0.0.4: KaraFun end detection now reads only
 the player panel (was 11-31 s late, silent BGM gap); key/tempo readback only overwrites the display when a disagreeing read repeats
 (fixes the panel flipping to 100% while KaraFun stayed at -5%). Operator confirmed play/pause, key change and speed change work.
+**Verified 2026-09-29 10:52-10:55 with a real song (operator confirmed by ear):** live tempo changes (100->90->100->95) all taken by KaraFun;
+both once-a-minute readbacks logged `display unchanged` (no more flip to 100%); end of song noticed at `remaining=-5` with no slow probe
+(was -13..-31) and the background music came back "perfect". Menu bar hidden on the virtual test screen in full screen is BetterDisplay's
+max-level overlay (`BetterDisplay Overlay for Display 8`), not SingWS; operator decided full screen works as is (no change made).
 Also learned: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make fileproviderd/cloudd/bird
 saturate the Mac (load average >50) and cause video slowdowns; the video capture itself logs a steady 29 fps. Do not build while the
 operator is testing playback.
