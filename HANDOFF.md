@@ -18,7 +18,22 @@ Also learned: iCloud "Desktop & Documents" sync is ON and the project folder is 
 saturate the Mac (load average >50) and cause video slowdowns; the video capture itself logs a steady 29 fps. Do not build while the
 operator is testing playback.
 
-## INSTALLED 2026-09-29 12:02 — capture-only KaraFun video + seek (UNCOMMITTED source, label 1.0.0.5, arm64, unpublished)
+## RELEASED 1.0.0.5 — 2026-09-29 (published, latest; the exact release DMG is installed on this Mac)
+
+Tag `v1.0.0.5`, release commit `8300e55`, https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.5. arm64 `65f19e24...`
+(127,068,526 B) and x86_64 `20f2f4f4...` (152,919,340 B); sizes and re-downloaded SHA-256s match `docs/release.json`, live on
+Pages with the download page and both `latest/download` links. Contains: capture-only KaraFun video (no fullscreen fallback),
+placement log, KaraFun seek via Skip 10s, faster end detection, steadier tempo readback, Detect Now fix (see the sections below).
+Checks: 1142 tests + 92 environment-group tests (scratch `SINGWS_HOME`, live log unchanged); both DMGs hdiutil-verified, strict
+signature, arch (arm64 420 / x86_64 433 Mach-O), macOS minimum <= 12.3 (816 / 842 files), markers present, old fallback absent.
+Intel smoke-launched under Rosetta only (BASS ready, clean exit); **never run on a physical Intel Mac** (Detect Now there is
+still unconfirmed). Installed here 12:28: the released arm64 DMG (exe `bda75d45...`); backup `local-installs/20260929-release-1.0.0.5/`.
+Still open: rehearse on the real TV (KaraFun's window must never cover the audience screen; guard = floating level + 2 s reassert,
+skipped when host and audience share a screen); dead code `_renderer_give_up` / `fallback` decision; slow `server_sync` (1-3 s, worker thread).
+Server: unchanged today, repo `f5bb7a7` clean and pushed; 4 non-code files differ live vs repo (see 1.0.0.4).
+Version policy: next test builds stay at 1.0.0.5 until the operator says release again, then bump.
+
+## Was installed 2026-09-29 12:02 — capture-only KaraFun video + seek (now committed as `b38ac74` and released in 1.0.0.5)
 
 Installed exe `3305f3e5...` (DMG verified, signature ok, identical to installer). Backups of the previous app + profile:
 `local-installs/20260929-*` (private). Three changes over commit `170b68e`, all in `0.2.18.1.py`, **not committed yet**:
