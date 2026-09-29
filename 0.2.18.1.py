@@ -44669,7 +44669,7 @@ class KaraokeApp(QWidget):
         split.addWidget(right); split.setStretchFactor(1, 1)
         from PyQt6.QtWidgets import QStackedWidget, QTabBar
         self.chat_tab_bar = QTabBar(); self.chat_tab_bar.setExpanding(False); self.chat_tab_bar.setDrawBase(False)
-        self.chat_tab_bar.setUsesScrollButtons(False); self.chat_tab_bar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chat_tab_bar.setUsesScrollButtons(False)
         self.chat_tab_bar.setStyleSheet(self._chat_tab_bar_css())
         for label in ("Everyone", "Private", "Host chat"): self.chat_tab_bar.addTab(label)
         self.chat_stack = QStackedWidget()
