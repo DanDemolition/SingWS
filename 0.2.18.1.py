@@ -44668,7 +44668,9 @@ class KaraokeApp(QWidget):
         #   Host chat = one-to-one messages between singers and the host
         split.addWidget(right); split.setStretchFactor(1, 1)
         from PyQt6.QtWidgets import QStackedWidget, QTabBar
-        self.chat_tab_bar = QTabBar(); self.chat_tab_bar.setExpanding(False); self.chat_tab_bar.setDrawBase(True)
+        self.chat_tab_bar = QTabBar(); self.chat_tab_bar.setExpanding(False); self.chat_tab_bar.setDrawBase(False)
+        self.chat_tab_bar.setUsesScrollButtons(False); self.chat_tab_bar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chat_tab_bar.setStyleSheet(self._chat_tab_bar_css())
         for label in ("Everyone", "Private", "Host chat"): self.chat_tab_bar.addTab(label)
         self.chat_stack = QStackedWidget()
         self.chat_stack.addWidget(self._build_room_chat_tab())
@@ -44684,6 +44686,34 @@ class KaraokeApp(QWidget):
         self._chat_pulse_timer = QTimer(self); self._chat_pulse_timer.setInterval(420); self._chat_pulse_timer.timeout.connect(self._update_chat_nav_state); self._chat_pulse_timer.start()
         QTimer.singleShot(800, self._schedule_chat_poll)
         return page
+
+    def _chat_tab_bar_css(self) -> str:
+        """Pill tabs matching the Settings dialog: quiet when idle, accent-filled when selected."""
+        return f"""
+            QTabBar {{ background: transparent; qproperty-drawBase: 0; }}
+            QTabBar::tab {{
+                background: {_v('surface_alt')};
+                color: {_v('text_soft')};
+                border: 1px solid {_v('border')};
+                border-radius: 10px;
+                padding: 8px 20px;
+                margin: 2px 6px 6px 0px;
+                font-size: 13px;
+                font-weight: 800;
+                min-height: 20px;
+            }}
+            QTabBar::tab:hover {{
+                background: rgba(124,61,255,0.16);
+                color: {_v('text_bright')};
+                border: 1px solid {_v('accent')};
+            }}
+            QTabBar::tab:selected {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {_v('accent_bright')}, stop:1 {_v('accent')});
+                color: {_v('accent_text')};
+                border: 1px solid {_v('accent_bright')};
+            }}
+        """
 
     # ------------------------------------------------------------------ room chat
     # Group room + singer-to-singer private messages. The host reads everything and can
