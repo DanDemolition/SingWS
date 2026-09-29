@@ -2800,6 +2800,9 @@ def _network_safe_body(resp, limit: int = 300) -> str:
     except Exception:
         return ""
 
+from urllib.parse import quote, unquote   # room chat action links
+
+
 def _network_normalize_base_url(base_url: str) -> str:
     base = str(base_url or "").strip().rstrip("/")
     if base and "://" not in base:
@@ -44643,7 +44646,7 @@ class KaraokeApp(QWidget):
     def _build_chat_page(self):
         page = QWidget()
         layout = QVBoxLayout(page); layout.setContentsMargins(16, 16, 16, 16); layout.setSpacing(10)
-        title = QLabel("Singer Chat"); title.setStyleSheet(f"color:{_v('text_bright')};font-size:20px;font-weight:850;")
+        title = QLabel("Chat"); title.setStyleSheet(f"color:{_v('text_bright')};font-size:20px;font-weight:850;")
         title_row = QHBoxLayout(); title_row.addWidget(title); title_row.addStretch(1)
         self.chat_clear_button = QPushButton("Clear Chat History")
         self.chat_clear_button.setToolTip("Permanently delete all singer chat messages from the server")
@@ -44660,13 +44663,437 @@ class KaraokeApp(QWidget):
         self.chat_send_button = QPushButton("Send"); self.chat_send_button.clicked.connect(self._send_chat_message)
         self.chat_message_input.returnPressed.connect(self._send_chat_message)
         send_row.addWidget(self.chat_message_input, 1); send_row.addWidget(self.chat_send_button); right_layout.addLayout(send_row)
-        split.addWidget(right); split.setStretchFactor(1, 1); layout.addWidget(split, 1)
+        # Three views on one page, to keep the screen uncluttered:
+        #   Everyone  = the group room      Private = singer-to-singer messages (host monitors)
+        #   Host chat = one-to-one messages between singers and the host
+        split.addWidget(right); split.setStretchFactor(1, 1)
+        from PyQt6.QtWidgets import QStackedWidget, QTabBar
+        self.chat_tab_bar = QTabBar(); self.chat_tab_bar.setExpanding(False); self.chat_tab_bar.setDrawBase(True)
+        for label in ("Everyone", "Private", "Host chat"): self.chat_tab_bar.addTab(label)
+        self.chat_stack = QStackedWidget()
+        self.chat_stack.addWidget(self._build_room_chat_tab())
+        self.chat_stack.addWidget(split)
+        self.room_filter_combo.hide()               # the tab bar now chooses Everyone / Private
+        self.chat_tab_bar.currentChanged.connect(self._on_chat_tab_changed)
+        layout.addWidget(self.chat_tab_bar)
+        layout.addWidget(self.chat_stack, 1)
+        self._on_chat_tab_changed(0)
         self._chat_messages = []; self._chat_last_id = 0; self._chat_poll_inflight = False; self._chat_data_generation = 0
         _now = time.localtime(); self._chat_night_start = int(time.mktime((_now.tm_year, _now.tm_mon, _now.tm_mday, 0, 0, 0, _now.tm_wday, _now.tm_yday, _now.tm_isdst)))
         self._chat_poll_timer = QTimer(self); self._chat_poll_timer.timeout.connect(self._schedule_chat_poll); self._chat_poll_timer.start(3000)
         self._chat_pulse_timer = QTimer(self); self._chat_pulse_timer.setInterval(420); self._chat_pulse_timer.timeout.connect(self._update_chat_nav_state); self._chat_pulse_timer.start()
         QTimer.singleShot(800, self._schedule_chat_poll)
         return page
+
+    # ------------------------------------------------------------------ room chat
+    # Group room + singer-to-singer private messages. The host reads everything and can
+    # remove, approve, mute or clear. Messages are unfiltered by default; the venue's
+    # rules are set in the web dashboard.
+
+    def _room_chat_conn(self):
+        base = _network_normalize_base_url(self.settings.get("base_url", ""))
+        user = str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+        key = str(self.settings.get("api_key", "") or "").strip()
+        return (base, user, key) if base and user and key else None
+
+    def _build_room_chat_tab(self):
+        from PyQt6.QtWidgets import QTextBrowser
+        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 8, 0, 0); layout.setSpacing(8)
+        top = QHBoxLayout()
+        self.room_status_label = QLabel("Room chat: connecting…"); self.room_status_label.setStyleSheet(section_meta_css())
+        self.room_filter_combo = QComboBox(); self.room_filter_combo.addItems(["Everything", "Group room", "Private messages", "Needs attention"])
+        self.room_search_input = QLineEdit(); self.room_search_input.setPlaceholderText("Find a singer or word…")
+        self.room_refresh_button = QPushButton("Refresh"); self.room_clear_button = QPushButton("Clear Room Chat")
+        self.room_clear_button.setToolTip("Delete every room message, picture, mute and block for this venue (also happens automatically after the retention time)")
+        top.addWidget(self.room_status_label, 1)
+        layout.addLayout(top)
+        controls = QHBoxLayout()
+        controls.addWidget(self.room_filter_combo); controls.addWidget(self.room_search_input, 1)
+        controls.addWidget(self.room_refresh_button); controls.addWidget(self.room_clear_button)
+        layout.addLayout(controls)
+        self.room_mutes_label = QLabel(""); self.room_mutes_label.setTextFormat(Qt.TextFormat.RichText)
+        self.room_mutes_label.setOpenExternalLinks(False); self.room_mutes_label.setWordWrap(True)
+        self.room_mutes_label.linkActivated.connect(lambda href: self._on_room_anchor(QUrl(href)))
+        layout.addWidget(self.room_mutes_label)
+        self.room_view = QTextBrowser(); self.room_view.setOpenLinks(False); self.room_view.setOpenExternalLinks(False)
+        self.room_view.anchorClicked.connect(self._on_room_anchor)
+        layout.addWidget(self.room_view, 1)
+        self._room_messages = {}; self._room_mutes = []; self._room_settings = {}
+        self._room_last_id = 0; self._room_poll_inflight = False; self._room_generation = 0; self._room_tick = 0
+        self._room_attention_ids = set(); self._room_notified = set(); self._room_seen_ids = set(); self._room_unread = 0; self._room_new_by_channel = {"group": 0, "dm": 0}
+        self._room_media = {}; self._room_media_thumb = {}; self._room_gif_full = {}; self._room_media_pending = set(); self._room_reachable = None; self._room_baseline_done = False
+        self.room_filter_combo.currentIndexChanged.connect(lambda *_: self._render_room_chat())
+        self.room_search_input.textChanged.connect(lambda *_: self._render_room_chat())
+        self.room_refresh_button.clicked.connect(lambda: self._schedule_room_poll(True))
+        self.room_clear_button.clicked.connect(self._room_clear_night)
+        self._room_poll_timer = QTimer(self); self._room_poll_timer.timeout.connect(self._room_poll_tick); self._room_poll_timer.start(3000)
+        QTimer.singleShot(1500, lambda: self._schedule_room_poll(True))
+        return page
+
+    _ROOM_TAB_CHANNELS = {0: "group", 1: "dm"}          # tab index -> room channel; tab 2 is the host chat
+
+    def _room_view_open(self) -> bool:
+        bar = getattr(self, "chat_tab_bar", None)
+        return bar is not None and bar.currentIndex() in self._ROOM_TAB_CHANNELS
+
+    def _room_channel_counts(self):
+        """Per channel: (new messages since you last looked, messages needing attention)."""
+        new = getattr(self, "_room_new_by_channel", None) or {}
+        attention = {"group": 0, "dm": 0}
+        for mid in getattr(self, "_room_attention_ids", ()) or ():
+            ch = (getattr(self, "_room_messages", {}).get(mid) or {}).get("channel") or "group"
+            attention[ch if ch in attention else "group"] += 1
+        return new, attention
+
+    def _chat_tab_labels(self):
+        bar = getattr(self, "chat_tab_bar", None)
+        current = bar.currentIndex() if bar is not None else 0
+        new, attention = self._room_channel_counts()
+        labels = []
+        for idx, (name, ch) in enumerate((("Everyone", "group"), ("Private", "dm"))):
+            bits = []
+            if new.get(ch) and idx != current: bits.append(f"{new[ch]} new")
+            if attention.get(ch): bits.append(f"⚠ {attention[ch]}")
+            labels.append(name + (f" ({', '.join(bits)})" if bits else ""))
+        unread = sum(1 for m in list(getattr(self, "_chat_messages", []) or []) if m.get("direction") == "in" and not m.get("read"))
+        labels.append("Host chat" + (f" ({unread} new)" if unread else ""))
+        return labels
+
+    def _on_chat_tab_changed(self, index: int):
+        """Everyone / Private show the room view filtered to that channel; Host chat shows the singer list."""
+        stack = getattr(self, "chat_stack", None)
+        if stack is None: return
+        ch = self._ROOM_TAB_CHANNELS.get(index)
+        stack.setCurrentIndex(0 if ch else 1)
+        if ch:
+            combo = getattr(self, "room_filter_combo", None)
+            if combo is not None: combo.setCurrentIndex(1 if ch == "group" else 2)
+            new = getattr(self, "_room_new_by_channel", None)
+            if isinstance(new, dict): new[ch] = 0
+            self._room_unread = sum((new or {}).values()) if isinstance(new, dict) else 0
+            self._update_room_tab_title(); self._render_room_chat()
+        else:
+            self._update_room_tab_title()
+
+    def _update_room_tab_title(self):
+        bar = getattr(self, "chat_tab_bar", None)
+        if bar is not None:
+            for idx, label in enumerate(self._chat_tab_labels()):
+                if idx < bar.count(): bar.setTabText(idx, label)
+        self._update_chat_nav_state()
+
+    def _room_poll_tick(self):
+        self._room_tick += 1
+        # New messages arrive every tick; a full refresh every ~15s also picks up changes to
+        # old ones (reports added by singers, actions from another host device).
+        self._schedule_room_poll(full=(self._room_tick % 5 == 0))
+
+    def _schedule_room_poll(self, full: bool = False):
+        conn = self._room_chat_conn()
+        if not conn or self._room_poll_inflight: return
+        base, user, key = conn
+        self._room_poll_inflight = True
+        since = 0 if full else int(self._room_last_id or 0)
+        generation = self._room_generation
+
+        def worker():
+            data = {}
+            try:
+                r = requests.get(f"{base}/api/v1/host_chat_moderation.php",
+                                 params={"user": user, "action": "list", "since_id": since},
+                                 headers={"X-API-Key": key, "Accept": "application/json"}, timeout=8)
+                data = r.json() if r.ok else {}
+            except Exception:
+                data = {}
+
+            def finish():
+                self._room_poll_inflight = False
+                if generation != self._room_generation: return
+                if not data.get("ok"):
+                    self._room_reachable = False
+                    self.room_status_label.setText("Room chat: could not reach the server")
+                    return
+                self._room_reachable = True
+                self._apply_room_list(data, replace=full)
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker, daemon=True, name="room-chat-poll").start()
+
+    def _apply_room_list(self, data: dict, replace: bool):
+        items = list(data.get("messages") or [])
+        if replace:
+            self._room_messages = {int(m["id"]): m for m in items}
+        else:
+            for m in items: self._room_messages[int(m["id"])] = m
+        self._room_last_id = max(self._room_messages) if self._room_messages else 0
+        self._room_mutes = list(data.get("mutes") or [])
+        self._room_settings = dict(data.get("settings") or {})
+        new_ids = [i for i in self._room_messages if i not in self._room_seen_ids]
+        self._room_seen_ids.update(new_ids)
+        if self._room_baseline_done:
+            self._room_unread += len(new_ids)      # only messages that arrived after the first load count as new
+            for i in new_ids:
+                ch = "dm" if self._room_messages[i].get("channel") == "dm" else "group"
+                self._room_new_by_channel[ch] = self._room_new_by_channel.get(ch, 0) + 1
+        self._room_baseline_done = True
+        attention = {i for i, m in self._room_messages.items()
+                     if m.get("status") != "removed" and (m.get("status") == "held" or int(m.get("reports") or 0) > 0)}
+        fresh = attention - self._room_notified
+        self._room_attention_ids = attention
+        self._room_notified |= attention
+        for mid in sorted(fresh)[:3]:
+            m = self._room_messages[mid]
+            what = "held for approval" if m.get("status") == "held" else "reported"
+            self._show_processing_notification(f"⚠ Room chat message {what}: {m.get('from', '')}: {str(m.get('message', ''))[:80]}", level="warning")
+        bar = getattr(self, "chat_tab_bar", None)
+        if bar is not None and bar.currentIndex() in self._ROOM_TAB_CHANNELS:
+            self._room_new_by_channel[self._ROOM_TAB_CHANNELS[bar.currentIndex()]] = 0   # you are looking at it
+        self._room_unread = sum(self._room_new_by_channel.values())
+        self._update_room_tab_title()
+        self._render_room_chat()
+
+    def _room_display_name(self, key: str) -> str:
+        for m in self._room_messages.values():
+            if m.get("from_key") == key and m.get("from"): return str(m["from"])
+        return key.title() if key else ""
+
+    def _render_room_chat(self):
+        view = getattr(self, "room_view", None)
+        if view is None: return
+        import html as _html
+        settings = self._room_settings
+        if self._room_reachable is False:
+            return
+        if settings and not settings.get("group_enabled") and not settings.get("dm_enabled"):
+            self.room_status_label.setText("Room chat is OFF. Turn it on in the web dashboard under “Singer Chat & Screen Preview”.")
+        else:
+            on = lambda k: "on" if settings.get(k) else "off"
+            self.room_status_label.setText(
+                f"Group room {on('group_enabled')} · Private messages {on('dm_enabled')} · "
+                f"{len(self._room_messages)} messages · {len(self._room_attention_ids)} need attention")
+        muted_keys = {m.get("singer_key"): m for m in self._room_mutes}
+        if self._room_mutes:
+            parts = []
+            for m in self._room_mutes:
+                until = "for the night" if not int(m.get("until") or 0) else "until " + time.strftime("%I:%M %p", time.localtime(int(m["until"])))
+                parts.append(f"{_html.escape(str(m.get('singer') or m.get('singer_key')))} ({until}) "
+                             f"<a href='room://unmute/{quote(str(m.get('singer_key')), safe='')}'>Unmute</a>")
+            self.room_mutes_label.setText("Muted: " + " · ".join(parts))
+        else:
+            self.room_mutes_label.setText("")
+        mode = self.room_filter_combo.currentIndex(); needle = self.room_search_input.text().strip().casefold()
+        rows = []
+        for mid in sorted(self._room_messages):
+            m = self._room_messages[mid]
+            if mode == 1 and m.get("channel") != "group": continue
+            if mode == 2 and m.get("channel") != "dm": continue
+            if mode == 3 and mid not in self._room_attention_ids: continue
+            if needle and needle not in (str(m.get("message", "")) + " " + str(m.get("from", "")) + " " + str(m.get("to_key", ""))).casefold(): continue
+            rows.append(m)
+        rows = rows[-300:]
+        if not rows:
+            view.setHtml(f"<p style='color:{_v('text_muted')};'>No messages{' match this filter' if (mode or needle) else ' yet'}.</p>")
+            return
+        muted_color = {"group": "#8b5cf6", "dm": "#38bdf8", "held": "#f59e0b", "removed": "#6b7280", "blocked": "#ef4444"}
+        bar = view.verticalScrollBar(); was_bottom = bar.value() >= bar.maximum() - 4; old_value = bar.value()
+        out = []
+        for m in rows:
+            mid = int(m["id"]); status = str(m.get("status") or "visible"); channel = str(m.get("channel") or "group")
+            color = muted_color.get(status if status in muted_color else channel, "#8b5cf6")
+            sender = _html.escape(str(m.get("from") or m.get("from_key") or ""))
+            who = f"<b style='color:{_v('text_bright')}'>{sender}</b>"
+            tags = []
+            if channel == "dm":
+                tags.append(f"<span style='color:#38bdf8'>PRIVATE → {_html.escape(self._room_display_name(str(m.get('to_key') or '')))}</span>")
+            else:
+                tags.append("<span style='color:#8b5cf6'>GROUP</span>")
+            if status == "held": tags.append(f"<span style='color:#f59e0b'>HELD ({_html.escape(str(m.get('flag') or ''))})</span>")
+            if status == "removed": tags.append("<span style='color:#9ca3af'>REMOVED</span>")
+            if status == "blocked": tags.append("<span style='color:#ef4444'>BLOCKED BY RECIPIENT (they never saw it)</span>")
+            if int(m.get("reports") or 0): tags.append(f"<span style='color:#ef4444'>REPORTED ×{int(m['reports'])}</span>")
+            stamp = time.strftime("%I:%M:%S %p", time.localtime(int(m.get("created_at") or 0))) if m.get("created_at") else ""
+            text = _html.escape(str(m.get("message") or "")).replace("\n", "<br>")
+            if status == "removed" and text: text = f"<s style='color:#9ca3af'>{text}</s>"
+            body = text
+            media_id = int(m.get("media_id") or 0)
+            if m.get("kind") == "image" and media_id:
+                img = self._room_media.get(media_id)
+                if img is None:
+                    body += "<br><i style='color:#9ca3af'>loading picture…</i>"; self._room_fetch_media(media_id)
+                else:
+                    uri = self._room_media_thumb.get(media_id)
+                    if uri is None:
+                        import base64
+                        from PyQt6.QtCore import QBuffer, QIODevice
+                        thumb = img.scaledToWidth(260, Qt.TransformationMode.SmoothTransformation) if img.width() > 260 else img
+                        buf = QBuffer(); buf.open(QIODevice.OpenModeFlag.WriteOnly); thumb.save(buf, "PNG")
+                        uri = "data:image/png;base64," + base64.b64encode(bytes(buf.data())).decode("ascii")
+                        self._room_media_thumb[media_id] = uri
+                    body += f"<br><a href='room://image/{media_id}'><img src='{uri}'></a>"
+            gif = m.get("gif") if m.get("kind") == "gif" and isinstance(m.get("gif"), dict) else None
+            if gif and re.match(r"^https://(media[0-9]*|i)\.giphy\.com/", str(gif.get("preview") or "")):
+                gid = str(gif.get("id") or "")
+                self._room_gif_full[gid] = str(gif.get("full") or gif.get("url") or "")
+                uri = self._room_media_thumb.get("gif:" + gid)
+                if uri is None:
+                    body += "<br><i style='color:#9ca3af'>loading GIF…</i>"; self._room_fetch_gif(gid, str(gif["preview"]))
+                else:
+                    body += f"<br><a href='room://gif/{quote(gid, safe='')}'><img src='{uri}'></a> <span style='color:#9ca3af;font-size:11px'>GIF · GIPHY (click to open)</span>"
+            sender_key = quote(str(m.get("from_key") or ""), safe="")
+            acts = []
+            if status == "removed": acts.append(f"<a href='room://restore/{mid}'>Restore</a>")
+            else: acts.append(f"<a href='room://remove/{mid}'>Remove</a>")
+            if status == "held": acts.append(f"<a href='room://approve/{mid}'><b>Approve</b></a>")
+            if int(m.get("reports") or 0): acts.append(f"<a href='room://resolve/{mid}'>Dismiss reports</a>")
+            if str(m.get("from_key")) in muted_keys: acts.append(f"<a href='room://unmute/{sender_key}'>Unmute {sender}</a>")
+            else: acts.append(f"Mute {sender}: <a href='room://mute/{sender_key}/10'>10 min</a> · <a href='room://mute/{sender_key}/60'>1 hour</a> · <a href='room://mute/{sender_key}/0'>tonight</a>")
+            out.append(
+                f"<table width='100%' cellspacing='0' cellpadding='6' style='margin-bottom:6px'><tr>"
+                f"<td width='4' bgcolor='{color}'></td>"
+                f"<td bgcolor='#1c1c2a'>{who}  {' · '.join(tags)}  <span style='color:#9ca3af'>{stamp}</span><br>{body}"
+                f"<br><span style='font-size:11px;color:#9ca3af'>{'  |  '.join(acts)}</span></td></tr></table>")
+        view.setHtml("".join(out))
+        bar.setValue(bar.maximum() if was_bottom else old_value)
+
+    def _on_room_anchor(self, url):
+        parts = [unquote(p) for p in url.toString().replace("room://", "", 1).split("/") if p != ""]
+        if not parts: return
+        action = parts[0]
+        if action == "image" and len(parts) > 1:
+            self._room_show_image(int(parts[1])); return
+        if action == "gif" and len(parts) > 1:
+            full = self._room_gif_full.get(parts[1])
+            if full and re.match(r"^https://(media[0-9]*|i)\.giphy\.com/", full):
+                QDesktopServices.openUrl(QUrl(full))
+            return
+        if action in ("remove", "restore", "approve", "resolve") and len(parts) > 1:
+            self._room_action("resolve_reports" if action == "resolve" else action, {"id": int(parts[1])}); return
+        if action == "mute" and len(parts) > 2:
+            self._room_action("mute", {"singer": parts[1], "minutes": int(parts[2])}); return
+        if action == "unmute" and len(parts) > 1:
+            self._room_action("unmute", {"singer": parts[1]})
+
+    def _room_action(self, action: str, args: dict):
+        conn = self._room_chat_conn()
+        if not conn:
+            self._show_processing_notification("Room chat needs the server connection to be configured.", level="error"); return
+        base, user, key = conn
+
+        def worker():
+            ok = False; error = ""
+            try:
+                r = requests.post(f"{base}/api/v1/host_chat_moderation.php", data={"user": user, "action": action, **args},
+                                  headers={"X-API-Key": key, "Accept": "application/json"}, timeout=8)
+                data = r.json() if r.content else {}
+                ok = bool(r.ok and data.get("ok"))
+                if not ok: error = str(data.get("error") or f"Server returned {r.status_code}")
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                if ok: self._schedule_room_poll(True)
+                else: self._show_processing_notification(f"Room chat action failed: {error}", level="error")
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker, daemon=True, name="room-chat-action").start()
+
+    def _room_clear_night(self):
+        answer = QMessageBox.question(
+            self, "Clear Room Chat",
+            "Delete ALL room chat messages, pictures, mutes and blocks for this venue from the server? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes: return
+        conn = self._room_chat_conn()
+        if not conn:
+            self._show_processing_notification("Room chat needs the server connection to be configured.", level="error"); return
+        base, user, key = conn
+        self.room_clear_button.setEnabled(False)
+
+        def worker():
+            ok = False; error = ""
+            try:
+                r = requests.post(f"{base}/api/v1/host_chat_moderation.php", data={"user": user, "action": "clear_night"},
+                                  headers={"X-API-Key": key, "Accept": "application/json"}, timeout=10)
+                data = r.json() if r.content else {}
+                ok = bool(r.ok and data.get("ok"))
+                if not ok: error = str(data.get("error") or f"Server returned {r.status_code}")
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                self.room_clear_button.setEnabled(True)
+                if ok:
+                    self._room_generation += 1
+                    self._room_messages = {}; self._room_mutes = []; self._room_last_id = 0
+                    self._room_attention_ids = set(); self._room_notified = set(); self._room_seen_ids = set(); self._room_unread = 0; self._room_new_by_channel = {"group": 0, "dm": 0}
+                    self._room_media = {}; self._room_media_thumb = {}; self._room_media_pending = set(); self._room_baseline_done = False
+                    self._update_room_tab_title(); self._render_room_chat()
+                    self._show_processing_notification("Room chat cleared.", level="success")
+                else:
+                    self._show_processing_notification(f"Could not clear room chat: {error}", level="error")
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker, daemon=True, name="room-chat-clear").start()
+
+    def _room_fetch_media(self, media_id: int):
+        conn = self._room_chat_conn()
+        if not conn or media_id in self._room_media_pending or media_id in self._room_media: return
+        self._room_media_pending.add(media_id)
+        base, user, key = conn
+
+        def worker():
+            image = None
+            try:
+                r = requests.get(f"{base}/api/v1/chat_media.php", params={"user": user, "action": "view", "media_id": media_id},
+                                 headers={"X-API-Key": key}, timeout=15)
+                if r.ok:
+                    img = QImage()
+                    if img.loadFromData(r.content): image = img
+            except Exception:
+                image = None
+
+            def finish():
+                self._room_media_pending.discard(media_id)
+                if image is not None:
+                    self._room_media[media_id] = image
+                    self._render_room_chat()
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker, daemon=True, name="room-chat-media").start()
+
+    def _room_fetch_gif(self, gid: str, url: str):
+        key = "gif:" + gid
+        if key in self._room_media_pending or key in self._room_media_thumb: return
+        self._room_media_pending.add(key)
+
+        def worker():
+            uri = None
+            try:
+                r = requests.get(url, timeout=15, allow_redirects=False)
+                img = QImage()
+                if r.ok and len(r.content) < 3_000_000 and img.loadFromData(r.content):
+                    import base64
+                    from PyQt6.QtCore import QBuffer, QIODevice
+                    thumb = img.scaledToWidth(200, Qt.TransformationMode.SmoothTransformation) if img.width() > 200 else img
+                    buf = QBuffer(); buf.open(QIODevice.OpenModeFlag.WriteOnly); thumb.save(buf, "PNG")
+                    uri = "data:image/png;base64," + base64.b64encode(bytes(buf.data())).decode("ascii")
+            except Exception:
+                uri = None
+
+            def finish():
+                self._room_media_pending.discard(key)
+                if uri is not None:
+                    self._room_media_thumb[key] = uri
+                    self._render_room_chat()
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker, daemon=True, name="room-chat-gif").start()
+
+    def _room_show_image(self, media_id: int):
+        img = self._room_media.get(media_id)
+        if img is None: return
+        dlg = QDialog(self); dlg.setWindowTitle("Room chat picture"); lay = QVBoxLayout(dlg)
+        label = QLabel(); label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pix = QPixmap.fromImage(img)
+        if pix.width() > 1000 or pix.height() > 760:
+            pix = pix.scaled(1000, 760, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        label.setPixmap(pix); lay.addWidget(label)
+        dlg.exec()
 
     def _chat_conversations(self):
         grouped = {}
@@ -44693,10 +45120,11 @@ class KaraokeApp(QWidget):
             stamp = time.strftime("%I:%M %p", time.localtime(int(m.get("created_at") or 0))) if m.get("created_at") else ""
             lines.append(f"{who}  {stamp}\n{m.get('message','')}")
         self.chat_transcript.setPlainText("\n\n".join(lines)); self.chat_transcript.moveCursor(QTextCursor.MoveOperation.End)
-        self._update_chat_nav_state()
+        self._update_room_tab_title()
 
     def _update_chat_nav_state(self):
         unread = sum(1 for m in list(getattr(self,"_chat_messages",[]) or []) if m.get("direction")=="in" and not m.get("read"))
+        unread += len(getattr(self, "_room_attention_ids", ()) or ())   # held / reported room messages
         label = getattr(self,"_nav_text_labels",{}).get(getattr(self,"bottom_chat_button",None))
         if label is not None: label.setText(f"Chat ({unread})" if unread else "Chat")
         btn = getattr(self,"bottom_chat_button",None)
@@ -44780,6 +45208,7 @@ class KaraokeApp(QWidget):
         item=self.chat_singer_list.currentItem(); message=self.chat_message_input.text().strip()
         if item is None or not message: return
         key=str(item.data(Qt.ItemDataRole.UserRole) or ""); grouped=self._chat_conversations(); singer=str((grouped.get(key) or [{}])[-1].get("singer") or "")
+        if not singer: return
         self.chat_message_input.clear(); self.chat_send_button.setEnabled(False)
         def worker():
             ok,err=self._net_send_direct_message(singer,message)
