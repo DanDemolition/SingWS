@@ -47,7 +47,7 @@ class FullscreenTests(unittest.TestCase):
     def test_player_menu_precedes_generic_fullscreen_and_requires_audience_window(self):
         script = "\n".join(renderer_fullscreen_script())
         menu_click = 'click menu item "Expand Player to Full Screen" of playerMenu'
-        self.assertLess(script.index('if name of candidateWindow is "Dual Renderer"'),
+        self.assertLess(script.index('if candidateName is "Dual Renderer"'),
                         script.index(menu_click))
         self.assertLess(script.index('if exists menu item "Exit Player Full Screen"'),
                         script.index(menu_click))

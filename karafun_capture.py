@@ -21,7 +21,11 @@ class KaraFunCapture:
             ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32),
             ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_uint64),
         ]
-        self._buffer = ctypes.create_string_buffer(1280 * 720 * 4 + 4096)
+        self._lib.singws_karafun_capture_serial.restype = ctypes.c_uint64
+        self._lib.singws_karafun_capture_stats.argtypes = [
+            ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double),
+        ]
+        self._buffer = ctypes.create_string_buffer(1280 * 1024 * 4 + 4096)
         self._serial = 0
 
     def start(self):
@@ -33,7 +37,18 @@ class KaraFunCapture:
     def stop(self):
         self._lib.singws_karafun_capture_stop()
 
+    def stats(self):
+        """(capture_lag_ms, frame_arrival_seconds_on_the_host_clock) of the newest frame."""
+        lag = ctypes.c_double()
+        arrival = ctypes.c_double()
+        self._lib.singws_karafun_capture_stats(ctypes.byref(lag), ctypes.byref(arrival))
+        return lag.value, arrival.value
+
     def latest_frame(self):
+        # Ask for the frame serial first: copying a multi-megabyte frame on every
+        # poll when nothing changed was pure waste (and added latency at high poll rates).
+        if self._lib.singws_karafun_capture_serial() == self._serial:
+            return None
         width = ctypes.c_int32()
         height = ctypes.c_int32()
         stride = ctypes.c_int32()
@@ -47,4 +62,5 @@ class KaraFunCapture:
         if width.value <= 0 or height.value <= 0 or stride.value * height.value != size:
             return None
         self._serial = serial.value
-        return bytes(self._buffer.raw[:size]), width.value, height.value, stride.value
+        # .raw copies the whole 5MB buffer before slicing; a memoryview slice copies only the frame.
+        return bytes(memoryview(self._buffer)[:size]), width.value, height.value, stride.value

@@ -181,6 +181,7 @@ class StartStopGatingTests(unittest.TestCase):
         # bare __new__ QObject: preset attrs that getattr() would otherwise
         # turn into Qt "super-class __init__ never called" RuntimeErrors.
         app._lyrics_bg_video_player = None
+        app._active_external_karafun = None
         return app
 
     def start(self, app):

@@ -2274,7 +2274,10 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
         self.assertIn('playbackToggleName is "play"', state_probe)
         self.assertIn('managed_start_state = self._karafun_playback_menu_state()', self.automation)
         self.assertIn('if managed_start_state == "IDLE":', self.automation)
-        self.assertEqual(self.automation.count('_karafun_activate_result_for_playback('), 1)
+        # Three call sites, but never more than one runs per song: two are the arms of a single
+        # if/else in the managed path (raise the results window first, or not), the third is the
+        # non-managed path.
+        self.assertEqual(self.automation.count('_karafun_activate_result_for_playback('), 3)
         self.assertIn("idle result loaded; explicit Play sent", self.automation)
 
     def test_fast_start_does_not_replace_observed_managed_state_with_playing(self):

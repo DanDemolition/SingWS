@@ -25,10 +25,41 @@ private final class CaptureOutput: NSObject, SCStreamOutput {
         let height = CVPixelBufferGetHeight(buffer)
         let stride = CVPixelBufferGetBytesPerRow(buffer)
         guard width > 0, height > 0, stride >= width * 4 else { return }
+        // Capture pipeline latency: how long ago this frame was captured
+        // (its presentation timestamp is on the host time clock) versus now.
+        let arrival = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
+        let captured = CMTimeGetSeconds(sampleBuffer.presentationTimeStamp)
         CaptureState.shared.receive(Data(bytes: base, count: stride * height),
                                     width: width, height: height, stride: stride,
-                                    generation: generation)
+                                    generation: generation,
+                                    lagSeconds: max(0, arrival - captured), arrivalSeconds: arrival)
     }
+}
+
+
+// Match the window's own aspect ratio. A fixed 1280x720 frame made
+// ScreenCaptureKit scale a non-16:9 window to fit and leave an empty strip,
+// which SingWS then stretched to the screen. Crop a small margin so the rounded
+// corners and the traffic lights that appear on hover stay out of the picture.
+private func makeConfiguration(for window: SCWindow) -> SCStreamConfiguration {
+    let config = SCStreamConfiguration()
+    let cornerInset: CGFloat = 6
+    let topInset: CGFloat = 30
+    let crop = CGRect(
+        x: cornerInset, y: topInset,
+        width: max(1, window.frame.width - 2 * cornerInset),
+        height: max(1, window.frame.height - topInset - cornerInset))
+    config.sourceRect = crop
+    let outputHeight = min(1024.0, max(2.0, (1280.0 * crop.height / crop.width).rounded()))
+    config.width = 1280
+    config.height = Int(outputHeight)
+    config.pixelFormat = kCVPixelFormatType_32BGRA
+    // 30 fps. A 60 fps capture doubled the CPU scaling/painting of every frame at the
+    // audience window's full size and made the video visibly laggy (2026-09-28).
+    config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+    config.queueDepth = 2
+    config.showsCursor = false
+    return config
 }
 
 private final class CaptureState {
@@ -41,6 +72,8 @@ private final class CaptureState {
     private var height: Int32 = 0
     private var stride: Int32 = 0
     private var serial: UInt64 = 0
+    private var lagSeconds: Double = 0
+    private var arrivalSeconds: Double = 0
     private var stream: SCStream?
     private var output: CaptureOutput?
 
@@ -68,13 +101,7 @@ private final class CaptureState {
                 }
                 guard let window else { throw NSError(domain: "SingWSKaraFunCapture", code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "KaraFun Dual Renderer is not open"]) }
-                let config = SCStreamConfiguration()
-                config.width = 1280
-                config.height = 720
-                config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-                config.queueDepth = 2
-                config.showsCursor = false
+                let config = makeConfiguration(for: window)
                 let receiver = CaptureOutput(generation: current)
                 let active = SCStream(filter: SCContentFilter(desktopIndependentWindow: window),
                                       configuration: config, delegate: nil)
@@ -86,6 +113,22 @@ private final class CaptureState {
                 try await active.startCapture()
                 let stale = isStale(current)
                 if stale { try? await active.stopCapture() }
+                // KaraFun can resize or move its renderer after the stream
+                // starts. The crop and output size were fixed at start, so a
+                // resize left an empty strip in the frame (2026-09-28). Follow
+                // the window: reconfigure whenever its size changes.
+                var lastSize = window.frame.size
+                while !isStale(current) {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    guard let content = try? await SCShareableContent.excludingDesktopWindows(
+                        false, onScreenWindowsOnly: false),
+                          let live = content.windows.first(where: { $0.windowID == window.windowID })
+                    else { continue }
+                    if live.frame.size != lastSize {
+                        lastSize = live.frame.size
+                        try? await active.updateConfiguration(makeConfiguration(for: live))
+                    }
+                }
             } catch {
                 fputs("[KARAFUN-CAPTURE] \(error)\n", stderr)
                 fail(current)
@@ -129,7 +172,7 @@ private final class CaptureState {
     }
 
     func receive(_ data: Data, width: Int, height: Int, stride: Int,
-                 generation current: UInt64) {
+                 generation current: UInt64, lagSeconds lag: Double, arrivalSeconds arrival: Double) {
         lock.lock()
         defer { lock.unlock() }
         guard current == generation, state == 1 || state == 2 else { return }
@@ -137,11 +180,23 @@ private final class CaptureState {
         self.width = Int32(width)
         self.height = Int32(height)
         self.stride = Int32(stride)
+        lagSeconds = lag
+        arrivalSeconds = arrival
         serial &+= 1
         state = 2
     }
 
     func status() -> Int32 { lock.lock(); defer { lock.unlock() }; return state }
+
+    // Cheap change check so Python does not copy a multi-megabyte frame on every poll.
+    func currentSerial() -> UInt64 { lock.lock(); defer { lock.unlock() }; return serial }
+
+    func stats(lagMs: UnsafeMutablePointer<Double>?, arrival: UnsafeMutablePointer<Double>?) {
+        lock.lock()
+        defer { lock.unlock() }
+        lagMs?.pointee = lagSeconds * 1000.0
+        arrival?.pointee = arrivalSeconds
+    }
 
     func copy(to destination: UnsafeMutableRawPointer?, capacity: Int32,
               width outWidth: UnsafeMutablePointer<Int32>?,
@@ -171,6 +226,14 @@ public func singws_karafun_capture_stop() { CaptureState.shared.stop() }
 
 @_cdecl("singws_karafun_capture_status")
 public func singws_karafun_capture_status() -> Int32 { CaptureState.shared.status() }
+
+@_cdecl("singws_karafun_capture_serial")
+public func singws_karafun_capture_serial() -> UInt64 { CaptureState.shared.currentSerial() }
+
+@_cdecl("singws_karafun_capture_stats")
+public func singws_karafun_capture_stats(
+    _ lagMs: UnsafeMutablePointer<Double>?, _ arrival: UnsafeMutablePointer<Double>?
+) { CaptureState.shared.stats(lagMs: lagMs, arrival: arrival) }
 
 @_cdecl("singws_karafun_capture_copy_frame")
 public func singws_karafun_capture_copy_frame(

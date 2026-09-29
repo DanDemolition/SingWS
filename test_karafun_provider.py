@@ -119,7 +119,7 @@ class KaraFunProviderTests(unittest.TestCase):
     def test_assisted_workflow_manages_the_macos_show_screen(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"karafun_manage_show_screen": True', source)
-        self.assertIn("def _handoff_show_screen_to_karafun(self):", source)
+        self.assertIn("def _handoff_show_screen_to_karafun(self, force_managed: bool = False):", source)
         self.assertIn('"karafun_transparent_handoff",', source)
         self.assertIn('"karafun_windowed_reveal",', source)
         self.assertNotIn('self.settings.get("karafun_transparent_handoff"', source)
@@ -387,24 +387,20 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn("KaraFun did not report active playback after Play", worker)
         self.assertIn('adjustment_signature = f"key={requested_key};tempo={requested_tempo}"', source)
         self.assertIn("needs_adjustment = requested_key != 0 or requested_tempo != 100", worker)
-        self.assertIn('entry["karafun_submission_state"] = "karafun_waiting_for_adjustment"', worker)
-        self.assertIn('menu item "Add to Queue"', worker)
+        # Key/tempo are applied automatically now: there is no manual "Ready" wait state any more.
+        self.assertNotIn('karafun_waiting_for_adjustment', worker)
+        self.assertIn('karafun_auto_key_tempo', worker)
         self.assertIn('entry["karafun_queued_for_adjustment"] = True', worker)
         self.assertIn('if playbackName is "pause" then', worker)
         self.assertIn('return "QUEUED_PAUSED"', worker)
         self.assertIn('str(queued_result or "").strip() != "QUEUED_PAUSED"', worker)
-        self.assertIn("self._set_external_karafun_adjustment_waiting(", worker)
-        self.assertIn('active_session.get("adjustment_ready_event")', worker)
-        self.assertIn("manual adjustment ready; playback released", worker)
+        self.assertNotIn("_set_external_karafun_adjustment_waiting", worker)
+        self.assertNotIn("adjustment_ready_event", worker)
         adjusted_start = worker[worker.index("if queued_for_adjustment:"):]
         adjusted_start = adjusted_start[:adjusted_start.index("elif managed_handoff:")]
         self.assertIn("self._karafun_press_play_control()", adjusted_start)
         self.assertNotIn("_karafun_activate_result_for_playback", adjusted_start)
         self.assertIn('_schedule_early_handoff("after_adjusted_queue_playback_started")', adjusted_start)
-        self.assertLess(
-            worker.index("waiting for manual adjustment"),
-            worker.index('_schedule_bgm_fade("before_result_activation")'),
-        )
         self.assertIn('QPushButton("Ready — Start Song")', source)
         self.assertIn("MANUAL KARAFUN CHANGE REQUIRED", source)
         self.assertIn("BGM will continue and the song will not start", source)

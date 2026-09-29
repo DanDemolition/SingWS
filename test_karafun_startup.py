@@ -17,6 +17,7 @@ def methods():
              '_handoff_show_screen_to_karafun'}
     nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
     namespace = {'sys': SimpleNamespace(platform='darwin'), '_diag': lambda *a: None,
+                 'time': SimpleNamespace(sleep=lambda *_: None),
                  'renderer_raise_script': renderer_raise_script}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'startup-test', 'exec'), namespace)
     return namespace
@@ -30,10 +31,31 @@ class StartupTests(unittest.TestCase):
             _karafun_search_script=mock.Mock(return_value=['resolve']),
             _run_karafun_applescript_sync=mock.Mock(return_value=reply),
             _macos_native_double_click=mock.Mock(return_value=True),
+            settings={},
+            _karafun_raise_results_window=mock.Mock(),
+            _karafun_frontmost_app_name=lambda: 'KaraFun',
         )
 
     def activate(self, host):
         return methods()['_karafun_activate_result_for_playback'](host, (100, 200))
+
+    def test_reuse_point_skips_the_resolve_scan(self):
+        host = self.host(reply=(True, 'DOUBLE_CLICKED', ''))
+        ok = methods()['_karafun_activate_result_for_playback'](host, (300, 210), reuse_point=True)
+        self.assertEqual(ok, (True, ''))
+        host._karafun_search_script.assert_not_called()
+        self.assertEqual(host._active_external_karafun['entry']['karafun_result_activation_point'],
+                         (300, 210))
+
+    def test_learned_native_double_click_is_sent_first(self):
+        host = self.host()
+        host.settings = {'karafun_native_double_click': True}
+        ok = methods()['_karafun_activate_result_for_playback'](host, (300, 210), reuse_point=True)
+        self.assertEqual(ok, (True, ''))
+        host._macos_native_double_click.assert_called_once_with(300, 210)
+        entry = host._active_external_karafun['entry']
+        self.assertTrue(entry['karafun_native_retry_sent'])
+        self.assertTrue(entry['karafun_native_first'])
 
     def test_click_uses_fresh_result_coordinates_after_window_moved(self):
         host = self.host()
@@ -88,7 +110,7 @@ class StartupTests(unittest.TestCase):
         methods()['_handoff_show_screen_to_karafun'](host)
         host._karafun_run_window_script.assert_called_once_with(renderer_raise_script(), timeout=5)
         script = '\n'.join(renderer_raise_script())
-        self.assertLess(script.index('name of candidateWindow is "Dual Renderer"'),
+        self.assertLess(script.index('candidateName is "Dual Renderer"'),
                         script.index('AXRaise'))
         self.assertNotIn('AXFullScreen', script)
         self.assertNotIn('click', script)
