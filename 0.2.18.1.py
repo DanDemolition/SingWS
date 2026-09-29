@@ -2723,6 +2723,61 @@ def _log_launch_identity() -> dict:
 _MAC_LOCATION_DELEGATE_CLASS = None
 
 
+def karafun_dual_renderer_windows(_source=None):
+    """Every KaraFun "Dual Renderer" window in ANY Space, or None when it cannot be determined.
+
+    Uses CoreGraphics' window list (about 70 ms, no System Events). System Events only lists windows in the
+    current Space, so it can be blind to a renderer that macOS put in its own full-screen Space, and SingWS
+    then pressed KaraFun's video button, which is a TOGGLE, blind and closed the window it had just opened.
+    """
+    try:
+        if _source is None:
+            import objc
+            bundle = objc.loadBundle("CoreGraphics", {}, bundle_path="/System/Library/Frameworks/CoreGraphics.framework")
+            funcs = {}
+            objc.loadBundleFunctions(bundle, funcs, [("CGWindowListCopyWindowInfo", b"@II")])
+            infos = funcs["CGWindowListCopyWindowInfo"](0, 0) or []   # kCGWindowListOptionAll, kCGNullWindowID
+        else:
+            infos = _source
+        out = []
+        for w in infos:
+            if str(w.get("kCGWindowOwnerName", "")) != "KaraFun" or str(w.get("kCGWindowName", "")) != "Dual Renderer":
+                continue
+            b = w.get("kCGWindowBounds", {}) or {}
+            out.append({
+                "onscreen": bool(w.get("kCGWindowIsOnscreen", False)),
+                "layer": int(w.get("kCGWindowLayer", 0)),
+                "width": int(b.get("Width", 0)), "height": int(b.get("Height", 0)),
+            })
+        return out
+    except Exception:
+        return None
+
+
+def karafun_renderer_press_decision(renderer_windows, presses, since_last_press, playing_for, since_first_seen=None):
+    """What to do while SingWS's own check cannot find KaraFun's video window: "wait", "press" or "fallback".
+
+    KaraFun's video button is a toggle, so pressing it while the window exists closes it. Once the song is
+    playing: press at most once when the window is genuinely absent, press a second time only if it is
+    still absent ten seconds later, and never press while a window exists in any Space. If a window exists
+    but SingWS still cannot reach it after eight seconds, give up on capture (fullscreen handoff) instead
+    of leaving the audience screen black. `renderer_windows` is None when unknown.
+    """
+    if renderer_windows:
+        if since_first_seen is not None and since_first_seen >= 8.0:
+            return "fallback"
+        return "wait"
+    if playing_for is None or playing_for < 3.0:
+        return "wait"
+    if presses == 0:
+        return "press"
+    if renderer_windows is not None and presses < 2 and since_last_press is not None and since_last_press >= 10.0:
+        return "press"
+    if since_last_press is not None and since_last_press >= 12.0:
+        return "fallback"
+    return "wait"
+
+
 def karafun_confirmed_readback(known, first, second):
     """Decide whether a key/tempo read back from KaraFun's Personalize panel may overwrite SingWS's display.
 
@@ -51930,7 +51985,26 @@ class KaraokeApp(QWidget):
             'end tell',
             'end tell',
         ]
-        press_state = {"count": 0, "last": 0.0}
+        press_state = {"count": 0, "last": 0.0, "seen_at": None}
+
+        def _renderer_give_up(outcome):
+            """True when capture cannot proceed and the fullscreen handoff should take over now."""
+            if outcome != "NO_DUAL_RENDERER":
+                return False
+            now = time.monotonic()
+            windows = karafun_dual_renderer_windows()
+            if windows and press_state.get("seen_at") is None:
+                press_state["seen_at"] = now
+            active = getattr(self, "_active_external_karafun", None)
+            entry = active.get("entry") if isinstance(active, dict) else None
+            playing_since = entry.get("karafun_display_started_at") if isinstance(entry, dict) else None
+            decision = karafun_renderer_press_decision(
+                windows, press_state["count"],
+                (now - press_state["last"]) if press_state["count"] else None,
+                (now - float(playing_since)) if playing_since else None,
+                (now - press_state["seen_at"]) if press_state.get("seen_at") is not None else None,
+            )
+            return decision == "fallback"
 
         def _window_ready(result=""):
             if getattr(self, "_karafun_handoff_token", None) != token:
@@ -51971,40 +52045,35 @@ class KaraokeApp(QWidget):
                 outcome = str(result or "").strip()
                 if outcome == "WINDOWED":
                     _begin_capture()
-                elif outcome in {"EXITING_FULLSCREEN", "NO_DUAL_RENDERER"} and attempt < 160:
+                elif outcome in {"EXITING_FULLSCREEN", "NO_DUAL_RENDERER"} and attempt < 160 and not _renderer_give_up(outcome):
                     # 2026-09-27: KaraFun creates the renderer only once the
                     # track is playing, and the single AXPress from the opener
                     # did not open it, so the operator had to click KaraFun's
                     # video button by hand while the audience screen sat black.
-                    # The opener returns READY without touching anything once
-                    # the window exists, so re-running it every ~3s is safe.
-                    # Press the (toggle) button only once the song is playing, give
-                    # each press time to take effect, and stop after three tries.
-                    if outcome == "NO_DUAL_RENDERER" and press_state["count"] < 3:
+                    # 2026-09-29: the button is a TOGGLE and System Events cannot see a
+                    # renderer in another Space, so three blind presses closed the
+                    # window they had opened. Decide from CoreGraphics' all-Space window
+                    # list (karafun_renderer_press_decision) and never press while a
+                    # renderer exists.
+                    if outcome == "NO_DUAL_RENDERER":
                         active = getattr(self, "_active_external_karafun", None)
                         entry = active.get("entry") if isinstance(active, dict) else None
                         playing_since = entry.get("karafun_display_started_at") if isinstance(entry, dict) else None
                         now = time.monotonic()
-                        due = (
-                            playing_since
-                            and now - float(playing_since) >= 3.0
-                            and (press_state["count"] == 0 or now - press_state["last"] >= 6.0)
+                        windows = karafun_dual_renderer_windows()
+                        if windows and press_state.get("seen_at") is None:
+                            press_state["seen_at"] = now
+                        decision = karafun_renderer_press_decision(
+                            windows, press_state["count"],
+                            (now - press_state["last"]) if press_state["count"] else None,
+                            (now - float(playing_since)) if playing_since else None,
+                            (now - press_state["seen_at"]) if press_state.get("seen_at") is not None else None,
                         )
-                        if due:
+                        if decision == "press":
                             press_state["count"] += 1
                             press_state["last"] = now
-                            _diag(f"[KARAFUN-CAPTURE] renderer still absent; pressing video button "
-                                  f"({press_state['count']}/3)")
-                            self._karafun_run_window_script(
-                                ['tell application "System Events"',
-                                 'tell (first application process whose name contains "KaraFun")',
-                                 'return (name of every window) as text',
-                                 'end tell', 'end tell'],
-                                on_complete=lambda r="": _diag(
-                                    f"[KARAFUN-CAPTURE] KaraFun windows: {str(r or '').strip()[:160]!r}"
-                                ),
-                                timeout=5,
-                            )
+                            _diag(f"[KARAFUN-CAPTURE] renderer absent in every Space; pressing video button "
+                                  f"({press_state['count']}/2)")
                             self._karafun_run_window_script(
                                 lines,
                                 on_complete=lambda r="": _diag(
