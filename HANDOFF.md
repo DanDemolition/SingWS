@@ -27,11 +27,13 @@ live by hash. Chat was switched on in the dashboard and confirmed working end to
 **Installed 2026-09-29 01:05:** Apple Silicon build `e98c719b…` at `/Applications/SingWS.app` (normal profile;
 backup of previous app + profile in `local-installs/20260929-chat-tabs/backup/`, private). Chat page seen on
 screen: three tabs, GIF thumbnail, photo, moderation links all work. Its tab bar was plain/unstyled.
-**Newer build NOT installed:** Chat tabs restyled as pills matching Settings/bottom nav (commits `dbcf216`,
-`526ae70`; the first briefly added a pointing-hand cursor, removed because the app deliberately uses the arrow
-cursor). New `SingWS-1.0.0.2-arm64-installer.dmg` (exe `156a4988…`) is verified (signature, arm64, markers) but
-not installed; the Intel installer predates the tab styling and needs a rebuild. Untested on real hardware /
-real songs: KaraFun end to end, Private + Host chat tabs in the app, Intel Mac.
+**Installed 2026-09-29 01:32 (current):** Apple Silicon build exe `ca6ecbe6…` (commit `3b16397`) at
+`/Applications/SingWS.app`. Chat tabs are pill-styled, bright, never elided, left-aligned; seen on screen and readable.
+Two earlier tab bugs fixed along the way (labels cut to "Ever...", tabs centred; then dim text). Backups of the
+previous apps + profile: `local-installs/20260929-*` (private). Still open: Intel installer needs a rebuild with the
+tab fixes; KaraFun end to end with a real song and a real Intel Mac are untested; version bump + release publish is
+deferred until the operator is done. GIFs now switch off for the night when the GIPHY allowance runs out (server
+`f5bb7a7`, live; button disappears, resets when chat is cleared or after 12h). Server rebooted onto kernel 6.8.0-142.
 
 **App:** commits `4b93f5b` (KaraFun) and `be401f7` (three-tab Chat page, GIF thumbnails) pushed. Installers
 `SingWS-1.0.0.2-arm64-installer.dmg` and `-x86_64-installer.dmg` are built, signed, verified and smoke-launched
