@@ -2,6 +2,17 @@
 
 Updated 2026-09-29.
 
+## RELEASED 1.0.0.3 — 2026-09-29 (published, latest)
+
+Full release, both installers, published at https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.3 (tag `v1.0.0.3`,
+release commit `241367f`). Apple Silicon `2525f183...` (127,054,926 bytes) and Intel `3b68c025...` (151,839,315 bytes);
+sizes and re-downloaded SHA-256s match `docs/release.json`, which is live on GitHub Pages (auto-update clients see it)
+along with the updated `docs/index.html` download page (was stale at 1.0.0.1). Both builds verified: signature, arch
+(arm64 420 / x86_64 433 Mach-O), macOS minimum <= 12.3, new code present, clean launch (Intel under Rosetta only).
+Order followed: version bump -> build -> verify -> manifest -> tag pushed alone -> draft + upload -> size/hash check ->
+publish -> `main` pushed last. **This Mac still runs the pre-release 1.0.0.2-labelled build (same code); it will be
+offered 1.0.0.3 by the updater, or install the 1.0.0.3 DMG.** Intel build not run on physical Intel hardware.
+
 ## Chat, GIFs, request expiry — 2026-09-29 (server LIVE and tested, app installers built, NOT installed)
 
 **Server (wskar.com), all deployed and checked:** room chat (Everyone / Private / Host chat on the singer
