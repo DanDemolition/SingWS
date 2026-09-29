@@ -54267,11 +54267,30 @@ class KaraokeApp(QWidget):
                         'set out to ""',
                         'set idleTextFound to false',
                         'set playingHintFound to false',
+                        # Everything the monitor needs (the play/pause button, the
+                        # "no item is being played" text and the two clocks) is a
+                        # direct child of the main split group. Walking the whole
+                        # window also visits every search-result row, which took
+                        # 11-31 seconds at the end of each song (2026-09-29): the
+                        # end was noticed that late and background music stayed
+                        # silent until then. Read just that panel; fall back to the
+                        # full walk only if the layout is not what we expect.
+                        'set elems to {}',
+                        'try',
+                        'repeat with topElement in UI elements of mainWindow',
+                        'if (role of topElement as text) is "AXSplitGroup" then',
+                        'set elems to UI elements of topElement',
+                        'exit repeat',
+                        'end if',
+                        'end repeat',
+                        'end try',
+                        'if (count of elems) is 0 then',
                         'try',
                         'set elems to entire contents of mainWindow',
                         'on error',
                         'set elems to UI elements of mainWindow',
                         'end try',
+                        'end if',
                         'repeat with elem in elems',
                         'try',
                         # Query only attributes used by the monitor. Fetching

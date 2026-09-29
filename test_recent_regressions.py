@@ -2305,6 +2305,18 @@ class KaraFunAutoStartRecoveryTests(unittest.TestCase):
             self.monitor.index('if (count of windows) is 0 then return ""'),
         )
 
+    def test_monitor_reads_only_the_player_panel_not_the_whole_window(self):
+        """Regression 2026-09-29: at the end of every song the monitor walked KaraFun's whole window
+        (every search-result row), taking 11-31 s, so the end - and the background music - came that
+        late. It must read just the main split group's direct children, falling back to the full walk
+        only if there is no split group."""
+        self.assertIn("'if (role of topElement as text) is \"AXSplitGroup\" then',", self.monitor)
+        self.assertIn("'set elems to UI elements of topElement',", self.monitor)
+        fast = self.monitor.index("AXSplitGroup")
+        full = self.monitor.index("set elems to entire contents of mainWindow")
+        self.assertLess(fast, full)                       # fast path first, full walk only as the fallback
+        self.assertIn("if (count of elems) is 0 then", self.monitor)
+
     def test_recovery_presses_only_once(self):
         """A repeated press would toggle play/pause and silence a playing song."""
         self.assertIn("recovery_pressed = True", self.monitor)
