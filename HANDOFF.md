@@ -2,7 +2,22 @@
 
 Updated 2026-09-29.
 
-## RELEASED 1.0.0.3 — 2026-09-29 (published, latest)
+## RELEASED 1.0.0.4 — 2026-09-29 (published, latest; installed on this Mac)
+
+Fixes "Detect Now" location on Intel Macs (operator report: could not detect no matter how many tries). New
+`LocationFixCollector` (pure Python, 10 tests in `test_location_fix.py`): ignores cached fixes older than 30s, keeps the
+most accurate fresh fix, treats kCLErrorLocationUnknown/Network as transient (keeps waiting), stops early only within
+100 m, accepts up to 3 km at the deadline; Detect Now waits up to 25 s (startup 15 s); logs
+`[SESSION-LOCATION] detected accuracy_m=..`. **Verified on real hardware here (Apple Silicon): 35 m in 0.2 s at startup.**
+NOT yet verified on a physical Intel Mac - ask the operator to press Detect Now there and check the log line.
+Release https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.4 (commit `3e55987`): arm64 `c39e60eb...`
+(127,056,396 B), x86_64 `427c4dba...` (151,828,085 B); sizes and re-downloaded SHA-256s match `docs/release.json`, live
+on Pages with the download page. Installed on this Mac: exe `0fd53a23...`, backup in `local-installs/20260929-location-fix/`.
+Remaining: 4 non-code server files (.gitignore, config.inc.example, two tools/run_*.py) differ live vs repo (deploy with
+`scripts/deploy-wskar-rsync.sh --apply` from a clean `git archive` export, not the private checkout); "Test" singer
+history (17 plays) left in place; phone-requested song with key/tempo untested.
+
+## Previously: 1.0.0.3 (superseded)
 
 Full release, both installers, published at https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.3 (tag `v1.0.0.3`,
 release commit `241367f`). Apple Silicon `2525f183...` (127,054,926 bytes) and Intel `3b68c025...` (151,839,315 bytes);
