@@ -104,7 +104,22 @@
       "Bash(.venv/bin/dmgbuild -s dmg_settings.py \"SingWS-0.2.18.1\" SingWS-0.2.18.1-arm64-installer.dmg)",
       "Bash(.venv/bin/dmgbuild -s dmg_settings.py \"SingWS-0.2.18.1\" SingWS-0.2.18.1-universal-installer.dmg)",
       "Bash(lipo -info dist/SingWS.app/Contents/MacOS/SingWS)",
-      "Bash(echo \"  primary dist/SingWS.app architecture: $\\(lipo -info dist/SingWS.app/Contents/MacOS/SingWS 2>&1)"
+      "Bash(echo \"  primary dist/SingWS.app architecture: $\\(lipo -info dist/SingWS.app/Contents/MacOS/SingWS 2>&1)",
+      "Bash(awk '{print \"  installed: \"$6\" \"$7\" \"$8}')",
+      "Bash(defaults read *)",
+      "Bash(codesign -dvv /Applications/SingWS.app)",
+      "Bash(codesign -d -r- /Applications/SingWS.app)",
+      "Bash(codesign --verify --deep --strict /Applications/SingWS.app)",
+      "Bash(security find-identity *)",
+      "Bash(security find-certificate *)",
+      "Bash(security default-keychain *)",
+      "Bash(awk '{print $5\" bytes  \"$6\" \"$7\" \"$8}')",
+      "Bash(security dump-trust-settings *)",
+      "Bash(security add-trusted-cert *)",
+      "Bash(echo \"add-trusted-cert exit=$?\")",
+      "Bash(codesign --verify --deep --strict __CMDSUB_OUTPUT__/SingWS.app)",
+"Bash(ssh -i /Users/daniel/.ssh/id_ed25519_wskar:*)",
+"Bash(rsync:*)"
     ]
   }
 }
