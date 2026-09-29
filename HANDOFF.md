@@ -2,6 +2,20 @@
 
 Updated 2026-09-29.
 
+## INCIDENT 2026-09-29 04:23 — singer history deletions by mistake (fully restored)
+
+While removing the "Test" singer from Singer History by scripting the UI (System Events), a position click on the
+filtered list triggered **five** `history_singer_delete` exports instead of one. Removed: Test (intended) plus **Aryana A.,
+Bill F, Codex Capture Test, Codex Playback Test** (not intended; two are real singers). Cause of the extra four not
+established. **Restored within minutes from backups, both sides, verified:** local `singer_history.json` +
+`singer_preferences.json` from `local-installs/20260929-location-fix/backup/profile/` (pre-restore copies in
+`.../pre-restore/`); server `tenants/wsk/history.db` via one transaction from
+`/root/singws-chat-deploy/history-before-test-cleanup-20260929T093632Z.db` (safety copy of the pre-restore live DB:
+`history-before-restore-20260929T112533Z.db`). The four singers' deletion markers were removed on both sides; Test stays deleted.
+After relaunch and sync: local and server both 92 singers / 791 deletion markers; Bill F 19 songs; Test absent; DB quick_check ok.
+The rotation's empty "Test" slot also went (expected). **Lesson: do not script clicks/keystrokes against destructive UI
+(Delete Singer / Clear ...). Have the operator do those, or use the server tool with an explicit target.**
+
 ## RELEASED 1.0.0.4 — 2026-09-29 (published, latest; installed on this Mac)
 
 Fixes "Detect Now" location on Intel Macs (operator report: could not detect no matter how many tries). New
