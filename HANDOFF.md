@@ -27,6 +27,17 @@ live by hash. Chat was switched on in the dashboard and confirmed working end to
 **Installed 2026-09-29 01:05:** Apple Silicon build `e98c719b…` at `/Applications/SingWS.app` (normal profile;
 backup of previous app + profile in `local-installs/20260929-chat-tabs/backup/`, private). Chat page seen on
 screen: three tabs, GIF thumbnail, photo, moderation links all work. Its tab bar was plain/unstyled.
+**KaraFun real-song test 2026-09-29 (operator confirmed by ear + panel):** three real "Test / NOFX / Linoleum" songs
+through the installed Apple Silicon build. Verified: launch, exact search, start, ~29fps capture with no lag, BGM handling,
+natural end detection, rotation advance, server-confirmed completion. **Key/tempo:** live SingWS Key +/- (1 semitone) and
+Tempo +/- (1% per press) work during play; a queued song's own key/tempo (right-click > Change Key... /
+Change Speed / Tempo...) is applied automatically at start (log: `automatic key/tempo ... key=+2 tempo=90% ... ok=1`).
+The panel Key/Tempo set BEFORE a song starts does NOT carry to it (start reads the queued entry) - a mistake in my
+first test instructions, not a bug. Not tested: a song requested from a phone with a key/tempo (same start path).
+Three "Test" performances from these tests are in real history / Fun Stats (clean up if wanted).
+Intel installer rebuilt with the tab fixes and verified (signature, x86_64, markers, Rosetta smoke launch): exe
+`b871cec0...`, DMG sha256 `d598c159bee42c30...`, NOT installed and not run on real Intel hardware.
+
 **Installed 2026-09-29 01:32 (current):** Apple Silicon build exe `ca6ecbe6…` (commit `3b16397`) at
 `/Applications/SingWS.app`. Chat tabs are pill-styled, bright, never elided, left-aligned; seen on screen and readable.
 Two earlier tab bugs fixed along the way (labels cut to "Ever...", tabs centred; then dim text). Backups of the
