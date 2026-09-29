@@ -44669,7 +44669,7 @@ class KaraokeApp(QWidget):
         split.addWidget(right); split.setStretchFactor(1, 1)
         from PyQt6.QtWidgets import QStackedWidget, QTabBar
         self.chat_tab_bar = QTabBar(); self.chat_tab_bar.setExpanding(False); self.chat_tab_bar.setDrawBase(False)
-        self.chat_tab_bar.setUsesScrollButtons(False)
+        self.chat_tab_bar.setUsesScrollButtons(False); self.chat_tab_bar.setElideMode(Qt.TextElideMode.ElideNone)   # never shorten the labels
         self.chat_tab_bar.setStyleSheet(self._chat_tab_bar_css())
         for label in ("Everyone", "Private", "Host chat"): self.chat_tab_bar.addTab(label)
         self.chat_stack = QStackedWidget()
@@ -44677,7 +44677,7 @@ class KaraokeApp(QWidget):
         self.chat_stack.addWidget(split)
         self.room_filter_combo.hide()               # the tab bar now chooses Everyone / Private
         self.chat_tab_bar.currentChanged.connect(self._on_chat_tab_changed)
-        layout.addWidget(self.chat_tab_bar)
+        layout.addWidget(self.chat_tab_bar, 0, Qt.AlignmentFlag.AlignLeft)      # natural width, on the left (not centred)
         layout.addWidget(self.chat_stack, 1)
         self._on_chat_tab_changed(0)
         self._chat_messages = []; self._chat_last_id = 0; self._chat_poll_inflight = False; self._chat_data_generation = 0

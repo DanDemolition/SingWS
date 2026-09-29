@@ -239,6 +239,14 @@ class RoomTabTests(unittest.TestCase):
         host._chat_messages = [{'direction': 'in', 'read': False}, {'direction': 'in', 'read': True}]
         self.assertEqual(host._chat_tab_labels()[2], 'Host chat (1 new)')
 
+    def test_chat_tab_bar_is_not_elided_or_centred(self):
+        """Regression: in the real app the labels were cut to 'Ever...' and the tabs sat mid-page."""
+        source = Path('0.2.18.1.py').read_text()
+        build = source[source.index('def _build_chat_page'):source.index('def _chat_tab_bar_css')]
+        self.assertIn('setElideMode(Qt.TextElideMode.ElideNone)', build)
+        self.assertIn('layout.addWidget(self.chat_tab_bar, 0, Qt.AlignmentFlag.AlignLeft)', build)
+        self.assertNotIn('PointingHandCursor', build)          # the app deliberately uses the arrow cursor
+
     def test_attention_badges_are_per_channel(self):
         host = self.make()
         self.feed(host, [msg(1), msg(2, channel='dm', status='held', flag='link', frm='Bob', frm_key='bob', to_key='alice')])
