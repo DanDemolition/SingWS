@@ -24,6 +24,15 @@ complaint is fixed** (operator could not confirm with him; verified against live
 live by hash. Chat was switched on in the dashboard and confirmed working end to end with two phones
 (text, GIF, photo, host moderation).
 
+**Installed 2026-09-29 01:05:** Apple Silicon build `e98c719b…` at `/Applications/SingWS.app` (normal profile;
+backup of previous app + profile in `local-installs/20260929-chat-tabs/backup/`, private). Chat page seen on
+screen: three tabs, GIF thumbnail, photo, moderation links all work. Its tab bar was plain/unstyled.
+**Newer build NOT installed:** Chat tabs restyled as pills matching Settings/bottom nav (commits `dbcf216`,
+`526ae70`; the first briefly added a pointing-hand cursor, removed because the app deliberately uses the arrow
+cursor). New `SingWS-1.0.0.2-arm64-installer.dmg` (exe `156a4988…`) is verified (signature, arm64, markers) but
+not installed; the Intel installer predates the tab styling and needs a rebuild. Untested on real hardware /
+real songs: KaraFun end to end, Private + Host chat tabs in the app, Intel Mac.
+
 **App:** commits `4b93f5b` (KaraFun) and `be401f7` (three-tab Chat page, GIF thumbnails) pushed. Installers
 `SingWS-1.0.0.2-arm64-installer.dmg` and `-x86_64-installer.dmg` are built, signed, verified and smoke-launched
 (scratch profile) but **not installed and not published**; version still 1.0.0.2. Chat page layout not yet seen
