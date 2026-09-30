@@ -18,7 +18,7 @@ Also learned: iCloud "Desktop & Documents" sync is ON and the project folder is 
 saturate the Mac (load average >50) and cause video slowdowns; the video capture itself logs a steady 29 fps. Do not build while the
 operator is testing playback.
 
-## Host can speak in room chat — 2026-09-30 (server LIVE, app installed here, NOT in the public 1.0.0.5 release)
+## Host can speak in room chat — 2026-09-30 (server LIVE; now INCLUDED in the re-released 1.0.0.5, see below)
 
 Operator asked: host must be able to talk in Everyone, interject in Private conversations, and pick a host name.
 **Server** (`c7ea450`, pushed, deployed 2026-09-30 by the operator with `server-deployments/host-say/deploy.sh`; live SHA-256 of all four
@@ -28,15 +28,27 @@ default "Host"), host messages visible to BOTH singers of a private thread, coun
 highlight. A singer named "@host" is refused (`invalid_sender`/`invalid_recipient`) so nobody can pose as the host. Venue switches still
 apply (group/dm/gifs/photos off = refused). Undo: `/root/singws-chat-deploy/host-say-<UTC time>/rollback.sh`. Tests: `tools/test_host_say.php`
 (in `tools/run_room_chat_tests.py`, all five suites pass in a disposable copy).
-**App** (`f2f3fab`, label stays 1.0.0.5 by the operator's choice, so it differs from the published 1.0.0.5 DMG): message bar under Everyone,
+**App** (`f2f3fab`, label stays 1.0.0.5 by the operator's choice; the published 1.0.0.5 DMGs were replaced with builds containing it): message bar under Everyone,
 "Interject" link under each private message (target shown as "Interjecting in A <-> B"), GIF picker (server-side GIPHY search) and photo
 upload, setting Settings > Network > Connection > "Chat name" (`host_chat_name`, default "Host"). Host's own messages are not counted as new.
 Tests: 1152 pass (`test_room_chat_tab.py` +9). Installed exe `bce6f0c6...` (backup `local-installs/20260930-host-chat/`); operator tested
-("all good"). **Next release must carry a new version number** or anyone on 1.0.0.5 will not have this.
+("all good").
 Test-env note: the Qt platform plugins in `.venv-test-arm64-fresh` will not load; copy them to `/tmp/singws-release-qt-platforms` and
 `codesign --force --sign -` them, then use `QT_QPA_PLATFORM_PLUGIN_PATH` (the folder is lost when /tmp is cleaned).
 
-## RELEASED 1.0.0.5 — 2026-09-29 (published, latest; the exact release DMG is installed on this Mac)
+## RE-RELEASED 1.0.0.5 with host chat — 2026-09-30 (same version number, assets replaced; latest; installed on this Mac)
+
+Operator asked for both chips rebuilt and the existing v1.0.0.5 GitHub release replaced (same version). Done: release commit `6d0c745`;
+tag `v1.0.0.5` was **force-moved** from `8300e55` to `6d0c745`; both DMGs replaced with `gh release upload --clobber`, notes extended.
+arm64 `3f086e51...` (127,076,211 B) and x86_64 `c2caaac6...` (152,901,891 B); re-downloaded sizes and SHA-256s equal `docs/release.json`,
+live on Pages with the download page and both `latest/download` links. Installed here: the arm64 build (exe `bce6f0c6...`), byte-identical
+to the released DMG's app. Checks: Intel hdiutil, strict signature, x86_64 (433 Mach-O), macOS min <= 12.3 (842), markers (chat say, chat
+name, seek, capture-only), Rosetta smoke launch (BASS ready, clean exit, live log unmoved). Tests: 1152 app tests, five PHP suites.
+**Caveats:** auto-update will NOT offer this to anyone already on 1.0.0.5 (same version), so they must download it again (the notes
+say so). Intel has still never run on a physical Intel Mac (Detect Now there unconfirmed). Real-TV rehearsal (KaraFun window vs
+audience window) still pending. Next release: bump the version as usual.
+
+## Previously released 1.0.0.5 — 2026-09-29 (superseded by the re-release above; hashes below are the FIRST 1.0.0.5 DMGs)
 
 Tag `v1.0.0.5`, release commit `8300e55`, https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.5. arm64 `65f19e24...`
 (127,068,526 B) and x86_64 `20f2f4f4...` (152,919,340 B); sizes and re-downloaded SHA-256s match `docs/release.json`, live on
