@@ -16,14 +16,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PyQt6.QtCore import Qt, QUrl
     from PyQt6.QtGui import QImage, QPixmap
-    from PyQt6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QListWidget, QStackedWidget, QTabBar, QTextBrowser
+    from PyQt6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QListWidget, QPushButton, QStackedWidget, QTabBar, QTextBrowser
     QT_OK = True
 except Exception:  # pragma: no cover - environments without a working Qt
     QT_OK = False
 
 METHODS = {'_room_chat_conn', '_update_room_tab_title', '_room_poll_tick', '_apply_room_list',
            '_room_display_name', '_render_room_chat', '_on_room_anchor', '_room_view_open', '_room_channel_counts',
-           '_chat_tab_labels', '_on_chat_tab_changed'}
+           '_chat_tab_labels', '_on_chat_tab_changed', '_room_thread_keys', '_room_say_context', '_refresh_room_compose',
+           '_room_say_send'}
 
 
 @lru_cache(maxsize=1)
@@ -32,7 +33,8 @@ def namespace():
     nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in METHODS]
     ns = {'re': re, 'time': time, 'quote': quote, 'unquote': unquote, 'Qt': Qt, 'QUrl': QUrl, 'QImage': QImage,
           '_v': lambda name: '#dddddd', '_diag': lambda *a: None,
-          '_network_normalize_base_url': lambda u: u.rstrip('/')}
+          '_network_normalize_base_url': lambda u: u.rstrip('/'), 'requests': mock.Mock(),
+          'threading': SimpleNamespace(Thread=lambda target=None, **kw: SimpleNamespace(start=lambda: target()))}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'room-tab-test', 'exec'), ns)
     return ns
 
@@ -73,6 +75,11 @@ class RoomTabTests(unittest.TestCase):
         host._update_chat_nav_state = mock.Mock(); host._show_processing_notification = mock.Mock()
         host._room_action = mock.Mock(); host._room_show_image = mock.Mock(); host._room_fetch_media = mock.Mock(); host._room_fetch_gif = mock.Mock()
         host._schedule_room_poll = mock.Mock()
+        host._run_on_ui_thread = lambda fn: fn()
+        host._ROOM_SAY_ERRORS = {'group_chat_disabled': 'Everyone chat is switched off.'}
+        host._room_say_target = None
+        host.room_say_target_label = QLabel(); host.room_say_input = QLineEdit(); host.room_say_send_button = QPushButton('Send')
+        host.room_say_gif_button = QPushButton('GIF'); host.room_say_photo_button = QPushButton('Photo')
         host.chat_tab_bar.currentChanged.connect(lambda i: host._on_chat_tab_changed(i))
         host.chat_tab_bar.setCurrentIndex(2)          # start on Host chat, so room messages count as unseen
         return host
@@ -265,6 +272,120 @@ class RoomTabTests(unittest.TestCase):
         host = self.make()
         self.feed(host, [], settings={'group_enabled': False, 'dm_enabled': False})
         self.assertIn('Room chat is OFF', host.room_status_label.text())
+
+
+def host_msg(mid, channel='group', thread='group', text='hello', to_key=''):
+    m = msg(mid, channel=channel, frm='DJ Dan', frm_key='@host', to_key=to_key, text=text)
+    m['thread'] = thread; m['host'] = True
+    return m
+
+
+@unittest.skipUnless(QT_OK, "PyQt6 not usable here")
+class HostSpeaksTests(unittest.TestCase):
+    """The host can speak in Everyone, and interject in a private conversation (both singers see it)."""
+    make = RoomTabTests.make
+    feed = RoomTabTests.feed
+    text = RoomTabTests.text
+    html = RoomTabTests.html
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.requests = namespace()['requests']
+        self.requests.reset_mock()
+        self.requests.post.return_value = mock.Mock(ok=True, content=b'{}', status_code=200, json=lambda: {'ok': True, 'id': 7})
+
+    def dm(self, mid, frm, frm_key, to_key, text='psst'):
+        m = msg(mid, channel='dm', frm=frm, frm_key=frm_key, to_key=to_key, text=text)
+        m['thread'] = '|'.join(sorted([frm_key, to_key]))
+        return m
+
+    def test_private_messages_offer_interject_for_their_two_singers(self):
+        host = self.make()
+        self.feed(host, [self.dm(1, 'Alice', 'alice', 'bob'), msg(2, text='group one')])
+        host.chat_tab_bar.setCurrentIndex(1); host._render_room_chat()
+        html = self.html(host)
+        self.assertIn('room://say/alice/bob', html)
+        host.chat_tab_bar.setCurrentIndex(0); host._render_room_chat()
+        self.assertNotIn('room://say/', self.html(host))               # nothing to interject into on Everyone
+
+    def test_host_messages_are_tagged_and_never_offer_mute(self):
+        host = self.make()
+        self.feed(host, [self.dm(1, 'Alice', 'alice', 'bob'), host_msg(2, 'dm', 'alice|bob', 'be nice'), host_msg(3, text='welcome')])
+        host.chat_tab_bar.setCurrentIndex(1); host._render_room_chat()
+        text, html = self.text(host), self.html(host)
+        self.assertIn('HOST', text); self.assertIn('PRIVATE ↔ Alice / Bob', text); self.assertIn('be nice', text)
+        self.assertNotIn('room://mute/%40host', html); self.assertNotIn('room://mute/@host', html)
+        self.assertIn('room://say/alice/bob', html)                    # a host message can be replied to in the same thread
+
+    def test_own_messages_do_not_count_as_new(self):
+        host = self.make()
+        self.feed(host, [])                                            # baseline load
+        self.feed(host, [host_msg(1, text='mine'), msg(2, text='theirs')], replace=False)
+        self.assertEqual(host._room_new_by_channel['group'], 1)
+
+    def test_compose_context_follows_the_tab_and_the_picked_conversation(self):
+        host = self.make()
+        host.chat_tab_bar.setCurrentIndex(0)
+        self.assertIn('Speaking to everyone', host.room_say_target_label.text())
+        self.assertTrue(host.room_say_input.isEnabled())
+        host.chat_tab_bar.setCurrentIndex(1)
+        self.assertFalse(host.room_say_input.isEnabled()); self.assertIn('Interject', host.room_say_target_label.text())
+        self.feed(host, [self.dm(1, 'Alice', 'alice', 'bob')])
+        host._on_room_anchor(QUrl('room://say/alice/bob'))
+        self.assertTrue(host.room_say_input.isEnabled())
+        self.assertIn('Interjecting in Alice ↔ Bob', host.room_say_target_label.text())
+        host.settings['host_chat_name'] = 'DJ Dan'; host._refresh_room_compose()
+        self.assertIn('as “DJ Dan”', host.room_say_target_label.text())
+
+    def test_send_to_everyone(self):
+        host = self.make(); host.settings['host_chat_name'] = 'DJ Dan'
+        host.chat_tab_bar.setCurrentIndex(0)
+        host.room_say_input.setText('Welcome! 🎤🔥'); host._room_say_send()
+        args, kwargs = self.requests.post.call_args
+        self.assertTrue(args[0].endswith('/api/v1/host_chat_moderation.php'))
+        data = kwargs['data']
+        self.assertEqual((data['action'], data['channel'], data['message'], data['host_name']), ('say', 'group', 'Welcome! 🎤🔥', 'DJ Dan'))
+        self.assertEqual(kwargs['headers']['X-API-Key'], 'k')
+        self.assertEqual(host.room_say_input.text(), '')               # cleared after a successful send
+        host._schedule_room_poll.assert_called_with(True)
+
+    def test_interject_in_a_private_conversation(self):
+        host = self.make()
+        host.chat_tab_bar.setCurrentIndex(1); host._on_room_anchor(QUrl('room://say/alice/bob'))
+        host.room_say_input.setText('keep it clean 😄'); host._room_say_send()
+        data = self.requests.post.call_args.kwargs['data']
+        self.assertEqual((data['channel'], data['a'], data['b'], data['message']), ('dm', 'alice', 'bob', 'keep it clean 😄'))
+
+    def test_gif_and_picture_go_with_the_message(self):
+        host = self.make()
+        host.chat_tab_bar.setCurrentIndex(0)
+        host._room_say_send(gif_id='abc12345')
+        self.assertEqual(self.requests.post.call_args.kwargs['data']['gif_id'], 'abc12345')
+        host._room_say_send(media_id=42)
+        self.assertEqual(self.requests.post.call_args.kwargs['data']['media_id'], 42)
+
+    def test_nothing_is_sent_when_empty_or_no_conversation_is_picked(self):
+        host = self.make()
+        host.chat_tab_bar.setCurrentIndex(0); host.room_say_input.setText('   '); host._room_say_send()
+        host.chat_tab_bar.setCurrentIndex(1); host.room_say_input.setText('hello'); host._room_say_send()
+        self.requests.post.assert_not_called()
+
+    def test_a_refused_message_is_explained_and_kept(self):
+        host = self.make()
+        self.requests.post.return_value = mock.Mock(ok=False, content=b'{}', status_code=400,
+                                                    json=lambda: {'ok': False, 'error': 'group_chat_disabled'})
+        host.chat_tab_bar.setCurrentIndex(0); host.room_say_input.setText('hi'); host._room_say_send()
+        self.assertEqual(host.room_say_input.text(), 'hi')
+        self.assertIn('Everyone chat is switched off.', host._show_processing_notification.call_args.args[0])
+
+    def test_the_chat_name_setting_exists_and_is_saved_from_the_network_dialog(self):
+        source = Path('0.2.18.1.py').read_text()
+        self.assertIn('"host_chat_name": "Host"', source)
+        self.assertIn('self.settings["host_chat_name"] = (chat_name_edit.text().strip() or "Host")[:24]', source)
+        self.assertIn('QLabel("Chat name:")', source)
 
 
 if __name__ == '__main__':
