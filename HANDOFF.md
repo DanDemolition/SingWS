@@ -183,7 +183,7 @@ on screen. Stray Finder-duplicate refs `main 2` in `SingWS-Server/.git` were mov
 
 Intel was built and packaged first. Both architectures use the approved purple/neon-green rotation design. The later candidate removes the separate animated lyrics preview: live CDG/MP4 remains as the transparent full-screen underlay, while a brief neon sweep, particle burst, and staggered queue pulse spotlights the next singer every 30 seconds without covering the QR code or ticker.
 
-Intel: strict signing, x86_64 architecture, macOS 12 minimum, DMG verification, and clean Rosetta launch/exit passed. Apple Silicon: strict signing, arm64 architecture, macOS 12.3 minimum and DMG verification passed. Installed at `/Applications/SingWS.app` and launched with normal profile/server connection. Backup: a backup that has since been deleted/`. The system location permission prompt is left for the operator.
+Intel: strict signing, x86_64 architecture, macOS 12 minimum, DMG verification, and clean Rosetta launch/exit passed. Apple Silicon: strict signing, arm64 architecture, macOS 12.3 minimum and DMG verification passed. Installed at `/Applications/SingWS.app` and launched with normal profile/server connection. Backup: a backup that has since been deleted. The system location permission prompt is left for the operator.
 
 Tests: initial Intel root suite 1085 passed; 22 failures were resolved by two test-fixture updates, rerunning the timing test without concurrent build load, and running native-media tests with their matching ARM source runtime. The revised queue spotlight passed 47 focused tests. Actual CDG animation screenshots are in a backup that has since been deleted. Physical Intel hardware and venue TV remain operator rehearsal checks.
 
