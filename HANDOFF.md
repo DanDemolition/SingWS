@@ -4,19 +4,14 @@ Updated 2026-09-29.
 
 ## VERSION POLICY (operator instruction, 2026-09-29)
 
-**Do not bump the version for test builds.** Source is set to **1.0.0.5**, which is the *next release* (1.0.0.4 is the latest
-published; 1.0.0.5/1.0.0.6 were unpublished test labels and no v1.0.0.5 tag or release exists). Rebuild for testing without
-changing it; bump only when actually releasing. The Apple Silicon app installed on the operator's Mac is a test build labelled
-1.0.0.6 (exe `cdcb9dcb...`); it contains the 1.0.0.5 fixes below. Unreleased since 1.0.0.4: KaraFun end detection now reads only
-the player panel (was 11-31 s late, silent BGM gap); key/tempo readback only overwrites the display when a disagreeing read repeats
-(fixes the panel flipping to 100% while KaraFun stayed at -5%). Operator confirmed play/pause, key change and speed change work.
-**Verified 2026-09-29 10:52-10:55 with a real song (operator confirmed by ear):** live tempo changes (100->90->100->95) all taken by KaraFun;
-both once-a-minute readbacks logged `display unchanged` (no more flip to 100%); end of song noticed at `remaining=-5` with no slow probe
-(was -13..-31) and the background music came back "perfect". Menu bar hidden on the virtual test screen in full screen is BetterDisplay's
-max-level overlay (`BetterDisplay Overlay for Display 8`), not SingWS; operator decided full screen works as is (no change made).
-Also learned: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make fileproviderd/cloudd/bird
-saturate the Mac (load average >50) and cause video slowdowns; the video capture itself logs a steady 29 fps. Do not build while the
-operator is testing playback.
+**Do not bump the version for test builds.** 1.0.0.5 is the latest release (published 2026-09-29 and re-released with host chat on
+2026-09-30, same number); rebuild for testing without changing it and bump only when actually releasing. The 1.0.0.5/1.0.0.6 labels used
+on earlier unpublished test builds are gone: no 1.0.0.6 exists anywhere (no tag, branch, installer or backup), and everything those
+builds contained (KaraFun end detection reading only the player panel, steadier tempo readback, capture-only video, seek) shipped in
+1.0.0.5. Iron rule from that day: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make
+fileproviderd/cloudd/bird saturate the Mac (load average >50) and cause video slowdowns while the capture itself logs a steady 29 fps.
+Do not build while the operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's
+max-level overlay, not SingWS; the operator decided full screen works as is.
 
 ## Host can speak in room chat — 2026-09-30 (server LIVE; now INCLUDED in the re-released 1.0.0.5, see below)
 
