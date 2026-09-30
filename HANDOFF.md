@@ -151,7 +151,7 @@ live by hash. Chat was switched on in the dashboard and confirmed working end to
 (text, GIF, photo, host moderation).
 
 **Installed 2026-09-29 01:05:** Apple Silicon build `e98c719b…` at `/Applications/SingWS.app` (normal profile;
-backup of previous app + profile in `local-installs/20260929-chat-tabs/backup/`, private). Chat page seen on
+backup of previous app + profile in a backup that has since been deleted, private). Chat page seen on
 screen: three tabs, GIF thumbnail, photo, moderation links all work. Its tab bar was plain/unstyled.
 **KaraFun real-song test 2026-09-29 (operator confirmed by ear + panel):** three real "Test / NOFX / Linoleum" songs
 through the installed Apple Silicon build. Verified: launch, exact search, start, ~29fps capture with no lag, BGM handling,
@@ -183,9 +183,9 @@ on screen. Stray Finder-duplicate refs `main 2` in `SingWS-Server/.git` were mov
 
 Intel was built and packaged first. Both architectures use the approved purple/neon-green rotation design. The later candidate removes the separate animated lyrics preview: live CDG/MP4 remains as the transparent full-screen underlay, while a brief neon sweep, particle burst, and staggered queue pulse spotlights the next singer every 30 seconds without covering the QR code or ticker.
 
-Intel: strict signing, x86_64 architecture, macOS 12 minimum, DMG verification, and clean Rosetta launch/exit passed. Apple Silicon: strict signing, arm64 architecture, macOS 12.3 minimum and DMG verification passed. Installed at `/Applications/SingWS.app` and launched with normal profile/server connection. Backup: `local-installs/20260906-release-0.4.7.1/backup/`. The system location permission prompt is left for the operator.
+Intel: strict signing, x86_64 architecture, macOS 12 minimum, DMG verification, and clean Rosetta launch/exit passed. Apple Silicon: strict signing, arm64 architecture, macOS 12.3 minimum and DMG verification passed. Installed at `/Applications/SingWS.app` and launched with normal profile/server connection. Backup: a backup that has since been deleted/`. The system location permission prompt is left for the operator.
 
-Tests: initial Intel root suite 1085 passed; 22 failures were resolved by two test-fixture updates, rerunning the timing test without concurrent build load, and running native-media tests with their matching ARM source runtime. The revised queue spotlight passed 47 focused tests. Actual CDG animation screenshots are in `local-installs/20260907-queue-spotlight-qa/`. Physical Intel hardware and venue TV remain operator rehearsal checks.
+Tests: initial Intel root suite 1085 passed; 22 failures were resolved by two test-fixture updates, rerunning the timing test without concurrent build load, and running native-media tests with their matching ARM source runtime. The revised queue spotlight passed 47 focused tests. Actual CDG animation screenshots are in a backup that has since been deleted. Physical Intel hardware and venue TV remain operator rehearsal checks.
 
 Build commands and detailed verification: `docs/verification/2026-09-06-rotation-release.md`.
 
@@ -210,7 +210,7 @@ and synchronized with the configured server, initialized mpv and BASS, and its
 main/audience windows, QR artwork, ticker and controls were inspected on screen.
 No new SingWS native crash report or logged Python error appeared. The previous
 0.4.6.6 app and normal profile are backed up under
-`../local-installs/20260904-105116/`. Automated verification passed 994 tests
+a backup that has since been deleted. Automated verification passed 994 tests
 plus 39 subtests and 86 native tests. Full-song karaoke playback and a physical
 external-display rehearsal remain unverified.
 
@@ -280,7 +280,7 @@ Frozen code/native-load/architecture/macOS/signing checks pass. The mounted
 installer's 3,183 entries exactly match the signed app; hdiutil verification,
 helper and shortcut checks pass. The old download page was updated to the
 new installer-derived version/link/size/hash alongside docs/release.json.
-Private backup/build/test receipt: `../local-installs/20260831-115652/`.
+Private backup/build/test receipt: a backup that has since been deleted.
 Report: `docs/verification/2026-08-31-release-0.4.6.6.md`.
 Published as the latest GitHub release after its remote size and SHA-256
 matched the verified local DMG. The final follow-up commit pushes main only
@@ -304,7 +304,7 @@ Normal app `/Applications/SingWS.app`, still version 0.4.6.5, executable SHA-256
 `2af5d6fe2909af944ea820172d981858285da621e025ff31f4640d261462edfe`.
 Frozen code, native loads, architecture/macOS compatibility and strict signing
 verified. Previous app/data and private desktop evidence are in
-`../local-installs/20260831-112154/`. Nothing published. Source changes only main
+a backup that has since been deleted. Nothing published. Source changes only main
 relative to prior candidate. Report and commands:
 `docs/verification/2026-08-31-ticker-host-overlap.md`.
 The external-display/full-song KaraFun rehearsal remains pending.
@@ -323,7 +323,7 @@ requests manual Complete if it cannot verify an end, rather than forcing it.
 normal-end single-observation transitions and stale-session guards are covered.
 No renderer/audio/server changes or history cleanup. The slow accessibility
 scrape remains; physical full-song/end/next-video testing is still required.
-Normal-app candidate build/receipts: `../local-installs/20260831-110236/`.
+Normal-app candidate build/receipts: a backup that has since been deleted.
 Report: `docs/verification/2026-08-31-karafun-false-completion.md`.
 Installed `/Applications/SingWS.app` (normal identity/profile, version 0.4.6.5),
 executable SHA-256:
@@ -374,7 +374,7 @@ Installed executable SHA-256:
 `4ab3b8f768f4d06081e18f02f5d6acd69289617f568af508b09099f566367751`.
 
 The old app ZIP and 16 normal profile JSON/SQLite files were backed up under
-`../local-installs/20260831-104012/`. The profile backup is private and contains
+a backup that has since been deleted. The profile backup is private and contains
 credentials: do not publish it. Old ZIP integrity/hash, SQLite quick_check,
 57 focused regressions, frozen code equivalence, 432 Intel architecture checks,
 840 macOS-12 checks, native-library loads and strict deep signing passed.
@@ -397,7 +397,7 @@ ZIP and logs are archived at `../retired-test-builds/20260831-040139/`; the old
 launcher is disabled. No test history/settings were imported into the normal
 profile. The independent-catalog proposal below is superseded by this choice.
 Manual song completions now affect actual history/Fun Stats, as explained to
-the operator. Build/install/search receipts: `../local-installs/20260831-104012/`.
+the operator. Build/install/search receipts: a backup that has since been deleted.
 
 ## Private test KaraFun search diagnosis — 2026-08-31
 
