@@ -18,6 +18,24 @@ Also learned: iCloud "Desktop & Documents" sync is ON and the project folder is 
 saturate the Mac (load average >50) and cause video slowdowns; the video capture itself logs a steady 29 fps. Do not build while the
 operator is testing playback.
 
+## Host can speak in room chat — 2026-09-30 (server LIVE, app installed here, NOT in the public 1.0.0.5 release)
+
+Operator asked: host must be able to talk in Everyone, interject in Private conversations, and pick a host name.
+**Server** (`c7ea450`, pushed, deployed 2026-09-30 by the operator with `server-deployments/host-say/deploy.sh`; live SHA-256 of all four
+files verified equal to the commit): `host_chat_moderation.php` new POST `say` (channel group|dm, a, b, message, gif_id, media_id, host_name)
+and `gifs` search; `chat_media.php` accepts host uploads; `_chat.inc` `CHAT_HOST_KEY='@host'`, `chat_host_send`, `chat_host_name` (24 chars,
+default "Host"), host messages visible to BOTH singers of a private thread, counted unread, `host:true` flag; `room_chat_ui.js` HOST tag +
+highlight. A singer named "@host" is refused (`invalid_sender`/`invalid_recipient`) so nobody can pose as the host. Venue switches still
+apply (group/dm/gifs/photos off = refused). Undo: `/root/singws-chat-deploy/host-say-<UTC time>/rollback.sh`. Tests: `tools/test_host_say.php`
+(in `tools/run_room_chat_tests.py`, all five suites pass in a disposable copy).
+**App** (`f2f3fab`, label stays 1.0.0.5 by the operator's choice, so it differs from the published 1.0.0.5 DMG): message bar under Everyone,
+"Interject" link under each private message (target shown as "Interjecting in A <-> B"), GIF picker (server-side GIPHY search) and photo
+upload, setting Settings > Network > Connection > "Chat name" (`host_chat_name`, default "Host"). Host's own messages are not counted as new.
+Tests: 1152 pass (`test_room_chat_tab.py` +9). Installed exe `bce6f0c6...` (backup `local-installs/20260930-host-chat/`); operator tested
+("all good"). **Next release must carry a new version number** or anyone on 1.0.0.5 will not have this.
+Test-env note: the Qt platform plugins in `.venv-test-arm64-fresh` will not load; copy them to `/tmp/singws-release-qt-platforms` and
+`codesign --force --sign -` them, then use `QT_QPA_PLATFORM_PLUGIN_PATH` (the folder is lost when /tmp is cleaned).
+
 ## RELEASED 1.0.0.5 — 2026-09-29 (published, latest; the exact release DMG is installed on this Mac)
 
 Tag `v1.0.0.5`, release commit `8300e55`, https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.5. arm64 `65f19e24...`
