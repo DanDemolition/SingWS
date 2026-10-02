@@ -4,14 +4,44 @@ Updated 2026-09-29.
 
 ## VERSION POLICY (operator instruction, 2026-09-29)
 
-**Do not bump the version for test builds.** 1.0.0.5 is the latest release (published 2026-09-29 and re-released with host chat on
-2026-09-30, same number); rebuild for testing without changing it and bump only when actually releasing. The 1.0.0.5/1.0.0.6 labels used
-on earlier unpublished test builds are gone: no 1.0.0.6 exists anywhere (no tag, branch, installer or backup), and everything those
-builds contained (KaraFun end detection reading only the player panel, steadier tempo readback, capture-only video, seek) shipped in
-1.0.0.5. Iron rule from that day: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make
-fileproviderd/cloudd/bird saturate the Mac (load average >50) and cause video slowdowns while the capture itself logs a steady 29 fps.
-Do not build while the operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's
-max-level overlay, not SingWS; the operator decided full screen works as is.
+**Do not bump the version for test builds.** 1.0.0.6 is the latest release (2026-10-02); rebuild for testing without changing it
+and bump only when the operator says release. (1.0.0.5 was published 2026-09-29 and re-released with host chat on 2026-09-30.)
+Iron rule: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make fileproviderd/cloudd/bird
+saturate the Mac (load average >50) and cause video slowdowns while the capture itself logs a steady 29 fps. Do not build while the
+operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
+SingWS; the operator decided full screen works as is.
+
+## RELEASED 1.0.0.6 — 2026-10-02 (published, latest; NOT yet installed on this Mac)
+
+Tag `v1.0.0.6`, code commit `605c130`, release commit `98bd873`; https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.6.
+arm64 `96d8521b...` (127,082,643 B), x86_64 `82b1f88d...` (152,949,249 B); sizes and re-downloaded SHA-256s equal `docs/release.json`,
+live on Pages with the download page and both `latest/download` links. Checks: hdiutil, strict signature, arch (420 / 433 Mach-O),
+macOS min <= 12.3 (816 / 842), markers for every feature below, search-abort present in the frozen `song_index`, smoke launch of both
+(Intel under Rosetta; scratch `SINGWS_HOME`, live log unmoved). Tests: 1224 + 92 (environment group) pass.
+Contents (all from the 2026-10-01 show-log review and the operator's reports):
+- KaraFun cold start: `_karafun_wait_until_ready` (KaraFun running + main window + 2 s settle, 60 s limit) before any search; the
+  "is it playing" check waits 30 s when KaraFun was just launched (12 s warm). The cold run took ~16 s to start playing and was
+  declared failed at 12 s.
+- Search result bug: a "length" only had to contain a colon and be under 9 chars, so the label "Display:" became the click target
+  (22:03 song took 63 s). Now `isDurationText` (digits and colons only); titles match without trailing "(live)"/"[Remix]".
+- KaraFun video window ("Dual Renderer", window level above normal windows) used to open maximised over the host screen. Now parked so
+  a 3 px strip stays on one screen edge (`karafun_park_position`, host screen preferred, never touches a second screen); re-checked every
+  2 s; if no picture for 10 s it is moved back and parking stops for that song. Setting `karafun_park_video_window` (default on).
+- Optional preview-pane capture (`karafun_capture_source` = `preview_pane`, default `video_window`, Settings > KaraFun, off by default):
+  captures the preview built into KaraFun's MAIN window via the new native region mode (`singws_karafun_capture_start_region` /
+  `set_region`; Retina pane ~1566 px wide, output capped at 1600). Pane found from the accessibility tree (`karafun_preview_pane_rect`:
+  right of the tall splitter, below the toolbar, above the overlay controls, minus 14 pt). Shown fitted with bars (the pane is ~2.7:1).
+  Automatic per-song fallback to the video window if the pane is not found, the stream will not start, or no picture for 10 s while
+  playing. **NOT yet tried on a real song.** Unknown: whether KaraFun keeps drawing when SingWS fully covers its window.
+- Network settings: Detect Now runs in a background thread; OK no longer waits for location detection (it ran 25 s on the GUI thread
+  each time, replayed clicks made it minutes). Failure text now points at Wi-Fi. Log lines `[NETWORK-DIALOG] ...` time both.
+- Search: a cancelled library search stops its SQLite scan (`should_abort` progress handler) and is never cached.
+- Emoji button (😀) on the Everyone/Private bar and the Host chat tab.
+- Log: `[LAUNCH] clean shutdown (aboutToQuit)` and `main window closing` (a run that just stops was killed/crashed); PERF probes
+  `rotation_effects_now_singing` / `rotation_effects_rail` (21 song-end freezes of 0.4-0.8 s have no known cause yet).
+Still open: real-song test of the parked window and of preview-pane capture; Intel has run a real show (1.0.0.5, 2026-10-01, no
+crash, Detect Now worked at first and failed at the venue with CoreLocation "unknown") but not these features; song-end screen freezes;
+KJ Genie research: it is Windows-only and uses KaraFun's Windows-only websocket Player API; the Mac app opens no local port.
 
 ## Host can speak in room chat — 2026-09-30 (server LIVE; now INCLUDED in the re-released 1.0.0.5, see below)
 
