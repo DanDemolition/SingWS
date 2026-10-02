@@ -239,7 +239,7 @@ class KaraFunProviderTests(unittest.TestCase):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"karafun_request_url": ""', source)
         self.assertIn('_make_settings_tab("KaraFun")', source)
-        self.assertIn('QCheckBox("Automatically search and start KaraFun songs")', source)
+        self.assertIn('QCheckBox("Use KaraFun integration")', source)
         self.assertIn('self.settings["karafun_request_url"] = karafun_url_edit.text().strip()', source)
         self.assertIn("karafun_url_edit.setEchoMode(QLineEdit.EchoMode.Password)", source)
         self.assertNotIn('"karafun_request_url": "https://', source)

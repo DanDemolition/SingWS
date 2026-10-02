@@ -39,23 +39,32 @@ def run(settings, pgrep_rc=1, app_path=Path('/Applications/KaraFun.app'), platfo
 
 
 class StartupLaunchTests(unittest.TestCase):
-    def test_off_by_default_launches_nothing(self):
+    ON = {'karafun_launch_at_startup': True, 'karafun_auto_queue_enabled': True}      # the launch switch AND the integration
+
+    def test_integration_off_launches_nothing(self):
         self.assertFalse(run({}).run.called)
+        self.assertFalse(run({'karafun_launch_at_startup': True}).run.called)           # launch switch alone is not enough
+        self.assertFalse(run({'karafun_auto_queue_enabled': True, 'karafun_launch_at_startup': False}).run.called)
+
+    def test_the_launch_switch_defaults_on_once_the_integration_is_on(self):
+        sub = run({'karafun_auto_queue_enabled': True})
+        launch = [c.args[0] for c in sub.run.call_args_list if c.args[0][0].endswith('open')]
+        self.assertEqual(launch, [['/usr/bin/open', '-g', '-j', '/Applications/KaraFun.app']])
 
     def test_enabled_launches_hidden_in_background(self):
-        sub = run({'karafun_launch_at_startup': True})
+        sub = run(dict(self.ON))
         launch = [c.args[0] for c in sub.run.call_args_list if c.args[0][0].endswith('open')]
         self.assertEqual(launch, [['/usr/bin/open', '-g', '-j', '/Applications/KaraFun.app']])
 
     def test_skips_when_already_running(self):
-        sub = run({'karafun_launch_at_startup': True}, pgrep_rc=0)
+        sub = run(dict(self.ON), pgrep_rc=0)
         self.assertFalse([c for c in sub.run.call_args_list if c.args[0][0].endswith('open')])
 
     def test_skips_when_app_missing(self):
-        self.assertFalse(run({'karafun_launch_at_startup': True}, app_path=None).run.called)
+        self.assertFalse(run(dict(self.ON), app_path=None).run.called)
 
     def test_not_macos_launches_nothing(self):
-        self.assertFalse(run({'karafun_launch_at_startup': True}, platform='win32').run.called)
+        self.assertFalse(run(dict(self.ON), platform='win32').run.called)
 
 
 if __name__ == '__main__':

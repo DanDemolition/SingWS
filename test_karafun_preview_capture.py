@@ -10,8 +10,9 @@ SOURCE = Path("0.2.18.1.py").read_text(encoding="utf-8")
 
 def namespace():
     tree = ast.parse(SOURCE)
-    names = {"KARAFUN_PREVIEW_OVERLAY_MARGIN", "KARAFUN_PREVIEW_FRAME_TIMEOUT_S", "KARAFUN_PREVIEW_FIND_TIMEOUT_S"}
-    funcs = {"karafun_preview_probe_script", "karafun_preview_pane_rect", "karafun_preview_region_changed"}
+    names = {"KARAFUN_PREVIEW_OVERLAY_MARGIN", "KARAFUN_PREVIEW_FRAME_TIMEOUT_S", "KARAFUN_PREVIEW_FIND_TIMEOUT_S",
+             "KARAFUN_PREVIEW_MAX_RESTARTS"}
+    funcs = {"karafun_preview_probe_script", "karafun_preview_pane_rect", "karafun_preview_region_changed", "karafun_fill_region"}
     body = [n for n in tree.body if (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets))
             or (isinstance(n, ast.FunctionDef) and n.name in funcs)]
     ns = {}
@@ -121,54 +122,178 @@ class ProbeScriptTests(unittest.TestCase):
         self.assertIn('role is "AXSplitGroup"', source)
 
 
-class WiringTests(unittest.TestCase):
-    def test_default_is_the_video_window_and_the_switch_stores_text(self):
-        self.assertIn('"karafun_capture_source": "video_window"', SOURCE)
-        self.assertIn('self.settings["karafun_capture_source"] = "preview_pane" if checked else "video_window"', SOURCE)
-        self.assertIn("karafun_preview_cb.toggled.connect(_on_karafun_preview_toggled)", SOURCE)
+class FillRegionTests(unittest.TestCase):
+    """The pane is about 2.7:1; cut the sides to 16:9 so the TV is filled with no bars and no stretching."""
 
-    def test_the_preview_source_is_chosen_only_when_asked_and_not_already_failed(self):
-        body = SOURCE[SOURCE.index("def _start_karafun_dual_renderer_capture(self):"):]
-        body = body[:body.index("lines = [")]
-        self.assertIn('self._karafun_capture_source() == "preview_pane"', body)
-        self.assertIn('_active_for_source.get("preview_capture_failed")', body)
+    def test_the_real_pane_is_cut_to_exactly_16_by_9_and_centred(self):
+        fill = NS["karafun_fill_region"]
+        x, y, w, h = fill((945.0, 52.0, 783.0, 284.0))
+        self.assertAlmostEqual(w / h, 16 / 9, places=3)
+        self.assertEqual((y, h), (52.0, 284.0))                       # full height kept
+        self.assertAlmostEqual((x - 945.0), (945.0 + 783.0) - (x + w), places=3)     # same amount cut off each side
+        self.assertGreater(w, 480); self.assertLess(w, 520)
+
+    def test_a_region_that_is_already_16_by_9_or_narrower_is_unchanged(self):
+        fill = NS["karafun_fill_region"]
+        self.assertEqual(fill((0.0, 0.0, 1600.0, 900.0)), (0.0, 0.0, 1600.0, 900.0))
+        self.assertEqual(fill((10.0, 20.0, 700.0, 500.0)), (10.0, 20.0, 700.0, 500.0))
+
+    def test_bad_regions_pass_through(self):
+        fill = NS["karafun_fill_region"]
+        self.assertEqual(fill((0, 0, 0, 100)), (0, 0, 0, 100))
+        self.assertEqual(fill((0, 0, 100, -5)), (0, 0, 100, -5))
+
+    def test_a_taller_panel_cuts_less(self):
+        fill = NS["karafun_fill_region"]
+        small = fill((0.0, 0.0, 783.0, 284.0))[2]
+        big = fill((0.0, 0.0, 783.0, 380.0))[2]
+        self.assertGreater(big, small)                                # more of the width is kept when the panel is taller
+
+    def test_it_is_used_for_the_first_capture_and_for_following_resizes(self):
+        self.assertIn('region=karafun_fill_region(found["region"])', SOURCE)
+        refresh = SOURCE[SOURCE.index("def _refresh_karafun_preview_region("):SOURCE.index("def _check_karafun_preview_alive(")]
+        self.assertIn('fitted = karafun_fill_region(found["region"]) if found else None', refresh)
+        self.assertIn("capture.set_region(fitted)", refresh)
+
+    def test_the_audience_picture_fills_the_window(self):
+        self.assertIn("vw.video_area.set_karaoke_frame(frame, stretch_fill=True)", SOURCE)
+
+
+class SimplifiedSettingsTests(unittest.TestCase):
+    """Settings > KaraFun > Playback is two switches; the video-window method and its extras are gone."""
+
+    def card(self):
+        i = SOURCE.index('v = _section_card(tab_karafun, "Playback",')
+        return SOURCE[i:SOURCE.index('v = _section_card(tab_karafun, "Audio Output")')]
+
+    def test_there_are_exactly_two_switches(self):
+        card = self.card()
+        self.assertEqual(card.count("QCheckBox("), 2)
+        self.assertIn('QCheckBox("Use KaraFun integration")', card)
+        self.assertIn('QCheckBox("Launch KaraFun when SingWS starts")', card)
+
+    def test_the_master_switch_drives_search_start_key_tempo_and_capture(self):
+        card = self.card()
+        self.assertIn('self.settings["karafun_auto_queue_enabled"] = bool(checked)', card)
+        self.assertIn('self.settings["karafun_auto_key_tempo"] = bool(checked)', card)
+        self.assertIn('self.settings["karafun_dual_renderer_capture"] = True', card)
+
+    def test_capture_is_forced_on_at_launch_whatever_was_saved(self):
+        self.assertIn('self.settings["karafun_dual_renderer_capture"] = True', SOURCE[SOURCE.index('self.settings["karaoke_engine"] = "mpv"'):][:900])
+        self.assertIn('"karafun_dual_renderer_capture": True', SOURCE)
+
+    def test_launching_karafun_at_startup_needs_the_integration_on(self):
+        body = SOURCE[SOURCE.index("def _launch_karafun_at_startup(self):"):][:900]
+        self.assertIn('self.settings.get("karafun_launch_at_startup", True)', body)
+        self.assertIn('self.settings.get("karafun_auto_queue_enabled", False)', body)
+
+    def test_the_removed_settings_and_code_are_really_gone(self):
+        for gone in ("karafun_park_video_window", "karafun_capture_source", "karafun_dual_renderer_windows",
+                     "karafun_renderer_press_decision", "_ensure_renderer_windowed", "_park_karafun_video_window",
+                     "_check_parked_video_alive", "_fallback_karafun_preview_to_video_window", "preview_capture_failed",
+                     "karafun_move_window_script", "karafun_park_position", "Keep KaraFun's video window out of the way",
+                     "Show KaraFun Dual Renderer inside SingWS"):
+            self.assertNotIn(gone, SOURCE, gone)
+
+
+class CaptureFlowTests(unittest.TestCase):
+    def test_the_capture_always_goes_to_the_preview_pane(self):
+        body = SOURCE[SOURCE.index("def _start_karafun_dual_renderer_capture(self):"):SOURCE.index("def _start_karafun_preview_capture(")]
         self.assertIn("self._start_karafun_preview_capture(token)", body)
+        self.assertNotIn("Dual Renderer", body.replace('"""Start capturing', ""))        # no video-window branch left
 
-    def test_a_failure_falls_back_to_the_video_window_for_that_song(self):
-        body = SOURCE[SOURCE.index("def _fallback_karafun_preview_to_video_window("):SOURCE.index("def _refresh_karafun_preview_region(")]
-        self.assertIn('active["preview_capture_failed"] = True', body)
-        self.assertIn("self._stop_karafun_dual_renderer_capture()", body)
-        self.assertIn("self._start_karafun_dual_renderer_capture", body)
+    def test_a_missing_pane_keeps_being_looked_for_and_the_operator_is_told_once(self):
+        body = SOURCE[SOURCE.index("def _start_karafun_preview_capture("):SOURCE.index("def _restart_karafun_preview_capture(")]
+        self.assertIn("while True:", body)
+        self.assertIn("not getattr(self, \"_karafun_capture_active\", False)", body)            # stops when the song ends
+        self.assertIn("if not notified and", body)
+        self.assertIn("KaraFun's picture isn't available yet", body)
 
-    def test_every_way_the_preview_can_fail_reaches_the_fallback(self):
-        find = SOURCE[SOURCE.index("def _start_karafun_preview_capture("):SOURCE.index("def _fallback_karafun_preview_to_video_window(")]
-        self.assertIn("self._fallback_karafun_preview_to_video_window(reason)", find)             # pane never found
+    def test_every_way_the_picture_can_be_lost_restarts_the_capture(self):
         stream = SOURCE[SOURCE.index("def _begin_karafun_capture_stream("):SOURCE.index("def _stop_karafun_dual_renderer_capture(")]
-        self.assertIn('f"capture did not start: {exc}"', stream)                                    # stream would not start
-        self.assertIn("self._fallback_karafun_preview_to_video_window(str(exc))", stream)          # status / permission error
-        self.assertIn("self._check_karafun_preview_alive()", stream)                               # silence while playing
+        self.assertIn('self._restart_karafun_preview_capture(f"capture did not start: {exc}")', stream)
+        self.assertIn("self._restart_karafun_preview_capture(str(exc))", stream)
+        self.assertIn("self._check_karafun_preview_alive()", stream)
+        alive = SOURCE[SOURCE.index("def _check_karafun_preview_alive("):SOURCE.index("def _begin_karafun_capture_stream(")]
+        self.assertIn("self._restart_karafun_preview_capture(", alive)
 
     def test_silence_while_paused_is_not_a_failure(self):
         body = SOURCE[SOURCE.index("def _check_karafun_preview_alive("):SOURCE.index("def _begin_karafun_capture_stream(")]
         self.assertIn('entry.get("karafun_paused_at")', body)
         self.assertIn("KARAFUN_PREVIEW_FRAME_TIMEOUT_S", body)
 
-    def test_the_picture_is_fitted_not_stretched_in_preview_mode(self):
-        self.assertIn("set_karaoke_frame(frame, stretch_fill=(region is None))", SOURCE)
-
     def test_the_region_follows_the_panel_and_state_resets(self):
         stream = SOURCE[SOURCE.index("def _begin_karafun_capture_stream("):SOURCE.index("def _stop_karafun_dual_renderer_capture(")]
         self.assertIn("self._refresh_karafun_preview_region()", stream)
         stop = SOURCE[SOURCE.index("def _stop_karafun_dual_renderer_capture("):][:900]
-        for key in ("_karafun_preview_region", "_karafun_capture_started_at", "_karafun_preview_probe_inflight"):
+        for key in ("_karafun_preview_region", "_karafun_capture_started_at", "_karafun_preview_probe_inflight", "_karafun_last_frame_at"):
             self.assertIn(key, stop)
 
-    def test_region_probing_never_runs_on_the_gui_thread(self):
+    def test_probing_never_runs_on_the_gui_thread(self):
         for name in ("_start_karafun_preview_capture", "_refresh_karafun_preview_region"):
             body = SOURCE[SOURCE.index(f"def {name}("):]
             body = body[:body.index("\n    def ", 10)]
             self.assertIn("threading.Thread(", body, name)
             self.assertIn("_run_karafun_applescript_sync(karafun_preview_probe_script()", body.replace("\n", " ").replace("  ", " "), name)
+
+
+class RestartTests(unittest.TestCase):
+    """_restart_karafun_preview_capture: a few automatic restarts per song, then a plain message."""
+
+    def build(self):
+        tree = ast.parse(SOURCE)
+        method = None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                for sub in node.body:
+                    if isinstance(sub, ast.FunctionDef) and sub.name == "_restart_karafun_preview_capture":
+                        method = sub
+        ns = dict(NS)
+        timers = []
+        ns.update(_diag=lambda *a: None, QTimer=type("T", (), {"singleShot": staticmethod(lambda ms, fn: timers.append((ms, fn)))}))
+        exec(compile(ast.Module(body=[method], type_ignores=[]), "restart", "exec"), ns)
+        from types import SimpleNamespace
+        active = {"entry": {}}
+        host = SimpleNamespace(_active_external_karafun=active, stopped=0, shown=[], started=0)
+        host._stop_karafun_dual_renderer_capture = lambda: setattr(host, "stopped", host.stopped + 1)
+        host._show_processing_notification = lambda msg, level="info": host.shown.append((msg, level))
+        host._start_karafun_dual_renderer_capture = lambda: setattr(host, "started", host.started + 1)
+        return ns["_restart_karafun_preview_capture"], host, active, timers
+
+    def test_restarts_a_few_times_then_gives_up_with_a_message(self):
+        restart, host, active, timers = self.build()
+        limit = NS["KARAFUN_PREVIEW_MAX_RESTARTS"]
+        for n in range(limit):
+            restart(host, "lost")
+            ms, fn = timers[-1]
+            self.assertGreaterEqual(ms, 1000)
+            fn()
+            self.assertEqual(host.started, n + 1)
+        self.assertEqual(active["preview_restarts"], limit)
+        restart(host, "lost again")
+        self.assertEqual(len(timers), limit)                           # no further restart scheduled
+        self.assertEqual(host.shown[-1][1], "error")
+        self.assertIn("picture was lost", host.shown[-1][0])
+
+    def test_the_first_loss_says_it_is_reconnecting(self):
+        restart, host, _active, _timers = self.build()
+        restart(host, "lost")
+        self.assertEqual(host.shown[0][1], "warning")
+        self.assertIn("reconnecting", host.shown[0][0])
+
+    def test_a_restart_for_a_song_that_has_ended_does_nothing(self):
+        restart, host, _active, timers = self.build()
+        restart(host, "lost")
+        host._active_external_karafun = None                           # the song ended during the 2.5 s pause
+        timers[-1][1]()
+        self.assertEqual(host.started, 0)
+
+    def test_with_no_active_song_it_stops_and_does_not_restart(self):
+        restart, host, _active, timers = self.build()
+        host._active_external_karafun = None
+        restart(host, "lost")
+        self.assertEqual(timers, [])
+        self.assertEqual(host.stopped, 1)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "the capture library is macOS only")

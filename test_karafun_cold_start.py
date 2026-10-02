@@ -94,6 +94,10 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(order, sorted(order))
         self.assertIn("was_running=karafun_was_running", block)
 
+    def test_a_cold_start_gets_a_longer_playback_check(self):
+        self.assertIn("max_probe_attempts = 12 if karafun_was_running else 30", SOURCE)
+        self.assertIn("for probe_attempt in range(max_probe_attempts):", SOURCE)
+
     @unittest.skipUnless(sys.platform == "darwin", "osacompile is macOS only")
     def test_the_readiness_script_compiles(self):
         captured = {}
