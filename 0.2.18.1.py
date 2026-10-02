@@ -1029,7 +1029,8 @@ class SongSearchThread(QThread):
         started = time.monotonic()
         try:
             # Exact/substring results are cheap and should reach the UI first.
-            rows = song_index.search_songs(self.query, limit=int(self.limit), fuzzy=False)
+            rows = song_index.search_songs(self.query, limit=int(self.limit), fuzzy=False,
+                                           should_abort=self.isInterruptionRequested)
         except Exception:
             rows = []
         strict_ms = (time.monotonic() - started) * 1000.0
@@ -1046,7 +1047,8 @@ class SongSearchThread(QThread):
             if len(q) < 3 or len(rows) >= 40:
                 return
             fuzzy_started = time.monotonic()
-            fuzzy_rows = song_index.search_songs(q, limit=min(int(self.limit), 150), fuzzy=True)
+            fuzzy_rows = song_index.search_songs(q, limit=min(int(self.limit), 150), fuzzy=True,
+                                                should_abort=self.isInterruptionRequested)
             fuzzy_ms = (time.monotonic() - fuzzy_started) * 1000.0
             _perf_log_if_slow("fuzzy_search", fuzzy_ms)
             if self.isInterruptionRequested():
@@ -2755,6 +2757,229 @@ def karafun_dual_renderer_windows(_source=None):
         return None
 
 
+# Preview-pane capture: instead of KaraFun's separate "Dual Renderer" window, capture the video preview that is built into
+# KaraFun's MAIN window (top-right). The main window is an ordinary window, so it can sit behind SingWS and never pops
+# up over the host screen. Opt-in; the video-window capture stays the default and the fallback.
+KARAFUN_PREVIEW_OVERLAY_MARGIN = 14.0    # points kept clear above KaraFun's title/progress overlay on the preview
+KARAFUN_PREVIEW_FRAME_TIMEOUT_S = 10.0   # no new picture this long while playing: fall back to the video window
+KARAFUN_PREVIEW_FIND_TIMEOUT_S = 25.0    # how long to wait for KaraFun's main window to show its preview pane
+
+
+def karafun_preview_probe_script():
+    """System Events lines listing KaraFun's main window and the controls in its main split view, one per line:
+    WINDOW|x|y|w|h and E|role|name|x|y|w|h (global points). Read-only."""
+    return [
+        'on cleanText(t)',
+        'set t to t as text',
+        'set AppleScript\'s text item delimiters to "|"',
+        'set parts to text items of t',
+        'set AppleScript\'s text item delimiters to " "',
+        'set t to parts as text',
+        'set AppleScript\'s text item delimiters to ""',
+        'return t',
+        'end cleanText',
+        'tell application "System Events"',
+        'set matches to every application process whose name contains "KaraFun"',
+        'if (count of matches) is 0 then return "NOT_RUNNING"',
+        'tell item 1 of matches',
+        'set out to ""',
+        'repeat with w in windows',
+        'set windowName to ""',
+        'try',
+        'set windowName to name of w',
+        'end try',
+        'if windowName is not "Dual Renderer" then',
+        'try',
+        'set g to first UI element of w whose role is "AXSplitGroup"',
+        'set wp to position of w',
+        'set ws to size of w',
+        'set out to "WINDOW|" & (item 1 of wp) & "|" & (item 2 of wp) & "|" & (item 1 of ws) & "|" & (item 2 of ws) & linefeed',
+        'repeat with h in (UI elements of g)',
+        'try',
+        'set hp to position of h',
+        'set hs to size of h',
+        'set nm to ""',
+        'try',
+        'set nm to my cleanText(name of h)',
+        'end try',
+        'set out to out & "E|" & (role of h as text) & "|" & nm & "|" & (item 1 of hp) & "|" & (item 2 of hp) & "|" & (item 1 of hs) & "|" & (item 2 of hs) & linefeed',
+        'end try',
+        'end repeat',
+        'return out',
+        'end try',
+        'end if',
+        'end repeat',
+        'return "NO_WINDOW"',
+        'end tell',
+        'end tell',
+    ]
+
+
+def karafun_preview_pane_rect(probe_text):
+    """Where KaraFun's built-in video preview is, from the probe above.
+
+    Returns {"window": (x, y, w, h), "region": (x, y, w, h)} with the region in WINDOW points (origin at the window's
+    top-left, as ScreenCaptureKit wants it), or None when the layout is not recognised. The picture sits in the right
+    column: right of the tall vertical splitter, below the toolbar (the splitter starts there), above the queue controls.
+    KaraFun draws its title / time / progress overlay over the bottom of the picture, so the region stops just above the
+    highest control of that overlay.
+    """
+    window = None
+    elements = []
+    for line in str(probe_text or "").splitlines():
+        parts = line.strip().split("|")
+        try:
+            if parts[0] == "WINDOW" and len(parts) == 5:
+                window = tuple(float(v) for v in parts[1:5])
+            elif parts[0] == "E" and len(parts) >= 7:
+                x, y, w, h = (float(v) for v in parts[-4:])
+                elements.append({"role": parts[1], "name": parts[2], "x": x, "y": y, "w": w, "h": h})
+        except ValueError:
+            continue
+    if window is None or not elements:
+        return None
+    wx, wy, ww, wh = window
+    splitters = [e for e in elements if e["role"] == "AXSplitter" and e["h"] >= 300 and e["w"] <= 6 and e["x"] > wx + 0.3 * ww]
+    if not splitters:
+        return None
+    splitter = max(splitters, key=lambda e: e["x"])
+    left = splitter["x"] + max(1.0, splitter["w"])
+    top = splitter["y"]
+    right = wx + ww
+    queue_header = min((e["y"] for e in elements if e["role"] == "AXPopUpButton" and e["x"] >= left - 2 and e["y"] > top + 60), default=None)
+    overlay = [e["y"] for e in elements
+               if e["role"] in ("AXImage", "AXStaticText", "AXButton", "AXSlider") and e["x"] >= left - 2 and e["y"] > top + 60
+               and (queue_header is None or e["y"] < queue_header)]
+    if overlay:
+        bottom = min(overlay) - KARAFUN_PREVIEW_OVERLAY_MARGIN
+    elif queue_header is not None:
+        bottom = queue_header - 8
+    else:
+        return None
+    width, height = right - left, bottom - top
+    if width < 200 or height < 80:
+        return None
+    return {"window": window, "region": (left - wx, top - wy, width, height)}
+
+
+def karafun_preview_region_changed(old, new, tolerance=2.0):
+    """True when two regions differ by more than `tolerance` points in any value (so small jitter is ignored)."""
+    if old is None or new is None:
+        return old is not new
+    return any(abs(a - b) > tolerance for a, b in zip(old, new))
+
+
+# KaraFun's "Dual Renderer" window sits at a window level above ordinary windows, so wherever it opens (the host screen,
+# maximised) it covers whatever you are working in. Capture does not need it visible, so it is parked with only a thin
+# strip left on one screen edge (a window with nothing visible tends to stop rendering, so not zero).
+KARAFUN_PARK_SLIVER_PX = 3
+KARAFUN_PARK_FRAME_TIMEOUT_S = 10.0       # no capture frame this long after parking: put the window back
+
+
+def _karafun_rect_overlap(a, b):
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return max(0, min(ax + aw, bx + bw) - max(ax, bx)) * max(0, min(ay + ah, by + bh) - max(ay, by))
+
+
+def karafun_visible_area(rect, screens):
+    """Pixels of `rect` (x, y, w, h) that lie on any of `screens`."""
+    return sum(_karafun_rect_overlap(rect, tuple(s)) for s in screens)
+
+
+def karafun_needs_parking(rect, screens, sliver=KARAFUN_PARK_SLIVER_PX):
+    """True when more than a thin strip of the window is on a screen."""
+    return karafun_visible_area(rect, screens) > (sliver + 5) * max(rect[2], rect[3])
+
+
+def karafun_park_position(width, height, screens, preferred=0, sliver=KARAFUN_PARK_SLIVER_PX):
+    """Where to put a width x height window so only a `sliver`-pixel strip of it touches ONE screen edge and nothing
+    touches any other screen. `screens` are (x, y, w, h) in global points; `preferred` is tried first (the host screen,
+    so the audience screen never gets a stray strip). Hanging above a screen is not offered: windows cannot go above
+    the menu bar. Returns (x, y), or None if no such spot exists."""
+    if width <= 0 or height <= 0 or not screens:
+        return None
+    screens = [tuple(int(v) for v in s) for s in screens]
+    order = list(range(len(screens)))
+    if 0 <= preferred < len(screens):
+        order.remove(preferred)
+        order.insert(0, preferred)
+    for i in order:
+        sx, sy, sw, sh = screens[i]
+        for x, y in ((sx, sy + sh - sliver),               # hang below the bottom edge
+                     (sx + sw - sliver, sy),               # hang off the right edge
+                     (sx - width + sliver, sy)):           # hang off the left edge
+            rect = (x, y, width, height)
+            others = [s for j, s in enumerate(screens) if j != i]
+            if karafun_visible_area(rect, others) == 0 and karafun_visible_area(rect, [screens[i]]) <= sliver * max(width, height):
+                return int(x), int(y)
+    return None
+
+
+def karafun_move_window_script(x, y):
+    """System Events lines that move KaraFun's Dual Renderer window to global (x, y)."""
+    return [
+        'tell application "System Events"',
+        'set matches to every application process whose name contains "KaraFun"',
+        'if (count of matches) is 0 then return "NO_APP"',
+        'tell item 1 of matches',
+        'repeat with w in windows',
+        'set windowName to ""',
+        'try',
+        'set windowName to name of w',
+        'end try',
+        'if windowName is "Dual Renderer" then',
+        f'set position of w to {{{int(x)}, {int(y)}}}',
+        'return "MOVED"',
+        'end if',
+        'end repeat',
+        'return "NO_WINDOW"',
+        'end tell',
+        'end tell',
+    ]
+
+
+# A cold KaraFun (not running when the song was queued) needs time before it will take a search and a double-click.
+# 2026-10-01 show: the first cold run searched the moment it was launched and "did not report active playback".
+KARAFUN_READY_TIMEOUT_S = 60.0
+KARAFUN_COLD_SETTLE_S = 2.0
+
+
+def karafun_match_title(title):
+    """The title to look for on a KaraFun result row: the queued title without trailing "(live)" / "[remix]" qualifiers.
+
+    KaraFun lists a song under its plain name, so "Just the Way You Are (live)" matched no row and the search fell
+    back to a label (2026-10-01). The artist is still checked separately, and an empty result keeps the original.
+    """
+    text = str(title or "").strip()
+    stripped = re.sub(r"(?:\s*[\(\[][^\)\]]*[\)\]])+\s*$", "", text).strip()
+    return stripped or text
+
+
+# AppleScript handler: a KaraFun result row's length reads like 3:41 or 1:02:03. The old test (contains a colon and is
+# shorter than 9 characters) also accepted the toolbar label "Display:", so a label became the double-click target.
+KARAFUN_DURATION_HANDLER_LINES = [
+    'on isDurationText(t)',
+    'set t to t as text',
+    'if t is "" then return false',
+    'if (length of t) > 8 then return false',
+    'set seenDigit to false',
+    'set seenColon to false',
+    'repeat with ch in characters of t',
+    'set c to ch as text',
+    'if c is ":" then',
+    'set seenColon to true',
+    'else if "0123456789" contains c then',
+    'set seenDigit to true',
+    'else if c is not " " then',
+    'return false',
+    'end if',
+    'end repeat',
+    'return (seenDigit and seenColon)',
+    'end isDurationText',
+]
+
+
 def karafun_renderer_press_decision(renderer_windows, presses, since_last_press, playing_for, since_first_seen=None):
     """What to do while SingWS's own check cannot find KaraFun's video window: "wait", "press" or "fallback".
 
@@ -3650,6 +3875,8 @@ DEFAULTS = {
     "karafun_dual_renderer_capture": False, # Experimental ScreenCaptureKit audience renderer; opt in only
     "karafun_native_double_click": False,   # Learned: System Events clicks only select the result on this Mac
     "karafun_auto_key_tempo": True,          # Set KaraFun key/tempo from the queue entry via its Playback menu
+    "karafun_capture_source": "video_window",   # or "preview_pane": capture the preview built into KaraFun's main window
+    "karafun_park_video_window": True,      # keep KaraFun's video window parked at a screen edge, out of the way
     "karafun_launch_at_startup": False,     # Launch KaraFun hidden when SingWS starts so the first song is not a cold start
     "karafun_auto_queue_enabled": False, # Machine-local host automation; requires macOS Accessibility permission
     "karafun_accessibility_prompt_requested": False, # macOS trust prompt is requested once for an automation-enabled install
@@ -18975,8 +19202,13 @@ class RotationView(QMainWindow):
             and not karaoke_active
             and not self._transition_overlay_active()
         )
+        # Timing only (no behaviour change): the 2026-10-01 show log has 21 GUI freezes of 0.4-0.8 s right when a
+        # song ends and these effects switch back on, but nothing says which surface costs the time.
+        _t0 = time.perf_counter()
         if self.now_singing_surface is not None:
             self.now_singing_surface.set_effects_enabled(enabled)
+        _perf_log_if_slow("rotation_effects_now_singing", (time.perf_counter() - _t0) * 1000.0)
+        _t1 = time.perf_counter()
         if self.rotation_rail is not None:
             self.rotation_rail.set_effects_enabled(enabled)
             # Singer movement is functional information, not a decorative
@@ -18984,6 +19216,7 @@ class RotationView(QMainWindow):
             # karaoke playback; only the lighting/backdrop effects yield GPU
             # time to the lyric surface.
             self.rotation_rail.set_running(True)
+        _perf_log_if_slow("rotation_effects_rail", (time.perf_counter() - _t1) * 1000.0)
 
         previous = getattr(self, "_show_priority_karaoke_active", None)
         if previous is None or bool(previous) != karaoke_active:
@@ -28384,6 +28617,31 @@ class KaraokeApp(QWidget):
 
         karafun_startup_cb.toggled.connect(_on_karafun_startup_toggled)
         v.addWidget(karafun_startup_cb)
+        karafun_park_cb = QCheckBox("Keep KaraFun's video window out of the way")
+        karafun_park_cb.setChecked(bool(self.settings.get("karafun_park_video_window", True)))
+        karafun_park_cb.setToolTip(
+            "KaraFun's video window opens on top of everything (often maximised over the host screen). SingWS "
+            "moves it so only a thin strip stays on a screen edge; the picture is still captured for the show. "
+            "If the picture ever stops, SingWS puts the window back. Turn off to leave KaraFun's window alone.")
+        karafun_park_cb.setEnabled(sys.platform == "darwin")
+        karafun_park_cb.toggled.connect(lambda checked: _save_karafun_choice("karafun_park_video_window", checked))
+        v.addWidget(karafun_park_cb)
+        karafun_preview_cb = QCheckBox("Capture KaraFun's preview pane instead of its video window (experimental)")
+        karafun_preview_cb.setChecked(str(self.settings.get("karafun_capture_source", "video_window")) == "preview_pane")
+        karafun_preview_cb.setToolTip(
+            "Takes the show picture from the video preview built into KaraFun's main window (top right), so KaraFun's "
+            "separate video window is not needed and nothing pops up over your screens. Works together with 'Show KaraFun Dual "
+            "Renderer inside SingWS' above. Keep KaraFun's main window open "
+            "behind SingWS with part of the preview visible. If the preview can't be found or stops, SingWS "
+            "switches back to the video window by itself for that song. Off = use the video window (the default).")
+        karafun_preview_cb.setEnabled(sys.platform == "darwin")
+
+        def _on_karafun_preview_toggled(checked):
+            self.settings["karafun_capture_source"] = "preview_pane" if checked else "video_window"
+            self.save_settings()
+
+        karafun_preview_cb.toggled.connect(_on_karafun_preview_toggled)
+        v.addWidget(karafun_preview_cb)
 
         v = _section_card(tab_karafun, "Audio Output")
         karafun_audio_follow_cb = QCheckBox("Use SingWS's saved audio output")
@@ -36953,9 +37211,10 @@ class KaraokeApp(QWidget):
                 else:
                     loc_status_label.setText("No active venue coordinates saved yet.")
 
-            def detect_location_now(show_result=True, timeout_sec=25.0):
-                update_location_status("Detecting current device location...")
-                loc, err = self._detect_current_device_location(timeout_sec=timeout_sec)
+            detect_state = {"running": False}
+
+            def apply_detect_result(loc, err, show_result):
+                """Show a finished detection (GUI thread)."""
                 if loc:
                     lat_val = f"{float(loc['latitude']):.6f}"
                     lng_val = f"{float(loc['longitude']):.6f}"
@@ -36971,16 +37230,49 @@ class KaraokeApp(QWidget):
                     update_location_status()
                     if show_result:
                         QMessageBox.information(dlg, "Location Detected", f"Using current device location:\n\n{lat_val}, {lng_val}")
-                    return True
+                    return
                 friendly_err = self._friendly_location_detection_error(err)
-                update_location_status(f"{friendly_err} Manual coordinates will be used if provided.")
+                saved_lat, saved_lng = lat_edit.text().strip(), lng_edit.text().strip()
+                if saved_lat and saved_lng:
+                    friendly_err += f"\n\nThe venue coordinates already shown ({saved_lat}, {saved_lng}) stay in use."
+                update_location_status(f"{friendly_err.splitlines()[0]} Manual coordinates will be used if provided.")
                 if show_result:
-                    QMessageBox.warning(
-                        dlg,
-                        "Location Detection Failed",
-                        friendly_err
-                    )
-                return False
+                    QMessageBox.warning(dlg, "Location Detection Failed", friendly_err)
+
+            def detect_location_now(show_result=True, timeout_sec=25.0):
+                """Detect in the background so this window stays usable.
+
+                Detection used to run on the GUI thread with user input held back, so the dialog was dead for up to
+                25 seconds, and every click made meanwhile was replayed afterwards (each Detect Now or OK started
+                another 25-second wait: "stuck for a couple of minutes" at the venue, 2026-10-01).
+                """
+                if detect_state["running"]:
+                    return False
+                detect_state["running"] = True
+                detect_now_btn.setEnabled(False)
+                update_location_status(f"Detecting current device location... (up to {int(timeout_sec)} seconds; you can keep using this window)")
+
+                def worker():
+                    loc, err = None, "Auto-detect failed."
+                    started = time.monotonic()
+                    _diag(f"[NETWORK-DIALOG] Detect Now started (background, up to {int(timeout_sec)}s)")
+                    try:
+                        loc, err = self._detect_current_device_location(timeout_sec=timeout_sec)
+                    except Exception as exc:
+                        err = f"Auto-detect failed: {exc}"
+                    _diag(f"[NETWORK-DIALOG] Detect Now finished in {time.monotonic() - started:.1f}s ok={int(bool(loc))}")
+
+                    def finish():
+                        detect_state["running"] = False
+                        try:
+                            detect_now_btn.setEnabled(True)
+                            if dlg.isVisible():
+                                apply_detect_result(loc, err, show_result)
+                        except RuntimeError:
+                            pass                      # the dialog was closed and its widgets are gone
+                    self._run_on_ui_thread(finish)
+                threading.Thread(target=worker, daemon=True, name="singws-detect-now").start()
+                return True
 
             update_location_status()
 
@@ -37390,6 +37682,7 @@ class KaraokeApp(QWidget):
     
             def accept():
                 # Save new values
+                _accept_started = time.monotonic()
                 self.settings["base_url"] = _network_normalize_base_url(base_edit.text() or "https://beta.wskar.com")
                 uid = user_edit.text().strip()
                 if uid:
@@ -37412,7 +37705,8 @@ class KaraokeApp(QWidget):
                     self.settings["session_location_accuracy_meters"] = ""
                     self.settings["session_location_detected_at"] = 0
                 if self.settings["session_location_auto_detect"]:
-                    detect_location_now(show_result=False)
+                    # Never wait for CoreLocation here: sync_session_location_async() below detects off-thread and
+                    # stores the result. Waiting on the GUI thread froze this window for 25 s on every OK at the venue.
                     if (not self.settings.get("session_location_latitude")) or (not self.settings.get("session_location_longitude")):
                         self.settings["session_location_source"] = "manual_fallback" if (lat_edit.text().strip() and lng_edit.text().strip()) else ""
                 if not str(self.settings.get("session_location_session_id", "") or "").strip():
@@ -37456,6 +37750,7 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
                 self.restart_request_polling()
+                _diag(f"[NETWORK-DIALOG] OK handled on the GUI thread in {(time.monotonic() - _accept_started) * 1000.0:.0f}ms")
     
                 dlg.accept()
     
@@ -37479,7 +37774,8 @@ class KaraokeApp(QWidget):
                 return permission_msg
             if "code=0" in lower:
                 return (
-                    "SingWS could not get a location fix yet. Try again near the venue, "
+                    "SingWS could not get a location fix. A Mac without GPS finds its location from nearby "
+                    "Wi-Fi, so make sure Wi-Fi is turned on (it does not have to be connected) and try again, "
                     "or enter the venue coordinates manually."
                 )
             return (
@@ -37618,7 +37914,7 @@ class KaraokeApp(QWidget):
             qt_app = QApplication.instance()
             while time.time() < deadline and not event.is_set():
                 run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
-                if qt_app is not None:
+                if qt_app is not None and threading.current_thread() is threading.main_thread():
                     try:
                         qt_app.processEvents(
                             QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents, 20
@@ -44839,7 +45135,9 @@ class KaraokeApp(QWidget):
         send_row = QHBoxLayout(); self.chat_message_input = QLineEdit(); self.chat_message_input.setPlaceholderText("Message singer…")
         self.chat_send_button = QPushButton("Send"); self.chat_send_button.clicked.connect(self._send_chat_message)
         self.chat_message_input.returnPressed.connect(self._send_chat_message)
-        send_row.addWidget(self.chat_message_input, 1); send_row.addWidget(self.chat_send_button); right_layout.addLayout(send_row)
+        self.chat_emoji_button = QPushButton("😀"); self.chat_emoji_button.setToolTip("Emoji")
+        self.chat_emoji_button.clicked.connect(lambda: self._show_emoji_picker(self.chat_message_input, self.chat_emoji_button))
+        send_row.addWidget(self.chat_message_input, 1); send_row.addWidget(self.chat_emoji_button); send_row.addWidget(self.chat_send_button); right_layout.addLayout(send_row)
         # Three views on one page, to keep the screen uncluttered:
         #   Everyone  = the group room      Private = singer-to-singer messages (host monitors)
         #   Host chat = one-to-one messages between singers and the host
@@ -44932,14 +45230,16 @@ class KaraokeApp(QWidget):
         layout.addWidget(self.room_say_target_label)
         say_row = QHBoxLayout()
         self.room_say_input = QLineEdit(); self.room_say_input.setMaxLength(300); self.room_say_input.setPlaceholderText("Type a message… (emoji work too)")
+        self.room_say_emoji_button = QPushButton("😀"); self.room_say_emoji_button.setToolTip("Emoji")
         self.room_say_gif_button = QPushButton("GIF"); self.room_say_photo_button = QPushButton("Photo"); self.room_say_send_button = QPushButton("Send")
         say_row.addWidget(self.room_say_input, 1)
-        for w in (self.room_say_gif_button, self.room_say_photo_button, self.room_say_send_button): say_row.addWidget(w)
+        for w in (self.room_say_emoji_button, self.room_say_gif_button, self.room_say_photo_button, self.room_say_send_button): say_row.addWidget(w)
         layout.addLayout(say_row)
         self.room_say_input.returnPressed.connect(lambda: self._room_say_send())
         self.room_say_send_button.clicked.connect(lambda: self._room_say_send())
         self.room_say_photo_button.clicked.connect(self._room_say_photo)
         self.room_say_gif_button.clicked.connect(self._room_say_gif)
+        self.room_say_emoji_button.clicked.connect(lambda: self._show_emoji_picker(self.room_say_input, self.room_say_emoji_button))
         self._room_messages = {}; self._room_mutes = []; self._room_settings = {}
         self._room_last_id = 0; self._room_poll_inflight = False; self._room_generation = 0; self._room_tick = 0
         self._room_attention_ids = set(); self._room_notified = set(); self._room_seen_ids = set(); self._room_unread = 0; self._room_new_by_channel = {"group": 0, "dm": 0}
@@ -45218,6 +45518,54 @@ class KaraokeApp(QWidget):
             return a, b
         return str(m.get("from_key") or ""), str(m.get("to_key") or "")
 
+    # Emoji offered by the chat emoji button. Each entry is split on spaces, so multi-part emoji such as the
+    # heart and the peace sign stay in one piece.
+    _EMOJI_SECTIONS = (
+        ("Smileys", "😀 😃 😄 😁 😆 😅 😂 🤣 🙂 😉 😊 😇 🥰 😍 🤩 😘 😋 😜 🤪 😎 🤓 🥳 😏 😌 😴 🤔 🙄 😬 😮 😱 😢 😭 😤 😡 🥺 😳 🤗 🤭 🙃"),
+        ("Hands", "👍 👎 👏 🙌 🙏 💪 🤝 ✌️ 🤞 🤟 🤘 👌 👋 🤙 ☝️ 👆 👇 👉 👈 ✊ 👊 🫶"),
+        ("Party and music", "🎤 🎶 🎵 🎸 🥁 🎹 🎧 🎺 🎷 🪩 🎉 🎊 🥂 🍻 🍺 🍹 🔥 ⭐ 🌟 ✨ 💃 🕺 👑 🏆 🎯 🎬 📣 🔔 🎁 🚀"),
+        ("Hearts", "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💖 💗 💓 💯 💥 💫 💦"),
+        ("Fun", "🐶 🐱 🦄 🐻 🦁 🐸 🍕 🍔 🍟 🌮 🍩 🍪 ☕ 🍷 🌈 ☀️ 🌙 ⚡ ❄️ 🌴 🎃 👻 💀 🤡"),
+    )
+
+    def _build_emoji_picker_widget(self, line_edit, on_pick=None):
+        """A scrollable grid of emoji; clicking one inserts it at the cursor in `line_edit`."""
+        from PyQt6.QtWidgets import QScrollArea, QToolButton, QGridLayout
+        columns = 8
+        body = QWidget(); outer = QVBoxLayout(body); outer.setContentsMargins(8, 6, 8, 6); outer.setSpacing(4)
+        for title, chars in self._EMOJI_SECTIONS:
+            label = QLabel(title); label.setStyleSheet(section_meta_css()); outer.addWidget(label)
+            grid = QGridLayout(); grid.setSpacing(2)
+            for index, emoji in enumerate(chars.split()):
+                button = QToolButton(); button.setText(emoji); button.setAutoRaise(True)
+                button.setFixedSize(38, 34); button.setStyleSheet("QToolButton { font-size: 20px; }")
+                button.setToolTip(emoji)
+
+                def pick(_checked=False, e=emoji):
+                    line_edit.insert(e)
+                    line_edit.setFocus()
+                    if on_pick is not None: on_pick(e)
+                button.clicked.connect(pick)
+                grid.addWidget(button, index // columns, index % columns)
+            outer.addLayout(grid)
+        outer.addStretch(1)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(body)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedSize(columns * 40 + 34, 300)
+        return scroll
+
+    def _show_emoji_picker(self, line_edit, anchor):
+        """Open the emoji grid above `anchor`. It stays open for several picks and closes when you click away."""
+        from PyQt6.QtWidgets import QMenu, QWidgetAction
+        menu = QMenu(self)
+        action = QWidgetAction(menu)
+        picker = self._build_emoji_picker_widget(line_edit)
+        action.setDefaultWidget(picker)
+        menu.addAction(action)
+        origin = anchor.mapToGlobal(QPoint(0, 0))
+        menu.exec(QPoint(origin.x(), max(0, origin.y() - picker.height() - 12)))
+
     def _room_say_context(self):
         """(channel, a, b, label) the host is speaking in right now, or None (Private, no conversation picked yet)."""
         bar = getattr(self, "chat_tab_bar", None)
@@ -45242,6 +45590,8 @@ class KaraokeApp(QWidget):
         options = getattr(self, "_room_settings", {}) or {}
         self.room_say_input.setEnabled(on); self.room_say_send_button.setEnabled(on)
         self.room_say_photo_button.setEnabled(on); self.room_say_gif_button.setEnabled(on)
+        emoji_button = getattr(self, "room_say_emoji_button", None)
+        if emoji_button is not None: emoji_button.setEnabled(on)
         self.room_say_photo_button.setVisible(bool(options.get("photos_enabled", True)))
         self.room_say_gif_button.setVisible(bool(options.get("gifs_enabled", True)))
 
@@ -46770,6 +47120,7 @@ class KaraokeApp(QWidget):
         - Save main-window geometry to settings.json.
         - Stop playback + background music + polling threads.
         """
+        _diag("[LAUNCH] main window closing (closeEvent)")
         # Join the brand-choices worker thread first: destroying a running
         # QThread during teardown aborts the process.
         try:
@@ -51744,6 +52095,65 @@ class KaraokeApp(QWidget):
             pass
         return message
 
+    @staticmethod
+    def _karafun_process_running() -> bool:
+        try:
+            return subprocess.run(["/usr/bin/pgrep", "-x", "KaraFun"], capture_output=True, timeout=5).returncode == 0
+        except Exception:
+            return False
+
+    def _karafun_main_window_state(self) -> str:
+        """READY (a real KaraFun window exists), NO_WINDOW (still starting), NOT_RUNNING, or ERROR (cannot ask)."""
+        ok, out, _error = self._run_karafun_applescript_sync([
+            'tell application "System Events"',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "NOT_RUNNING"',
+            'tell item 1 of matches',
+            'repeat with w in windows',
+            'set windowName to ""',
+            'try',
+            'set windowName to name of w',
+            'end try',
+            'if windowName is not "Dual Renderer" then return "READY"',
+            'end repeat',
+            'return "NO_WINDOW"',
+            'end tell',
+            'end tell',
+        ], timeout=10)
+        return str(out or "").strip() if ok else "ERROR"
+
+    def _karafun_wait_until_ready(self, *, was_running: bool, session_is_current, timeout: float = KARAFUN_READY_TIMEOUT_S) -> None:
+        """Block (worker thread) until KaraFun can take a search; raise with a plain message if it never does.
+
+        A KaraFun that was already running answers at once. One we just launched gets its main window plus a short
+        settle, so the first song after a cold start is not searched for while KaraFun is still loading.
+        """
+        started = time.monotonic()
+        deadline = started + float(timeout)
+        last_state = ""
+        while True:
+            if not session_is_current():
+                raise RuntimeError("KaraFun launch cancelled: playback session ended")
+            state = self._karafun_main_window_state()
+            if state == "ERROR":
+                # Cannot ask System Events (no Accessibility yet): the permission check that follows reports that clearly.
+                _diag("[KARAFUN] readiness check unavailable; continuing to the permission check")
+                return
+            if state == "READY":
+                if not was_running:
+                    time.sleep(KARAFUN_COLD_SETTLE_S)
+                _diag(f"[KARAFUN] ready after {time.monotonic() - started:.1f}s cold={int(not was_running)}")
+                return
+            if state != last_state:
+                _diag(f"[KARAFUN] waiting for KaraFun to finish starting ({state})")
+                last_state = state
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"KaraFun did not finish starting within {int(timeout)} seconds. "
+                    "Open KaraFun, make sure it is signed in, then start the song again."
+                )
+            time.sleep(0.5)
+
     def _launch_karafun_at_startup(self):
         """Start KaraFun hidden so the first KaraFun song is not a cold start.
 
@@ -52141,6 +52551,11 @@ class KaraokeApp(QWidget):
         self._karafun_handoff_complete = False
         self._karafun_capture_active = True
         self._karafun_capture_session = True
+        _active_for_source = getattr(self, "_active_external_karafun", None)
+        if (sys.platform == "darwin" and self._karafun_capture_source() == "preview_pane"
+                and not (isinstance(_active_for_source, dict) and _active_for_source.get("preview_capture_failed"))):
+            self._start_karafun_preview_capture(token)
+            return
         lines = [
             'tell application "System Events"',
             'set matches to every application process whose name contains "KaraFun"',
@@ -52343,7 +52758,88 @@ class KaraokeApp(QWidget):
         if not self._karafun_run_window_script(check_lines, on_complete=_window_ready, timeout=8):
             self._stop_karafun_dual_renderer_capture()
 
-    def _begin_karafun_capture_stream(self, token):
+    def _karafun_capture_source(self) -> str:
+        return "preview_pane" if str(self.settings.get("karafun_capture_source", "video_window")) == "preview_pane" else "video_window"
+
+    def _start_karafun_preview_capture(self, token):
+        """Find the preview pane in KaraFun's main window (background thread), then capture it."""
+        def worker():
+            deadline = time.monotonic() + KARAFUN_PREVIEW_FIND_TIMEOUT_S
+            found = None
+            reason = "KaraFun's main window with its preview pane was not found"
+            while time.monotonic() < deadline:
+                if getattr(self, "_karafun_handoff_token", None) != token:
+                    return
+                ok, out, error = self._run_karafun_applescript_sync(karafun_preview_probe_script(), timeout=8)
+                if ok:
+                    found = karafun_preview_pane_rect(out)
+                    if found:
+                        break
+                    reason = f"layout not recognised ({str(out or '').strip()[:60]!r})"
+                else:
+                    reason = f"could not read KaraFun's window ({str(error or out)[:80]})"
+                time.sleep(1.0)
+
+            def finish():
+                if getattr(self, "_karafun_handoff_token", None) != token:
+                    return
+                if not found:
+                    self._fallback_karafun_preview_to_video_window(reason)
+                    return
+                _diag(f"[KARAFUN-CAPTURE] preview pane found region={tuple(round(v) for v in found['region'])} "
+                      f"window={tuple(round(v) for v in found['window'])}")
+                self._begin_karafun_capture_stream(token, region=found["region"])
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker, daemon=True, name="karafun-preview-find").start()
+
+    def _fallback_karafun_preview_to_video_window(self, reason: str):
+        """The preview pane could not be used: capture KaraFun's video window for this song instead."""
+        active = getattr(self, "_active_external_karafun", None)
+        if isinstance(active, dict):
+            active["preview_capture_failed"] = True
+        _diag(f"[KARAFUN-CAPTURE] preview-pane capture unavailable ({reason}); using the video window for this song")
+        self._stop_karafun_dual_renderer_capture()
+        QTimer.singleShot(0, self._start_karafun_dual_renderer_capture)
+
+    def _refresh_karafun_preview_region(self):
+        """Follow the preview pane if KaraFun's window or panel was moved or resized (background thread, one at a time)."""
+        state = object.__getattribute__(self, "__dict__")
+        capture = getattr(self, "_karafun_capture", None)
+        current = state.get("_karafun_preview_region")
+        if capture is None or current is None or state.get("_karafun_preview_probe_inflight"):
+            return
+        state["_karafun_preview_probe_inflight"] = True
+
+        def worker():
+            try:
+                ok, out, _error = self._run_karafun_applescript_sync(karafun_preview_probe_script(), timeout=8)
+                found = karafun_preview_pane_rect(out) if ok else None
+                if found and karafun_preview_region_changed(state.get("_karafun_preview_region"), found["region"]):
+                    state["_karafun_preview_region"] = found["region"]
+                    capture.set_region(found["region"])
+                    _diag(f"[KARAFUN-CAPTURE] preview pane moved/resized; region={tuple(round(v) for v in found['region'])}")
+            except Exception as exc:
+                _diag(f"[KARAFUN-CAPTURE] preview region refresh failed: {exc}")
+            finally:
+                state["_karafun_preview_probe_inflight"] = False
+        threading.Thread(target=worker, daemon=True, name="karafun-preview-region").start()
+
+    def _check_karafun_preview_alive(self):
+        """No new picture from the preview pane for a while during playback (e.g. macOS stopped drawing a covered
+        window): switch to the video window for this song."""
+        state = object.__getattribute__(self, "__dict__")
+        if state.get("_karafun_preview_region") is None:
+            return
+        active = getattr(self, "_active_external_karafun", None)
+        entry = active.get("entry") if isinstance(active, dict) else None
+        if isinstance(entry, dict) and entry.get("karafun_paused_at"):
+            return                                       # paused: a still picture is expected
+        last = max(float(state.get("_karafun_last_frame_at") or 0.0), float(state.get("_karafun_capture_started_at") or 0.0))
+        if last and time.monotonic() - last >= KARAFUN_PREVIEW_FRAME_TIMEOUT_S:
+            self._fallback_karafun_preview_to_video_window(
+                f"no new picture for {KARAFUN_PREVIEW_FRAME_TIMEOUT_S:.0f}s - the window may be fully covered")
+
+    def _begin_karafun_capture_stream(self, token, region=None):
         # A retained native mpv child can cover Qt's painted audience and host
         # preview areas even after local playback stops.
         self._set_mpv_hosts_visible(False)
@@ -52351,13 +52847,19 @@ class KaraokeApp(QWidget):
             from karafun_capture import KaraFunCapture
             capture = KaraFunCapture()
             self._karafun_capture = capture
-            if not capture.start():
-                raise RuntimeError("ScreenCaptureKit did not start")
+            if not capture.start(region=region):
+                raise RuntimeError("ScreenCaptureKit did not start" if region is None
+                                   else "this build cannot capture a region of KaraFun's window")
         except Exception as exc:
             self._karafun_handoff_in_progress = False
             self._karafun_capture_active = False
             _diag(f"[KARAFUN-CAPTURE] unavailable: {exc}")
+            if region is not None:
+                self._fallback_karafun_preview_to_video_window(f"capture did not start: {exc}")
             return
+        _state = object.__getattribute__(self, "__dict__")
+        _state["_karafun_preview_region"] = region
+        _state["_karafun_capture_started_at"] = time.monotonic()
 
         timer = QTimer(self)
         # 25ms polling added up to 25ms (12ms on average) of lag before a captured
@@ -52372,19 +52874,22 @@ class KaraokeApp(QWidget):
                 return
             try:
                 if capture.status() < 0:
-                    raise RuntimeError("Dual Renderer unavailable or Screen Recording permission denied")
+                    raise RuntimeError("Dual Renderer unavailable or Screen Recording permission denied"
+                                       if region is None else "KaraFun's main window is unavailable or Screen Recording permission denied")
                 latest = capture.latest_frame()
                 if latest is None:
                     return
                 pixels, width, height, stride = latest
                 seen_at = time.monotonic()
+                self._karafun_last_frame_at = seen_at
                 frame = QImage(pixels, width, height, stride, QImage.Format.Format_ARGB32).copy()
                 vw = getattr(self, "video_window", None)
                 preview = getattr(self, "preview_window", None)
                 if vw is None or preview is None or frame.isNull():
                     raise RuntimeError("KaraFun video surfaces unavailable")
                 vw.idle = False
-                vw.video_area.set_karaoke_frame(frame, stretch_fill=True)
+                # The preview pane is wider than 16:9, so it is fitted with bars rather than stretched.
+                vw.video_area.set_karaoke_frame(frame, stretch_fill=(region is None))
                 preview.force_black = False
                 preview.video_area.set_karaoke_frame(frame)
                 try:
@@ -52409,9 +52914,13 @@ class KaraokeApp(QWidget):
                     self._karafun_handoff_complete = True
                     self._karafun_handoff_in_progress = False
                     _diag("[KARAFUN-CAPTURE] first Dual Renderer frame ready")
+                    QTimer.singleShot(250, lambda: self._park_karafun_video_window("first_frame"))
             except Exception as exc:
                 _diag(f"[KARAFUN-CAPTURE] stopped: {exc}")
-                self._stop_karafun_dual_renderer_capture()
+                if region is not None:
+                    self._fallback_karafun_preview_to_video_window(str(exc))
+                else:
+                    self._stop_karafun_dual_renderer_capture()
 
         timer.timeout.connect(_poll)
         timer.start()
@@ -52441,12 +52950,89 @@ class KaraokeApp(QWidget):
                 guard.stop()
                 return
             self._reassert_show_window_surface("karafun_capture_guard", force=True)
+            self._park_karafun_video_window("guard")
+            self._check_parked_video_alive()
+            if region is not None:
+                self._refresh_karafun_preview_region()
+                self._check_karafun_preview_alive()
 
         guard.timeout.connect(_keep_audience_in_front)
         self._karafun_capture_guard_timer = guard
         guard.start()
 
+    def _park_karafun_video_window(self, reason: str = "guard"):
+        """Move KaraFun's video window out of the way (background thread; one at a time)."""
+        if sys.platform != "darwin" or not bool(self.settings.get("karafun_park_video_window", True)):
+            return
+        state = object.__getattribute__(self, "__dict__")
+        if state.get("_karafun_park_disabled") or state.get("_karafun_park_inflight"):
+            return
+        qt_screens = QApplication.screens()
+        screens = [(g.x(), g.y(), g.width(), g.height()) for g in (sc.geometry() for sc in qt_screens)]
+        try:
+            preferred = qt_screens.index(self.screen())
+        except ValueError:
+            preferred = 0
+        state["_karafun_park_inflight"] = True
+
+        def worker():
+            try:
+                windows = karafun_dual_renderer_windows() or []
+                if not windows:
+                    return
+                w = windows[0]
+                rect = (int(w["x"]), int(w["y"]), int(w["width"]), int(w["height"]))
+                if not karafun_needs_parking(rect, screens):
+                    if not state.get("_karafun_parked_at"):
+                        state["_karafun_parked_at"] = time.monotonic()      # already out of the way
+                    return
+                target = karafun_park_position(rect[2], rect[3], screens, preferred=preferred)
+                if target is None:
+                    _diag_rate_limited("karafun_park_nowhere",
+                                       "[KARAFUN-CAPTURE] no screen edge to park the video window on; leaving it", 300.0)
+                    return
+                if not state.get("_karafun_video_window_home"):
+                    state["_karafun_video_window_home"] = (rect[0], rect[1])
+                ok, out, error = self._run_karafun_applescript_sync(karafun_move_window_script(*target), timeout=8)
+                if ok and str(out or "").strip() == "MOVED":
+                    state["_karafun_parked_at"] = time.monotonic()
+                    _diag(f"[KARAFUN-CAPTURE] parked video window from=({rect[0]},{rect[1]}) to={target} "
+                          f"size={rect[2]}x{rect[3]} reason={reason}")
+                else:
+                    _diag_rate_limited("karafun_park_failed",
+                                       f"[KARAFUN-CAPTURE] could not park the video window: {str(out or error)[:120]}", 60.0)
+            except Exception as exc:
+                _diag(f"[KARAFUN-CAPTURE] parking failed: {exc}")
+            finally:
+                state["_karafun_park_inflight"] = False
+        threading.Thread(target=worker, daemon=True, name="karafun-park-window").start()
+
+    def _check_parked_video_alive(self):
+        """If frames stop after parking, put the window back where it was and stop parking for this song."""
+        state = object.__getattribute__(self, "__dict__")
+        parked_at = state.get("_karafun_parked_at")
+        if not parked_at or state.get("_karafun_park_disabled"):
+            return
+        last = max(float(state.get("_karafun_last_frame_at") or 0.0), float(parked_at))
+        if time.monotonic() - last < KARAFUN_PARK_FRAME_TIMEOUT_S:
+            return
+        state["_karafun_park_disabled"] = True
+        home = state.get("_karafun_video_window_home") or (80, 80)
+        _diag(f"[KARAFUN-CAPTURE] no picture from the parked video window for {KARAFUN_PARK_FRAME_TIMEOUT_S:.0f}s; "
+              f"moving it back to {home} and leaving it there")
+
+        def worker():
+            try:
+                self._run_karafun_applescript_sync(karafun_move_window_script(*home), timeout=8)
+            except Exception as exc:
+                _diag(f"[KARAFUN-CAPTURE] could not move the video window back: {exc}")
+        threading.Thread(target=worker, daemon=True, name="karafun-unpark-window").start()
+
     def _stop_karafun_dual_renderer_capture(self):
+        _park_state = object.__getattribute__(self, "__dict__")
+        for _key in ("_karafun_parked_at", "_karafun_park_disabled", "_karafun_video_window_home", "_karafun_last_frame_at",
+                     "_karafun_preview_region", "_karafun_capture_started_at", "_karafun_preview_probe_inflight"):
+            _park_state.pop(_key, None)
         self._set_show_window_capture_level(False)
         guard = getattr(self, "_karafun_capture_guard_timer", None)
         if guard is not None:
@@ -53284,7 +53870,7 @@ class KaraokeApp(QWidget):
     def _karafun_search_script(self, *, query: str, safe_title: str = "", safe_artist: str = "",
                                require_exact_title: bool = False, resolve_only: bool = False):
         query_literal = self._karafun_applescript_literal(query)
-        safe_title_literal = self._karafun_applescript_literal(safe_title)
+        safe_title_literal = self._karafun_applescript_literal(karafun_match_title(safe_title))
         safe_artist_literal = self._karafun_applescript_literal(safe_artist)
         lines = [
             'tell application "System Events"',
@@ -53441,7 +54027,7 @@ class KaraokeApp(QWidget):
                     'set dY to (item 2 of dp) + ((item 2 of ds) div 2)',
                     'set rowDelta to dY - rowY',
                     'if rowDelta < 0 then set rowDelta to -rowDelta',
-                    'if dName contains ":" and (length of dName) < 9 and dX > rowX and rowDelta < 30 then',
+                    'if (my isDurationText(dName)) and dX > rowX and rowDelta < 30 then',
                     'set durationText to dName',
                     'exit repeat',
                     'end if',
@@ -53477,7 +54063,7 @@ class KaraokeApp(QWidget):
                 'set dY to (item 2 of dp) + ((item 2 of ds) div 2)',
                 'set rowDelta to dY - rowY',
                 'if rowDelta < 0 then set rowDelta to -rowDelta',
-                'if dName contains ":" and (length of dName) < 9 and dX > rowX and rowDelta < 30 then',
+                'if (my isDurationText(dName)) and dX > rowX and rowDelta < 30 then',
                 'set durationText to dName',
                 'exit repeat',
                 'end if',
@@ -53512,7 +54098,7 @@ class KaraokeApp(QWidget):
                 'set dY to (item 2 of dp) + ((item 2 of ds) div 2)',
                 'set rowDelta to dY - centerY',
                 'if rowDelta < 0 then set rowDelta to -rowDelta',
-                'if dName contains ":" and (length of dName) < 9 and dX > centerX and rowDelta < 30 then',
+                'if (my isDurationText(dName)) and dX > centerX and rowDelta < 30 then',
                 'set durationText to dName',
                 'exit repeat',
                 'end if',
@@ -53535,7 +54121,7 @@ class KaraokeApp(QWidget):
             'end tell',
             'end tell',
         ])
-        return lines
+        return lines + KARAFUN_DURATION_HANDLER_LINES
 
     def _automate_karafun_search_only(self, entry: dict) -> bool:
         """Search KaraFun from Add KaraFun without starting playback."""
@@ -53800,10 +54386,16 @@ class KaraokeApp(QWidget):
                     entry.pop(stale_key, None)
                 entry["karafun_key_current"] = 0
                 entry["karafun_tempo_current"] = 100
+                karafun_was_running = self._karafun_process_running()
+                if not karafun_was_running:
+                    self._run_on_ui_thread(lambda: self._set_karafun_entry_status(entry, "launching", message="Starting KaraFun..."))
                 if not self._open_karafun_for_entry(entry):
                     raise RuntimeError(
                         str(getattr(self, "_last_karafun_launch_error", "") or "KaraFun could not be opened")
                     )
+                _require_current_session()
+                # Make sure KaraFun is up and ready before any search or click (cold start).
+                self._karafun_wait_until_ready(was_running=karafun_was_running, session_is_current=_session_is_current)
                 _require_current_session()
                 permission_ok, permission_error = self._karafun_apple_events_preflight()
                 if not permission_ok:
@@ -54332,7 +54924,10 @@ class KaraokeApp(QWidget):
                 last_playback_probe = ""
                 native_double_click_retried = False
                 if not verified_playing and not fast_start:
-                    for probe_attempt in range(12):
+                    # A cold KaraFun took about 16 s to start playing after the double-click (2026-10-01 20:34); the
+                    # old 12 s limit declared failure two seconds before it did. A warm one keeps the short limit.
+                    max_probe_attempts = 12 if karafun_was_running else 30
+                    for probe_attempt in range(max_probe_attempts):
                         time.sleep(1.0)
                         ok, probe_result, probe_error = _run_session_script(playback_probe_script, timeout=5)
                         last_playback_probe = str(probe_result or probe_error or "").strip()
@@ -61619,6 +62214,9 @@ if __name__ == "__main__":
     app = QApplication([])
     app.setApplicationName("SingWS")
     app.setApplicationVersion(APP_VERSION)
+    # A breadcrumb for a normal quit (Cmd+Q, closing the window, the updater). A run whose log simply stops, with no
+    # such line, was killed or crashed: 2026-10-01 had a run that ended mid-song and the log could not say which.
+    app.aboutToQuit.connect(lambda: _diag(f"[LAUNCH] clean shutdown (aboutToQuit) session={PROCESS_SESSION_UUID}"))
 
     # Single instance lock - prevents double-launching (Windows/Linux only, macOS handles this natively)
     if sys.platform != "darwin":

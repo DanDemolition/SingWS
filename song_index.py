@@ -616,7 +616,7 @@ def _rank_key(row: Dict[str, Any], q: str):
 
 
 def search_songs(query: str, *, limit: int=500, dbfile: Optional[Path]=None,
-                 fuzzy: bool=True) -> List[Dict[str,Any]]:
+                 fuzzy: bool=True, should_abort: Optional[Callable[[], bool]]=None) -> List[Dict[str,Any]]:
     """
     Search songs in the database.
 
@@ -627,6 +627,10 @@ def search_songs(query: str, *, limit: int=500, dbfile: Optional[Path]=None,
 
     Returns list of dicts with keys: id, path, artist, title, discid, duration_secs,
     mtime, size_bytes, song_type, display, searchstring
+
+    `should_abort` lets a caller that has already moved on (the operator typed another letter) stop the scan: it is
+    polled from inside SQLite, so the full-library LIKE scan ends within a few milliseconds instead of running on and
+    making the newest search wait behind it. An aborted search returns [] and is never cached.
     """
     _perf_t0 = time.time()
     dbfile = dbfile or db_path()
@@ -643,6 +647,20 @@ def search_songs(query: str, *, limit: int=500, dbfile: Optional[Path]=None,
         return _copy_rows(cached)
 
     con = _connect(dbfile, read_only=True)
+    aborted = {"hit": False}
+    if should_abort is not None:
+        def _progress():
+            try:
+                if should_abort():
+                    aborted["hit"] = True
+                    return 1                       # non-zero makes SQLite stop the statement ("interrupted")
+            except Exception:
+                pass
+            return 0
+        try:
+            con.set_progress_handler(_progress, 20000)
+        except Exception:
+            pass
     # Do NOT call init_schema here — search is read-only.  Schema migrations
     # run only inside rebuild_from_tracks_json.  Calling init_schema here would
     # attempt a write-transaction (the schema-v3 backfill UPDATE) which blocks
@@ -679,8 +697,12 @@ def search_songs(query: str, *, limit: int=500, dbfile: Optional[Path]=None,
         for r in con.execute(f"SELECT * FROM songs LIMIT {_FUZZY_SCAN_CAP}"):
             scanned += 1
             # Cheap periodic time check so a giant library can't hang the thread.
-            if (scanned & 2047) == 0 and (time.time() - _t_fuzzy) > _FUZZY_TIME_BUDGET_S:
-                break
+            if (scanned & 2047) == 0:
+                if should_abort is not None and should_abort():
+                    aborted["hit"] = True
+                    break
+                if (time.time() - _t_fuzzy) > _FUZZY_TIME_BUDGET_S:
+                    break
             d = dict(r)
             ss = str(d.get("searchstring") or "")
             ctokens = [_canon_token(tok) for tok in ss.split()]
@@ -699,11 +721,16 @@ def search_songs(query: str, *, limit: int=500, dbfile: Optional[Path]=None,
                 extra.append(d)
                 if len(extra) >= int(limit):
                     break
+        if aborted["hit"]:
+            con.close()
+            return []
         extra.sort(key=lambda d: _rank_key(d, q))
         rows.extend(extra)
         fuzzy_ms = (time.time() - _t_fuzzy) * 1000.0
 
     con.close()
+    if aborted["hit"]:
+        return []
     total_ms = (time.time() - _perf_t0) * 1000.0
     _perf_log_if_slow("search_songs", total_ms, 50.0)
     if _SEARCH_DIAG:

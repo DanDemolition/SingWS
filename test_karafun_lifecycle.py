@@ -68,6 +68,8 @@ class KaraFunLifecycleTests(unittest.TestCase):
             _karafun_search_queries_for_entry=lambda e: ["Sugarcult Memory"],
             _set_karafun_entry_status=mock.Mock(),
             _open_karafun_for_entry=lambda e: True,
+            _karafun_process_running=lambda: True,
+            _karafun_wait_until_ready=lambda **kwargs: None,
             _karafun_apple_events_preflight=lambda: (True, ""),
             _ensure_karafun_audio_output=lambda: (True, ""),
             _karafun_search_script=lambda **kwargs: ["search"],

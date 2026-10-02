@@ -41,7 +41,26 @@ private final class CaptureOutput: NSObject, SCStreamOutput {
 // ScreenCaptureKit scale a non-16:9 window to fit and leave an empty strip,
 // which SingWS then stretched to the screen. Crop a small margin so the rounded
 // corners and the traffic lights that appear on hover stay out of the picture.
-private func makeConfiguration(for window: SCWindow) -> SCStreamConfiguration {
+// Region mode: capture only `region` (window points, origin at the window's top-left) of KaraFun's MAIN window,
+// i.e. its built-in preview pane, instead of the separate "Dual Renderer" window. The output keeps the region's
+// aspect ratio and is capped at 1600 px wide; `scale` is the window's points-to-pixels factor (2 on Retina).
+private func makeConfiguration(for window: SCWindow, region: CGRect? = nil, scale: CGFloat = 2) -> SCStreamConfiguration {
+    if let region = region {
+        let bounds = CGRect(origin: .zero, size: window.frame.size)
+        let crop = region.intersection(bounds)
+        if !crop.isNull && crop.width >= 8 && crop.height >= 8 {
+            let config = SCStreamConfiguration()
+            config.sourceRect = crop
+            let outWidth = min(1600.0, max(64.0, (crop.width * scale).rounded()))
+            config.width = Int(outWidth)
+            config.height = Int(max(2.0, (outWidth * crop.height / crop.width).rounded()))
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+            config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+            config.queueDepth = 2
+            config.showsCursor = false
+            return config
+        }
+    }
     let config = SCStreamConfiguration()
     let cornerInset: CGFloat = 6
     let topInset: CGFloat = 30
@@ -76,10 +95,24 @@ private final class CaptureState {
     private var arrivalSeconds: Double = 0
     private var stream: SCStream?
     private var output: CaptureOutput?
+    private var requestedRegion: CGRect? = nil
 
-    func start() -> Int32 {
+    func setRegion(_ region: CGRect) {
+        lock.lock()
+        if requestedRegion != nil { requestedRegion = region }
+        lock.unlock()
+    }
+
+    private func currentRegion() -> CGRect? {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestedRegion
+    }
+
+    func start(region: CGRect? = nil) -> Int32 {
         lock.lock()
         if state == 1 || state == 2 { lock.unlock(); return 1 }
+        requestedRegion = region
         generation &+= 1
         let current = generation
         state = 1
@@ -92,19 +125,31 @@ private final class CaptureState {
                 for _ in 0..<30 {
                     let content = try await SCShareableContent.excludingDesktopWindows(
                         false, onScreenWindowsOnly: false)
-                    window = content.windows.first(where: {
-                        $0.title == "Dual Renderer" &&
+                    let karafun = content.windows.filter {
                         $0.owningApplication?.bundleIdentifier == "com.recisio.kfiphone"
-                    })
+                    }
+                    if region == nil {
+                        window = karafun.first(where: { $0.title == "Dual Renderer" })
+                    } else {
+                        // The main window: the biggest ordinary KaraFun window that is not the video window.
+                        window = karafun.filter {
+                            $0.title != "Dual Renderer" && $0.windowLayer == 0 &&
+                            $0.frame.width > 400 && $0.frame.height > 300
+                        }.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+                    }
                     if window != nil || isStale(current) { break }
                     try await Task.sleep(nanoseconds: 300_000_000)
                 }
                 guard let window else { throw NSError(domain: "SingWSKaraFunCapture", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "KaraFun Dual Renderer is not open"]) }
-                let config = makeConfiguration(for: window)
+                    userInfo: [NSLocalizedDescriptionKey: region == nil
+                               ? "KaraFun Dual Renderer is not open" : "KaraFun main window is not open"]) }
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                var scale: CGFloat = 2
+                if #available(macOS 14.0, *) { scale = CGFloat(filter.pointPixelScale) }
+                var lastRegion = currentRegion()
+                let config = makeConfiguration(for: window, region: lastRegion, scale: scale)
                 let receiver = CaptureOutput(generation: current)
-                let active = SCStream(filter: SCContentFilter(desktopIndependentWindow: window),
-                                      configuration: config, delegate: nil)
+                let active = SCStream(filter: filter, configuration: config, delegate: nil)
                 try active.addStreamOutput(receiver, type: .screen,
                                            sampleHandlerQueue: DispatchQueue(
                                             label: "singws.karafun.capture.frames"))
@@ -124,9 +169,12 @@ private final class CaptureState {
                         false, onScreenWindowsOnly: false),
                           let live = content.windows.first(where: { $0.windowID == window.windowID })
                     else { continue }
-                    if live.frame.size != lastSize {
+                    let wanted = currentRegion()
+                    if live.frame.size != lastSize || wanted != lastRegion {
                         lastSize = live.frame.size
-                        try? await active.updateConfiguration(makeConfiguration(for: live))
+                        lastRegion = wanted
+                        try? await active.updateConfiguration(
+                            makeConfiguration(for: live, region: wanted, scale: scale))
                     }
                 }
             } catch {
@@ -220,6 +268,16 @@ private final class CaptureState {
 
 @_cdecl("singws_karafun_capture_start")
 public func singws_karafun_capture_start() -> Int32 { CaptureState.shared.start() }
+
+@_cdecl("singws_karafun_capture_start_region")
+public func singws_karafun_capture_start_region(_ x: Double, _ y: Double, _ w: Double, _ h: Double) -> Int32 {
+    CaptureState.shared.start(region: CGRect(x: x, y: y, width: w, height: h))
+}
+
+@_cdecl("singws_karafun_capture_set_region")
+public func singws_karafun_capture_set_region(_ x: Double, _ y: Double, _ w: Double, _ h: Double) {
+    CaptureState.shared.setRegion(CGRect(x: x, y: y, width: w, height: h))
+}
 
 @_cdecl("singws_karafun_capture_stop")
 public func singws_karafun_capture_stop() { CaptureState.shared.stop() }

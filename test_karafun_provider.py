@@ -296,7 +296,7 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertIn('key code 0 using command down', search_helper)
         self.assertIn("def _karafun_applescript_literal", source)
         self.assertIn("query_literal = self._karafun_applescript_literal(query)", search_helper)
-        self.assertIn("safe_title_literal = self._karafun_applescript_literal(safe_title)", search_helper)
+        self.assertIn("safe_title_literal = self._karafun_applescript_literal(karafun_match_title(safe_title))", search_helper)
         self.assertIn("keystroke {query_literal}", search_helper)
         self.assertIn("(name of elem as text) contains {safe_title_literal}", search_helper)
         self.assertIn('if durationText is not "" then return "FIRST|"', search_helper)

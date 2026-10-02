@@ -920,7 +920,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         )
         self.assertIn("manager.requestWhenInUseAuthorization()", detect)
         network = function_source("configure_network")
-        self.assertIn("detect_location_now(show_result=False)", network)
+        # OK/Save no longer waits for a detection at all (it froze the dialog for the full wait at the venue,
+        # 2026-10-01): the off-thread location sync that follows detects and stores the result.
+        self.assertNotIn("detect_location_now(show_result=False)", network)
+        self.assertIn('self.sync_session_location_async("network_settings_saved")', network)
 
     def test_remote_reconcile_never_saves_synchronously(self):
         # Reconcile ends by persisting queue + singer history + singer prefs.

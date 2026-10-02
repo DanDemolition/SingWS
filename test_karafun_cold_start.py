@@ -1,0 +1,108 @@
+"""KaraFun must be running and ready before the song-start automation searches or clicks (2026-10-01 show: the first,
+cold, run searched the moment KaraFun was launched and "did not report active playback")."""
+import ast
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+SOURCE = Path("0.2.18.1.py").read_text(encoding="utf-8")
+
+
+def build(clock):
+    tree = ast.parse(SOURCE)
+    wanted = {"KARAFUN_READY_TIMEOUT_S", "KARAFUN_COLD_SETTLE_S"}
+    body = [n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in wanted for t in n.targets)]
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, ast.FunctionDef) and sub.name in {"_karafun_wait_until_ready", "_karafun_main_window_state"}:
+                    sub.decorator_list = []
+                    body.append(sub)
+    ns = {"time": clock, "_diag": lambda *a: None, "subprocess": subprocess}
+    exec(compile(ast.Module(body=body, type_ignores=[]), "cold-start", "exec"), ns)
+    return ns
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def host(ns, states):
+    seq = list(states)
+    h = SimpleNamespace()
+    h._karafun_main_window_state = lambda: seq.pop(0) if len(seq) > 1 else seq[0]
+    h.wait = lambda **kw: ns["_karafun_wait_until_ready"](h, **kw)
+    return h
+
+
+class WaitUntilReadyTests(unittest.TestCase):
+    def test_an_already_running_karafun_goes_straight_through(self):
+        clock = FakeClock(); ns = build(clock)
+        h = host(ns, ["READY"])
+        h.wait(was_running=True, session_is_current=lambda: True)
+        self.assertEqual(clock.sleeps, [])
+
+    def test_a_cold_start_waits_for_the_window_then_settles(self):
+        clock = FakeClock(); ns = build(clock)
+        h = host(ns, ["NOT_RUNNING", "NO_WINDOW", "NO_WINDOW", "READY"])
+        h.wait(was_running=False, session_is_current=lambda: True)
+        self.assertEqual(clock.sleeps[:3], [0.5, 0.5, 0.5])
+        self.assertEqual(clock.sleeps[-1], ns["KARAFUN_COLD_SETTLE_S"])
+
+    def test_it_gives_up_with_a_plain_message(self):
+        clock = FakeClock(); ns = build(clock)
+        h = host(ns, ["NO_WINDOW"])
+        with self.assertRaises(RuntimeError) as ctx:
+            h.wait(was_running=False, session_is_current=lambda: True, timeout=5)
+        self.assertIn("did not finish starting within 5 seconds", str(ctx.exception))
+        self.assertLessEqual(clock.now - 1000.0, 6.0)
+
+    def test_it_cannot_block_forever_when_accessibility_is_missing(self):
+        clock = FakeClock(); ns = build(clock)
+        h = host(ns, ["ERROR"])
+        h.wait(was_running=False, session_is_current=lambda: True)      # returns; the permission check explains
+        self.assertEqual(clock.sleeps, [])
+
+    def test_a_cancelled_session_stops_the_wait(self):
+        clock = FakeClock(); ns = build(clock)
+        h = host(ns, ["NO_WINDOW"])
+        with self.assertRaises(RuntimeError) as ctx:
+            h.wait(was_running=False, session_is_current=lambda: False)
+        self.assertIn("cancelled", str(ctx.exception))
+
+    def test_the_default_timeout_covers_a_slow_cold_start(self):
+        self.assertGreaterEqual(build(FakeClock())["KARAFUN_READY_TIMEOUT_S"], 45.0)
+
+
+class WiringTests(unittest.TestCase):
+    def test_worker_checks_before_opening_and_waits_before_any_search(self):
+        i = SOURCE.index("karafun_was_running = self._karafun_process_running()")
+        block = SOURCE[i:i + 1400]
+        order = [block.index(x) for x in ("self._karafun_process_running()", "self._open_karafun_for_entry(entry)",
+                                           "self._karafun_wait_until_ready(", "self._karafun_apple_events_preflight()")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("was_running=karafun_was_running", block)
+
+    @unittest.skipUnless(sys.platform == "darwin", "osacompile is macOS only")
+    def test_the_readiness_script_compiles(self):
+        captured = {}
+        ns = build(FakeClock())
+        h = SimpleNamespace(_run_karafun_applescript_sync=lambda lines, timeout=None: (captured.setdefault("src", "\n".join(lines)) and True, "READY", ""))
+        self.assertEqual(ns["_karafun_main_window_state"](h), "READY")
+        result = subprocess.run(["osacompile", "-o", "/dev/null"], input=captured["src"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

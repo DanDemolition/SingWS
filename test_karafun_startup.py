@@ -1,5 +1,6 @@
 """Startup regressions without opening KaraFun or touching show data."""
 import ast
+import re
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,12 @@ def methods():
     names = {'_karafun_activate_result_for_playback', '_karafun_search_script',
              '_handoff_show_screen_to_karafun'}
     nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in names]
-    namespace = {'sys': SimpleNamespace(platform='darwin'), '_diag': lambda *a: None,
+    # _karafun_search_script also uses two module-level helpers (title qualifiers, strict song-length test)
+    nodes += [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == 'karafun_match_title')
+              or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'KARAFUN_DURATION_HANDLER_LINES'
+                                                    for t in n.targets))]
+    nodes.sort(key=lambda n: 0 if not isinstance(n, ast.FunctionDef) or n.name == 'karafun_match_title' else 1)
+    namespace = {'re': re, 'sys': SimpleNamespace(platform='darwin'), '_diag': lambda *a: None,
                  'time': SimpleNamespace(sleep=lambda *_: None),
                  'renderer_raise_script': renderer_raise_script}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'startup-test', 'exec'), namespace)
