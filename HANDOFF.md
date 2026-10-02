@@ -11,10 +11,12 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
-## TODO next build (operator, 2026-10-02; NOT to be done in the current 1.0.0.6 re-release)
-1. Now Singing card shows the raw `karafun_streaming:kf_<id>` path instead of song title / artist for KaraFun songs (screenshot 14:33).
-2. Preview-pane capture crops the KaraFun logo (bottom-right "Wild Style Karaoke" watermark) on the audience screen: zoom out a tad
-   (smaller crop in `karafun_fill_region` / pane margin) so the logo fits fully inside the window.
+## Fixed in source 2026-10-02, NOT built or installed (operator's two next-build items)
+1. Now Singing card: a KaraFun song showed `karafun_streaming:kf_<id>`; `_update_rotation_summary_card` now uses the active song's
+   artist/title (`_current_karaoke_artist/title`) for streaming paths. Source-guard test in `test_karafun_preview_capture.py`.
+2. Corner logo cut off: `karafun_fill_region` keeps 8% more width than an exact 16:9 cut (`KARAFUN_FILL_ZOOM_OUT = 1.08`), so the picture is
+   squeezed sideways ~8% when shown full-window. **Not seen on a real song** (KaraFun was not running): the bottom of the logo may also be
+   clipped by `KARAFUN_PREVIEW_OVERLAY_MARGIN`; tune the constant after looking at the audience screen. Tests: 179 related pass.
 
 ## RELEASED 1.0.0.6 — 2026-10-02 (published, latest; NOT yet installed on this Mac)
 

@@ -11,7 +11,7 @@ SOURCE = Path("0.2.18.1.py").read_text(encoding="utf-8")
 def namespace():
     tree = ast.parse(SOURCE)
     names = {"KARAFUN_PREVIEW_OVERLAY_MARGIN", "KARAFUN_PREVIEW_FRAME_TIMEOUT_S", "KARAFUN_PREVIEW_FIND_TIMEOUT_S",
-             "KARAFUN_PREVIEW_MAX_RESTARTS"}
+             "KARAFUN_PREVIEW_MAX_RESTARTS", "KARAFUN_FILL_ZOOM_OUT"}
     funcs = {"karafun_preview_probe_script", "karafun_preview_pane_rect", "karafun_preview_region_changed", "karafun_fill_region"}
     body = [n for n in tree.body if (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in n.targets))
             or (isinstance(n, ast.FunctionDef) and n.name in funcs)]
@@ -128,10 +128,10 @@ class FillRegionTests(unittest.TestCase):
     def test_the_real_pane_is_cut_to_exactly_16_by_9_and_centred(self):
         fill = NS["karafun_fill_region"]
         x, y, w, h = fill((945.0, 52.0, 783.0, 284.0))
-        self.assertAlmostEqual(w / h, 16 / 9, places=3)
+        self.assertAlmostEqual(w / h, 16 / 9 * NS["KARAFUN_FILL_ZOOM_OUT"], places=3)   # a little wider than 16:9 so the logo fits
         self.assertEqual((y, h), (52.0, 284.0))                       # full height kept
         self.assertAlmostEqual((x - 945.0), (945.0 + 783.0) - (x + w), places=3)     # same amount cut off each side
-        self.assertGreater(w, 480); self.assertLess(w, 520)
+        self.assertGreater(w, 530); self.assertLess(w, 580)
 
     def test_a_region_that_is_already_16_by_9_or_narrower_is_unchanged(self):
         fill = NS["karafun_fill_region"]
@@ -315,6 +315,14 @@ class WrapperTests(unittest.TestCase):
         from karafun_capture import KaraFunCapture
         capture = KaraFunCapture(library_path=lib)
         self.assertTrue(capture.supports_region)          # never start a capture here: that would ask for Screen Recording
+
+
+class NowSingingCardTests(unittest.TestCase):
+    def test_a_karafun_song_shows_its_title_and_artist_not_the_streaming_id(self):
+        i = SOURCE.index("def _update_rotation_summary_card")
+        body = SOURCE[i:i + 6000]
+        self.assertIn('current_path.lower().startswith("karafun_streaming:")', body)
+        self.assertLess(body.index("_current_karaoke_title"), body.index("self.lookup_display_name(current_path"))
 
 
 if __name__ == "__main__":

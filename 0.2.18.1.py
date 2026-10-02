@@ -2833,6 +2833,11 @@ def karafun_preview_pane_rect(probe_text):
     return {"window": window, "region": (left - wx, top - wy, width, height)}
 
 
+# Keep this much more of the pane's width than an exact 16:9 cut, so the corner logo is not clipped. The picture is then
+# shown full-window, so it is squeezed sideways by the same factor (1.08 = 8%, barely visible). 1.0 gives an exact 16:9.
+KARAFUN_FILL_ZOOM_OUT = 1.08
+
+
 def karafun_fill_region(region, aspect=16.0 / 9.0):
     """Crop the left and right of a region that is wider than `aspect` (centred), so it is exactly 16:9.
 
@@ -2843,8 +2848,8 @@ def karafun_fill_region(region, aspect=16.0 / 9.0):
     x, y, w, h = region
     if w <= 0 or h <= 0:
         return region
-    target = h * aspect
-    if w <= target + 1.0:
+    target = min(w, h * aspect * KARAFUN_FILL_ZOOM_OUT)
+    if w <= h * aspect + 1.0:
         return region
     return (x + (w - target) / 2.0, y, target, h)
 
@@ -23931,7 +23936,13 @@ class KaraokeApp(QWidget):
             if karaoke_active and current_singer:
                 current_artist = ""
                 current_title = ""
-                if current_path:
+                if current_path.lower().startswith("karafun_streaming:") and (
+                    getattr(self, "_current_karaoke_title", "") or getattr(self, "_current_karaoke_artist", "")
+                ):
+                    # A KaraFun song is not in the library index; the path lookup would show "karafun_streaming:kf_123".
+                    current_artist = str(getattr(self, "_current_karaoke_artist", "") or "").strip()
+                    current_title = str(getattr(self, "_current_karaoke_title", "") or "").strip()
+                elif current_path:
                     display_name = self.lookup_display_name(current_path, artist_title_only=True)
                     if " • " in display_name:
                         current_artist, current_title = [p.strip() for p in display_name.split(" • ", 1)]
