@@ -11,6 +11,11 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## TODO next build (operator, 2026-10-02; NOT to be done in the current 1.0.0.6 re-release)
+1. Now Singing card shows the raw `karafun_streaming:kf_<id>` path instead of song title / artist for KaraFun songs (screenshot 14:33).
+2. Preview-pane capture crops the KaraFun logo (bottom-right "Wild Style Karaoke" watermark) on the audience screen: zoom out a tad
+   (smaller crop in `karafun_fill_region` / pane margin) so the logo fits fully inside the window.
+
 ## RELEASED 1.0.0.6 — 2026-10-02 (published, latest; NOT yet installed on this Mac)
 
 Tag `v1.0.0.6`, code commit `605c130`, release commit `98bd873`; https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.6.
