@@ -11,12 +11,14 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
-## Fixed in source 2026-10-02, NOT built or installed (operator's two next-build items)
-1. Now Singing card: a KaraFun song showed `karafun_streaming:kf_<id>`; `_update_rotation_summary_card` now uses the active song's
-   artist/title (`_current_karaoke_artist/title`) for streaming paths. Source-guard test in `test_karafun_preview_capture.py`.
-2. Corner logo cut off: `karafun_fill_region` keeps 8% more width than an exact 16:9 cut (`KARAFUN_FILL_ZOOM_OUT = 1.08`), so the picture is
-   squeezed sideways ~8% when shown full-window. **Not seen on a real song** (KaraFun was not running): the bottom of the logo may also be
-   clipped by `KARAFUN_PREVIEW_OVERLAY_MARGIN`; tune the constant after looking at the audience screen. Tests: 179 related pass.
+## FINAL 1.0.0.6 (re-released twice, 2026-10-02; installed on this Mac; operator confirmed "works perfectly")
+Release commit `c6525f6`, tag `v1.0.0.6` force-moved to it. arm64 `b3d3a277...` (127,080,884 B), x86_64 `3f4a70fb...` (152,934,969 B);
+re-downloaded hashes equal `docs/release.json`; Pages and `latest/download` verified. Installed here: the arm64 build (backup of the previous
+app + profile in `local-installs/20261002-rebuild/`, private). Beyond the section below: single "Use KaraFun integration" switch +
+"Launch KaraFun when SingWS starts"; preview-pane capture is the only method (no video window, no parking, no fallback); picture cropped
+to 16:9 x `KARAFUN_FILL_ZOOM_OUT` (1.08) so the corner logo fits; Now Singing card shows KaraFun artist/title. Operator confirmed the
+logo and card on a real song. Anyone who installed an earlier 1.0.0.6 must download again (same version number). The parked-window and
+fallback descriptions below are SUPERSEDED. Intel still never run on a physical Intel Mac.
 
 ## RELEASED 1.0.0.6 — 2026-10-02 (published, latest; NOT yet installed on this Mac)
 
