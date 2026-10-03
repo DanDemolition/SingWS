@@ -3719,13 +3719,10 @@ DEFAULTS = {
     "karafun_fast_start_enabled": True, # Skip slow renderer/probe passes; the completion monitor verifies playback in background
     "karafun_audio_output_follow_singws": True, # Pin KaraFun to SingWS's saved physical output instead of AirPlay/system default
     "karafun_audio_output_name": "", # Optional KaraFun-only device name; blank follows audio_output_name
-    "karafun_audio_route_strict": False, # True = abort the song when KaraFun's output control can't be read (a wrong/unavailable route always blocks)
     "karafun_request_url": "",       # Private KaraFun host/session link; never included in public/server payloads
     "karafun_auto_submit_server": True,
     "karafun_auto_submit_host": True,
     "karafun_require_host_approval": False,
-    "karafun_submission_timeout_sec": 12,
-    "karafun_submission_retries": 1,
     "disc_id_priority": "",          # comma-separated prefixes for remote request matching (blank = no priority)
     "background_closed_image_path": "",   # optional background shown when requests are closed
     "background_closed_waitlist_on_image_path": "",  # server off + waitlist enabled
@@ -3745,7 +3742,6 @@ DEFAULTS = {
     "rotation_lock_insert_count": 0,        # session/persisted spacing counter for locked inserts
     "empty_rotation_slot_timeout_sec": 180, # keep a singer's place briefly while replacing a removed song
     "intro_loop_enabled": False,            # between songs: loop the next song's intro (instead of BGM)
-    "intro_loop_bars": 8,                   # bars to loop: 4 / 8 / 16
     "seamless_transitions_enabled": True,  # master safety switch; OFF preserves normal physical EOS behavior
     "karaoke_bgm_crossfade_enabled": False, # allow intentional karaoke -> BGM overlap at song end
     "karaoke_trim_verified_tail": True,    # end promptly once the file scan confirms all audio has ended
