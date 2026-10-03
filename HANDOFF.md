@@ -11,6 +11,22 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## Between-singer animations clipped in the host preview — fixed in source 2026-10-03, committed locally, NOT built/installed
+Operator report: the applause / singer-start animations looked zoomed in and cut off. Seen in his screenshot: only in the small Karaoke Preview
+panel of the main window (about 430x200); the real audience window was fine. Cause: `QML_SHOW_SCREEN_VFX_SOURCE` Text items had fixed
+`minimumPixelSize` floors (42/36/30/18/16) that cannot shrink into a small panel, so long names ("Christopher Montgomery") overflowed; three more
+lines (GET READY banner, Next Up artist and on-deck) had no fit at all. Now every floor is `Math.max(8, Math.min(N, root.height * 0.07))`
+(identical on a TV: 0.07 x 1080 > 42) and those three lines shrink to fit. Checked by rendering the real QML offscreen before/after at 430x200
+and 1920x1080 with long names (outro, singer start, next up). The QML itself was never wrong at normal sizes and had not changed in weeks.
+Tests: `SmallPanelTextFitTests` in test_show_screen_vfx.py.
+
+## Stall capture on the dev Mac — 2026-10-03, partial
+Scratch app copy (SINGWS_HOME=/tmp/kf/cap_home, no server) playing a 2-minute CDG song, `sample` of the main thread: ~38% busy; widget repaints
+~23% (QWidgetRepaintManager::sync), Qt Quick window sync ~10%, timers ~3%. Song end caused no stall on Apple Silicon, so the Intel 400 ms stall
+cannot be reproduced here. Python-level stall stacks mostly end at app.exec (the time is inside Qt painting), so Python stacks do not help; the
+native `sample` does. The A/B script (/tmp/kf/ab_capture.py, toggling ticker/show-screen/rotation effects) crashed on a missing sample file and
+was not finished.
+
 ## KaraFun picture ~2 s sooner — 2026-10-03, committed locally, NOT built/installed, early-start path NOT yet seen on a real song
 After the double-click the first frame came ~3-4 s later, mostly because capture waited for the pane-finding probe (~1.8 s, measured live) and
 only then started ScreenCaptureKit. Now `_start_karafun_preview_capture` remembers the last pane region (6 h) and, for the next song, starts the

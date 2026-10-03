@@ -7147,7 +7147,7 @@ Rectangle {
                 font.pixelSize: Math.max(48, nextPanel.height * 0.19)
                 font.bold: true
                 fontSizeMode: Text.Fit
-                minimumPixelSize: 30
+                minimumPixelSize: Math.max(8, Math.min(30, root.height * 0.07))
             }
             Text {
                 width: parent.width
@@ -7157,13 +7157,17 @@ Rectangle {
                 font.pixelSize: Math.max(24, nextPanel.height * 0.088)
                 font.bold: true
                 fontSizeMode: Text.Fit
-                minimumPixelSize: 18
+                minimumPixelSize: Math.max(8, Math.min(18, root.height * 0.07))
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
                 text: root.artistText
                 color: "#bfb7d8"
                 font.pixelSize: Math.max(17, nextPanel.height * 0.058)
+                fontSizeMode: Text.Fit
+                minimumPixelSize: 8
                 visible: text !== ""
             }
             Rectangle {
@@ -7186,10 +7190,14 @@ Rectangle {
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
                 text: root.onDeckText !== "" ? "ON DECK  •  " + root.onDeckText : ""
                 color: "#a99fc4"
                 font.pixelSize: Math.max(14, nextPanel.height * 0.045)
                 font.bold: true
+                fontSizeMode: Text.Fit
+                minimumPixelSize: 8
                 visible: text !== ""
             }
         }
@@ -7214,11 +7222,15 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.top: parent.top
             anchors.topMargin: Math.max(42, root.height * 0.10)
+            width: root.width * 0.94
+            horizontalAlignment: Text.AlignHCenter
             text: "GET READY  •  " + root.singerText.toUpperCase()
             color: "#f6c945"
             font.pixelSize: Math.max(22, root.height * 0.046)
             font.bold: true
             font.letterSpacing: 3.2
+            fontSizeMode: Text.Fit
+            minimumPixelSize: 8
         }
 
         Rectangle {
@@ -7257,7 +7269,7 @@ Rectangle {
             font.pixelSize: Math.max(19, root.height * 0.042)
             font.bold: true
             fontSizeMode: Text.Fit
-            minimumPixelSize: 16
+            minimumPixelSize: Math.max(8, Math.min(16, root.height * 0.07))
         }
     }
 
@@ -7286,7 +7298,7 @@ Rectangle {
             font.pixelSize: Math.max(76, root.height * 0.18)
             font.bold: true
             fontSizeMode: Text.Fit
-            minimumPixelSize: 42
+            minimumPixelSize: Math.max(8, Math.min(42, root.height * 0.07))
             style: Text.Outline
             styleColor: "#713fd0"
         }
@@ -7298,7 +7310,7 @@ Rectangle {
             font.pixelSize: Math.max(20, root.height * 0.045)
             font.bold: true
             fontSizeMode: Text.Fit
-            minimumPixelSize: 16
+            minimumPixelSize: Math.max(8, Math.min(16, root.height * 0.07))
             visible: text !== ""
         }
     }
@@ -7327,7 +7339,7 @@ Rectangle {
             font.pixelSize: Math.max(62, root.height * 0.13)
             font.bold: true
             fontSizeMode: Text.Fit
-            minimumPixelSize: 36
+            minimumPixelSize: Math.max(8, Math.min(36, root.height * 0.07))
         }
         Text {
             width: parent.width
@@ -7337,7 +7349,7 @@ Rectangle {
             font.pixelSize: Math.max(22, root.height * 0.052)
             font.bold: true
             fontSizeMode: Text.Fit
-            minimumPixelSize: 16
+            minimumPixelSize: Math.max(8, Math.min(16, root.height * 0.07))
         }
     }
 

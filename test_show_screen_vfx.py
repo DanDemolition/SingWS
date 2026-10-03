@@ -354,3 +354,32 @@ class ShowScreenVfxTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SmallPanelTextFitTests(unittest.TestCase):
+    """2026-10-03: in the host's small Karaoke Preview panel the between-singer animation looked zoomed in and long names
+    ("Christopher Montgomery") were cut off: the text had fixed minimum sizes that cannot shrink into a ~430x200 panel."""
+
+    def qml(self):
+        src = Path("0.2.18.1.py").read_text(encoding="utf-8")
+        a = src.index('QML_SHOW_SCREEN_VFX_SOURCE = r"""')
+        return src[a:src.index('"""', a + 40)]
+
+    def test_minimum_text_sizes_scale_with_the_panel_but_not_on_a_big_screen(self):
+        q = self.qml()
+        import re
+        mins = re.findall(r"minimumPixelSize: (.+)", q)
+        self.assertGreaterEqual(len(mins), 9)
+        for m in mins:
+            self.assertTrue(re.fullmatch(r"8|Math\.max\(8, Math\.min\(\d+, root\.height \* 0\.07\)\)", m.strip()), m)
+        # 0.07 * 1080 = 75: the 42 / 36 / 30 / 18 / 16 floors are unchanged on a TV
+        self.assertGreater(1080 * 0.07, 42)
+
+    def test_every_line_that_shows_a_name_or_title_shrinks_to_fit(self):
+        q = self.qml()
+        import re
+        for needle in ('"GET READY  •  " + root.singerText.toUpperCase()', 'root.artistText\n', '"ON DECK  •  " + root.onDeckText'):
+            i = q.index(needle)
+            block = q[q.rfind("Text {", 0, i):q.index("\n        }", i) if "\n        }" in q[i:i+900] else i + 700]
+            self.assertIn("fontSizeMode: Text.Fit", block, needle)
+            self.assertIn("minimumPixelSize", block, needle)
