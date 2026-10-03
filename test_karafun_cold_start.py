@@ -17,7 +17,7 @@ def build(clock):
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             for sub in node.body:
-                if isinstance(sub, ast.FunctionDef) and sub.name in {"_karafun_wait_until_ready", "_karafun_main_window_state", "_karafun_wake_window"}:
+                if isinstance(sub, ast.FunctionDef) and sub.name in {"_karafun_wait_until_ready", "_karafun_main_window_state"}:
                     sub.decorator_list = []
                     body.append(sub)
     ns = {"time": clock, "_diag": lambda *a: None, "subprocess": subprocess}
@@ -42,8 +42,6 @@ def host(ns, states):
     seq = list(states)
     h = SimpleNamespace()
     h._karafun_main_window_state = lambda: seq.pop(0) if len(seq) > 1 else seq[0]
-    h.wake_calls = []
-    h._karafun_wake_window = lambda: h.wake_calls.append(1)
     h.wait = lambda **kw: ns["_karafun_wait_until_ready"](h, **kw)
     return h
 
@@ -108,28 +106,6 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(ns["_karafun_main_window_state"](h), "READY")
         result = subprocess.run(["osacompile", "-o", "/dev/null"], input=captured["src"], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-
-
-class WindowWakeTests(unittest.TestCase):
-    """2026-10-03: the first search after KaraFun was launched hidden failed twice ("Can't get splitter group 1 of window Discover")
-    and cost ~5 s in retries. The window is now woken once, with fast polls, before the search."""
-
-    def test_a_ready_karafun_is_woken_once_before_the_search(self):
-        ns = build(FakeClock())
-        h = host(ns, ["READY"])
-        ns["_karafun_wait_until_ready"](h, was_running=True, session_is_current=lambda: True, timeout=5)
-        self.assertEqual(h.wake_calls, [1])
-
-    def test_the_wake_script_waits_for_the_window_to_fill_and_never_for_long(self):
-        src = Path("0.2.18.1.py").read_text(encoding="utf-8")
-        i = src.index("KARAFUN_WAKE_SCRIPT = [")
-        body = src[i:src.index("]", i)]
-        self.assertIn("'set frontmost to true'", body)
-        self.assertIn("'repeat 30 times'", body)                       # 30 x ~0.5 s: a ceiling, not a delay
-        self.assertIn("'set e to entire contents of w'", body)
-        self.assertIn("KARAFUN_WINDOW_MIN_ELEMENTS", body)
-        self.assertIn("time.sleep(0.4)", src)                          # and the same-query retry no longer pauses 1.5 s
-        self.assertNotIn("KaraFun UI not ready; retrying same query\")\n                            time.sleep(1.5)", src)
 
 
 if __name__ == "__main__":

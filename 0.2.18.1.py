@@ -2802,34 +2802,6 @@ def karafun_preview_region_changed(old, new, tolerance=2.0):
 # A cold KaraFun (not running when the song was queued) needs time before it will take a search and a double-click.
 # 2026-10-01 show: the first cold run searched the moment it was launched and "did not report active playback".
 KARAFUN_READY_TIMEOUT_S = 60.0
-# A KaraFun launched hidden at startup rebuilds its window when it is first brought forward. A search sent during that
-# answers "Can't get splitter group 1 of window Discover" / "Invalid index", and each failed try cost ~2.5 s (1 s of work plus a
-# 1.5 s pause): 5 of the 10 seconds to the first song on 2026-10-03. Waiting for the window to fill takes fast polls instead.
-KARAFUN_WINDOW_MIN_ELEMENTS = 40
-KARAFUN_WAKE_SCRIPT = [
-    'tell application "System Events"',
-    'set matches to every application process whose name contains "KaraFun"',
-    'if (count of matches) is 0 then return "NOT_RUNNING"',
-    'tell item 1 of matches',
-    'set frontmost to true',
-    'set n to 0',
-    'repeat 30 times',
-    'try',
-    'repeat with w in windows',
-    'if name of w is not "Dual Renderer" then',
-    'set e to entire contents of w',
-    'set n to count of e',
-    'exit repeat',
-    'end if',
-    'end repeat',
-    'end try',
-    f'if n >= {KARAFUN_WINDOW_MIN_ELEMENTS} then return "READY|" & n',
-    'delay 0.2',
-    'end repeat',
-    'return "SLOW|" & n',
-    'end tell',
-    'end tell',
-]
 KARAFUN_COLD_SETTLE_S = 2.0
 
 
@@ -50523,17 +50495,6 @@ class KaraokeApp(QWidget):
         ], timeout=10)
         return str(out or "").strip() if ok else "ERROR"
 
-    def _karafun_wake_window(self) -> None:
-        """Bring KaraFun forward and wait (fast polls, at most ~8 s) until its window has filled in. Never raises: the search
-        has its own retries, this only avoids paying for them."""
-        started = time.monotonic()
-        try:
-            ok, out, _error = self._run_karafun_applescript_sync(KARAFUN_WAKE_SCRIPT, timeout=12)
-            _diag(f"[KARAFUN] window wake {str(out or '').strip()!r} after {time.monotonic() - started:.1f}s" if ok
-                  else f"[KARAFUN] window wake skipped ({str(_error or out)[:80]})")
-        except Exception as exc:
-            _diag(f"[KARAFUN] window wake failed: {exc}")
-
     def _karafun_wait_until_ready(self, *, was_running: bool, session_is_current, timeout: float = KARAFUN_READY_TIMEOUT_S) -> None:
         """Block (worker thread) until KaraFun can take a search; raise with a plain message if it never does.
 
@@ -50555,7 +50516,6 @@ class KaraokeApp(QWidget):
                 if not was_running:
                     time.sleep(KARAFUN_COLD_SETTLE_S)
                 _diag(f"[KARAFUN] ready after {time.monotonic() - started:.1f}s cold={int(not was_running)}")
-                self._karafun_wake_window()
                 return
             if state != last_state:
                 _diag(f"[KARAFUN] waiting for KaraFun to finish starting ({state})")
@@ -52672,7 +52632,7 @@ class KaraokeApp(QWidget):
                             # artist, and a title-only search can land on a
                             # different song entirely.
                             _diag(f"[KARAFUN-AUTO] search attempt={attempt} KaraFun UI not ready; retrying same query")
-                            time.sleep(0.4)
+                            time.sleep(1.5)
                             continue
                         break
                     if not ok:
