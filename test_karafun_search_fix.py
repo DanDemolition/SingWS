@@ -111,5 +111,35 @@ class GeneratedScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, f"{kw}: {result.stderr}")
 
 
+class SearchTimingTests(unittest.TestCase):
+    """2026-10-03: a search took ~6 s. 3 s was a fixed wait for results that are on screen ~1.3 s after Enter, and the row scan
+    made slow Accessibility lookups for every element. Same answers, less waiting (measured live: 6.0 s -> 2.9 s)."""
+
+    def script(self):
+        return HOST._karafun_script_source(HOST._karafun_search_script(
+            query="Bruno Mars Dance With Me", safe_title="Dance With Me", safe_artist="Bruno Mars", require_exact_title=True))
+
+    def test_no_fixed_three_second_wait_after_the_search_is_typed(self):
+        source = self.script()
+        self.assertNotIn("delay 3\n", source + "\n")
+        after_enter = source[source.index("key code 36"):]
+        self.assertLess(after_enter.index("repeat 9 times"), after_enter.index("set elems to entire contents of mainWindow"))
+
+    def test_it_waits_for_the_result_count_to_change_and_hold_then_gives_up(self):
+        source = self.script()
+        self.assertIn("if nowCount > firstCount and nowCount is lastCount then exit repeat", source)
+        self.assertIn("set pollElems to entire contents of mainWindow", source)
+        self.assertEqual(source.count("repeat 9 times"), 1)             # bounded: about the old 3 seconds at worst
+
+    def test_slow_position_and_size_lookups_come_after_the_cheap_name_checks(self):
+        source = self.script()
+        self.assertLess(source.index("if nameHit then"), source.index("set ap to position of artistElem"))
+        self.assertLess(source.index("set nameHit to false"), source.index("if nameHit then"))
+        self.assertEqual(source.count("if my isDurationText(dName) then"), 3)
+        first = source.index("if my isDurationText(dName) then")
+        self.assertLess(first, source.index("set dp to position of durationElem"))
+        self.assertNotIn("(my isDurationText(dName)) and dX", source)
+
+
 if __name__ == "__main__":
     unittest.main()

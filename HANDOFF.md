@@ -11,6 +11,17 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## KaraFun search ~3 s faster — 2026-10-03, committed locally, NOT built/installed, tried on the real KaraFun (search only, nothing played)
+`_karafun_search_script` (0.2.18.1.py) took ~6 s per search: 0.45 s to find the search field, 0.2 s typing, a FIXED `delay 3`, then ~2.3 s
+scanning rows. Measured live: the results window (the main window retitled "Results for ...") holds ~71 elements until the rows arrive
+(~0.6 s after Enter), then jumps to 116-176 and stays. Now: poll `count of entire contents of mainWindow` (0.32 s per poll), carry on once it
+changed from the first poll and held for two polls, cap `repeat 9 times` (~3 s, the old wait). The row scans read the slow position/size only
+after the cheap name / duration-text checks (same conditions, fewer Accessibility calls). A/B against the old script on 6 queries (incl. a
+missing song and an apostrophe mismatch): identical answers every time, 6.0 s -> 2.9-3.3 s for normal searches (nonexistent song 9.8 -> 5.6 s).
+Remaining risk: if rows ever arrive in several chunks more than ~0.3 s apart the poll could settle early; the existing retry ladder then
+applies. Watch `[KARAFUN-AUTO] search attempt=1 result=` in the next show log (expect FOUND at attempt 1 and ~3 s after the query).
+Tests: `SearchTimingTests` in test_karafun_search_fix.py. The harness used is /tmp/kf/search_timing.py (not in the repo).
+
 ## Host chat pictures/GIFs + phone chat layout — 2026-10-03, committed locally, NOT built, NOT deployed, NOT pushed
 Operator asked for (1) pictures and GIFs in the app's Host chat window (they existed only in Everyone/Private), (2) a better phone layout
 for the chat sheet (close X too small, sheet sitting under the address bar).
