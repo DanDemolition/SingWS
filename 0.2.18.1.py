@@ -52207,7 +52207,9 @@ class KaraokeApp(QWidget):
                     'end if',
                     'end try',
                     'end repeat',
-                    'return "FOUND|" & rowX & "|" & rowY & "|" & durationText',
+                    # A real result row always shows its length. The header 'Results for "<query>"' contains both the title and the
+                    # artist too, and used to be accepted as the row when KaraFun had no match (2026-10-03).
+                    'if durationText is not "" then return "FOUND|" & rowX & "|" & rowY & "|" & durationText',
                     'end if',
                     'end if',
                     'end if',
@@ -52247,7 +52249,7 @@ class KaraokeApp(QWidget):
                 'end repeat',
                 # Weaker verdict when the artist was known but not confirmed
                 # on the row: the caller decides whether to accept it.
-                f'return "{"TITLE_ONLY" if safe_artist else "FOUND"}|" & rowX & "|" & rowY & "|" & durationText',
+                f'if durationText is not "" then return "{"TITLE_ONLY" if safe_artist else "FOUND"}|" & rowX & "|" & rowY & "|" & durationText',
                 'end if',
                 'end if',
                 'end try',

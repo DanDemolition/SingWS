@@ -141,5 +141,23 @@ class SearchTimingTests(unittest.TestCase):
         self.assertNotIn("(my isDurationText(dName)) and dX", source)
 
 
+class NoMatchIsNotFoundTests(unittest.TestCase):
+    """2026-10-03: a song KaraFun did not have came back as FOUND|574|60| - the 'Results for "<query>"' header holds the title and the
+    artist - and the app then spent ~30 s trying to play it. A real row always has a length next to it."""
+
+    def test_found_and_title_only_need_a_length(self):
+        source = HOST._karafun_script_source(HOST._karafun_search_script(
+            query="Avenged Sevenfold A Little Piece of Heaven", safe_title="A Little Piece of Heaven", safe_artist="Avenged Sevenfold", require_exact_title=True))
+        self.assertEqual(source.count('if durationText is not "" then return "FOUND|"'), 1)
+        self.assertEqual(source.count('if durationText is not "" then return "TITLE_ONLY|"'), 1)
+        self.assertNotIn('\nreturn "FOUND|"', source)
+        self.assertNotIn('\nreturn "TITLE_ONLY|"', source)
+
+    def test_without_an_artist_the_title_only_pass_also_needs_a_length(self):
+        source = HOST._karafun_script_source(HOST._karafun_search_script(query="Memory", safe_title="Memory", require_exact_title=True))
+        self.assertIn('if durationText is not "" then return "FOUND|"', source)
+        self.assertNotIn('\nreturn "FOUND|"', source)
+
+
 if __name__ == "__main__":
     unittest.main()
