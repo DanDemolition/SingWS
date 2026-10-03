@@ -11,6 +11,25 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## Host chat pictures/GIFs + phone chat layout — 2026-10-03, committed locally, NOT built, NOT deployed, NOT pushed
+Operator asked for (1) pictures and GIFs in the app's Host chat window (they existed only in Everyone/Private), (2) a better phone layout
+for the chat sheet (close X too small, sheet sitting under the address bar).
+**Server** (`SingWS-Server`, one local commit, deploy NOT done): Host chat text still lives in `singer_notifications`; a picture/GIF is a
+`chat_messages` row on new channel `host` (thread_key = singer's norm name), so retention, Clear Night and picture authorisation reuse the room-chat
+rules. New in `_chat.inc`: `chat_hostchat_send_media`, `chat_hostchat_list_for_singer`. `host_chat_moderation.php say` accepts `channel=host`
+(+ `a`, `singer_name`, `media_id`/`gif_id`); `singer_chat.php` `send` accepts `media_id`/`gif_id`, `list` returns `media_messages` with its own
+cursor `since_mid`; `chat_media.php` allows uploads when host chat is on; `host_chat.php clear_history` also clears them. Singers are muted /
+rate limited as in the rooms; the host never is. The phone Host chat tab only exists when Everyone or Private is on (old text-only overlay
+otherwise). `room_chat_ui.js` cache-buster bumped to `?v=2` in `index.php` (phones would otherwise keep the old file).
+Phone layout (`room_chat_ui.js`): safe-area padding (page uses viewport-fit=cover, so the header/X sat under the notch/status bar), 44 px round
+close button, 44 px tabs/buttons, sheet follows `visualViewport` (address bar, keyboard), page scroll locked while open, Escape closes.
+Seen in the browser at 390x760 and 320x568 with a stubbed server (real keyboard/notch behaviour needs a real phone).
+**App** (`0.2.18.1.py`): Host chat tab has GIF + Photo buttons (reuse `_room_say_gif/_room_say_photo` with `deliver=`), transcript is a
+clickable QTextBrowser merging text and pictures by time (`_render_host_chat_transcript`), `_room_attachment_html` is shared with the room view,
+unread counts include singers' pictures, host-channel rows never count as Everyone messages. Tests: 1220 pass (`test_host_chat_media.py` new,
+`test_room_chat_tab.py` +1); PHP: 6 suites pass incl. new `test_host_chat_media.php` and an endpoint section in `test_room_chat_http.php`.
+**Deploy order:** server first (the app and phone need the new endpoints; old app + new server is fine), then app build.
+
 ## Log review 2026-10-03 of the 2026-10-02 show (1.0.0.5 -> 1.0.0.6, Intel venue Mac) — source fix committed, NOT built/installed
 No errors or Python tracebacks; all 4 KaraFun songs started (13 s from queue to playing; the AppleScript search is ~7 s of that),
 capture 5-7 ms/frame at 24-28 fps. One real fault: **21:26:59 closeEvent ran, no "clean shutdown", app relaunched 2 min later** (a

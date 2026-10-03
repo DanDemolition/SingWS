@@ -45020,14 +45020,23 @@ class KaraokeApp(QWidget):
         self.chat_singer_list.currentRowChanged.connect(lambda *_: (self._chat_mark_current_read(), self._render_chat_page()))
         split.addWidget(self.chat_singer_list)
         right = QWidget(); right_layout = QVBoxLayout(right); right_layout.setContentsMargins(8,0,0,0)
-        self.chat_transcript = QTextEdit(); self.chat_transcript.setReadOnly(True); self.chat_transcript.setPlaceholderText("Select a singer conversation.")
+        from PyQt6.QtWidgets import QTextBrowser as _QTextBrowser
+        self.chat_transcript = _QTextBrowser(); self.chat_transcript.setReadOnly(True); self.chat_transcript.setPlaceholderText("Select a singer conversation.")
+        self.chat_transcript.setOpenLinks(False); self.chat_transcript.setOpenExternalLinks(False)
+        self.chat_transcript.anchorClicked.connect(self._on_room_anchor)      # click a picture / GIF to open it
         right_layout.addWidget(self.chat_transcript, 1)
         send_row = QHBoxLayout(); self.chat_message_input = QLineEdit(); self.chat_message_input.setPlaceholderText("Message singer…")
         self.chat_send_button = QPushButton("Send"); self.chat_send_button.clicked.connect(self._send_chat_message)
         self.chat_message_input.returnPressed.connect(self._send_chat_message)
         self.chat_emoji_button = QPushButton("😀"); self.chat_emoji_button.setToolTip("Emoji")
         self.chat_emoji_button.clicked.connect(lambda: self._show_emoji_picker(self.chat_message_input, self.chat_emoji_button))
-        send_row.addWidget(self.chat_message_input, 1); send_row.addWidget(self.chat_emoji_button); send_row.addWidget(self.chat_send_button); right_layout.addLayout(send_row)
+        self.chat_gif_button = QPushButton("GIF"); self.chat_gif_button.setToolTip("Send a GIF to this singer")
+        self.chat_photo_button = QPushButton("Photo"); self.chat_photo_button.setToolTip("Send a picture to this singer")
+        self.chat_gif_button.clicked.connect(lambda: self._room_say_gif(deliver=self._host_chat_send_media))
+        self.chat_photo_button.clicked.connect(lambda: self._room_say_photo(deliver=self._host_chat_send_media, button=self.chat_photo_button))
+        send_row.addWidget(self.chat_message_input, 1)
+        for _w in (self.chat_emoji_button, self.chat_gif_button, self.chat_photo_button, self.chat_send_button): send_row.addWidget(_w)
+        right_layout.addLayout(send_row)
         # Three views on one page, to keep the screen uncluttered:
         #   Everyone  = the group room      Private = singer-to-singer messages (host monitors)
         #   Host chat = one-to-one messages between singers and the host
@@ -45167,7 +45176,7 @@ class KaraokeApp(QWidget):
             if new.get(ch) and idx != current: bits.append(f"{new[ch]} new")
             if attention.get(ch): bits.append(f"⚠ {attention[ch]}")
             labels.append(name + (f" ({', '.join(bits)})" if bits else ""))
-        unread = sum(1 for m in list(getattr(self, "_chat_messages", []) or []) if m.get("direction") == "in" and not m.get("read"))
+        unread = sum(1 for m in list(getattr(self, "_chat_messages", []) or []) if m.get("direction") == "in" and not m.get("read")) + self._host_chat_media_unread()
         labels.append("Host chat" + (f" ({unread} new)" if unread else ""))
         return labels
 
@@ -45245,6 +45254,7 @@ class KaraokeApp(QWidget):
             new_ids = [i for i in new_ids if not self._room_messages[i].get("host")]   # the host's own messages are not "new"
             self._room_unread += len(new_ids)      # only messages that arrived after the first load count as new
             for i in new_ids:
+                if self._room_messages[i].get("channel") == "host": continue          # counted by _host_chat_media_unread
                 ch = "dm" if self._room_messages[i].get("channel") == "dm" else "group"
                 self._room_new_by_channel[ch] = self._room_new_by_channel.get(ch, 0) + 1
         self._room_baseline_done = True
@@ -45264,6 +45274,7 @@ class KaraokeApp(QWidget):
         self._update_room_tab_title()
         self._render_room_chat()
         self._refresh_room_compose()
+        if any(m.get("channel") == "host" for m in items) or replace: self._render_chat_page()
 
     def _room_display_name(self, key: str) -> str:
         for m in self._room_messages.values():
@@ -45332,31 +45343,7 @@ class KaraokeApp(QWidget):
             stamp = time.strftime("%I:%M:%S %p", time.localtime(int(m.get("created_at") or 0))) if m.get("created_at") else ""
             text = _html.escape(str(m.get("message") or "")).replace("\n", "<br>")
             if status == "removed" and text: text = f"<s style='color:#9ca3af'>{text}</s>"
-            body = text
-            media_id = int(m.get("media_id") or 0)
-            if m.get("kind") == "image" and media_id:
-                img = self._room_media.get(media_id)
-                if img is None:
-                    body += "<br><i style='color:#9ca3af'>loading picture…</i>"; self._room_fetch_media(media_id)
-                else:
-                    uri = self._room_media_thumb.get(media_id)
-                    if uri is None:
-                        import base64
-                        from PyQt6.QtCore import QBuffer, QIODevice
-                        thumb = img.scaledToWidth(260, Qt.TransformationMode.SmoothTransformation) if img.width() > 260 else img
-                        buf = QBuffer(); buf.open(QIODevice.OpenModeFlag.WriteOnly); thumb.save(buf, "PNG")
-                        uri = "data:image/png;base64," + base64.b64encode(bytes(buf.data())).decode("ascii")
-                        self._room_media_thumb[media_id] = uri
-                    body += f"<br><a href='room://image/{media_id}'><img src='{uri}'></a>"
-            gif = m.get("gif") if m.get("kind") == "gif" and isinstance(m.get("gif"), dict) else None
-            if gif and re.match(r"^https://(media[0-9]*|i)\.giphy\.com/", str(gif.get("preview") or "")):
-                gid = str(gif.get("id") or "")
-                self._room_gif_full[gid] = str(gif.get("full") or gif.get("url") or "")
-                uri = self._room_media_thumb.get("gif:" + gid)
-                if uri is None:
-                    body += "<br><i style='color:#9ca3af'>loading GIF…</i>"; self._room_fetch_gif(gid, str(gif["preview"]))
-                else:
-                    body += f"<br><a href='room://gif/{quote(gid, safe='')}'><img src='{uri}'></a> <span style='color:#9ca3af;font-size:11px'>GIF · GIPHY (click to open)</span>"
+            body = text + self._room_attachment_html(m)
             sender_key = quote(str(m.get("from_key") or ""), safe="")
             acts = []
             if status == "removed": acts.append(f"<a href='room://restore/{mid}'>Restore</a>")
@@ -45375,6 +45362,36 @@ class KaraokeApp(QWidget):
                 f"<br><span style='font-size:11px;color:#9ca3af'>{'  |  '.join(acts)}</span></td></tr></table>")
         view.setHtml("".join(out))
         bar.setValue(bar.maximum() if was_bottom else old_value)
+
+    def _room_attachment_html(self, m: dict) -> str:
+        """The picture or GIF of a room / Host chat message as HTML. The thumbnail is fetched in the background
+        the first time; until then a "loading" line stands in for it."""
+        body = ""
+        media_id = int(m.get("media_id") or 0)
+        if m.get("kind") == "image" and media_id:
+            img = self._room_media.get(media_id)
+            if img is None:
+                body += "<br><i style='color:#9ca3af'>loading picture…</i>"; self._room_fetch_media(media_id)
+            else:
+                uri = self._room_media_thumb.get(media_id)
+                if uri is None:
+                    import base64
+                    from PyQt6.QtCore import QBuffer, QIODevice
+                    thumb = img.scaledToWidth(260, Qt.TransformationMode.SmoothTransformation) if img.width() > 260 else img
+                    buf = QBuffer(); buf.open(QIODevice.OpenModeFlag.WriteOnly); thumb.save(buf, "PNG")
+                    uri = "data:image/png;base64," + base64.b64encode(bytes(buf.data())).decode("ascii")
+                    self._room_media_thumb[media_id] = uri
+                body += f"<br><a href='room://image/{media_id}'><img src='{uri}'></a>"
+        gif = m.get("gif") if m.get("kind") == "gif" and isinstance(m.get("gif"), dict) else None
+        if gif and re.match(r"^https://(media[0-9]*|i)\.giphy\.com/", str(gif.get("preview") or "")):
+            gid = str(gif.get("id") or "")
+            self._room_gif_full[gid] = str(gif.get("full") or gif.get("url") or "")
+            uri = self._room_media_thumb.get("gif:" + gid)
+            if uri is None:
+                body += "<br><i style='color:#9ca3af'>loading GIF…</i>"; self._room_fetch_gif(gid, str(gif["preview"]))
+            else:
+                body += f"<br><a href='room://gif/{quote(gid, safe='')}'><img src='{uri}'></a> <span style='color:#9ca3af;font-size:11px'>GIF · GIPHY (click to open)</span>"
+        return body
 
     def _on_room_anchor(self, url):
         parts = [unquote(p) for p in url.toString().replace("room://", "", 1).split("/") if p != ""]
@@ -45493,6 +45510,9 @@ class KaraokeApp(QWidget):
         "message_too_long": "That message is too long (300 characters at most).",
         "invalid_action": "The server needs the newer chat update before the host can speak.",
         "invalid_recipient": "Pick a private conversation first (Interject).",
+        "direct_messages_disabled": "Messaging singers is switched off in the web dashboard.",
+        "missing_attachment": "Pick a picture or a GIF first.",
+        "invalid_media": "That picture could not be sent. Try again.",
     }
 
     def _room_say_send(self, gif_id: str = "", media_id: int = 0):
@@ -45533,15 +45553,17 @@ class KaraokeApp(QWidget):
             self._run_on_ui_thread(finish)
         threading.Thread(target=worker, daemon=True, name="room-chat-say").start()
 
-    def _room_say_photo(self):
-        if self._room_say_context() is None: return
+    def _room_say_photo(self, deliver=None, button=None):
+        """Pick a picture, upload it as the host and hand the media id to `deliver` (default: speak in the room)."""
+        if deliver is None and self._room_say_context() is None: return
         path, _ = QFileDialog.getOpenFileName(self, "Send a picture", "", "Pictures (*.jpg *.jpeg *.png *.gif *.webp)")
         if not path: return
         conn = self._room_chat_conn()
         if not conn:
             self._show_processing_notification("Room chat needs the server connection to be configured.", level="error"); return
         base, user, key = conn
-        self.room_say_photo_button.setEnabled(False)
+        button = button or self.room_say_photo_button
+        button.setEnabled(False)
 
         def worker():
             media_id = 0; error = ""
@@ -45556,15 +45578,16 @@ class KaraokeApp(QWidget):
                 error = str(exc)
 
             def finish():
-                self._refresh_room_compose()
-                if media_id: self._room_say_send(media_id=media_id)
+                self._refresh_room_compose(); button.setEnabled(True)
+                if media_id: (deliver or self._room_say_send)(media_id=media_id)
                 else: self._show_processing_notification("Could not upload the picture: " + self._ROOM_SAY_ERRORS.get(error, error), level="error")
             self._run_on_ui_thread(finish)
         threading.Thread(target=worker, daemon=True, name="room-chat-photo").start()
 
-    def _room_say_gif(self):
-        """Search GIPHY through the server (same allowance and rating limit singers use) and send the chosen GIF."""
-        if self._room_say_context() is None: return
+    def _room_say_gif(self, deliver=None):
+        """Search GIPHY through the server (same allowance and rating limit singers use) and send the chosen GIF
+        (in the room, or through `deliver`)."""
+        if deliver is None and self._room_say_context() is None: return
         conn = self._room_chat_conn()
         if not conn:
             self._show_processing_notification("Room chat needs the server connection to be configured.", level="error"); return
@@ -45630,7 +45653,7 @@ class KaraokeApp(QWidget):
         search()
         if dlg.exec() == QDialog.DialogCode.Accepted:
             item = results.currentItem()
-            if item is not None: self._room_say_send(gif_id=str(item.data(Qt.ItemDataRole.UserRole)))
+            if item is not None: (deliver or self._room_say_send)(gif_id=str(item.data(Qt.ItemDataRole.UserRole)))
 
     def _room_action(self, action: str, args: dict):
         conn = self._room_chat_conn()
@@ -45713,7 +45736,7 @@ class KaraokeApp(QWidget):
                 self._room_media_pending.discard(media_id)
                 if image is not None:
                     self._room_media[media_id] = image
-                    self._render_room_chat()
+                    self._render_room_chat(); self._render_host_chat_transcript()
             self._run_on_ui_thread(finish)
         threading.Thread(target=worker, daemon=True, name="room-chat-media").start()
 
@@ -45740,7 +45763,7 @@ class KaraokeApp(QWidget):
                 self._room_media_pending.discard(key)
                 if uri is not None:
                     self._room_media_thumb[key] = uri
-                    self._render_room_chat()
+                    self._render_room_chat(); self._render_host_chat_transcript()
             self._run_on_ui_thread(finish)
         threading.Thread(target=worker, daemon=True, name="room-chat-gif").start()
 
@@ -45762,28 +45785,116 @@ class KaraokeApp(QWidget):
             if key: grouped.setdefault(key, []).append(msg)
         return grouped
 
+    # ---- Host chat pictures and GIFs --------------------------------------------------------------------
+    # Plain text lives in singer_notifications (host_chat.php). A picture or GIF is a room-chat row on channel "host"
+    # whose thread is the singer's key; those rows arrive with the room messages, so they are merged by time here.
+    def _host_chat_media_rows(self, key=None):
+        out = []
+        for mid in sorted(getattr(self, "_room_messages", {}) or {}):
+            m = self._room_messages[mid]
+            if m.get("channel") != "host": continue
+            if key is None or str(m.get("thread") or "").casefold() == key: out.append(m)
+        return out
+
+    def _host_chat_media_unread(self, key=None) -> int:
+        seen = getattr(self, "_host_media_read", None)
+        if seen is None: seen = self._host_media_read = set()
+        return sum(1 for m in self._host_chat_media_rows(key)
+                   if not m.get("host") and str(m.get("from_key") or "") != "@host" and m.get("status") != "removed" and int(m["id"]) not in seen)
+
+    def _host_chat_singer_name(self, key: str) -> str:
+        for m in (self._chat_conversations().get(key) or [])[::-1]:
+            if m.get("singer"): return str(m["singer"])
+        for m in self._host_chat_media_rows(key)[::-1]:
+            if m.get("from_key") not in ("", "@host", None) and m.get("from"): return str(m["from"])
+        return ""
+
+    def _render_host_chat_transcript(self):
+        view = getattr(self, "chat_transcript", None)
+        if view is None or not hasattr(self, "chat_singer_list"): return
+        import html as _html
+        item = self.chat_singer_list.currentItem()
+        key = str(item.data(Qt.ItemDataRole.UserRole) or "") if item is not None else ""
+        entries = [(int(m.get("created_at") or 0), 0, int(m.get("id") or 0), m, False) for m in self._chat_conversations().get(key, [])]
+        entries += [(int(m.get("created_at") or 0), 1, int(m.get("id") or 0), m, True) for m in self._host_chat_media_rows(key)]
+        entries.sort(key=lambda e: e[:3])
+        bar = view.verticalScrollBar(); was_bottom = bar.value() >= bar.maximum() - 4; old_value = bar.value()
+        out = []
+        for ts, _kind, _id, m, is_media in entries:
+            stamp = time.strftime("%I:%M %p", time.localtime(ts)) if ts else ""
+            if is_media:
+                mine = bool(m.get("host")) or str(m.get("from_key") or "") == "@host"
+                if m.get("status") == "removed":
+                    body = "<i style='color:#9ca3af'>(removed)</i>"
+                else:
+                    body = _html.escape(str(m.get("message") or "")).replace("\n", "<br>") + self._room_attachment_html(m)
+            else:
+                mine = m.get("direction") != "in"
+                body = _html.escape(str(m.get("message") or "")).replace("\n", "<br>")
+            out.append(f"<p style='margin:0 0 12px 0'><b>{'You' if mine else 'Singer'}</b> <span style='color:#9ca3af'>{stamp}</span><br>{body}</p>")
+        view.setHtml("".join(out))
+        bar.setValue(bar.maximum() if was_bottom else old_value)
+
+    def _host_chat_send_media(self, gif_id: str = "", media_id: int = 0):
+        """Send the picked picture / GIF (with whatever is typed as a caption) to the selected singer's Host chat."""
+        item = self.chat_singer_list.currentItem()
+        if item is None:
+            self._show_processing_notification("Pick a singer conversation first.", level="warning"); return
+        key = str(item.data(Qt.ItemDataRole.UserRole) or ""); singer = self._host_chat_singer_name(key)
+        conn = self._room_chat_conn()
+        if not conn or not singer:
+            self._show_processing_notification("Host chat needs the server connection to be configured.", level="error"); return
+        base, user, api_key = conn
+        payload = {"user": user, "action": "say", "channel": "host", "a": key, "singer_name": singer,
+                   "message": self.chat_message_input.text().strip(),
+                   "host_name": str(self.settings.get("host_chat_name", "Host") or "Host")}
+        if gif_id: payload["gif_id"] = str(gif_id)
+        if media_id: payload["media_id"] = int(media_id)
+
+        def worker():
+            ok = False; error = ""
+            try:
+                r = requests.post(f"{base}/api/v1/host_chat_moderation.php", data=payload,
+                                  headers={"X-API-Key": api_key, "Accept": "application/json"}, timeout=10)
+                data = r.json() if r.content else {}
+                ok = bool(r.ok and data.get("ok"))
+                if not ok: error = str(data.get("error") or f"Server returned {r.status_code}")
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                if ok:
+                    self.chat_message_input.clear(); self._schedule_room_poll(True)
+                else:
+                    self._show_processing_notification("Could not send: " + self._ROOM_SAY_ERRORS.get(error, error), level="error")
+            self._run_on_ui_thread(finish)
+        threading.Thread(target=worker, daemon=True, name="host-chat-media").start()
+
     def _render_chat_page(self):
         if not hasattr(self, "chat_singer_list"): return
         grouped = self._chat_conversations(); current_key = self.chat_singer_list.currentItem().data(Qt.ItemDataRole.UserRole) if self.chat_singer_list.currentItem() else ""
+        media_by_key = {}
+        for m in self._host_chat_media_rows():
+            media_by_key.setdefault(str(m.get("thread") or "").casefold(), []).append(m)
+        for k in list(media_by_key):
+            if not k: media_by_key.pop(k)
+        latest = lambda k: max([int(m.get("created_at") or 0) for m in grouped.get(k, [])] + [int(m.get("created_at") or 0) for m in media_by_key.get(k, [])] + [0])
         self.chat_singer_list.blockSignals(True); self.chat_singer_list.clear(); target = -1
-        for key, messages in sorted(grouped.items(), key=lambda pair: max(int(m.get("id",0)) for m in pair[1]), reverse=True):
-            unread = sum(1 for m in messages if m.get("direction") == "in" and not m.get("read"))
-            name = str(messages[-1].get("singer") or key); item = QListWidgetItem(f"{name}{f'  • {unread} new' if unread else ''}")
+        for key in sorted(set(grouped) | set(media_by_key), key=latest, reverse=True):
+            messages = grouped.get(key, [])
+            unread = sum(1 for m in messages if m.get("direction") == "in" and not m.get("read")) + self._host_chat_media_unread(key)
+            name = self._host_chat_singer_name(key) or key; item = QListWidgetItem(f"{name}{f'  • {unread} new' if unread else ''}")
             item.setData(Qt.ItemDataRole.UserRole, key); self.chat_singer_list.addItem(item)
             if key == current_key: target = self.chat_singer_list.count()-1
         if target < 0 and self.chat_singer_list.count(): target = 0
         if target >= 0: self.chat_singer_list.setCurrentRow(target)
         self.chat_singer_list.blockSignals(False)
-        item = self.chat_singer_list.currentItem(); key = item.data(Qt.ItemDataRole.UserRole) if item else ""; lines=[]
-        for m in grouped.get(key, []):
-            who = "Singer" if m.get("direction") == "in" else "You"
-            stamp = time.strftime("%I:%M %p", time.localtime(int(m.get("created_at") or 0))) if m.get("created_at") else ""
-            lines.append(f"{who}  {stamp}\n{m.get('message','')}")
-        self.chat_transcript.setPlainText("\n\n".join(lines)); self.chat_transcript.moveCursor(QTextCursor.MoveOperation.End)
+        self._render_host_chat_transcript()
         self._update_room_tab_title()
 
     def _update_chat_nav_state(self):
         unread = sum(1 for m in list(getattr(self,"_chat_messages",[]) or []) if m.get("direction")=="in" and not m.get("read"))
+        unread += self._host_chat_media_unread()                          # pictures / GIFs singers sent to the host
         unread += len(getattr(self, "_room_attention_ids", ()) or ())   # held / reported room messages
         label = getattr(self,"_nav_text_labels",{}).get(getattr(self,"bottom_chat_button",None))
         if label is not None: label.setText(f"Chat ({unread})" if unread else "Chat")
@@ -45855,6 +45966,9 @@ class KaraokeApp(QWidget):
         key=str(item.data(Qt.ItemDataRole.UserRole) or ""); singer=""
         for m in self._chat_messages:
             if str(m.get("singer_key") or "")==key: m["read"]=True; singer=str(m.get("singer") or singer)
+        seen = getattr(self, "_host_media_read", None)
+        if seen is None: seen = self._host_media_read = set()
+        seen.update(int(m["id"]) for m in self._host_chat_media_rows(key))
         if not singer: return
         base=_network_normalize_base_url(self.settings.get("base_url","")); user=str(self.settings.get("user",self.settings.get("tenant","")) or ""); api=str(self.settings.get("api_key","") or "")
         def mark_read():
@@ -45867,7 +45981,7 @@ class KaraokeApp(QWidget):
     def _send_chat_message(self):
         item=self.chat_singer_list.currentItem(); message=self.chat_message_input.text().strip()
         if item is None or not message: return
-        key=str(item.data(Qt.ItemDataRole.UserRole) or ""); grouped=self._chat_conversations(); singer=str((grouped.get(key) or [{}])[-1].get("singer") or "")
+        key=str(item.data(Qt.ItemDataRole.UserRole) or ""); singer=self._host_chat_singer_name(key)
         if not singer: return
         self.chat_message_input.clear(); self.chat_send_button.setEnabled(False)
         def worker():

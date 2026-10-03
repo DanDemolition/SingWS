@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - environments without a working Qt
 METHODS = {'_room_chat_conn', '_update_room_tab_title', '_room_poll_tick', '_apply_room_list',
            '_room_display_name', '_render_room_chat', '_on_room_anchor', '_room_view_open', '_room_channel_counts',
            '_chat_tab_labels', '_on_chat_tab_changed', '_room_thread_keys', '_room_say_context', '_refresh_room_compose',
-           '_room_say_send'}
+           '_room_say_send', '_room_attachment_html', '_host_chat_media_rows', '_host_chat_media_unread'}
 
 
 @lru_cache(maxsize=1)
@@ -73,6 +73,7 @@ class RoomTabTests(unittest.TestCase):
         host._room_media = {}; host._room_media_thumb = {}; host._room_gif_full = {}; host._room_media_pending = set(); host._room_reachable = True
         host._room_baseline_done = False
         host._update_chat_nav_state = mock.Mock(); host._show_processing_notification = mock.Mock()
+        host._render_chat_page = mock.Mock(); host._render_host_chat_transcript = mock.Mock()
         host._room_action = mock.Mock(); host._room_show_image = mock.Mock(); host._room_fetch_media = mock.Mock(); host._room_fetch_gif = mock.Mock()
         host._schedule_room_poll = mock.Mock()
         host._run_on_ui_thread = lambda fn: fn()
@@ -93,6 +94,19 @@ class RoomTabTests(unittest.TestCase):
 
     def text(self, host):
         return host.room_view.toPlainText()
+
+    def test_host_chat_items_are_not_room_messages(self):
+        """A picture in a singer's Host chat arrives with the room rows but belongs to Host chat only."""
+        host = self.make()
+        host._apply_room_list({'messages': [msg(1)], 'mutes': [], 'settings': {}}, replace=True)          # baseline
+        private = dict(msg(2, channel='host', frm='Alice', frm_key='alice', text='secret picture', kind='image', media_id=5), thread='alice')
+        host._apply_room_list({'messages': [msg(1), private], 'mutes': [], 'settings': {}}, replace=True)
+        self.assertEqual(host._room_new_by_channel, {'group': 0, 'dm': 0})
+        host.room_filter_combo.setCurrentIndex(1); host._render_room_chat()
+        self.assertNotIn('secret picture', host.room_view.toPlainText())
+        host.room_filter_combo.setCurrentIndex(2); host._render_room_chat()
+        self.assertNotIn('secret picture', host.room_view.toPlainText())
+        host._render_chat_page.assert_called()                       # the Host chat page is refreshed instead
 
     def test_shows_group_private_and_flags(self):
         host = self.make()
