@@ -4,7 +4,7 @@ Updated 2026-09-29.
 
 ## VERSION POLICY (operator instruction, 2026-09-29)
 
-**Do not bump the version for test builds.** 1.0.0.6 is the latest release (2026-10-02); rebuild for testing without changing it
+**Do not bump the version for test builds.** 1.0.0.7 is the latest release (2026-10-03); rebuild for testing without changing it
 and bump only when the operator says release. (1.0.0.5 was published 2026-09-29 and re-released with host chat on 2026-09-30.)
 Iron rule: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make fileproviderd/cloudd/bird
 saturate the Mac (load average >50) and cause video slowdowns while the capture itself logs a steady 29 fps. Do not build while the
@@ -48,6 +48,15 @@ missing song and an apostrophe mismatch): identical answers every time, 6.0 s ->
 Remaining risk: if rows ever arrive in several chunks more than ~0.3 s apart the poll could settle early; the existing retry ladder then
 applies. Watch `[KARAFUN-AUTO] search attempt=1 result=` in the next show log (expect FOUND at attempt 1 and ~3 s after the query).
 Tests: `SearchTimingTests` in test_karafun_search_fix.py. The harness used is /tmp/kf/search_timing.py (not in the repo).
+
+## RELEASED 1.0.0.7 — 2026-10-03 (published, latest; NOT yet installed on this Mac)
+Tag `v1.0.0.7`, release commit `2e75508`; https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.7. arm64 `20e41877...` (127,052,832 B), x86_64
+`0b403a30...` (152,908,214 B); re-downloaded sizes and SHA-256s equal `docs/release.json`; Pages and both `latest/download` links verified.
+Checks: hdiutil, strict signature, arch, version 1.0.0.7, macOS min 12.3, new code present and removed code absent in the frozen bytecode, smoke
+launch of both (Intel under Rosetta, scratch profile, clean shutdown, live log untouched). Tests: 1,233 + 92 app, 19 server suites. Contents: faster
+KaraFun search (~3 s) and picture (~2 s), Host chat pictures/GIFs + phone chat layout (server already deployed), animation text fits the small preview,
+Reset-to-defaults fix, ~1,900 lines of dead code removed. Normal auto-update path (new version number). Cleanup moved ~4 GB of old builds/venvs to the Trash.
+First thing to do: install, play one KaraFun song and one CDG song, check the new log lines (see the audit report).
 
 ## Pre-show audit — 2026-10-03: GO WITH CAUTION (report: docs/verification/2026-10-03-preshow-audit.md)
 Done headless; nothing built/installed. Fixed: Reset-to-defaults NameError, animation text clipping in the small preview, plus dead-code removal
