@@ -11,6 +11,30 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## Rehearsal of the post-1.0.0.7 test build — 2026-10-03 (installed on this Mac: test build 4, label 1.0.0.7, NOT published, 6 local commits pushed)
+Installed exe starts `949b43cf...` (arm64). Operator-confirmed on real hardware: KaraFun auto-start of two songs (Avenged Sevenfold / A Little Piece of
+Heaven; Bruno Mars / Finesse remix), the fast picture start (`starting at once from the last pane region` then `last pane region confirmed`), seek,
+live key/tempo, song end + rotation advance + background music return, an MP4 song, CDG songs with background video, history, waitlist, host/phone chat on a
+real phone, a 30 s Wi-Fi cut (relay reconnected in ~5 s, 72 requests reconciled, no duplicates, playback unaffected). No tracebacks or crash reports.
+- **KaraFun search wait (the "still isn't starting" bug):** the poll-for-rows version of `_karafun_search_script` (commit 3aa6010) broke every search that
+  started from KaraFun's Discover page (window renamed while polling; 16 s, no match, measured twice against twice from a fresh KaraFun). The fixed
+  `delay 3` is back (commit 78efa4e, with a warning comment). Kept: cheaper row scans, a result needs a visible length (38b2b98), and a read-only
+  `no_match diagnosis` log line (cc1ec5b). The "KaraFun search ~3 s faster" claim below is SUPERSEDED: search is ~5 s again. Do not reintroduce polling without
+  testing from a freshly launched KaraFun. The wake-window attempt (b796fef) was reverted (503166f). Still open: ~5 s of "UI not ready" retries on the
+  first search after KaraFun is launched hidden.
+- **Background music coming in late was a SETTING, not code:** the operator's `~/SingWS/settings.json` had `karaoke_trim_verified_tail: false` (checkbox
+  "Skip verified silence at the end of karaoke songs"), which skips the audio-end scan entirely, so the music fell back to the fixed 3 s before the file
+  end. After he switched it on, `[END-AUDIO] holding; audio continues to ...` appears and he said the music came in "right when I would have".
+  The shipped default is on.
+- **Background video loops:** `~/Music/Karaoke/VJ Loops` are Photo-JPEG .mov at 70 Mbit/s (1.3 GB), software-decoded (`hwdec=no` for the background
+  player, pinned in test_bg_video_lyrics.py). H.264 copies made in `~/Music/Karaoke/VJ Loops H264 test` (182 MB, same frames, looks identical). On Apple
+  Silicon: libavcodec work in a 6 s sample fell ~80% and total busy work ~43%, but overall CPU stayed ~70%; operator felt it ran better. Expected to help Intel
+  more (software decode); NOT measured on Intel. Hardware decode for the H.264 loops was proposed, not done.
+- **Load facts (dev Mac):** ~190 idle ffmpeg worker threads appear at every song start and vanish at the end (harmless); idle memory steps 594 -> 868 MB
+  (first MP4/first song) -> ~1,030 -> ~1,065 MB then plateaus (IOSurface pools 424 MB, constant); no per-song leak seen on CDG. Whether the first step was
+  "first song" or "MP4" was not separated (no second MP4 available); the operator chose to drop it.
+- **Not done:** Intel never run; Intel-only 120-400 ms stalls unexplained; the commits are on `main` but NOTHING is released. Release 1.0.0.8 only when the operator says.
+
 ## Between-singer animations clipped in the host preview — fixed in source 2026-10-03, committed locally, NOT built/installed
 Operator report: the applause / singer-start animations looked zoomed in and cut off. Seen in his screenshot: only in the small Karaoke Preview
 panel of the main window (about 430x200); the real audience window was fine. Cause: `QML_SHOW_SCREEN_VFX_SOURCE` Text items had fixed
@@ -38,7 +62,7 @@ black player. Also: the probe no longer reads element names (1.8 s -> 1.45 s; th
 moved/resized KaraFun's window or dragged the splitter since the last song, the TV shows the wrong crop for the ~1.5 s until the probe re-aims.
 Tests: test_karafun_fast_capture.py (7). To check on a real song: log lines above, and the picture should appear ~2 s earlier than before.
 
-## KaraFun search ~3 s faster — 2026-10-03, committed locally, NOT built/installed, tried on the real KaraFun (search only, nothing played)
+## KaraFun search ~3 s faster — 2026-10-03 — SUPERSEDED: the polling was reverted (see the rehearsal section above); search is a fixed 3 s wait again
 `_karafun_search_script` (0.2.18.1.py) took ~6 s per search: 0.45 s to find the search field, 0.2 s typing, a FIXED `delay 3`, then ~2.3 s
 scanning rows. Measured live: the results window (the main window retitled "Results for ...") holds ~71 elements until the rows arrive
 (~0.6 s after Enter), then jumps to 116-176 and stays. Now: poll `count of entire contents of mainWindow` (0.32 s per poll), carry on once it

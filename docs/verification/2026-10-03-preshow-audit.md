@@ -80,3 +80,9 @@ Server deployed by the operator and verified hash-equal to the repo: chat files 
 ## 15. Assessment: GO WITH CAUTION
 No known show-critical failure remains and all automated checks pass, but the playback, long-duration and reconnect checks that the checklist
 requires for a plain GO were not possible headless. Do the 10-minute rehearsal above before the show.
+
+## Addendum: rehearsal with an installed test build (2026-10-03 afternoon)
+Played on the real Mac (Apple Silicon, normal profile): two KaraFun songs, an MP4, three CDG songs with background video, key/tempo/seek, history,
+waitlist, host and phone chat, a 30 s Wi-Fi cut. All behaved; see HANDOFF.md for the log evidence. Corrections to the audit above: the KaraFun
+"search 6 s -> 3 s" polling change was a regression on a fresh KaraFun start and was reverted (fixed 3 s wait restored); background music late at song end
+was the operator's saved setting `karaoke_trim_verified_tail=false`, not code. Still unverified: Intel hardware, Intel-only stalls, a 4-hour soak.
