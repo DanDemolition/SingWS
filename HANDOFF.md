@@ -49,6 +49,16 @@ Remaining risk: if rows ever arrive in several chunks more than ~0.3 s apart the
 applies. Watch `[KARAFUN-AUTO] search attempt=1 result=` in the next show log (expect FOUND at attempt 1 and ~3 s after the query).
 Tests: `SearchTimingTests` in test_karafun_search_fix.py. The harness used is /tmp/kf/search_timing.py (not in the repo).
 
+## Server state vs GitHub — 2026-10-03
+Host chat pictures/GIFs + phone chat layout: DEPLOYED by the operator (all seven files hash-equal to server commit `8f6fff6`; singer page serves
+`room_chat_ui.js?v=2`; chat endpoints 401 without a key; config.inc 403). Server repo `8f6fff6` and app repo are pushed to GitHub.
+Full tracked-file comparison (178 files vs live): everything equal except (1) the three deploy scripts (not meant to be on the server),
+(2) `tenants/_template/okjweb.db` and `settings.json` (runtime template data, left alone), and (3) **`global.inc`**: the live copy is the version before
+`06ed70d` (July 19, request identity/order sync); that commit was deployed except this one file. The repo version adds `PRAGMA busy_timeout=5000`
+and skips a write when the state row exists (server PHP 8.3 already throws on PDO errors by default). Low risk, fixes "database is locked" blank
+responses when phones submit at the same moment. One-file deploy prepared, NOT yet run: `server-deployments/global-inc-sync/deploy.sh`
+(checks live == the old version first, backs up, php -l, hashes, undo script).
+
 ## Host chat pictures/GIFs + phone chat layout — 2026-10-03, committed locally, NOT built, NOT deployed, NOT pushed
 Operator asked for (1) pictures and GIFs in the app's Host chat window (they existed only in Everyone/Private), (2) a better phone layout
 for the chat sheet (close X too small, sheet sitting under the address bar).
