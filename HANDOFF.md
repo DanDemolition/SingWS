@@ -14,9 +14,9 @@ SingWS; the operator decided full screen works as is.
 ## Log review 2026-10-03 of the 2026-10-02 show (1.0.0.5 -> 1.0.0.6, Intel venue Mac) — source fix committed, NOT built/installed
 No errors or Python tracebacks; all 4 KaraFun songs started (13 s from queue to playing; the AppleScript search is ~7 s of that),
 capture 5-7 ms/frame at 24-28 fps. One real fault: **21:26:59 closeEvent ran, no "clean shutdown", app relaunched 2 min later** (a
-network blip: server_sync 1.9 s just before). `network_lifecycle.wait_for_idle()` and `QThread.wait()` in `_shutdown_network_transports`
-have no limit. Fix: `_start_shutdown_watchdog` (after settings + queue are saved, forces `os._exit(0)` 20 s later, logs
-`[SHUTDOWN] still running ...`) plus `[SHUTDOWN]` breadcrumbs; tests in `test_shutdown_breadcrumbs.py`. Cause not proven (no stack).
+network blip: server_sync 1.9 s just before). `network_lifecycle.wait_for_idle()` and `QThread.wait()` in `_shutdown_network_transports` have no limit, but the operator does not
+remember any hang and this is the only occurrence, so NO behaviour change was made: only `[SHUTDOWN]` breadcrumbs in `closeEvent` and
+before the two waits (a forced-exit watchdog was added then removed). If it recurs, the last `[SHUTDOWN]` line shows where it stops.
 Not changed (no evidence of harm): ~1 GUI stall/min of 120-400 ms in every state (stack capture is off), ~2 per song change (median
 235 ms), 400 ms stall after each song end when "rotation decorative effects resumed" (consistent ~410 ms; the rotation_effects probes
 never fired, so the cost is elsewhere), 2-3 s stall at every launch (app_startup 2.3-3.1 s), key/tempo readback returns None every

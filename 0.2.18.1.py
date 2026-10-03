@@ -47003,31 +47003,6 @@ class KaraokeApp(QWidget):
     # ========== END SKIP FUNCTIONALITY ==========
 
 
-    SHUTDOWN_WATCHDOG_SECONDS = 20.0
-
-    def _start_shutdown_watchdog(self):
-        """Guarantee the app exits after the operator quits.
-
-        2026-10-02 21:26:59: closeEvent ran, "clean shutdown" never logged, and the app was gone two minutes later only
-        because it was relaunched. Teardown waits on in-flight HTTP (network_lifecycle.wait_for_idle) and on QThreads with
-        no limit, so a network hiccup can hold the process open. By the time this starts, settings and the queue are
-        already saved; if the process is still alive after the limit, exit it rather than leave a ghost window.
-        """
-        if getattr(self, "_shutdown_watchdog_started", False):
-            return
-        self._shutdown_watchdog_started = True
-        limit = float(self.SHUTDOWN_WATCHDOG_SECONDS)
-
-        def _force_exit():
-            time.sleep(limit)
-            try:
-                _diag(f"[SHUTDOWN] still running {limit:.0f}s after close; forcing exit (data was saved before teardown)")
-            except Exception:
-                pass
-            os._exit(0)
-
-        threading.Thread(target=_force_exit, daemon=True, name="shutdown-watchdog").start()
-
     def closeEvent(self, event):
         """Close main window -> quit whole app.
 
@@ -47108,10 +47083,6 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[SHUTDOWN] final queue save failed: {e}")
         _diag("[SHUTDOWN] settings and queue saved")
-        try:
-            self._start_shutdown_watchdog()
-        except Exception:
-            pass
 
         # Stop karaoke playback cleanly
         try:
