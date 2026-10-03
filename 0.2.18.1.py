@@ -800,36 +800,12 @@ ZIP_METHOD_STORE     = 0
 ZIP_METHOD_DEFLATE   = 8
 ZIP_METHOD_DEFLATE64 = 9
 
-def zip_uses_deflate64(zip_path: str) -> bool:
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            for zi in zf.infolist():
-                if zi.compress_type == ZIP_METHOD_DEFLATE64:
-                    return True
-        return False
-    except Exception:
-        return True
 
 
 # ---------------- ZIP Handling (Cross-platform, safe, cached) ----------------
 import zipfile
 from collections import OrderedDict
 
-def probe_duration_from_zip(zip_path: str) -> float | None:
-    "Probe duration of MP3 inside a ZIP without extracting to disk"
-    import os
-    zip_path = os.path.abspath(zip_path)  # Fix for Windows background thread context
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            for name in zf.namelist():
-                if name.lower().endswith('.mp3'):
-                    with zf.open(name) as mp3file:
-                        if MutagenFile:
-                            mf = MutagenFile(BytesIO(mp3file.read()))
-                            return mf.info.length if mf and mf.info else None
-    except Exception as e:
-        print(f"zip fast duration failed: {zip_path} :: {e}")
-    return None
 
 # Add this class after your existing imports and before the KaraokeApp class
 
@@ -839,46 +815,6 @@ class PlaybackCache:
     def __init__(self):
         self.cache = OrderedDict()
 
-    def extract_for_playback(self, zip_path: str) -> str:
-        import tempfile, shutil
-        if zip_path in self.cache:
-            self.cache.move_to_end(zip_path)
-            return self.cache[zip_path]
-
-        tmpdir = tempfile.mkdtemp(prefix="mp3g_")
-        max_uncompressed_bytes = 512 * 1024 * 1024
-
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                members = [zi for zi in zf.infolist() if not zi.is_dir()]
-                total_uncompressed = sum(max(0, zi.file_size) for zi in members)
-                if total_uncompressed > max_uncompressed_bytes:
-                    raise ValueError("ZIP is too large to extract safely")
-
-                for zi in members:
-                    rel_name = zi.filename.replace("\\", "/")
-                    parts = [p for p in rel_name.split("/") if p]
-                    if any(p == ".." for p in parts):
-                        raise ValueError(f"Unsafe ZIP entry path: {zi.filename}")
-                    if rel_name.startswith("/"):
-                        raise ValueError(f"Unsafe ZIP entry path: {zi.filename}")
-
-                    out_path = os.path.normpath(os.path.join(tmpdir, rel_name))
-                    if os.path.commonpath([tmpdir, out_path]) != tmpdir:
-                        raise ValueError(f"Unsafe ZIP entry path: {zi.filename}")
-
-                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                    with zf.open(zi, "r") as src, open(out_path, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-
-            self.cache[zip_path] = tmpdir
-            if len(self.cache) > self.MAX_CACHE:
-                old_zip, old_tmp = self.cache.popitem(last=False)
-                shutil.rmtree(old_tmp, ignore_errors=True)
-            return tmpdir
-        except Exception as e:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            raise RuntimeError(f"Failed to extract ZIP: {e}")
 playback_cache = PlaybackCache()
 
 def find_mp3g_in_dir(folder: str):
@@ -1965,14 +1901,6 @@ def set_loudness_workers_enabled(enabled: bool, reason: str = ""):
         _loudness_cancel_event.set()
 
 
-def _loudness_lower_priority(pid: int):
-    """Renice the analysis subprocess from the parent so the OS scheduler favors
-    playback threads.  Done after spawn (not via preexec_fn) because preexec_fn
-    is unsafe in a multithreaded program.  Best-effort; ignored if unsupported."""
-    try:
-        os.setpriority(os.PRIO_PROCESS, pid, 12)
-    except Exception:
-        pass
 
 
 def _loudness_load_cache():
@@ -3974,98 +3902,6 @@ for _canonical_brand, _aliases in DISC_BRAND_ALIASES.items():
             _keys.add(_key)
     _DISC_BRAND_ALIAS_KEYS_BY_CANONICAL[_canonical_brand] = _keys
 
-def build_bg_index(roots, out_path=BG_MUSIC_INDEX_PATH, max_workers=8, fast_only=True):
-    """
-    Build/refresh a fast BG music index. Phase 1 is path/size/mtime only (instant at 60k+ files).
-    If fast_only=False, will also probe tags/duration using mutagen in a thread pool.
-    """
-    import os, time, hashlib, json
-    from pathlib import Path
-    audio_exts = {'.mp3','.wav','.flac','.m4a','.aac','.ogg','.mp4'}
-
-    roots = [str(Path(r)) for r in roots or [] if r and os.path.isdir(r)]
-    if not roots:
-        data = {"version": 1, "scanned_at": int(time.time()), "roots": [], "track_count": 0, "tracks": []}
-        out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        return data
-
-    # Load existing for incremental checks
-    existing = {}
-    try:
-        if out_path.exists():
-            existing = json.loads(out_path.read_text(encoding="utf-8"))
-    except Exception:
-        existing = {}
-    prev = {t.get("path"): (t.get("size",0), t.get("mtime",0)) for t in existing.get("tracks", [])}
-
-    files = []
-    for root in roots:
-        for dirpath, _, filenames in os.walk(root):
-            base = os.path.basename(dirpath)
-            if base.startswith('.'):   # skip dot folders
-                continue
-            for fn in filenames:
-                if fn.startswith('.'):  # skip dotfiles / ._*
-                    continue
-                ext = os.path.splitext(fn)[1].lower()
-                if ext in audio_exts:
-                    p = os.path.join(dirpath, fn)
-                    try:
-                        st = os.stat(p)
-                    except Exception:
-                        continue
-                    files.append((p, st.st_size, int(st.st_mtime), ext))
-
-    tracks, to_probe = [], []
-    for p, size, mtime, ext in files:
-        needs_probe = prev.get(p) != (size, mtime)
-        entry = {
-            "id": hashlib.blake2b(p.encode("utf-8"), digest_size=8).hexdigest(),
-            "path": p,
-            "file": os.path.basename(p),
-            "ext": ext,
-            "size": size,
-            "mtime": mtime,
-            "title": None, "artist": None, "album": None, "duration": None,
-        }
-        tracks.append(entry)
-        if needs_probe and not fast_only:
-            to_probe.append(entry)
-
-    # Optional parallel tag probe (lazy by default)
-    if to_probe:
-        def _probe(e):
-            try:
-                if MutagenFile:
-                    mf = MutagenFile(e["path"])
-                    if mf:
-                        if getattr(mf, "info", None) and getattr(mf.info, "length", None):
-                            e["duration"] = int(mf.info.length + 0.5)
-                        tags = getattr(mf, "tags", None)
-                        def _first(*ks):
-                            for k in ks:
-                                v = tags.get(k) if tags and k in tags else None
-                                if isinstance(v, list) and v: return str(v[0])
-                                if v: return str(v)
-                            return None
-                        e["title"]  = _first("TIT2","title","TITLE")
-                        e["artist"] = _first("TPE1","artist","ARTIST")
-                        e["album"]  = _first("TALB","album","ALBUM")
-            except Exception:
-                pass
-            return e
-
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for _ in ex.map(_probe, to_probe):
-                pass
-
-    data = {"version": 1, "scanned_at": int(time.time()), "roots": roots, "track_count": len(tracks), "tracks": tracks}
-    tmp = out_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(out_path)
-    print(f"BG index written: {out_path} ({len(tracks)} tracks)")
-    return data
 
 def _disc_brand_key(value) -> str:
     return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
@@ -4216,8 +4052,6 @@ def disc_value_matches_brand(value, brand) -> bool:
             return True
     return False
 
-def disc_id_matches_brand(disc_id, brand) -> bool:
-    return disc_value_matches_brand(disc_id, brand)
 
 def disc_brand_candidate_values(track) -> list[str]:
     if not isinstance(track, dict):
@@ -4276,15 +4110,6 @@ def effective_disc_priority(host_priority, singer_brand_raw="", singer_override=
         "unknown_ignored": bool(selected_raw and not selected),
     }
 
-def disc_priority_available_versions(matches):
-    versions = []
-    for m in matches or []:
-        if not isinstance(m, dict):
-            continue
-        disc = str(m.get("disc_id") or m.get("discid") or "").strip()
-        if disc and disc not in versions:
-            versions.append(disc)
-    return versions
 
 def build_disc_brand_scan_report(tracks, max_unknowns: int = 50) -> dict:
     report = {
@@ -4697,54 +4522,6 @@ class BackgroundMusicPlayer(QObject):
             if self.is_playing:
                 self.fade_out(500)
 
-    def load_folder(self, folder_path):
-        """Load all audio files from a folder into the playlist"""
-        from pathlib import Path
-        
-        audio_extensions = {'.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.mp4'}
-        
-        try:
-            folder = Path(folder_path)
-            audio_files = []
-            
-            # Recursively find all audio files
-            for file_path in folder.rglob('*'):
-                # Skip hidden/system files (._* files on macOS)
-                if file_path.name.startswith('.') or file_path.name.startswith('._'):
-                    continue
-                    
-                if file_path.is_file() and file_path.suffix.lower() in audio_extensions:
-                    audio_files.append(str(file_path))
-            
-            if not audio_files:
-                print(f"No audio files found in {folder_path}")
-                return
-            
-            # Sort alphabetically for consistent order
-            audio_files.sort()
-            
-            # Stop current playback
-            self.stop()
-            
-            # Clear old artwork cache when loading new folder
-            self.clear_artwork_cache()
-            
-            # Load new playlist
-            self.playlist = audio_files
-            self.current_index = 0
-            self.is_shuffled = False
-            
-            print(f"Loaded {len(audio_files)} background music tracks from {folder_path}")
-            
-            # IMMEDIATE UI update - don't wait for background tasks
-            if hasattr(self.parent(), 'update_bg_track_display'):
-                self.parent().update_bg_track_display()
-            
-            # Start background pre-caching after UI is updated
-            QTimer.singleShot(200, self._start_artwork_precache)
-                
-        except Exception as e:
-            print(f"Failed to load background music folder: {e}")
 
     def _start_artwork_precache(self):
         """Start background pre-caching of artwork for upcoming tracks"""
@@ -4797,10 +4574,6 @@ class BackgroundMusicPlayer(QObject):
         if hasattr(self.parent(), 'update_bg_track_display'):
             self.parent().update_bg_track_display()
 
-    def clear_artwork_cache(self):
-        """Clear the artwork cache to free memory"""
-        self.artwork_cache.clear()
-        print("🗑️ Artwork cache cleared")
 
     def manage_artwork_cache(self):
         """Remove old entries if cache gets too large"""
@@ -5801,13 +5574,6 @@ class BackgroundMusicPlayer(QObject):
         if was_playing:  # Auto-continue if we were playing
             self.play()
 
-    def _ensure_volume_set(self):
-        """Ensure volume is properly set on the pipeline"""
-        self._sync_volume_from_ui_or_settings("ensure-volume")
-        if self._bass_ready():
-            self._bass_engine.set_master_volume(self.volume)
-            self._bg_volume_diag("ensure-volume-applied", self.get_active_track_path())
-            return
 
     def _target_volume_from_ui(self):
         """Prefer the manager's visible slider; fall back to saved setting."""
@@ -6083,19 +5849,6 @@ class BackgroundMusicPlayer(QObject):
             
         return artwork
 
-    def get_current_artwork(self):
-        """Get artwork for currently playing track - OPTIMIZED VERSION"""
-        if not self.playlist or self.current_index >= len(self.playlist):
-            return None
-            
-        current_file = self.playlist[self.current_index]
-        
-        # Check cache first for instant return
-        if current_file in self.artwork_cache:
-            return self.artwork_cache[current_file]
-        
-        # If not cached, try to extract (this will cache it automatically)
-        return self.get_album_artwork(current_file)
     
 _CLEAN_CDG_CACHE = {"key": None, "threshold": None, "transparent": None, "result": None}
 
@@ -9203,15 +8956,6 @@ class BackgroundMusicManager(QMainWindow):
             return p
         return None
 
-    def _add_selected_from_library(self):
-        items = self.library_list.selectedItems()
-        paths = []
-        for it in items:
-            p = it.data(Qt.ItemDataRole.UserRole)
-            if p:
-                paths.append(p)
-        if paths:
-            self.add_tracks_to_playlist(paths)
 
     def _sync_to_player(self, reset_index: bool = True, defer_pipeline_realign: bool = False):
         """
@@ -9327,15 +9071,6 @@ class BackgroundMusicManager(QMainWindow):
         if 0 <= index < len(self._browser_roots):
             self._set_browser_root(self._browser_roots[index][1])
 
-    def _open_browser_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
-        if not folder:
-            return
-        # Add the folder as a quick root for fast return.
-        if all(folder != p for _l, p in self._browser_roots):
-            self._browser_roots.append((Path(folder).name or folder, folder))
-            self.browser_root_combo.addItem(self._browser_roots[-1][0])
-        self._set_browser_root(folder)
 
     def _audio_extensions(self) -> tuple[str, ...]:
         return ('.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg')
@@ -9951,51 +9686,11 @@ class BackgroundMusicManager(QMainWindow):
         self.update_timer.timeout.connect(self.update_display)
         self.update_timer.start(1000)
 
-    def load_library_index(self):
-        """Deprecated (old bgmusic.json flow). Kept as no-op for compatibility."""
-        return
 
-    def _refresh_library_view(self):
-        """Deprecated (old bgmusic.json flow)."""
-        return
 
-    def _on_library_double_click(self, item):
-        """Deprecated (old library-list flow)."""
-        return
 
-    def _clear_bg_library(self):
-        """Deprecated (old bgmusic.json flow)."""
-        return
 
-    def _iter_audio_files(self, path: str):
-        """Yield absolute audio file paths from a file or folder (recursive)."""
-        audio_exts = {'.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.mp4'}
-        if os.path.isdir(path):
-            for root, _, files in os.walk(path):
-                for f in files:
-                    if f.startswith('.'):
-                        continue
-                    if os.path.splitext(f)[1].lower() in audio_exts:
-                        yield os.path.join(root, f)
-        else:
-            if os.path.splitext(path)[1].lower() in audio_exts:
-                yield path
         
-    def add_folder(self):
-        """Add a folder to the music database"""
-        folder = QFileDialog.getExistingDirectory(self, "Select Music Folder")
-        if not folder:
-            return
-            
-        # Store the folder path for rescanning
-        if not hasattr(self, 'scanned_folders'):
-            self.scanned_folders = []
-        if folder not in self.scanned_folders:
-            self.scanned_folders.append(folder)
-            
-        # Scan for music files
-        self.scan_folder(folder)
-        self.save_database()
         
     def scan_folder(self, folder):
         """Scan a folder for music files"""
@@ -10299,17 +9994,6 @@ class BackgroundMusicManager(QMainWindow):
             except Exception as e:
                 print(f"Failed to load playlist: {e}")
                 
-    def save_database(self):
-        """Save the music database"""
-        try:
-            data = {
-                'tracks': self.music_database,
-                'folders': getattr(self, 'scanned_folders', [])
-            }
-            with open(self.db_path, 'w') as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            print(f"Failed to save database: {e}")
             
     def save_current_playlist(self):
         """Save the current playlist"""
@@ -10596,74 +10280,10 @@ class BackgroundMusicManager(QMainWindow):
         except Exception:
             pass
 
-    def _choose_bg_folders(self):
-        # Multi-select folder picker (non-native dialog allows multi)
-        dlg = QFileDialog(self, "Select background music folder(s)")
-        dlg.setFileMode(QFileDialog.FileMode.Directory)
-        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
 
-        # Start where external drives live on macOS; otherwise Home
-        try:
-            if sys.platform == "darwin" and Path("/Volumes").exists():
-                start_dir = "/Volumes"
-            else:
-                start_dir = str(Path.home())
-            dlg.setDirectory(start_dir)
-        except Exception:
-            pass
 
-        # Helpful sidebar shortcuts (Home, root, Volumes)
-        try:
-            urls = [
-                QUrl.fromLocalFile(str(Path.home())),
-                QUrl.fromLocalFile("/"),
-            ]
-            if sys.platform == "darwin":
-                urls.append(QUrl.fromLocalFile("/Volumes"))
-            dlg.setSidebarUrls(urls)
-        except Exception:
-            pass
-
-        # enable multi-select in the non-native dialog’s views
-        for w in dlg.findChildren(QTreeView) + dlg.findChildren(QListWidget):
-            try:
-                w.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-            except Exception:
-                pass
-
-        if dlg.exec():
-            folders = [str(Path(p)) for p in dlg.selectedFiles()]
-            p = self._host()
-            if p and hasattr(p, "settings"):
-                roots = list(p.settings.get("bg_import_folders", []))
-                # append only new ones
-                for f in folders:
-                    if f not in roots:
-                        roots.append(f)
-                p.settings["bg_import_folders"] = roots
-                try:
-                    p.save_settings()
-                except Exception:
-                    pass
-            self._rescan_bg_library()
-
-    def _rescan_bg_library(self):
-        """Deprecated (old bgmusic.json flow)."""
-        return
-
-    def _open_manage_folders(self):
-        """Deprecated button target; now mapped to filesystem folder picker."""
-        self._open_browser_folder()
         
-    def filter_database(self, text):
-        self.refresh_database_display()
         
-    def add_from_database(self, item):
-        """Double-click in database to add to playlist"""
-        path = item.data(Qt.ItemDataRole.UserRole)
-        if path:
-            self.add_tracks_to_playlist([path])
             
     def play_from_playlist(self, item):
         """Double-click in playlist to play"""
@@ -10744,16 +10364,6 @@ class BackgroundMusicManager(QMainWindow):
         self._sync_to_player(reset_index=False)
         self.highlight_current_track()
 
-    def _rebuild_playlist_widget(self, selected_rows=None):
-        self.playlist_list.clear()
-        for t in self.current_playlist:
-            it = self._make_playlist_item(t["filename"], t["path"])
-            self.playlist_list.addItem(it)
-        if selected_rows:
-            for r in selected_rows:
-                if 0 <= r < self.playlist_list.count():
-                    self.playlist_list.item(r).setSelected(True)
-        self.update_playlist_count()
         
     def remove_selected_from_playlist(self):
         """Remove selected rows from the Current Playlist"""
@@ -10921,15 +10531,6 @@ class BackgroundMusicManager(QMainWindow):
         except Exception as e:
             print(f"Failed to load playlist: {e}")
                 
-    def rescan_folders(self):
-        """Rescan all previously added folders"""
-        if hasattr(self, 'scanned_folders'):
-            self.music_database.clear()
-            for folder in self.scanned_folders:
-                if os.path.exists(folder):
-                    self.scan_folder(folder)
-            self.save_database()
-            self.status_label.setText(f"Rescanned {len(self.scanned_folders)} folders")
         
 
     def _apply_main_window_look(self):
@@ -15483,264 +15084,6 @@ class ZipExtractWorker(QObject):
             self.finished.emit(self.zip_path, "", "", self.semitones, False, str(e))
         
 
-class TrackItemDelegate(QStyledItemDelegate):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.row_height = 60  # Double the current height
-        
-    def paint(self, painter, option, index):
-        painter.save()
-        
-        # Get the full display text
-        full_text = index.data(Qt.ItemDataRole.DisplayRole)
-        
-        # Parse the display text to extract components
-        artist, title, disc_id, duration = self.parse_display_text(full_text)        # Set up colors based on selection/alternating
-        palette = option.palette
-        if option.state & QStyle.StateFlag.State_Selected:
-            bg_color = palette.color(QPalette.ColorRole.Highlight)
-            text_color = palette.color(QPalette.ColorRole.HighlightedText)
-        elif index.row() % 2 == 0:
-            bg_color = palette.color(QPalette.ColorRole.Base)
-            text_color = palette.color(QPalette.ColorRole.Text)
-        else:
-            bg_color = palette.color(QPalette.ColorRole.AlternateBase)
-            text_color = palette.color(QPalette.ColorRole.Text)
-
-        # Fill background
-        painter.fillRect(option.rect, bg_color)
-        # Set up fonts (inherit global app font family + size)
-        artist_font = QApplication.font(); artist_font.setWeight(QFont.Weight.Normal)
-        title_font  = QApplication.font();  title_font.setWeight(QFont.Weight.Normal)
-        right_font  = QApplication.font();  right_font.setWeight(QFont.Weight.Normal)
-        
-        painter.setPen(text_color)
-        
-        # Calculate margins and positions - BALANCED SPACING
-        left_margin = 12
-        right_margin = 12
-        vertical_margin = 12  # Equal top and bottom margin
-        line_spacing = 4  # Space between artist and title lines
-        
-        # Calculate text heights
-        artist_metrics = QFontMetrics(artist_font)
-        title_metrics = QFontMetrics(title_font)
-        right_metrics = QFontMetrics(right_font)
-        
-        artist_height = artist_metrics.height()
-        title_height = title_metrics.height()
-        right_height = right_metrics.height()
-        
-        # Total content height
-        total_text_height = artist_height + line_spacing + title_height
-        
-        # Center the text block vertically within the item
-        content_start_y = option.rect.top() + (option.rect.height() - total_text_height) // 2
-        
-        # Left side content area
-        left_area_width = option.rect.width() - 320  # Reserve space for right side        
-
-        # Draw artist (top line, bold) - centered vertically
-        artist_rect = QRect(
-            option.rect.left() + left_margin,
-            content_start_y,
-            left_area_width - left_margin,
-            artist_height
-        )
-        painter.setFont(artist_font)
-        painter.drawText(artist_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, artist)
-        
-        # Draw title (bottom line, normal weight) - directly below artist
-        title_rect = QRect(
-            option.rect.left() + left_margin,
-            content_start_y + artist_height + line_spacing,
-            left_area_width - left_margin,
-            title_height
-        )
-        painter.setFont(title_font)
-        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
-        
-        # Draw disc ID (top right) - aligned with artist
-        disc_rect = QRect(
-            option.rect.right() - 180,
-            content_start_y,
-            170,
-            right_height
-        )
-        painter.setFont(right_font)
-        painter.setPen(text_color)
-        painter.drawText(disc_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, disc_id)
-        
-        # --- right-side metrics ---
-        right_font = painter.font()
-        fm = QFontMetrics(right_font)  # <-- add this line
-        painter.setFont(right_font)
-        right_height = fm.height()
-
-        # Parse tail from the row text: "... [mm:ss] +N"
-        # 'text' here should be the full display string for the row.
-        try:
-            raw = text.strip()
-        except NameError:
-            # Fallback if your variable is named differently
-            raw = index.data(Qt.ItemDataRole.DisplayRole).strip()
-
-        # 1) duration [mm:ss] at end, with optional bare key after it
-        #    We capture both in one pass for robustness.
-        dur_key = re.search(r'\[([0-9]{1,2}:[0-9]{2})\]\s*\[?([+\-]\d+)?\]?\s*$', raw)
-        duration = ""
-        key_info = ""
-        if dur_key:
-            duration = dur_key.group(1) or ""
-            key_info = dur_key.group(2) or ""
-            key_info = key_info.strip().strip('[]')
-            # Remove the matched tail so the rest of the renderer uses clean text
-            raw = raw[:dur_key.start()].strip()
-
-        # --- draw key at far right, duration just to its left ---
-        key_w   = 56   # width for "+2"/"-1"
-        dur_w   = 74   # width for "03:23"
-        gap     = 8    # space between duration and key
-        edgepad = 8    # right edge padding
-
-        # KEY (far right)
-        if key_info:
-            key_rect = QRect(
-                option.rect.right() - key_w - edgepad,
-                content_start_y + artist_height + line_spacing,
-                key_w,
-                right_height
-            )
-            painter.setPen(QColor("#FBD000"))  # warm yellow key change
-            painter.drawText(
-                key_rect,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                key_info
-            )
-
-        # DURATION (to the left of key; if no key, hug the right edge)
-        if duration:
-            right_edge = option.rect.right() - edgepad
-            if key_info:
-                right_edge -= (key_w + gap)
-            duration_rect = QRect(
-                right_edge - dur_w,
-                content_start_y + artist_height + line_spacing,
-                dur_w,
-                right_height
-            )
-            painter.setPen(text_color)
-            painter.drawText(
-                duration_rect,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                duration
-            )
-
-        # Widths: adjust if your font runs tight
-        key_w = 56
-        dur_w = 74
-        gap   = 8
-        edge_pad = 8
-
-        # KEY at absolute far right (only if present)
-        if key_info:
-            key_rect = QRect(
-                option.rect.right() - key_w - edge_pad,
-                content_start_y + artist_height + line_spacing,
-                key_w,
-                right_height
-            )
-            painter.setPen(QColor("#FBD000"))  # warm yellow key change
-            painter.drawText(
-                key_rect,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                key_info  # e.g., "+2" or "-1"
-            )
-
-        # DURATION just to the left of the key (so key appears AFTER duration)
-        if duration:
-            # If key missing, keep duration near the edge; otherwise, leave room for key + gap
-            right_edge = option.rect.right() - edge_pad
-            if key_info:
-                right_edge = option.rect.right() - edge_pad - key_w - gap
-
-            duration_rect = QRect(
-                right_edge - dur_w,
-                content_start_y + artist_height + line_spacing,
-                dur_w,
-                right_height
-            )
-            painter.setPen(text_color)
-            painter.drawText(
-                duration_rect,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                duration
-            )
-        
-        painter.restore()
-    
-    def sizeHint(self, option, index):
-        return QSize(0, self.row_height)
-    
-    def parse_display_text(self, text):
-        """Parse the display text into artist, title, disc_id, and duration.
-
-        Also: if duet info is embedded in disc_id like 'KVDM-12345  👥 A & B',
-        move '👥 A & B' onto the artist line so disc IDs don't get cut off.
-        """
-        # Example input:
-        #   "Artist - Title - DISC123  [03:45]"
-        # or (with duet marker embedded):
-        #   "Artist - Title - DISC123  👥 Des & Bob  [03:45]"
-
-        # Extract duration first (in brackets at the end)
-        duration = ""
-        duration_match = re.search(r'\[([^\]]+)\]$', text)
-        if duration_match:
-            duration = duration_match.group(1)
-            text = text[:duration_match.start()].strip()
-
-        # Split by " - " to get parts
-        parts = text.split(" - ")
-
-        if len(parts) >= 3:
-            artist = parts[0].strip()
-            title = parts[1].strip()
-            disc_id = parts[2].strip()
-        elif len(parts) == 2:
-            artist = parts[0].strip()
-            title = parts[1].strip()
-            disc_id = ""
-        else:
-            # Fallback - use the whole text as title
-            artist = ""
-            title = text.strip()
-            disc_id = ""
-
-        # ---- DUET MARKER RELOCATION ----
-        # If duet marker is packed into disc_id, move it to artist so the disc id stays readable.
-        if disc_id and "👥" in disc_id:
-            disc_main, duet_part = disc_id.split("👥", 1)  # maxsplit=1 (what you wanted)
-            disc_id = disc_main.strip()
-            duet_part = duet_part.strip()
-            if duet_part:
-                if artist:
-                    artist = f"{artist}  👥 {duet_part}"
-                else:
-                    artist = f"👥 {duet_part}"
-
-        # Optional safety: if for any reason the duet marker ends up in title, move it too.
-        if title and "👥" in title:
-            title_main, duet_part = title.split("👥", 1)
-            title = title_main.strip()
-            duet_part = duet_part.strip()
-            if duet_part:
-                if artist:
-                    artist = f"{artist}  👥 {duet_part}"
-                else:
-                    artist = f"👥 {duet_part}"
-
-        return artist, title, disc_id, duration
 
 
 class RightAlignedMetaDelegate(QStyledItemDelegate):
@@ -16101,20 +15444,6 @@ class AutoResizingListWidget(QListWidget):
         self.updateGeometries()
 
 
-class WrapHeightListWidget(QListWidget):
-    """QListWidget whose rows grow to fit word-wrapped multi-line text.
-
-    Pairs with WrapHeightItemDelegate (which measures wrapped height against the
-    current viewport width). Re-lays out on resize so heights track the column
-    width — used by the singer-history directory so long names wrap instead of
-    being truncated with a trailing "…".
-    """
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        try:
-            self.scheduleDelayedItemsLayout()
-        except Exception:
-            pass
 
 
 class WrapHeightItemDelegate(QStyledItemDelegate):
@@ -17107,68 +16436,6 @@ class QueueListView(QListView):
 
 from PyQt6.QtWidgets import QMainWindow
 
-# --- Smart vertical scrollbar (macOS-friendly) ---
-# Goal: behave like the old .75 build:
-# - When no scrolling is needed: NO extra gutter (width=0)
-# - When scrolling is needed: show a dark, small handle and reserve space (so text "shrinks" cleanly)
-# - Keep native macOS fonts/controls elsewhere (we only style the scrollbar itself)
-def attach_smart_vscroll(view, width_px=10):
-    from PyQt6.QtCore import Qt
-    sb = view.verticalScrollBar()
-
-    # Force the scrollbar object to exist so we can control width precisely.
-    # We then collapse it to 0px when not needed to avoid the "always reserved" blank strip.
-    view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-    view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
-    def _apply():
-        if sb.maximum() <= 0:
-            # No scrolling needed -> collapse to 0px (no reserved space)
-            sb.setStyleSheet(f"""
-                QScrollBar:vertical {{
-                    width: 0px;
-                    background: transparent;
-                    margin: 0px;
-                }}
-                QScrollBar::handle:vertical {{
-                    background: rgba(0,0,0,0.0);
-                    border: none;
-                    border-radius: 0px;
-                    min-height: 0px;
-                }}
-                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-            """)
-        else:
-            # Scrolling needed -> reserve width and use a dark "block" handle (old look)
-            w = int(width_px)
-            sb.setStyleSheet(f"""
-                QScrollBar:vertical {{
-                    width: {w}px;
-                    background: transparent;
-                    margin: 0px;
-                }}
-                QScrollBar::handle:vertical {{
-                    background: rgba(0,0,0,0.70);
-                    border: 1px solid rgba(255,255,255,0.10);
-                    border-radius: 2px;   /* squarer like old build */
-                    min-height: 26px;
-                }}
-                QScrollBar::handle:vertical:hover {{
-                    background: rgba(0,0,0,0.85);
-                }}
-                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-            """)
-
-    # Update whenever content size changes
-    try:
-        sb.rangeChanged.connect(lambda *_: _apply())
-    except Exception:
-        pass
-
-    _apply()
-    return sb
 
 QML_NOW_SINGING_SOURCE = r"""
 import QtQuick
@@ -17713,8 +16980,6 @@ class RenderThreadNowSingingCard(QFrame):
             countdown_value,
         )
 
-    def set_singer(self, text):
-        self.set_state(text)
 
     def set_countdown(self, text):
         value = str(text or "")
@@ -20004,8 +19269,6 @@ class SoundboardPad(QPushButton):
             # clip rather than resuming mid-way through.
             self._play_from_start()
 
-    def _on_state_changed(self, _state):
-        self._refresh_face()
 
     # ---- drag & drop ----
 
@@ -23610,20 +22873,6 @@ class KaraokeApp(QWidget):
         except Exception:
             return ""
 
-    def _queue_singer_song_count_label(self, singer: dict) -> str:
-        try:
-            songs = singer.get("songs", []) or []
-            active = 0
-            for song in songs:
-                if isinstance(song, dict):
-                    if song.get("skipped", False):
-                        continue
-                active += 1
-            if active <= 0:
-                return "EMPTY"
-            return "1 SONG" if active == 1 else f"{active} SONGS"
-        except Exception:
-            return ""
 
     @staticmethod
     def _queue_singer_status_label(
@@ -23670,40 +22919,8 @@ class KaraokeApp(QWidget):
         except Exception:
             return 0
 
-    def _queue_singer_has_duet(self, singer: dict) -> bool:
-        try:
-            for entry in singer.get("songs", []) or []:
-                if isinstance(entry, dict):
-                    if entry.get("skipped", False):
-                        continue
-                    return bool(str(entry.get("duet_display", "") or "").strip())
-                if isinstance(entry, (tuple, list)) and len(entry) >= 3:
-                    return bool(str(entry[2] or "").strip())
-                return False
-        except Exception:
-            pass
-        return False
 
-    def _queue_singer_has_priority(self, singer: dict) -> bool:
-        try:
-            if str(singer.get("preferred_disc_priority", "") or "").strip():
-                return True
-            name = str(singer.get("name", "") or "").strip()
-            return bool(self._singer_disc_priority_override(name))
-        except Exception:
-            return False
 
-    def _queue_wait_badge(self, wait_secs: int) -> str:
-        try:
-            wait_secs = max(0, int(wait_secs or 0))
-            if wait_secs <= 0:
-                return ""
-            eta = datetime.now() + timedelta(seconds=wait_secs)
-            if wait_secs < 3600:
-                return f"WAIT {self._fmt_m_ss(wait_secs)}"
-            return f"WAIT {eta.strftime('%I:%M %p').lstrip('0')}"
-        except Exception:
-            return ""
 
     def _build_search_row_text(self, track: dict) -> tuple[str, str, str, str]:
         """Returns (visible_text, tooltip_text, left_chunk, right_chunk) for search rows."""
@@ -24032,13 +23249,7 @@ class KaraokeApp(QWidget):
         except Exception:
             return "KJ"
 
-    def _set_rotation_summary_progress(self, ratio: float):
-        # No-op: the hero card's progress bar was removed (it duplicated the
-        # transport deck's seek slider). Kept so existing callers stay valid.
-        return
 
-    def _refresh_rotation_summary_art_preview(self):
-        return
 
     def _schedule_reformat_lists(self):
         """Debounce reformatting on resize so dragging the window stays smooth."""
@@ -24973,14 +24184,6 @@ class KaraokeApp(QWidget):
             start_seconds=start_seconds,
         )
 
-    def _gst_teardown(self):
-        """Stop the karaoke transport and reset per-song modifiers.
-
-        The legacy GStreamer pipeline objects this used to tear down were
-        removed long ago (gst_pipeline & co. were always None), so the
-        transport stop is the whole job now."""
-        self._stop_karaoke_transport()
-        self._karaoke_transport_tempo_ratio = 1.0
 
     def _gst_teardown_async(self):
         """Stop playback without blocking the UI.
@@ -25308,17 +24511,6 @@ class KaraokeApp(QWidget):
                 1800.0,
             )
 
-    def _perf_process_snapshot(self) -> tuple[str, str]:
-        cpu = "n/a"
-        mem = "n/a"
-        if PSUTIL_AVAILABLE:
-            try:
-                proc = psutil.Process(os.getpid())
-                cpu = f"{proc.cpu_percent(interval=None):.1f}%"
-                mem = f"{proc.memory_info().rss / (1024 * 1024):.0f}MB"
-            except Exception:
-                pass
-        return cpu, mem
 
     def _tick_perf_debug_overlay(self):
         """Periodically log playback diagnostics ([MP4-PERF]) to the log file.
@@ -25368,23 +24560,6 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print(f"[MP4-PERF] diagnostics log failed: {e}")
 
-    def configure_crossfade(self):
-        """Configure crossfade settings"""
-        current_duration = self.bg_music.crossfade_duration_ms / 1000.0
-        
-        duration, ok = QInputDialog.getDouble(
-            self,
-            "Crossfade Settings",
-            "Crossfade duration (seconds):",
-            current_duration,
-            0.0,  # minimum
-            10.0,  # maximum
-            1     # decimals
-        )
-        
-        if ok:
-            self.bg_music.crossfade_duration_ms = int(duration * 1000)
-            print(f"Crossfade duration set to {duration} seconds")
 
     def is_network_configured(self) -> bool:
         """Check if network settings are properly configured for polling"""
@@ -25459,26 +24634,7 @@ class KaraokeApp(QWidget):
         status = probe_network_sync_status(base_url, user_id, api_key, timeout_sec=3.0)
         return bool(status.get("ok")), str(status.get("message") or "Sync failed")
 
-    def debug_network_sync_status(self, timeout_sec: float = 6.0) -> dict:
-        """Return the same sync-status probe used by the Network dialog."""
-        base_url = self.settings.get("base_url", "")
-        user_id = self.settings.get("user", "") or self.settings.get("tenant", "")
-        api_key = self.settings.get("api_key", "")
-        return probe_network_sync_status(base_url, user_id, api_key, timeout_sec=timeout_sec)
 
-    def debug_disc_brand_scan_report(self, max_unknowns: int = 50) -> dict:
-        """Scan loaded library metadata/filenames and report disc-company alias coverage."""
-        report = build_disc_brand_scan_report(getattr(self, "tracks", []) or [], max_unknowns=max_unknowns)
-        try:
-            _diag(
-                "[DISC-BRAND] scan "
-                f"tracks={report.get('track_count', 0)} "
-                f"canonical_counts={report.get('canonical_counts', {})} "
-                f"unknown_prefixes={report.get('unknown_prefixes', [])}"
-            )
-        except Exception:
-            pass
-        return report
 
     # ------------------------------------------------------------------
     # WebSocket request relay (wss://wskar.com/relay + get_requests_v2.php)
@@ -26671,58 +25827,8 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _gst_watch_bus(self, pipeline, which="main"):
-        """Attach a bus watch to a pipeline so we can react to EOS/ERROR."""
-        try:
-            bus = pipeline.get_bus()
-            bus.add_signal_watch()
-            # Pass which ("main" | "preview") so we know who fired the message
-            bus.connect("message", self._on_gst_message, which)
-        except Exception as e:
-            print("Bus watch add failed:", e)
 
-    def _gst_unwatch_bus(self, pipeline):
-        """Remove signal watch from a pipeline's bus (safe to call even if not added)."""
-        if not pipeline:
-            return
-        try:
-            bus = pipeline.get_bus()
-            bus.remove_signal_watch()
-        except Exception:
-            pass
 
-    def _on_gst_message(self, bus, msg, which):
-        if bool(getattr(self, "_app_closing", False)):
-            return
-        mtype = msg.type
-        if mtype == Gst.MessageType.ELEMENT:
-            # Level meter messages from CDG/ZIP audio path (for optional end-silence trim).
-            try:
-                if which == "main" and getattr(self, "_end_silence_mode", "") == "cdg":
-                    st = msg.get_structure()
-                    if st is not None and st.get_name() == "level":
-                        db_vals = []
-                        for field in ("peak", "rms", "decay"):
-                            try:
-                                v = st.get_value(field)
-                            except Exception:
-                                v = None
-                            db_vals.extend(self._extract_db_values(v))
-                        if db_vals:
-                            self._karaoke_last_level_db = max(db_vals)
-                            self._karaoke_last_level_ts = time.monotonic()
-            except Exception:
-                pass
-            return
-        elif mtype == Gst.MessageType.EOS:
-            # Only react to EOS from the MAIN pipeline; preview will end too.
-            if which == "main":
-                QTimer.singleShot(0, lambda: self._handle_media_end_safe("eos"))
-        elif mtype == Gst.MessageType.ERROR:
-            err, debug = msg.parse_error()
-            print(f"GStreamer ERROR from {which}: {err} ({debug})")
-            if which == "main":
-                QTimer.singleShot(0, lambda: self._handle_media_end_safe("error"))
 
     def _prepare_overlay(self, sink, win):
         # Attach sink to a QWidget via VideoOverlay
@@ -27351,44 +26457,6 @@ class KaraokeApp(QWidget):
             return []
         return devices
 
-    def _qt_audio_device_for_selected_output(self):
-        """Resolve the existing SingWS/GStreamer selection to QAudioDevice.
-
-        This adapter lets the FFmpeg/Signalsmith transport honor the same host
-        choice without changing persisted device IDs or the production engine.
-        """
-        try:
-            from PyQt6.QtMultimedia import QMediaDevices
-
-            default_device = QMediaDevices.defaultAudioOutput()
-            selected = self._get_selected_audio_output_id()
-            if selected == "default":
-                name = str(default_device.description() or "")
-                return default_device, name
-
-            outputs = list(getattr(self, "_audio_output_cache", []) or [])
-            if not outputs:
-                outputs = self._refresh_audio_output_cache()
-            selected_item = next((item for item in outputs if str(item.get("id") or "") == selected), None)
-            selected_name = (
-                str((selected_item or {}).get("name") or "").strip()
-                or str(self.settings.get("audio_output_name", "") or "").strip()
-            )
-            qt_outputs = list(QMediaDevices.audioOutputs() or [])
-            device = match_qt_audio_device(qt_outputs, selected_name) if match_qt_audio_device else None
-            if device is not None:
-                _diag(f"[PY-KARAOKE] Qt audio output matched selected={selected!r} name={selected_name!r}")
-                return device, selected_name
-
-            default_name = str(default_device.description() or "")
-            _diag(
-                f"[PY-KARAOKE] Qt audio output match unavailable selected={selected!r} "
-                f"gst_name={selected_name!r}; using default={default_name!r}"
-            )
-            return default_device, default_name
-        except Exception as exc:
-            _diag(f"[PY-KARAOKE] Qt audio output resolution failed; using implicit default ({exc})")
-            return None, ""
 
     def _audio_output_id_for_device(self, dev) -> str:
         try:
@@ -29785,23 +28853,6 @@ class KaraokeApp(QWidget):
         """Ultra-fast check - just verify it's a zip file"""
         return file_path.lower().endswith('.zip')
 
-    def get_mp3g_metadata(self, zip_path):
-        """Extract metadata from MP3G zip filename"""
-        base_name = os.path.splitext(os.path.basename(zip_path))[0]
-        parts = base_name.split(" - ", 2)
-        
-        if len(parts) == 3:
-            disc_id, artist, title = parts
-            return {
-                "path": zip_path,
-                "artist": artist.strip(),
-                "title": title.strip(), 
-                "disc_id": disc_id.strip(),
-                "display": f"{artist.strip()} - {title.strip()} - {disc_id.strip()}",
-                "duration": None,
-                "type": "mp3g"  # Mark as MP3G for special handling
-            }
-        return None
 
     def probe_mp3g_duration(self, zip_path):
         """
@@ -33826,10 +32877,6 @@ class KaraokeApp(QWidget):
         root.addWidget(shell)
         return page
 
-    def _history_sort_key(self, record: dict):
-        # Alphabetical by singer name (case-insensitive) so the directory is
-        # easy to scan during a show.
-        return str(record.get("name", "") or "").strip().lower()
 
     def _history_song_display(self, song: dict) -> str:
         artist = str(song.get("artist", "") or "").strip() or "Unknown Artist"
@@ -36112,17 +35159,6 @@ class KaraokeApp(QWidget):
             except Exception as exc:
                 _diag(f"[REQUEST-LIFECYCLE] reconnect terminal flush failed error={exc}")
 
-    def _hero_badge_text(self, singer_name: str, artist: str = "", title: str = "") -> str:
-        singer_name = str(singer_name or "").strip()
-        artist = str(artist or "").strip()
-        title = str(title or "").strip()
-        source = singer_name or artist or title
-        if not source:
-            return "LIVE"
-        parts = [p for p in re.split(r"\s+", source) if p]
-        if len(parts) >= 2:
-            return (parts[0][:1] + parts[1][:1]).upper()
-        return parts[0][:2].upper()
 
     def open_header_qr_preview(self):
         url = self._header_qr_url()
@@ -38161,82 +37197,8 @@ class KaraokeApp(QWidget):
         except Exception as e:
             return False, str(e)
 
-    def restart_polling_thread(self):
-        """Stop current polling thread and start a new one with updated endpoint"""
-        try:
-            # Stop current polling worker first
-            if hasattr(self, "poll_worker") and self.poll_worker:
-                self.poll_worker.stop()
-            
-            # Stop and clean up thread
-            if hasattr(self, "poll_thread") and self.poll_thread:
-                if self.poll_thread.isRunning():
-                    self.poll_thread.requestInterruption()
-                    self.poll_thread.quit()
-                    
-                    # Wait for thread to finish, but don't hang forever
-                    if not self.poll_thread.wait(3000):  # 3 second timeout
-                        print("⚠️ Thread didn't stop gracefully, terminating...")
-                        self.poll_thread.terminate()
-                        self.poll_thread.wait(1000)
-                
-                # Clean up old objects
-                try:
-                    if hasattr(self, "poll_worker") and self.poll_worker:
-                        self.poll_worker.deleteLater()
-                    self.poll_thread.deleteLater()
-                except Exception:
-                    pass
-            
-            # Short delay to ensure cleanup
-            QTimer.singleShot(100, self._start_new_polling_thread)
-            
-        except Exception as e:
-            print(f"⚠️ Error stopping polling thread: {e}")
-            # Try to start new thread anyway
-            QTimer.singleShot(500, self._start_new_polling_thread)
     
-    def _start_new_polling_thread(self):
-        """Start the new polling thread (called after cleanup delay)"""
-        try:
-            # Create completely new thread and worker
-            self.poll_thread = QThread()
-            base_url = _network_normalize_base_url(self.settings.get("base_url", "https://beta.wskar.com"))
-            tenant = self.settings.get("user", self.settings.get("tenant", ""))
-            api_key = self.settings.get("api_key", "")
 
-            try:
-                _poll_iv = self._effective_request_poll_interval_sec()
-            except Exception:
-                _poll_iv = 2
-            self.poll_worker = SimplePollWorker(
-                base_url,
-                tenant,
-                api_key,
-                interval_sec=_poll_iv,
-                host_interval_sec=self._effective_host_poll_interval_sec(),
-            )
-            self.poll_worker.moveToThread(self.poll_thread)
-            self.poll_worker.requests_received.connect(self.handle_requests_from_thread)
-            self.poll_worker.host_commands_received.connect(self.handle_host_commands_from_thread)
-            self.poll_worker.host_state_sync_requested.connect(self._schedule_host_control_state_sync)
-            self.poll_thread.started.connect(self.poll_worker.run)
-
-            # Cleanup handlers
-            self.poll_thread.finished.connect(self.poll_worker.deleteLater)
-            self.poll_thread.finished.connect(self.poll_thread.deleteLater)
-
-            # Start the new thread
-            self.poll_thread.start()
-            print(f"✅ Polling restarted with URL: {base_url}/get_requests.php (tenant={tenant})")
-
-        except Exception as e:
-            print(f"⚠️ Failed to start new polling thread: {e}")
-
-    # --- Sync both labels with this helper everywhere ---
-    def set_now_singing(self, text):
-        self.set_now_singing_text(text)
-        self.update_rotation_view()
 
     def clear_now_singing(self):
         """Reset the Now Singing line to an idle placeholder (kept visible to prevent layout shifts)."""
@@ -38504,11 +37466,6 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _apply_karaoke_key_live_value(self, semitones_value: float):
-        self._apply_karaoke_live_modifiers(
-            tempo_ratio=float(getattr(self, "_karaoke_live_tempo_ratio", 1.0) or 1.0),
-            semitones_value=semitones_value,
-        )
 
     def _apply_karaoke_live_modifiers(self, tempo_ratio: float, semitones_value: float):
         transport = getattr(self, "karaoke_transport", None)
@@ -38522,8 +37479,6 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[PY-KARAOKE] modifier update failed: {e}")
 
-    def _apply_karaoke_key_live(self):
-        self._apply_karaoke_key_live_value(float(self._clamp_karaoke_key(self._current_karaoke_semitones)))
 
     def _apply_karaoke_tempo_ratio_live(self, ratio: float):
         self._apply_karaoke_live_modifiers(
@@ -38962,88 +37917,7 @@ class KaraokeApp(QWidget):
         if self._end_silence_mode in ("cdg", "mp4"):
             _diag(f"[END-SILENCE] {self._end_silence_mode.upper()} detector armed")
 
-    def _extract_db_values(self, value) -> list[float]:
-        out = []
-        try:
-            if value is None:
-                return out
-            if isinstance(value, (list, tuple)):
-                seq = value
-            elif hasattr(value, "n_values") and hasattr(value, "get_nth"):
-                seq = [value.get_nth(i) for i in range(int(value.n_values))]
-            elif hasattr(value, "__len__") and hasattr(value, "__getitem__"):
-                try:
-                    seq = [value[i] for i in range(len(value))]
-                except Exception:
-                    seq = [value]
-            else:
-                seq = [value]
-            for x in seq:
-                try:
-                    f = float(x)
-                    if math.isfinite(f) and -120.0 <= f <= 10.0:
-                        out.append(f)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return out
 
-    def _on_karaoke_meter_sample(self, sink):
-        """Appsink callback for karaoke audio level meter (CDG/ZIP/MP4)."""
-        _perf_t0 = time.perf_counter()
-        try:
-            sample = sink.emit("pull-sample")
-            if sample is None:
-                return Gst.FlowReturn.OK
-            buf = sample.get_buffer()
-            if buf is None:
-                return Gst.FlowReturn.OK
-
-            ok, info = buf.map(Gst.MapFlags.READ)
-            if not ok:
-                return Gst.FlowReturn.OK
-            try:
-                raw = bytes(info.data or b"")
-            finally:
-                buf.unmap(info)
-
-            if not raw:
-                return Gst.FlowReturn.OK
-
-            nbytes = min(len(raw), 4096)
-            nbytes -= (nbytes % 2)
-            if nbytes <= 2:
-                return Gst.FlowReturn.OK
-
-            arr = array('h')
-            arr.frombytes(raw[:nbytes])
-            if sys.byteorder != 'little':
-                arr.byteswap()
-
-            n = len(arr)
-            if n <= 0:
-                return Gst.FlowReturn.OK
-
-            step = max(1, n // 1024)
-            total = 0.0
-            count = 0
-            for i in range(0, n, step):
-                v = float(arr[i]) / 32768.0
-                total += v * v
-                count += 1
-            if count <= 0:
-                return Gst.FlowReturn.OK
-
-            rms = (total / float(count)) ** 0.5
-            db = 20.0 * math.log10(max(1e-9, rms))
-            self._karaoke_last_level_db = float(db)
-            self._karaoke_last_level_ts = time.monotonic()
-        except Exception:
-            pass
-        finally:
-            _perf_log_if_slow("audio_karaoke_meter_callback", (time.perf_counter() - _perf_t0) * 1000.0)
-        return Gst.FlowReturn.OK
 
     def _read_level_db(self) -> float | None:
         """Return loudest dB from level element last-message, or None if unavailable."""
@@ -39108,52 +37982,8 @@ class KaraokeApp(QWidget):
         # default is unchanged, so this only widens what the host may choose.
         return max(0.5, min(60.0, val))
 
-    def _has_queued_karaoke_after_current(self) -> bool:
-        try:
-            for singer in list(getattr(self, "queue", []) or []):
-                if isinstance(singer, dict) and not singer.get("skipped", False) and self.is_singer_active(singer):
-                    return True
-        except Exception:
-            pass
-        return False
 
-    def _stuck_song_min_seconds(self) -> float:
-        """Evidence window for declaring a song dead in the middle of playback.
 
-        Deliberately NOT the host's trailing-trim setting. That setting answers
-        "how fast should background music come back at the END of a song", and
-        a host who turns it down to 0.5s to close that gap is not asking to
-        have live songs cut. Every other end reason is gated on being near the
-        end of the track; this one can fire anywhere past the 35% mark, so it
-        has to stand on its own evidence.
-
-        A real performance does not sit below the silence threshold with no
-        lyric movement for this long -- a genuinely dead or stalled track does.
-        """
-        try:
-            value = float(self.settings.get("stuck_song_min_seconds", 25.0) or 25.0)
-        except Exception:
-            value = 25.0
-        return max(10.0, min(120.0, value))
-
-    def _stuck_song_confirmed(self, cdg_stale_for: float) -> bool:
-        """True only when audio AND lyrics have both been dead a long time.
-
-        Both clocks must clear the window. Half a second of a quiet passage
-        with no lyric wipe is completely normal mid-song -- an atmospheric
-        break, a breakdown, a gap between phrases -- and cutting there ends a
-        song the singer is still performing.
-        """
-        window = self._stuck_song_min_seconds()
-        try:
-            silent_for = float(getattr(self, "_end_silence_accum_s", 0.0) or 0.0)
-        except Exception:
-            silent_for = 0.0
-        try:
-            stale_for = float(cdg_stale_for or 0.0)
-        except Exception:
-            stale_for = 0.0
-        return silent_for >= window and stale_for >= window
 
     def _prefire_bgm_at_verified_audio_end(self) -> bool:
         """Fade BGM under a verified dead audio tail without ending visuals.
@@ -40015,10 +38845,6 @@ class KaraokeApp(QWidget):
             pass
         return None
 
-    def _next_singer_display(self) -> str:
-        """Return the name of the singer after the current one in the active queue."""
-        s = self._next_singer_entry()
-        return str(s.get("name", "") or "").strip() if isinstance(s, dict) else ""
 
     def _next_up_queue_target(self):
         """Return (singer, entry) for the next playable queue item."""
@@ -40041,16 +38867,6 @@ class KaraokeApp(QWidget):
             return singer, entry
         return None, None
 
-    def _first_active_singer_name_from_queue(self) -> str:
-        try:
-            for singer in getattr(self, "queue", []) or []:
-                if not isinstance(singer, dict) or singer.get("skipped", False):
-                    continue
-                if self._first_active_entry_for_singer(singer) is not None:
-                    return str(singer.get("name", "") or "").strip()
-        except Exception:
-            pass
-        return ""
 
     def _next_up_entry_artist_title(self, entry, song_path: str = "") -> tuple[str, str]:
         artist = ""
@@ -41222,12 +40038,6 @@ class KaraokeApp(QWidget):
             ids = set()
         return ids if isinstance(ids, set) else set()
 
-    def _remote_request_already_pending(self, request_id: int) -> bool:
-        try:
-            rid = int(request_id or 0)
-        except Exception:
-            rid = 0
-        return rid > 0 and (rid in self._deferred_remote_request_ids() or rid in self._remote_request_inflight_ids())
 
     def _should_defer_remote_adds_now(self) -> bool:
         return (
@@ -42104,9 +40914,6 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
-    def _should_preserve_rotation_identity(self, singer) -> bool:
-        """Backward-compatible wrapper for older rotation identity call sites."""
-        return self._should_preserve_empty_singer_row(singer)
 
     def _clear_queue_songs_preserving_singers(self, *, reason: str = "host_clear_queue") -> int:
         """Clear queued songs without treating empty song lists as singer deletion."""
@@ -42356,21 +41163,6 @@ class KaraokeApp(QWidget):
                 return i
         return len(self.queue)
 
-    def _rotation_boundary_name(self) -> str:
-        """Name of first singer in next-rotation block (optional subtle marker text)."""
-        saw_unsung_active = False
-        for singer in self.queue:
-            is_active = self.is_singer_active(singer)
-            if (not is_active) and saw_unsung_active:
-                return str(singer.get("name", "") or "")
-            if not is_active:
-                continue
-            if bool(singer.get("round_sung", False)):
-                if saw_unsung_active:
-                    return str(singer.get("name", "") or "")
-            else:
-                saw_unsung_active = True
-        return ""
 
     def _rotation_recompute_round_state(self, force_reset: bool = False):
         """Normalize/maintain round markers for rotation mode."""
@@ -42652,105 +41444,9 @@ class KaraokeApp(QWidget):
             return float(bpm)
         return None
 
-    def _build_phrase_start_submenu(self, menu, singer_idx: int, song_idx: int):
-        entry = self._queue_song_entry(singer_idx, song_idx)
-        if entry is None:
-            act = menu.addAction("Phrase start unavailable for this entry")
-            act.setEnabled(False)
-            return
-        primary, audio = self._phrase_song_paths(entry)
-        try:
-            current = entry.get("phrase_start_seconds")
-            current = float(current) if current is not None else None
-        except Exception:
-            current = None
-        # Non-prompting BPM peek just for labels.
-        bpm = self._phrase_resolve_bpm(primary, audio, prompt=False)
 
-        begin_act = menu.addAction("✓ Start at Beginning" if (current is None or current <= 0.0) else "Start at Beginning")
-        begin_act.triggered.connect(lambda: self._set_phrase_start_beginning(singer_idx, song_idx))
-        menu.addSeparator()
-        for bars in (4, 8, 16):
-            label = f"Start at {bars} Bars"
-            if bpm:
-                secs = phrase_markers.bars_to_seconds(bars, bpm)
-                if secs is not None:
-                    label += f"  ({self._fmt_mmss(secs)})"
-                    if current is not None and abs(current - secs) < 0.05:
-                        label = "✓ " + label
-            act = menu.addAction(label)
-            act.triggered.connect(lambda _checked=False, b=bars: self._apply_phrase_bars(singer_idx, song_idx, b))
-        menu.addSeparator()
-        custom_act = menu.addAction("Custom Phrase Start…")
-        custom_act.triggered.connect(lambda: self.open_phrase_start_dialog(singer_idx, song_idx))
 
-    def _set_phrase_start_beginning(self, singer_idx: int, song_idx: int):
-        entry = self._queue_song_entry(singer_idx, song_idx)
-        if entry is None:
-            return
-        # Explicit 0.0 (not None) so it overrides any saved default marker.
-        entry["phrase_start_seconds"] = 0.0
-        name = str(entry.get("display_name") or "this song")
-        self._persist_song_modifier_change(f"Phrase start reset to beginning for {name}")
 
-    def _apply_phrase_bars(self, singer_idx: int, song_idx: int, bars: int):
-        entry = self._queue_song_entry(singer_idx, song_idx)
-        if entry is None:
-            return
-        primary, audio = self._phrase_song_paths(entry)
-        bpm = self._phrase_resolve_bpm(primary, audio)
-        if bpm:
-            self._apply_phrase_bars_with_bpm(singer_idx, song_idx, bars, float(bpm))
-            return
-        # No known BPM → auto-detect from the audio in the background, cache it,
-        # then apply. Plug-and-play: no prompt, no UI freeze.
-        try:
-            self._set_processing_text("Analyzing tempo…")
-        except Exception:
-            pass
-
-        def _on_bpm(detected):
-            if detected and detected > 0:
-                try:
-                    if primary:
-                        phrase_markers.set_song_bpm(primary, float(detected))
-                except Exception:
-                    pass
-                self._apply_phrase_bars_with_bpm(singer_idx, song_idx, bars, float(detected))
-            else:
-                # Couldn't detect a tempo → open the dialog so the host can set it.
-                self.open_phrase_start_dialog(singer_idx, song_idx)
-
-        self._detect_bpm_async(audio or primary, _on_bpm)
-
-    def _apply_phrase_bars_with_bpm(self, singer_idx: int, song_idx: int, bars: int, bpm: float):
-        entry = self._queue_song_entry(singer_idx, song_idx)
-        if entry is None:
-            return
-        primary, _audio = self._phrase_song_paths(entry)
-        # Beat-aligned when we know the grid: N bars from the first downbeat.
-        analysis = phrase_markers.get_song_analysis(primary) if primary else None
-        if analysis and analysis.get("first_beat") is not None:
-            seconds = float(analysis["first_beat"]) + bars * (4.0 * 60.0 / float(bpm))
-        else:
-            seconds = phrase_markers.bars_to_seconds(bars, bpm)
-        if seconds is None:
-            return
-        entry["phrase_start_seconds"] = float(seconds)
-        try:
-            if primary:
-                phrase_markers.upsert_marker(
-                    primary, kind=phrase_markers.bar_kind(bars), seconds=float(seconds),
-                    bars=int(bars), bpm=float(bpm), label=phrase_markers.bar_label(bars),
-                    source="bpm", song_key=self._phrase_song_key(entry), make_default=True,
-                )
-        except Exception as e:
-            _diag(f"[PHRASE-START] could not save bar marker: {e}")
-        self._sync_push_phrase_markers()
-        name = str(entry.get("display_name") or "this song")
-        self._persist_song_modifier_change(
-            f"Phrase start: {bars} bars ({self._fmt_mmss(seconds)}) for {name}"
-        )
 
     def _detect_bpm_async(self, audio_path, callback, cache_path=None):
         """Decode + estimate tempo/beat off the UI thread (cached under
@@ -46419,46 +45115,6 @@ class KaraokeApp(QWidget):
             pass
         return artist.strip(), title.strip()
 
-    def _find_discid_candidates(self, artist: str, title: str) -> list:
-        artist_n = str(artist or "").strip().lower()
-        title_n = str(title or "").strip().lower()
-        # Strict mode for Change Disc ID: exact artist + exact title only.
-        if not title_n or not artist_n:
-            return []
-
-        matched = []
-        seen = set()
-        for t in (self.tracks or []):
-            path = str(t.get("path", "") or "")
-            if not path:
-                continue
-            path_l = path.lower()
-            if path_l in seen:
-                continue
-
-            ta = str(t.get("artist", "") or "").strip().lower()
-            tt = str(t.get("title", "") or "").strip().lower()
-            if not tt and not ta:
-                continue
-
-            if ta != artist_n or tt != title_n:
-                continue
-
-            track = {
-                "artist": t.get("artist") or "",
-                "title": t.get("title") or "",
-                "discid": t.get("discid") or t.get("disc_id") or "",
-                "disc_id": t.get("disc_id") or t.get("discid") or "",
-                "duration": t.get("duration_secs") or t.get("duration") or "",
-                "path": path,
-                "type": t.get("type") or "",
-                "display": t.get("display") or "",
-            }
-            seen.add(path_l)
-            matched.append((str(track.get("disc_id", "") or "").upper(), track))
-
-        matched.sort(key=lambda x: x[0])
-        return [x[1] for x in matched]
 
     def _track_from_search_row(self, row: dict) -> dict:
         if not isinstance(row, dict):
@@ -46925,204 +45581,6 @@ class KaraokeApp(QWidget):
         dlg.exec()
 
 
-    def open_change_discid_dialog(self, singer_idx: int, song_idx: int):
-        if singer_idx < 0 or singer_idx >= len(self.queue):
-            return
-        songs = self.queue[singer_idx].get("songs", [])
-        if song_idx < 0 or song_idx >= len(songs):
-            return
-
-        old_entry = songs[song_idx]
-        artist, title = self._queue_entry_artist_title(old_entry)
-        candidates = self._find_discid_candidates(artist, title)
-        if not candidates:
-            QMessageBox.information(self, "Change Disc ID", "No matching songs found for this artist/title.")
-            return
-
-        current_path = self._queue_entry_primary_path(old_entry).lower()
-
-        class _DiscIdPickerDialog(QDialog):
-            def __init__(self, parent=None):
-                super().__init__(parent)
-                self._on_resize_cb = None
-            def resizeEvent(self, event):
-                super().resizeEvent(event)
-                cb = getattr(self, "_on_resize_cb", None)
-                if cb is not None:
-                    try:
-                        cb()
-                    except Exception:
-                        pass
-
-        dlg = _DiscIdPickerDialog(self)
-        dlg.setWindowTitle("Change Disc ID")
-        dlg.setMinimumSize(500, 260)
-        restored_geometry = False
-        try:
-            geo_hex = str((self.settings or {}).get("change_discid_dialog_geometry", "") or "").strip()
-            if geo_hex:
-                restored_geometry = bool(dlg.restoreGeometry(QByteArray.fromHex(geo_hex.encode("ascii"))))
-        except Exception:
-            restored_geometry = False
-        if not restored_geometry:
-            try:
-                sz = (self.settings or {}).get("change_discid_dialog_size") or {}
-                w = int(sz.get("w", 860))
-                h = int(sz.get("h", 480))
-                dlg.resize(max(500, w), max(260, h))
-            except Exception:
-                dlg.resize(860, 480)
-
-        # Match Network/Settings look
-        try:
-            base = self.palette().color(QPalette.ColorRole.Base)
-            win = self.palette().color(QPalette.ColorRole.Window)
-            txtc = self.palette().color(QPalette.ColorRole.Text)
-            border = base.darker(120)
-            field_bg = base.darker(105)
-            dlg.setStyleSheet(
-                dialog_stylesheet(win, base, txtc)
-                + f"""
-                QListWidget {{
-                    background-color: {field_bg.name()};
-                    color: {txtc.name()};
-                    border: 1px solid {border.name()};
-                    border-radius: 8px;
-                    outline: none;
-                }}
-                QListWidget::item {{ padding: 2px 6px; }}
-                QListWidget::item:selected {{
-                    background-color: palette(highlight);
-                    color: palette(highlighted-text);
-                }}
-                """
-            )
-        except Exception:
-            pass
-
-        v = QVBoxLayout(dlg)
-        header_full_text = f"Matches for: {artist or 'Unknown Artist'} • {title or 'Unknown Title'}"
-        header_label = QLabel(header_full_text)
-        header_label.setWordWrap(False)
-        header_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-        header_label.setStyleSheet(f"color: {_v('warning')}; font-weight: 700;")
-        v.addWidget(header_label)
-
-        results = QListWidget(dlg)
-        results.setAlternatingRowColors(True)
-        results.setUniformItemSizes(True)
-        results.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        results.setItemDelegate(
-            RightAlignedMetaDelegate(
-                self._row_left_role,
-                self._row_right_role,
-                results,
-                compact_shift_ratio=0.0,
-                edge_pad_px=2,
-                gap_px=12,
-                force_scrollbar_reserve_px=0,
-            )
-        )
-        v.addWidget(results, 1)
-
-        selected_row = -1
-        for idx, track in enumerate(candidates):
-            label, tooltip, left, right = self._build_search_row_text(track)
-            # Keep backing text compact; delegate renders aligned left/right chunks.
-            it = QListWidgetItem(left)
-            it.setData(Qt.ItemDataRole.UserRole, track)
-            self._set_aligned_row_meta(it, left, right)
-            try:
-                it.setToolTip(tooltip)
-            except Exception:
-                pass
-            results.addItem(it)
-            if current_path and str(track.get("path", "") or "").lower() == current_path:
-                selected_row = idx
-
-        if selected_row >= 0:
-            results.setCurrentRow(selected_row)
-        elif results.count() > 0:
-            results.setCurrentRow(0)
-
-        def refresh_rows_for_width():
-            try:
-                current = results.currentRow()
-                for i in range(results.count()):
-                    it = results.item(i)
-                    track = it.data(Qt.ItemDataRole.UserRole)
-                    if not isinstance(track, dict):
-                        continue
-                    label, tooltip, left, right = self._build_search_row_text(track)
-                    it.setText(left)
-                    self._set_aligned_row_meta(it, left, right)
-                    try:
-                        it.setToolTip(tooltip)
-                    except Exception:
-                        pass
-                if 0 <= current < results.count():
-                    results.setCurrentRow(current)
-            except Exception:
-                pass
-
-        def refresh_header_elide():
-            try:
-                fm = header_label.fontMetrics()
-                avail = max(80, header_label.width() - 6)
-                header_label.setText(fm.elidedText(header_full_text, Qt.TextElideMode.ElideRight, avail))
-            except Exception:
-                pass
-
-        resize_refresh_timer = QTimer(dlg)
-        resize_refresh_timer.setSingleShot(True)
-        def _refresh_on_resize():
-            refresh_rows_for_width()
-            refresh_header_elide()
-        resize_refresh_timer.timeout.connect(_refresh_on_resize)
-        dlg._on_resize_cb = lambda: resize_refresh_timer.start(20)
-        QTimer.singleShot(0, refresh_rows_for_width)
-        QTimer.singleShot(0, refresh_header_elide)
-
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dlg)
-        ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
-        if ok_btn is not None:
-            ok_btn.setEnabled(results.currentRow() >= 0)
-        results.itemSelectionChanged.connect(
-            lambda: ok_btn.setEnabled(results.currentRow() >= 0) if ok_btn is not None else None
-        )
-        v.addWidget(btns)
-
-        def apply_choice():
-            sel = results.currentItem()
-            if sel is None:
-                return
-            track = sel.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(track, dict):
-                return
-            try:
-                if self._replace_queue_song_with_track(singer_idx, song_idx, track, source="change_discid_dialog"):
-                    dlg.accept()
-            except Exception as e:
-                QMessageBox.warning(dlg, "Change Disc ID", str(e))
-
-        btns.accepted.connect(apply_choice)
-        btns.rejected.connect(dlg.reject)
-
-        def persist_size():
-            try:
-                s = dlg.size()
-                self.settings["change_discid_dialog_size"] = {"w": int(s.width()), "h": int(s.height())}
-                try:
-                    self.settings["change_discid_dialog_geometry"] = bytes(dlg.saveGeometry().toHex()).decode("ascii")
-                except Exception:
-                    pass
-                self.save_settings()
-            except Exception:
-                pass
-
-        dlg.finished.connect(lambda _r: persist_size())
-        dlg.exec()
     # ========== END SKIP FUNCTIONALITY ==========
 
 
@@ -48523,10 +46981,6 @@ class KaraokeApp(QWidget):
         m, s = divmod(int(secs), 60)
         return f"{m:02d}:{s:02d}"
 
-    def _fmt_hhmm(self, secs: int) -> str:
-        h, r = divmod(int(secs), 3600)
-        m, _ = divmod(r, 60)
-        return f"{h:02d}:{m:02d}"
         
     def _fmt_m_ss(self, secs: int | None) -> str:
         if not secs or secs <= 0:
@@ -48534,89 +46988,12 @@ class KaraokeApp(QWidget):
         m, s = divmod(int(secs), 60)
         return f"{m}:{s:02d}"
 
-    def _duration_cache_key(self, p: str) -> tuple[int, float] | None:
-        """
-        Stable key so we can skip re-probing unchanged files.
-        Returns (size, mtime) or None if the file is missing/inaccessible.
-        """
-        try:
-            st = os.stat(p)
-            return (st.st_size, st.st_mtime)
-        except Exception:
-            return None
         
-    def _duration_cache_key_for_path(self, file_path: str):
-        """
-        For normal files: (mtime,size). For ZIPs: coarse (zip mtime,size) only.
-        Strong ZIP member identity (crc/usize/member) is stored per-track in 'dur_member_key'.
-        """
-        try:
-            if str(file_path).lower().endswith(".zip"):
-                return {
-                    "zip_mtime": int(os.path.getmtime(file_path)),
-                    "zip_size":  os.path.getsize(file_path),
-                }
-            st = os.stat(file_path)
-            return {"mtime": int(st.st_mtime), "size": st.st_size}
-        except Exception:
-            return None
 
-    def _priority_paths(self) -> set[str]:
-        """
-        Prioritize durations that affect the UI right now:
-          1) Each singer's NEXT song (top of their list)
-          2) Currently visible search results
-        Everything else is probed afterwards in the background.
-        """
-        pri = set()
-
-        # 1) next song for each active singer
-        try:
-            for s in self.queue:
-                if s.get("songs"):
-                    song_info, _key = s["songs"][0]
-                    p = song_info[0] if isinstance(song_info, (tuple, list)) else song_info
-                    if p:
-                        pri.add(str(p))
-        except Exception:
-            pass
-
-        # 2) visible search results (list)
-        try:
-            if hasattr(self, "results_list"):
-                for r in range(self.results_list.count()):
-                    it = self.results_list.item(r)
-                    t = it.data(Qt.ItemDataRole.UserRole)
-                    if isinstance(t, dict) and t.get("path"):
-                        pri.add(str(t["path"]))
-        except Exception:
-            pass
-
-        return pri
 
     def _get_track_obj(self, song_path: str):
         return self._find_track_by_path_ci(song_path)
 
-    def set_video_timing_offset_ms(self, ms: int):
-        """Save the visual-only CDG/MP4 timing offset and apply it live to any
-        currently-playing karaoke transport. Audio is untouched."""
-        try:
-            ms = max(-3000, min(3000, int(ms)))
-        except Exception:
-            ms = 0
-        self.settings["video_timing_offset_ms"] = ms
-        try:
-            self.save_settings()
-        except Exception:
-            pass
-        try:
-            if str(getattr(self, "_current_karaoke_mode", "") or "").lower() != "cdg":
-                t = getattr(self, "karaoke_transport", None)
-                if t is not None and hasattr(t, "set_video_offset_ms"):
-                    t.set_video_offset_ms(ms)
-                    _diag(f"[VIDEO-OFFSET] live offset set to {ms:+d}ms")
-        except Exception:
-            pass
 
     def set_cdg_timing_offset_ms(self, ms: int):
         """Save CDG fine tuning on top of the active engine's timing baseline.
@@ -49769,22 +48146,6 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def clear_search(self):
-        """Clear the search box and results (kept for compatibility)."""
-        try:
-            self.search_input.blockSignals(True)
-            self.search_input.clear()
-        finally:
-            self.search_input.blockSignals(False)
-
-        # Clear the visible list + map and return focus.
-        try:
-            self.results_list.clear()
-            self.track_map = {}
-        except Exception:
-            pass
-
-        self.search_input.setFocus()
 
     def add_song_to_singer(self):
         singer_name = self.singer_input.text().strip()
@@ -55660,20 +54021,6 @@ class KaraokeApp(QWidget):
             button.setText("Starting…")
         _diag("[KARAFUN] operator pressed Ready after manual key/tempo adjustment")
 
-    def _set_external_karafun_adjustment_released(self, active):
-        if self._active_external_karafun is not active or not isinstance(active, dict):
-            return
-        active["needs_manual_adjustment"] = False
-        note = active.get("adjustment_note")
-        ready_btn = active.get("adjustment_ready_button")
-        complete_btn = active.get("complete_button")
-        if note is not None:
-            note.setText("Starting KaraFun. SingWS will advance automatically when playback ends.")
-            note.setStyleSheet(section_meta_css())
-        if ready_btn is not None:
-            ready_btn.setVisible(False)
-        if complete_btn is not None:
-            complete_btn.setEnabled(True)
 
     def _finish_external_karafun_playback(self, action: str, *, expected_active=None):
         active = self._active_external_karafun
@@ -55900,35 +54247,6 @@ class KaraokeApp(QWidget):
         finally:
             self._play_confirmation_open = False
 
-    def _advance_from_pending_start_after_confirmation(self) -> bool:
-        context = getattr(self, "_pending_play_start_context", None)
-        if not isinstance(context, dict):
-            return False
-        pending_singer_id = str(context.get("singer_id") or "")
-        if not self._cancel_pending_singer_start_for_queue_change("confirmed_play_advance"):
-            return False
-        # Rollback restored the selected request. Advancing rotates that singer
-        # without setting skip, completing the request, or deleting the song.
-        for idx, candidate in enumerate(list(getattr(self, "queue", []) or [])):
-            if not isinstance(candidate, dict):
-                continue
-            if str(self._ensure_singer_id(candidate) or "") != pending_singer_id:
-                continue
-            retained = self.queue.pop(idx)
-            self.queue.append(retained)
-            self.queue = self.queue.copy()
-            _diag(
-                f"[PLAY-COMMAND] retained pending song and rotated singer "
-                f"singer_id={pending_singer_id} from_index={idx}"
-            )
-            try:
-                self._request_queue_display_refresh()
-                self._schedule_save_data(0)
-            except Exception:
-                pass
-            break
-        self._next_in_progress = False
-        return True
 
     def _flash_play_control_kept_current(self):
         """Briefly say why Play did nothing, so the press is not silent.
@@ -56664,15 +54982,6 @@ class KaraokeApp(QWidget):
         except Exception as e:
             _diag(f"[PY-KARAOKE] restart failed: {e}")
 
-    def _safe_get_volume(self, vol):
-        """Return current volume as float, robust to PyGObject differences."""
-        try:
-            return float(vol.get_property("volume"))
-        except Exception:
-            try:
-                return float(getattr(vol.props, "volume"))
-            except Exception:
-                return 1.0  # sensible fallback
 
     def _safe_set_volume(self, vol, value: float):
         """Set volume safely across PyGObject builds."""
@@ -56902,9 +55211,6 @@ class KaraokeApp(QWidget):
         )
 
 
-    def on_media_ended(self, event=None):
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(0, self._handle_media_end_safe)
                 
     def play_mp3(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         return self._play_mp3(song_path, semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
@@ -56930,8 +55236,6 @@ class KaraokeApp(QWidget):
                 counter += 1
         return -1, -1
 
-    def get_block_size(self, singer):
-        return 1 + len(singer["songs"])
 
     def _queue_entry_remote_request_id(self, entry):
         try:
@@ -57310,36 +55614,6 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _queue_entry_dup_signature(self, entry):
-        """Signature for accidental-duplicate detection within ONE singer:
-        normalized artist + title + karaoke version (disc id, else the actual
-        library file). None when there isn't enough data to compare safely.
-        Never used across singers — other singers' copies are unrelated."""
-        if not isinstance(entry, dict):
-            return None
-        artist, title = self._queue_entry_artist_title_for_tombstone(entry)
-        if not str(title or "").strip():
-            return None
-
-        def norm(value) -> str:
-            return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
-
-        version = str(
-            entry.get("provider_track_id")
-            or entry.get("selected_disc_id")
-            or entry.get("disc_id")
-            or entry.get("selected_version")
-            or ""
-        ).strip()
-        provider = str(entry.get("provider") or "local").strip().lower()
-        if provider and provider != "local" and version:
-            version = f"{provider}:{version}"
-        if not version:
-            try:
-                version = str(self._song_info_primary_path(entry.get("song_info")) or "")
-            except Exception:
-                version = ""
-        return (norm(artist), norm(title), norm(version))
 
     def _cleanup_duplicate_singer_songs(self, *, reason: str = "") -> int:
         """Collapse only entries that share the same immutable request ID.
@@ -59738,21 +58012,6 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=send, daemon=True).start()
 
-    def debug_bg_music_state(self):
-        """Debug method to check background music state"""
-        if hasattr(self, 'bg_music'):
-            print(f"Background Music Debug:")
-            print(f"  - Has playlist: {bool(self.bg_music.playlist)}")
-            print(f"  - Playlist length: {len(self.bg_music.playlist) if self.bg_music.playlist else 0}")
-            print(f"  - Current index: {self.bg_music.current_index}")
-            print(f"  - Is playing: {self.bg_music.is_playing}")
-            print(f"  - Volume: {self.bg_music.volume}")
-            engine = getattr(self.bg_music, "_bass_engine", None)
-            print(f"  - Audio engine: {getattr(engine, 'backend_name', 'none')}")
-            if self.bg_music.playlist:
-                print(f"  - Current track: {self.bg_music.get_current_track_info()}")
-        else:
-            print("No background music object found")
 
     def _style_bg_main_controls(self):
         """Match compact BG controls to the BG manager button look."""
@@ -60303,33 +58562,6 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print("Show karaoke window failed:", e)
 
-    def debug_current_bg_artwork(self):
-        """Debug method to test artwork extraction on current background music file"""
-        if not hasattr(self, 'bg_music') or not self.bg_music.playlist:
-            print("No background music loaded")
-            return
-            
-        if self.bg_music.current_index >= len(self.bg_music.playlist):
-            print("Invalid current index")
-            return
-            
-        current_file = self.bg_music.playlist[self.bg_music.current_index]
-        
-        # Test the enhanced artwork extraction
-        print(f"\n🧪 Testing artwork extraction for current track:")
-        print(f"📁 File: {current_file}")
-        
-        # You can call this to test
-        artwork = self.bg_music.get_album_artwork(current_file)
-        
-        if artwork:
-            print(f"✅ SUCCESS: Got artwork {artwork.width()}x{artwork.height()}")
-            # Force update the display
-            self.update_bg_track_display()
-        else:
-            print("❌ FAILED: No artwork extracted")
-            
-        return artwork
 
     def _advance_bg_to_next_paused(self):
         """Advance background music to next track but keep it paused"""
@@ -61867,139 +60099,6 @@ class DetachedPainterTicker(QFrame):
         self._view.close()
         super().closeEvent(event)
 
-# -------- Manage Folders dialog --------
-class ManageFoldersDialog(QDialog):
-    def __init__(self, parent, folders: list[str]):
-        super().__init__(parent)
-        self.setWindowTitle("Manage Folders")
-        self.resize(640, 420)
-        self.setWindowModality(Qt.WindowModality.WindowModal)
-        try:
-            base = self.palette().color(QPalette.ColorRole.Base)
-            win = self.palette().color(QPalette.ColorRole.Window)
-            txtc = self.palette().color(QPalette.ColorRole.Text)
-            border = base.darker(120)
-            field_bg = base.darker(105)
-            self.setStyleSheet(
-                dialog_stylesheet(win, base, txtc)
-                + f"""
-                QListWidget {{
-                    background-color: {_v('surface')};
-                    color: {_v('text')};
-                    border: 1px solid {_v('border')};
-                    border-radius: 8px;
-                    outline: none;
-                }}
-                QListWidget::item {{ padding: 6px 8px; }}
-                QListWidget::item:selected {{
-                    background-color: {_v('accent')};
-                    color: {_v('accent_text')};
-                }}
-                """
-            )
-        except Exception:
-            pass
-
-        self._list = QListWidget(self)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        # Fill existing
-        for f in folders or []:
-            self._list.addItem(f)
-
-        # Controls
-        add_btn = QPushButton("Add…")
-        remove_btn = QPushButton("Remove")
-        up_btn = QPushButton("Move Up")
-        down_btn = QPushButton("Move Down")
-        try:
-            remove_btn.setStyleSheet(warning_button_css(padding="6px 12px", radius=8))
-        except Exception:
-            pass
-
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(add_btn)
-        btn_row.addWidget(remove_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(up_btn)
-        btn_row.addWidget(down_btn)
-
-        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 18, 18, 18)
-        lay.setSpacing(10)
-        tip = QLabel("These folders will be scanned for background music. Changes take effect when you click OK.")
-        tip.setStyleSheet(section_meta_css())
-        tip.setWordWrap(True)
-        lay.addWidget(tip)
-        lay.addWidget(self._list)
-        lay.addLayout(btn_row)
-        lay.addWidget(box)
-
-        # Wire
-        add_btn.clicked.connect(self._add_folders)
-        remove_btn.clicked.connect(self._remove_selected)
-        up_btn.clicked.connect(self._move_up)
-        down_btn.clicked.connect(self._move_down)
-        box.accepted.connect(self.accept)
-        box.rejected.connect(self.reject)
-
-    def folders(self) -> list[str]:
-        vals = [self._list.item(i).text() for i in range(self._list.count())]
-        seen, out = set(), []
-        for f in vals:
-            if f not in seen:
-                out.append(f); seen.add(f)
-        return out
-
-    def _add_folders(self):
-        dlg = QFileDialog(self, "Add folder(s)")
-        dlg.setFileMode(QFileDialog.FileMode.Directory)
-        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        try:
-            if sys.platform == "darwin" and Path("/Volumes").exists():
-                dlg.setDirectory("/Volumes")
-            else:
-                dlg.setDirectory(str(Path.home()))
-            urls = [QUrl.fromLocalFile(str(Path.home())), QUrl.fromLocalFile("/")]
-            if sys.platform == "darwin":
-                urls.append(QUrl.fromLocalFile("/Volumes"))
-            dlg.setSidebarUrls(urls)
-        except Exception:
-            pass
-
-        # enable multi-select on internal views
-        for w in dlg.findChildren(QTreeView) + dlg.findChildren(QListWidget):
-            try:
-                w.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-            except Exception:
-                pass
-
-        if dlg.exec():
-            for sel in dlg.selectedFiles():
-                self._list.addItem(str(Path(sel)))
-
-    def _remove_selected(self):
-        for it in self._list.selectedItems():
-            self._list.takeItem(self._list.row(it))
-
-    def _move_up(self):
-        rows = sorted([self._list.row(i) for i in self._list.selectedItems()])
-        for r in rows:
-            if r > 0:
-                it = self._list.takeItem(r)
-                self._list.insertItem(r-1, it)
-                self._list.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
-
-    def _move_down(self):
-        rows = sorted([self._list.row(i) for i in self._list.selectedItems()], reverse=True)
-        for r in rows:
-            if r < self._list.count()-1:
-                it = self._list.takeItem(r)
-                self._list.insertItem(r+1, it)
-                self._list.setCurrentItem(it, QItemSelectionModel.SelectionFlag.ClearAndSelect)
 
 if __name__ == "__main__" and "--singws-offline-analysis-worker" in sys.argv:
     from libmpv_media_jobs import run_isolated_analysis_worker
