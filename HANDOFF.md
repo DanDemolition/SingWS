@@ -4,12 +4,23 @@ Updated 2026-09-29.
 
 ## VERSION POLICY (operator instruction, 2026-09-29)
 
-**Do not bump the version for test builds.** 1.0.0.7 is the latest release (2026-10-03); rebuild for testing without changing it
+**Do not bump the version for test builds.** 1.0.0.7 (re-released 2026-10-03 evening) is the latest release; rebuild for testing without changing it
 and bump only when the operator says release. (1.0.0.5 was published 2026-09-29 and re-released with host chat on 2026-09-30.)
 Iron rule: iCloud "Desktop & Documents" sync is ON and the project folder is ~24 GB, so builds make fileproviderd/cloudd/bird
 saturate the Mac (load average >50) and cause video slowdowns while the capture itself logs a steady 29 fps. Do not build while the
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
+
+## RE-RELEASED 1.0.0.7 (same version number) — 2026-10-03 evening, published, latest; installed on this Mac (arm64)
+Tag `v1.0.0.7` force-moved from `2e75508` to release commit `0eecc37`; both DMGs replaced with `gh release upload --clobber`, notes replaced.
+arm64 `cf1d09ce...` (127,059,391 B, the exact tested build 4, exe `949b43cf...`) and x86_64 `a752a978...` (152,910,214 B); re-downloaded sizes and
+SHA-256s equal `docs/release.json`; Pages (manifest + download page) and `latest/download` verified. Checks: hdiutil, strict signature, arch, version 1.0.0.7,
+macOS min 12.3, markers (fixed `delay 3` present, `lowCount` absent, no_match diagnosis, fast picture start, host chat media, shutdown breadcrumbs),
+Rosetta smoke launch of the Intel app on scratch data (BASS ready, clean shutdown, live log unmoved; the first attempt did not exit within 40 s right after
+the build, a second exited on its own in 9 s: unexplained, probably load). Contents beyond the first 1.0.0.7: the KaraFun search fixed-wait restore
+(the first 1.0.0.7 could fail to start a song when KaraFun began on its Discover page), no-match diagnosis log line, duration guard.
+**Caveats:** auto-update will NOT offer this to anyone already on 1.0.0.7, so they must download again (the notes say so). Intel has still never run on a
+physical Intel Mac; the Intel-only stalls are unexplained. Next release: bump the version as usual (1.0.0.8).
 
 ## Rehearsal of the post-1.0.0.7 test build — 2026-10-03 (installed on this Mac: test build 4, label 1.0.0.7, NOT published, 6 local commits pushed)
 Installed exe starts `949b43cf...` (arm64). Operator-confirmed on real hardware: KaraFun auto-start of two songs (Avenged Sevenfold / A Little Piece of
