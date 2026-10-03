@@ -20,8 +20,9 @@ before the two waits (a forced-exit watchdog was added then removed). If it recu
 Not changed (no evidence of harm): ~1 GUI stall/min of 120-400 ms in every state (stack capture is off), ~2 per song change (median
 235 ms), 400 ms stall after each song end when "rotation decorative effects resumed" (consistent ~410 ms; the rotation_effects probes
 never fired, so the cost is elsewhere), 2-3 s stall at every launch (app_startup 2.3-3.1 s), key/tempo readback returns None every
-minute (no stall correlation), host-state POST ~400 ms every ~15 s (new TLS connection per call; a keep-alive Session would cut it,
-untried), network_sync_check 3 s (five sequential checks, operator-triggered).
+minute (no stall correlation), host-state POST ~400 ms every ~15 s (new TLS connection per call; TESTED 2026-10-03 against wskar.com: a reused
+connection takes 65 ms vs 258 ms fresh when calls are <=3 s apart, but Apache closes idle connections, so at the real 8-60 s spacing
+reuse gives no gain (255 ms either way). Not worth doing; only back-to-back bursts would benefit), network_sync_check 3 s (five sequential checks, operator-triggered).
 
 ## FINAL 1.0.0.6 (re-released twice, 2026-10-02; installed on this Mac; operator confirmed "works perfectly")
 Release commit `c6525f6`, tag `v1.0.0.6` force-moved to it. arm64 `b3d3a277...` (127,080,884 B), x86_64 `3f4a70fb...` (152,934,969 B);
