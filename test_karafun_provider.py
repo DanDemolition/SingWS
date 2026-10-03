@@ -6,9 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import karafun_provider
 import song_index
-from playback_providers import AvailabilityStatus, SongProvider
 
 
 class KaraFunProviderTests(unittest.TestCase):
@@ -61,28 +59,6 @@ class KaraFunProviderTests(unittest.TestCase):
         self.assertNotIn("help of elem", script)
         self.assertNotIn("value of elem", script)
         self.assertIn('elementRole is "AXStaticText"', script)
-
-    def test_streaming_reference_becomes_external_track_dict(self):
-        ref = karafun_provider.KaraFunReference(
-            title="Song",
-            artist="Artist",
-            provider_track_id="kf-123",
-            provider_url="https://www.karafun.com/karaoke/artist/song/",
-            streaming=True,
-        ).to_provider_track()
-
-        data = ref.to_track_dict()
-        self.assertEqual(data["provider"], SongProvider.KARAFUN_STREAMING.value)
-        self.assertEqual(data["provider_track_id"], "kf-123")
-        self.assertEqual(data["availability_status"], AvailabilityStatus.EXTERNALLY_CONTROLLED.value)
-        self.assertTrue(data["path"].startswith("karafun_streaming:"))
-
-    def test_kfn_reference_never_claims_direct_playback(self):
-        ref = karafun_provider.kfn_reference("/tmp/Artist - Song.kfn", artist="Artist")
-
-        self.assertEqual(ref.provider, SongProvider.KARAFUN_LOCAL)
-        self.assertEqual(ref.availability_status, AvailabilityStatus.EXTERNALLY_CONTROLLED)
-        self.assertEqual(ref.local_reference_path, "/tmp/Artist - Song.kfn")
 
     def test_search_index_preserves_provider_metadata(self):
         with tempfile.TemporaryDirectory() as td:

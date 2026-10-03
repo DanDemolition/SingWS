@@ -25,7 +25,6 @@ clock-driven instead of offset-driven.
 | `okj_audio_backend.py` | audio player, key/pitch changer, tempo/speed, EQ, fades, silence *sensing*, hang detection | PyGObject + GStreamer (`brew install gstreamer pygobject3`) |
 | `okj_cdg.py` | CDG decoder/renderer | numpy |
 | `okj_fileinfo.py` | filename → artist/title/song_id parsing; brand priority selection | stdlib only |
-| `okj_ticker.py` | scrolling ticker (rules/tips/rotation) | Pillow (+ optional PySide6/PyQt5) |
 | `gst_bootstrap.py` | — (new: runtime env setup for bundled GStreamer) | stdlib only |
 | `wildstyle.spec` | — (new: PyInstaller bundling of GStreamer into the .app) | PyInstaller |
 | `build_app.sh` | — (new: build + self-containment verification) | — |
