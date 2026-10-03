@@ -15,5 +15,29 @@ class ShutdownBreadcrumbTests(unittest.TestCase):
         self.assertLess(body.index('"""', body.index('"""') + 3), body.index('[LAUNCH] main window closing (closeEvent)'))
 
 
+class ShutdownWatchdogTests(unittest.TestCase):
+    """2026-10-02 21:26:59: a quit that never finished. Settings and queue are saved first, then a watchdog guarantees exit."""
+
+    def test_watchdog_starts_after_the_saves_and_before_the_network_teardown(self):
+        i = SOURCE.index("def closeEvent(self, event):\n        \"\"\"Close main window -> quit whole app.")
+        body = SOURCE[i:i + 9000]
+        saved = body.index("[SHUTDOWN] settings and queue saved")
+        started = body.index("self._start_shutdown_watchdog()")
+        teardown = body.index("self._shutdown_network_transports()")
+        self.assertLess(saved, started)
+        self.assertLess(started, teardown)
+
+    def test_watchdog_forces_exit_and_says_so(self):
+        i = SOURCE.index("def _start_shutdown_watchdog(self):")
+        body = SOURCE[i:i + 1600]
+        self.assertIn("os._exit(0)", body)
+        self.assertIn("[SHUTDOWN] still running", body)
+        self.assertIn("daemon=True", body)
+
+    def test_the_two_unbounded_waits_leave_breadcrumbs(self):
+        self.assertIn('[SHUTDOWN] waiting for in-flight HTTP requests', SOURCE)
+        self.assertIn('[SHUTDOWN] waiting for the poll thread', SOURCE)
+
+
 if __name__ == "__main__":
     unittest.main()

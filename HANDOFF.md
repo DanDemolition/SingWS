@@ -11,6 +11,18 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## Log review 2026-10-03 of the 2026-10-02 show (1.0.0.5 -> 1.0.0.6, Intel venue Mac) — source fix committed, NOT built/installed
+No errors or Python tracebacks; all 4 KaraFun songs started (13 s from queue to playing; the AppleScript search is ~7 s of that),
+capture 5-7 ms/frame at 24-28 fps. One real fault: **21:26:59 closeEvent ran, no "clean shutdown", app relaunched 2 min later** (a
+network blip: server_sync 1.9 s just before). `network_lifecycle.wait_for_idle()` and `QThread.wait()` in `_shutdown_network_transports`
+have no limit. Fix: `_start_shutdown_watchdog` (after settings + queue are saved, forces `os._exit(0)` 20 s later, logs
+`[SHUTDOWN] still running ...`) plus `[SHUTDOWN]` breadcrumbs; tests in `test_shutdown_breadcrumbs.py`. Cause not proven (no stack).
+Not changed (no evidence of harm): ~1 GUI stall/min of 120-400 ms in every state (stack capture is off), ~2 per song change (median
+235 ms), 400 ms stall after each song end when "rotation decorative effects resumed" (consistent ~410 ms; the rotation_effects probes
+never fired, so the cost is elsewhere), 2-3 s stall at every launch (app_startup 2.3-3.1 s), key/tempo readback returns None every
+minute (no stall correlation), host-state POST ~400 ms every ~15 s (new TLS connection per call; a keep-alive Session would cut it,
+untried), network_sync_check 3 s (five sequential checks, operator-triggered).
+
 ## FINAL 1.0.0.6 (re-released twice, 2026-10-02; installed on this Mac; operator confirmed "works perfectly")
 Release commit `c6525f6`, tag `v1.0.0.6` force-moved to it. arm64 `b3d3a277...` (127,080,884 B), x86_64 `3f4a70fb...` (152,934,969 B);
 re-downloaded hashes equal `docs/release.json`; Pages and `latest/download` verified. Installed here: the arm64 build (backup of the previous

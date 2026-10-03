@@ -26189,10 +26189,12 @@ class KaraokeApp(QWidget):
         # calls exit/OPENSSL_cleanup. Drain TLS users before Qt tears down.
         wait_for_idle = getattr(requests, "wait_for_idle", None)
         if callable(wait_for_idle):
+            _diag("[SHUTDOWN] waiting for in-flight HTTP requests")
             wait_for_idle()
         if t is not None:
             try:
                 if t.isRunning():
+                    _diag("[SHUTDOWN] waiting for the poll thread")
                     t.requestInterruption()
                     t.quit()
                     t.wait()
@@ -47001,6 +47003,31 @@ class KaraokeApp(QWidget):
     # ========== END SKIP FUNCTIONALITY ==========
 
 
+    SHUTDOWN_WATCHDOG_SECONDS = 20.0
+
+    def _start_shutdown_watchdog(self):
+        """Guarantee the app exits after the operator quits.
+
+        2026-10-02 21:26:59: closeEvent ran, "clean shutdown" never logged, and the app was gone two minutes later only
+        because it was relaunched. Teardown waits on in-flight HTTP (network_lifecycle.wait_for_idle) and on QThreads with
+        no limit, so a network hiccup can hold the process open. By the time this starts, settings and the queue are
+        already saved; if the process is still alive after the limit, exit it rather than leave a ghost window.
+        """
+        if getattr(self, "_shutdown_watchdog_started", False):
+            return
+        self._shutdown_watchdog_started = True
+        limit = float(self.SHUTDOWN_WATCHDOG_SECONDS)
+
+        def _force_exit():
+            time.sleep(limit)
+            try:
+                _diag(f"[SHUTDOWN] still running {limit:.0f}s after close; forcing exit (data was saved before teardown)")
+            except Exception:
+                pass
+            os._exit(0)
+
+        threading.Thread(target=_force_exit, daemon=True, name="shutdown-watchdog").start()
+
     def closeEvent(self, event):
         """Close main window -> quit whole app.
 
@@ -47080,6 +47107,11 @@ class KaraokeApp(QWidget):
             self.save_data()
         except Exception as e:
             _diag(f"[SHUTDOWN] final queue save failed: {e}")
+        _diag("[SHUTDOWN] settings and queue saved")
+        try:
+            self._start_shutdown_watchdog()
+        except Exception:
+            pass
 
         # Stop karaoke playback cleanly
         try:
@@ -47117,7 +47149,9 @@ class KaraokeApp(QWidget):
             pass
 
         # --- Stop network relays/polling cleanly ---
+        _diag("[SHUTDOWN] stopping network transports")
         self._shutdown_network_transports()
+        _diag("[SHUTDOWN] network transports stopped")
 
         # Close secondary windows (karaoke output, preview, etc.)
         try:
