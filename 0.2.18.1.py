@@ -29574,7 +29574,6 @@ class KaraokeApp(QWidget):
             tilt_slider.setValue(25)
             exciter_mix_slider.setValue(20)
             ceiling_slider.setValue(-10)
-            mp4_quality_combo.setCurrentIndex(mp4_quality_combo.findData(720))
             log_email_edit.setText("")
             auto_crash_logs_cb.setChecked(False)
             smtp_host_edit.setText("")
