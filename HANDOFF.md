@@ -20,12 +20,13 @@ lines (GET READY banner, Next Up artist and on-deck) had no fit at all. Now ever
 and 1920x1080 with long names (outro, singer start, next up). The QML itself was never wrong at normal sizes and had not changed in weeks.
 Tests: `SmallPanelTextFitTests` in test_show_screen_vfx.py.
 
-## Stall capture on the dev Mac — 2026-10-03, partial
-Scratch app copy (SINGWS_HOME=/tmp/kf/cap_home, no server) playing a 2-minute CDG song, `sample` of the main thread: ~38% busy; widget repaints
-~23% (QWidgetRepaintManager::sync), Qt Quick window sync ~10%, timers ~3%. Song end caused no stall on Apple Silicon, so the Intel 400 ms stall
-cannot be reproduced here. Python-level stall stacks mostly end at app.exec (the time is inside Qt painting), so Python stacks do not help; the
-native `sample` does. The A/B script (/tmp/kf/ab_capture.py, toggling ticker/show-screen/rotation effects) crashed on a missing sample file and
-was not finished.
+## Stall capture on the dev Mac — 2026-10-03, STOPPED at the operator's request (no further runs without asking)
+Scratch app copy (SINGWS_HOME=/tmp/kf/cap_home, no server) playing a CDG song, native `sample` of the main thread. First run: ~38% busy, widget
+repaints ~23%, Qt Quick sync ~10%. The song end caused no stall on Apple Silicon, so the Intel 400 ms stall cannot be reproduced here, and
+Python-level stall stacks mostly end at app.exec (time is inside Qt painting), so only native sampling helps. The effect-toggle comparison
+(rotation/ticker/show-screen/Quick surfaces) was inconclusive: results split into two modes (~0% vs ~18% widget repaint) caused by whether the
+test window was covered (macOS stops repainting covered windows), not by the setting; a controlled re-run was started and cancelled. These runs
+take over the operator's screen, so do the rest in the audit, on the Intel Mac, only when he agrees. Nothing here changed app behaviour.
 
 ## KaraFun picture ~2 s sooner — 2026-10-03, committed locally, NOT built/installed, early-start path NOT yet seen on a real song
 After the double-click the first frame came ~3-4 s later, mostly because capture waited for the pane-finding probe (~1.8 s, measured live) and
