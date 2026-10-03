@@ -150,7 +150,8 @@ class FillRegionTests(unittest.TestCase):
         self.assertGreater(big, small)                                # more of the width is kept when the panel is taller
 
     def test_it_is_used_for_the_first_capture_and_for_following_resizes(self):
-        self.assertIn('region=karafun_fill_region(found["region"])', SOURCE)
+        self.assertIn('fitted = karafun_fill_region(found["region"])', SOURCE)
+        self.assertIn("self._begin_karafun_capture_stream(token, region=fitted)", SOURCE)
         refresh = SOURCE[SOURCE.index("def _refresh_karafun_preview_region("):SOURCE.index("def _check_karafun_preview_alive(")]
         self.assertIn('fitted = karafun_fill_region(found["region"]) if found else None', refresh)
         self.assertIn("capture.set_region(fitted)", refresh)

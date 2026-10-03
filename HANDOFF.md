@@ -11,6 +11,16 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## KaraFun picture ~2 s sooner — 2026-10-03, committed locally, NOT built/installed, early-start path NOT yet seen on a real song
+After the double-click the first frame came ~3-4 s later, mostly because capture waited for the pane-finding probe (~1.8 s, measured live) and
+only then started ScreenCaptureKit. Now `_start_karafun_preview_capture` remembers the last pane region (6 h) and, for the next song, starts the
+capture at once from it while the same probe checks it; if the pane moved it is re-aimed (`[KARAFUN-CAPTURE] the pane had moved since the last
+song; re-aimed`), else `last pane region confirmed`. The first song of a session still waits for the probe. Warm-up frames of an idle player
+are held back until the entry status is "playing" (never longer than 6 s: `_karafun_frame_gate_until`), so the TV does not flash KaraFun's
+black player. Also: the probe no longer reads element names (1.8 s -> 1.45 s; the pane logic never used them). Exposure: if the operator
+moved/resized KaraFun's window or dragged the splitter since the last song, the TV shows the wrong crop for the ~1.5 s until the probe re-aims.
+Tests: test_karafun_fast_capture.py (7). To check on a real song: log lines above, and the picture should appear ~2 s earlier than before.
+
 ## KaraFun search ~3 s faster — 2026-10-03, committed locally, NOT built/installed, tried on the real KaraFun (search only, nothing played)
 `_karafun_search_script` (0.2.18.1.py) took ~6 s per search: 0.45 s to find the search field, 0.2 s typing, a FIXED `delay 3`, then ~2.3 s
 scanning rows. Measured live: the results window (the main window retitled "Results for ...") holds ~71 elements until the rows arrive

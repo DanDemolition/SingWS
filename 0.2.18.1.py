@@ -2769,10 +2769,8 @@ def karafun_preview_probe_script():
         'try',
         'set hp to position of h',
         'set hs to size of h',
+        # Names are never used to find the pane, and reading them cost ~0.3 s of a ~1.8 s probe (measured 2026-10-03).
         'set nm to ""',
-        'try',
-        'set nm to my cleanText(name of h)',
-        'end try',
         'set out to out & "E|" & (role of h as text) & "|" & nm & "|" & (item 1 of hp) & "|" & (item 2 of hp) & "|" & (item 1 of hs) & "|" & (item 2 of hs) & linefeed',
         'end try',
         'end repeat',
@@ -52563,14 +52561,36 @@ class KaraokeApp(QWidget):
 
 
 
+    KARAFUN_REGION_CACHE_MAX_AGE_S = 6 * 3600
+
     def _start_karafun_preview_capture(self, token):
         """Find the preview pane in KaraFun's main window (background thread), then capture it. If it is not there yet
-        keep looking for as long as the song is active, and tell the operator once what to do."""
+        keep looking for as long as the song is active, and tell the operator once what to do.
+
+        Finding the pane takes ~1.5 s of Accessibility calls, and the first frame used to wait for it. KaraFun's window
+        rarely moves between songs, so when a region was found earlier this session the picture starts at once from that
+        region while the same probe checks it; if the pane has moved the capture is re-aimed (the guard does that too)."""
+        state = object.__getattribute__(self, "__dict__")
+        cached = state.get("_karafun_last_preview_region")
+        cached_at = float(state.get("_karafun_last_preview_region_at") or 0.0)
+        early = bool(cached and (time.monotonic() - cached_at) < self.KARAFUN_REGION_CACHE_MAX_AGE_S)
+        state["_karafun_frame_gate_until"] = None
+
         def worker():
             started = time.monotonic()
             found = None
             notified = False
             reason = "KaraFun's main window with its preview pane was not found"
+            if early:
+                def begin_early():
+                    if getattr(self, "_karafun_handoff_token", None) != token or not getattr(self, "_karafun_capture_active", False):
+                        return
+                    _diag(f"[KARAFUN-CAPTURE] starting at once from the last pane region {tuple(round(v) for v in cached)}; checking it")
+                    # The capture is warm before the song plays; keep KaraFun's idle (black) player off the audience screen
+                    # until the song is playing - but never for more than 6 s, so a status that never arrives cannot black it out.
+                    state["_karafun_frame_gate_until"] = time.monotonic() + 6.0
+                    self._begin_karafun_capture_stream(token, region=cached)
+                self._run_on_ui_thread(begin_early)
             while True:
                 if getattr(self, "_karafun_handoff_token", None) != token or not getattr(self, "_karafun_capture_active", False):
                     return
@@ -52593,10 +52613,23 @@ class KaraokeApp(QWidget):
             def finish():
                 if getattr(self, "_karafun_handoff_token", None) != token:
                     return
+                fitted = karafun_fill_region(found["region"])
+                state["_karafun_last_preview_region"] = fitted
+                state["_karafun_last_preview_region_at"] = time.monotonic()
+                if early:
+                    capture = getattr(self, "_karafun_capture", None)
+                    current = state.get("_karafun_preview_region")
+                    if capture is not None and current is not None and karafun_preview_region_changed(current, fitted):
+                        state["_karafun_preview_region"] = fitted
+                        capture.set_region(fitted)
+                        _diag(f"[KARAFUN-CAPTURE] the pane had moved since the last song; re-aimed to {tuple(round(v) for v in fitted)}")
+                    else:
+                        _diag(f"[KARAFUN-CAPTURE] last pane region confirmed pane={tuple(round(v) for v in found['region'])}")
+                    return
                 _diag(f"[KARAFUN-CAPTURE] preview pane found pane={tuple(round(v) for v in found['region'])} "
-                      f"capturing={tuple(round(v) for v in karafun_fill_region(found['region']))} "
+                      f"capturing={tuple(round(v) for v in fitted)} "
                       f"window={tuple(round(v) for v in found['window'])}")
-                self._begin_karafun_capture_stream(token, region=karafun_fill_region(found["region"]))
+                self._begin_karafun_capture_stream(token, region=fitted)
             self._run_on_ui_thread(finish)
         threading.Thread(target=worker, daemon=True, name="karafun-preview-find").start()
 
@@ -52625,7 +52658,7 @@ class KaraokeApp(QWidget):
         state = object.__getattribute__(self, "__dict__")
         capture = getattr(self, "_karafun_capture", None)
         current = state.get("_karafun_preview_region")
-        if capture is None or current is None or state.get("_karafun_preview_probe_inflight"):
+        if capture is None or current is None or state.get("_karafun_preview_probe_inflight", "_karafun_frame_gate_until"):
             return
         state["_karafun_preview_probe_inflight"] = True
 
@@ -52701,6 +52734,11 @@ class KaraokeApp(QWidget):
                 pixels, width, height, stride = latest
                 seen_at = time.monotonic()
                 self._karafun_last_frame_at = seen_at
+                gate = _state.get("_karafun_frame_gate_until")
+                if gate:
+                    if seen_at < gate and str((self._karafun_active_entry() or {}).get("karafun_status") or "") != "playing":
+                        return
+                    _state["_karafun_frame_gate_until"] = None
                 frame = QImage(pixels, width, height, stride, QImage.Format.Format_ARGB32).copy()
                 vw = getattr(self, "video_window", None)
                 preview = getattr(self, "preview_window", None)
@@ -52778,7 +52816,7 @@ class KaraokeApp(QWidget):
     def _stop_karafun_dual_renderer_capture(self):
         _park_state = object.__getattribute__(self, "__dict__")
         for _key in ("_karafun_last_frame_at", "_karafun_preview_region", "_karafun_capture_started_at",
-                     "_karafun_preview_probe_inflight"):
+                     "_karafun_preview_probe_inflight", "_karafun_frame_gate_until"):
             _park_state.pop(_key, None)
         self._set_show_window_capture_level(False)
         guard = getattr(self, "_karafun_capture_guard_timer", None)
