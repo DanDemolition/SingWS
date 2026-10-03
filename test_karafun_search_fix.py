@@ -119,18 +119,15 @@ class SearchTimingTests(unittest.TestCase):
         return HOST._karafun_script_source(HOST._karafun_search_script(
             query="Bruno Mars Dance With Me", safe_title="Dance With Me", safe_artist="Bruno Mars", require_exact_title=True))
 
-    def test_no_fixed_three_second_wait_after_the_search_is_typed(self):
+    def test_the_search_waits_a_fixed_three_seconds_for_results(self):
+        # Polling the result count instead was tried on 2026-10-03: it broke every search that started from KaraFun's Discover page
+        # (the window is renamed while polling; 16 s, no match, measured against the fixed wait on a fresh KaraFun). Keep the wait fixed.
         source = self.script()
-        self.assertNotIn("delay 3\n", source + "\n")
         after_enter = source[source.index("key code 36"):]
-        self.assertLess(after_enter.index("repeat 9 times"), after_enter.index("set elems to entire contents of mainWindow"))
-
-    def test_it_waits_for_the_result_count_to_change_and_hold_then_gives_up(self):
-        source = self.script()
-        self.assertIn("if nowCount >= lowCount + 15 and nowCount is lastCount then exit repeat", source)   # rows, not just a retitled window
-        self.assertIn("if nowCount > 0 and nowCount < lowCount then set lowCount to nowCount", source)    # copes with old results left on screen
-        self.assertIn("set pollElems to entire contents of mainWindow", source)
-        self.assertEqual(source.count("repeat 9 times"), 1)             # bounded: about the old 3 seconds at worst
+        self.assertTrue(after_enter.lstrip().startswith("key code 36\ndelay 3"))
+        self.assertNotIn("repeat 9 times", source)
+        self.assertNotIn("pollElems", source)
+        self.assertNotIn("lowCount", source)
 
     def test_slow_position_and_size_lookups_come_after_the_cheap_name_checks(self):
         source = self.script()

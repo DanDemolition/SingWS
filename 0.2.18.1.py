@@ -52140,25 +52140,11 @@ class KaraokeApp(QWidget):
             'delay 0.05',
             f'keystroke {query_literal}',
             'key code 36',
-            # Wait for the results list, not a fixed 3 seconds. Measured 2026-10-03 on the show Mac's KaraFun: the window holds
-            # ~71 elements until the rows arrive (about 0.6 s after Enter), then jumps (116-176) and stays there. Poll the
-            # element count and carry on once it has changed and held for two polls; otherwise give up after ~3 s, exactly
-            # the old wait, so a slow or empty search behaves as before.
-            'set lowCount to 1000000',
-            'set lastCount to -1',
-            'repeat 9 times',
-            'set nowCount to 0',
-            'try',
-            'set pollElems to entire contents of mainWindow',
-            'set nowCount to count of pollElems',
-            'end try',
-            # The smallest count seen is the empty window (old results disappear first, so this also copes with a list left on screen from
-            # the previous search). Rows add dozens of elements (71 -> 116/176 measured); a retitled window adds one. Waiting for +15
-            # stops a cold KaraFun, whose results arrive late, from being scanned before any row exists (2026-10-03, first song after launch).
-            'if nowCount > 0 and nowCount < lowCount then set lowCount to nowCount',
-            'if nowCount >= lowCount + 15 and nowCount is lastCount then exit repeat',
-            'set lastCount to nowCount',
-            'end repeat',
+            # A fixed wait for the results to arrive. Polling the element count instead (tried 2026-10-03) was ~2 s faster when KaraFun was
+            # already on a results page, but when KaraFun started on its Discover page the window is renamed while it polls and the
+            # search then found nothing in 16 s - measured twice against twice on a fresh KaraFun: fixed wait found the song both
+            # times (6 s), the poll failed both times. Do not reintroduce without testing from a fresh KaraFun start.
+            'delay 3',
         ]
         if resolve_only:
             # Do not type a new search during recovery. Raise the existing
