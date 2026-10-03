@@ -49,6 +49,12 @@ Remaining risk: if rows ever arrive in several chunks more than ~0.3 s apart the
 applies. Watch `[KARAFUN-AUTO] search attempt=1 result=` in the next show log (expect FOUND at attempt 1 and ~3 s after the query).
 Tests: `SearchTimingTests` in test_karafun_search_fix.py. The harness used is /tmp/kf/search_timing.py (not in the repo).
 
+## Pre-show audit — 2026-10-03: GO WITH CAUTION (report: docs/verification/2026-10-03-preshow-audit.md)
+Done headless; nothing built/installed. Fixed: Reset-to-defaults NameError, animation text clipping in the small preview, plus dead-code removal
+(86 definitions / 1,901 lines, 3 unused modules, 4 unused settings, folder clutter moved to ~/.Trash/SingWS-audit-cleanup-20261003). All app (1,232 + 92)
+and server (19 suites) tests pass; new headless stability check. NEXT: build both arches, install, and rehearse one KaraFun + one CDG song
+(watch for the new `starting at once from the last pane region` / `search attempt=1 result=FOUND` log lines) before the next show.
+
 ## Server state vs GitHub — 2026-10-03
 Host chat pictures/GIFs + phone chat layout: DEPLOYED by the operator (all seven files hash-equal to server commit `8f6fff6`; singer page serves
 `room_chat_ui.js?v=2`; chat endpoints 401 without a key; config.inc 403). Server repo `8f6fff6` and app repo are pushed to GitHub.
