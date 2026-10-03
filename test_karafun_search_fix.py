@@ -127,7 +127,8 @@ class SearchTimingTests(unittest.TestCase):
 
     def test_it_waits_for_the_result_count_to_change_and_hold_then_gives_up(self):
         source = self.script()
-        self.assertIn("if nowCount > firstCount and nowCount is lastCount then exit repeat", source)
+        self.assertIn("if nowCount >= lowCount + 15 and nowCount is lastCount then exit repeat", source)   # rows, not just a retitled window
+        self.assertIn("if nowCount > 0 and nowCount < lowCount then set lowCount to nowCount", source)    # copes with old results left on screen
         self.assertIn("set pollElems to entire contents of mainWindow", source)
         self.assertEqual(source.count("repeat 9 times"), 1)             # bounded: about the old 3 seconds at worst
 
