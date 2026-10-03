@@ -160,5 +160,42 @@ class NoMatchIsNotFoundTests(unittest.TestCase):
         self.assertNotIn('\nreturn "FOUND|"', source)
 
 
+class NoMatchDiagnosisTests(unittest.TestCase):
+    """2026-10-03: a song plainly on KaraFun's screen came back as "no match" and the log could not say why. A failed search now
+    records what KaraFun's window looked like, once per song."""
+
+    def test_the_worker_logs_a_diagnosis_once_per_song(self):
+        src = SOURCE
+        self.assertIn("diag_logged = False", src)
+        i = src.index("if not diag_logged:")
+        self.assertIn("self._karafun_search_diag_script(safe_title)", src[i:i + 500])
+        self.assertIn("[KARAFUN-AUTO] no_match diagnosis:", src)
+
+    def test_the_diagnosis_script_is_read_only_and_compiles(self):
+        import subprocess
+        method = ns_method = None
+        text = "\n".join(HOST_DIAG())
+        for banned in ("keystroke", "click", "key code", "set frontmost", "perform action", "set value"):
+            self.assertNotIn(banned, text)
+        self.assertIn("withTitle=", text)
+        if sys.platform == "darwin":
+            r = subprocess.run(["osacompile", "-o", "/dev/null", "-e", text], capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+
+def HOST_DIAG():
+    tree = ast.parse(SOURCE)
+    body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "karafun_match_title"]
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, ast.FunctionDef) and sub.name in ("_karafun_search_diag_script", "_karafun_applescript_literal"):
+                    sub.decorator_list = []; body.append(sub)
+    ns = {"re": re}
+    exec(compile(ast.Module(body=body, type_ignores=[]), "diag", "exec"), ns)
+    h = SimpleNamespace(_karafun_applescript_literal=ns["_karafun_applescript_literal"])
+    return ns["_karafun_search_diag_script"](h, "A Little Piece of Heaven (live)")
+
+
 if __name__ == "__main__":
     unittest.main()

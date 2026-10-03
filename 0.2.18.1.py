@@ -52020,6 +52020,52 @@ class KaraokeApp(QWidget):
             _diag(f"[KARAFUN-AUTO] result double-click sent through accessibility x={x} y={y}")
         return True, ""
 
+    def _karafun_search_diag_script(self, safe_title: str):
+        """Read-only description of KaraFun's main window for the log when a search finds no match: who is frontmost, the windows,
+        how many elements/texts/lengths the window exposes, how many texts carry the title, and the first few texts."""
+        title = self._karafun_applescript_literal(karafun_match_title(safe_title))
+        return [
+            'tell application "System Events"',
+            'set frontName to name of first application process whose frontmost is true',
+            'set matches to every application process whose name contains "KaraFun"',
+            'if (count of matches) is 0 then return "KaraFun not running"',
+            'tell item 1 of matches',
+            'set out to "front=" & frontName',
+            'repeat with w in windows',
+            'try',
+            'set wname to name of w',
+            'set wp to position of w',
+            'set ws to size of w',
+            'set out to out & " | window [" & wname & "] " & (item 1 of wp) & "," & (item 2 of wp) & " " & (item 1 of ws) & "x" & (item 2 of ws)',
+            'if wname is not "Dual Renderer" then',
+            'set es to entire contents of w',
+            'set textCount to 0',
+            'set lengthCount to 0',
+            'set titleCount to 0',
+            'set firstTexts to ""',
+            'repeat with e in es',
+            'try',
+            'if role of e is "AXStaticText" then',
+            'set textCount to textCount + 1',
+            'set v to name of e as text',
+            'if v contains ":" and (length of v) < 9 then set lengthCount to lengthCount + 1',
+            f'if v contains {title} then set titleCount to titleCount + 1',
+            'if textCount <= 8 then',
+            'if (length of v) > 40 then set v to text 1 thru 40 of v',
+            'set firstTexts to firstTexts & "<" & v & ">"',
+            'end if',
+            'end if',
+            'end try',
+            'end repeat',
+            'set out to out & " elements=" & (count of es) & " texts=" & textCount & " lengths=" & lengthCount & " withTitle=" & titleCount & " first=" & firstTexts',
+            'end if',
+            'end try',
+            'end repeat',
+            'return out',
+            'end tell',
+            'end tell',
+        ]
+
     def _karafun_search_script(self, *, query: str, safe_title: str = "", safe_artist: str = "",
                                require_exact_title: bool = False, resolve_only: bool = False):
         query_literal = self._karafun_applescript_literal(query)
@@ -52594,6 +52640,7 @@ class KaraokeApp(QWidget):
                 # consume a rung of that ladder, and a query that carries no
                 # artist may only accept an artist-verified row.
                 safe_artist_match = str(artist or "").strip()
+                diag_logged = False
                 for attempt, query in enumerate(search_queries, start=1):
                     if not query:
                         continue
@@ -52653,6 +52700,15 @@ class KaraokeApp(QWidget):
                         continue
                     last_error = parts[-1] if parts else "KaraFun search failed"
                     _diag(f"[KARAFUN-AUTO] search attempt={attempt} no_match result={str(candidate or '')[:180]!r}")
+                    if not diag_logged:
+                        # 2026-10-03: a song that is plainly on KaraFun's screen came back as "no match" and the log could not say why.
+                        diag_logged = True
+                        try:
+                            _dok, _dout, _derr = self._run_karafun_applescript_sync(
+                                self._karafun_search_diag_script(safe_title), timeout=20)
+                            _diag(f"[KARAFUN-AUTO] no_match diagnosis: {str(_dout if _dok else _derr)[:900]!r}")
+                        except Exception as _exc:
+                            _diag(f"[KARAFUN-AUTO] no_match diagnosis failed: {_exc}")
                 parts = found.split("|")
                 if len(parts) < 3 or parts[0] not in {"FOUND", "TITLE_ONLY", "FIRST"}:
                     raise RuntimeError(last_error or "No acceptable KaraFun match")
