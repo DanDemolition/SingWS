@@ -44689,7 +44689,11 @@ class KaraokeApp(QWidget):
             ok,err=self._net_send_direct_message(singer,message)
             def finish():
                 self.chat_send_button.setEnabled(True)
-                if ok: self._chat_last_id=0; self._chat_messages=[]; self._schedule_chat_poll()
+                if ok:
+                    # A poll already in flight asked for "newer than the old last id"; if it landed after this reset it would become the
+                    # whole history (just the newest line). Mark it stale so the next poll re-reads everything.
+                    self._chat_data_generation=int(getattr(self,"_chat_data_generation",0) or 0)+1
+                    self._chat_last_id=0; self._chat_messages=[]; self._schedule_chat_poll()
                 else: self._show_processing_notification(err or "Could not send chat message.",level="error")
             self._run_on_ui_thread(finish)
         threading.Thread(target=worker,daemon=True).start()
