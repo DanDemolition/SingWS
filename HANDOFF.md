@@ -11,6 +11,32 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## 1.0.0.8 TEST BUILD — 2026-10-04 (built both arches, NOT published; operator tests it tomorrow, releases the day after if all is good)
+Source `40309d9` (app) and `55b3f8f` (server), both pushed. APP_VERSION and both specs say 1.0.0.8; `docs/release.json` and `docs/index.html` still say 1.0.0.7
+(so nobody is offered anything). Release steps when the operator says go: write manifest (`SINGWS_REQUIRED_ARCHES="mac_arm64,mac_x86_64" python3 tools/write_manifest.py 1.0.0.8`),
+update the two hashes/links in `docs/index.html`, notes, commit, tag `v1.0.0.8` pushed alone, `gh release create --draft` + both DMGs, re-download hash check, publish, push `main` last.
+What is in it (over the re-released 1.0.0.7):
+- **Host chat history vanishing (reported after the 2026-10-03 show, Host chat tab):** sending a host chat message clears `_chat_messages` and re-reads from id 0; a poll already
+  in flight asked for "newer than the old last id" and, landing after the reset, became the whole history (only the newest line) until the next send. Fix: the send bumps
+  `_chat_data_generation` so the stale poll is discarded (`test_host_chat_send_race.py`, reproduced then fixed).
+- **Song-end timing probes (log only):** `@_perf_timed("ui_songend_...")` on ten song-end steps (stop_playback, handler, cleanup, idle background, outro, QR refreshes, video surfaces,
+  now-singing, bg button). Slow steps (>16 ms) log `[PERF-DIAG] ui_songend_... took Nms`. Purpose: the ~450 ms hitch at most song ends on the Intel Mac (67 of 102 song ends in the
+  2026-10-03 show) has no known cause and stack capture must stay off. Read the next Intel show log for these lines. Ruled out already: logging cost (async queue, 72 lines/min),
+  `gc.collect()` at song end (about 2 ms with 134k rows), idle background image decode (images are ~1200x675, 12 ms here), `server_sync` (6% overlap with stalls vs 3% chance).
+- **Show-screen preview, singers vs DAW (operator: DAW must stay frequent and clean, singers may be lighter):** server `api/show-screen/snapshot/index.php` records
+  `daw_viewer_seen_at` (DAW browser session) and `singer_viewer_seen_at` (singer token) next to `viewer_seen_at` (anyone; unchanged meaning, so old apps behave as before). App: when only
+  singers are watching it grabs a frame every 3 s (`_daw_snapshot_singers_only`) at 320x180 JPEG quality 22; a DAW page, or a server that reports no kinds, keeps 0.25 s/1 s timer, 426x240 q28.
+  **Server deployed by the operator 2026-10-04** (script `server-deployments/preview-viewer-kinds/deploy.sh`, git-ignored; verified live: the endpoint now returns both new fields; rollback
+  path is printed by the script under `/root/singws-chat-deploy/preview-viewer-kinds-<time>/`). Tests: `test_daw_preview_audience.py`, server `tools/test_singer_screen_preview.php` (+3 asserts).
+  Why it matters: ~30 preview captures cost ~250 ms each on the Intel Mac's main thread (about 7% of the 335 freezes); the preview was watched ~51 of 215 show minutes.
+- **Show-log review of the 2026-10-03 Intel show (21:15-01:32, build = the re-released 1.0.0.7, exe hash matched the DMG):** no tracebacks/errors, no network drops, 3/3 KaraFun searches
+  FOUND on attempt 1 (8, 8, 10 s query-to-playing on Intel), fast picture start worked on Intel, 335 GUI freezes over 120 ms (median 194 ms, p90 400 ms, ~78/hour; 3 over 1 s, all near
+  startup/idle-overlay change). Quits at the end of nights log `closeEvent` then `network transports stopped` and no `clean shutdown` line (3 of 4 quits in the 3 logs); the operator
+  confirmed those were him closing the app and there was no crash, so it is a logging gap, not a fault. Background music coming in late was a settings value (`karaoke_trim_verified_tail`), see below.
+**To check tomorrow (operator):** DAW page looks as clean/frequent as before; a singer's phone preview looks acceptable but lighter; send a host chat message while a singer message
+arrives and confirm the conversation does not collapse; KaraFun + CDG + MP4 songs; then read the log for `ui_songend_` lines. Intel still has never been run on a physical Intel Mac
+with a build from this machine other than through the operator's venue Mac (he runs the released builds there).
+
 ## RE-RELEASED 1.0.0.7 (same version number) — 2026-10-03 evening, published, latest; installed on this Mac (arm64)
 Tag `v1.0.0.7` force-moved from `2e75508` to release commit `0eecc37`; both DMGs replaced with `gh release upload --clobber`, notes replaced.
 arm64 `cf1d09ce...` (127,059,391 B, the exact tested build 4, exe `949b43cf...`) and x86_64 `a752a978...` (152,910,214 B); re-downloaded sizes and
