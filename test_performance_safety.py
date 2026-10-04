@@ -1074,7 +1074,8 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn('self._retune_daw_snapshot_timer("startup")', init_source)
         self.assertNotIn("self._daw_snapshot_timer.start(1000)", init_source)
         target = function_source("_daw_snapshot_timer_target_ms")
-        self.assertIn("return 1000", target)
+        # 1 s for a DAW page (or an older server); 3 s while only singers watch (test_daw_preview_audience.py)
+        self.assertIn("else 1000", target)
         self.assertIn("return 5000", target)
         self.assertLess(
             target.index("_daw_preview_server_backoff_until"),

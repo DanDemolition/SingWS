@@ -29089,7 +29089,13 @@ class KaraokeApp(QWidget):
             n = 0
         return n < 2 or ((n + 1) % 100) == 0
 
+    def _daw_snapshot_singers_only(self) -> bool:
+        """True while the only people watching the preview are singers (no DAW page): they get a lighter stream."""
+        return str(getattr(self, "_daw_snapshot_audience", "") or "") == "singer"
+
     def _daw_snapshot_min_interval_sec(self) -> float:
+        if self._daw_snapshot_singers_only():
+            return 3.0
         try:
             if bool(getattr(self, "karaoke_playing", False)) and not bool(self._is_karaoke_paused()):
                 return 0.25
@@ -29113,7 +29119,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         if self._daw_snapshot_viewer_recent():
-            return 1000
+            return 3000 if self._daw_snapshot_singers_only() else 1000
         # With no recent DAW viewer, only poll for a newly opened page. Video
         # frame callbacks must not turn playback into an unconditional upload
         # stream, especially while the server or venue network is struggling.
@@ -29260,8 +29266,21 @@ class KaraokeApp(QWidget):
                     viewer_seen_at = int((payload or {}).get("viewer_seen_at") or 0)
                     enabled = bool((payload or {}).get("enabled", False))
                     viewer_recent = viewer_seen_at > 0 and (time.time() - viewer_seen_at) <= 14
+                    # A newer server says which kind of viewer is watching. Singers alone get a lighter stream; a DAW page
+                    # (or a server that does not report the kinds) keeps the full-rate, full-quality stream.
+                    audience = ""
+                    if viewer_recent:
+                        audience = "daw"
+                        if "daw_viewer_seen_at" in (payload or {}) or "singer_viewer_seen_at" in (payload or {}):
+                            daw_seen = int((payload or {}).get("daw_viewer_seen_at") or 0)
+                            singer_seen = int((payload or {}).get("singer_viewer_seen_at") or 0)
+                            daw_recent = daw_seen > 0 and (time.time() - daw_seen) <= 14
+                            singer_recent = singer_seen > 0 and (time.time() - singer_seen) <= 14
+                            if singer_recent and not daw_recent:
+                                audience = "singer"
                     try:
                         self._daw_snapshot_viewer_recent_until = time.monotonic() + 16.0 if viewer_recent else 0.0
+                        self._daw_snapshot_audience = audience
                     except Exception:
                         pass
                     should_capture = enabled and viewer_recent
@@ -29486,9 +29505,10 @@ class KaraokeApp(QWidget):
                 if active and image is not None and not image.isNull():
                     from PyQt6.QtCore import QBuffer, QIODevice
                     scale_t0 = time.perf_counter()
+                    singers_only = self._daw_snapshot_singers_only()
                     scaled = image.scaled(
-                        426,
-                        240,
+                        320 if singers_only else 426,
+                        180 if singers_only else 240,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.FastTransformation,
                     )
@@ -29497,7 +29517,7 @@ class KaraokeApp(QWidget):
                     ba = QByteArray()
                     buf = QBuffer(ba)
                     buf.open(QIODevice.OpenModeFlag.WriteOnly)
-                    scaled.save(buf, "JPEG", 28)
+                    scaled.save(buf, "JPEG", 22 if singers_only else 28)
                     jpg = bytes(ba)
                     encode_ms = (time.perf_counter() - encode_t0) * 1000.0
                     files = {"snapshot": ("snapshot.jpg", jpg, "image/jpeg")}
