@@ -3334,6 +3334,26 @@ def _perf_log_if_slow(name: str, ms: float):
         pass
 
 
+def _perf_timed(name: str):
+    """Time a method and log it through the slow-step logger when it passes that name's threshold.
+
+    Added 2026-10-04 for the song-end hitch (about 450 ms on the Intel show Mac, cause unknown, no stack capture allowed):
+    the next show log then says which step of the song-end path is slow. Cost: two perf_counter reads per call.
+    """
+    def decorate(fn):
+        import functools as _functools
+
+        @_functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _perf_log_if_slow(name, (time.perf_counter() - started) * 1000.0)
+        return wrapper
+    return decorate
+
+
 def _fit_dialog_to_screen(dlg, *, preferred=(760, 640), minimum=(520, 360), margin=80):
     """Size a dialog to its preferred size, but never larger than the screen.
 
@@ -24287,6 +24307,7 @@ class KaraokeApp(QWidget):
         """Legacy API retained for callers; no native parking surface exists."""
         return 0
 
+    @_perf_timed("ui_songend_video_surfaces")
     def _recreate_video_surfaces(self, reason: str):
         """Clear stale frames without replacing live native macOS widgets.
 
@@ -25835,6 +25856,7 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 print("VideoOverlay bind failed:", e)
                 
+    @_perf_timed("ui_songend_handler")
     def _handle_media_end_safe(self, trigger: str = "eos"):
         """Called when the current track finishes or on pipeline ERROR."""
         if getattr(self, "_stop_in_progress", False):
@@ -26035,6 +26057,7 @@ class KaraokeApp(QWidget):
             _diag(f"[PERFORMANCE] could not retire request {request_id}: {e}")
         return True
 
+    @_perf_timed("ui_songend_cleanup")
     def _finish_media_end_cleanup(self, end_silence_triggered: bool, schedule_bg_resume: bool):
         """Finalize karaoke end: teardown/UI reset and optional delayed BG resume."""
         try:
@@ -34976,6 +34999,7 @@ class KaraokeApp(QWidget):
             caption = ""
         return caption or str(DEFAULTS.get("rotation_request_qr_caption", "JOIN THE QUEUE!"))
 
+    @_perf_timed("ui_songend_qr_rotation")
     def _refresh_rotation_request_qr(self, reason: str = "update", *, force: bool = False):
         """Push (or clear) the request QR card on the rotation window.
 
@@ -35017,6 +35041,7 @@ class KaraokeApp(QWidget):
         _diag(f"[QR-ROTATION] shown url={url} reason={reason} "
               f"caption={caption!r} built={int(not pix.isNull())}")
 
+    @_perf_timed("ui_songend_qr_show")
     def _refresh_show_screen_qr(self, reason: str = "update", *, force: bool = False):
         """Push (or clear) the request QR painted on the show screen. Shown when
         the 'show_request_qr' setting is on AND requests are accepting; the URL
@@ -35617,6 +35642,7 @@ class KaraokeApp(QWidget):
             return p
         return self._default_background_path()
 
+    @_perf_timed("ui_songend_idle_background")
     def _apply_idle_background(self, force: bool = False, advance_slideshow: bool = False):
         try:
             if not hasattr(self, "video_window") or self.video_window is None:
@@ -37196,6 +37222,7 @@ class KaraokeApp(QWidget):
     
 
 
+    @_perf_timed("ui_songend_clear_now_singing")
     def clear_now_singing(self):
         """Reset the Now Singing line to an idle placeholder (kept visible to prevent layout shifts)."""
         try:
@@ -38963,6 +38990,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+    @_perf_timed("ui_songend_outro")
     def _mark_next_up_overlay_pending_after_completion(self, *, reason: str = "media_end") -> bool:
         """Legacy entry point: show a brief outro, never a Next Up countdown."""
         try:
@@ -54939,6 +54967,7 @@ class KaraokeApp(QWidget):
         else:
             QTimer.singleShot(0, _commit_pending_start)
 
+    @_perf_timed("ui_songend_stop_playback")
     def stop_playback(self, skip_confirmation=False):
         # A song stopped before it ended was never performed, so it must not be
         # recorded as sung -- otherwise the singer cannot re-add it. On a real
@@ -58427,6 +58456,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    @_perf_timed("ui_songend_bg_button")
     def update_bg_button_state(self):
         """
         Update BG controls on main UI and keep legacy hooks safe.
