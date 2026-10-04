@@ -11,10 +11,11 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
-## 1.0.0.8 TEST BUILD — 2026-10-04 (built both arches, NOT published; operator tests it tomorrow, releases the day after if all is good)
-Source `40309d9` (app) and `55b3f8f` (server), both pushed. APP_VERSION and both specs say 1.0.0.8; `docs/release.json` and `docs/index.html` still say 1.0.0.7
-(so nobody is offered anything). Release steps when the operator says go: write manifest (`SINGWS_REQUIRED_ARCHES="mac_arm64,mac_x86_64" python3 tools/write_manifest.py 1.0.0.8`),
-update the two hashes/links in `docs/index.html`, notes, commit, tag `v1.0.0.8` pushed alone, `gh release create --draft` + both DMGs, re-download hash check, publish, push `main` last.
+## RELEASED 1.0.0.8 — 2026-10-04 (published, latest; installed on this Mac (arm64); Intel installer for the venue Mac installed by the operator on 2026-10-05)
+Tag `v1.0.0.8` at release commit `0acb828` (code `40309d9`, bytecode of both installers identical to the source); https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.8.
+arm64 `7bd9870c...` (127,061,222 B) and x86_64 `8a0a0662...` (152,898,047 B); re-downloaded `latest/download` sizes and SHA-256s equal `docs/release.json`; Pages manifest and download page verified.
+Published as a normal release on the operator's instruction (he wanted to download it at work to test on the Intel Mac the next day; a pre-release was created first and then promoted).
+Normal auto-update path (new version number). Next release: bump to 1.0.0.9, or ask what the operator wants.
 What is in it (over the re-released 1.0.0.7):
 - **Host chat history vanishing (reported after the 2026-10-03 show, Host chat tab):** sending a host chat message clears `_chat_messages` and re-reads from id 0; a poll already
   in flight asked for "newer than the old last id" and, landing after the reset, became the whole history (only the newest line) until the next send. Fix: the send bumps
@@ -33,7 +34,7 @@ What is in it (over the re-released 1.0.0.7):
   FOUND on attempt 1 (8, 8, 10 s query-to-playing on Intel), fast picture start worked on Intel, 335 GUI freezes over 120 ms (median 194 ms, p90 400 ms, ~78/hour; 3 over 1 s, all near
   startup/idle-overlay change). Quits at the end of nights log `closeEvent` then `network transports stopped` and no `clean shutdown` line (3 of 4 quits in the 3 logs); the operator
   confirmed those were him closing the app and there was no crash, so it is a logging gap, not a fault. Background music coming in late was a settings value (`karaoke_trim_verified_tail`), see below.
-**To check tomorrow (operator):** DAW page looks as clean/frequent as before; a singer's phone preview looks acceptable but lighter; send a host chat message while a singer message
+**To check on the Intel Mac (operator, 2026-10-05):** DAW page looks as clean/frequent as before; a singer's phone preview looks acceptable but lighter; send a host chat message while a singer message
 arrives and confirm the conversation does not collapse; KaraFun + CDG + MP4 songs; then read the log for `ui_songend_` lines. Intel still has never been run on a physical Intel Mac
 with a build from this machine other than through the operator's venue Mac (he runs the released builds there).
 
