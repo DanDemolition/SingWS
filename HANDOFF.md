@@ -11,7 +11,7 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
-## RELEASED 1.0.0.8 — 2026-10-04 (published, latest; installed on this Mac (arm64); Intel installer for the venue Mac installed by the operator on 2026-10-05)
+## RELEASED 1.0.0.8 — 2026-10-04 (published, latest; installed on this Mac (arm64); the operator plans to install the Intel DMG on the venue Mac on 2026-10-05 and test it there - NOT yet done)
 Tag `v1.0.0.8` at release commit `0acb828` (code `40309d9`, bytecode of both installers identical to the source); https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.8.
 arm64 `7bd9870c...` (127,061,222 B) and x86_64 `8a0a0662...` (152,898,047 B); re-downloaded `latest/download` sizes and SHA-256s equal `docs/release.json`; Pages manifest and download page verified.
 Published as a normal release on the operator's instruction (he wanted to download it at work to test on the Intel Mac the next day; a pre-release was created first and then promoted).
