@@ -22062,6 +22062,7 @@ class KaraokeApp(QWidget):
             "master_params": master_params,
         }
 
+    @_perf_timed("ui_songstart_audio_chain")
     def _push_mpv_audio_processing(self, reason: str = "update", audio_path: str = ""):
         """Send the audio chain to mpv. No-op unless mpv owns the audio."""
         plugin = getattr(self, "_mpv_playback", None)
@@ -23526,6 +23527,7 @@ class KaraokeApp(QWidget):
         self._stop_lyrics_background_video("karaoke_stopped")
 
     # -------------------- MP4 background videos behind CDG lyrics ----------
+    @_perf_timed("ui_songstart_bg_video")
     def _start_lyrics_background_video(self):
         """Start the shuffled MP4 background loop for a CDG song, when the
         host enabled it. Falls back silently (normal CDG background) when the
@@ -23991,6 +23993,7 @@ class KaraokeApp(QWidget):
             f"fill={2 if mode == 'blur' else (1 if mode == 'sidefill' else 0)}"
         )
 
+    @_perf_timed("ui_songstart_transport_setup")
     def _start_mpv_karaoke_transport(
         self, *, audio_path, video_path, mode, semitones,
         start_seconds=0.0, loop_seconds=None, duration_seconds=None,
@@ -24032,7 +24035,9 @@ class KaraokeApp(QWidget):
         self.karaoke_transport = transport
         self.karaoke_volume = None
         try:
+            _native_t0 = time.perf_counter()
             transport.start(start_seconds)
+            _perf_log_if_slow("ui_songstart_native_load", (time.perf_counter() - _native_t0) * 1000.0)
             if loop_seconds and len(loop_seconds) == 2:
                 transport.set_loop(float(loop_seconds[0]), float(loop_seconds[1]))
         except Exception:
@@ -24107,6 +24112,7 @@ class KaraokeApp(QWidget):
             duration_seconds=duration_seconds,
         )
 
+    @_perf_timed("ui_songstart_prepare")
     def _prepare_karaoke_start(self, media_path: str):
         self.karaoke_playing = True
         try:
@@ -24201,6 +24207,7 @@ class KaraokeApp(QWidget):
         )
 
 
+    @_perf_timed("ui_songend_teardown_async")
     def _gst_teardown_async(self):
         """Stop playback without blocking the UI.
 
@@ -24299,6 +24306,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    @_perf_timed("ui_songend_detach_sinks")
     def _detach_video_sinks_now(self, reason: str):
         """Compatibility no-op now that karaoke uses the Python renderer."""
         self._teardown_detach_sinks = []
@@ -25876,9 +25884,24 @@ class KaraokeApp(QWidget):
         # gc thresholds at startup to avoid pauses mid-song; the trade-off
         # is that we should run a manual collection at points where a
         # brief pause is inaudible — between songs is ideal.
+        # A full collection here cost the Intel show Mac a visible freeze at every song end (the song-end handler took ~356 ms
+        # with ~200 ms before cleanup, 2026-10-04 show). Young generations are cheap; a full pass runs at most every 30 minutes.
+        # The duration is always logged so the next show confirms the cost.
         try:
             import gc as _gc
-            _gc.collect()
+            _gc_now = time.monotonic()
+            _gc_last_full = getattr(self, "_last_full_gc_ts", None)
+            if _gc_last_full is None:
+                self._last_full_gc_ts = _gc_now
+                _gc_last_full = _gc_now
+            _gc_full = (_gc_now - float(_gc_last_full)) >= 1800.0
+            _gc_started = time.perf_counter()
+            if _gc_full:
+                self._last_full_gc_ts = _gc_now
+                _gc.collect()
+            else:
+                _gc.collect(1)
+            _diag(f"[PERF-DIAG] ui_songend_gc_{'full' if _gc_full else 'young'} took {(time.perf_counter() - _gc_started) * 1000.0:.0f}ms")
         except Exception:
             pass
 
@@ -25981,6 +26004,7 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
+    @_perf_timed("ui_songend_commit_performance")
     def _commit_pending_performance(self, reason: str = "song_completed") -> bool:
         """Record the song that just finished as actually performed.
 
@@ -26024,6 +26048,7 @@ class KaraokeApp(QWidget):
         )
         return True
 
+    @_perf_timed("ui_songend_discard_performance")
     def _discard_pending_performance(self, reason: str = "stopped_early") -> bool:
         """Drop an in-flight song without recording it as performed."""
         try:
@@ -29180,6 +29205,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    @_perf_timed("ui_songstart_daw_preview")
     def _mark_daw_preview_playback_started(self, media_path: str = "") -> None:
         self._daw_snapshot_generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0) + 1
         self._daw_snapshot_first_frame_pending = True
@@ -29200,6 +29226,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    @_perf_timed("ui_songend_daw_preview_stopped")
     def _mark_daw_preview_playback_stopped(self, reason: str = "stop") -> None:
         self._daw_snapshot_generation = int(getattr(self, "_daw_snapshot_generation", 0) or 0) + 1
         self._daw_snapshot_first_frame_pending = False
@@ -35699,6 +35726,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    @_perf_timed("ui_songend_show_idle_bg")
     def _show_idle_background_after_karaoke(self, *, reason: str = "karaoke_stop", advance_slideshow: bool = True) -> None:
         """Restore the audience screen to the idle background after karaoke.
 
@@ -37612,12 +37640,14 @@ class KaraokeApp(QWidget):
         if (not self._karaoke_tempo_global) and (not bool(getattr(self, "karaoke_playing", False))):
             self._set_karaoke_tempo(100, apply_live=False)
 
+    @_perf_timed("ui_songend_reset_tempo")
     def _reset_karaoke_tempo_for_track_end(self):
         """Reset tempo to normal unless Global Tempo is enabled."""
         if bool(getattr(self, "_karaoke_tempo_global", False)):
             return
         self._set_karaoke_tempo(100, apply_live=True)
 
+    @_perf_timed("ui_songend_reset_key")
     def _reset_karaoke_key_for_track_end(self):
         try:
             self._karaoke_mod_timer.stop()
@@ -37664,6 +37694,7 @@ class KaraokeApp(QWidget):
         self._bg_prefire_silence_accum_s = 0.0
         self._bg_prefire_silence_last_ts = 0.0
 
+    @_perf_timed("ui_songstart_audio_end_floor")
     def _arm_audio_end_floor(self, audio_path: str, duration_hint=None):
         """Find where this file's audio really stops, in the background.
 
@@ -37794,6 +37825,7 @@ class KaraokeApp(QWidget):
             f"file={os.path.basename(scan_path)}"
         )
 
+    @_perf_timed("ui_songstart_visual_end_floor")
     def _arm_visual_end_floor(self, visual_path: str, mode: str):
         """Use validated visual metadata; uncertain formats fall back to EOS."""
         self._karaoke_visual_end_s = None
@@ -37937,6 +37969,7 @@ class KaraokeApp(QWidget):
             pass
         return None
 
+    @_perf_timed("ui_songstart_end_silence")
     def _setup_end_silence_state(self, mode: str, level_elem=None):
         self._karaoke_level_elem = level_elem
         self._end_silence_mode = str(mode or "")
@@ -38732,6 +38765,7 @@ class KaraokeApp(QWidget):
         finally:
             _perf_log_if_slow("ui_now_singing_update", (time.perf_counter() - started) * 1000.0)
 
+    @_perf_timed("ui_songstart_singer_vfx")
     def _trigger_show_screen_singer_start_vfx(
         self,
         singer_display: str,
@@ -38795,6 +38829,7 @@ class KaraokeApp(QWidget):
             state["_show_transition_effects_key"] = enabled
         return bag.next()
 
+    @_perf_timed("ui_songend_outro_payload")
     def _song_outro_payload_from_current(self) -> dict:
         try:
             state = object.__getattribute__(self, "__dict__")
@@ -39163,6 +39198,7 @@ class KaraokeApp(QWidget):
                      f' color:{_v("text_soft")};">{_esc(clause)}</span>')
         return html
 
+    @_perf_timed("ui_last_sung_card")
     def _update_last_sung_card(self):
         try:
             last = str(getattr(self, "_last_sung_singer_display", "") or "").strip()
@@ -39208,6 +39244,7 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    @_perf_timed("ui_songend_remember_last_sung")
     def _remember_last_sung_from_current(self):
         try:
             state = object.__getattribute__(self, "__dict__")
@@ -40089,6 +40126,7 @@ class KaraokeApp(QWidget):
             and bool(getattr(self, "karaoke_playing", False))
         )
 
+    @_perf_timed("ui_songend_remote_add_status")
     def _update_deferred_remote_add_status(self):
         try:
             state = object.__getattribute__(self, "__dict__")
@@ -40175,6 +40213,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+    @_perf_timed("ui_songend_flush_remote_adds")
     def _flush_deferred_remote_adds(self, reason: str = "between_singers", *, force: bool = False) -> int:
         try:
             active = bool(object.__getattribute__(self, "__dict__").get("karaoke_playing", False))
@@ -49793,6 +49832,7 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
+    @_perf_timed("ui_songstart_prescan_next")
     def _prescan_next_track(self, path: str):
         """Scan only the current next-up song in a daemon thread."""
         if not path:
@@ -49969,6 +50009,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+    @_perf_timed("ui_songend_schedule_bg_resume")
     def _schedule_bg_resume(self, delay_ms: int, reason: str = "default"):
         try:
             self._bg_resume_timer.stop()
@@ -50173,6 +50214,7 @@ class KaraokeApp(QWidget):
             bool(getattr(self, "_media_end_cleanup_schedule_bg_resume", False)),
         )
 
+    @_perf_timed("ui_songstart_prepare_bg")
     def _prepare_bg_for_karaoke_start(self, current_song_info):
         """Fade/advance BG with lead-silence offset + fixed transition gap."""
         if not self.bg_music.playlist:
@@ -54426,6 +54468,7 @@ class KaraokeApp(QWidget):
         )
         self._flash_play_control_kept_current()
 
+    @_perf_timed("ui_songstart_play_next")
     def play_next_file(self, skip_confirmation=False, *, command_source="internal"):
         # Intro Loop release: if the next song is held in a looping intro, a
         # Play/Next press just lets it continue past the loop — no teardown, no
