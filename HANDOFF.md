@@ -11,6 +11,15 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## Singer notifications auto-clear - 2026-10-05 (server code committed and pushed, NOT deployed; no app change needed)
+Operator: notifications on the server should clear after ~18 h, or go away once seen. Server `a795678`: every singer notification (stage cues AND host/singer chat messages) now expires with the venue's
+retention (`chat_retention_hours`, default 18, the same setting that clears room chat) - on every singer fetch (`purge_stale_singer_notifications`) and in the hourly `tools/chat_cleanup.php`
+(`purge_expired_singer_notifications`). Opening the singer page's Notifications panel sends `mark_seen=1` (`singer_session_ui.js?v=15`): what it showed gets `read_at`, and rows with `read_at` are no longer listed
+(the rows are kept, so the host's Host chat conversation is intact; the singer's own replies, inserted already-read, no longer clutter the panel). Also fixed: the delivered-at update mixed named and `?`
+placeholders and only updated some rows (documented SQLite3 behaviour), so the existing "cleared 15 min after delivery" rule now applies to every stage cue. Old rule "chat is NEVER auto-deleted" in
+`tools/test_singer_notification_expiry.php` was changed to the new rule; new `tools/test_singer_notification_retention.php` (endpoint, seen marking, host chat intact, per-venue retention in the cron). All 9 PHP suites pass.
+**To go live:** operator runs `server-deployments/notification-expiry/deploy.sh` (five existing files; checks live == the previous commit's files first, backs up, php -l, hashes, undo script). Old singer pages (cached JS) keep working but only get the 18 h expiry.
+
 ## Bug reports to the developer - 2026-10-05 (server DEPLOYED and verified end to end; app code committed, NOT yet in any build)
 Operator asked: permanent bug email to dan@wildstylekaraoke.com on every build (no recipient picker), sending only the LAST SHOW's log, not 3 days.
 **Design:** the app never mails anything itself and holds no mail credentials (the app repo is public). It POSTs a sanitized ZIP to the venue's own server (`api/v1/support_logs.php`, venue API key
