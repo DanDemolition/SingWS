@@ -53405,8 +53405,9 @@ class KaraokeApp(QWidget):
                         self._handoff_show_screen_to_karafun()
                     except Exception as e:
                         _diag(f"[KARAFUN] post-play show-screen handoff failed: {e}")
-                    adjustment = result["message"].lower()
-                    if (requested_key != 0 and "|true|" not in adjustment) or (requested_tempo != 100 and not adjustment.endswith("|true")):
+                    if self._karafun_adjustment_needs_attention(
+                            requested_key, requested_tempo, result["message"],
+                            str(entry.get("karafun_adjustment_applied") or "") == adjustment_signature):
                         self._show_processing_notification("KaraFun started, but key/tempo controls need manual adjustment.", level="warning")
                     else:
                         self._show_processing_notification(f"KaraFun queued and started: {title}", level="success")
@@ -53447,6 +53448,19 @@ class KaraokeApp(QWidget):
     @staticmethod
     def _karafun_clock_seconds(value: str):
         return normalize_karafun_duration_seconds(value)
+
+    @staticmethod
+    def _karafun_adjustment_needs_attention(requested_key, requested_tempo, adjustment_message, already_applied):
+        """True when a started KaraFun song should warn that key/tempo still need a manual adjustment.
+
+        The key/tempo menu clicks run BEFORE the song starts and mark the entry as applied. The later slider step is then skipped, so
+        its reply is the placeholder "ADJUSTED|false|false", and the old check read that placeholder as "nothing was adjusted": the
+        2026-10-04 22:33 song (key -1, set correctly in KaraFun) got "key/tempo controls need manual adjustment" anyway.
+        """
+        if already_applied:
+            return False
+        reply = str(adjustment_message or "").lower()
+        return bool((requested_key != 0 and "|true|" not in reply) or (requested_tempo != 100 and not reply.endswith("|true")))
 
     @staticmethod
     def _karafun_fallback_remaining(duration, elapsed_wall, seek_offset=0.0):
