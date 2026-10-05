@@ -7677,6 +7677,7 @@ class VideoAreaWidget(QWidget):
             return
         painter.drawPixmap(self.rect(), pixmap, pixmap.rect())
 
+    @_perf_timed("ui_songend_set_background_image")
     def set_background_image(self, image_path):
         old_pixmap = QPixmap(self.background_pixmap) if not self.background_pixmap.isNull() else QPixmap()
         old_path = str(getattr(self, "_background_image_path", "") or "")
@@ -35648,6 +35649,7 @@ class KaraokeApp(QWidget):
             label="idle slideshow folder scan",
         ) or [])
 
+    @_perf_timed("ui_songend_idle_bg_resolve")
     def _resolve_idle_background_path(self, advance_slideshow: bool = False) -> str:
         # 1) Server-off override, split by waitlist state. The original closed
         # image remains the fallback for settings created before this split.

@@ -29,6 +29,8 @@ LABELS = {
     "_arm_visual_end_floor": "ui_songstart_visual_end_floor", "_trigger_show_screen_singer_start_vfx": "ui_songstart_singer_vfx",
     "_mark_daw_preview_playback_started": "ui_songstart_daw_preview", "_prescan_next_track": "ui_songstart_prescan_next",
     "_update_last_sung_card": "ui_last_sung_card",
+    # inside the idle-background restore (44 ms, ~3 calls per song end on Intel): which part costs it? (Qt already caches decoded images)
+    "_resolve_idle_background_path": "ui_songend_idle_bg_resolve", "set_background_image": "ui_songend_set_background_image",
 }
 
 
