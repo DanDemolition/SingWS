@@ -49832,6 +49832,22 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
+    def _next_up_loudness_cached(self, resolved: str, library_path: str = "") -> bool:
+        """True if a stored loudness measurement already covers the next-up song.
+
+        MP3+G playback uses a temporary extracted MP3 whose path changes every session, while the library scan stores its
+        measurement under the stable ZIP. Checking only the temporary path made every next-up ZIP song get measured again
+        (38 full decodes of 35 CDG songs during the 2026-10-04 show, with freezes while each ran). Same lookup order the song start uses.
+        """
+        for key in (resolved, library_path):
+            if key and loudness_gain_db_cached(key) is not None:
+                return True
+        try:
+            archive = self.zip_cache.archive_for_extracted_path(resolved)
+        except Exception:
+            archive = ""
+        return bool(archive) and loudness_gain_db_cached(archive) is not None
+
     @_perf_timed("ui_songstart_prescan_next")
     def _prescan_next_track(self, path: str):
         """Scan only the current next-up song in a daemon thread."""
@@ -49897,7 +49913,9 @@ class KaraokeApp(QWidget):
                     offset = detect_lead_silence(resolved)
                 try:
                     if self._karaoke_normalize_active():
-                        if loudness_gain_db_cached(resolved) is None:
+                        if self._next_up_loudness_cached(resolved, scan_path):
+                            _diag(f"[LOUDNESS] next-up analysis skipped reason=library_cache_hit file={Path(resolved).name}")
+                        else:
                             analyze_loudness_async(resolved)
                             _diag(f"[LOUDNESS] queued next-up analysis for {Path(resolved).name}")
                     else:
