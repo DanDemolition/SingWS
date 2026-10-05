@@ -42,6 +42,7 @@ class MonitorReplay:
             _karafun_activate_result_for_playback=mock.Mock(return_value=(True, "")),
             _karafun_press_play_control=mock.Mock(return_value=(True, "")),
             _finish_external_karafun_playback=mock.Mock(),
+            _karafun_fallback_remaining=lambda duration, elapsed, offset=0.0: int(duration) - int(elapsed) - int(float(offset or 0.0)),   # the real one is tested in test_karafun_stop_and_seek_end.py
             _set_karafun_entry_status=mock.Mock(),
             KARAFUN_PLAYBACK_RECOVERY_DELAY_S=12,
             KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S=6,

@@ -106,6 +106,7 @@ class KaraFunLifecycleTests(unittest.TestCase):
                     _run_on_ui_thread=callbacks.append,
                     _karafun_clock_seconds=lambda v: None,
                     _finish_external_karafun_playback=mock.Mock(),
+                    _karafun_fallback_remaining=lambda duration, elapsed, offset=0.0: int(duration) - int(elapsed) - int(float(offset or 0.0)),   # the real one is tested in test_karafun_stop_and_seek_end.py
                     KARAFUN_PLAYBACK_RECOVERY_DELAY_S=12,
                     KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S=2,
                     KARAFUN_PLAYBACK_ALERT_DELAY_S=40,

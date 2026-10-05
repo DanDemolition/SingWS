@@ -52015,6 +52015,15 @@ class KaraokeApp(QWidget):
                 if self._karafun_active_entry() is not entry:
                     return
                 moved = done * 10.0 * (1 if steps > 0 else -1)
+                if done:
+                    # The end detection counts from the wall clock; tell it about the seek (see _karafun_fallback_remaining).
+                    entry["karafun_seek_offset_s"] = float(entry.get("karafun_seek_offset_s") or 0.0) + moved
+                    try:
+                        token, rearm = getattr(self, "_karafun_duration_rearm", (None, None))
+                        if callable(rearm) and token == entry.get("karafun_completion_monitor"):
+                            rearm()
+                    except Exception as exc:
+                        _diag(f"[KARAFUN] could not re-arm the end watchdog after the seek: {exc}")
                 started = entry.get("karafun_display_started_at")
                 if started and done:
                     # elapsed = now - started, so a skip forward moves the origin back.
@@ -53439,6 +53448,20 @@ class KaraokeApp(QWidget):
     def _karafun_clock_seconds(value: str):
         return normalize_karafun_duration_seconds(value)
 
+    @staticmethod
+    def _karafun_fallback_remaining(duration, elapsed_wall, seek_offset=0.0):
+        """Seconds the song has left by the wall clock, corrected for seeks made inside KaraFun.
+
+        A skip forward of N seconds means the song ends N seconds EARLIER than the wall clock says (a skip back, later). The
+        end detection used the raw wall clock, so after skipping ahead it still believed minutes remained, refused to trust
+        KaraFun going idle, and left the song active: Play said "current song kept" and Stop/Skip did nothing (2026-10-05).
+        """
+        try:
+            offset = float(seek_offset or 0.0)
+        except Exception:
+            offset = 0.0
+        return int(duration) - int(elapsed_wall) - int(offset)
+
     # Fast start assumes playback; these bound how long that assumption may go
     # unverified before the monitor presses play, and then warns the operator.
     KARAFUN_PLAYBACK_RECOVERY_DELAY_S = 12.0
@@ -53519,7 +53542,8 @@ class KaraokeApp(QWidget):
                     last_playing = float(entry.get("karafun_last_playing_ts") or 0.0)
                     playing_age = (time.monotonic() - last_playing) if last_playing > 0 else None
                     confirmed_remaining = (
-                        fallback_duration - (time.monotonic() - playback_confirmed_at)
+                        self._karafun_fallback_remaining(
+                            fallback_duration, time.monotonic() - playback_confirmed_at, entry.get("karafun_seek_offset_s"))
                         if playback_confirmed_at is not None else None
                     )
                     if confirmed_remaining is not None and confirmed_remaining > 0:
@@ -53548,6 +53572,24 @@ class KaraokeApp(QWidget):
             duration_watchdog = threading.Timer(fallback_delay, _duration_watchdog_fired)
             duration_watchdog.daemon = True
             duration_watchdog.start()
+            watchdog_holder = [duration_watchdog]
+
+            def _rearm_duration_watchdog():
+                """After a seek the song ends earlier/later than the timer armed at the start: arm it again for the new end."""
+                try:
+                    watchdog_holder[0].cancel()
+                except Exception:
+                    pass
+                base = playback_confirmed_at if playback_confirmed_at is not None else started
+                delay = max(1.0, self._karafun_fallback_remaining(
+                    fallback_duration, time.monotonic() - base, entry.get("karafun_seek_offset_s")) + 2.0)
+                timer = threading.Timer(delay, _duration_watchdog_fired)
+                timer.daemon = True
+                timer.start()
+                watchdog_holder[0] = timer
+
+            # On self, not in the entry: queue entries are saved as JSON.
+            self._karafun_duration_rearm = (monitor_token, _rearm_duration_watchdog)
 
         def _monitor():
             nonlocal seen_playback, last_state, last_clock_candidates, idle_stop_count
@@ -53768,7 +53810,8 @@ class KaraokeApp(QWidget):
                     # Count from the first confirmed playback, not from the
                     # handoff: everything before that is KaraFun starting up.
                     fallback_origin = playback_clock_origin if playback_clock_origin is not None else started
-                    fallback_remaining = fallback_duration - int(time.monotonic() - fallback_origin)
+                    fallback_remaining = self._karafun_fallback_remaining(
+                        fallback_duration, time.monotonic() - fallback_origin, entry.get("karafun_seek_offset_s"))
                 if remaining is None and fallback_remaining is not None:
                     remaining = fallback_remaining
                     remaining_from_fallback = True
@@ -54225,6 +54268,8 @@ class KaraokeApp(QWidget):
         try:
             entry.pop("karafun_completion_monitor", None)
             entry.pop("karafun_play_started_at", None)
+            entry.pop("karafun_seek_offset_s", None)
+            self._karafun_duration_rearm = (None, None)
         except Exception:
             pass
         self.karaoke_playing = False
@@ -55186,6 +55231,29 @@ class KaraokeApp(QWidget):
             # Never let a dialog failure block the operator.
             return True
 
+    def _stop_external_karafun_from_button(self, active: dict):
+        """Stop pressed while a KaraFun song is the active song: end it instead of leaving it stuck.
+
+        The Stop handler only knew the local player, so with KaraFun active it did nothing and the session stayed on the KaraFun
+        capture (2026-10-05). A song that is over, or that SingWS could not confirm finished, counts as completed (the same
+        outcome as pressing Play Next then); a song stopped part-way goes back to the queue, as stop_playback already did.
+        """
+        entry = active.get("entry") if isinstance(active.get("entry"), dict) else {}
+        action = "return_to_queue"
+        try:
+            if str(entry.get("karafun_status") or "") == "manual":
+                action = "complete"
+            else:
+                times = self._karafun_display_times()
+                if times is not None:
+                    elapsed, duration = times
+                    if float(duration) > 0 and float(elapsed) >= float(duration) - 5.0:
+                        action = "complete"
+        except Exception:
+            action = "return_to_queue"
+        _diag(f"[KARAFUN] Stop pressed with a KaraFun song active; action={action}")
+        self._finish_external_karafun_playback(action, expected_active=active)
+
     def stop_and_clear_now_singing(self, skip_confirmation=False):
         """
         Manual Stop (Stop button):
@@ -55193,6 +55261,10 @@ class KaraokeApp(QWidget):
         - Then teardown pipelines and restore BG music with your normal fade-in
         - NON-BLOCKING on macOS (fire-and-forget pipeline teardown)
         """
+        karafun_active = getattr(self, "_active_external_karafun", None)
+        if isinstance(karafun_active, dict):
+            self._stop_external_karafun_from_button(karafun_active)
+            return
         if getattr(self, "_manual_stop_in_progress", False):
             _diag("Manual stop ignored (already in progress)")
             return
