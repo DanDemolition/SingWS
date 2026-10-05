@@ -2152,7 +2152,7 @@ def loudness_gain_db_cached(audio_path: str):
 
 
 def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full",
-                           session=None):
+                           session=None, paced: bool = False):
     """Measure integrated loudness (LUFS) and sample peak via bundled libmpv.
 
     Returns (integrated_lufs, max_peak_db) or (None, None).  The measured peak
@@ -2194,7 +2194,8 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full
                 # intro/verse while still decoding only one minute in total.
                 result = measure_loudness_fast_lufs(audio_path, timeout=120.0)
             else:
-                result = measure_loudness_lufs(audio_path, timeout=120.0)
+                result = (measure_loudness_lufs(audio_path, timeout=300.0, paced=True) if paced
+                          else measure_loudness_lufs(audio_path, timeout=120.0))
     except (AnalysisHelperError, AnalysisTrackError):
         raise
     except Exception as exc:
@@ -2268,7 +2269,8 @@ def analyze_loudness_async(audio_path: str):
                 return
             sig = _loudness_file_sig(audio_path)
             with _loudness_sem:
-                lufs, peak_db = _measure_loudness_lufs(audio_path, cancel_check=lambda: not _loudness_workers_allowed())
+                # Live next-up analysis: paced so it does not saturate the show Mac while a song plays (see LIVE_ANALYSIS_DUTY).
+                lufs, peak_db = _measure_loudness_lufs(audio_path, cancel_check=lambda: not _loudness_workers_allowed(), paced=True)
             if not _loudness_workers_allowed():
                 try:
                     _diag(f"[LOUDNESS] analysis cancelled before cache write file={os.path.basename(audio_path)}")

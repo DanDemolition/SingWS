@@ -115,16 +115,45 @@ class OfflineMpvJob:
     def request_log_messages(self, level: str):
         self.lib.mpv_request_log_messages(self.handle, os.fsencode(level))
 
+    def _pause_for(self, pause_seconds: float, cancel_check=None):
+        """Hold the decoder for a short while (duty-cycle throttling), staying cancellable."""
+        self.command("set", "pause", "yes")
+        try:
+            resume_at = time.monotonic() + max(0.0, float(pause_seconds))
+            while time.monotonic() < resume_at:
+                if cancel_check is not None and cancel_check():
+                    raise InterruptedError("libmpv offline decode cancelled")
+                time.sleep(min(0.02, max(0.0, resume_at - time.monotonic())))
+        finally:
+            self.command("set", "pause", "no")
+
     def wait_for_end(
         self, timeout: float, log_messages: list[str] | None = None,
-        cancel_check=None,
+        cancel_check=None, duty: tuple[float, float] | None = None,
     ):
+        """Wait for the decode to finish.
+
+        duty=(run_seconds, pause_seconds) throttles the decoder: it runs for run_seconds, is paused for pause_seconds, and repeats.
+        The decoded audio is untouched (unlike changing the playback speed), so the measurement is identical; only the average
+        CPU use drops. Used for the live next-up analysis, which otherwise decodes a whole song flat out inside the show.
+        """
         deadline = time.monotonic() + max(1.0, float(timeout))
+        run_seconds = pause_seconds = 0.0
+        next_pause_at = None
+        if duty is not None:
+            run_seconds, pause_seconds = max(0.005, float(duty[0])), max(0.0, float(duty[1]))
+            next_pause_at = time.monotonic() + run_seconds
         while time.monotonic() < deadline:
             if cancel_check is not None and cancel_check():
                 raise InterruptedError("libmpv offline decode cancelled")
-            event = self.lib.mpv_wait_event(self.handle, min(0.25, deadline - time.monotonic()))
+            wait_seconds = min(0.25, deadline - time.monotonic())
+            if next_pause_at is not None:
+                wait_seconds = max(0.001, min(wait_seconds, next_pause_at - time.monotonic()))
+            event = self.lib.mpv_wait_event(self.handle, wait_seconds)
             if not event:
+                if next_pause_at is not None and time.monotonic() >= next_pause_at:
+                    self._pause_for(pause_seconds, cancel_check)
+                    next_pause_at = time.monotonic() + run_seconds
                 continue
             if event.contents.event_id == MPV_EVENT_END_FILE:
                 if event.contents.error < 0:
@@ -138,6 +167,9 @@ class OfflineMpvJob:
                     log_messages.append(message.text.decode("utf-8", "replace"))
             if event.contents.event_id == MPV_EVENT_SHUTDOWN:
                 raise RuntimeError("libmpv shut down before decode completed")
+            if next_pause_at is not None and time.monotonic() >= next_pause_at:
+                self._pause_for(pause_seconds, cancel_check)
+                next_pause_at = time.monotonic() + run_seconds
         raise TimeoutError("libmpv offline decode timed out")
 
     def close(self):
@@ -436,12 +468,19 @@ def _parse_karaoke_boundaries(messages: list[str]) -> tuple[float, float | None,
     return duration, audio_start, audio_end
 
 
+# The live next-up loudness analysis runs this decode inside the show, next to video, ticker and audio effects. Flat out it
+# saturates a busy Intel Mac for 6-8 s (freezes at ~27x the normal rate, 2026-10-04 show); at 50 ms on / 150 ms off the same
+# measurement takes about four times longer at about a quarter of the CPU.
+LIVE_ANALYSIS_DUTY = (0.05, 0.15)
+
+
 def _measure_loudness_lavfi(
     source: str,
     *,
     timeout: float = 120.0,
     start_seconds: float | None = None,
     duration_seconds: float | None = None,
+    paced: bool = False,
 ):
     """Measure directly in libavfilter without creating an intermediate WAV."""
     job = OfflineMpvJob()
@@ -456,7 +495,7 @@ def _measure_loudness_lavfi(
         # libavfilter's informational output is exposed at mpv's verbose level.
         job.request_log_messages("v")
         job.command("loadfile", str(source), "replace")
-        job.wait_for_end(timeout, messages)
+        job.wait_for_end(timeout, messages, duty=LIVE_ANALYSIS_DUTY if paced else None)
     finally:
         job.close()
 
@@ -850,6 +889,7 @@ def measure_loudness_lufs(
     timeout: float = 120.0,
     start_seconds: float | None = None,
     duration_seconds: float | None = None,
+    paced: bool = False,
 ):
     """Return BS.1770 integrated LUFS and sample peak dBFS.
 
@@ -864,6 +904,7 @@ def measure_loudness_lufs(
             timeout=timeout,
             start_seconds=start_seconds,
             duration_seconds=duration_seconds,
+            paced=paced,
         )
     except Exception as exc:
         # Older libmpv/libavfilter builds may not expose ebur128. Keep the

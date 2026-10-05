@@ -900,7 +900,7 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertEqual(result, (-16.4, -0.7))
         native.assert_called_once_with(
             "/tmp/song.mp3", timeout=37.0,
-            start_seconds=None, duration_seconds=None)
+            start_seconds=None, duration_seconds=None, paced=False)
 
     def test_loudness_measurement_falls_back_when_native_filter_unavailable(self):
         import libmpv_media_jobs
