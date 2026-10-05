@@ -42,6 +42,12 @@ middle segments ("Ultimix 330"), "(Ultimix By ...)" and trailing BPM, "[Official
 Track 01, URLs) are ignored and the file name fills gaps. Used by the audience idle card (`_get_idle_bg_overlay_info`, tags read once per track) and the host
 panel (`_bg_track_title_artist`). Nothing is renamed on disk. Tests: `test_track_display.py`; full suite 1309 pass. Look at the card on screen with a few real tracks.
 
+## Singer page location help - 2026-10-05 (server commit `84ed134`, pushed, NOT deployed)
+When a phone cannot get a location, the singer page opens a bottom sheet with steps for that device (Android Chrome, iPhone Safari/Chrome) and a Try again button
+(`showLocationHelp` in `index.php`, also `window.SingWSLocation.help`; used by the request form, Singer History add, and the first-run setup). `singer_session_ui.js?v=16`.
+Seen at phone width in the browser pane only; real Chrome/iPhone permission behaviour untested. Deploy = `index.php` + `singer_session_ui.js` (no script prepared).
+Open: if the complaint is location TIMING OUT with permission on, that is a different fix - ask which phones/message.
+
 ## RELEASED 1.0.0.8 — 2026-10-04 (published, latest; installed on this Mac (arm64); the operator plans to install the Intel DMG on the venue Mac on 2026-10-05 and test it there - NOT yet done)
 Tag `v1.0.0.8` at release commit `0acb828` (code `40309d9`, bytecode of both installers identical to the source); https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.8.
 arm64 `7bd9870c...` (127,061,222 B) and x86_64 `8a0a0662...` (152,898,047 B); re-downloaded `latest/download` sizes and SHA-256s equal `docs/release.json`; Pages manifest and download page verified.
