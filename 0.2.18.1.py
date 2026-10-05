@@ -130,6 +130,7 @@ import contextlib
 import song_index  # local module (~/SingWS/singws.db)
 import phrase_markers  # local module (~/SingWS/phrase_markers.db) — Phrase-Aligned Song Start
 import phrase_detect  # local module — tempo/beat analysis + beat-aligned loops
+import track_display  # local module — artist/title cleanup for the background-music card
 import transition_analysis  # pure, fail-closed audio/visual transition metadata
 try:
     from mutagen import File as MutagenFile
@@ -7456,6 +7457,7 @@ class VideoAreaWidget(QWidget):
         self._karaoke_frame_count = 0
         self._karaoke_scale_time_ms = 0.0
         self._idle_bg_artwork_path = ""
+        self._idle_bg_text = ("", "")
         self._idle_bg_artwork = QPixmap()
         self._viz_phase = 0.0
         self._viz_levels = [0.08] * 14
@@ -8201,18 +8203,9 @@ class VideoAreaWidget(QWidget):
                 return None
 
             path = str(playlist[idx])
-            stem = Path(path).stem
-            artist = ""
-            title = stem
-            if " - " in stem:
-                artist, title = stem.split(" - ", 1)
-                artist = artist.strip()
-                title = title.strip()
-            else:
-                title = stem.strip()
-
             if path != self._idle_bg_artwork_path:
                 self._idle_bg_artwork_path = path
+                self._idle_bg_text = track_display.display_for_file(path)   # tags read once per track, not per repaint
                 self._idle_bg_artwork = QPixmap()
                 try:
                     art = bg.get_album_artwork(path)
@@ -8221,6 +8214,7 @@ class VideoAreaWidget(QWidget):
                 except Exception:
                     pass
 
+            artist, title = getattr(self, "_idle_bg_text", ("", ""))
             return {
                 "title": title or "",
                 "artist": artist or "",
@@ -58396,50 +58390,9 @@ class KaraokeApp(QWidget):
         except Exception:
             key = str(file_path or "")
 
-        title = ""
-        artist = ""
-        try:
-            stem = Path(file_path).stem
-        except Exception:
-            stem = ""
-        if " - " in stem:
-            _a, _t = stem.split(" - ", 1)
-            artist = _a.strip()
-            title = _t.strip()
-        else:
-            title = stem.strip()
-
-        # Only hit file tags if filename parsing was incomplete.
-        need_tags = (not title) or (not artist)
-        try:
-            if need_tags and file_path and MutagenFile is not None:
-                mf = MutagenFile(file_path)
-                tags = getattr(mf, "tags", None) if mf is not None else None
-
-                def _first(*names):
-                    if not tags:
-                        return ""
-                    for n in names:
-                        try:
-                            v = tags.get(n)
-                        except Exception:
-                            v = None
-                        if isinstance(v, list) and v:
-                            return str(v[0]).strip()
-                        if v:
-                            return str(v).strip()
-                    return ""
-
-                if not title:
-                    title = _first("TIT2", "TITLE", "title", "\xa9nam")
-                if not artist:
-                    artist = _first("TPE1", "ARTIST", "artist", "\xa9ART")
-        except Exception:
-            pass
+        artist, title = track_display.display_for_file(str(file_path or ""))
         if not title:
-            title = stem.strip() or "Unknown Title"
-        if not artist:
-            artist = ""
+            title = "Unknown Title"
 
         out = (title, artist)
         try:

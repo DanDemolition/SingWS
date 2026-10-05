@@ -35,6 +35,13 @@ end-to-end email arrived. **Still needed:** a new app build installed (installed
 A real test email was sent 2026-10-05 through the exact server mail code (Resend accepted it); inbox/spam receipt to be confirmed by the operator. **SECURITY:** while reading `resend_email.inc` a session PRINTED the live Resend key into the
 conversation: the operator must rotate it in Resend and update `resend_email.inc` on the server. Scans found no secret in the public repo (tree and history), the server repo history or any log. AGENTS.md now has a "Secrets never appear in output" rule.
 
+## Cleaner artist/title on the background-music card — 2026-10-05, committed, NOT built/installed
+`track_display.py` (new, pure Python) turns messy BGM file names into a tidy artist/title: drops track numbers ("01.", "00."), pack/album
+middle segments ("Ultimix 330"), "(Ultimix By ...)" and trailing BPM, "[Official Video]"/"(Explicit)"/"(Radio Edit)" noise, fixes `Don_t`/`Lil_`,
+"F."/"ft." -> "feat.", capitalises all-lowercase titles, and drops the duplicated half of "x- x". Good file tags win; junk tags (Unknown, Various Artists,
+Track 01, URLs) are ignored and the file name fills gaps. Used by the audience idle card (`_get_idle_bg_overlay_info`, tags read once per track) and the host
+panel (`_bg_track_title_artist`). Nothing is renamed on disk. Tests: `test_track_display.py`; full suite 1309 pass. Look at the card on screen with a few real tracks.
+
 ## RELEASED 1.0.0.8 — 2026-10-04 (published, latest; installed on this Mac (arm64); the operator plans to install the Intel DMG on the venue Mac on 2026-10-05 and test it there - NOT yet done)
 Tag `v1.0.0.8` at release commit `0acb828` (code `40309d9`, bytecode of both installers identical to the source); https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.8.
 arm64 `7bd9870c...` (127,061,222 B) and x86_64 `8a0a0662...` (152,898,047 B); re-downloaded `latest/download` sizes and SHA-256s equal `docs/release.json`; Pages manifest and download page verified.
