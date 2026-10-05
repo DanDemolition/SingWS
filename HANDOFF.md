@@ -11,7 +11,7 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
-## Bug reports to the developer - 2026-10-05 (code done and tested, NOT deployed, NOT built, NOT released)
+## Bug reports to the developer - 2026-10-05 (server DEPLOYED and verified end to end; app code committed, NOT yet in any build)
 Operator asked: permanent bug email to dan@wildstylekaraoke.com on every build (no recipient picker), sending only the LAST SHOW's log, not 3 days.
 **Design:** the app never mails anything itself and holds no mail credentials (the app repo is public). It POSTs a sanitized ZIP to the venue's own server (`api/v1/support_logs.php`, venue API key
 header); the server keeps a copy (`tenants/<user>/support_logs/`, newest 25) and mails it to the fixed address `SUPPORT_LOG_TO` in `api/v1/_support_mail.inc` via the Resend account password reset already uses
@@ -20,7 +20,9 @@ header); the server keeps a copy (`tenants/<user>/support_logs/`, newest 25) and
 not name), as ONE sanitized log with a header; `send_log_package_to_developer` posts it; Settings > Advanced > Logs & Crash Reporting now has "Send Last Show's Logs" and "Automatically send a bug report ... after a crash"
 (default ON, `crash_auto_send_logs`). The recipient box, SMTP fields and all SMTP code are gone; the old keys (`crash_log_email_to`, `log_smtp_*`, including a saved mail password) are removed from settings.json at launch.
 The venue API key field in Settings > Network is now always masked. Tests: `test_last_show_logs.py` (18+), server `tools/test_support_logs.php` (17 checks), 1,273 app tests + 96 native pass.
-**To make it live:** (1) operator runs `server-deployments/support-logs/deploy.sh` (two new files; checks the mail helper exists without showing it; undo script removes the new files); (2) a new app build installed.
+**Server deployed by the operator 2026-10-05** (`server-deployments/support-logs/deploy.sh`; undo path printed by the script under `/root/singws-chat-deploy/support-logs-<time>/rollback.sh`). Verified live from outside: no login -> 400 `missing_user`,
+wrong key -> 401, GET -> 405, `resend_email.inc` and `config.inc` -> 403 over the web, and a real multipart upload with the venue key returned `{"ok":true,"stored":true,"emailed":true}`; the operator confirmed both the direct Resend test email and the
+end-to-end email arrived. **Still needed:** a new app build installed (installed apps still have the old SMTP settings UI and send nothing to the server).
 A real test email was sent 2026-10-05 through the exact server mail code (Resend accepted it); inbox/spam receipt to be confirmed by the operator. **SECURITY:** while reading `resend_email.inc` a session PRINTED the live Resend key into the
 conversation: the operator must rotate it in Resend and update `resend_email.inc` on the server. Scans found no secret in the public repo (tree and history), the server repo history or any log. AGENTS.md now has a "Secrets never appear in output" rule.
 
