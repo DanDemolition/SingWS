@@ -42,6 +42,21 @@ middle segments ("Ultimix 330"), "(Ultimix By ...)" and trailing BPM, "[Official
 Track 01, URLs) are ignored and the file name fills gaps. Used by the audience idle card (`_get_idle_bg_overlay_info`, tags read once per track) and the host
 panel (`_bg_track_title_artist`). Nothing is renamed on disk. Tests: `test_track_display.py`; full suite 1309 pass. Look at the card on screen with a few real tracks.
 
+## 1.0.0.9 RELEASE IN PROGRESS - 2026-10-05 (version bump committed and pushed `6693707`; NOT published)
+Operator said "build and release". Done: version set to 1.0.0.9 (`0.2.18.1.py`, both specs); full suite 1,309 pass (scratch SINGWS_HOME, `.venv-test-arm64-fresh` with
+`SINGWS_TEST_PYTHON` + `QT_QPA_PLATFORM_PLUGIN_PATH=/tmp/singws-release-qt-platforms`; the native 96 need `.venv-universal`, missing on this Mac, NOT run today);
+arm64 built: `SingWS-1.0.0.9-arm64-installer.dmg` sha256 `83a8a0cc...` (exe `cb7c447f...`) - NOT yet verified (operator interrupted the read-only mount check; ask before resuming).
+**Still to do, in this order:** verify arm64 (hdiutil, strict signature, arch, version, markers, launch on scratch SINGWS_HOME), build Intel
+(`SINGWS_BUILD_PYTHON=.venv-build-intel-rosetta/bin/python ./build_singws_mac_intel.sh`; hdiutil flake -> retry) and verify it (Rosetta smoke launch), `tools/write_manifest.py 1.0.0.9`,
+release commit + tag pushed ALONE, draft release + upload + size/SHA check, publish, push `main` LAST (the manifest goes live then), re-download check. `release.sh` does this but also builds
+only the native flavour and re-runs tests; past releases were done by hand in that order.
+What 1.0.0.9 contains (all since 1.0.0.8): permanent developer bug-report email (last show's log only, via the server; no mail credentials in the app; recipient box and SMTP removed; API key
+field always masked); KaraFun: seek moves the end timing and Stop ends an active KaraFun song, no false "key/tempo needs manual adjustment" note; cleaner artist/title on the BGM card
+(`track_display.py`, tags + file name, nothing renamed); host chat history fix was already in 1.0.0.8. No app change is needed for the server items below.
+**Server (wskar.com) state, all verified live by hash 2026-10-05:** notification auto-expiry (already live) and the singer-page location help sheet (deployed today with
+`server-deployments/location-help/deploy.sh`, undo `/root/singws-chat-deploy/location-help-20261005T190426Z/rollback.sh`). Server repo `84ed134`, app repo pushed; GitHub matches.
+**Operator still owes:** rotate the Resend key (it was printed in a chat) and revoke the old SMTP app password. Operator rejected building a reusable deploy tool and the YouTube Music BGM idea: do not suggest either again.
+
 ## Singer page location help - 2026-10-05 (server commit `84ed134`, pushed, NOT deployed)
 When a phone cannot get a location, the singer page opens a bottom sheet with steps for that device (Android Chrome, iPhone Safari/Chrome) and a Try again button
 (`showLocationHelp` in `index.php`, also `window.SingWSLocation.help`; used by the request form, Singer History add, and the first-run setup). `singer_session_ui.js?v=16`.
