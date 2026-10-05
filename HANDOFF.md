@@ -34,6 +34,12 @@ What is in it (over the re-released 1.0.0.7):
   FOUND on attempt 1 (8, 8, 10 s query-to-playing on Intel), fast picture start worked on Intel, 335 GUI freezes over 120 ms (median 194 ms, p90 400 ms, ~78/hour; 3 over 1 s, all near
   startup/idle-overlay change). Quits at the end of nights log `closeEvent` then `network transports stopped` and no `clean shutdown` line (3 of 4 quits in the 3 logs); the operator
   confirmed those were him closing the app and there was no crash, so it is a logging gap, not a fault. Background music coming in late was a settings value (`karaoke_trim_verified_tail`), see below.
+**Operator-confirmed 2026-10-05 after the 2026-10-04 show (Intel, build 1.0.0.8, exe `8713fbbd...` = the released DMG): the DAW page and the singers/DAW preview split are good.** Log evidence agrees: singer-only mode ran
+(3 s timer, 320x178 frames ~2.9 KB) and DAW mode ran (1 s timer, 426x215 ~15.7 KB); only 1 slow preview capture (18 ms) in 4.1 h, but the preview was watched only ~2 min, so it was barely exercised.
+**Show-log findings 2026-10-04 (46 songs, 21:34-01:40):** no errors; 326 GUI freezes (79/h, median 173 ms, total ~80 s): song end 49 x ~439 ms, song start 134 x ~174 ms, other 143 x ~144 ms; the `ui_songend_` probes
+show the song-end handler = ~356 ms (cleanup 148, stop_playback 98 inside it, `idle_background` 44, video_surfaces 28, qr_show 22, outro 23), so ~200 ms before cleanup is untimed and by code reading is the full `gc.collect()` on the first
+lines of `_handle_media_end_safe` (real-app heap measured here: 7-18 ms; Intel is several times slower and the heap grows) - NOT yet confirmed on Intel. Proposed for 1.0.0.9: young-generation collect (or none) + a gc probe, song-start probes, split cleanup.
+Memory on the Intel Mac grows ~350-470 MB/h and does not plateau (same on 10-02, 10-03, 10-04: 749 -> 3,226 MB over the night); cause unknown (native?); last night's BG loops were `VJ Loops/Halloween VJ` (15 mp4, 25% opacity, software decode). Host chat bug: no evidence either way (app logs nothing about chat).
 **To check on the Intel Mac (operator, 2026-10-05):** DAW page looks as clean/frequent as before; a singer's phone preview looks acceptable but lighter; send a host chat message while a singer message
 arrives and confirm the conversation does not collapse; KaraFun + CDG + MP4 songs; then read the log for `ui_songend_` lines. Intel still has never been run on a physical Intel Mac
 with a build from this machine other than through the operator's venue Mac (he runs the released builds there).
