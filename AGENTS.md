@@ -527,3 +527,15 @@ Multiple requests may share those values legitimately.
 Duplicate detection should use the permanent request identifier rather than metadata comparisons whenever possible.
 
 Request identifiers must be generated once at request creation time and must never change during the request lifetime.
+
+---
+
+## Secrets never appear in output
+
+Several files hold live credentials: `SingWS-Server/resend_email.inc`, `config.inc`, `stripe_config.inc` and `~/SingWS/settings.json`
+(venue API key, and in older versions an SMTP password). Never `cat`, `sed`, `Read` or otherwise print them. Inspect them with a masked
+read that shows key names and value lengths only, and when a value is needed (for a request or a search) load it into a variable and
+use it without echoing it. The app's logs and bug-report bundles are already redacted (`_sanitize_log_text`); keep it that way, and keep
+the venue API key field masked in Settings. On 2026-10-05 a session printed a live Resend key by reading `resend_email.inc`; the key had
+to be rotated. The app repository is public: never commit a credential, and the Resend key lives only in the untracked, git-ignored
+`resend_email.inc` on the server.

@@ -2347,30 +2347,108 @@ def _recent_log_files(days: int = 3, *, now: float | None = None) -> list[Path]:
     return sorted(out, key=lambda p: p.name)
 
 
-def prepare_log_email_package(days: int = 3, *, crash_log: str | Path | None = None) -> tuple[Path | None, list[Path], str]:
-    """Create a sanitized ZIP of recent SingWS log/crash files only.
+_LAUNCH_LINE_RE = re.compile(r"^\[\d\d:\d\d:\d\d\] \[[A-Z]+\] \[LAUNCH\] \{")
+_LOG_STAMP_RE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
+# A run of the app shorter than this is a restart, not a show (the 2026-10-05 export relaunch ran for 40 seconds).
+LAST_SHOW_MIN_SECONDS = 10 * 60
 
-    Queue/history/settings JSON files are intentionally excluded so singer data
-    and credentials are not sent as part of routine diagnostics.
+
+def _log_line_seconds(lines: list[str]) -> list[float | None]:
+    """Seconds since the first stamped line for each line (None for continuation lines), counting midnight rollovers."""
+    out: list[float | None] = []
+    base = None
+    day = 0
+    previous = None
+    for line in lines:
+        m = _LOG_STAMP_RE.match(line)
+        if not m:
+            out.append(None)
+            continue
+        t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+        if previous is not None and t < previous - 6 * 3600:
+            day += 1
+        previous = t
+        absolute = day * 86400 + t
+        if base is None:
+            base = absolute
+        out.append(float(absolute - base))
+    return out
+
+
+def _last_show_slice(lines: list[str]) -> tuple[int, int, float]:
+    """(first, end, seconds) of the log lines belonging to the most recent show.
+
+    Every launch writes a [LAUNCH] line, so the lines between two launches are one run of the app. The last show is the latest run
+    that lasted at least LAST_SHOW_MIN_SECONDS, because a short run right after a show is usually the operator reopening the app
+    to send its logs. If no run is that long, the latest run is used.
+    """
+    if not lines:
+        return 0, 0, 0.0
+    starts = [i for i, line in enumerate(lines) if _LAUNCH_LINE_RE.match(line)]
+    if not starts or starts[0] != 0:
+        starts = [0] + starts
+    bounds = list(zip(starts, starts[1:] + [len(lines)]))
+    seconds = _log_line_seconds(lines)
+
+    def run_seconds(first: int, end: int) -> float:
+        stamped = [v for v in seconds[first:end] if v is not None]
+        return (max(stamped) - min(stamped)) if stamped else 0.0
+
+    runs = [(first, end, run_seconds(first, end)) for first, end in bounds]
+    for first, end, length in reversed(runs):
+        if length >= LAST_SHOW_MIN_SECONDS:
+            return first, end, length
+    return runs[-1]
+
+
+def _build_last_show_package(days: int = 7, *, crash_log: str | Path | None = None) -> dict:
+    """Create a sanitized ZIP holding the log of the last show (one run of the app, even across midnight).
+
+    Queue/history/settings JSON files are intentionally excluded so singer data and credentials are not sent as part of routine
+    diagnostics. Returns {"package", "files", "window", "error"}.
     """
     import zipfile
 
     # Asynchronous log writes mean the most recent lines may still be queued;
     # a bundle that stops short of the problem is not worth sending.
     flush_log_queue()
-    files = _recent_log_files(days)
+    found = list(_recent_log_files(days))
+
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except Exception:
+            return 0.0
+
+    found.sort(key=lambda path: (_mtime(path), path.name))        # oldest first: midnight rotation makes names sort wrongly
+    lines: list[str] = []
+    used: list[Path] = []
+    for path in found:
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if text and not text.endswith("\n"):
+            text += "\n"
+        used.append(Path(path))
+        lines.extend(text.splitlines(keepends=True))
+    extra: list[Path] = []
     if crash_log:
         try:
             cp = Path(crash_log)
-            if cp.exists() and cp.is_file() and cp not in files:
-                files.append(cp)
+            if cp.exists() and cp.is_file() and cp not in used:
+                extra.append(cp)
         except Exception:
             pass
-    files = sorted({Path(p) for p in files}, key=lambda p: p.name)
-    if not files:
-        return None, [], "No SingWS log files from the requested window."
+    if not lines and not extra:
+        return {"package": None, "files": [], "window": "", "error": "No SingWS log files from the requested window."}
+    first, end, length = _last_show_slice(lines)
+    show_lines = lines[first:end]
+    stamps = [m.group(0) for m in (_LOG_STAMP_RE.match(line) for line in show_lines) if m]
+    window = f"{stamps[0].strip('[]')} - {stamps[-1].strip('[]')} ({int(length // 60)} min)" if stamps else ""
+    header = f"# SingWS last show log: {len(show_lines)} lines, {window or 'no timestamps'}; from {', '.join(p.name for p in used) or 'crash log only'}\n"
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    package = LOGS_DIR / f"singws_logs_last_{int(days)}_days_{stamp}.zip"
+    package = LOGS_DIR / f"singws_last_show_{stamp}.zip"
     # Build under a temporary name and rename only on success.  Writing the ZIP
     # in place left a truncated, unopenable archive sitting next to the good
     # ones when packaging died partway on 2026-08-16 (a 712-byte file with no
@@ -2379,14 +2457,15 @@ def prepare_log_email_package(days: int = 3, *, crash_log: str | Path | None = N
     building = package.with_suffix(".zip.partial")
     try:
         with zipfile.ZipFile(building, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for path in files:
+            if show_lines:
+                zf.writestr(f"singws_last_show_{stamp}.log", _sanitize_log_text(header + "".join(show_lines)))
+            for path in extra:
                 try:
-                    raw = path.read_text(encoding="utf-8", errors="replace")
-                    zf.writestr(path.name, _sanitize_log_text(raw))
+                    zf.writestr(path.name, _sanitize_log_text(path.read_text(encoding="utf-8", errors="replace")))
                 except Exception as exc:
                     zf.writestr(f"{path.name}.error.txt", f"Failed to read {path.name}: {exc}")
         os.replace(building, package)
-        return package, files, ""
+        return {"package": package, "files": used + extra, "window": window, "error": ""}
     except BaseException as exc:
         # BaseException so a MemoryError — the likely cause when this ran with
         # the app at 7.9 GB — also cleans up instead of orphaning the partial.
@@ -2395,72 +2474,78 @@ def prepare_log_email_package(days: int = 3, *, crash_log: str | Path | None = N
         except Exception:
             pass
         if isinstance(exc, Exception):
-            return None, files, f"Failed to package logs: {exc}"
+            return {"package": None, "files": used + extra, "window": window, "error": f"Failed to package logs: {exc}"}
         raise
 
 
-def _log_email_config_from_settings(settings: dict | None) -> dict:
+def prepare_log_email_package(days: int = 7, *, crash_log: str | Path | None = None) -> tuple[Path | None, list[Path], str]:
+    built = _build_last_show_package(days, crash_log=crash_log)
+    return built["package"], built["files"], built["error"]
+
+
+def _log_server_config(settings: dict | None) -> dict:
     s = settings if isinstance(settings, dict) else {}
-    try:
-        port = int(s.get("log_smtp_port", 587) or 587)
-    except Exception:
-        port = 587
     return {
-        "to": str(s.get("crash_log_email_to", "") or "").strip(),
-        "host": str(s.get("log_smtp_host", "") or "").strip(),
-        "port": port,
-        "username": str(s.get("log_smtp_username", "") or "").strip(),
-        "password": str(s.get("log_smtp_password", "") or ""),
-        "from": str(s.get("log_smtp_from", "") or "").strip() or str(s.get("log_smtp_username", "") or "").strip(),
-        "tls": bool(s.get("log_smtp_tls", True)),
+        "base": _network_normalize_base_url(str(s.get("base_url", "") or "")),
+        "user": str(s.get("user", s.get("tenant", "")) or "").strip(),
+        "key": str(s.get("api_key", "") or "").strip(),
     }
 
 
-def _log_email_missing_config(config: dict) -> list[str]:
-    required = ("to", "host", "username", "password", "from")
-    return [key for key in required if not str(config.get(key, "") or "").strip()]
+def send_log_package_to_developer(settings: dict, package_path: Path, *, reason: str = "manual", window: str = "") -> tuple[bool, str]:
+    """Send the packaged logs through the venue's own SingWS server connection.
 
-
-def send_log_package_via_smtp(settings: dict, package_path: Path, *, subject: str | None = None) -> tuple[bool, str]:
-    import smtplib
-    from email.message import EmailMessage
-
-    config = _log_email_config_from_settings(settings)
-    missing = _log_email_missing_config(config)
-    if missing:
-        return False, "Email is not configured. Fill in recipient, SMTP host, username, app password, and sender."
+    The server keeps a copy and emails it to the developer: the destination is fixed on the server, and no mail credentials exist
+    in the app. Needs the same server connection (address, venue, API key) the rest of the app uses.
+    """
+    config = _log_server_config(settings)
+    if not (config["base"] and config["user"] and config["key"]):
+        return False, "Not connected to your SingWS account (Settings > Network), so the logs cannot be sent."
     if not package_path or not Path(package_path).exists():
         return False, "Log package was not created."
+    name = Path(package_path).name
     try:
-        msg = EmailMessage()
-        msg["Subject"] = subject or f"SingWS logs {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        msg["From"] = config["from"]
-        msg["To"] = config["to"]
-        msg.set_content(
-            "Attached is a sanitized SingWS diagnostic log bundle.\n\n"
-            "The bundle contains recent app/crash logs only. API keys, tokens, passwords, and PIN-like values are redacted."
+        data = {
+            "user": config["user"], "reason": reason, "app_version": APP_VERSION,
+            "build_id": APP_VERSION, "platform": f"{platform.system()} {platform.machine()} {platform.mac_ver()[0]}".strip(),
+            "session_window": window,
+        }
+        response = requests.post(
+            f"{config['base']}/api/v1/support_logs.php", data=data,
+            files={"logs": (name, Path(package_path).read_bytes(), "application/zip")},
+            headers={"X-API-Key": config["key"], "Accept": "application/json"}, timeout=30,
         )
-        data = Path(package_path).read_bytes()
-        msg.add_attachment(data, maintype="application", subtype="zip", filename=Path(package_path).name)
-        with smtplib.SMTP(config["host"], int(config["port"]), timeout=20) as smtp:
-            if config["tls"]:
-                smtp.starttls()
-            smtp.login(config["username"], config["password"])
-            smtp.send_message(msg)
-        logging.info(f"[LOG-EMAIL] sent package={Path(package_path).name} to={config['to']}")
-        return True, f"Sent {Path(package_path).name} to {config['to']}."
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        if response.status_code == 200 and body.get("ok"):
+            logging.info(f"[LOG-EMAIL] sent package={name} stored={body.get('stored')} emailed={body.get('emailed')}")
+            if body.get("emailed"):
+                return True, "Sent the last show's logs to the developer."
+            return True, "The logs reached the server and are saved there, but the email to the developer could not be sent."
+        error = str(body.get("error") or f"HTTP {response.status_code}")
+        logging.error(f"[LOG-EMAIL] send failed package={name}: {error}")
+        friendly = {
+            "unauthorized": "The server did not accept this venue's API key (Settings > Network).",
+            "rate_limited": "Logs were already sent a few times recently. Try again later.",
+            "too_large": "The log bundle was too large to send.",
+        }
+        return False, "Could not send the logs: " + friendly.get(error, error)
     except Exception as exc:
-        logging.error(f"[LOG-EMAIL] send failed package={Path(package_path).name}: {exc}")
-        return False, f"Send failed: {exc}"
+        logging.error(f"[LOG-EMAIL] send failed package={name}: {exc}")
+        return False, f"Could not send the logs: {exc}"
 
 
-def send_recent_logs_email(settings: dict, days: int = 3, *, crash_log: str | Path | None = None) -> tuple[bool, str, Path | None]:
-    package, files, package_error = prepare_log_email_package(days, crash_log=crash_log)
+def send_recent_logs_email(settings: dict, days: int = 7, *, crash_log: str | Path | None = None,
+                           reason: str = "manual") -> tuple[bool, str, Path | None]:
+    built = _build_last_show_package(days, crash_log=crash_log)
+    package, files, package_error = built["package"], built["files"], built["error"]
     if package_error:
         logging.warning(f"[LOG-EMAIL] package failed: {package_error}")
         return False, package_error, package
-    logging.info(f"[LOG-EMAIL] packaged files={len(files)} package={package.name if package else ''}")
-    ok, msg = send_log_package_via_smtp(settings, package, subject=f"SingWS last {int(days)} days of logs")
+    logging.info(f"[LOG-EMAIL] packaged files={len(files)} package={package.name if package else ''} window={built['window']}")
+    ok, msg = send_log_package_to_developer(settings, package, reason=reason, window=built["window"])
     return ok, msg, package
 
 
@@ -2469,15 +2554,15 @@ def maybe_auto_send_crash_logs(crash_log: str | Path | None):
         settings = {}
         if SETTINGS_PATH.exists():
             settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8") or "{}")
-        if not isinstance(settings, dict) or not bool(settings.get("crash_auto_send_logs", False)):
+        if not isinstance(settings, dict) or not bool(settings.get("crash_auto_send_logs", True)):
             return
         def _work():
-            # Without this guard a throw here (MemoryError, SMTP teardown, a
+            # Without this guard a throw here (MemoryError, a network error, a
             # disk error) killed the daemon thread without a single log line,
             # which is why the 22:15:45 crash on 2026-08-16 has no [LOG-EMAIL]
             # record at all while the other three do.
             try:
-                ok, msg, package = send_recent_logs_email(settings, 3, crash_log=crash_log)
+                ok, msg, package = send_recent_logs_email(settings, 7, crash_log=crash_log, reason="crash")
                 logging.info(f"[LOG-EMAIL] auto crash send ok={int(ok)} package={Path(package).name if package else ''} msg={msg}")
             except Exception as exc:
                 logging.error(f"[LOG-EMAIL] auto crash send failed: {exc!r}")
@@ -3799,14 +3884,7 @@ DEFAULTS = {
     "karaoke_track_trims": {},             # {track_path_or_id: gain_db} manual per-track playback trim
     "karaoke_normalize_enabled": True,     # [advanced only] Loudness-normalize karaoke songs
     "bg_normalize_enabled": True,          # [advanced only] Loudness-normalize background music
-    "crash_log_email_to": "",              # recipient for manual/automatic diagnostic log bundles
-    "crash_auto_send_logs": False,         # auto-send sanitized crash logs after a crash when SMTP is configured
-    "log_smtp_host": "",                   # SMTP host for log email, e.g. smtp.gmail.com
-    "log_smtp_port": 587,                  # SMTP STARTTLS port
-    "log_smtp_username": "",               # SMTP username / sender login
-    "log_smtp_password": "",               # SMTP/app password; never written to logs
-    "log_smtp_from": "",                   # optional sender address; defaults to SMTP username
-    "log_smtp_tls": True,                  # use STARTTLS
+    "crash_auto_send_logs": True,          # after a crash, send the last show's sanitized logs to the developer through the SingWS server
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
@@ -19653,8 +19731,13 @@ class KaraokeApp(QWidget):
         # KaraFun's picture is always captured from its preview pane now; the old switch (and the video-window
         # method behind it) are gone, so a saved "off" must not turn the capture off.
         self.settings["karafun_dual_renderer_capture"] = True
+        # Bug reports now go to the developer through the SingWS server, so the mail recipient and the SMTP login that older
+        # versions saved here are obsolete. Remove them so a saved mail password does not stay on disk.
+        _legacy_log_mail_keys = ("crash_log_email_to", "log_smtp_host", "log_smtp_port", "log_smtp_username",
+                                 "log_smtp_password", "log_smtp_from", "log_smtp_tls")
+        _legacy_removed = [k for k in _legacy_log_mail_keys if self.settings.pop(k, None) is not None]
         _, library_settings_changed = _migrate_library_locations(self.settings)
-        if library_settings_changed:
+        if library_settings_changed or _legacy_removed:
             self.save_settings()
         # Keep macOS from napping/idle-sleeping SingWS during a session, so the
         # idle app no longer "freezes" between songs (tester logs 2026-07-18).
@@ -28210,59 +28293,17 @@ class KaraokeApp(QWidget):
         _display_actions_card.addLayout(_display_actions)
 
         _adv_actions_card = _section_card(tab_advanced, "Logs & Crash Reporting",
-                          "Send sanitized app/crash logs for troubleshooting. Configure SMTP with an app password; credentials are saved locally and never written to logs.")
+                          "Bug reports always go to the SingWS developer through your SingWS account. Only the log of your last show is sent, with passwords and keys removed.")
         _adv_actions = QHBoxLayout()
         _adv_actions.addWidget(logs_btn)
-        send_logs_btn = QPushButton("Send Last 3 Days of Logs")
+        send_logs_btn = QPushButton("Send Last Show's Logs")
         _adv_actions.addWidget(send_logs_btn)
         _adv_actions.addStretch(1)
         _adv_actions_card.addLayout(_adv_actions)
 
-        log_email_row = QHBoxLayout()
-        log_email_row.addWidget(QLabel("Send logs to:"))
-        log_email_edit = QLineEdit(str(self.settings.get("crash_log_email_to", "") or ""))
-        log_email_edit.setPlaceholderText("debug@example.com")
-        log_email_row.addWidget(log_email_edit, 1)
-        _adv_actions_card.addLayout(log_email_row)
-
-        auto_crash_logs_cb = QCheckBox("Automatically send crash logs after a crash")
-        auto_crash_logs_cb.setChecked(bool(self.settings.get("crash_auto_send_logs", False)))
+        auto_crash_logs_cb = QCheckBox("Automatically send a bug report to the developer after a crash")
+        auto_crash_logs_cb.setChecked(bool(self.settings.get("crash_auto_send_logs", True)))
         _adv_actions_card.addWidget(auto_crash_logs_cb)
-
-        smtp_grid = QGridLayout()
-        smtp_grid.setHorizontalSpacing(8)
-        smtp_grid.setVerticalSpacing(7)
-
-        smtp_host_edit = QLineEdit(str(self.settings.get("log_smtp_host", "") or ""))
-        smtp_host_edit.setPlaceholderText("smtp.gmail.com")
-        smtp_port_spin = QSpinBox(dlg)
-        smtp_port_spin.setRange(1, 65535)
-        try:
-            smtp_port_spin.setValue(max(1, min(65535, int(self.settings.get("log_smtp_port", 587) or 587))))
-        except Exception:
-            smtp_port_spin.setValue(587)
-        smtp_user_edit = QLineEdit(str(self.settings.get("log_smtp_username", "") or ""))
-        smtp_user_edit.setPlaceholderText("SMTP username")
-        smtp_password_edit = QLineEdit(str(self.settings.get("log_smtp_password", "") or ""))
-        smtp_password_edit.setPlaceholderText("SMTP app password")
-        smtp_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        smtp_from_edit = QLineEdit(str(self.settings.get("log_smtp_from", "") or ""))
-        smtp_from_edit.setPlaceholderText("optional sender email")
-        smtp_tls_cb = QCheckBox("Use STARTTLS")
-        smtp_tls_cb.setChecked(bool(self.settings.get("log_smtp_tls", True)))
-
-        smtp_grid.addWidget(QLabel("SMTP host:"), 0, 0)
-        smtp_grid.addWidget(smtp_host_edit, 0, 1)
-        smtp_grid.addWidget(QLabel("Port:"), 0, 2)
-        smtp_grid.addWidget(smtp_port_spin, 0, 3)
-        smtp_grid.addWidget(QLabel("Username:"), 1, 0)
-        smtp_grid.addWidget(smtp_user_edit, 1, 1, 1, 3)
-        smtp_grid.addWidget(QLabel("App password:"), 2, 0)
-        smtp_grid.addWidget(smtp_password_edit, 2, 1, 1, 3)
-        smtp_grid.addWidget(QLabel("From:"), 3, 0)
-        smtp_grid.addWidget(smtp_from_edit, 3, 1, 1, 2)
-        smtp_grid.addWidget(smtp_tls_cb, 3, 3)
-        _adv_actions_card.addLayout(smtp_grid)
 
         # Push each tab's content to the top so controls don't stretch apart.
         for _t in _setting_tabs:
@@ -28689,14 +28730,7 @@ class KaraokeApp(QWidget):
             tilt_slider.setValue(25)
             exciter_mix_slider.setValue(20)
             ceiling_slider.setValue(-10)
-            log_email_edit.setText("")
-            auto_crash_logs_cb.setChecked(False)
-            smtp_host_edit.setText("")
-            smtp_port_spin.setValue(587)
-            smtp_user_edit.setText("")
-            smtp_password_edit.setText("")
-            smtp_from_edit.setText("")
-            smtp_tls_cb.setChecked(True)
+            auto_crash_logs_cb.setChecked(True)
             self._set_audio_output_id("default")
             _populate_audio_combo("default")
 
@@ -28793,39 +28827,22 @@ class KaraokeApp(QWidget):
         logs_btn.clicked.connect(on_open_logs)
 
         def save_log_email_settings(*_):
-            self.settings["crash_log_email_to"] = log_email_edit.text().strip()
             self.settings["crash_auto_send_logs"] = bool(auto_crash_logs_cb.isChecked())
-            self.settings["log_smtp_host"] = smtp_host_edit.text().strip()
-            self.settings["log_smtp_port"] = int(smtp_port_spin.value())
-            self.settings["log_smtp_username"] = smtp_user_edit.text().strip()
-            self.settings["log_smtp_password"] = smtp_password_edit.text()
-            self.settings["log_smtp_from"] = smtp_from_edit.text().strip()
-            self.settings["log_smtp_tls"] = bool(smtp_tls_cb.isChecked())
             try:
                 self._schedule_save_settings(700)
             except Exception:
                 self.save_settings()
 
-        def send_last_three_days_logs():
+        def send_last_show_logs():
             save_log_email_settings()
-            config = _log_email_config_from_settings(self.settings)
-            missing = _log_email_missing_config(config)
-            if missing:
-                QMessageBox.information(
-                    dlg,
-                    "Log Email Setup Required",
-                    "Configure the recipient and SMTP/app-password fields first.\n\n"
-                    "For Gmail or iCloud, create an app password and use it here instead of your normal password."
-                )
-                return
             send_logs_btn.setEnabled(False)
             try:
-                self._show_processing_notification("Packaging and sending logs...", level="info", persistent=True)
+                self._show_processing_notification("Packaging and sending the last show's logs...", level="info", persistent=True)
             except Exception:
                 pass
 
             def _worker():
-                ok, msg, package = send_recent_logs_email(dict(self.settings), 3)
+                ok, msg, package = send_recent_logs_email(dict(self.settings), 7)
 
                 def _finish():
                     send_logs_btn.setEnabled(True)
@@ -28833,22 +28850,14 @@ class KaraokeApp(QWidget):
                         self._show_processing_notification(msg, level="success" if ok else "error")
                     except Exception:
                         pass
-                    QMessageBox.information(
-                        dlg,
-                        "Send Logs",
-                        f"{msg}\n\nPackage: {package}" if package else msg,
-                    )
+                    QMessageBox.information(dlg, "Send Logs", msg)
 
                 self._run_on_ui_thread(_finish)
 
             threading.Thread(target=_worker, daemon=True, name="singws-manual-log-email").start()
 
-        for _w in (log_email_edit, smtp_host_edit, smtp_user_edit, smtp_password_edit, smtp_from_edit):
-            _w.textChanged.connect(save_log_email_settings)
-        smtp_port_spin.valueChanged.connect(save_log_email_settings)
-        smtp_tls_cb.toggled.connect(save_log_email_settings)
         auto_crash_logs_cb.toggled.connect(save_log_email_settings)
-        send_logs_btn.clicked.connect(send_last_three_days_logs)
+        send_logs_btn.clicked.connect(send_last_show_logs)
         reset_btn.clicked.connect(on_reset)
 
         def apply_settings():
@@ -36081,6 +36090,8 @@ class KaraokeApp(QWidget):
             row2b.addWidget(QLabel("API Key:"))
             key_edit = QLineEdit(self.settings.get("api_key", ""))
             key_edit.setPlaceholderText("")
+            # Always hidden: the venue API key must never be readable on screen (operator request 2026-10-05).
+            key_edit.setEchoMode(QLineEdit.EchoMode.Password)
             row2b.addWidget(key_edit)
             v.addLayout(row2b)
 

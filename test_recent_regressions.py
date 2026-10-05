@@ -89,7 +89,10 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertFalse(self.singws.DEFAULTS["next_up_overlay_enabled"])
         self.assertEqual(int(self.singws.DEFAULTS["next_up_overlay_duration_sec"]), 10)
         self.assertIn("lyrics_background_video_opacity", self.singws.DEFAULTS)
-        self.assertIn("crash_log_email_to", self.singws.DEFAULTS)
+        # Bug reports go to the developer through the SingWS server: no recipient and no SMTP login are settings any more.
+        self.assertTrue(self.singws.DEFAULTS["crash_auto_send_logs"])
+        for legacy in ("crash_log_email_to", "log_smtp_host", "log_smtp_password", "log_smtp_username", "log_smtp_from", "log_smtp_port", "log_smtp_tls"):
+            self.assertNotIn(legacy, self.singws.DEFAULTS)
 
     def test_widget_surfaces_are_double_buffered_by_default_on_macos(self):
         """Single buffering is opt-in; it corrupted the operator window.
@@ -474,14 +477,18 @@ class RecentRegressionTests(unittest.TestCase):
                 os.utime(old, (old_time, old_time))
                 os.utime(old_rotated, (old_time, old_time))
 
+                # Midnight rotation: the pre-midnight part is the OLDER file even though its name sorts after.
+                os.utime(rotated, (time.time() - 7200, time.time() - 7200))
                 package, files, error = self.singws.prepare_log_email_package(days=3)
                 self.assertEqual(error, "")
                 self.assertIsNotNone(package)
                 self.assertEqual([p.name for p in files], [rotated.name, "singws_recent.log"])
                 with zipfile.ZipFile(package, "r") as zf:
-                    text = zf.read("singws_recent.log").decode("utf-8")
-                    self.assertEqual(zf.read(rotated.name).decode("utf-8"),
-                                     "[22:00:00] token=***")
+                    names = zf.namelist()
+                    self.assertEqual(len(names), 1, "the last show travels as ONE log")
+                    self.assertTrue(names[0].startswith("singws_last_show_") and names[0].endswith(".log"))
+                    text = zf.read(names[0]).decode("utf-8")
+                self.assertIn("[22:00:00] token=***", text)
                 self.assertNotIn("secret", text)
                 self.assertNotIn("hunter2", text)
                 self.assertIn("api_key=***", text)

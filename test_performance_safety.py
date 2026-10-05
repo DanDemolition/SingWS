@@ -960,7 +960,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("flush_log_queue()", function_source("log_crash"))
         self.assertIn("flush_log_queue()", function_source("_on_app_about_to_quit"))
         package = MAIN_SOURCE[
-            MAIN_SOURCE.index("def prepare_log_email_package"):MAIN_SOURCE.index("def send_log_package_via_smtp")
+            MAIN_SOURCE.index("def _build_last_show_package"):MAIN_SOURCE.index("def prepare_log_email_package")
         ]
         self.assertIn("flush_log_queue()", package)
 
