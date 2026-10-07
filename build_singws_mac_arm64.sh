@@ -27,7 +27,7 @@ fi
 
 for required in \
     "$ENTRY" "$SPEC" "$PYTHON" \
-    mpv_karaoke_transport.py MoltenVK_icd.json constraints-macos12.txt \
+    mpv_karaoke_transport.py constraints-macos-arm64.txt \
     SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py \
     tools/verify_macos_min_version.py; do
     [[ -e "$required" ]] || { echo "Missing required file: $required"; exit 1; }
@@ -47,11 +47,16 @@ security find-identity -v -p codesigning | grep -Fq "\"$CODE_SIGN_IDENTITY\"" ||
 # Bundle the optional ScreenCaptureKit renderer bridge with this build.
 zsh native/karafun_capture/build_capture.sh arm64
 
-: "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
+: "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native/mpv_runtime/artifacts/arm64/Frameworks}"
 export SINGWS_MPV_FRAMEWORKS
+"$PYTHON" tools/verify_mpv_runtime.py \
+    "$SINGWS_MPV_FRAMEWORKS/singws_libmpv.2.dylib" --arch arm64 --maximum 12.3
+zsh native/mpv_bridge/build_bridge.sh --arch arm64 \
+    --frameworks "$SINGWS_MPV_FRAMEWORKS" \
+    --out "$SINGWS_MPV_FRAMEWORKS/libsingws_mpv_bridge.dylib"
 STACK_INPUTS=(
     mpv_playback_iina.py
-    native/mpv_bridge/libsingws_mpv_bridge.dylib
+    "$SINGWS_MPV_FRAMEWORKS/libsingws_mpv_bridge.dylib"
     "$SINGWS_MPV_FRAMEWORKS/singws_libmpv.2.dylib"
 )
 for required in "${STACK_INPUTS[@]}"; do
@@ -65,15 +70,14 @@ done
 "$PYTHON" tools/verify_macos_arch.py --runtime --require arm64
 "$PYTHON" -c "import PyQt6"
 
-# This build is intended to cover macOS 12 and above, retiring the separate
-# legacy edition. PyQt6/Qt6 6.10+ raise the floor to macOS 13 while carrying a
-# "macosx_10_14" wheel tag, so the tag cannot be trusted -- check the installed
-# versions against the verified pin set instead.
+# Apple Silicon follows the current dependency line. Check installed versions
+# against its independent pins so Intel's macOS 12.3 limits cannot silently
+# hold this build back.
 "$PYTHON" - <<'PYPINS'
 import re, sys
 from importlib.metadata import PackageNotFoundError, version
 wanted = {}
-for line in open("constraints-macos12.txt", encoding="utf-8"):
+for line in open("constraints-macos-arm64.txt", encoding="utf-8"):
     line = line.split("#", 1)[0].strip()
     if not line:
         continue
@@ -87,14 +91,14 @@ for name, pin in wanted.items():
         bad.append(f"{name}: not installed (need {pin})")
         continue
     if found != pin:
-        bad.append(f"{name}: {found} installed, macOS 12 build needs {pin}")
+        bad.append(f"{name}: {found} installed, Apple Silicon build needs {pin}")
 if bad:
-    print("Dependency versions break macOS 12 support:")
+    print("Apple Silicon dependency versions do not match the release pins:")
     for line in bad:
         print(f"  {line}")
-    sys.exit("Install the pinned set: pip install -c constraints-macos12.txt "
+    sys.exit("Install the pinned set: pip install -c constraints-macos-arm64.txt "
              + " ".join(wanted))
-print(f"macOS 12 dependency pins verified: "
+print(f"Apple Silicon dependency pins verified: "
       + ", ".join(f"{n}=={v}" for n, v in sorted(wanted.items())))
 PYPINS
 
@@ -137,10 +141,10 @@ for name in sys.argv[2:]:
 print(f"Bundled media core loads cleanly: {', '.join(sys.argv[2:])}")
 PYCHECK
 
-# Nothing in the shipped Apple Silicon bundle may require a newer macOS than
-# 12.3, which is the floor of the arm64 SciPy wheel used by this build.
-# Checks the real Mach-O load commands, not wheel tags or filenames.
-"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch arm64 --maximum 12.3
+# Current scientific Python wheels set the Apple Silicon floor to macOS 14.
+# M1 Max and newer hardware can run that release. Check the real Mach-O load
+# commands, not wheel tags or filenames.
+"$PYTHON" tools/verify_macos_min_version.py "$APP_PATH" --arch arm64 --maximum 14.0
 
 # Stage the bundle BEFORE signing, and sign the staged copy.
 #

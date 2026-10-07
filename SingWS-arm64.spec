@@ -39,19 +39,17 @@ for helper in (
     if helper_path.exists():
         extra_datas.append((str(helper_path), "."))
 
-moltenvk_icd = project_root / "MoltenVK_icd.json"
 iina_frameworks = Path(os.environ.get("SINGWS_MPV_FRAMEWORKS", "") or
-                       (project_root / "native_dual_view" / "Frameworks"))
-bridge_dylib = project_root / "native" / "mpv_bridge" / "libsingws_mpv_bridge.dylib"
+                       (project_root / "native" / "mpv_runtime" / "artifacts" / "arm64" / "Frameworks"))
+bridge_dylib = iina_frameworks / "libsingws_mpv_bridge.dylib"
 if not iina_frameworks.is_dir() or not bridge_dylib.is_file():
     raise SystemExit("Required bundled native mpv bridge/runtime is missing")
-iina_dylibs = sorted(iina_frameworks.glob("*.dylib"))
+iina_dylibs = sorted(path for path in iina_frameworks.glob("*.dylib") if path != bridge_dylib)
 if not iina_dylibs:
     raise SystemExit(f"No dylibs found in {iina_frameworks}")
 binaries.extend((str(path), ".") for path in iina_dylibs)
 binaries.append((str(bridge_dylib), "."))
 print(f"[spec] native mpv stack: {len(iina_dylibs)} dylibs + bridge")
-extra_datas.append((str(moltenvk_icd), "vulkan/icd.d"))
 
 for bass_lib in (Path("vendor/bass") / name for name in (
     "libbass.dylib",

@@ -1,0 +1,21 @@
+# Current Apple Silicon dependency line. This build supports M1 Max hardware
+# and newer; unlike Intel, it is not constrained to macOS 12.3. Re-audit the
+# finished bundle's real Mach-O load commands whenever these pins change.
+
+numpy==2.5.3
+scipy==1.18.1
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.2
+PyQt6_sip==13.13.0
+Pillow==12.3.0
+certifi==2026.7.22
+charset-normalizer==3.5.2
+idna==3.20
+mutagen==1.48.1
+psutil==7.2.2
+pyobjc-core==12.2.2
+pyobjc-framework-Cocoa==12.2.2
+pyobjc-framework-CoreLocation==12.2.2
+qrcode==8.2
+requests==2.34.2
+urllib3==2.8.0

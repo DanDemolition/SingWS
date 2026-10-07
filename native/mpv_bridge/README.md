@@ -1,49 +1,31 @@
-# SingWS native mpv bridge (IINA-derived stack)
+# SingWS native mpv bridge
 
 `libsingws_mpv_bridge.dylib` is the in-process libmpv core behind
 `mpv_playback_iina.py`: one libmpv instance renders each frame once into a
 shared texture presented by two native NSViews (output + preview). No
 mpv-owned windows, no `wid`, no follower synchronization.
 
-## Where the frameworks come from
+## Where the runtime comes from
 
-The IINA-derived media libraries are **not** in this repo (see Licensing) and
-never will be: 71 prebuilt GPL dylibs, ~62 MB, x86_64 only. They are extracted
-from an IINA.app bundle and renamed with the `singws_` prefix.
-
-The tree expects them at **`native_dual_view/Frameworks/`** (repo root), which
-is gitignored — so a fresh checkout does not have them and cannot build Intel
-until they are put back by hand. Copy the directory in, or point
-`SINGWS_MPV_FRAMEWORKS` at wherever you keep it; every consumer honours that
-variable first:
-
-| Consumer | Default if `SINGWS_MPV_FRAMEWORKS` is unset |
-| --- | --- |
-| `build_singws_mac_intel.sh` | `$(pwd)/native_dual_view/Frameworks` |
-| `SingWS-x86_64.spec` | `<repo root>/native_dual_view/Frameworks` |
-| `build_bridge.sh` | `$HOME/Downloads/native_dual_view/Frameworks` |
-
-Note the third row disagrees with the other two — the bridge builder still
-defaults to the download location the stack first arrived in. Pass
-`--frameworks` explicitly, or export `SINGWS_MPV_FRAMEWORKS`, rather than
-relying on any of these defaults.
-
-This is the same arrangement as `vendor/mpv-iina-Frameworks/`: a local artifact
-the build depends on, deliberately kept out of git.
+`native/mpv_runtime/build_runtime.sh` builds the pinned, patched mpv 0.41.0
+runtime for arm64 or x86_64. See `native/mpv_runtime/README.md` for sources,
+licenses, checksums and the macOS 12.3 compatibility policy. The old extracted
+IINA dependency tree is no longer used by the app builders.
 
 ## Building
 
 Point the build at the directory containing `singws_libmpv.2.dylib`:
 
 ```bash
-./build_bridge.sh --arch x86_64 --frameworks /path/to/Frameworks
+./build_bridge.sh --arch x86_64 \
+  --frameworks ../mpv_runtime/artifacts/x86_64/Frameworks
 ```
 
-Deployment target is pinned to **macOS 12.0**. Verify afterwards:
+Deployment target is pinned to **macOS 12.3**. Verify afterwards:
 
 ```bash
 tools/verify_macos_min_version.py native/mpv_bridge/libsingws_mpv_bridge.dylib \
-    --arch x86_64 --maximum 12.0
+    --arch x86_64 --maximum 12.3
 ```
 
 At runtime the dylib resolves libmpv through `@loader_path` and
@@ -70,5 +52,5 @@ wiping the EQ and master bus on every key change.
 
 ## Licensing
 
-IINA and mpv are **GPL-licensed**. Distributing a product built on this stack
-carries GPL source and notice obligations. Resolve this before shipping.
+The combined runtime is GPL-covered. See `native/mpv_runtime/LICENSES.md` and
+ship the required license texts and corresponding source with releases.

@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 APP_NAME="SingWS"
 ENTRY="0.2.18.1.py"
 SPEC="SingWS-x86_64.spec"
-PYTHON="${SINGWS_BUILD_PYTHON:-.venv-universal/bin/python}"
+PYTHON="${SINGWS_BUILD_PYTHON:-.venv-build-intel-rosetta/bin/python}"
 NATIVE_PYTHON="$PYTHON"
 CODE_SIGN_IDENTITY="${SINGWS_CODESIGN_IDENTITY:-SingWS Local Code Signing}"
 
@@ -24,7 +24,7 @@ fi
 for required in \
     "$ENTRY" "$SPEC" "$PYTHON" \
     "$NATIVE_PYTHON" \
-    mpv_karaoke_transport.py MoltenVK_icd.json constraints-macos12.txt \
+    mpv_karaoke_transport.py constraints-macos12.txt \
     SingWS.entitlements dmg_settings.py tools/verify_macos_arch.py \
     tools/verify_macos_min_version.py; do
     [[ -e "$required" ]] || { echo "Missing required file: $required"; exit 1; }
@@ -44,10 +44,14 @@ security find-identity -v -p codesigning | grep -Fq "\"$CODE_SIGN_IDENTITY\"" ||
 # Build the Intel ScreenCaptureKit bridge before packaging the app.
 zsh native/karafun_capture/build_capture.sh x86_64
 
-: "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native_dual_view/Frameworks}"
+: "${SINGWS_MPV_FRAMEWORKS:=$(pwd)/native/mpv_runtime/artifacts/x86_64/Frameworks}"
 export SINGWS_MPV_FRAMEWORKS
-: "${SINGWS_MPV_BRIDGE:=$(pwd)/native/mpv_bridge/libsingws_mpv_bridge.dylib}"
+: "${SINGWS_MPV_BRIDGE:=$SINGWS_MPV_FRAMEWORKS/libsingws_mpv_bridge.dylib}"
 export SINGWS_MPV_BRIDGE
+"$NATIVE_PYTHON" tools/verify_mpv_runtime.py \
+    "$SINGWS_MPV_FRAMEWORKS/singws_libmpv.2.dylib" --arch x86_64 --maximum 12.3
+zsh native/mpv_bridge/build_bridge.sh --arch x86_64 \
+    --frameworks "$SINGWS_MPV_FRAMEWORKS" --out "$SINGWS_MPV_BRIDGE"
 STACK_INPUTS=(
     mpv_playback_iina.py
     "$SINGWS_MPV_BRIDGE"

@@ -1,0 +1,5 @@
+--- a/src/common/mathmisc.h
++++ b/src/common/mathmisc.h
+@@ -25,0 +26,2 @@
++#include <cstddef>
++
