@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/singws-analysis"]
+members = ["crates/singws-analysis", "crates/singws-dsp", "crates/singws-dsp-ffi"]
 
 [profile.release]
 opt-level = 3

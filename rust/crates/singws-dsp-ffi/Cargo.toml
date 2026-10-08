@@ -1,0 +1,13 @@
+[package]
+name = "singws-dsp-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI for singws-dsp: a BASS DSPPROC-compatible callback so Python is never on the audio thread."
+publish = false
+
+[lib]
+name = "singws_dsp_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+singws-dsp = { path = "../singws-dsp" }

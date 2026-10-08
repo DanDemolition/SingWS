@@ -3761,6 +3761,10 @@ DEFAULTS = {
     # audio thread (blocks, mean/p99/max time, blocks over half their own duration, gaps between callbacks, BASS CPU,
     # stalled-mixer polls). Cost: two clock reads and a few additions per audio block. Set False to switch off.
     "audio_diag_counters": True,
+    # Which implementation runs the BGM master chain (gate, tilt EQ, exciter, compressor, limiter): "python" (the reference,
+    # runs inside a BASS audio-thread callback) or "rust" (libsingws_dsp_ffi.dylib, called by BASS directly). Falls back to
+    # Python if the library is missing. Takes effect at the next launch.
+    "master_dsp_engine": "python",
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -22250,6 +22254,21 @@ class KaraokeApp(QWidget):
                 pass
             return None
 
+    def _new_bgm_master_processor(self):
+        """The BGM master processor: the Rust one when `master_dsp_engine` is "rust" and its library loads (BASS then calls
+        Rust directly, no Python on the audio thread), otherwise the Python reference. Applies from the next launch."""
+        want = str(self.settings.get("master_dsp_engine", "python") or "python").strip().lower()
+        if want == "rust":
+            try:
+                from rust_master_dsp import RustMasterProcessor
+                proc = RustMasterProcessor(sample_rate=44100, channels=2)
+                _diag("[MASTER-AUDIO] BGM master processor engine=rust (native DSP callback)")
+                return proc
+            except Exception as exc:
+                _diag(f"[MASTER-AUDIO] Rust master DSP unavailable ({exc}); using the Python processor")
+        from singws_master_audio import MasterAudioProcessor
+        return MasterAudioProcessor(sample_rate=44100, channels=2)
+
     def _ensure_bgm_master_processor(self):
         """Create/refresh a SEPARATE MasterAudioProcessor for the BGM mixer so
         background music gets the identical gate/tilt/exciter/compressor/limiter
@@ -22264,8 +22283,7 @@ class KaraokeApp(QWidget):
             return None
         try:
             if getattr(self, "bgm_master", None) is None:
-                from singws_master_audio import MasterAudioProcessor
-                self.bgm_master = MasterAudioProcessor(sample_rate=44100, channels=2)
+                self.bgm_master = self._new_bgm_master_processor()
             self.bgm_master.set_params(self._compute_master_audio_params())
             self.bgm_master.set_enabled(True)
             return self.bgm_master

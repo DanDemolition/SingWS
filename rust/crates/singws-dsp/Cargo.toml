@@ -1,0 +1,10 @@
+[package]
+name = "singws-dsp"
+version = "0.1.0"
+edition = "2024"
+description = "Allocation-free port of SingWS's MasterAudioProcessor (gate, tilt EQ, exciter, compressor, limiter, clip guard). Safe Rust only."
+publish = false
+
+[lib]
+name = "singws_dsp"
+path = "src/lib.rs"

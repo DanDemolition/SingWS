@@ -108,7 +108,8 @@ def _engine():
     e._master_dsp_handle = 0
     e._diag_ref = {"master": None, "sample_rate": 48000.0}
     e._diag_stalled_polls = 0
-    e._closed = True   # the stub is never a real engine; keep __del__ from tidying half-built state
+    e._closed = True
+    e.close = lambda: None   # a stub: nothing to tear down in __del__
     e.bass = _FakeBass()
     return e
 

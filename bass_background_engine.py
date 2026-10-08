@@ -214,7 +214,7 @@ def format_audio_diag(snapshot) -> str:
     cpu = snapshot.get("bass_cpu")
     cpu_text = f"{cpu:.1f}%" if isinstance(cpu, (int, float)) else "n/a"
     return (
-        f"[AUDIO-DIAG] master-dsp blocks={m.get('blocks', 0)} mean={m.get('mean_us', 0):.0f}us "
+        f"[AUDIO-DIAG] master-dsp[{snapshot.get('engine', 'python')}] blocks={m.get('blocks', 0)} mean={m.get('mean_us', 0):.0f}us "
         f"p99{p99_text} max={m.get('max_us', 0):.0f}us over_budget={m.get('over_budget', 0)} "
         f"gap_max={m.get('gap_max_ms', 0):.0f}ms gaps>100ms={m.get('gaps_over_100ms', 0)} "
         f"gaps>500ms={m.get('gaps_over_500ms', 0)} restarts={m.get('restarts', 0)} | "
@@ -654,17 +654,26 @@ class BassBackgroundEngine:
 
     def set_audio_diagnostics(self, enabled: bool) -> None:
         """Turn the master-DSP timing counters on or off (cheap; on by default via the host setting)."""
-        self._diag_state()["master"] = AudioCallbackStats() if enabled else None
+        state = self._diag_state()
+        state["enabled"] = bool(enabled)
+        state["master"] = AudioCallbackStats() if enabled else None   # Python-callback counters
         self._diag_stalled_polls = 0
 
     def audio_diagnostics_snapshot(self):
         """Counters since the previous snapshot, then reset. None when diagnostics are off."""
         state = self._diag_state()
-        old = state.get("master")
-        if old is None:
-            return None
-        fresh = AudioCallbackStats(last_start=old.last_start)
-        state["master"] = fresh
+        native = self._native_master()
+        if native is not None:
+            if not state.get("enabled"):
+                return None
+            master, engine_kind = native.stats_snapshot(reset=True), "rust"
+        else:
+            old = state.get("master")
+            if old is None:
+                return None
+            fresh = AudioCallbackStats(last_start=old.last_start)
+            state["master"] = fresh
+            master, engine_kind = old.summary(), "python"
         cpu = None
         stalled = 0
         try:
@@ -677,7 +686,7 @@ class BassBackgroundEngine:
             stalled = getattr(self, "_diag_stalled_polls", 0)
         except Exception:
             pass
-        return {"master": old.summary(), "bass_cpu": cpu, "mixer_stalled": stalled}
+        return {"master": master, "engine": engine_kind, "bass_cpu": cpu, "mixer_stalled": stalled}
 
     def _detach_master_dsp(self) -> None:
         if self._master_dsp_handle and self.mixer:
@@ -688,8 +697,32 @@ class BassBackgroundEngine:
         self._master_dsp_handle = 0
         self._master_proc_ref["proc"] = None
 
+    def _native_master(self):
+        """The Rust master processor when one is attached to BASS (its callback runs entirely in Rust), else None."""
+        proc = getattr(self, "_master_proc", None)
+        if proc is not None and getattr(proc, "native", False) and getattr(self, "_master_dsp_handle", 0):
+            return proc
+        return None
+
+    def _attach_native_master_dsp(self, native) -> None:
+        """Register the Rust ``DSPPROC`` with BASS directly: no Python code runs on the audio thread."""
+        proc_ptr, user_ptr = native
+        try:
+            self._master_proc.configure_stream(self.sample_rate, 2)  # the mixer is stereo float
+        except Exception:
+            pass
+        self._master_proc_ref["proc"] = self._master_proc
+        # Priority below the EQ (which uses 0) so the chain is EQ -> master, like the Python callback.
+        self._master_dsp_handle = int(self.bass.BASS_ChannelSetDSP(
+            self.mixer, ctypes.c_void_p(proc_ptr), ctypes.c_void_p(user_ptr), -1,
+        ))
+
     def _attach_master_dsp(self) -> None:
         if not self.mixer or self._master_proc is None:
+            return
+        native = getattr(self._master_proc, "native_dsp", None)
+        if native is not None:
+            self._attach_native_master_dsp(native)
             return
         # Build the C callback only once and stash it on self to keep the
         # ctypes object alive — if it's GC'd while BASS still holds the
@@ -952,6 +985,11 @@ class BassBackgroundEngine:
 
         try:
             self._detach_master_fx()
+        except Exception:
+            pass
+        try:
+            # Native processors hand BASS a raw pointer: the DSP must be gone before anything can free that object.
+            self._detach_master_dsp()
         except Exception:
             pass
 

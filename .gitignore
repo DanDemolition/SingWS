@@ -75,3 +75,5 @@ native/mpv_bridge/*.dylib
 *.egg-info/
 # The server is its own repository (SingWS-Server)
 SingWS-Server/
+# Built Rust master-DSP library; produced by rust/build_dsp.sh
+native/singws_dsp/*/*.dylib

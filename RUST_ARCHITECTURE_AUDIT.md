@@ -78,7 +78,8 @@ stale. The venue Mac is Intel (6 physical cores, 32 GB) [REPORTED]. This matters
 
 * `BassBackgroundEngine` (`bass_background_engine.py`) drives BASS + BASSmix through ctypes: a stereo-float mixer (`BASS_Mixer_StreamCreate`), decks as
   mixer channels, equal-power crossfade envelopes on BASS's own audio clock (`BASS_Mixer_ChannelSetEnvelope`), preloaded paused decks.
-* **Python on BASS's audio thread:** when the EQ is non-flat or the master processor is active, the engine registers ctypes `DSPPROC` callbacks
+* **Correction 2026-10-08:** the BGM **EQ uses BASS's native effects** (`_attach_native_eq_fx`); the Python EQ callback only attaches when the environment variable `SINGWS_ALLOW_PYTHON_BGM_EQ_DSP=1` is set. Only the full **master processor** (`_attach_master_dsp`) runs Python on the audio thread. The original text below over-stated the EQ.
+* **Python on BASS's audio thread:** when the master processor is active (and, with the env override, the EQ), the engine registers ctypes `DSPPROC` callbacks
   (`_dsp_proc`, `bass_background_engine.py` ~559-590 and ~611-630) that call into NumPy/SciPy (`proc.process_f32_array`). Each callback must take the GIL and
   can allocate. They swallow exceptions ("Audio thread: swallow exceptions so we never crash BASS"). [VERIFIED]
   Whether these callbacks are active in a show depends on settings: `master_audio_enabled` defaults to `False` (`0.2.18.1.py:3873`) and `_eq_should_attach`

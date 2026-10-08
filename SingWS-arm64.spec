@@ -21,6 +21,11 @@ capture_dylib = project_root / "native" / "karafun_capture" / "libsingws_karafun
 if capture_dylib.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{capture_dylib}'"):
     binaries.append((str(capture_dylib), "."))
 
+# Rust master-DSP library (rust/build_dsp.sh). Optional: without it the app falls back to the Python processor.
+dsp_dylib = project_root / "native" / "singws_dsp" / "arm64" / "libsingws_dsp_ffi.dylib"
+if dsp_dylib.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{dsp_dylib}'"):
+    binaries.append((str(dsp_dylib), "."))
+
 for helper in (
     "media_helpers.py",
     "libmpv_media_jobs.py",
@@ -32,6 +37,7 @@ for helper in (
     "song_index.py",
     "singws_eq.py",
     "singws_master_audio.py",
+    "rust_master_dsp.py",
     "mac_keep_awake.py",
     "karafun_capture.py",
 ):
@@ -145,6 +151,7 @@ a = Analysis(
         'bass_soundboard_engine',
         'mpv_karaoke_transport',
         'bass_background_engine',
+        'rust_master_dsp',
         # The Homebrew backend and the python-mpv module are added below only
         # for the homebrew stack: PyInstaller's ctypes hook resolves
         # ctypes.util.find_library('mpv') for the `mpv` module and bundles
