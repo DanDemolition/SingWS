@@ -3728,9 +3728,9 @@ FFMPEG_CDG_BASE_OFFSET_MS = 750
 # almost nothing. Applying the FFmpeg figure there put CDG ~750ms out and left
 # the operator cancelling it by hand on the Display slider.
 MPV_CDG_BASE_OFFSET_MS = -50
-# Show calibration for MP4 tracks on the native mpv surface. Keep this out of
-# the user-facing fine-tuning value so the normal control position is zero.
-MPV_MP4_BASE_OFFSET_MS = 100
+# macOS 27.2 field testing with the patched CoreAudio runtime established that
+# MP4 audio/video is aligned without an automatic lead.
+MPV_MP4_BASE_OFFSET_MS = 0
 
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
@@ -3799,6 +3799,7 @@ DEFAULTS = {
     "cdg_timing_engine_split_migrated": False,
     "mpv_cdg_minus_50_baseline_migrated": False,
     "mpv_mp4_100_baseline_migrated": False,
+    "mpv_mp4_zero_baseline_migrated": False,
     "mp4_timing_offset_ms": 0,       # MP4/video trim, FFmpeg/painter engine
     "mp4_timing_offset_mpv_ms": 0,   # MP4/video trim, mpv engine (different display latency)
     "video_timing_offset_ms": 0,     # legacy visual offset; no longer shared between CDG and MP4
@@ -19993,9 +19994,29 @@ class KaraokeApp(QWidget):
                 except Exception:
                     saved_fine = 0
                 self.settings["mp4_timing_offset_mpv_ms"] = max(
-                    -3000, min(3000, saved_fine - MPV_MP4_BASE_OFFSET_MS)
+                    -3000, min(3000, saved_fine - 100)
                 )
             self.settings["mpv_mp4_100_baseline_migrated"] = True
+            changed = True
+        if not bool(self.settings.get("mpv_mp4_zero_baseline_migrated", False)):
+            # The patched CoreAudio runtime tested in macOS 27.2 no longer
+            # needs the old +100ms MP4 baseline. Re-express existing fine
+            # tuning against zero so every upgraded install keeps the timing
+            # it was already using; fresh installs start at a true 0ms.
+            if (
+                bool(self.settings.get("mpv_mp4_100_baseline_migrated", False))
+                and "mp4_timing_offset_mpv_ms" in self.settings
+            ):
+                try:
+                    saved_fine = int(
+                        self.settings.get("mp4_timing_offset_mpv_ms", 0) or 0
+                    )
+                except Exception:
+                    saved_fine = 0
+                self.settings["mp4_timing_offset_mpv_ms"] = max(
+                    -3000, min(3000, saved_fine + 100)
+                )
+            self.settings["mpv_mp4_zero_baseline_migrated"] = True
             changed = True
         if not bool(self.settings.get("end_silence_threshold_2_5_migrated", False)):
             # Earlier releases used 6s by default and show testing commonly
