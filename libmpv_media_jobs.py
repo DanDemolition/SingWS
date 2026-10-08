@@ -62,6 +62,9 @@ class _MpvLogMessage(ctypes.Structure):
 def _runtime_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    configured = os.environ.get("SINGWS_MPV_FRAMEWORKS", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
     return Path(__file__).resolve().parent / "native_dual_view" / "Frameworks"
 
 

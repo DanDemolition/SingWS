@@ -109,11 +109,13 @@ class UpdateManifestDefaultsTests(unittest.TestCase):
 
 
 class PackagingSpecTests(unittest.TestCase):
-    def test_intel_release_targets_macos123_iina_stack(self):
+    def test_intel_release_targets_macos123_pinned_mpv_runtime(self):
         spec = Path("SingWS-x86_64.spec").read_text(encoding="utf-8")
         build = Path("build_singws_mac_intel.sh").read_text(encoding="utf-8")
         self.assertIn("Required bundled native mpv bridge/runtime is missing", spec)
-        self.assertIn("native/mpv_bridge/libsingws_mpv_bridge.dylib", build)
+        self.assertIn("native/mpv_runtime/artifacts/x86_64/Frameworks", build)
+        self.assertIn("tools/verify_mpv_runtime.py", build)
+        self.assertIn("singws_libmpv.2.dylib", build)
         self.assertNotIn("SINGWS_MEDIA_STACK", spec + build)
         self.assertIn("'LSMinimumSystemVersion': '12.3'", spec)
         self.assertIn("--maximum 12.3", build)
