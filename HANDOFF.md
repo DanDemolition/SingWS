@@ -42,6 +42,18 @@ middle segments ("Ultimix 330"), "(Ultimix By ...)" and trailing BPM, "[Official
 Track 01, URLs) are ignored and the file name fills gaps. Used by the audience idle card (`_get_idle_bg_overlay_info`, tags read once per track) and the host
 panel (`_bg_track_title_artist`). Nothing is renamed on disk. Tests: `test_track_display.py`; full suite 1309 pass. Look at the card on screen with a few real tracks.
 
+## Rust migration planning + Stage 1 prototype - 2026-10-08 (documents committed `5b93269`; prototype files UNCOMMITTED, to finish 2026-10-09)
+Operator asked for a Rust architecture audit/plan: `RUST_ARCHITECTURE_AUDIT.md`, `RUST_MIGRATION_PLAN.md`, `RUST_PROTOTYPE_DESIGN.md` (repo root, committed and pushed). Answers given: install Rust yes (done: rustc/cargo 1.99.0 in
+`~/.rustup`, `~/.cargo`, targets aarch64+x86_64 apple-darwin, `--no-modify-path`, so `cargo` is NOT on PATH in new shells: use `export PATH="$HOME/.cargo/bin:$PATH"`); Intel stays at macOS 12.3, Apple Silicon minimum does not matter; the operator wants the
+highest-end sounding key/tempo (Signalsmith was his guess; shipped code uses mpv rubberband R3: proposed a blind A/B render of both before any switch, NOT done); keep BASS; he DOES use the BGM EQ/master processors in shows, so Python-on-BASS-audio-thread (Stage 2) is a live risk;
+documents committed. **The app version stays 1.0.1.0 (operator: keep same version); no app code changed.**
+**Prototype (uncommitted, additive only):** `rust/` workspace (`rust/Cargo.toml`, `rust-toolchain.toml`, `rust/.gitignore`, `rust/crates/singws-analysis/`: `src/lib.rs`, `src/silence.rs`, `src/main.rs`, `tests/analysis.rs`) and `tools/rust_analysis_compare.py`.
+Build/test: `cd rust && cargo test --release`. 17 tests pass. Compare against the local loudness cache (read-only): `.venv/bin/python tools/rust_analysis_compare.py --jobs 4 --libmpv-sample 20`.
+Result on 258 real files: loudness 255/258 within 0.1 LU (the 3 misses are exactly 0.1: rounding), sample peak 251/258; 8.3 files/s on 4 threads, ~20 MB RSS; libmpv baseline 568 ms/track sequential vs Rust median 475 ms/file (so the 2x speed target is NOT shown yet; needs the Intel venue Mac).
+**Open finding:** the 7 peak mismatches are all files where libmpv stored 0.0 and Rust saw +0.2..+1.4 dBFS (decoded values above full scale; SUSPECTED libmpv clamps): fix = cap sample peak at 0 dBFS.
+**Tomorrow:** cap peak at 0 and rerun; cross-compile and run the x86_64 build (Rosetta for correctness only; performance only on the venue Mac); decide PyO3 vs CLI packaging spike; criterion benches; commit and push the prototype (`rust/target` is git-ignored and was deleted with `cargo clean` to keep it out of iCloud);
+Stage 0 (log counters for audio underruns / EQ-master callback time, default off) still needs the operator's yes for the next build.
+
 ## RELEASED 1.0.0.9 - 2026-10-05 (published, latest; NOT installed on this Mac; operator to install on the venue Intel Mac)
 Tag `v1.0.0.9`, release commit `d99bb48` (version bump `6693707`); https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.9.
 arm64 `83a8a0cc...` (127,067,050 B) and x86_64 `db3f4ccc...` (152,864,638 B); re-downloaded `latest/download` sizes and SHA-256s equal `docs/release.json`; download page updated.
