@@ -4,6 +4,7 @@ import ctypes
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,7 @@ HSTREAM = DWORD
 
 BASS_ACTIVE_STOPPED = 0
 BASS_ACTIVE_PLAYING = 1
+BASS_ACTIVE_STALLED = 2
 BASS_ACTIVE_PAUSED = 3
 
 BASS_SAMPLE_FLOAT = 0x100
@@ -118,6 +120,108 @@ def _find_library(stem: str, required: bool = True) -> Path | None:
     return None
 
 
+class AudioCallbackStats:
+    """Cheap per-block timing for the Python master-processor DSP callback.
+
+    The callback runs on BASS's audio thread and needs the GIL, so what matters is how long it
+    takes per block and how irregular the callbacks are. Updated only by the audio thread and read
+    by the GUI thread through :meth:`BassBackgroundEngine.audio_diagnostics_snapshot`, which swaps
+    in a fresh object instead of locking (a block counted in the old object is harmless).
+    """
+
+    EDGES_US = (100, 250, 500, 1000, 2000, 5000, 10000, 25000)
+    # A block that needs more than half its own duration to process leaves little margin.
+    BUDGET_FRACTION = 0.5
+    # Longer than this between callbacks means the mixer was paused/stopped, not starved.
+    RESTART_GAP_S = 2.0
+
+    def __init__(self, last_start: float | None = None):
+        self.blocks = 0
+        self.total_s = 0.0
+        self.max_s = 0.0
+        self.over_budget = 0
+        self.hist = [0] * (len(self.EDGES_US) + 1)
+        self.gap_max_s = 0.0
+        self.gaps_over_100ms = 0
+        self.gaps_over_500ms = 0
+        self.restarts = 0
+        self.last_start = last_start
+
+    def record(self, start: float, end: float, block_s: float) -> None:
+        dur = end - start
+        self.blocks += 1
+        self.total_s += dur
+        if dur > self.max_s:
+            self.max_s = dur
+        if block_s > 0 and dur > block_s * self.BUDGET_FRACTION:
+            self.over_budget += 1
+        us = dur * 1e6
+        idx = len(self.EDGES_US)
+        for i, edge in enumerate(self.EDGES_US):
+            if us <= edge:
+                idx = i
+                break
+        self.hist[idx] += 1
+        if self.last_start is not None:
+            gap = start - self.last_start
+            if gap > self.RESTART_GAP_S:
+                self.restarts += 1
+            else:
+                if gap > self.gap_max_s:
+                    self.gap_max_s = gap
+                if gap > 0.1:
+                    self.gaps_over_100ms += 1
+                if gap > 0.5:
+                    self.gaps_over_500ms += 1
+        self.last_start = start
+
+    def p99_upper_us(self):
+        """Upper edge (microseconds) of the histogram bucket holding the 99th percentile; None if beyond the last edge."""
+        if not self.blocks:
+            return 0
+        target = self.blocks * 0.99
+        running = 0
+        for i, count in enumerate(self.hist):
+            running += count
+            if running >= target:
+                return self.EDGES_US[i] if i < len(self.EDGES_US) else None
+        return None
+
+    def summary(self) -> dict:
+        return {
+            "blocks": self.blocks,
+            "mean_us": (self.total_s / self.blocks * 1e6) if self.blocks else 0.0,
+            "p99_upper_us": self.p99_upper_us(),
+            "max_us": self.max_s * 1e6,
+            "over_budget": self.over_budget,
+            "gap_max_ms": self.gap_max_s * 1e3,
+            "gaps_over_100ms": self.gaps_over_100ms,
+            "gaps_over_500ms": self.gaps_over_500ms,
+            "restarts": self.restarts,
+        }
+
+
+def format_audio_diag(snapshot) -> str:
+    """One log line from :meth:`BassBackgroundEngine.audio_diagnostics_snapshot`; empty when there is nothing to say."""
+    if not snapshot:
+        return ""
+    m = snapshot.get("master") or {}
+    stalled = int(snapshot.get("mixer_stalled", 0) or 0)
+    if not m.get("blocks") and not stalled:
+        return ""
+    p99 = m.get("p99_upper_us")
+    p99_text = f"<={p99:.0f}us" if p99 is not None else ">25000us"
+    cpu = snapshot.get("bass_cpu")
+    cpu_text = f"{cpu:.1f}%" if isinstance(cpu, (int, float)) else "n/a"
+    return (
+        f"[AUDIO-DIAG] master-dsp blocks={m.get('blocks', 0)} mean={m.get('mean_us', 0):.0f}us "
+        f"p99{p99_text} max={m.get('max_us', 0):.0f}us over_budget={m.get('over_budget', 0)} "
+        f"gap_max={m.get('gap_max_ms', 0):.0f}ms gaps>100ms={m.get('gaps_over_100ms', 0)} "
+        f"gaps>500ms={m.get('gaps_over_500ms', 0)} restarts={m.get('restarts', 0)} | "
+        f"bass_cpu={cpu_text} mixer_stalled_polls={stalled}"
+    )
+
+
 class BassBackgroundEngine:
     """Two-deck BASSmix player for background music fades and crossfades."""
     # Class-level flag to ensure BASS_Init is only called once per process
@@ -164,6 +268,9 @@ class BassBackgroundEngine:
         self._master_dsp_handle = 0
         self._master_dsp_callback = None  # keep CFUNCTYPE alive to avoid GC
         self._master_proc_ref = {"proc": None}
+        # Opt-out timing counters for the Python master DSP callback (see AudioCallbackStats).
+        self._diag_ref = {"master": None, "sample_rate": float(self.sample_rate)}
+        self._diag_stalled_polls = 0
         self._load_runtime()
         self._init_output()
 
@@ -203,6 +310,11 @@ class BassBackgroundEngine:
         self.bass.BASS_ChannelStop.restype = BOOL
         self.bass.BASS_ChannelIsActive.argtypes = [DWORD]
         self.bass.BASS_ChannelIsActive.restype = DWORD
+        try:
+            self.bass.BASS_GetCPU.argtypes = []
+            self.bass.BASS_GetCPU.restype = ctypes.c_float
+        except Exception:
+            pass
         self.bass.BASS_ChannelSetAttribute.argtypes = [DWORD, DWORD, ctypes.c_float]
         self.bass.BASS_ChannelSetAttribute.restype = BOOL
         self.bass.BASS_ChannelSlideAttribute.argtypes = [DWORD, DWORD, ctypes.c_float, DWORD]
@@ -533,6 +645,40 @@ class BassBackgroundEngine:
             except Exception:
                 pass
 
+    def _diag_state(self) -> dict:
+        """The shared counter holder (created on first use so partially-built engines in tests still work)."""
+        state = self.__dict__.get("_diag_ref")
+        if state is None:
+            state = self._diag_ref = {"master": None, "sample_rate": float(getattr(self, "sample_rate", 48000) or 48000)}
+        return state
+
+    def set_audio_diagnostics(self, enabled: bool) -> None:
+        """Turn the master-DSP timing counters on or off (cheap; on by default via the host setting)."""
+        self._diag_state()["master"] = AudioCallbackStats() if enabled else None
+        self._diag_stalled_polls = 0
+
+    def audio_diagnostics_snapshot(self):
+        """Counters since the previous snapshot, then reset. None when diagnostics are off."""
+        state = self._diag_state()
+        old = state.get("master")
+        if old is None:
+            return None
+        fresh = AudioCallbackStats(last_start=old.last_start)
+        state["master"] = fresh
+        cpu = None
+        stalled = 0
+        try:
+            cpu = float(self.bass.BASS_GetCPU())
+        except Exception:
+            pass
+        try:
+            if self.mixer and int(self.bass.BASS_ChannelIsActive(self.mixer)) == BASS_ACTIVE_STALLED:
+                self._diag_stalled_polls = getattr(self, "_diag_stalled_polls", 0) + 1
+            stalled = getattr(self, "_diag_stalled_polls", 0)
+        except Exception:
+            pass
+        return {"master": old.summary(), "bass_cpu": cpu, "mixer_stalled": stalled}
+
     def _detach_master_dsp(self) -> None:
         if self._master_dsp_handle and self.mixer:
             try:
@@ -555,11 +701,15 @@ class BassBackgroundEngine:
             )
             channels = 2  # the mixer is stereo float
             proc_ref = self._master_proc_ref
+            diag_ref = self._diag_state()
+            perf = time.perf_counter
 
             def _dsp_proc(handle, channel, buffer_ptr, length, user):
                 proc = proc_ref["proc"]
                 if proc is None or buffer_ptr == 0 or length == 0:
                     return
+                stats = diag_ref["master"]
+                t0 = perf() if stats is not None else 0.0
                 try:
                     # length is in bytes; mixer is float32 stereo.
                     n_floats = int(length) // 4
@@ -571,6 +721,8 @@ class BassBackgroundEngine:
                     processed = proc.process_f32_array(frames)
                     if processed is not frames:
                         view[:] = processed.ravel()
+                    if stats is not None:
+                        stats.record(t0, perf(), frames.shape[0] / diag_ref["sample_rate"])
                 except Exception:
                     # Audio thread: swallow exceptions so we never crash BASS.
                     pass

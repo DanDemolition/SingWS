@@ -1426,7 +1426,7 @@ from media_helpers import NS_PER_SECOND, match_qt_audio_device
 GstKaraokeTransport = None
 GST_KARAOKE_IMPORT_ERROR = None
 
-from bass_background_engine import BassBackgroundEngine, BassBackgroundError
+from bass_background_engine import BassBackgroundEngine, BassBackgroundError, format_audio_diag
 from libmpv_background_engine import LibmpvBackgroundEngine
 from bass_soundboard_engine import BassSoundboardChannel, BassSoundboardError
 
@@ -3757,6 +3757,10 @@ DEFAULTS = {
     # performance_debug_enabled precisely so stall stacks stay usable without
     # paying this. Turn on only to identify a specific stall, then turn back off.
     "stall_event_attribution": False,
+    # Once-a-minute "[AUDIO-DIAG]" log line with the timing of the Python master-processor callback that runs on BASS's
+    # audio thread (blocks, mean/p99/max time, blocks over half their own duration, gaps between callbacks, BASS CPU,
+    # stalled-mixer polls). Cost: two clock reads and a few additions per audio block. Set False to switch off.
+    "audio_diag_counters": True,
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -4568,6 +4572,10 @@ class BackgroundMusicPlayer(QObject):
                         self._bass_engine.set_master_processor(None)
             except Exception:
                 pass
+            try:
+                self._start_audio_diag_counters(parent)
+            except Exception:
+                pass
             return True
         except Exception as e:
             self._bass_engine = None
@@ -4576,6 +4584,34 @@ class BackgroundMusicPlayer(QObject):
 
     def _bass_ready(self) -> bool:
         return getattr(self, "_bass_engine", None) is not None
+
+    def _start_audio_diag_counters(self, parent) -> None:
+        """Enable the master-DSP timing counters and the once-a-minute log line (setting `audio_diag_counters`)."""
+        engine = getattr(self, "_bass_engine", None)
+        if engine is None or not hasattr(engine, "set_audio_diagnostics"):
+            return
+        enabled = bool(parent.settings.get("audio_diag_counters", True)) if (parent is not None and hasattr(parent, "settings")) else False
+        engine.set_audio_diagnostics(enabled)
+        timer = getattr(self, "_audio_diag_timer", None)
+        if enabled:
+            if timer is None:
+                timer = QTimer(self)
+                timer.setInterval(60000)
+                timer.timeout.connect(self._log_audio_diag)
+                self._audio_diag_timer = timer
+            if not timer.isActive():
+                timer.start()
+        elif timer is not None:
+            timer.stop()
+
+    def _log_audio_diag(self) -> None:
+        engine = getattr(self, "_bass_engine", None)
+        snapshot_fn = getattr(engine, "audio_diagnostics_snapshot", None)
+        if not callable(snapshot_fn):
+            return
+        line = format_audio_diag(snapshot_fn())
+        if line:
+            _diag(line)
 
     def _bass_selected_output_name(self) -> str | None:
         try:

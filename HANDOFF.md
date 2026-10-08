@@ -42,6 +42,17 @@ middle segments ("Ultimix 330"), "(Ultimix By ...)" and trailing BPM, "[Official
 Track 01, URLs) are ignored and the file name fills gaps. Used by the audience idle card (`_get_idle_bg_overlay_info`, tags read once per track) and the host
 panel (`_bg_track_title_artist`). Nothing is renamed on disk. Tests: `test_track_display.py`; full suite 1309 pass. Look at the card on screen with a few real tracks.
 
+## Audio counters (Rust plan Stage 0) - 2026-10-08, committed, NOT built/installed, version stays 1.0.1.0
+Operator said yes. New `[AUDIO-DIAG]` log line once a minute (only when background music is playing through BASS with the master processor attached): blocks, mean/p99/max time of the Python master-processor callback
+that runs on BASS's audio thread (`bass_background_engine._dsp_proc`), blocks over half their own duration, gaps between callbacks (>100 ms, >500 ms, max), BASS CPU, polls where the mixer reported "stalled".
+Code: `AudioCallbackStats`, `format_audio_diag`, `BassBackgroundEngine.set_audio_diagnostics / audio_diagnostics_snapshot`, host wiring `BackgroundMusicPlayer._start_audio_diag_counters / _log_audio_diag`.
+**Default ON** (setting `audio_diag_counters`, set False to switch off) - changed from the "off by default" I first told the operator, because the cost is two clock reads and a few additions per block (measured 0.52 us per block; a block is ~25,000 us) and otherwise he would have to edit settings.json. Tell him so.
+Facts found while doing it: the BGM **EQ uses BASS native effects** (the Python EQ callback only attaches with env `SINGWS_ALLOW_PYTHON_BGM_EQ_DSP=1`); only the **full master processor** is Python on the audio thread. The dev profile has `master_audio_enabled = True`, so it is live when BGM plays. Karaoke (mpv) is not covered: no bridge change was made.
+How to read it after a show: `grep AUDIO-DIAG ~/SingWS/logs/*.log`. Healthy: over_budget=0, p99 well under 5000us, gaps>500ms=0, mixer_stalled_polls=0. Anything else is the evidence for or against Rust Stage 2.
+Tests: `test_audio_diag_counters.py` (12, drives the real callback through a stub BASS); full suite 1,321 pass (native 96 not run: `.venv-universal` is missing on this Mac). The old `test_bgm_master.py` bare-engine tests needed the engine to create its counter state lazily (`_diag_state`).
+Test-env note: the Qt plugin folder `/tmp/singws-release-qt-platforms` was cleared again; rebuild it with `cp -R .venv-test-arm64-fresh/lib/python3.13/site-packages/PyQt6/Qt6/plugins/platforms /tmp/singws-release-qt-platforms` then `codesign --force --sign - /tmp/singws-release-qt-platforms/*.dylib` (venv is python3.13, not 3.14).
+Key check 2026-10-08 (operator asked that the Resend key never appear anywhere): no file, no git history of either repo, no log and no Claude data folder contained it; the only copy was in this session's own transcript and was overwritten in place with filler (0 left under `~/.claude`).
+
 ## Rust migration planning + Stage 1 prototype - 2026-10-08 (documents committed `5b93269`; prototype files UNCOMMITTED, to finish 2026-10-09)
 Operator asked for a Rust architecture audit/plan: `RUST_ARCHITECTURE_AUDIT.md`, `RUST_MIGRATION_PLAN.md`, `RUST_PROTOTYPE_DESIGN.md` (repo root, committed and pushed). Answers given: install Rust yes (done: rustc/cargo 1.99.0 in
 `~/.rustup`, `~/.cargo`, targets aarch64+x86_64 apple-darwin, `--no-modify-path`, so `cargo` is NOT on PATH in new shells: use `export PATH="$HOME/.cargo/bin:$PATH"`); Intel stays at macOS 12.3, Apple Silicon minimum does not matter; the operator wants the
@@ -52,7 +63,7 @@ documents committed. **The app version stays 1.0.1.0 (operator: keep same versio
 Result on this Mac (arm64, 258 real files): loudness 258/258 within 0.1 LU, sample peak 251/251 within 0.1 dB; 8.3 files/s on 4 threads, ~20 MB RSS; libmpv baseline 568 ms/track sequential vs Rust median 475 ms/file (2x speed target NOT yet shown; needs the Intel venue Mac).
 The 7 earlier "peak" mismatches were legacy cache entries (unrounded loudness + placeholder peak 0.0) from an older writer, NOT an engine difference; do NOT clamp peak (libmpv stores positive peaks to +1.6 dBFS). The compare mode skips those entries and says so.
 **Intel build for tonight:** `~/Downloads/singws-analyze-intel/` (x86_64, min macOS 12.3 verified, signed with the local identity, sha256 `e1454ccb...`; correct under Rosetta here: 60/60 loudness, 55/55 peak). The operator runs it on the venue Mac BEFORE the show (README.txt in that folder) and sends back the 5 lines it prints.
-**Still to do:** read the Intel numbers; decide PyO3 module vs command-line helper (recommendation: command-line helper, same pattern as the existing isolated analysis helper); Stage 0 log counters need the operator's yes for the next build; blind A/B of rubberband vs Signalsmith not done.
+**Still to do:** read the Intel numbers; decide PyO3 module vs command-line helper (recommendation: command-line helper, same pattern as the existing isolated analysis helper); Stage 0 counters are done; blind A/B of rubberband vs Signalsmith not done.
 
 ## RELEASED 1.0.0.9 - 2026-10-05 (published, latest; NOT installed on this Mac; operator to install on the venue Intel Mac)
 Tag `v1.0.0.9`, release commit `d99bb48` (version bump `6693707`); https://github.com/DanDemolition/SingWS/releases/tag/v1.0.0.9.
