@@ -148,6 +148,15 @@ Every stage: Python app stays usable; old path remains; rollback = flip the flag
 ### Stage 5 - Mic monitoring and AI-assisted transitions (future, unscheduled)
 Requires Stage 4. Input stream + low-latency monitor path (budget set from measured device latency); AI features produce parameters offline, never run inference on the audio thread.
 
+### Stage 6 - Host UI on Tauri (future, unscheduled; added at the operator's request 2026-10-08)
+* **Goal:** a more modern, sleeker host interface. Operator wants this "eventually"; nothing here is scheduled.
+* **Scope:** the host panels only (queue, rotation, history, chat, Settings, library tools). The **audience screen stays native**: mpv GL views, CDG/video, show-screen animations and the ticker are native macOS surfaces whose stacking depends on creation order (`AGENTS.md` rule 6), which a system web view cannot replace. Tauri would own the host window; native code would keep the audience window.
+* **Prerequisite (the real cost):** `0.2.18.1.py` (60,415 lines) mixes interface and show logic. The logic (rotation, requests, sync, playback sequencing) must first sit behind a clear API, which is what Stages 1-3 start to provide. Only then can a new UI call into it (local IPC or the existing relay protocol) instead of living inside the PyQt classes.
+* **Cheaper alternative worth trying first:** restyle the existing PyQt app with Qt Quick/QML theming (`singws_theme.py`, and the QML surfaces already used for the rail, now-singing card and ticker). It may deliver most of the look with no rewrite.
+* **Risks:** very large; two UI stacks during the transition; web-view limits for video/GL; accessibility and input-focus behaviour differ; the live-show rules (never change surface ordering during a show, look at it on screen) apply throughout.
+* **Rollback:** the PyQt host window stays selectable until the Tauri host passes two real shows.
+* **Acceptance (when the time comes):** feature parity checklist for every host panel, no change to audience-screen behaviour, measured UI responsiveness at least as good as today on the Intel venue Mac, and two shows without a regression.
+
 ---
 
 ## 5. Cross-cutting test and release requirements
@@ -167,5 +176,6 @@ Requires Stage 4. Input stream + low-latency monitor path (budget set from measu
 3. Decide Stage 2 from Stage 0 data.
 4. Stage 3 in shadow mode.
 5. Stage 4 only through its gate.
+6. Stage 6 (Tauri host UI) only after the core is behind a clear API; try QML restyling first.
 
 Total new build-time dependency before Stage 1 is accepted: the Rust stable toolchain (not installed on this Mac today). No runtime dependency is added by Stage 1.

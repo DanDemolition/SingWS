@@ -66,7 +66,7 @@ Tests: 1,309 pass today; the 96 native tests were NOT run (`.venv-universal` is 
 `bridge.mm` has not changed since Sept 20, so behaviour should be the same, but watch Intel playback on the first run.
 Contents: developer bug-report email path (last show's log, via the server), cleaner BGM artist/title (`track_display.py`), KaraFun skip-ahead end timing + Stop, no false key/tempo note. Server (location help, notification expiry) already live.
 Normal auto-update path (new version number). To check on the Intel Mac: send a bug report from Settings > Advanced; BGM card names; a KaraFun song with a skip ahead; then read the log for `ui_songend_` lines.
-**Operator still owes:** rotate the Resend key and revoke the old SMTP app password. Rejected ideas, do not suggest again: reusable deploy tool, YouTube Music BGM.
+Rejected ideas, do not suggest again: reusable deploy tool, YouTube Music BGM. **Do NOT remind the operator to rotate the Resend key or revoke the old SMTP password: he told us to stop (2026-10-08); only make sure the key is never printed.**
 
 ## Singer page location help - 2026-10-05 (server commit `84ed134`, pushed, NOT deployed)
 When a phone cannot get a location, the singer page opens a bottom sheet with steps for that device (Android Chrome, iPhone Safari/Chrome) and a Try again button
