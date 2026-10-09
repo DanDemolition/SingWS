@@ -300,3 +300,38 @@ pub unsafe extern "C" fn singws_master_dsp_proc(_handle: u32, _channel: u32, buf
     // A panic must never unwind into BASS's thread.
     let _ = catch_unwind(AssertUnwindSafe(|| m.run(slice)));
 }
+
+/// Stage 3 shadow hook: one JSON step of the song-lifecycle machine. Returns the output length, or a negative
+/// code (-1 bad input, -2 output buffer too small, -3 panic). Never panics across the ABI.
+///
+/// # Safety
+/// `state`/`event` must be NUL-terminated strings; `out` must be writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_transport_step_json(
+    state: *const std::os::raw::c_char,
+    event: *const std::os::raw::c_char,
+    stop_in_progress: i32,
+    out: *mut u8,
+    cap: usize,
+) -> i64 {
+    if state.is_null() || event.is_null() || out.is_null() {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let s = unsafe { std::ffi::CStr::from_ptr(state) }.to_str().map_err(|_| ())?;
+        let e = unsafe { std::ffi::CStr::from_ptr(event) }.to_str().map_err(|_| ())?;
+        singws_transport::step_json(s, e, stop_in_progress != 0).map_err(|_| ())
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}

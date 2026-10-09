@@ -3836,6 +3836,8 @@ DEFAULTS = {
     # Rust helper runs alongside and any disagreement is logged as [ANALYSIS-SHADOW]) or "rust" (Rust answers what it has been
     # verified for, libmpv on any trouble). Takes effect at the next launch.
     "analysis_engine": "libmpv",
+    # Stage 3 shadow: feed KaraFun playback events to the Rust lifecycle machine and LOG disagreements only (never acts). Read at launch.
+    "transport_shadow": False,
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -53630,6 +53632,21 @@ class KaraokeApp(QWidget):
     KARAFUN_HANDOFF_TIMEOUT_RECOVERY_DELAY_S = 6.0
     KARAFUN_PLAYBACK_ALERT_DELAY_S = 40.0
 
+    def _transport_shadow(self):
+        """The Stage 3 shadow machine, or None when the setting is off or the library is missing. Never raises."""
+        try:
+            if not bool(self.settings.get("transport_shadow", False)):
+                return None
+            sh = getattr(self, "_transport_shadow_obj", None)
+            if sh is None:
+                import transport_shadow
+                sh = transport_shadow.TransportShadow(_diag)
+                self._transport_shadow_obj = sh
+                _diag(f"[TRANSPORT-SHADOW] enabled available={int(sh.available)}")
+            return sh if sh.available else None
+        except Exception:
+            return None
+
     def _start_karafun_completion_monitor(self, entry: dict):
         """Complete the active external track once KaraFun reports end/idle state."""
         if not isinstance(entry, dict):
@@ -54051,6 +54068,18 @@ class KaraokeApp(QWidget):
                 # Require end timing as corroboration, and never complete while
                 # playing or unknown. At a corroborated end, one idle reading
                 # suffices: waiting for a second full scrape adds dead air.
+                try:
+                    _sh = self._transport_shadow()
+                    if _sh is not None:
+                        _sid = active_session.get("_shadow_id")
+                        if playing_reported:
+                            _sh.observe(_sid, "playing")
+                        if clock_near_end:
+                            _sh.observe(_sid, "end_clock")
+                        if idle_reported and not playing_reported:
+                            _sh.observe(_sid, "idle")
+                except Exception:
+                    pass
                 should_complete = (
                     idle_reported and not playing_reported and seen_playback
                     and idle_stop_count >= 1 and age > 8.0
@@ -54069,6 +54098,12 @@ class KaraokeApp(QWidget):
                                 else "karaFun_idle_expected_end"
                             )
                             _diag(f"[KARAFUN] completion event received reason={reason} remaining={remaining} idle={int(idle_reported)}")
+                            try:
+                                _sh = self._transport_shadow()
+                                if _sh is not None:
+                                    _sh.app_auto_complete(active_session.get("_shadow_id"))
+                            except Exception:
+                                pass
                             self._finish_external_karafun_playback("complete", expected_active=active_session)
                     self._run_on_ui_thread(_complete_near_end)
                     return
@@ -54188,6 +54223,13 @@ class KaraokeApp(QWidget):
         self._current_karaoke_artist = str(artist or "")
         self._current_karaoke_title = str(title or "")
         _diag(f"[KARAFUN] song started singer={singer_display!r} artist={artist!r} title={title!r}")
+        try:
+            _sh = self._transport_shadow()
+            if _sh is not None and isinstance(self._active_external_karafun, dict):
+                _dur = 0 if bool(entry.get("duration_estimated", False)) else int(entry.get("duration") or 0)
+                self._active_external_karafun["_shadow_id"] = _sh.start(True, _dur or None)
+        except Exception:
+            pass
         QTimer.singleShot(0, lambda: self._reapply_rotation_presentation(scroll_current=True))
         try:
             self._clear_next_up_overlay_pending("external_karafun_start")
@@ -54405,6 +54447,12 @@ class KaraokeApp(QWidget):
         if not isinstance(active, dict):
             return
         action = str(action or "").strip().lower()
+        try:
+            _sh = self._transport_shadow()
+            if _sh is not None:
+                _sh.app_finished(active.get("_shadow_id"), action)
+        except Exception:
+            pass
         _diag(f"[KARAFUN] finish requested action={action!r} submission_state={str((active.get('entry') or {}).get('karafun_submission_state') or '')!r}")
         singer = active.get("singer") if isinstance(active.get("singer"), dict) else {}
         entry = active.get("entry") if isinstance(active.get("entry"), dict) else {}

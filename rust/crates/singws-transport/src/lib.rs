@@ -19,7 +19,7 @@ pub const DURATION_SLACK_S: f64 = 3.0;
 /// End-clock evidence older than this is not "fresh".
 pub const END_CLOCK_FRESH_S: f64 = 5.0;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Idle,
     Starting { session: SessionId, external: bool, duration: Option<f64>, retried: bool },
@@ -28,7 +28,7 @@ pub enum State {
     Ending { session: SessionId },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     StartRequested { session: SessionId, external: bool, duration: Option<f64> },
     PlayingObserved { session: SessionId, now: f64 },
@@ -42,7 +42,7 @@ pub enum Event {
     CleanupDone { session: SessionId },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum Command {
     BeginPlayback(SessionId),
     RetryResult(SessionId),
@@ -52,6 +52,14 @@ pub enum Command {
     AdvanceRotation(SessionId),
     WarnOperator(SessionId, &'static str),
     Ignore(&'static str),
+}
+
+/// JSON bridge for the Python shadow hook: state/event in, `{"state":..,"commands":[..]}` out.
+pub fn step_json(state_json: &str, event_json: &str, stop_in_progress: bool) -> Result<String, String> {
+    let state: State = serde_json::from_str(state_json).map_err(|e| format!("state: {e}"))?;
+    let event: Event = serde_json::from_str(event_json).map_err(|e| format!("event: {e}"))?;
+    let (next, commands) = step(&state, &event, stop_in_progress);
+    serde_json::to_string(&serde_json::json!({ "state": next, "commands": commands })).map_err(|e| e.to_string())
 }
 
 fn session_of(s: &State) -> Option<SessionId> {
@@ -251,6 +259,13 @@ mod tests {
         let (s, c) = run(&[play(1.0), Event::MediaEnd { session: 1, now: 1.0, error: false }]);
         assert_eq!(s, State::Idle);
         assert!(c.iter().all(|v| matches!(v[0], Ignore(_))));
+    }
+
+    #[test]
+    fn json_bridge_round_trips() {
+        let out = step_json("\"Idle\"", r#"{"StartRequested":{"session":7,"external":true,"duration":200.0}}"#, false).unwrap();
+        assert!(out.contains("BeginPlayback") && out.contains("Starting"), "{out}");
+        assert!(step_json("\"Idle\"", "{bad", false).is_err());
     }
 
     /// Fuzz: any event order must never panic, and AdvanceRotation can only follow a CleanupDone.

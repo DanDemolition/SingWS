@@ -44,6 +44,7 @@ for helper in (
     "singws_master_audio.py",
     "rust_master_dsp.py",
     "rust_analysis.py",
+    "transport_shadow.py",
     "mac_keep_awake.py",
     "karafun_capture.py",
 ):
@@ -159,6 +160,7 @@ a = Analysis(
         'bass_background_engine',
         'rust_master_dsp',
         'rust_analysis',
+        'transport_shadow',
         # The Homebrew backend and the python-mpv module are added below only
         # for the homebrew stack: PyInstaller's ctypes hook resolves
         # ctypes.util.find_library('mpv') for the `mpv` module and bundles
