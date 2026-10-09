@@ -77,3 +77,5 @@ native/mpv_bridge/*.dylib
 SingWS-Server/
 # Built Rust master-DSP library; produced by rust/build_dsp.sh
 native/singws_dsp/*/*.dylib
+# Built Rust analysis helper; produced by rust/build_analyze.sh
+native/singws_analyze/*/singws-analyze

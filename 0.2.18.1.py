@@ -2152,8 +2152,72 @@ def loudness_gain_db_cached(audio_path: str):
         return None
 
 
+_analysis_engine_setting = "libmpv"
+_rust_live_sessions: dict = {}
+
+
+def _set_analysis_engine(value):
+    """Record the analysis_engine setting ("libmpv" | "shadow" | "rust"; anything else means "libmpv")."""
+    global _analysis_engine_setting
+    try:
+        import rust_analysis
+        _analysis_engine_setting = rust_analysis.normalize_engine(value)
+    except Exception:
+        _analysis_engine_setting = "libmpv"
+    if _analysis_engine_setting != "libmpv":
+        _diag(f"[ANALYSIS] analysis_engine={_analysis_engine_setting}")
+
+
+def _make_analysis_session(factory):
+    """The library scan's analysis session: the libmpv helper unless analysis_engine asks for Rust (then wrapped, and any
+    Rust trouble falls back to the libmpv answer)."""
+    primary = factory()
+    if _analysis_engine_setting == "libmpv":
+        return primary
+    try:
+        import rust_analysis
+        return rust_analysis.make_session(_analysis_engine_setting, lambda: primary, log=_diag)
+    except Exception as exc:
+        _diag(f"[ANALYSIS] could not enable analysis_engine={_analysis_engine_setting} ({exc}); using libmpv")
+        return primary
+
+
+def _measure_loudness_with_engine(engine, audio_path, cancel_check, paced):
+    """Session-less full measurement under analysis_engine "shadow" or "rust" (next-up analysis and one-off calls)."""
+    def libmpv_call():
+        return _measure_loudness_lufs(audio_path, cancel_check=cancel_check, mode="full", session=None, paced=paced,
+                                      _engine="libmpv")
+    try:
+        import rust_analysis
+        key = bool(paced)
+        session = _rust_live_sessions.get(key)
+        if session is None:
+            # A paced (live, mid-show) request runs niced so it never competes with the show's GUI and audio threads.
+            session = _rust_live_sessions[key] = rust_analysis.RustAnalysisSession(low_priority=key)
+        if not session.usable:
+            return libmpv_call()
+
+        def rust_call():
+            return session.measure(audio_path, timeout=120.0, cancel_check=cancel_check)
+
+        if engine == "shadow":
+            return rust_analysis.shadow_run("loudness", audio_path, libmpv_call, rust_call, log=_diag)
+        if rust_analysis.RUST_LOUDNESS_VERIFIED:
+            try:
+                lufs, peak = rust_call()
+                if lufs is not None:
+                    return float(lufs), None if peak is None else float(peak)
+            except InterruptedError:
+                return None, None
+            except Exception as exc:
+                _diag(f"[ANALYSIS] rust failed for {os.path.basename(str(audio_path))!r} ({exc}); using libmpv")
+    except Exception as exc:
+        _diag(f"[ANALYSIS] engine={engine} unavailable ({exc}); using libmpv")
+    return libmpv_call()
+
+
 def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full",
-                           session=None, paced: bool = False):
+                           session=None, paced: bool = False, _engine=None):
     """Measure integrated loudness (LUFS) and sample peak via bundled libmpv.
 
     Returns (integrated_lufs, max_peak_db) or (None, None).  The measured peak
@@ -2164,6 +2228,8 @@ def _measure_loudness_lufs(audio_path: str, cancel_check=None, mode: str = "full
     past 8 GB during a library scan.  A failing session falls back to the plain
     one-shot path so an older libmpv without ebur128 still works.
     """
+    if _engine is None and session is None and mode == "full" and _analysis_engine_setting != "libmpv":
+        return _measure_loudness_with_engine(_analysis_engine_setting, audio_path, cancel_check, paced)
     if cancel_check is not None:
         try:
             if cancel_check():
@@ -3765,6 +3831,10 @@ DEFAULTS = {
     # runs inside a BASS audio-thread callback) or "rust" (libsingws_dsp_ffi.dylib, called by BASS directly). Falls back to
     # Python if the library is missing. Takes effect at the next launch.
     "master_dsp_engine": "python",
+    # Engine for loudness / silence-boundary analysis: "libmpv" (default, today's behaviour), "shadow" (libmpv stays in charge; the
+    # Rust helper runs alongside and any disagreement is logged as [ANALYSIS-SHADOW]) or "rust" (Rust answers what it has been
+    # verified for, libmpv on any trouble). Takes effect at the next launch.
+    "analysis_engine": "libmpv",
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -13789,7 +13859,7 @@ class AnalyzeLibraryWorker(QObject):
         last_progress_emit = 0.0
         try:
             from libmpv_media_jobs import AnalysisHelperError, AnalysisTrackError, IsolatedLoudnessSession
-            session = IsolatedLoudnessSession()
+            session = _make_analysis_session(IsolatedLoudnessSession)
         except Exception:
             session = None
         for item in self.items:
@@ -19766,6 +19836,8 @@ class KaraokeApp(QWidget):
         # KaraFun's picture is always captured from its preview pane now; the old switch (and the video-window
         # method behind it) are gone, so a saved "off" must not turn the capture off.
         self.settings["karafun_dual_renderer_capture"] = True
+        # Which engine measures loudness/boundaries during analysis; read once per launch ("libmpv" unless the operator opts in).
+        _set_analysis_engine(self.settings.get("analysis_engine", "libmpv"))
         # Bug reports now go to the developer through the SingWS server, so the mail recipient and the SMTP login that older
         # versions saved here are obsolete. Remove them so a saved mail password does not stay on disk.
         _legacy_log_mail_keys = ("crash_log_email_to", "log_smtp_host", "log_smtp_port", "log_smtp_username",
