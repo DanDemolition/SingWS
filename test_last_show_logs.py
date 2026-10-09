@@ -53,6 +53,24 @@ class LastShowSliceTests(unittest.TestCase):
         self.assertNotIn("REOPEN", body)
         self.assertGreaterEqual(picked[2], 240 * 60)                 # crossed midnight and still counted as one run
 
+    def test_a_ten_minute_settings_session_after_the_show_is_not_the_show(self):
+        # 2026-10-09: the operator reopened the app after the show and tuned sliders for 10 min 11 s; the old 10-minute limit chose it.
+        lines = run(21 * 60 + 34, 250, "SHOW") + run(3 * 60 + 12, 11, "TUNING")
+        picked = self.m._last_show_slice(lines)
+        body = self.text(lines, picked)
+        self.assertIn("SHOW minute 250", body)
+        self.assertNotIn("TUNING", body)
+
+    def test_a_twenty_five_minute_session_after_a_show_is_still_not_the_show(self):
+        lines = run(21 * 60, 200, "SHOW") + run(2 * 60, 26, "CHECK")
+        self.assertNotIn("CHECK", self.text(lines, self.m._last_show_slice(lines)))
+
+    def test_a_real_short_show_counts_when_nothing_else_is_longer(self):
+        lines = run(21 * 60, 200, "NIGHT-ONE") + run(30 * 60, 50, "SHORT-PARTY")
+        body = self.text(lines, self.m._last_show_slice(lines))
+        self.assertIn("SHORT-PARTY", body)
+        self.assertNotIn("NIGHT-ONE", body)
+
     def test_earlier_shows_are_not_included(self):
         lines = run(20 * 60, 120, "NIGHT-ONE") + run(30 * 60, 90, "NIGHT-TWO")
         body = self.text(lines, self.m._last_show_slice(lines))

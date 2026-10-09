@@ -2416,8 +2416,9 @@ def _recent_log_files(days: int = 3, *, now: float | None = None) -> list[Path]:
 
 _LAUNCH_LINE_RE = re.compile(r"^\[\d\d:\d\d:\d\d\] \[[A-Z]+\] \[LAUNCH\] \{")
 _LOG_STAMP_RE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
-# A run of the app shorter than this is a restart, not a show (the 2026-10-05 export relaunch ran for 40 seconds).
-LAST_SHOW_MIN_SECONDS = 10 * 60
+# A run of the app shorter than this is a restart, not a show (the 2026-10-05 export relaunch ran for 40 seconds; the
+# 2026-10-09 post-show settings session ran 10 min 11 s and was wrongly picked as "the show" with a 10-minute limit).
+LAST_SHOW_MIN_SECONDS = 30 * 60
 
 
 def _log_line_seconds(lines: list[str]) -> list[float | None]:
