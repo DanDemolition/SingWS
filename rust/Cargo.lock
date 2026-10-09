@@ -328,6 +328,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-bgm"
+version = "0.1.0"
+
+[[package]]
 name = "singws-dsp"
 version = "0.1.0"
 
@@ -337,6 +341,10 @@ version = "0.1.0"
 dependencies = [
  "singws-dsp",
 ]
+
+[[package]]
+name = "singws-transport"
+version = "0.1.0"
 
 [[package]]
 name = "smallvec"

@@ -1,0 +1,10 @@
+[package]
+name = "singws-transport"
+version = "0.1.0"
+edition = "2024"
+description = "Pure song-lifecycle state machine for SingWS (no I/O, no clock). Shadow-mode reference for the end-of-song / KaraFun completion rules."
+publish = false
+
+[lib]
+name = "singws_transport"
+path = "src/lib.rs"

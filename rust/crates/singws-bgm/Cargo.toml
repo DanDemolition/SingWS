@@ -1,0 +1,10 @@
+[package]
+name = "singws-bgm"
+version = "0.1.0"
+edition = "2024"
+description = "Device-free, allocation-free two-deck BGM mixer core (sample-accurate equal-power crossfade). Stage 4 groundwork: proves transition quality offline before any audio-device or BASS replacement work."
+publish = false
+
+[lib]
+name = "singws_bgm"
+path = "src/lib.rs"
