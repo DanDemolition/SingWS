@@ -27326,6 +27326,7 @@ class KaraokeApp(QWidget):
 
     def configure_settings(self):
         """App settings dialog (list text size + CDG display mode)."""
+        _settings_open_started = time.perf_counter()
         from PyQt6.QtWidgets import (
             QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
             QSlider, QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox, QScrollArea, QTabWidget
@@ -29041,7 +29042,12 @@ class KaraokeApp(QWidget):
         save_btn.clicked.connect(save_settings_and_close)
         apply_btn.clicked.connect(apply_settings)
         cancel_btn.clicked.connect(cancel_settings)
+        _audio_started = time.perf_counter()
         _populate_audio_combo(self._get_selected_audio_output_id())
+        # Log-only probes (2026-10-09): opening Settings froze the GUI ~3 s on the Intel Mac. Slow steps log
+        # "[PERF-DIAG] ui_settings_...": build = whole dialog construction, audio_devices = the output-device lookup.
+        _perf_log_if_slow("ui_settings_audio_devices", (time.perf_counter() - _audio_started) * 1000.0)
+        _perf_log_if_slow("ui_settings_build", (time.perf_counter() - _settings_open_started) * 1000.0)
 
         # Each tab scrolls internally; changing tabs should not resize the
         # dialog or push the Save/Apply/Cancel bar off the laptop screen.

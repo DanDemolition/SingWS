@@ -374,8 +374,11 @@ def _configure_ebur128_job(job: "OfflineMpvJob", *, include_envelope: bool = Fal
         # Continue the same decoded stream through fixed 100 ms RMS windows.
         # ametadata prints one compact scalar per window; no PCM/waveform is
         # retained and loudness + transition boundaries share one decode pass.
+        # 4800 samples is 100 ms only at 48 kHz; resample first so 44.1 kHz
+        # files (most MP3s) get true 100 ms windows (otherwise 109 ms, the
+        # envelope is ~8% short and transition_analysis rejects the record).
         graph += (
-            ",asetnsamples=n=4800:p=1,astats=metadata=1:reset=1,"
+            ",aresample=48000,asetnsamples=n=4800:p=1,astats=metadata=1:reset=1,"
             "ametadata=print:key=lavfi.astats.Overall.RMS_level"
         )
     job.option("af", f"lavfi=[{graph}]")

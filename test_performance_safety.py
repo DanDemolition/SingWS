@@ -70,6 +70,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("existing_loudness.get(\"mode\") == \"full\"", MAIN_SOURCE)
         media_jobs = pathlib.Path("libmpv_media_jobs.py").read_text(encoding="utf-8")
         self.assertIn("asetnsamples=n=4800:p=1", media_jobs)
+        self.assertIn("aresample=48000,asetnsamples=n=4800", media_jobs)
         self.assertIn("lavfi.astats.Overall.RMS_level", media_jobs)
         self.assertIn("def measure_transition", media_jobs)
 
