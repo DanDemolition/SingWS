@@ -36,7 +36,7 @@ def main(argv: list[str]) -> int:
         print(f"no settings file at {path}")
         return 2
     data = json.loads(path.read_text())
-    current = str(data.get(KEY, "python"))
+    current = str(data.get(KEY, "rust"))
     if not argv:
         print(f"{KEY} = {current}")
         return 0

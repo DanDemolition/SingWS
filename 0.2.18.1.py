@@ -3828,10 +3828,11 @@ DEFAULTS = {
     # audio thread (blocks, mean/p99/max time, blocks over half their own duration, gaps between callbacks, BASS CPU,
     # stalled-mixer polls). Cost: two clock reads and a few additions per audio block. Set False to switch off.
     "audio_diag_counters": True,
-    # Which implementation runs the BGM master chain (gate, tilt EQ, exciter, compressor, limiter): "python" (the reference,
-    # runs inside a BASS audio-thread callback) or "rust" (libsingws_dsp_ffi.dylib, called by BASS directly). Falls back to
-    # Python if the library is missing. Takes effect at the next launch.
-    "master_dsp_engine": "python",
+    # Which implementation runs the BGM master chain (gate, tilt EQ, exciter, compressor, limiter): "rust" (DEFAULT since
+    # 2026-10-09: libsingws_dsp_ffi.dylib, called by BASS directly, no Python on the audio thread; a full Intel show ran it
+    # with zero over-budget blocks and zero gaps) or "python" (the reference, runs inside a BASS audio-thread callback).
+    # Falls back to Python if the library is missing. Takes effect at the next launch.
+    "master_dsp_engine": "rust",
     # Engine for loudness / silence-boundary analysis: "libmpv" (default, today's behaviour), "shadow" (libmpv stays in charge; the
     # Rust helper runs alongside and any disagreement is logged as [ANALYSIS-SHADOW]) or "rust" (Rust answers what it has been
     # verified for, libmpv on any trouble). Takes effect at the next launch.
@@ -22330,9 +22331,9 @@ class KaraokeApp(QWidget):
             return None
 
     def _new_bgm_master_processor(self):
-        """The BGM master processor: the Rust one when `master_dsp_engine` is "rust" and its library loads (BASS then calls
+        """The BGM master processor: the Rust one when `master_dsp_engine` is "rust" (the default) and its library loads (BASS then calls
         Rust directly, no Python on the audio thread), otherwise the Python reference. Applies from the next launch."""
-        want = str(self.settings.get("master_dsp_engine", "python") or "python").strip().lower()
+        want = str(self.settings.get("master_dsp_engine", "rust") or "rust").strip().lower()
         if want == "rust":
             try:
                 from rust_master_dsp import RustMasterProcessor

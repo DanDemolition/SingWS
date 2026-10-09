@@ -252,8 +252,8 @@ class ParamOrderTests(unittest.TestCase):
 class HostWiringTests(unittest.TestCase):
     SRC = (Path(__file__).resolve().parent / "0.2.18.1.py").read_text()
 
-    def test_setting_defaults_to_python_until_the_operator_chooses(self):
-        self.assertRegex(self.SRC, r'"master_dsp_engine":\s*"python"')
+    def test_setting_defaults_to_rust_with_python_fallback(self):
+        self.assertRegex(self.SRC, r'"master_dsp_engine":\s*"rust"')
 
     def test_host_falls_back_to_python_when_the_library_is_missing(self):
         body = self.SRC.split("def _new_bgm_master_processor")[1].split("def _ensure_bgm_master_processor")[0]
