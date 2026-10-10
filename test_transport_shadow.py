@@ -94,6 +94,89 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@unittest.skipUnless(_DYLIB.exists(), "Rust dylib not built (rust/build_dsp.sh or cargo build -p singws-dsp-ffi)")
+class NativeSongTests(unittest.TestCase):
+    """Native (non-KaraFun) songs: start -> playing -> media end -> cleanup, plus stop and return-to-queue."""
+
+    def setUp(self):
+        self.lines = []
+        self.sh = ts.TransportShadow(self.lines.append, lib=_lib())
+
+    def text(self):
+        return "\n".join(self.lines)
+
+    def test_a_native_song_that_ends_normally_has_no_mismatch(self):
+        sid = self.sh.start(False, 200.0)
+        self.sh.observe(sid, "playing")
+        self.sh.observe(sid, "media_end")
+        self.sh.app_auto_complete(sid)
+        self.sh.app_finished(sid, "native_end")
+        self.assertEqual(self.sh.mismatches, 0, self.text())
+        self.assertIn("CompleteSong", self.text())
+        self.assertIn("AdvanceRotation", self.text())
+
+    def test_the_app_ending_a_song_the_machine_never_saw_playing_is_a_mismatch(self):
+        sid = self.sh.start(False, 200.0)  # no "playing" observation: the machine is still Starting
+        self.sh.observe(sid, "media_end")
+        self.sh.app_auto_complete(sid)
+        self.assertEqual(self.sh.mismatches, 1, self.text())
+
+    def test_a_manual_stop_is_not_a_completion_and_not_a_mismatch(self):
+        sid = self.sh.start(False, 200.0)
+        self.sh.observe(sid, "playing")
+        self.sh.app_stopped(sid)
+        self.sh.start(False, 100.0)  # next song: nothing overdue from the stopped one
+        self.assertEqual(self.sh.mismatches, 0, self.text())
+
+    def test_return_to_queue_counts_as_a_stop_not_a_manual_complete(self):
+        sid = self.sh.start(True, 200.0)
+        self.sh.observe(sid, "playing", now=1.0)
+        self.sh.observe(sid, "playing", now=3.0)
+        self.sh.app_finished(sid, "return_to_queue")
+        self.assertNotIn("CompleteSong", self.text())
+        self.assertEqual(self.sh.mismatches, 0, self.text())
+
+    def test_a_duplicate_media_end_is_ignored_by_the_machine_and_is_not_a_mismatch(self):
+        sid = self.sh.start(False, 200.0)
+        self.sh.observe(sid, "playing")
+        self.sh.observe(sid, "media_end")
+        self.sh.observe(sid, "media_end")  # the app logs "duplicate media-end ignored" for the same thing
+        self.assertEqual(self.sh.mismatches, 0, self.text())
+        self.assertIn("duplicate", self.text())
+
+    def test_a_media_end_while_a_stop_is_in_progress_is_ignored(self):
+        sid = self.sh.start(False, 200.0)
+        self.sh.observe(sid, "playing")
+        self.sh.observe(sid, "media_end", stop_in_progress=True)
+        self.assertNotIn("CompleteSong", self.text())
+
+    def test_the_machine_completing_a_native_song_the_app_never_finishes_is_a_mismatch(self):
+        sid = self.sh.start(False, 200.0)
+        self.sh.observe(sid, "playing")
+        self.sh.observe(sid, "media_end")
+        self.sh.start(False, 100.0)  # next song starts, the first one was never finished by the app
+        self.assertEqual(self.sh.mismatches, 1, self.text())
+
+    def test_events_for_a_finished_session_are_dropped_silently(self):
+        sid = self.sh.start(False, 200.0)
+        self.sh.observe(sid, "playing")
+        self.sh.observe(sid, "media_end")
+        self.sh.app_auto_complete(sid)
+        self.sh.app_finished(sid, "native_end")
+        before = len(self.lines)
+        self.sh.app_stopped(sid)  # the real app calls stop_playback right after the end cleanup
+        self.sh.observe(sid, "media_end")
+        self.assertEqual(len(self.lines), before, self.text())
+
+    def test_the_karafun_watchdog_only_warns(self):
+        sid = self.sh.start(True, 200.0)
+        self.sh.observe(sid, "playing", now=1.0)
+        self.sh.observe(sid, "playing", now=3.0)
+        self.sh.observe(sid, "watchdog")
+        self.assertIn("WarnOperator", self.text())
+        self.assertNotIn("CompleteSong", self.text())
+
+
 class AppWiringGuardTests(unittest.TestCase):
     """Source guards: the hooks exist, are wrapped, and the feature is off by default."""
 
@@ -101,11 +184,14 @@ class AppWiringGuardTests(unittest.TestCase):
     def setUpClass(cls):
         cls.src = Path(__file__).with_name("0.2.18.1.py").read_text()
 
-    def test_off_by_default(self):
-        self.assertIn('"transport_shadow": False', self.src)
+    def test_on_by_default_because_it_only_logs(self):
+        # Flipped to on 2026-10-10 at the operator's request: log-only, every call wrapped, a missing dylib means "unavailable".
+        self.assertIn('"transport_shadow": True', self.src)
+        self.assertIn('self.settings.get("transport_shadow", True)', self.src)
 
     def test_hooks_present(self):
-        for needle in ('_sh.start(True, _dur or None)', '_sh.observe(_sid, "idle")', "_sh.app_auto_complete(", "_sh.app_finished("):
+        for needle in ('_sh.start(True, _dur or None)', '_sh.observe(_sid, "idle")', "_sh.app_auto_complete(", "_sh.app_finished(",
+                       '_sh.start(False, duration_seconds or None)', '"media_end"', "_sh.app_stopped(", '"watchdog"'):
             self.assertIn(needle, self.src)
 
     def test_specs_bundle_the_module(self):

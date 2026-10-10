@@ -356,8 +356,10 @@ class AppHookTests(unittest.TestCase):
     def helper_env(self, mode="ok", **kw):
         return mock.patch.dict(os.environ, {"SINGWS_ANALYZE_BIN": str(make_helper(self.tmp.name, mode, **kw))})
 
-    def test_the_default_is_libmpv_and_nothing_else_runs(self):
-        self.assertEqual(self.singws.DEFAULTS["analysis_engine"], "libmpv")
+    def test_the_default_setting_is_rust_but_an_unconfigured_module_runs_only_libmpv(self):
+        # Flipped to "rust" on 2026-10-10 at the operator's request; the module-level state stays "libmpv" until launch applies
+        # the setting, so nothing here may touch the Rust helper.
+        self.assertEqual(self.singws.DEFAULTS["analysis_engine"], "rust")
         with mock.patch.object(ra, "RustAnalysisSession", side_effect=AssertionError("rust must not be touched")):
             self.assertEqual(self.singws._measure_loudness_lufs("/m/a.mp3"), (-20.0, -3.0))
             primary = object()
@@ -425,7 +427,7 @@ class AppHookTests(unittest.TestCase):
     def test_the_scan_asks_for_its_session_through_the_hook(self):
         src = Path("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn("session = _make_analysis_session(IsolatedLoudnessSession)", src)
-        self.assertIn('_set_analysis_engine(self.settings.get("analysis_engine", "libmpv"))', src)
+        self.assertIn('_set_analysis_engine(self.settings.get("analysis_engine", "rust"))', src)
 
 
 def _wav(path, seconds=6, rate=44100, amp=0.0708):

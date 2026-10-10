@@ -97,17 +97,22 @@ class TransportShadow:
             self._say(f"start error: {exc!r}")
             return 0
 
-    def observe(self, session, kind, now=None):
-        """kind: 'playing' | 'idle' | 'end_clock' | 'watchdog'."""
+    def observe(self, session, kind, now=None, error=False, stop_in_progress=False):
+        """kind: 'playing' | 'idle' | 'end_clock' | 'watchdog' | 'media_end' (native end of stream; `error` for a decode failure)."""
         try:
-            if not self.available or not session:
+            if not self.available or not session or session != self._session:
                 return
             now = time.monotonic() if now is None else now
             self._check_overdue(now)
             name = {"playing": "PlayingObserved", "idle": "IdleObserved", "end_clock": "EndClockObserved",
-                    "watchdog": "WatchdogExpired"}[kind]
-            body = {"session": int(session)} if kind == "watchdog" else {"session": int(session), "now": float(now)}
-            self._record(self._step({name: body}), now)
+                    "watchdog": "WatchdogExpired", "media_end": "MediaEnd"}[kind]
+            if kind == "watchdog":
+                body = {"session": int(session)}
+            elif kind == "media_end":
+                body = {"session": int(session), "now": float(now), "error": bool(error)}
+            else:
+                body = {"session": int(session), "now": float(now)}
+            self._record(self._step({name: body}, stop_in_progress=stop_in_progress), now)
         except Exception as exc:
             self._say(f"observe error: {exc!r}")
 
@@ -115,22 +120,39 @@ class TransportShadow:
         """The app's monitor decided the song ended on its own (called just before it finishes the song)."""
         self._auto_flag = True
         try:
-            if self.available and session and not self._completed_in_shadow():
+            if self.available and session and session == self._session and not self._completed_in_shadow():
                 self._mismatch(f"app auto-completed session {session}; machine had not completed it (state={self._state[:60]})")
         except Exception:
             pass
 
-    def app_finished(self, session, action):
-        """The app finished the song (any route). A finish with no auto-complete flag is a manual Complete."""
+    def app_stopped(self, session):
+        """The song was stopped or returned to the queue (never completed): the machine goes back to idle."""
         try:
-            if not self.available or not session:
+            if not self.available or not session or session != self._session:
+                return
+            self._app_finished = True
+            self._shadow_completed_at = None  # a stop is not a completion, so there is nothing overdue to report
+            self._auto_flag = False
+            self._record(self._step({"StopRequested": {"session": int(session)}}), time.monotonic())
+            self._flush_session()
+        except Exception as exc:
+            self._say(f"stop error: {exc!r}")
+
+    def app_finished(self, session, action):
+        """The app finished the song (any route). A finish with no auto-complete flag is a manual Complete; a
+        return-to-queue/stop/skip is a stop, not a completion."""
+        try:
+            if not self.available or not session or session != self._session:
+                return
+            if any(word in str(action or "").lower() for word in ("return", "stop", "skip")):
+                self.app_stopped(session)
                 return
             now = time.monotonic()
             self._app_finished = True
             if not self._auto_flag:
                 self._record(self._step({"ManualComplete": {"session": int(session)}}), now)
             self._auto_flag = False
-            self._step({"CleanupDone": {"session": int(session)}})
+            self._record(self._step({"CleanupDone": {"session": int(session)}}), now)
             self._flush_session()
         except Exception as exc:
             self._say(f"finish error: {exc!r}")

@@ -3851,12 +3851,14 @@ DEFAULTS = {
     # with zero over-budget blocks and zero gaps) or "python" (the reference, runs inside a BASS audio-thread callback).
     # Falls back to Python if the library is missing. Takes effect at the next launch.
     "master_dsp_engine": "rust",
-    # Engine for loudness / silence-boundary analysis: "libmpv" (default, today's behaviour), "shadow" (libmpv stays in charge; the
-    # Rust helper runs alongside and any disagreement is logged as [ANALYSIS-SHADOW]) or "rust" (Rust answers what it has been
-    # verified for, libmpv on any trouble). Takes effect at the next launch.
-    "analysis_engine": "libmpv",
-    # Stage 3 shadow: feed KaraFun playback events to the Rust lifecycle machine and LOG disagreements only (never acts). Read at launch.
-    "transport_shadow": False,
+    # Engine for loudness / silence-boundary analysis: "rust" (DEFAULT since 2026-10-10: Rust answers loudness, peak, duration and
+    # silence boundaries, which matched libmpv on every real file tested; the BGM crossfade envelope and ANY Rust trouble fall back
+    # to libmpv), "libmpv" (the old behaviour) or "shadow" (libmpv stays in charge; the Rust helper runs alongside and any
+    # disagreement is logged as [ANALYSIS-SHADOW]). Takes effect at the next launch.
+    "analysis_engine": "rust",
+    # Stage 3 shadow: feed playback events (KaraFun and native songs) to the Rust lifecycle machine and LOG disagreements only; it
+    # never acts. DEFAULT ON since 2026-10-10 (log-only, every call is wrapped). Read at launch.
+    "transport_shadow": True,
     # Draw the karaoke picture on a dedicated render thread instead of the GUI thread, so a frozen GUI (for example while
     # another app launches) cannot freeze the TV. DEFAULT ON since 2026-10-10 (operator's call, to rehearse it in the real
     # app before any release; proven so far only in tools/render_thread_probe.py on Apple Silicon). Set it to false in
@@ -19999,7 +20001,7 @@ class KaraokeApp(QWidget):
         # method behind it) are gone, so a saved "off" must not turn the capture off.
         self.settings["karafun_dual_renderer_capture"] = True
         # Which engine measures loudness/boundaries during analysis; read once per launch ("libmpv" unless the operator opts in).
-        _set_analysis_engine(self.settings.get("analysis_engine", "libmpv"))
+        _set_analysis_engine(self.settings.get("analysis_engine", "rust"))
         try:
             # The bridge reads this when it creates its renderer (first song). Never overrides an explicit env choice.
             if bool(self.settings.get("karaoke_render_thread", True)):
@@ -24498,7 +24500,7 @@ class KaraokeApp(QWidget):
         # One authoritative playback path. A native-core failure is surfaced
         # by _start_mpv_karaoke_transport; silently changing clocks/renderers
         # in the middle of a live show is no longer permitted.
-        return self._start_mpv_karaoke_transport(
+        started = self._start_mpv_karaoke_transport(
             audio_path=audio_path,
             video_path=video_path,
             mode=mode,
@@ -24507,6 +24509,14 @@ class KaraokeApp(QWidget):
             loop_seconds=loop_seconds,
             duration_seconds=duration_seconds,
         )
+        try:
+            _sh = self._transport_shadow()
+            if _sh is not None and started:
+                self._shadow_native_id = _sh.start(False, duration_seconds or None)
+                _sh.observe(self._shadow_native_id, "playing")
+        except Exception:
+            pass
+        return started
 
     @_perf_timed("ui_songstart_prepare")
     def _prepare_karaoke_start(self, media_path: str):
@@ -26263,12 +26273,26 @@ class KaraokeApp(QWidget):
     @_perf_timed("ui_songend_handler")
     def _handle_media_end_safe(self, trigger: str = "eos"):
         """Called when the current track finishes or on pipeline ERROR."""
+        try:
+            _sh = self._transport_shadow()
+            if _sh is not None and not isinstance(getattr(self, "_active_external_karafun", None), dict):
+                _sh.observe(getattr(self, "_shadow_native_id", 0), "media_end",
+                            error=(str(trigger or "").strip().lower() == "error"),
+                            stop_in_progress=bool(getattr(self, "_stop_in_progress", False)))
+        except Exception:
+            pass
         if getattr(self, "_stop_in_progress", False):
             return
         if bool(getattr(self, "_media_end_handoff_active", False)):
             _diag("[END] duplicate media-end ignored: handoff already active")
             return
         trigger = str(trigger or "eos").strip().lower()
+        try:
+            _sh = self._transport_shadow()
+            if _sh is not None and not isinstance(getattr(self, "_active_external_karafun", None), dict):
+                _sh.app_auto_complete(getattr(self, "_shadow_native_id", 0))
+        except Exception:
+            pass
         self._media_end_overlay_eligible = (trigger != "error")
         self._media_end_handoff_active = True
         try:
@@ -26481,6 +26505,12 @@ class KaraokeApp(QWidget):
     @_perf_timed("ui_songend_cleanup")
     def _finish_media_end_cleanup(self, end_silence_triggered: bool, schedule_bg_resume: bool):
         """Finalize karaoke end: teardown/UI reset and optional delayed BG resume."""
+        try:
+            _sh = self._transport_shadow()
+            if _sh is not None and not isinstance(getattr(self, "_active_external_karafun", None), dict):
+                _sh.app_finished(getattr(self, "_shadow_native_id", 0), "native_end")
+        except Exception:
+            pass
         try:
             # Before stop_playback(), which discards anything still pending.
             self._commit_pending_performance(reason="song_completed")
@@ -53801,7 +53831,7 @@ class KaraokeApp(QWidget):
     def _transport_shadow(self):
         """The Stage 3 shadow machine, or None when the setting is off or the library is missing. Never raises."""
         try:
-            if not bool(self.settings.get("transport_shadow", False)):
+            if not bool(self.settings.get("transport_shadow", True)):
                 return None
             sh = getattr(self, "_transport_shadow_obj", None)
             if sh is None:
@@ -53902,6 +53932,12 @@ class KaraokeApp(QWidget):
                         again.daemon = True
                         again.start()
                         return
+                    try:
+                        _sh = self._transport_shadow()
+                        if _sh is not None:
+                            _sh.observe(active_session.get("_shadow_id"), "watchdog")
+                    except Exception:
+                        pass
                     _diag(
                         "[KARAFUN] end unverified reason=duration_watchdog "
                         f"last_playing={'never' if playing_age is None else f'{playing_age:.1f}s ago'}"
@@ -55667,6 +55703,12 @@ class KaraokeApp(QWidget):
             QTimer.singleShot(75, finish_confirmed_stop)
             return
         self._manual_stop_in_progress = True
+        try:
+            _sh = self._transport_shadow()
+            if _sh is not None and not isinstance(getattr(self, "_active_external_karafun", None), dict):
+                _sh.app_stopped(getattr(self, "_shadow_native_id", 0))
+        except Exception:
+            pass
         self._cancel_pending_karaoke_start_transition()
         self._cancel_pending_media_end_cleanup("manual_stop")
         try:
