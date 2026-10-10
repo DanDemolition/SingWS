@@ -11,8 +11,10 @@ class RenderThreadGuards(unittest.TestCase):
         cls.main = (ROOT / "0.2.18.1.py").read_text()
         cls.bridge = (ROOT / "native" / "mpv_bridge" / "bridge.mm").read_text()
 
-    def test_setting_is_off_by_default_and_reaches_the_bridge_through_the_environment(self):
-        self.assertIn('"karaoke_render_thread": False', self.main)
+    def test_setting_is_on_by_default_and_reaches_the_bridge_through_the_environment(self):
+        # Flipped to on 2026-10-10 at the operator's request, to rehearse it in the real app before any release.
+        self.assertIn('"karaoke_render_thread": True', self.main)
+        self.assertIn('self.settings.get("karaoke_render_thread", True)', self.main)
         self.assertIn('os.environ.setdefault("SINGWS_RENDER_THREAD", "1")', self.main)
 
     def test_bridge_defaults_to_the_main_queue(self):
