@@ -4476,6 +4476,7 @@ BG_SILENCE_MIN_S = 1.2      # sustained silence required before advancing
 BG_SILENCE_TAIL_WINDOW = 45.0  # only act within this many seconds of the track end
 BGM_UNKNOWN_ANALYSIS_PREGAIN = 1.0  # uncached BG tracks play raw; analysis is for future starts only
 BGM_TRACK_CROSSFADE_MS = 5000  # overlap adjacent background tracks for a smooth mix
+BGM_STOP_FADE_MS = 1000        # the user's Stop button fades the music out over this long, then stops (Pause stays instant)
 
 
 class BackgroundMusicPlayer(QObject):
@@ -4769,6 +4770,38 @@ class BackgroundMusicPlayer(QObject):
             target = engine.meter_level()
             self._meter_level = (self._meter_level * 0.70) + (target * 0.30)
             self._meter_last_ts = time.monotonic()
+        except Exception:
+            pass
+
+    def stop_with_fade(self, duration_ms: int = BGM_STOP_FADE_MS):
+        """The user's Stop: fade the music out, THEN stop (position is dropped, like stop()). Pause is not affected and stays instant, and
+        internal callers of stop() (track changes) keep their instant stop. Pressing Play/Pause/another Stop during the fade takes over."""
+        try:
+            engine = getattr(self, "_bass_engine", None)
+            if engine is None or engine.primary is None or not self.is_playing or int(duration_ms) <= 0:
+                self.stop()
+                return
+            self._bass_fade_generation += 1
+            self._bass_crossfade_generation += 1
+            self.crossfade_active = False
+            self.crossfade_progress = 0.0
+            self._crossfade_target_index = None
+            engine.cancel_crossfade()
+            self._next_preload_attempt = None
+            generation = int(self._bass_fade_generation)
+            engine.slide_master_volume(0.0, int(duration_ms))
+            QTimer.singleShot(int(duration_ms) + 30, lambda g=generation: self._stop_after_stop_fade(g))
+        except Exception:
+            self.stop()
+
+    def _stop_after_stop_fade(self, generation: int):
+        if generation != int(getattr(self, "_bass_fade_generation", 0) or 0):
+            return      # something else (Play, Pause, another fade) took over while fading
+        self.stop()
+        try:
+            self.volume = self._target_volume_from_ui()
+            if self._bass_ready():
+                self._bass_engine.set_master_volume(self.volume)    # the next Play must not start at the faded-out 0
         except Exception:
             pass
 
@@ -10522,7 +10555,7 @@ class BackgroundMusicManager(QMainWindow):
         if not self._begin_bg_ui_action("stop"):
             return
         try:
-            self.bg_music.stop()
+            self.bg_music.stop_with_fade()
             self.play_button.setText("▶")
         finally:
             self._end_bg_ui_action()
@@ -59028,9 +59061,12 @@ class KaraokeApp(QWidget):
 
     def _bg_main_stop(self):
         try:
-            self.bg_music.stop()
+            self.bg_music.stop_with_fade()
             self.update_bg_button_state()
             self.update_bg_track_display()
+            # the music is still fading for a moment: refresh the buttons/labels again once it has actually stopped
+            QTimer.singleShot(BGM_STOP_FADE_MS + 150, self.update_bg_button_state)
+            QTimer.singleShot(BGM_STOP_FADE_MS + 150, self.update_bg_track_display)
         except Exception:
             pass
 
