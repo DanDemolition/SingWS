@@ -10,14 +10,14 @@
       "filename": "SingWS-1.0.1.0-arm64-installer.dmg",
       "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-1.0.1.0-arm64-installer.dmg",
       "size": "130 MB",
-      "sha256": "c480b2621d4e9874d4b73e41aece0899190c30d0146361e86d507ea7717c410a"
+      "sha256": "74d8a510c00e7d36bd064186b8846ddfdaf37920e0cf45d10a81fa4f02d1575b"
     },
     "mac_x86_64": {
       "label": "Intel Mac (macOS 12.3+)",
       "filename": "SingWS-1.0.1.0-x86_64-installer.dmg",
       "url": "https://github.com/DanDemolition/SingWS/releases/latest/download/SingWS-1.0.1.0-x86_64-installer.dmg",
       "size": "148 MB",
-      "sha256": "aee193516092e252ddb55d56e35dcff94f8fac9a310e1d1729505fba87e6ce1d"
+      "sha256": "337f85011c45ae4f3126f0e926aeedc7a21727dd8697bec5bc0b68367bbaebd6"
     }
   }
 }
