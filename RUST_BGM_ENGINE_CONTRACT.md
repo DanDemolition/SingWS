@@ -16,7 +16,8 @@ behind a `bgm_engine` setting that defaults to `"bass"` until it has been rehear
 | Streaming decode on a worker thread into a lock-free ring (`stream.rs`, `ring.rs`, `resample.rs`) | rust/crates/singws-bgm | done (M3) |
 | Sound card output (cpal): named device with fallback, rate negotiation, callback timing, latency, error flags (`device.rs`) | rust/crates/singws-bgm | done (M3) |
 | 10-band EQ (`eq.rs`) and the full master chain (`fx.rs`, the `singws-dsp` crate used directly) as engine effects, meter | rust/crates/singws-bgm | done (M4) |
-| C ABI / Python adapter with the same method names as the BASS engine | - | milestone 5 |
+| Real-time wrapper: lock-free command queue in, state snapshot + retired-deck outbox out (`rt.rs`), `BgmSystem` (`system.rs`) | rust/crates/singws-bgm | done (M5) |
+| C ABI (`singws-bgm-ffi`) and the Python adapter `rust_bgm_engine.py` (same method names as the BASS engine) behind the `bgm_engine` setting | repo root | done (M5) |
 
 ## Operations the app uses (Python surface of the BASS engine)
 
@@ -170,3 +171,36 @@ error flag path exists but was never exercised), changing the device's sample ra
 * Not covered: the EQ/master chain were checked at 48 kHz (EQ) and 44.1 kHz (chain tool); a rate change mid-play would call
   `MasterProcessor::configure_stream`, which the engine does not do yet (the engine rate is fixed per output; M5 rebuilds the engine on a
   device change).
+
+## Milestone 5 results - wiring behind a setting (2026-10-10)
+
+* **Setting `bgm_engine`** = `"bass"` (default) | `"rust"`; read at launch (`BackgroundMusicPlayer._bgm_engine_preference`, which reads the settings file
+  itself because the player is built before the host's settings exist). `"rust"` tries `RustBackgroundEngine`; ANY failure (library missing, wrong
+  ABI, output cannot be opened) logs `[BG-RUST] ... using BASS` and continues with BASS, then the existing libmpv fallback. If a saved output
+  name is not found the system default is used and logged. A shipped (frozen) app loads ONLY the library bundled inside it.
+* **Lock-free design** (`rt.rs`): the audio thread owns the engine. Control -> audio: a bounded SPSC command queue (256; producers serialised by a
+  mutex the audio thread never touches). Audio -> control: a `Snapshot` of atomics (position, duration, meter, flags, counters) refreshed every
+  block, and an outbox that hands retired decks back so their buffers are freed on the control thread. This removes the milestone-3 weakness:
+  `singws-bgm-device probe --hammer` (a control thread every 2 ms plus a seek each second) over two 60-second runs and 21,000+ control
+  iterations each: 0 xruns, 0 dropped commands, 0 gap frames, callback max 94-96 us.
+* **C ABI** (`singws-bgm-ffi`, `libsingws_bgm_ffi.dylib`, ABI 1): create/destroy, deck_open (worker thread), the transport and crossfade
+  commands, snapshot reads, EQ and master-chain setters (master parameter names checked against the app's list), stats, flush, headless
+  create + render for tests. Every call catches panics. `rust/build_bgm.sh` builds arm64 + x86_64 (macOS 12.3 minimum) into
+  `native/singws_bgm/<arch>/`; both specs bundle it if present.
+* **Adapter** (`rust_bgm_engine.py`): the methods and attributes the app really uses (load/play/pause/stop, volume + slide, primary/secondary
+  normalisation, prepare/install/discard, preload, start/complete/cancel crossfade, seek, times, ended, meter, set_eq, set_master_processor
+  (mirrors the processor's parameters; the app re-applies after every change), diagnostics, close, `primary`/`secondary`, `bass.BASS_ChannelPlay`
+  shim). State the app reads right after a call is made fresh: after calls that change the track the adapter waits (a few ms) for the audio thread
+  to confirm, so a stale "ended" from the previous track cannot leak into the new one (test).
+* **Evidence:** 21 Python tests drive the REAL engine headless and measure the audio (playback level, seek, crossfade promotion, volume slide,
+  normalisation x2 and the x4 clamp, EQ +12 dB and detach, limiter at -6 and -12 dB following parameter changes, meter, diagnostics shape, close),
+  plus app-selection tests (default bass, rust when available, any failure -> BASS, bass never touches the Rust module). Full suite 1,455 pass.
+  With the real sound card (silent) the adapter loads a track in 20 ms, positions advance in step with real time, a 1.5 s crossfade finishes in
+  1.51 s, the `[AUDIO-DIAG]` line prints (callback mean 269 us incl. EQ + master chain). In the PACKAGED arm64 app on a scratch profile: default ->
+  `BASS background engine ready`; `bgm_engine=rust` -> `Rust background engine ready`; `bgm_engine=rust` with the library removed -> the
+  fallback line and BASS.
+
+**Not done / not verified (all for M6):** actual background-music playback through the app's own `BackgroundMusicPlayer` with the Rust engine
+(playlist advance, scheduled crossfades, fade in/out, volume recovery) has not been run; the Intel installer was not rebuilt and the Intel library
+never ran on Intel hardware; a USB interface; unplugging the output mid-play (`device_lost` is exposed and counted, the app does not yet react to
+it, and neither does it for BASS); the app logs `[AUDIO-DIAG] master-dsp[rust-engine]`, so grep for that.

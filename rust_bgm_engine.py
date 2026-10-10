@@ -54,9 +54,11 @@ def _candidate_paths() -> list[Path]:
     for root in roots:
         if root:
             paths.extend([Path(root) / LIB_NAME, Path(root) / "Frameworks" / LIB_NAME])
-    here = Path(__file__).resolve().parent
-    paths.append(here / "native" / "singws_bgm" / _arch_dir() / LIB_NAME)
-    paths.append(Path.home() / ".cache" / "singws-rust-target" / "release" / LIB_NAME)
+    if not getattr(sys, "frozen", False):
+        # Development runs only. A shipped app uses ONLY the library bundled inside it: a stray build in a cache folder must never be loaded.
+        here = Path(__file__).resolve().parent
+        paths.append(here / "native" / "singws_bgm" / _arch_dir() / LIB_NAME)
+        paths.append(Path.home() / ".cache" / "singws-rust-target" / "release" / LIB_NAME)
     return paths
 
 

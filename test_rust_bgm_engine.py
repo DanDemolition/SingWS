@@ -249,6 +249,11 @@ class AdapterTests(unittest.TestCase):
 
 
 class UnavailableTests(unittest.TestCase):
+    def test_a_frozen_app_never_looks_in_developer_cache_folders(self):
+        with mock.patch.object(sys, "frozen", True, create=True):
+            paths = [str(p) for p in rbe._candidate_paths()]
+        self.assertFalse(any(".cache" in p or "/native/singws_bgm/" in p for p in paths), paths)
+
     def test_a_missing_library_raises_and_does_not_poison_a_later_load(self):
         saved = rbe._LIB
         try:
