@@ -5,6 +5,9 @@
 
 pub mod decode;
 pub mod engine;
+pub mod resample;
+pub mod ring;
+pub mod stream;
 
 pub trait Source {
     /// Fill `out` (interleaved stereo) and return the number of FRAMES written. Fewer than requested means end of stream.
