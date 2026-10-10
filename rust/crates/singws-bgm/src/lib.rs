@@ -3,6 +3,7 @@
 //! Crossfade is scheduled in *frames* so it is sample-accurate and independent of block size.
 //! Gate for the real engine (cpal + symphonia) is in RUST_MIGRATION_PLAN.md Stage 4; BASS stays the shipped engine.
 
+pub mod decode;
 pub mod engine;
 
 pub trait Source {
