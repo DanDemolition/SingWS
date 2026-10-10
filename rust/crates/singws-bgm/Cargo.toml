@@ -17,6 +17,10 @@ path = "src/render_main.rs"
 name = "singws-bgm-streamcheck"
 path = "src/streamcheck_main.rs"
 
+[[bin]]
+name = "singws-bgm-device"
+path = "src/device_main.rs"
+
 [dependencies]
 # Decoding: the same container/codec set the analyzer already uses.
 symphonia = { version = "0.6.1", features = ["mp3", "flac", "wav", "aac", "isomp4", "ogg", "vorbis", "pcm", "alac"] }

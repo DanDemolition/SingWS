@@ -13,8 +13,8 @@ behind a `bgm_engine` setting that defaults to `"bass"` until it has been rehear
 | File decoder (symphonia) + 44.1/48 kHz resampler (rubato `Fft`) + in-memory deck | `rust/crates/singws-bgm/src/decode.rs` | done, 6 tests |
 | A/B harness against BASS: `tools/bgm_ab_compare.py` (milestone 2, see results below) | tools | done |
 | Offline renderer `singws-bgm-render` (two real files -> WAV + gap/peak/RMS report) | `rust/crates/singws-bgm/src/render_main.rs` | done, run on real tracks |
-| Streaming decode on a worker thread into a ring buffer | - | milestone 3 |
-| Sound card output (cpal), named device, hot-plug, rate change | - | milestone 3 |
+| Streaming decode on a worker thread into a lock-free ring (`stream.rs`, `ring.rs`, `resample.rs`) | rust/crates/singws-bgm | done (M3) |
+| Sound card output (cpal): named device with fallback, rate negotiation, callback timing, latency, error flags (`device.rs`) | rust/crates/singws-bgm | done (M3) |
 | 10-band EQ and master compressor inside the engine | - | milestone 4 |
 | C ABI / Python adapter with the same method names as the BASS engine | - | milestone 5 |
 
@@ -116,3 +116,38 @@ Two real defects the harness found, both fixed:
 
 Harness caveats: BASS ignores the master volume on a decode-only mixer, so the harness compares at volume 1.0; the BASS mixer
 sits in a decode-only graph, so its output device behaviour (latency, hot-plug) is milestone 3, not measured here.
+
+## Milestone 3 results - streaming decode and the sound card (2026-10-10)
+
+New dependency (approved by the operator): **cpal 0.18** (Apache-2.0, runtime). Tools: `singws-bgm-streamcheck FILES` (streaming deck vs
+whole-file decode), `singws-bgm-device list|probe` (the engine over a real output; silent unless `--audible`).
+
+**Streaming deck** (`stream.rs`): worker thread decodes -> stereo -> streaming rubato resampler -> 2 s lock-free ring; the audio callback only pops.
+* Streaming resampler output is sample-identical to the whole-clip one for any chunking (test).
+* All 69 tracks in the local BGM playlist: full read through the streaming deck is bit-identical to `decode_file` (worst difference 0.0) and
+  seeks at 7 positions per file agree to ~5e-7; 0 underruns.
+* `read` returns short only at the true end; an underrun is silence with the position still advancing (counted).
+* Seek is NON-blocking: `seek` returns at once, the deck reports `poll_pending` until the worker has restarted (about 1 s before the
+  target so the resampler settles) and 30 ms of the new position is buffered; the engine plays silence for a pending deck WITHOUT
+  advancing its position or marking it ended (`pending_frames`, test). While an incoming deck is pending the crossfade waits.
+* Two bugs found by the tests/real files and fixed: a race that threw away new-position audio (worker now waits for a "ring flushed"
+  signal), and a start offset on MP3s with an encoder-delay tag (the decoded buffer begins `trim_start` frames into its packet).
+
+**Sound card** (`device.rs`), MacBook Pro Speakers, 48 kHz stereo f32, engine + 2 streaming decks + crossfade, silent:
+| buffer | callback mean / max | driver latency | missed blocks |
+|---|---|---|---|
+| 512 frames (10.7 ms, default) | 17-22 us / 87-95 us | 13.7 ms | 0 |
+| 256 | 7 / 27 us | 8.3 ms | 0 |
+| 128 | 2 / 10 us | 5.7 ms | 0 |
+| 64 | 1 / 8 us | 4.3 ms | 0 |
+A 44.1 kHz stream (decks resampled to 44.1 kHz) also runs clean. The callback uses under 1% of its time budget at every size.
+
+**Open weakness (decided, for M5):** the engine is shared as `Arc<Mutex<Engine>>` and the callback only `try_lock`s it. With a control thread
+taking the lock every 2 ms plus a seek each second for 60 s: 1-3 of ~5,650 blocks were lost (a click each); with the same traffic but no seeks,
+0 lost over 42,000 calls (two runs). The losses are not clustered in the 100 ms after a seek, so the cause is not yet understood (suspects: the
+control thread being pre-empted while holding the lock while decoder threads run hot after a seek). The app's real traffic is orders of
+magnitude lower, but the proper fix is a lock-free command queue from the control side to the audio thread, which the M5 Python adapter
+will want anyway. `singws-bgm-device probe --hammer` is the regression check.
+
+**Not covered by this milestone:** an external USB interface (only the built-in speakers exist on this Mac), unplugging a device mid-play (the
+error flag path exists but was never exercised), changing the device's sample rate mid-play, the Intel Mac.

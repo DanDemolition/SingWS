@@ -35,6 +35,12 @@ pub trait DeckSource: Send {
     fn seek(&mut self, frame: u64) -> bool;
     /// Total length in frames, when known.
     fn len_frames(&self) -> Option<u64>;
+    /// True while the deck cannot deliver audio yet (a streaming deck right after a seek). The engine then outputs silence for it
+    /// WITHOUT advancing its position or treating it as ended, so the audible position stays in step with what is heard.
+    /// Called once per mixed chunk from the audio thread: must not block.
+    fn poll_pending(&mut self) -> bool {
+        false
+    }
 }
 
 /// A processing stage applied to the mixed output after the master volume (EQ, master chain, ...).
@@ -210,6 +216,8 @@ pub struct Engine {
     scratch_b: Vec<f32>,
     /// Frames of silence produced while playing with nothing to play (the gap meter).
     pub gap_frames: u64,
+    /// Frames of silence output while the primary deck was still seeking (streaming decks); not a gap, not played.
+    pub pending_frames: u64,
     /// Click-prevention fade-in applied when a deck starts or is repositioned (BASSmix: 5 ms). 0 switches it off.
     ramp_s: f32,
 }
@@ -227,6 +235,7 @@ impl Engine {
             scratch_a: vec![0.0; MAX_BLOCK_FRAMES * 2],
             scratch_b: vec![0.0; MAX_BLOCK_FRAMES * 2],
             gap_frames: 0,
+            pending_frames: 0,
             ramp_s: RAMP_IN_S,
         }
     }
@@ -435,23 +444,33 @@ impl Engine {
         a.fill(0.0);
         b.fill(0.0);
         let mut na = 0usize;
+        let mut primary_pending = false;
         if let Some(p) = self.primary.as_mut() {
             if !p.ended {
-                na = p.src.read(a);
-                p.apply_ramp(&mut a[..na * 2]);
-                if na < frames {
-                    p.ended = true;
+                if p.src.poll_pending() {
+                    primary_pending = true;
+                } else {
+                    na = p.src.read(a);
+                    p.apply_ramp(&mut a[..na * 2]);
+                    if na < frames {
+                        p.ended = true;
+                    }
                 }
             }
         }
         let mut nb = 0usize;
+        let mut secondary_pending = false;
         if self.crossfade.is_some() {
             if let Some(s) = self.secondary.as_mut() {
                 if !s.ended {
-                    nb = s.src.read(b);
-                    s.apply_ramp(&mut b[..nb * 2]);
-                    if nb < frames {
-                        s.ended = true;
+                    if s.src.poll_pending() {
+                        secondary_pending = true;
+                    } else {
+                        nb = s.src.read(b);
+                        s.apply_ramp(&mut b[..nb * 2]);
+                        if nb < frames {
+                            s.ended = true;
+                        }
                     }
                 }
             }
@@ -461,7 +480,8 @@ impl Engine {
             self.secondary.as_ref().map(|d| d.norm).unwrap_or(1.0),
         );
         let (cf_total, cf_done) = self.crossfade.as_ref().map(|c| (c.total, c.done)).unwrap_or((0, 0));
-        let crossing = self.crossfade.is_some();
+        // while the incoming deck is still seeking, the fade waits (the outgoing track keeps playing at full level)
+        let crossing = self.crossfade.is_some() && !secondary_pending;
         for i in 0..frames {
             let (ga, gb) = if crossing {
                 let f = cf_done + i as u64;
@@ -503,7 +523,9 @@ impl Engine {
             }
         }
         let audible = na.max(nb);
-        if audible < frames {
+        if primary_pending {
+            self.pending_frames += frames as u64;
+        } else if audible < frames {
             self.gap_frames += (frames - audible) as u64;
         }
         for fx in self.effects.iter_mut() {
@@ -634,6 +656,53 @@ mod tests {
         let out = render(&mut e, 400);
         assert!(out[0] < 0.01, "ramp must restart after a seek, got {}", out[0]);
         assert_eq!(out[2 * 300], 1.0);
+    }
+
+    /// Counter source that reports `pending` for the first `pending_polls` polls (like a streaming deck right after a seek).
+    struct Pending {
+        inner: Counter,
+        pending_polls: u32,
+    }
+    impl DeckSource for Pending {
+        fn read(&mut self, out: &mut [f32]) -> usize {
+            self.inner.read(out)
+        }
+        fn seek(&mut self, f: u64) -> bool {
+            self.inner.seek(f)
+        }
+        fn len_frames(&self) -> Option<u64> {
+            self.inner.len_frames()
+        }
+        fn poll_pending(&mut self) -> bool {
+            if self.pending_polls > 0 {
+                self.pending_polls -= 1;
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn a_pending_deck_plays_silence_without_advancing_or_ending() {
+        let mut e = quiet_engine();
+        e.load(Box::new(Pending { inner: Counter { next: 1, total: 100_000 }, pending_polls: 3 }), 1.0, false, Some(1.0));
+        // pending is polled once per mix call; render six blocks of 64 frames (the first three poll as pending)
+        let mut out = vec![];
+        for _ in 0..6 {
+            out.extend(render(&mut e, 64));
+        }
+        let silent = out.iter().take_while(|v| **v == 0.0).count() / 2;
+        assert_eq!(silent, 3 * 64, "three pending blocks of silence");
+        assert_eq!(e.gap_frames, 0, "pending silence is not a gap");
+        assert_eq!(e.pending_frames, 3 * 64);
+        assert!(!e.source_ended(), "a pending deck is not ended");
+        let (pos, _) = e.get_times();
+        let played = (pos * RATE as f32).round() as usize;
+        assert_eq!(played, 3 * 64, "position advances only for audio that was played");
+        // and the audio that follows starts at frame 0 of the source, not later
+        assert_eq!(out[2 * silent], 1.0, "the first audio frame is the source's first frame, not a later one");
+        assert_eq!(out[2 * (silent + 5)], 6.0);
     }
 
     #[test]

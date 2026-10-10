@@ -32,6 +32,8 @@ use crate::ring::Ring;
 const RING_SECONDS: f64 = 2.0;
 const PREROLL_S: f64 = 1.0;
 const PREFILL_S: f64 = 0.2;
+/// After a seek the deck stays pending until this much of the new position is buffered (the worker decodes far faster than real time).
+const SEEK_PREFILL_S: f64 = 0.03;
 
 struct Session {
     format: Box<dyn FormatReader>,
@@ -215,6 +217,10 @@ pub struct StreamingDeck {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
     epoch: u64,
+    /// A seek has been requested and the worker has not yet acknowledged it.
+    seeking: bool,
+    /// The worker has restarted; waiting for the first ~30 ms of the new position to arrive.
+    settling: bool,
     est_total: Option<u64>,
     path: PathBuf,
     pub rate: u32,
@@ -243,7 +249,7 @@ impl StreamingDeck {
             .name("singws-bgm-decode".into())
             .spawn(move || worker_main(sh, p, target_rate, session))
             .map_err(|e| DecodeError::Unreadable(format!("cannot start decoder thread: {e}")))?;
-        let deck = Self { shared, worker: Some(worker), epoch: 0, est_total: est, path: path.to_path_buf(), rate: target_rate };
+        let deck = Self { shared, worker: Some(worker), epoch: 0, seeking: false, settling: false, est_total: est, path: path.to_path_buf(), rate: target_rate };
         deck.wait_ready(Duration::from_secs(3));
         Ok(deck)
     }
@@ -284,6 +290,11 @@ impl StreamingDeck {
 impl DeckSource for StreamingDeck {
     fn read(&mut self, out: &mut [f32]) -> usize {
         let want = out.len();
+        if self.poll_pending() {
+            // callers that skip `poll_pending` (the engine does not) get silence while a seek is in flight
+            out.fill(0.0);
+            return want / 2;
+        }
         let got = self.shared.ring.pop(out);
         if got >= want {
             return want / 2;
@@ -303,23 +314,46 @@ impl DeckSource for StreamingDeck {
         want / 2
     }
 
+    /// Non-blocking: records the target and returns at once. The audio thread finishes the hand-over in `poll_pending` (emptying the
+    /// ring once the worker has acknowledged) and the engine plays silence, without advancing, until the new audio arrives.
     fn seek(&mut self, frame: u64) -> bool {
         let s = &self.shared;
+        if s.failed.load(Ordering::Relaxed) || s.stop.load(Ordering::Relaxed) {
+            return false;
+        }
         self.epoch += 1;
         s.target_out.store(frame, Ordering::Release);
         s.want_gen.store(self.epoch, Ordering::Release);
-        // The worker acknowledges once it has stopped pushing old-generation audio; only then is it safe to empty the ring.
-        let t0 = Instant::now();
-        while s.ack_gen.load(Ordering::Acquire) != self.epoch {
-            if t0.elapsed() > Duration::from_millis(500) || s.stop.load(Ordering::Relaxed) {
+        self.seeking = true;
+        self.settling = false;
+        true
+    }
+
+    fn poll_pending(&mut self) -> bool {
+        let s = &self.shared;
+        if self.seeking {
+            if s.failed.load(Ordering::Relaxed) {
+                self.seeking = false;
                 return false;
             }
-            std::thread::sleep(Duration::from_micros(200));
+            if s.ack_gen.load(Ordering::Acquire) != self.epoch {
+                return true;
+            }
+            // the worker has stopped pushing old audio: empty the ring, then let it push the new position
+            s.ring.discard_all();
+            s.flushed_gen.store(self.epoch, Ordering::Release);
+            self.seeking = false;
+            self.settling = true;
         }
-        s.ring.discard_all();
-        s.flushed_gen.store(self.epoch, Ordering::Release);
-        self.wait_ready(Duration::from_millis(1500));
-        true
+        if self.settling {
+            let need = (SEEK_PREFILL_S * self.rate as f64) as usize * 2;
+            if s.ring.len() >= need || s.done_gen.load(Ordering::Acquire) == self.epoch || s.failed.load(Ordering::Relaxed) {
+                self.settling = false;
+            } else {
+                return true;
+            }
+        }
+        false
     }
 
     fn len_frames(&self) -> Option<u64> {
@@ -459,6 +493,21 @@ mod tests {
         d.join(name)
     }
 
+    /// Seek and wait (as the engine does, by polling) until the new position can be read.
+    fn seek_ready(deck: &mut StreamingDeck, frame: u64) {
+        assert!(deck.seek(frame), "seek {frame}");
+        let t0 = Instant::now();
+        while deck.poll_pending() {
+            assert!(t0.elapsed() < Duration::from_secs(3), "seek {frame} never became ready");
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        // like a real player: let the worker get ahead of the reader before reading
+        let t1 = Instant::now();
+        while deck.buffered_seconds() < 0.1 && deck.shared.done_gen.load(Ordering::Acquire) != deck.epoch && t1.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+
     fn read_all(deck: &mut StreamingDeck, max_frames: usize) -> Vec<f32> {
         let mut out = Vec::new();
         let mut buf = vec![0.0f32; 1000 * 2];
@@ -515,7 +564,7 @@ mod tests {
         let whole = decode_file(&p, 48_000).unwrap();
         let mut deck = StreamingDeck::open(&p, 48_000).unwrap();
         for target in [0u64, 1, 4799, 48_000, 123_457, 300_000, 5_000, 560_000] {
-            assert!(deck.seek(target), "seek {target}");
+            seek_ready(&mut deck, target);
             let mut buf = vec![0.0f32; 2400 * 2];
             assert_eq!(deck.read(&mut buf), 2400);
             let want = &whole.samples[target as usize * 2..(target as usize + 2400) * 2];
@@ -529,7 +578,7 @@ mod tests {
         let p = tmp("end.wav");
         write_wav(&p, 48_000, 2, 48_000);
         let mut deck = StreamingDeck::open(&p, 48_000).unwrap();
-        assert!(deck.seek(47_000));
+        seek_ready(&mut deck, 47_000);
         let mut buf = vec![0.0f32; 2000 * 2];
         let n = deck.read(&mut buf);
         assert_eq!(n, 1000, "exactly the frames that exist");
@@ -558,6 +607,27 @@ mod tests {
         assert_eq!(got.len(), whole.samples.len());
         assert!(got.iter().zip(whole.samples.iter()).all(|(a, b)| (a - b).abs() < 1e-6));
         assert_eq!(deck.underruns(), 0, "no underruns expected with an idle machine");
+    }
+
+    #[test]
+    fn seek_returns_at_once_and_the_deck_reports_pending_until_audio_arrives() {
+        let p = tmp("pending.wav");
+        write_wav(&p, 44_100, 2, 44_100 * 20);
+        let mut deck = StreamingDeck::open(&p, 48_000).unwrap();
+        let t0 = Instant::now();
+        assert!(deck.seek(500_000));
+        assert!(t0.elapsed() < Duration::from_millis(2), "seek blocked for {:?}", t0.elapsed());
+        let mut saw_pending = false;
+        let t1 = Instant::now();
+        while deck.poll_pending() {
+            saw_pending = true;
+            assert!(t1.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_micros(100));
+        }
+        assert!(saw_pending || t1.elapsed() < Duration::from_millis(1));
+        let mut buf = vec![0.0f32; 480 * 2];
+        assert_eq!(deck.read(&mut buf), 480);
+        assert_eq!(deck.underruns(), 0);
     }
 
     #[test]

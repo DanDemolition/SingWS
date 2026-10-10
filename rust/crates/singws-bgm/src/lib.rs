@@ -4,6 +4,7 @@
 //! Gate for the real engine (cpal + symphonia) is in RUST_MIGRATION_PLAN.md Stage 4; BASS stays the shipped engine.
 
 pub mod decode;
+pub mod device;
 pub mod engine;
 pub mod resample;
 pub mod ring;

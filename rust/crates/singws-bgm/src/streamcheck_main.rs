@@ -85,6 +85,10 @@ fn main() {
                 ok = false;
                 continue;
             }
+            let w0 = Instant::now();
+            while deck.poll_pending() && w0.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_micros(200));
+            }
             let want_n = 4800usize.min(total - target as usize);
             let got = read_exact_frames(&mut deck, want_n);
             let want = &whole.samples[target as usize * 2..(target as usize + want_n) * 2];
