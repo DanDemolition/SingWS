@@ -205,7 +205,9 @@ class AdapterTests(unittest.TestCase):
         proc = MasterAudioProcessor(sample_rate=RATE, channels=2)
         proc.set_params({"limiter_enabled": 1.0, "limiter_ceiling_db": -6.0, "comp_enabled": 0.0, "eq_enabled": 0.0, "exciter_mix": 0.0})
         proc.set_enabled(True)
+        self.assertFalse(e.master_attached)
         e.set_master_processor(proc)
+        self.assertTrue(e.master_attached, "the app's launch log reads this flag")
         e.render(RATE // 2)
         ceiling = 10 ** (-6.0 / 20.0)
         peak = float(np.abs(e.render(RATE // 2)).max())
@@ -216,6 +218,7 @@ class AdapterTests(unittest.TestCase):
         e.render(RATE // 2)
         self.assertLessEqual(float(np.abs(e.render(RATE // 2)).max()), 10 ** (-12.0 / 20.0) + 0.01)
         e.set_master_processor(None)
+        self.assertFalse(e.master_attached)
         e.render(RATE // 2)
         self.assertGreater(float(np.abs(e.render(RATE // 4)).max()), 0.9)
 

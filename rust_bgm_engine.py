@@ -226,6 +226,7 @@ class RustBackgroundEngine:
         self._master_names: list[str] | None = None
         self._diag_enabled = False
         self._diag_last = None
+        self.master_attached = False        # a master processor's parameters have been pushed and the chain is on
         self._lock = threading.RLock()      # serialises Python-side bookkeeping only; the audio thread never sees it
 
     # ---------------- helpers ----------------
@@ -519,6 +520,7 @@ class RustBackgroundEngine:
             return
         if processor is None:
             self._lib.singws_bgm_set_master_enabled(self._h, 0)
+            self.master_attached = False
             return
         try:
             params = dict(processor.params())
@@ -527,8 +529,10 @@ class RustBackgroundEngine:
             if self._lib.singws_bgm_set_master_params(self._h, values, len(names)) != 0:
                 return
             self._lib.singws_bgm_set_master_enabled(self._h, int(bool(processor.enabled())))
+            self.master_attached = bool(processor.enabled())
         except Exception:
             self._lib.singws_bgm_set_master_enabled(self._h, 0)
+            self.master_attached = False
 
     # ---------------- diagnostics ----------------
 

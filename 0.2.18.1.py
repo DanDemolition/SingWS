@@ -22588,7 +22588,7 @@ class KaraokeApp(QWidget):
                 bg._attach_host_audio_chain()
                 eng = getattr(bg, "_bass_engine", None)
                 _diag(f"[MASTER-AUDIO] BGM chain attached at launch master={int(bool(self._bgm_master_active()))} "
-                      f"proc={int(getattr(eng, '_master_proc', None) is not None)}")
+                      f"proc={int(bool(getattr(eng, 'master_attached', getattr(eng, '_master_proc', None) is not None)))}")
         except Exception as exc:
             _diag(f"[MASTER-AUDIO] BGM launch attach failed: {exc}")
 
