@@ -133,36 +133,46 @@ fn main() {
     let mut buf = vec![0.0f32; block * 2];
     let mut out: Vec<f32> = Vec::new();
     let rate = args.rate as f64;
-    let mut faded = false;
-    let mut after_fade_frames = 0u64;
-    let limit_frames = ((a.seconds() + b.as_ref().map(|b| b.seconds()).unwrap_or(0.0) + 5.0) * rate) as u64;
-    let single_len = ((args.lead + args.tail) * rate) as u64;
     let mut peak = 0.0f32;
-    loop {
-        let (pos, _) = engine.get_times();
-        if b.is_some() && !faded && pos as f64 >= xfade_at {
-            engine.start_crossfade(args.xfade_ms, 0.0);
-            faded = true;
+    let mut run = |engine: &mut Engine, frames: u64, out: &mut Vec<f32>, peak: &mut f32| {
+        // Exactly `frames` frames, in blocks of at most `block`.
+        let mut left = frames;
+        while left > 0 {
+            let n = left.min(block as u64) as usize;
+            engine.mix(&mut buf[..n * 2]);
+            *peak = buf[..n * 2].iter().fold(*peak, |m, s| m.max(s.abs()));
+            out.extend_from_slice(&buf[..n * 2]);
+            left -= n as u64;
         }
-        engine.mix(&mut buf);
-        peak = buf.iter().fold(peak, |m, s| m.max(s.abs()));
-        out.extend_from_slice(&buf);
-        if faded && engine.crossfade_finished() {
-            engine.complete_crossfade();
-        }
-        let frames_out = (out.len() / 2) as u64;
-        if faded && !engine.crossfade_active() {
-            after_fade_frames += block as u64;
-            if after_fade_frames as f64 >= args.tail * rate {
+    };
+    if b.is_some() {
+        // The fade starts on the exact frame `lead` seconds after the render began, so another engine rendering the same
+        // scenario can be compared sample for sample.
+        run(&mut engine, ((xfade_at - first) * rate).round() as u64, &mut out, &mut peak);
+        let (tp, td) = engine.get_times();
+        println!("times at fade start: pos {tp:.4} dur {td:.4}");
+        engine.start_crossfade(args.xfade_ms, 0.0);
+        let limit = ((b.as_ref().unwrap().seconds() + 5.0) * rate) as u64;
+        let mut after = 0u64;
+        let mut total = 0u64;
+        loop {
+            run(&mut engine, block as u64, &mut out, &mut peak);
+            total += block as u64;
+            if engine.crossfade_finished() {
+                engine.complete_crossfade();
+            }
+            if !engine.crossfade_active() {
+                after += block as u64;
+                if after as f64 >= args.tail * rate {
+                    break;
+                }
+            }
+            if total > limit {
                 break;
             }
         }
-        if b.is_none() && frames_out >= single_len {
-            break;
-        }
-        if frames_out > limit_frames || engine.source_ended() && !faded && b.is_none() {
-            break;
-        }
+    } else {
+        run(&mut engine, ((args.lead + args.tail) * rate) as u64, &mut out, &mut peak);
     }
     if let Err(e) = write_wav(&args.out, args.rate, &out) {
         eprintln!("error: cannot write {}: {e}", args.out.display());

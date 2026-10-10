@@ -11,6 +11,7 @@ behind a `bgm_engine` setting that defaults to `"bass"` until it has been rehear
 | Device-free engine core: two decks, crossfade envelopes, volume slides, normalization, meter, effects chain | `rust/crates/singws-bgm/src/engine.rs` | done, 14 tests |
 | Mixer used to prove equal-power maths | `rust/crates/singws-bgm/src/lib.rs` | done, 6 tests |
 | File decoder (symphonia) + 44.1/48 kHz resampler (rubato `Fft`) + in-memory deck | `rust/crates/singws-bgm/src/decode.rs` | done, 6 tests |
+| A/B harness against BASS: `tools/bgm_ab_compare.py` (milestone 2, see results below) | tools | done |
 | Offline renderer `singws-bgm-render` (two real files -> WAV + gap/peak/RMS report) | `rust/crates/singws-bgm/src/render_main.rs` | done, run on real tracks |
 | Streaming decode on a worker thread into a ring buffer | - | milestone 3 |
 | Sound card output (cpal), named device, hot-plug, rate change | - | milestone 3 |
@@ -84,3 +85,34 @@ All of these exist as methods on `Engine` in `engine.rs` unless marked "later".
 It prints the decoded lengths, the peak, the gap frames, and RMS per second so a level dip at the fade can be read without listening.
 First real-file run (2026-10-10, two local BGM tracks, 44.1 kHz MP3s): 0 gap frames, peak -0.91 dBFS, the level step at the fade is
 the two tracks' own loudness difference (about 8 dB, which the app's normalization gains remove).
+
+## Milestone 2 results - A/B against the BASS engine (2026-10-10)
+
+`tools/bgm_ab_compare.py A.mp3 B.mp3` renders the identical scenario (play A, crossfade into B starting on an exact frame, 5 s fade)
+through BASS's decode-only mixer and through the Rust engine, aligns them, and compares. Run on 6 real pairs from the BGM
+playlist (all 44.1 kHz MP3, which is all this Mac has; no 48 kHz or non-MP3 file was available):
+
+| Target (plan) | Result |
+|---|---|
+| gap < 5 ms | 0 silent frames in both engines on every pair |
+| crossfade level within 0.5 dB | worst 100 ms disagreement inside the fade 0.00-0.42 dB |
+| position readout | 0.02 ms apart at the fade start; duration within 13 ms on a 2-minute track |
+| sample alignment | 0 frames on every pair after the two fixes below |
+| audible-band match (added) | below 10 kHz the difference is 56-58 dB under the signal; overall SNR 26-52 dB |
+
+Where the engines still differ: only above ~10 kHz. BASS's mixer resampler and rubato's FFT resampler have different filters
+(difference energy sits at 16-20 kHz and above the 22.05 kHz Nyquist of the source). Not audible in practice; rubato is the
+higher-quality of the two.
+
+Two real defects the harness found, both fixed:
+
+1. **MP3 start offset (25.06 ms).** MP3s with no LAME encoder-delay header (symphonia reports delay 0): BASS still drops the standard
+   1105 start samples (576 + 529), symphonia drops none. `decode.rs` now drops 1105 too (`MP3_DEFAULT_DELAY_FRAMES`). MP3s with a
+   LAME header already agreed to the sample.
+2. **Click on start/seek.** BASSmix fades a channel in linearly over ~5 ms at start and after every reposition (gain at frame i is
+   (i + 0.5) / 240 at 48 kHz). The engine had no ramp, so a seek mid-song would click. `Engine` now applies it
+   (`RAMP_IN_S`, `set_ramp_in_seconds`; test `a_deck_ramps_in_over_five_ms_...`). Peak single-sample difference vs BASS fell
+   from 0.87 to 0.03-0.26.
+
+Harness caveats: BASS ignores the master volume on a decode-only mixer, so the harness compares at volume 1.0; the BASS mixer
+sits in a decode-only graph, so its output device behaviour (latency, hot-plug) is milestone 3, not measured here.

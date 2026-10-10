@@ -21,6 +21,9 @@ pub const MAX_BLOCK_FRAMES: usize = 8192;
 pub const ENVELOPE_SEGMENTS: usize = 64;
 /// Shortest crossfade BASS would schedule.
 pub const MIN_CROSSFADE_S: f32 = 0.05;
+/// BASSmix fades a channel in linearly over about 5 ms when it starts and after every reposition (click prevention).
+/// Measured against the BASS engine: gain at frame i is (i + 0.5) / 240 at 48 kHz, reaching 1.0 after ~4.96 ms.
+pub const RAMP_IN_S: f32 = 0.005;
 /// The meter looks at this much audio (BASS_Mixer_ChannelGetLevelEx window).
 pub const METER_WINDOW_S: f32 = 0.05;
 
@@ -151,12 +154,39 @@ struct Deck {
     len: Option<u64>,
     ended: bool,
     meter: Meter,
+    /// Frames already mixed since the deck started or was repositioned (drives the click-prevention ramp).
+    ramp_done: u32,
+    ramp_len: u32,
 }
 
 impl Deck {
-    fn new(src: Box<dyn DeckSource>, norm: f32, rate: f32) -> Self {
+    fn new(src: Box<dyn DeckSource>, norm: f32, rate: f32, ramp_s: f32) -> Self {
         let len = src.len_frames();
-        Self { src, norm: clamp_norm(norm), pos: 0, len, ended: false, meter: Meter::new(rate) }
+        Self {
+            src,
+            norm: clamp_norm(norm),
+            pos: 0,
+            len,
+            ended: false,
+            meter: Meter::new(rate),
+            ramp_done: 0,
+            ramp_len: (ramp_s * rate) as u32,
+        }
+    }
+    /// Fade the first `ramp_len` frames after a start or seek in, like BASSmix. `block` is interleaved stereo.
+    fn apply_ramp(&mut self, block: &mut [f32]) {
+        if self.ramp_done >= self.ramp_len {
+            return;
+        }
+        for frame in block.chunks_exact_mut(2) {
+            if self.ramp_done >= self.ramp_len {
+                break;
+            }
+            let g = (self.ramp_done as f32 + 0.5) / self.ramp_len as f32;
+            frame[0] *= g;
+            frame[1] *= g;
+            self.ramp_done += 1;
+        }
     }
 }
 
@@ -180,6 +210,8 @@ pub struct Engine {
     scratch_b: Vec<f32>,
     /// Frames of silence produced while playing with nothing to play (the gap meter).
     pub gap_frames: u64,
+    /// Click-prevention fade-in applied when a deck starts or is repositioned (BASSmix: 5 ms). 0 switches it off.
+    ramp_s: f32,
 }
 
 impl Engine {
@@ -195,7 +227,13 @@ impl Engine {
             scratch_a: vec![0.0; MAX_BLOCK_FRAMES * 2],
             scratch_b: vec![0.0; MAX_BLOCK_FRAMES * 2],
             gap_frames: 0,
+            ramp_s: RAMP_IN_S,
         }
+    }
+
+    /// Length of the fade-in after a start or seek, in seconds (default [`RAMP_IN_S`]; 0 disables it).
+    pub fn set_ramp_in_seconds(&mut self, s: f32) {
+        self.ramp_s = s.clamp(0.0, 0.05);
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -209,7 +247,7 @@ impl Engine {
         if let Some(v) = volume {
             self.master.set(clamp_volume(v));
         }
-        self.primary = Some(Deck::new(src, norm_gain, self.rate));
+        self.primary = Some(Deck::new(src, norm_gain, self.rate, self.ramp_s));
         self.playing = !paused;
     }
     pub fn play(&mut self) -> bool {
@@ -270,7 +308,7 @@ impl Engine {
         if self.primary.is_none() || self.crossfade.is_some() {
             return false;
         }
-        self.secondary = Some(Deck::new(src, norm_gain, self.rate));
+        self.secondary = Some(Deck::new(src, norm_gain, self.rate, self.ramp_s));
         true
     }
     pub fn invalidate_secondary_preload(&mut self) {
@@ -293,6 +331,7 @@ impl Engine {
             let offset = (start_seconds as f64 * rate as f64) as u64;
             if offset > 0 && offset < length && sec.src.seek(offset) {
                 sec.pos = offset;
+                sec.ramp_done = 0;
             }
         }
         let available_s = (length.saturating_sub(sec.pos)) as f64 / rate as f64;
@@ -344,6 +383,7 @@ impl Engine {
         if d.src.seek(target) {
             d.pos = target;
             d.ended = false;
+            d.ramp_done = 0;
             true
         } else {
             false
@@ -398,6 +438,7 @@ impl Engine {
         if let Some(p) = self.primary.as_mut() {
             if !p.ended {
                 na = p.src.read(a);
+                p.apply_ramp(&mut a[..na * 2]);
                 if na < frames {
                     p.ended = true;
                 }
@@ -408,6 +449,7 @@ impl Engine {
             if let Some(s) = self.secondary.as_mut() {
                 if !s.ended {
                     nb = s.src.read(b);
+                    s.apply_ramp(&mut b[..nb * 2]);
                     if nb < frames {
                         s.ended = true;
                     }
@@ -542,6 +584,13 @@ mod tests {
         }
     }
 
+    /// An engine with the start ramp off, for tests that look at the first frames.
+    fn quiet_engine() -> Engine {
+        let mut e = Engine::new(RATE);
+        e.set_ramp_in_seconds(0.0);
+        e
+    }
+
     fn render(e: &mut Engine, frames: usize) -> Vec<f32> {
         let mut v = vec![0.0; frames * 2];
         e.mix(&mut v);
@@ -550,6 +599,41 @@ mod tests {
     fn rms_db(block: &[f32]) -> f32 {
         let p: f32 = block.chunks(2).map(|f| f[0] * f[0]).sum::<f32>() / (block.len() / 2) as f32;
         10.0 * p.max(1e-12).log10()
+    }
+
+    /// Constant-level source.
+    struct Flat(u64);
+    impl DeckSource for Flat {
+        fn read(&mut self, out: &mut [f32]) -> usize {
+            let n = ((out.len() / 2) as u64).min(self.0) as usize;
+            out[..n * 2].fill(1.0);
+            self.0 -= n as u64;
+            n
+        }
+        fn seek(&mut self, _f: u64) -> bool {
+            true
+        }
+        fn len_frames(&self) -> Option<u64> {
+            Some(1_000_000)
+        }
+    }
+
+    #[test]
+    fn a_deck_ramps_in_over_five_ms_at_the_start_and_after_a_seek_like_bassmix() {
+        let mut e = Engine::new(RATE);
+        e.load(Box::new(Flat(1_000_000)), 1.0, false, Some(1.0));
+        let out = render(&mut e, 1000);
+        // measured on BASS: gain at frame i is (i + 0.5) / 240
+        for i in [0usize, 10, 100, 200, 239] {
+            let want = (i as f32 + 0.5) / 240.0;
+            assert!((out[2 * i] - want).abs() < 1e-5, "frame {i}: {} vs {want}", out[2 * i]);
+        }
+        assert_eq!(out[2 * 240], 1.0);
+        assert_eq!(out[2 * 999], 1.0);
+        assert!(e.seek(1.0));
+        let out = render(&mut e, 400);
+        assert!(out[0] < 0.01, "ramp must restart after a seek, got {}", out[0]);
+        assert_eq!(out[2 * 300], 1.0);
     }
 
     #[test]
@@ -571,7 +655,7 @@ mod tests {
 
     #[test]
     fn crossfade_keeps_the_level_steady_for_uncorrelated_tones() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.set_master_volume(1.0);
         e.load(Box::new(Tone::new(440.0, 0.5, 20.0)), 1.0, false, None);
         assert!(e.preload_secondary(Box::new(Tone::new(997.0, 0.5, 20.0)), 1.0));
@@ -587,7 +671,7 @@ mod tests {
 
     #[test]
     fn the_preloaded_deck_consumes_nothing_until_the_crossfade_starts() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Counter { next: 0, total: 100_000 }), 1.0, false, Some(1.0));
         assert!(e.preload_secondary(Box::new(Counter { next: 0, total: 100_000 }), 1.0));
         let _ = render(&mut e, 4800);
@@ -597,13 +681,13 @@ mod tests {
 
     #[test]
     fn a_crossfade_is_clamped_to_what_the_incoming_file_has_left() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(440.0, 0.5, 20.0)), 1.0, false, None);
         e.preload_secondary(Box::new(Tone::new(997.0, 0.5, 1.0)), 1.0);
         assert!(e.start_crossfade(5000, 0.0)); // asked for 5 s, the file has 1 s
         assert_eq!(e.crossfade.as_ref().unwrap().total, RATE as u64);
         // and never shorter than 50 ms
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(440.0, 0.5, 20.0)), 1.0, false, None);
         e.preload_secondary(Box::new(Tone::new(997.0, 0.5, 20.0)), 1.0);
         e.start_crossfade(1, 0.0);
@@ -612,7 +696,7 @@ mod tests {
 
     #[test]
     fn no_gap_when_the_outgoing_track_ends_inside_the_fade() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(440.0, 0.5, 3.0)), 1.0, false, Some(1.0));
         e.preload_secondary(Box::new(Tone::new(997.0, 0.5, 20.0)), 1.0);
         // seek the outgoing track near its end, so it runs out two seconds into a four second fade
@@ -624,7 +708,7 @@ mod tests {
 
     #[test]
     fn a_gap_is_counted_when_nothing_is_left_to_play() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(440.0, 0.5, 0.1)), 1.0, false, None);
         let _ = render(&mut e, RATE as usize / 2);
         assert!(e.gap_frames > 0);
@@ -633,7 +717,7 @@ mod tests {
 
     #[test]
     fn seeking_lands_on_the_right_frame_and_nothing_is_skipped() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Counter { next: 0, total: 10 * RATE as u64 }), 1.0, false, Some(1.0));
         let first = render(&mut e, 100);
         assert_eq!(first[0], 0.0);
@@ -651,7 +735,7 @@ mod tests {
 
     #[test]
     fn pause_outputs_silence_and_does_not_advance() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Counter { next: 0, total: 100_000 }), 1.0, false, Some(1.0));
         let _ = render(&mut e, 100);
         assert!(e.pause());
@@ -670,7 +754,7 @@ mod tests {
         assert_eq!(clamp_norm(f32::NAN), 1.0);
         assert_eq!(clamp_volume(2.0), 1.0);
         assert_eq!(clamp_volume(-1.0), 0.0);
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Counter { next: 1000, total: 1_000_000 }), 0.5, false, Some(0.5));
         let out = render(&mut e, 2);
         assert_eq!(out[0], 1000.0 * 0.5 * 0.5); // norm 0.5, master 0.5
@@ -678,7 +762,7 @@ mod tests {
 
     #[test]
     fn a_master_slide_is_smooth_monotonic_and_lands_exactly() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(0.0001, 1.0, 20.0)), 1.0, false, Some(1.0));
         // a flat 1.0 signal at the start of the tone is ~0, so use a DC source instead
         struct Dc(u64);
@@ -717,7 +801,7 @@ mod tests {
                 }
             }
         }
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Counter { next: 10, total: 1000 }), 1.0, false, Some(0.5));
         e.set_effects(vec![Box::new(Double)]);
         assert_eq!(render(&mut e, 1)[0], 10.0 * 0.5 * 2.0);
@@ -725,13 +809,13 @@ mod tests {
 
     #[test]
     fn the_meter_reads_the_audible_deck_like_bass() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(1000.0, 0.25, 5.0)), 1.0, false, Some(1.0));
         let _ = render(&mut e, RATE as usize / 2);
         let level = e.meter_level();
         // RMS of a 0.25 sine is 0.1768; BASS reports rms * 4, clamped to 1.0
         assert!((level - 0.707).abs() < 0.03, "level {level}");
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(1000.0, 1.0, 5.0)), 1.0, false, Some(1.0));
         let _ = render(&mut e, RATE as usize / 2);
         assert_eq!(e.meter_level(), 1.0);
@@ -739,7 +823,7 @@ mod tests {
 
     #[test]
     fn mix_never_reallocates_even_for_huge_blocks() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(440.0, 0.5, 60.0)), 1.0, false, None);
         let (pa, pb) = (e.scratch_a.as_ptr(), e.scratch_b.as_ptr());
         let _ = render(&mut e, MAX_BLOCK_FRAMES * 3 + 123);
@@ -748,7 +832,7 @@ mod tests {
 
     #[test]
     fn cancel_and_stop_reset_everything() {
-        let mut e = Engine::new(RATE);
+        let mut e = quiet_engine();
         e.load(Box::new(Tone::new(440.0, 0.5, 20.0)), 1.0, false, None);
         e.preload_secondary(Box::new(Tone::new(997.0, 0.5, 20.0)), 1.0);
         e.start_crossfade(1000, 0.0);

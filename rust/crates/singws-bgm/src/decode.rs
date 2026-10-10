@@ -19,6 +19,9 @@ use symphonia::core::meta::MetadataOptions;
 
 use crate::engine::DeckSource;
 
+/// Encoder delay (576) plus decoder delay (529) that BASS skips on an MP3 without a LAME header.
+pub const MP3_DEFAULT_DELAY_FRAMES: usize = 1105;
+
 #[derive(Debug)]
 pub enum DecodeError {
     Unreadable(String),
@@ -109,7 +112,7 @@ pub fn decode_file(path: &Path, target_rate: u32) -> Result<Decoded, DecodeError
     let mut format = symphonia::default::get_probe()
         .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
         .map_err(|e| DecodeError::Unsupported(format!("probe failed: {e}")))?;
-    let (track_id, params) = {
+    let (track_id, params, track_delay) = {
         let track = format.default_track(TrackType::Audio).ok_or(DecodeError::NoAudio)?;
         let params = track
             .codec_params
@@ -117,8 +120,9 @@ pub fn decode_file(path: &Path, target_rate: u32) -> Result<Decoded, DecodeError
             .and_then(|p| p.audio())
             .ok_or_else(|| DecodeError::Unsupported("track has no audio codec parameters".into()))?
             .clone();
-        (track.id, params)
+        (track.id, params, track.delay)
     };
+    let is_mp3 = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_MP3;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|e| DecodeError::Unsupported(format!("codec: {e}")))?;
@@ -172,6 +176,12 @@ pub fn decode_file(path: &Path, target_rate: u32) -> Result<Decoded, DecodeError
     }
     if rate == 0 || stereo.is_empty() {
         return Err(DecodeError::NoAudio);
+    }
+    // MP3 with no encoder-delay header (no LAME tag): BASS still drops the standard 576 + 529 start samples, symphonia drops none.
+    // Do the same so positions and crossfade offsets agree with the engine being replaced (measured: 1105 frames = 25.06 ms at 44.1 kHz).
+    if is_mp3 && track_delay.unwrap_or(0) == 0 {
+        let skip = (MP3_DEFAULT_DELAY_FRAMES * 2).min(stereo.len());
+        stereo.drain(..skip);
     }
     let samples = resample_stereo(stereo, rate, target_rate)?;
     Ok(Decoded { rate: target_rate, samples: Arc::new(samples), skipped_packets: skipped })
