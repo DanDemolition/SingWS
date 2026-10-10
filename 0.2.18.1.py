@@ -9761,7 +9761,14 @@ class BackgroundMusicManager(QMainWindow):
         playlist_header.addSpacing(8)
         playlist_header.addWidget(self.playlist_count)
         playlist_layout.addLayout(playlist_header)
-        
+
+        # Filter box for the playlist (2026-10-10). It only hides non-matching rows; it never reorders or removes anything.
+        self.playlist_search = QLineEdit()
+        self.playlist_search.setPlaceholderText("Search playlist...")
+        self.playlist_search.setClearButtonEnabled(True)
+        self.playlist_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
+        playlist_layout.addWidget(self.playlist_search)
+
         self.playlist_list = PlaylistWidget()
         self.playlist_list.setAlternatingRowColors(True)
         self.playlist_list.setStyleSheet(
@@ -9886,6 +9893,13 @@ class BackgroundMusicManager(QMainWindow):
         self.save_playlist_button.clicked.connect(self.save_playlist_as)
         self.load_playlist_button.clicked.connect(self.load_playlist_from_file)
         self.playlist_list.model().rowsMoved.connect(self._on_playlist_rows_moved)
+        self._playlist_filter_timer = QTimer(self)
+        self._playlist_filter_timer.setSingleShot(True)
+        self._playlist_filter_timer.setInterval(120)
+        self._playlist_filter_timer.timeout.connect(self._apply_playlist_filter)
+        self.playlist_search.textChanged.connect(lambda _t: self._playlist_filter_timer.start())
+        self.playlist_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.playlist_list.customContextMenuRequested.connect(self._show_playlist_context_menu)
 
         # Update timer for “Now Playing” label
         self.update_timer = QTimer(self)
@@ -10232,6 +10246,8 @@ class BackgroundMusicManager(QMainWindow):
 
             # IMPORTANT: Don’t jump playback to the top just because order changed
             self._sync_to_player(reset_index=False)
+            if self._playlist_filter_terms():
+                self._apply_playlist_filter()  # a drag/drop must not un-hide rows the search filtered out
 
             # If the mini label exists, refresh it
             parent = self._host()
@@ -10417,6 +10433,9 @@ class BackgroundMusicManager(QMainWindow):
 
         self._last_highlight_row = current_idx
         self._last_highlight_count = count
+        # The code above shows/hides rows by position only; re-apply the search so filtered-out rows stay hidden.
+        if self._playlist_filter_terms():
+            self._apply_playlist_filter()
                 
     # Additional methods...
     def play_next(self):
@@ -10504,6 +10523,112 @@ class BackgroundMusicManager(QMainWindow):
         self.bg_music.stop()
         self.bg_music.play()
         self.highlight_current_track()
+
+    # ── Playlist search + right-click reorder (2026-10-10) ────────────────────────────────────────────────────
+    def _playlist_filter_terms(self) -> list[str]:
+        box = getattr(self, "playlist_search", None)
+        return str(box.text() if box is not None else "").lower().split()
+
+    def _playlist_current_row(self) -> int:
+        """The row of the track the player is on (-1 when the player has no playlist). Rows at or above it are hidden."""
+        count = self.playlist_list.count()
+        if count <= 0 or not self.bg_music.playlist:
+            return -1
+        return max(0, min(int(self.bg_music.current_index), count - 1))
+
+    def _apply_playlist_filter(self):
+        """Hide rows that do not match every word typed in the search box.
+
+        Rows at or above the current track stay hidden exactly as highlight_current_track() hides them, so searching
+        never brings back tracks that already played. Clearing the box restores that same view.
+        """
+        terms = self._playlist_filter_terms()
+        count = self.playlist_list.count()
+        cutoff = self._playlist_current_row()
+        shown = 0
+        self.playlist_list.setUpdatesEnabled(False)
+        try:
+            for i in range(count):
+                item = self.playlist_list.item(i)
+                hidden = i <= cutoff
+                if not hidden and terms:
+                    text = item.text().lower()
+                    hidden = not all(t in text for t in terms)
+                item.setHidden(hidden)
+                if not hidden:
+                    shown += 1
+        finally:
+            self.playlist_list.setUpdatesEnabled(True)
+        if terms:
+            self.playlist_count.setText(f"{shown} of {len(self.current_playlist)} tracks")
+        else:
+            self.update_playlist_count()
+
+    def _selected_upcoming_rows(self) -> list[int]:
+        """Selected rows that have not played yet (the played ones are hidden, and moving them would shift the current track)."""
+        cutoff = self._playlist_current_row()
+        rows = {self.playlist_list.row(i) for i in self.playlist_list.selectedItems()}
+        return sorted(r for r in rows if r > cutoff)
+
+    def _move_playlist_rows(self, rows: list[int], dest: int | None):
+        """Move the given upcoming rows (ascending, all after the current track) to row `dest`, or to the end when None.
+
+        Every moved row is after the current track and the destination is after it too, so the player's current index
+        stays valid: only the order of upcoming tracks changes.
+        """
+        if not rows or len(self.current_playlist) != self.playlist_list.count():
+            return
+        moved_items, moved_tracks = [], []
+        self.playlist_list.setUpdatesEnabled(False)
+        try:
+            for r in reversed(rows):
+                moved_items.insert(0, self.playlist_list.takeItem(r))
+                moved_tracks.insert(0, self.current_playlist.pop(r))
+            insert_at = len(self.current_playlist) if dest is None else max(0, min(int(dest), len(self.current_playlist)))
+            for offset, (item, track) in enumerate(zip(moved_items, moved_tracks)):
+                self.current_playlist.insert(insert_at + offset, track)
+                self.playlist_list.insertItem(insert_at + offset, item)
+            self.playlist_list.clearSelection()
+            for offset in range(len(moved_items)):
+                it = self.playlist_list.item(insert_at + offset)
+                if it is not None:
+                    it.setSelected(True)
+        finally:
+            self.playlist_list.setUpdatesEnabled(True)
+        self._invalidate_highlight_cache()
+        self.update_playlist_count()
+        self.save_current_playlist()
+        self._sync_to_player(reset_index=False)
+        self.highlight_current_track()
+
+    def queue_selected_next(self):
+        """Right-click > Queue Next: put the selected tracks right after the one that is playing, in their current order."""
+        rows = self._selected_upcoming_rows()
+        if rows:
+            self._move_playlist_rows(rows, self._playlist_current_row() + 1)
+
+    def move_selected_to_end(self):
+        rows = self._selected_upcoming_rows()
+        if rows:
+            self._move_playlist_rows(rows, None)
+
+    def _show_playlist_context_menu(self, pos):
+        item = self.playlist_list.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.playlist_list.clearSelection()
+            item.setSelected(True)
+        has_rows = bool(self._selected_upcoming_rows())
+        menu = QMenu(self.playlist_list)
+        style_app_menu(menu)
+        queue_next = menu.addAction("Queue Next")
+        to_end = menu.addAction("Move to End of Playlist")
+        queue_next.setEnabled(has_rows)
+        to_end.setEnabled(has_rows)
+        chosen = menu.exec(self.playlist_list.viewport().mapToGlobal(pos))
+        if chosen == queue_next:
+            self.queue_selected_next()
+        elif chosen == to_end:
+            self.move_selected_to_end()
 
     def move_selected_up(self):
         rows = sorted({self.playlist_list.row(i) for i in self.playlist_list.selectedItems()})
@@ -10895,6 +11020,10 @@ class BackgroundMusicManager(QMainWindow):
             self.seek_slider.setStyleSheet(seek_slider_css())
             self.volume_text_label.setStyleSheet(f"color:{_v('text')}; font-size:12px; font-weight:650;")
             self.library_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
+            try:
+                self.playlist_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
+            except Exception:
+                pass
             self.fs_tree.setStyleSheet(
                 f"QTreeView {{ background:{_v('surface_deep')}; color:{_v('text')}; border:1px solid rgba(255,255,255,0.04); border-radius:8px; font-size:12px; padding:3px; }}"
                 f"QTreeView::item {{ padding:4px 6px; }}"
