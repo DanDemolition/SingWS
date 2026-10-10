@@ -8,3 +8,13 @@ publish = false
 [lib]
 name = "singws_bgm"
 path = "src/lib.rs"
+
+[[bin]]
+name = "singws-bgm-render"
+path = "src/render_main.rs"
+
+[dependencies]
+# Decoding: the same container/codec set the analyzer already uses.
+symphonia = { version = "0.6.1", features = ["mp3", "flac", "wav", "aac", "isomp4", "ogg", "vorbis", "pcm", "alac"] }
+# Sample-rate conversion (44.1 kHz files into a 48 kHz engine). Runtime dependency, MIT, pure Rust.
+rubato = "5.0.1"

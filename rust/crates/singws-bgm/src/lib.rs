@@ -3,6 +3,8 @@
 //! Crossfade is scheduled in *frames* so it is sample-accurate and independent of block size.
 //! Gate for the real engine (cpal + symphonia) is in RUST_MIGRATION_PLAN.md Stage 4; BASS stays the shipped engine.
 
+pub mod engine;
+
 pub trait Source {
     /// Fill `out` (interleaved stereo) and return the number of FRAMES written. Fewer than requested means end of stream.
     fn read(&mut self, out: &mut [f32]) -> usize;
