@@ -4651,41 +4651,50 @@ class BackgroundMusicPlayer(QObject):
                 self._bass_engine = LibmpvBackgroundEngine(output_name=output_name)
             backend = getattr(self._bass_engine, "backend_name", "BASS")
             _diag(f"[BG-BASS] {backend} background engine ready platform={self._platform_audio_label()}")
-            # Attach the BGM 10-band graphic EQ ONLY in advanced mode. Simple
-            # Audio Mode (default) leaves the EQ out of the chain entirely.
-            try:
-                parent = self.parent()
-                simple = bool(parent.settings.get("simple_audio_mode", True)) if (parent is not None and hasattr(parent, "settings")) else True
-                if parent is not None and not simple and hasattr(parent, "_ensure_eq_engines"):
-                    parent._ensure_eq_engines()
-                bgm_eq = getattr(parent, "bgm_eq", None) if parent is not None else None
-                if bgm_eq is not None and not simple:
-                    self._bass_engine.set_eq(bgm_eq)
-                elif hasattr(self._bass_engine, "set_eq"):
-                    self._bass_engine.set_eq(None)
-                _diag(f"[BG-BASS] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
-            except Exception:
-                pass
-            # Full master chain (gate/tilt EQ/exciter/compressor/limiter) so
-            # BGM is processed in tandem with karaoke songs when enabled.
-            try:
-                if (parent is not None and hasattr(parent, "_bgm_master_active")
-                        and hasattr(self._bass_engine, "set_master_processor")):
-                    if parent._bgm_master_active():
-                        self._bass_engine.set_master_processor(parent._ensure_bgm_master_processor())
-                    else:
-                        self._bass_engine.set_master_processor(None)
-            except Exception:
-                pass
-            try:
-                self._start_audio_diag_counters(parent)
-            except Exception:
-                pass
+            self._attach_host_audio_chain()
             return True
         except Exception as e:
             self._bass_engine = None
             _diag(f"[BG-BASS] no BASS/libmpv background engine available ({e})")
             return False
+
+    def _attach_host_audio_chain(self) -> None:
+        """Attach the BGM graphic EQ, the master chain and the audio counters to the current engine, from the host's settings.
+        Runs when the engine is created AND again once the host has finished loading its settings: the player is built before
+        `self.settings` exists, so the first run sees no settings and (by design of the guards) attaches nothing."""
+        if getattr(self, "_bass_engine", None) is None:
+            return
+        parent = self.parent()
+        # Attach the BGM 10-band graphic EQ ONLY in advanced mode. Simple
+        # Audio Mode (default) leaves the EQ out of the chain entirely.
+        try:
+            parent = self.parent()
+            simple = bool(parent.settings.get("simple_audio_mode", True)) if (parent is not None and hasattr(parent, "settings")) else True
+            if parent is not None and not simple and hasattr(parent, "_ensure_eq_engines"):
+                parent._ensure_eq_engines()
+            bgm_eq = getattr(parent, "bgm_eq", None) if parent is not None else None
+            if bgm_eq is not None and not simple:
+                self._bass_engine.set_eq(bgm_eq)
+            elif hasattr(self._bass_engine, "set_eq"):
+                self._bass_engine.set_eq(None)
+            _diag(f"[BG-BASS] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
+        except Exception:
+            pass
+        # Full master chain (gate/tilt EQ/exciter/compressor/limiter) so
+        # BGM is processed in tandem with karaoke songs when enabled.
+        try:
+            if (parent is not None and hasattr(parent, "_bgm_master_active")
+                    and hasattr(self._bass_engine, "set_master_processor")):
+                if parent._bgm_master_active():
+                    self._bass_engine.set_master_processor(parent._ensure_bgm_master_processor())
+                else:
+                    self._bass_engine.set_master_processor(None)
+        except Exception:
+            pass
+        try:
+            self._start_audio_diag_counters(parent)
+        except Exception:
+            pass
 
     def _bass_ready(self) -> bool:
         return getattr(self, "_bass_engine", None) is not None
@@ -19985,6 +19994,9 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
+        # The background player was built above, before these settings existed, so its EQ / master-chain / counter attach saw nothing.
+        # Redo it once the window has finished initialising (the event loop's first turn), so the chain is live from launch.
+        QTimer.singleShot(0, self._attach_bgm_chain_after_init)
         # Must land before VideoWindow is built: the ticker and show-VFX
         # backends are chosen once, at construction. Like the playback engine,
         # a change here takes effect on the next launch, never mid-show.
@@ -22542,6 +22554,17 @@ class KaraokeApp(QWidget):
         """BGM now runs the full master chain via a Python DSP, so it's active
         whenever master processing is active — exactly like karaoke."""
         return self._master_processing_active()
+
+    def _attach_bgm_chain_after_init(self):
+        try:
+            bg = getattr(self, "bg_music", None)
+            if bg is not None and hasattr(bg, "_attach_host_audio_chain"):
+                bg._attach_host_audio_chain()
+                eng = getattr(bg, "_bass_engine", None)
+                _diag(f"[MASTER-AUDIO] BGM chain attached at launch master={int(bool(self._bgm_master_active()))} "
+                      f"proc={int(getattr(eng, '_master_proc', None) is not None)}")
+        except Exception as exc:
+            _diag(f"[MASTER-AUDIO] BGM launch attach failed: {exc}")
 
     def _apply_bgm_master_processing(self):
         """Attach/detach the full BGM master processor to match the karaoke
