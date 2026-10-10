@@ -828,6 +828,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-bgm-ffi"
+version = "0.1.0"
+dependencies = [
+ "singws-bgm",
+ "singws-dsp",
+]
+
+[[package]]
 name = "singws-dsp"
 version = "0.1.0"
 

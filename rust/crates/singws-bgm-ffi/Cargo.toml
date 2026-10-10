@@ -1,0 +1,14 @@
+[package]
+name = "singws-bgm-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI over the Rust background-music engine (singws-bgm): the Python adapter rust_bgm_engine.py loads this with ctypes."
+publish = false
+
+[lib]
+name = "singws_bgm_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+singws-bgm = { path = "../singws-bgm" }
+singws-dsp = { path = "../singws-dsp" }

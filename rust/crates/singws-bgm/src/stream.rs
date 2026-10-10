@@ -224,6 +224,8 @@ pub struct StreamingDeck {
     est_total: Option<u64>,
     path: PathBuf,
     pub rate: u32,
+    /// Also counted here when set (the application aggregates all decks).
+    underrun_sink: Option<Arc<AtomicU64>>,
 }
 
 impl StreamingDeck {
@@ -249,9 +251,14 @@ impl StreamingDeck {
             .name("singws-bgm-decode".into())
             .spawn(move || worker_main(sh, p, target_rate, session))
             .map_err(|e| DecodeError::Unreadable(format!("cannot start decoder thread: {e}")))?;
-        let deck = Self { shared, worker: Some(worker), epoch: 0, seeking: false, settling: false, est_total: est, path: path.to_path_buf(), rate: target_rate };
+        let deck = Self { shared, worker: Some(worker), epoch: 0, seeking: false, settling: false, est_total: est, path: path.to_path_buf(), rate: target_rate, underrun_sink: None };
         deck.wait_ready(Duration::from_secs(3));
         Ok(deck)
+    }
+
+    pub fn with_underrun_sink(mut self, sink: Arc<AtomicU64>) -> Self {
+        self.underrun_sink = Some(sink);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -311,6 +318,9 @@ impl DeckSource for StreamingDeck {
         // underrun: the worker is behind. Silence for the rest of the block; the position (audio clock) still advances.
         out[got..].fill(0.0);
         self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+        if let Some(sink) = &self.underrun_sink {
+            sink.fetch_add(1, Ordering::Relaxed);
+        }
         want / 2
     }
 

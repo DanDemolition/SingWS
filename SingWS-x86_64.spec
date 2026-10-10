@@ -26,6 +26,11 @@ dsp_dylib = project_root / "native" / "singws_dsp" / "x86_64" / "libsingws_dsp_f
 if dsp_dylib.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{dsp_dylib}'"):
     binaries.append((str(dsp_dylib), "."))
 
+# Rust background-music engine library (rust/build_bgm.sh). Optional: without it `bgm_engine = "rust"` falls back to BASS.
+bgm_dylib = project_root / "native" / "singws_bgm" / "x86_64" / "libsingws_bgm_ffi.dylib"
+if bgm_dylib.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{bgm_dylib}'"):
+    binaries.append((str(bgm_dylib), "."))
+
 # Rust analysis helper (rust/build_analyze.sh). Optional: without it analysis_engine stays on libmpv.
 analyze_bin = project_root / "native" / "singws_analyze" / "x86_64" / "singws-analyze"
 if analyze_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{analyze_bin}'"):
@@ -43,6 +48,7 @@ for helper in (
     "singws_eq.py",
     "singws_master_audio.py",
     "rust_master_dsp.py",
+    "rust_bgm_engine.py",
     "rust_analysis.py",
     "transport_shadow.py",
     "system_snapshot.py",
@@ -165,6 +171,7 @@ a = Analysis(
         'mpv_karaoke_transport',
         'bass_background_engine',
         'rust_master_dsp',
+        'rust_bgm_engine',
         'rust_analysis',
         'transport_shadow',
         'system_snapshot',

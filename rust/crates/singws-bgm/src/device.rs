@@ -2,18 +2,20 @@
 //!   1. [`negotiate`] picks the device (by name, with fallback to the system default) and a stereo f32 config, preferring 48 kHz;
 //!   2. [`AudioOutput::start`] opens the stream over an `Arc<Mutex<Engine>>`.
 //!
-//! The callback only `try_lock`s the engine: if a control call happens to hold it (microseconds) the block is silence and
-//! `missed_locks` counts it, so the audio thread never waits. Control code must keep its critical sections short.
+//! The audio callback OWNS the engine (an [`RtEngine`]); control code talks to it through a lock-free command queue, so the audio thread
+//! never waits for anyone. (`missed_locks` is kept in the statistics for comparison with the milestone-3 mutex design and stays 0.)
 //! Every callback is timed; stream errors (device unplugged, route changed, xrun) are counted and flagged, never panic.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use crate::rt::RtEngine;
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, ErrorKind, SampleFormat, Stream, StreamConfig};
 
-use crate::engine::{Engine, MAX_BLOCK_FRAMES};
+use crate::engine::MAX_BLOCK_FRAMES;
 
 #[derive(Debug)]
 pub enum DeviceError {
@@ -188,12 +190,9 @@ pub struct AudioOutput {
 }
 
 impl AudioOutput {
-    pub fn start(n: Negotiated, engine: Arc<Mutex<Engine>>) -> Result<Self, DeviceError> {
-        {
-            let e = engine.lock().unwrap_or_else(|p| p.into_inner());
-            if e.sample_rate() != n.rate {
-                return Err(DeviceError::RateMismatch { engine: e.sample_rate(), stream: n.rate });
-            }
+    pub fn start(n: Negotiated, mut rt: RtEngine) -> Result<Self, DeviceError> {
+        if rt.engine_mut().sample_rate() != n.rate {
+            return Err(DeviceError::RateMismatch { engine: rt.engine_mut().sample_rate(), stream: n.rate });
         }
         let stats = Arc::new(Stats::default());
         let (st_cb, st_err) = (stats.clone(), stats.clone());
@@ -203,30 +202,22 @@ impl AudioOutput {
         let data_cb = move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
             let t0 = Instant::now();
             let frames = data.len() / ch;
-            match engine.try_lock() {
-                Ok(mut e) => {
-                    if ch == 2 {
-                        e.mix(data);
-                    } else {
-                        let mut done = 0usize;
-                        while done < frames {
-                            let k = (frames - done).min(MAX_BLOCK_FRAMES);
-                            e.mix(&mut scratch[..k * 2]);
-                            for i in 0..k {
-                                let o = (done + i) * ch;
-                                data[o] = scratch[2 * i];
-                                data[o + 1] = scratch[2 * i + 1];
-                                for c in 2..ch {
-                                    data[o + c] = 0.0;
-                                }
-                            }
-                            done += k;
+            if ch == 2 {
+                rt.process(data);
+            } else {
+                let mut done = 0usize;
+                while done < frames {
+                    let k = (frames - done).min(MAX_BLOCK_FRAMES);
+                    rt.process(&mut scratch[..k * 2]);
+                    for i in 0..k {
+                        let o = (done + i) * ch;
+                        data[o] = scratch[2 * i];
+                        data[o + 1] = scratch[2 * i + 1];
+                        for c in 2..ch {
+                            data[o + c] = 0.0;
                         }
                     }
-                }
-                Err(_) => {
-                    data.fill(0.0);
-                    st_cb.missed_locks.fetch_add(1, Ordering::Relaxed);
+                    done += k;
                 }
             }
             let us = t0.elapsed().as_micros() as u64;

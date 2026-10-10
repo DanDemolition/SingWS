@@ -220,6 +220,9 @@ pub struct Engine {
     pub pending_frames: u64,
     /// Click-prevention fade-in applied when a deck starts or is repositioned (BASSmix: 5 ms). 0 switches it off.
     ramp_s: f32,
+    /// Decks taken out of play, waiting to be freed by the control thread (dropping a deck frees its buffers, which the audio thread
+    /// must not do). Preallocated: pushing within capacity never allocates.
+    discarded: Vec<Box<dyn DeckSource>>,
 }
 
 impl Engine {
@@ -237,7 +240,21 @@ impl Engine {
             gap_frames: 0,
             pending_frames: 0,
             ramp_s: RAMP_IN_S,
+            discarded: Vec::with_capacity(16),
         }
+    }
+
+    fn retire(&mut self, d: Option<Deck>) {
+        if let Some(deck) = d {
+            if self.discarded.len() < self.discarded.capacity() {
+                self.discarded.push(deck.src);
+            } // else: the outbox is full (the control side is not collecting); dropping here is the lesser evil
+        }
+    }
+
+    /// A deck the engine no longer uses, to be dropped by the caller on a non-realtime thread.
+    pub fn take_discarded(&mut self) -> Option<Box<dyn DeckSource>> {
+        self.discarded.pop()
     }
 
     /// Length of the fade-in after a start or seek, in seconds (default [`RAMP_IN_S`]; 0 disables it).
@@ -272,8 +289,10 @@ impl Engine {
     }
     pub fn stop(&mut self) {
         self.crossfade = None;
-        self.secondary = None;
-        self.primary = None;
+        let s = self.secondary.take();
+        self.retire(s);
+        let p = self.primary.take();
+        self.retire(p);
         self.playing = false;
     }
     pub fn is_playing(&self) -> bool {
@@ -317,13 +336,18 @@ impl Engine {
         if self.primary.is_none() || self.crossfade.is_some() {
             return false;
         }
-        self.secondary = Some(Deck::new(src, norm_gain, self.rate, self.ramp_s));
+        let old = self.secondary.replace(Deck::new(src, norm_gain, self.rate, self.ramp_s));
+        self.retire(old);
         true
     }
     pub fn invalidate_secondary_preload(&mut self) {
         if self.crossfade.is_none() {
-            self.secondary = None;
+            let s = self.secondary.take();
+            self.retire(s);
         }
+    }
+    pub fn has_primary(&self) -> bool {
+        self.primary.is_some()
     }
     pub fn has_secondary(&self) -> bool {
         self.secondary.is_some()
@@ -362,13 +386,15 @@ impl Engine {
     /// Promote the incoming deck to primary.
     pub fn complete_crossfade(&mut self) -> bool {
         let Some(sec) = self.secondary.take() else { return false };
-        self.primary = Some(sec);
+        let old = self.primary.replace(sec);
+        self.retire(old);
         self.crossfade = None;
         true
     }
     pub fn cancel_crossfade(&mut self) {
         self.crossfade = None;
-        self.secondary = None;
+        let s = self.secondary.take();
+        self.retire(s);
     }
 
     // ---- position ------------------------------------------------------------------------------------------------
