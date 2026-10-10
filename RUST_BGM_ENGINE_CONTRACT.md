@@ -204,3 +204,6 @@ error flag path exists but was never exercised), changing the device's sample ra
 (playlist advance, scheduled crossfades, fade in/out, volume recovery) has not been run; the Intel installer was not rebuilt and the Intel library
 never ran on Intel hardware; a USB interface; unplugging the output mid-play (`device_lost` is exposed and counted, the app does not yet react to
 it, and neither does it for BASS); the app logs `[AUDIO-DIAG] master-dsp[rust-engine]`, so grep for that.
+
+**Default flipped (2026-10-10, operator decision):** `bgm_engine` now defaults to `"rust"` (before the M6 rehearsal; the operator chose this knowing M6 was
+outstanding). `"bass"` opts out. A start-up failure still falls back to BASS automatically; a running-but-misbehaving Rust engine does not.

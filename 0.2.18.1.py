@@ -3851,7 +3851,7 @@ DEFAULTS = {
     # with zero over-budget blocks and zero gaps) or "python" (the reference, runs inside a BASS audio-thread callback).
     # Falls back to Python if the library is missing. Takes effect at the next launch.
     "master_dsp_engine": "rust",
-    "bgm_engine": "bass",   # "bass" (default) | "rust": the Rust background-music engine (roadmap item 1); applies at next launch
+    "bgm_engine": "rust",   # "rust" (default, operator decision 2026-10-10) | "bass": the background-music engine; applies at next launch. A Rust start-up failure falls back to BASS.
     # Engine for loudness / silence-boundary analysis: "rust" (DEFAULT since 2026-10-10: Rust answers loudness, peak, duration and
     # silence boundaries, which matched libmpv on every real file tested; the BGM crossfade envelope and ANY Rust trouble fall back
     # to libmpv), "libmpv" (the old behaviour) or "shadow" (libmpv stays in charge; the Rust helper runs alongside and any
@@ -4638,9 +4638,10 @@ class BackgroundMusicPlayer(QObject):
             settings = getattr(parent, "settings", None) if parent is not None else None
             if not isinstance(settings, dict):
                 settings = _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
-            return "rust" if str(settings.get("bgm_engine", "bass") or "bass").strip().lower() == "rust" else "bass"
+            # "bass" is the only way to opt out; unset, empty or anything else means the default (rust)
+            return "bass" if str(settings.get("bgm_engine", "rust") or "rust").strip().lower() == "bass" else "rust"
         except Exception:
-            return "bass"
+            return "rust"
 
     def _init_bass_engine(self, output_name: str | None = None) -> bool:
         try:

@@ -275,7 +275,7 @@ def _load_app():
 
 
 class AppSelectionTests(unittest.TestCase):
-    """`_init_bass_engine` picks the engine from the `bgm_engine` setting and always falls back to BASS."""
+    """`_init_bass_engine` picks the engine from the `bgm_engine` setting (default rust) and always falls back to BASS."""
 
     @classmethod
     def setUpClass(cls):
@@ -295,11 +295,12 @@ class AppSelectionTests(unittest.TestCase):
         p._attach_host_audio_chain = lambda: None
         return p
 
-    def test_default_is_bass(self):
-        for setting in (None, "bass", "BASS", "nonsense", ""):
-            self.assertEqual(self._player(setting)._bgm_engine_preference(), "bass")
-        self.assertEqual(self._player("rust")._bgm_engine_preference(), "rust")
-        self.assertEqual(self._player(" Rust ")._bgm_engine_preference(), "rust")
+    def test_default_is_rust_and_bass_is_the_only_way_out(self):
+        for setting in (None, "rust", " Rust ", "", "nonsense"):
+            self.assertEqual(self._player(setting)._bgm_engine_preference(), "rust", setting)
+        for setting in ("bass", "BASS", " bass "):
+            self.assertEqual(self._player(setting)._bgm_engine_preference(), "bass", setting)
+        self.assertEqual(self.app.DEFAULTS["bgm_engine"], "rust")
 
     def test_rust_is_used_when_requested_and_available(self):
         p = self._player("rust")
