@@ -75,7 +75,7 @@ All of these exist as methods on `Engine` in `engine.rs` unless marked "later".
 3. **M4 - parity**: EQ bands, master chain, compressor, meter, normalization match BASS on the same input (tools: `tools/bgm_eq_check.py`,
    `tools/master_dsp_stage_check.py`).
 4. **M5 - wiring** behind `bgm_engine` (default `"bass"`; BASS kept in the build, automatic fallback if the Rust engine fails to start).
-5. **M6 - rehearsal**: 4 h soak here, the Intel Mac, two real shows. Only then may the default change.
+5. **M6 - rehearsal**: 4 h soak here, the Intel Mac, one real show (reduced from two by the operator on 2026-10-10). The default was flipped to rust before this completed, also by the operator's decision.
 
 ## How to run the offline renderer
 
@@ -207,3 +207,6 @@ it, and neither does it for BASS); the app logs `[AUDIO-DIAG] master-dsp[rust-en
 
 **Default flipped (2026-10-10, operator decision):** `bgm_engine` now defaults to `"rust"` (before the M6 rehearsal; the operator chose this knowing M6 was
 outstanding). `"bass"` opts out. A start-up failure still falls back to BASS automatically; a running-but-misbehaving Rust engine does not.
+
+**M6 acceptance (operator, 2026-10-10):** one real show, preferably on the Intel venue Mac, instead of two. Listening checks on the Apple Silicon Mac passed
+(crossfades, volume, fade in/out, EQ and master chain, pause/resume/skip).
