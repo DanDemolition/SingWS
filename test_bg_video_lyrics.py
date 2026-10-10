@@ -314,8 +314,12 @@ class NativeMpvDecodeTests(unittest.TestCase):
         bridge = Path("native/mpv_bridge/bridge.mm").read_text(encoding="utf-8")
         start = bridge.index("- (void)prepareForLoad:")
         prepare = bridge[start:bridge.index("- (BOOL)loadVideo:", start)]
-        self.assertIn("glBindFramebuffer(GL_FRAMEBUFFER,_cdgFbo)", prepare)
-        self.assertIn("glBindFramebuffer(GL_FRAMEBUFFER,_fbo)", prepare)
+        # The clear runs inside [self onGLSync:^{...}] (the render queue in render-thread mode, inline otherwise), so the
+        # ivars are spelled self->_x there. Same two retained targets, same ordering before loadfile.
+        compact = prepare.replace("self->", "")
+        self.assertIn("[self onGLSync:^{", prepare)
+        self.assertIn("glBindFramebuffer(GL_FRAMEBUFFER,_cdgFbo)", compact)
+        self.assertIn("glBindFramebuffer(GL_FRAMEBUFFER,_fbo)", compact)
         self.assertGreaterEqual(prepare.count("glClear(GL_COLOR_BUFFER_BIT)"), 2)
         self.assertLess(
             start,

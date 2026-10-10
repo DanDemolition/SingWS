@@ -3857,6 +3857,10 @@ DEFAULTS = {
     "analysis_engine": "libmpv",
     # Stage 3 shadow: feed KaraFun playback events to the Rust lifecycle machine and LOG disagreements only (never acts). Read at launch.
     "transport_shadow": False,
+    # Draw the karaoke picture on a dedicated render thread instead of the GUI thread, so a frozen GUI (for example while
+    # another app launches) cannot freeze the TV. EXPERIMENTAL, default off: with it off the bridge draws on the main
+    # thread exactly as before. Read once at launch, before the first song creates the bridge.
+    "karaoke_render_thread": False,
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -19995,6 +19999,13 @@ class KaraokeApp(QWidget):
         self.settings["karafun_dual_renderer_capture"] = True
         # Which engine measures loudness/boundaries during analysis; read once per launch ("libmpv" unless the operator opts in).
         _set_analysis_engine(self.settings.get("analysis_engine", "libmpv"))
+        try:
+            # The bridge reads this when it creates its renderer (first song). Never overrides an explicit env choice.
+            if bool(self.settings.get("karaoke_render_thread", False)):
+                os.environ.setdefault("SINGWS_RENDER_THREAD", "1")
+                _diag("[RENDER-THREAD] karaoke_render_thread=on: the karaoke picture is drawn on a dedicated render thread")
+        except Exception:
+            pass
         # Bug reports now go to the developer through the SingWS server, so the mail recipient and the SMTP login that older
         # versions saved here are obsolete. Remove them so a saved mail password does not stay on disk.
         _legacy_log_mail_keys = ("crash_log_email_to", "log_smtp_host", "log_smtp_port", "log_smtp_username",

@@ -43,7 +43,13 @@ static void bridgeLog(const char *fmt, ...) {
 
 @class BridgeRenderer;
 
-@interface BridgeVideoView : NSOpenGLView
+@interface BridgeVideoView : NSOpenGLView {
+@public
+    // Render-thread mode only: what the render thread may know about this view without touching AppKit. Refreshed on
+    // the main thread (viewGeometryChanged: / a 100 ms timer); a frozen main thread just leaves them stale.
+    std::atomic_bool presentable;
+    std::atomic_int backingW, backingH;
+}
 @property(nonatomic, weak) BridgeRenderer *renderer;
 @property(nonatomic) BOOL ignoresMouse;
 @end
@@ -79,6 +85,9 @@ static void bridgeLog(const char *fmt, ...) {
 - (void)setAudioDelaySeconds:(double)seconds;
 - (void)setCdgSidefill:(int)mode;
 - (void)nativeViewDidAttach:(BridgeVideoView *)view;
+- (BOOL)renderThreadActive;
+- (void)viewGeometryChanged:(BridgeVideoView *)view;
+- (uint64_t)presentCount;
 - (void)refreshViewsOutput:(NSView *)output preview:(NSView *)preview;
 - (void)beginWindowTransition:(int)durationMs;
 - (void)setRotationHost:(NSView *)host enabled:(BOOL)enabled;
@@ -88,8 +97,18 @@ static void bridgeLog(const char *fmt, ...) {
 
 @implementation BridgeVideoView
 - (void)drawRect:(NSRect)dirty { (void)dirty; [self.renderer presentView:self]; }
+- (void)update {
+    // Apple's multithreaded-OpenGL rule: -update must not run concurrently with drawing on the same context. Only
+    // matters (and is only taken) in render-thread mode, so the default path is unchanged.
+    CGLContextObj cgl=([self.renderer renderThreadActive] && self.openGLContext)?self.openGLContext.CGLContextObj:nullptr;
+    if(cgl)CGLLockContext(cgl);
+    [super update];
+    if(cgl)CGLUnlockContext(cgl);
+}
+- (void)reshape { [super reshape]; [self.renderer viewGeometryChanged:self]; }
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
+    [self.renderer viewGeometryChanged:self];
     // Qt may reconnect this native child long after QWidget::showEvent and its
     // bounded retries. AppKit is authoritative about when a drawable really
     // exists, so present at this lifecycle edge instead of guessing a delay.
@@ -116,6 +135,12 @@ static void bridgeLog(const char *fmt, ...) {
     return self.ignoresMouse ? nil : [super hitTest:point];
 }
 @end
+
+// Render-thread mode (see BridgeRenderer): 0 = every frame is drawn on the main thread (the long-standing behaviour),
+// 1 = a private serial queue owns all OpenGL work, so a stalled GUI thread cannot freeze the TV picture. Read once when
+// a renderer is created: from this flag (set by singws_bridge_set_render_thread) or the SINGWS_RENDER_THREAD env var.
+static std::atomic<int> g_renderThreadRequested{0};
+static char kRenderQueueKey;
 
 static void *getProc(void *ctx, const char *name) { (void)ctx; return dlsym(RTLD_DEFAULT, name); }
 static void renderWake(void *ctx) {
@@ -503,7 +528,13 @@ static GLuint makeProgram(void) {
     GLint _panelUniform, _backgroundTextureUniform, _backgroundOpacityUniform;
     GLint _previousBackgroundTextureUniform, _previousBackgroundOpacityUniform, _backgroundCrossfadeMixUniform;
     int _width, _height;
-    BOOL _hasFrame, _isCdg;
+    std::atomic<bool> _hasFrame, _isCdg;
+    // Render-thread mode. _glQueue is the main queue when the mode is off, so every dispatch that names it behaves
+    // exactly as the old dispatch_get_main_queue() did.
+    BOOL _renderThreadMode;
+    dispatch_queue_t _glQueue;
+    std::atomic<uint64_t> _presentCount;
+    NSTimer *_cacheTimer;
     // 0 off, 1 background colour, 2 ambient blur. Read on the GUI thread while
     // Python writes it from Qt's, same as the other display switches.
     std::atomic<int> _cdgSidefill;
@@ -572,6 +603,16 @@ static GLuint makeProgram(void) {
         _desiredAudioDelay=0.0;
         _outputTransitioning=false; _transitionSerial=0;
         _frameFence=nullptr;
+        _hasFrame=false; _isCdg=false; _presentCount=0; _cacheTimer=nil;
+        _renderThreadMode=(g_renderThreadRequested.load()!=0)||(getenv("SINGWS_RENDER_THREAD")&&*getenv("SINGWS_RENDER_THREAD")&&*getenv("SINGWS_RENDER_THREAD")!='0');
+        if(_renderThreadMode){
+            _glQueue=dispatch_queue_create("com.singws.mpv.render",
+                dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_USER_INTERACTIVE,0));
+            dispatch_queue_set_specific(_glQueue,&kRenderQueueKey,(void *)1,nullptr);
+        }else{
+            _glQueue=dispatch_get_main_queue();
+        }
+        bridgeLog("[bridge] render thread mode=%s",_renderThreadMode?"ON (private render queue)":"off (main thread)");
         _pictureSpanX=(300.0/216.0)/((double)_width/_height); // CDG default
         _controlQueue=dispatch_queue_create("com.singws.mpv.control",
                                             DISPATCH_QUEUE_SERIAL);
@@ -637,13 +678,63 @@ static GLuint makeProgram(void) {
             backgroundStatus!=GL_FRAMEBUFFER_COMPLETE || !_program) return nil;
         _outputView=[self attachTo:output]; _previewView=[self attachTo:preview];
         if (!_outputView || !_previewView) return nil;
+        if(_renderThreadMode){
+            [self refreshAllViewCaches];
+            __weak BridgeRenderer *weakSelf=self;
+            _cacheTimer=[NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *t){
+                BridgeRenderer *strongSelf=weakSelf;
+                if(!strongSelf||strongSelf->_stopping.load()){[t invalidate];return;}
+                [strongSelf refreshAllViewCaches];
+            }];
+            [[NSRunLoop mainRunLoop] addTimer:_cacheTimer forMode:NSRunLoopCommonModes];
+        }
     }
     return self;
+}
+
+- (BOOL)renderThreadActive { return _renderThreadMode; }
+- (uint64_t)presentCount { return _presentCount.load(); }
+
+// Run `block` on the thread that owns all OpenGL work: inline when the mode is off (the old behaviour), inline when
+// already on the render queue, otherwise synchronously on the render queue. Never called FROM the render queue to the
+// main thread, so the two cannot deadlock.
+- (void)onGLSync:(dispatch_block_t)block {
+    if(!_renderThreadMode || dispatch_get_specific(&kRenderQueueKey)){ block(); return; }
+    dispatch_sync(_glQueue,block);
+}
+
+// Main thread only. Captures what the render thread needs to know about a view (is it drawable, how big).
+- (void)refreshViewCache:(BridgeVideoView *)view {
+    if(!view)return;
+    NSOpenGLContext *ctx=view.openGLContext;
+    const bool ok=ctx && !view.isHiddenOrHasHiddenAncestor && view.window && view.window.isVisible;
+    NSSize s=[view convertSizeToBacking:view.bounds.size];
+    const int w=MAX(1,(int)s.width), h=MAX(1,(int)s.height);
+    if(w!=view->backingW.load() || h!=view->backingH.load()){
+        view->backingW=w; view->backingH=h;
+        // The drawable changed size: tell the context, serialized with the render thread's drawing.
+        if(ctx && view.window){
+            CGLLockContext(ctx.CGLContextObj); [ctx update]; CGLUnlockContext(ctx.CGLContextObj);
+        }
+    }
+    view->presentable=ok;
+}
+- (void)refreshAllViewCaches {
+    for(BridgeVideoView *view in @[_outputView?:(id)[NSNull null],_previewView?:(id)[NSNull null],
+                                   _rotationView?:(id)[NSNull null],_spotlightView?:(id)[NSNull null]]){
+        if([view isKindOfClass:[BridgeVideoView class]])[self refreshViewCache:view];
+    }
+}
+- (void)viewGeometryChanged:(BridgeVideoView *)view {
+    if(!_renderThreadMode || _stopping.load())return;
+    [self refreshViewCache:view];
+    [self presentView:view];
 }
 
 - (BridgeVideoView *)attachTo:(NSView *)parent {
     if (!parent) return nil;
     BridgeVideoView *view=[[BridgeVideoView alloc] initWithFrame:parent.bounds pixelFormat:_format];
+    view->presentable=false; view->backingW=1; view->backingH=1;
     NSOpenGLContext *ctx=[[NSOpenGLContext alloc] initWithFormat:_format shareContext:_master];
     [view setOpenGLContext:ctx]; view.renderer=self;
     view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
@@ -662,6 +753,7 @@ static GLuint makeProgram(void) {
     NSView *frame=content.superview;
     if(!content || !frame)return nil;
     BridgeVideoView *view=[[BridgeVideoView alloc] initWithFrame:content.frame pixelFormat:_format];
+    view->presentable=false; view->backingW=1; view->backingH=1;
     NSOpenGLContext *ctx=[[NSOpenGLContext alloc] initWithFormat:_format shareContext:_master];
     [view setOpenGLContext:ctx]; view.renderer=self;
     view.ignoresMouse=YES;
@@ -695,18 +787,20 @@ static GLuint makeProgram(void) {
     // song underneath them. Clear both retained karaoke targets before the new
     // decoder is allowed to draw; the first real frame will install a new GPU
     // fence for the consumer views as usual.
-    [_master makeCurrentContext];
-    CGLLockContext(_master.CGLContextObj);
+    [self onGLSync:^{
+    [self->_master makeCurrentContext];
+    CGLLockContext(self->_master.CGLContextObj);
     glClearColor(0,0,0,1);
-    glBindFramebuffer(GL_FRAMEBUFFER,_cdgFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER,self->_cdgFbo);
     glViewport(0,0,300,216);
     glClear(GL_COLOR_BUFFER_BIT);
-    glBindFramebuffer(GL_FRAMEBUFFER,_fbo);
-    glViewport(0,0,_width,_height);
+    glBindFramebuffer(GL_FRAMEBUFFER,self->_fbo);
+    glViewport(0,0,self->_width,self->_height);
     glClear(GL_COLOR_BUFFER_BIT);
     glBindFramebuffer(GL_FRAMEBUFFER,0);
     glFlush();
-    CGLUnlockContext(_master.CGLContextObj);
+    CGLUnlockContext(self->_master.CGLContextObj);
+    }];
     // Until FILE_LOADED reports the real dwidth/dheight, assume the format's
     // nominal geometry rather than carrying the previous song's over.
     _pictureSpanX=(_isCdg?(300.0/216.0):((double)_width/_height))
@@ -750,12 +844,17 @@ static GLuint makeProgram(void) {
         mpv_set_wakeup_callback(_mpv,eventWake,(__bridge void *)self);
         int r=mpv_initialize(_mpv); if (r<0) return NO;
         bridgeLog("[bridge] playback buffering audio=1.0s readahead=10s cache=256MiB");
-        [_master makeCurrentContext];
-        mpv_opengl_init_params init={.get_proc_address=getProc,.get_proc_address_ctx=nullptr};
-        mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,(void *)MPV_RENDER_API_TYPE_OPENGL},
-            {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,&init},{MPV_RENDER_PARAM_INVALID,nullptr}};
-        r=mpv_render_context_create(&_render,_mpv,params); if (r<0) return NO;
-        mpv_render_context_set_update_callback(_render,renderWake,(__bridge void *)self);
+        __block int createResult=0;
+        [self onGLSync:^{
+            [self->_master makeCurrentContext];
+            mpv_opengl_init_params init={.get_proc_address=getProc,.get_proc_address_ctx=nullptr};
+            mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,(void *)MPV_RENDER_API_TYPE_OPENGL},
+                {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,&init},{MPV_RENDER_PARAM_INVALID,nullptr}};
+            createResult=mpv_render_context_create(&self->_render,self->_mpv,params);
+            if(createResult>=0)
+                mpv_render_context_set_update_callback(self->_render,renderWake,(__bridge void *)self);
+        }];
+        r=createResult; if (r<0) return NO;
     } else {
         // mpv's loadfile command returns before the previous file has stopped.
         // audio-files and several playback properties are file-local, so
@@ -1018,12 +1117,14 @@ static GLuint makeProgram(void) {
         unsigned char *out=(unsigned char *)malloc((size_t)st*h);
         unsigned char *row=(unsigned char *)malloc((size_t)st);
         if(!out||!row){free(out);free(row);return nullptr;}
-        [_master makeCurrentContext]; CGLLockContext(_master.CGLContextObj);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER,_cdgFbo);
+        [self onGLSync:^{
+        [self->_master makeCurrentContext]; CGLLockContext(self->_master.CGLContextObj);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,self->_cdgFbo);
         glPixelStorei(GL_PACK_ALIGNMENT,4);
         glReadPixels(0,0,w,h,GL_BGRA,GL_UNSIGNED_BYTE,out);
         glBindFramebuffer(GL_READ_FRAMEBUFFER,0);
-        CGLUnlockContext(_master.CGLContextObj);
+        CGLUnlockContext(self->_master.CGLContextObj);
+        }];
         // OpenGL rows start at the lower-left; QImage rows start at the top.
         for(int y=0;y<h/2;y++){
             unsigned char *top=out+(size_t)y*st;
@@ -1085,9 +1186,12 @@ static GLuint makeProgram(void) {
     if(!view || !view.window || _stopping.load())return;
     NSOpenGLContext *ctx=view.openGLContext;
     if(!ctx)return;
+    CGLLockContext(ctx.CGLContextObj);
     [ctx clearDrawable];
     [ctx setView:view];
     [ctx update];
+    CGLUnlockContext(ctx.CGLContextObj);
+    [self refreshViewCache:view];
     [view setNeedsDisplay:YES];
     [self presentView:view];
     bridgeLog("[bridge] %s drawable reattached to window",
@@ -1133,11 +1237,14 @@ static GLuint makeProgram(void) {
         // viewDidMoveToWindow/nativeViewDidAttach owns real window changes;
         // only bind here when the context is not already attached to this
         // retained view.
+        CGLLockContext(ctx.CGLContextObj);
         if(ctx.view!=view){
             [ctx clearDrawable];
             [ctx setView:view];
         }
         [ctx update];
+        CGLUnlockContext(ctx.CGLContextObj);
+        [self refreshViewCache:view];
     }
     [_outputView setNeedsDisplay:YES];
     [_previewView setNeedsDisplay:YES]; [_rotationView setNeedsDisplay:YES];
@@ -1155,7 +1262,7 @@ static GLuint makeProgram(void) {
     bridgeLog("[bridge] output transition hold serial=%llu duration=%dms",
             (unsigned long long)serial,settleMs);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)settleMs*NSEC_PER_MSEC),
-                   dispatch_get_main_queue(),^{
+                   _glQueue,^{
         if(self->_stopping.load() || self->_transitionSerial.load()!=serial)return;
         self->_outputTransitioning=false;
         // CDG may have no new graphics packet after the resize. Explicitly
@@ -1163,7 +1270,10 @@ static GLuint makeProgram(void) {
         // waiting for another mpv render callback.
         [self presentView:self->_outputView];
         [self presentView:self->_previewView]; [self presentView:self->_rotationView]; [self presentView:self->_spotlightView];
-        [self->_outputView setNeedsDisplay:YES];
+        if(self->_renderThreadMode)
+            dispatch_async(dispatch_get_main_queue(),^{ [self->_outputView setNeedsDisplay:YES]; });
+        else
+            [self->_outputView setNeedsDisplay:YES];
         bridgeLog("[bridge] output transition released serial=%llu",
                 (unsigned long long)serial);
     });
@@ -1172,17 +1282,17 @@ static GLuint makeProgram(void) {
 - (void)scheduleRender {
     if (_stopping.load()) return; bool expected=false;
     if (!_renderQueued.compare_exchange_strong(expected,true)) return;
-    dispatch_async(dispatch_get_main_queue(),^{ self->_renderQueued=false; if(!self->_stopping.load())[self renderFrame]; });
+    dispatch_async(_glQueue,^{ self->_renderQueued=false; if(!self->_stopping.load())[self renderFrame]; });
 }
 - (void)scheduleEvents {
     if (_stopping.load()) return; bool expected=false;
     if (!_eventQueued.compare_exchange_strong(expected,true)) return;
-    dispatch_async(dispatch_get_main_queue(),^{ self->_eventQueued=false; if(!self->_stopping.load())[self drainEvents]; });
+    dispatch_async(_glQueue,^{ self->_eventQueued=false; if(!self->_stopping.load())[self drainEvents]; });
 }
 - (void)scheduleBackgroundRender {
     if(_stopping.load())return; bool expected=false;
     if(!_backgroundRenderQueued.compare_exchange_strong(expected,true))return;
-    dispatch_async(dispatch_get_main_queue(),^{
+    dispatch_async(_glQueue,^{
         self->_backgroundRenderQueued=false;
         if(self->_stopping.load()||!self->_backgroundRender)return;
         uint64_t flags=mpv_render_context_update(self->_backgroundRender);
@@ -1209,7 +1319,7 @@ static GLuint makeProgram(void) {
 - (void)scheduleBackgroundEvents {
     if(_stopping.load())return; bool expected=false;
     if(!_backgroundEventQueued.compare_exchange_strong(expected,true))return;
-    dispatch_async(dispatch_get_main_queue(),^{
+    dispatch_async(_glQueue,^{
         self->_backgroundEventQueued=false;
         if(!self->_backgroundMpv)return;
         while(true){
@@ -1238,15 +1348,17 @@ static GLuint makeProgram(void) {
 - (BOOL)loadBackgroundVideo:(NSString *)path opacity:(double)opacity {
     if(!path.length||_stopping.load())return NO;
     if(_backgroundHasFrame.load() && _backgroundOpacity.load()>0.0){
-        [_master makeCurrentContext]; CGLLockContext(_master.CGLContextObj);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER,_backgroundFbo);
+        [self onGLSync:^{
+        [self->_master makeCurrentContext]; CGLLockContext(self->_master.CGLContextObj);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,self->_backgroundFbo);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D,_previousBackgroundTexture);
-        glCopyTexSubImage2D(GL_TEXTURE_2D,0,0,0,0,0,_width,_height);
+        glBindTexture(GL_TEXTURE_2D,self->_previousBackgroundTexture);
+        glCopyTexSubImage2D(GL_TEXTURE_2D,0,0,0,0,0,self->_width,self->_height);
         glBindTexture(GL_TEXTURE_2D,0);
         glActiveTexture(GL_TEXTURE0);
         glBindFramebuffer(GL_READ_FRAMEBUFFER,0);
-        glFlush(); CGLUnlockContext(_master.CGLContextObj);
+        glFlush(); CGLUnlockContext(self->_master.CGLContextObj);
+        }];
         _previousBackgroundHasFrame=true;
         _previousBackgroundOpacity=_backgroundOpacity.load();
         _backgroundCrossfadeMix=0.0;
@@ -1288,11 +1400,16 @@ static GLuint makeProgram(void) {
         mpv_observe_property(_backgroundMpv,101,"time-pos",MPV_FORMAT_DOUBLE);
         mpv_observe_property(_backgroundMpv,102,"pause",MPV_FORMAT_FLAG);
         mpv_observe_property(_backgroundMpv,103,"eof-reached",MPV_FORMAT_FLAG);
-        [_master makeCurrentContext];
-        mpv_opengl_init_params init={.get_proc_address=getProc,.get_proc_address_ctx=nullptr};
-        mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,(void *)MPV_RENDER_API_TYPE_OPENGL},{MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,&init},{MPV_RENDER_PARAM_INVALID,nullptr}};
-        if(mpv_render_context_create(&_backgroundRender,_backgroundMpv,params)<0)return NO;
-        mpv_render_context_set_update_callback(_backgroundRender,backgroundRenderWake,(__bridge void *)self);
+        __block int backgroundCreate=0;
+        [self onGLSync:^{
+            [self->_master makeCurrentContext];
+            mpv_opengl_init_params init={.get_proc_address=getProc,.get_proc_address_ctx=nullptr};
+            mpv_render_param params[]={{MPV_RENDER_PARAM_API_TYPE,(void *)MPV_RENDER_API_TYPE_OPENGL},{MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,&init},{MPV_RENDER_PARAM_INVALID,nullptr}};
+            backgroundCreate=mpv_render_context_create(&self->_backgroundRender,self->_backgroundMpv,params);
+            if(backgroundCreate>=0)
+                mpv_render_context_set_update_callback(self->_backgroundRender,backgroundRenderWake,(__bridge void *)self);
+        }];
+        if(backgroundCreate<0)return NO;
     }
     // An EOF may leave pause asserted.  Every replacement animation must
     // explicitly resume without touching the karaoke/audio master core.
@@ -1497,12 +1614,16 @@ static GLuint makeProgram(void) {
         _rotationView.hidden=YES;
         return;
     }
-    if(!_rotationView) _rotationView=[self attachRotationBehind:host];
-    else if(_rotationHost!=host){
+    if(!_rotationView){
+        BridgeVideoView *created=[self attachRotationBehind:host];
+        [self onGLSync:^{ self->_rotationView=created; }];
+    }else if(_rotationHost!=host){
         [_rotationView removeFromSuperview];
-        _rotationView=nil;
-        _rotationView=[self attachRotationBehind:host];
+        [self onGLSync:^{ self->_rotationView=nil; }];
+        BridgeVideoView *created=[self attachRotationBehind:host];
+        [self onGLSync:^{ self->_rotationView=created; }];
     }
+    if(_renderThreadMode)[self refreshViewCache:_rotationView];
     _rotationHost=host;
     if(!_rotationView)return;
     _rotationView.hidden=!enabled;
@@ -1519,7 +1640,9 @@ static GLuint makeProgram(void) {
     if(!host){ _spotlightView.hidden=YES; return; }
     if(!_spotlightView || _spotlightHost!=host){
         [_spotlightView removeFromSuperview];
-        _spotlightView=[self attachTo:host];
+        BridgeVideoView *created=[self attachTo:host];
+        [self onGLSync:^{ self->_spotlightView=created; }];
+        if(_renderThreadMode)[self refreshViewCache:_spotlightView];
         _spotlightView.ignoresMouse=YES;
         _spotlightView.alphaValue=0;
         _spotlightHost=host;
@@ -1540,7 +1663,15 @@ static GLuint makeProgram(void) {
     }];
 }
 
+// Entry point for every present. Mode off: draw now on the calling (main) thread, as before. Mode on: hand the draw to the
+// render queue (or draw inline when already there), so AppKit callbacks and main-thread events never draw themselves.
 - (void)presentView:(BridgeVideoView *)view {
+    if(!view)return;
+    if(!_renderThreadMode || dispatch_get_specific(&kRenderQueueKey)){ [self presentViewNow:view]; return; }
+    __weak BridgeRenderer *weakSelf=self;
+    dispatch_async(_glQueue,^{ BridgeRenderer *strongSelf=weakSelf; if(strongSelf&&!strongSelf->_stopping.load())[strongSelf presentViewNow:view]; });
+}
+- (void)presentViewNow:(BridgeVideoView *)view {
     if(!view)return;  // nil belongs to neither view; labelling it would mislead
     // Why a present was skipped is the whole question when one window goes
     // blank while the other keeps drawing, so name the reason. Rate-limited to
@@ -1549,6 +1680,9 @@ static GLuint makeProgram(void) {
     int state = 0;
     if(!view.openGLContext) state = 1;
     else if(isOutput && _outputTransitioning.load()) state = 2;
+    // Render-thread mode must not read AppKit state (hidden/window/visible are main-thread questions): it trusts the
+    // cache the main thread keeps, and reports a not-presentable view as "view-hidden".
+    else if(_renderThreadMode) { if(!view->presentable.load()) state = 3; }
     else if(view.isHiddenOrHasHiddenAncestor) state = 3;
     else if(!view.window) state = 4;
     else if(!view.window.isVisible) state = 5;
@@ -1571,12 +1705,15 @@ static GLuint makeProgram(void) {
     // this halves the per-frame cost outright. Safe to skip: BridgeVideoView's
     // drawRect: calls back into presentView, so AppKit repaints from the
     // retained shared texture as soon as the view is on screen again.
-    [ctx makeCurrentContext]; [ctx update]; CGLLockContext(ctx.CGLContextObj);
+    // [ctx update] is a main-thread/AppKit call; in render-thread mode refreshViewCache does it (locked) on a resize.
+    [ctx makeCurrentContext]; if(!_renderThreadMode)[ctx update]; CGLLockContext(ctx.CGLContextObj);
     // The fence was inserted by the master producer context. This queues a
     // server-side wait in each shared consumer context and returns immediately,
     // preserving UI responsiveness while making the new CDG texture visible.
     if(_frameFence)glWaitSync(_frameFence,0,GL_TIMEOUT_IGNORED);
-    NSSize s=[view convertSizeToBacking:view.bounds.size]; int w=MAX(1,(int)s.width),h=MAX(1,(int)s.height);
+    int w,h;
+    if(_renderThreadMode){ w=MAX(1,view->backingW.load()); h=MAX(1,view->backingH.load()); }
+    else { NSSize s=[view convertSizeToBacking:view.bounds.size]; w=MAX(1,(int)s.width); h=MAX(1,(int)s.height); }
     glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,w,h); glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
     if(_hasFrame){
         const GLuint frameTexture=_isCdg?_cdgTexture:_texture;
@@ -1696,6 +1833,7 @@ static GLuint makeProgram(void) {
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,0);
         glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,0); glBindVertexArray(0); glUseProgram(0); }
     [ctx flushBuffer]; CGLUnlockContext(ctx.CGLContextObj);
+    _presentCount.fetch_add(1);
 }
 - (void)shutdown {
     if(_stopping.exchange(true))return;
@@ -1707,9 +1845,12 @@ static GLuint makeProgram(void) {
     if(_mpv)mpv_set_wakeup_callback(_mpv,nullptr,nullptr);
     if(_backgroundRender)mpv_render_context_set_update_callback(_backgroundRender,nullptr,nullptr);
     if(_backgroundMpv)mpv_set_wakeup_callback(_backgroundMpv,nullptr,nullptr);
-    if(_render){[_master makeCurrentContext];mpv_render_context_free(_render);_render=nullptr;}
-    if(_backgroundRender){[_master makeCurrentContext];mpv_render_context_free(_backgroundRender);_backgroundRender=nullptr;}
-    if(_frameFence){[_master makeCurrentContext];glDeleteSync(_frameFence);_frameFence=nullptr;}
+    if(_cacheTimer){[_cacheTimer invalidate];_cacheTimer=nil;}
+    [self onGLSync:^{
+        if(self->_render){[self->_master makeCurrentContext];mpv_render_context_free(self->_render);self->_render=nullptr;}
+        if(self->_backgroundRender){[self->_master makeCurrentContext];mpv_render_context_free(self->_backgroundRender);self->_backgroundRender=nullptr;}
+        if(self->_frameFence){[self->_master makeCurrentContext];glDeleteSync(self->_frameFence);self->_frameFence=nullptr;}
+    }];
     if(_mpv){mpv_terminate_destroy(_mpv);_mpv=nullptr;}
     if(_backgroundMpv){mpv_terminate_destroy(_backgroundMpv);_backgroundMpv=nullptr;}
     [_outputView removeFromSuperview]; [_previewView removeFromSuperview]; [_rotationView removeFromSuperview]; [_spotlightView removeFromSuperview];
@@ -1726,6 +1867,12 @@ void singws_bridge_set_rotation_host(void *h, uintptr_t host, int enabled) {
 }
 
 void singws_bridge_set_log_callback(SingWSBridgeLogFn cb) { g_bridgeLog.store(cb); }
+
+// Opt in to render-thread mode for renderers created AFTER this call (SINGWS_RENDER_THREAD=1 does the same).
+void singws_bridge_set_render_thread(int enabled) { g_renderThreadRequested.store(enabled?1:0); }
+int singws_bridge_render_thread_active(void *h) { return h&&[(__bridge BridgeRenderer *)h renderThreadActive]; }
+// Frames drawn so far (every view counts). Lets a test prove the picture keeps updating while the GUI thread is blocked.
+uint64_t singws_bridge_present_count(void *h) { return h?[(__bridge BridgeRenderer *)h presentCount]:0; }
 
 void *singws_bridge_create(uintptr_t outputView, uintptr_t previewView,
                            const char *videoPath, const char *audioPath) {
