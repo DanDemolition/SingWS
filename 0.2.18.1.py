@@ -3708,8 +3708,15 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
             except Exception:
                 return False
 
+        def _system_snapshot_enabled() -> bool:
+            try:
+                return bool(getattr(owner, "settings", {}).get("stall_system_snapshot", True))
+            except Exception:
+                return True
+
         def _watch():
             stall_logged = False
+            long_logged = False
             peak = 0.0
             while not bool(getattr(owner, "_mt_watch_stop", False)):
                 time.sleep(0.03)
@@ -3765,10 +3772,21 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                             f" main-thread stack at detection:\n{stack}{topology}"
                         )
                         stall_logged = True
+                    # A freeze over a second also freezes the TV picture (karaoke frames are drawn on the main thread),
+                    # so record what else the Mac was doing at that moment. Log only; costs ~0.3 s on this watchdog
+                    # thread, and only during an already-long stall.
+                    if gap >= 1.0 and not long_logged and _system_snapshot_enabled():
+                        long_logged = True
+                        try:
+                            import system_snapshot as _system_snapshot
+                            _diag(f"[STALL] system during a >1s stall: {_system_snapshot.snapshot()}")
+                        except Exception as _snap_exc:
+                            _diag(f"[STALL] system snapshot failed: {_snap_exc}")
                 else:
                     if stall_logged:
                         _diag(f"[STALL] GUI thread recovered after ~{int(peak * 1000)}ms")
                     stall_logged = False
+                    long_logged = False
                     peak = 0.0
 
         watch_thread = threading.Thread(target=_watch, name="singws-main-thread-watchdog", daemon=True)
@@ -3845,6 +3863,8 @@ DEFAULTS = {
     # 2026-08-09. Stall timing does not need this and stays on; enable only to
     # chase a specific stall, on a machine that is not running a show.
     "stall_stack_capture": False,
+    # Log a one-line system snapshot (load, memory pressure, busiest processes) when the GUI freezes for over a second.
+    "stall_system_snapshot": True,
     "show_safe_stall_diagnostics_migrated": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
@@ -11455,9 +11475,13 @@ class SingWSLogger:
         if PSUTIL_AVAILABLE:
             try:
                 process = psutil.Process()
-                cpu = process.cpu_percent()
                 mem = process.memory_info().rss / (1024**2)  # MB
-                logging.warning(f"  SingWS CPU: {cpu:.1f}%")
+                # (The old "SingWS CPU" line always read 0.0%: cpu_percent() on a new object needs two calls. The real
+                # numbers are in the "[STALL] system during a >1s stall" line.)
+                try:
+                    logging.warning("  Load average: %.1f/%.1f/%.1f" % os.getloadavg())
+                except Exception:
+                    pass
                 logging.warning(f"  SingWS Memory: {mem:.0f} MB")
             except:
                 pass
