@@ -5882,7 +5882,7 @@ class BackgroundMusicPlayer(QObject):
                 eff = float(self._bass_engine._effective_master())
             except Exception:
                 eff = self.volume
-            _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend=BASS master_gain={eff:.3f}")
+            _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend={getattr(self._bass_engine, 'backend_name', 'BASS')} master_gain={eff:.3f}")
             return
         _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend=none")
 
