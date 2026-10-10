@@ -35,6 +35,7 @@ import threading
 from typing import Sequence
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from scipy.signal import lfilter, sosfilt
 
 
@@ -156,6 +157,10 @@ def _highpass(freq, sr, q=0.707):
     return b0, b1, b2, a0, a1, a2
 
 
+# Longest limiter look-ahead the processor supports, in samples (a power of two, shared with the Rust port).
+_LIMITER_MAX_LOOKAHEAD = 1024
+
+
 class MasterAudioProcessor:
     """Light mastering chain for the karaoke song bus. See module docstring."""
 
@@ -206,11 +211,11 @@ class MasterAudioProcessor:
     def reset_state(self):
         """Clear all filter/envelope memory (e.g. after a seek)."""
         with self._lock:
-            self._reset_state_locked()
+            self._reset_state_locked(keep_delay=False)
 
     # ---------------- internal build ----------------
 
-    def _reset_state_locked(self):
+    def _reset_state_locked(self, keep_delay: bool = False):
         ch = self._channels
         # EQ shelf state (sosfilt zi): (n_sections, ch, 2)
         if self._eq_sos is not None and self._eq_sos.shape[0] > 0:
@@ -234,8 +239,15 @@ class MasterAudioProcessor:
         self._comp_det_zi = np.zeros(1, dtype=np.float64)
         self._comp_gain_zi = np.array([self._comp_rel_a], dtype=np.float64)
         self._comp_gain_last = 1.0
-        self._lim_det_zi = np.zeros(1, dtype=np.float64)
-        self._lim_gain_zi = np.array([self._lim_rel_a], dtype=np.float64)
+        # Look-ahead limiter. The audio history (the delay line) survives a parameter change so moving a slider does not drop out
+        # the last ~1 ms of sound; an explicit reset_state() (a seek) clears it. The gain history is always re-seeded at unity.
+        hist = getattr(self, "_lim_hist_x", None)
+        if not keep_delay or hist is None or hist.shape != (_LIMITER_MAX_LOOKAHEAD, ch):
+            self._lim_hist_x = np.zeros((_LIMITER_MAX_LOOKAHEAD, ch), dtype=np.float64)
+        self._lim_r_hist = np.ones(max(0, self._lim_len - 1), dtype=np.float64)
+        self._lim_m_hist = np.ones(max(0, self._lim_len - 1), dtype=np.float64)
+        self._lim_s = 1.0
+        self._lim_primed = False
         self._lim_gain_last = 1.0
 
     def _rebuild(self):
@@ -264,7 +276,8 @@ class MasterAudioProcessor:
         self._gate_rel_a = _one_pole_alpha(p["gate_release_ms"], sr)
         self._comp_det_a = _one_pole_alpha(p["comp_attack_ms"], sr)
         self._comp_rel_a = _one_pole_alpha(p["comp_release_ms"], sr)
-        self._lim_det_a = _one_pole_alpha(p["limiter_detector_ms"], sr)
+        # limiter_detector_ms is the limiter's LOOK-AHEAD (and so its attack time), as in the karaoke chain's alimiter `attack`.
+        self._lim_len = int(min(_LIMITER_MAX_LOOKAHEAD, max(1, math.floor(p["limiter_detector_ms"] * sr / 1000.0 + 0.5))))
         self._lim_rel_a = _one_pole_alpha(p["limiter_release_ms"], sr)
 
         self._gate_thr_lin = _db_to_lin(p["gate_threshold_db"])
@@ -273,7 +286,7 @@ class MasterAudioProcessor:
         self._lim_ceiling_lin = _db_to_lin(p["limiter_ceiling_db"])
         self._out_ceiling_lin = _db_to_lin(p["output_ceiling_db"])
 
-        self._reset_state_locked()
+        self._reset_state_locked(keep_delay=True)
 
     @staticmethod
     def _norm_sos(rows):
@@ -392,21 +405,53 @@ class MasterAudioProcessor:
                 x *= gsm[:, None]
                 x *= self._comp_makeup_lin
 
-            # ---- Brickwall-safety limiter ----
+            # ---- Look-ahead peak limiter ----
+            # Holds every output sample at or below the ceiling. The audio is delayed by (L-1) samples (L = limiter_detector_ms,
+            # about 1.2 ms) so the gain can be brought down BEFORE a peak arrives:
+            #   r[n] = the gain sample n needs to sit at the ceiling;
+            #   m[n] = min of r over the last L samples (so every gain that will touch sample n is at most r[n]);
+            #   a[n] = moving average of m over L samples (turns the steps into a smooth L-sample ramp);
+            #   s[n] = min(a[n], slow recovery toward unity) (the release; the min keeps the guarantee).
+            # The output sample for input n leaves at n+L-1, where a averages m[n..n+L-1], each of which includes r[n]: the gain
+            # is never above r[n], so the peak cannot pass. The previous design smoothed the PEAK before comparing it with the
+            # ceiling, so short peaks never reached it and only the final hard clip held the level.
+            hist_n = _LIMITER_MAX_LOOKAHEAD
+            if self._lim_hist_x.shape[1] != ch:
+                self._lim_hist_x = np.zeros((hist_n, ch), dtype=np.float64)
+            buf = np.concatenate((self._lim_hist_x, x), axis=0)
+            self._lim_hist_x = buf[-hist_n:]
             if p["limiter_enabled"] >= 0.5:
+                L = self._lim_len
+                if not self._lim_primed or self._lim_r_hist.shape[0] != L - 1:
+                    self._lim_r_hist = np.ones(L - 1, dtype=np.float64)
+                    self._lim_m_hist = np.ones(L - 1, dtype=np.float64)
+                    self._lim_s = 1.0
+                    self._lim_primed = True
                 peak = np.abs(x).max(axis=1)
-                penv, self._lim_det_zi = self._smooth(peak, self._lim_det_a, self._lim_det_zi)
-                penv = np.maximum(penv, 1e-7)
-                ceil = self._lim_ceiling_lin
-                # Reduce only where the smoothed peak exceeds the ceiling.
-                lim_gain = np.minimum(1.0, ceil / penv)
-                # Smooth the release so the limiter recovers gently; attack stays
-                # fast because we then take the min with the instantaneous target
-                # (so a peak can never sneak through while the gain rides back up).
-                lgsm, self._lim_gain_zi = self._smooth(lim_gain, self._lim_rel_a, self._lim_gain_zi)
-                lg = np.minimum(lim_gain, lgsm)
-                self._lim_gain_last = float(lg[-1])
-                x *= lg[:, None]
+                r = np.where(peak > 1e-9, np.minimum(1.0, self._lim_ceiling_lin / np.maximum(peak, 1e-9)), 1.0)
+                if L > 1:
+                    rr = np.concatenate((self._lim_r_hist, r))
+                    m = sliding_window_view(rr, L).min(axis=1)
+                    mm = np.concatenate((self._lim_m_hist, m))
+                    avg = sliding_window_view(mm, L).mean(axis=1)
+                    self._lim_r_hist = rr[-(L - 1):]
+                    self._lim_m_hist = mm[-(L - 1):]
+                else:
+                    avg = r
+                rel = self._lim_rel_a
+                gains = np.empty(n, dtype=np.float64)
+                s_prev = self._lim_s
+                for i, a_i in enumerate(avg.tolist()):
+                    rec = rel * s_prev + (1.0 - rel)
+                    s_prev = a_i if a_i < rec else rec
+                    gains[i] = s_prev
+                self._lim_s = s_prev
+                self._lim_gain_last = s_prev
+                delay = L - 1
+                x = buf[hist_n - delay: hist_n - delay + n] * gains[:, None]
+            else:
+                self._lim_primed = False
+                self._lim_gain_last = 1.0
 
             # ---- Hard clip guard ----
             np.clip(x, -self._out_ceiling_lin, self._out_ceiling_lin, out=x)
