@@ -51,7 +51,7 @@ pub const PARAM_NAMES: [&str; 28] = [
 pub const PARAM_COUNT: usize = PARAM_NAMES.len();
 
 /// Defaults identical to `DEFAULT_PARAMS`.
-const DEFAULTS: [f64; PARAM_COUNT] = [
+pub const DEFAULTS: [f64; PARAM_COUNT] = [
     0.0, -58.0, 1.6, 5.0, 140.0, -18.0, // gate
     1.0, 90.0, 1.0, 3200.0, 1.0, 0.7, 9000.0, 1.5, // eq
     0.0, 4000.0, // exciter

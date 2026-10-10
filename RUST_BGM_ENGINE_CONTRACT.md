@@ -15,7 +15,7 @@ behind a `bgm_engine` setting that defaults to `"bass"` until it has been rehear
 | Offline renderer `singws-bgm-render` (two real files -> WAV + gap/peak/RMS report) | `rust/crates/singws-bgm/src/render_main.rs` | done, run on real tracks |
 | Streaming decode on a worker thread into a lock-free ring (`stream.rs`, `ring.rs`, `resample.rs`) | rust/crates/singws-bgm | done (M3) |
 | Sound card output (cpal): named device with fallback, rate negotiation, callback timing, latency, error flags (`device.rs`) | rust/crates/singws-bgm | done (M3) |
-| 10-band EQ and master compressor inside the engine | - | milestone 4 |
+| 10-band EQ (`eq.rs`) and the full master chain (`fx.rs`, the `singws-dsp` crate used directly) as engine effects, meter | rust/crates/singws-bgm | done (M4) |
 | C ABI / Python adapter with the same method names as the BASS engine | - | milestone 5 |
 
 ## Operations the app uses (Python surface of the BASS engine)
@@ -151,3 +151,22 @@ will want anyway. `singws-bgm-device probe --hammer` is the regression check.
 
 **Not covered by this milestone:** an external USB interface (only the built-in speakers exist on this Mac), unplugging a device mid-play (the
 error flag path exists but was never exercised), changing the device's sample rate mid-play, the Intel Mac.
+
+## Milestone 4 results - EQ, master chain, meter (2026-10-10)
+
+* **Graphic EQ** (`eq.rs`): ten peaking biquads at 31.5 Hz .. 16 kHz, bandwidth one octave, +/-12 dB, controlled through an `EqHandle`.
+  The BASS DX8 PARAMEQ response was MEASURED (`tools/bgm_eq_response.py`; one band at +12 dB, 40 frequencies) and found to equal the RBJ
+  peaking formula with BW = 1.0 octave to within 0.12 dB. Against the real BASS engine with the operator's own curve and a harsh
+  alternating +/-12 dB curve (neighbouring bands overlapping), the Rust EQ is within 0.29 dB at all 40 frequencies (tolerance 0.5).
+  Disabled or flat = bit-exact pass-through; gain changes apply at the next block without a click (filter state kept).
+* **Master chain** (`fx.rs`): `singws-dsp`'s `MasterProcessor` as an engine effect, no FFI hop, parameters by name through a `MasterHandle`
+  (typos rejected). With the engine substituted for the library, `tools/master_dsp_stage_check.py` passes unchanged: compressor, limiter
+  (-1.00 dBFS), output clip, tilt EQ, your tilt, exciter, gate, live slider change, and agreement with the Python reference (2.98e-08).
+  `tools/bgm_rust_engine_check.py` runs both parts (EQ vs BASS, chain through the engine).
+* **Meter**: the engine's meter (RMS over 50 ms x4, audible deck, clamp 0..1) matches BASS's `meter_level` to within 0.0005 where it is not
+  pegged at 1.0 (most loud music pegs at 1.0 in both engines).
+* Effect order in the engine: EQ first, master chain last, as in the BASS mixer.
+* Not ported on purpose: `set_master_compressor` (BASS's separate DX8 compressor). The app never calls it; only old tests do.
+* Not covered: the EQ/master chain were checked at 48 kHz (EQ) and 44.1 kHz (chain tool); a rate change mid-play would call
+  `MasterProcessor::configure_stream`, which the engine does not do yet (the engine rate is fixed per output; M5 rebuilds the engine on a
+  device change).

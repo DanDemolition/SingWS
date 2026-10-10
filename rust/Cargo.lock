@@ -823,6 +823,7 @@ dependencies = [
  "audioadapter-buffers",
  "cpal",
  "rubato",
+ "singws-dsp",
  "symphonia",
 ]
 

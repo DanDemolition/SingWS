@@ -36,6 +36,7 @@ def db_to_gain(db: float) -> float:
 
 
 times_holder: list = []
+meter_holder: list = []
 
 
 def render_bass(a: str, b: str, a_args) -> np.ndarray:
@@ -77,6 +78,7 @@ def render_bass(a: str, b: str, a_args) -> np.ndarray:
         e.preload_secondary(b, norm_gain=db_to_gain(a_args.norm_b))
         pull(round(a_args.lead * RATE))
         times_holder.append(e.get_times())
+        meter_holder.append(e.meter_level())
         ok = e.start_crossfade(b, a_args.xfade_ms, norm_gain=db_to_gain(a_args.norm_b), start_seconds=0.0)
         if not ok:
             raise SystemExit("BASS start_crossfade refused")
@@ -240,6 +242,12 @@ def main():
     if rt:
         print(f"\nreadouts at fade start (audible position, duration): bass {bt[0]:.4f} / {bt[1]:.4f}   rust {rt[0]:.4f} / {rt[1]:.4f}   "
               f"(position diff {abs(bt[0] - rt[0]) * 1000:.2f} ms, duration diff {abs(bt[1] - rt[1]) * 1000:.2f} ms)")
+    rm = None
+    for line in rust_report.splitlines():
+        if line.startswith("meter at fade start"):
+            rm = float(line.split()[-1])
+    if rm is not None and meter_holder:
+        print(f"meter at fade start (0..1, RMS over 50 ms x4): bass {meter_holder[0]:.4f}   rust {rm:.4f}   (difference {abs(meter_holder[0] - rm):.4f})")
     print("\nrust report:\n" + "\n".join("  " + l for l in rust_report.strip().splitlines()[:2]))
 
     ok_gap = sr < 5.0 or sr <= sb + 1.0

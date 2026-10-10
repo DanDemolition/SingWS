@@ -12,7 +12,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use singws_bgm::decode::decode_file;
-use singws_bgm::engine::Engine;
+use singws_bgm::engine::{Effect, Engine};
+use singws_bgm::eq::GraphicEq;
+use singws_bgm::fx::MasterEffect;
 
 struct Args {
     out: PathBuf,
@@ -25,6 +27,10 @@ struct Args {
     norm_a_db: f32,
     norm_b_db: f32,
     volume: f32,
+    /// Play the single file through the effect chain, start to finish (no crossfade), and write the result.
+    process: bool,
+    eq_gains: Option<[f32; 10]>,
+    master_params: Option<PathBuf>,
     files: Vec<PathBuf>,
 }
 
@@ -40,6 +46,9 @@ fn parse() -> Result<Args, String> {
         norm_a_db: 0.0,
         norm_b_db: 0.0,
         volume: 0.8,
+        process: false,
+        eq_gains: None,
+        master_params: None,
         files: vec![],
     };
     let mut it = std::env::args().skip(1);
@@ -56,6 +65,17 @@ fn parse() -> Result<Args, String> {
             "--norm-a" => a.norm_a_db = val("--norm-a")?.parse().map_err(|e| format!("--norm-a: {e}"))?,
             "--norm-b" => a.norm_b_db = val("--norm-b")?.parse().map_err(|e| format!("--norm-b: {e}"))?,
             "--volume" => a.volume = val("--volume")?.parse().map_err(|e| format!("--volume: {e}"))?,
+            "--process" => a.process = true,
+            "--eq" => {
+                let v: Vec<f32> = val("--eq")?.split(',').map(|x| x.trim().parse().map_err(|e| format!("--eq: {e}"))).collect::<Result<_, _>>()?;
+                if v.len() != 10 {
+                    return Err("--eq needs ten comma-separated gains in dB".into());
+                }
+                let mut g = [0.0f32; 10];
+                g.copy_from_slice(&v);
+                a.eq_gains = Some(g);
+            }
+            "--master-params" => a.master_params = Some(PathBuf::from(val("--master-params")?)),
             "-h" | "--help" => return Err(String::new()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => a.files.push(PathBuf::from(arg)),
@@ -117,6 +137,79 @@ fn main() {
     let a = decode(&args.files[0]);
     let b = args.files.get(1).map(decode);
 
+    if args.process {
+        // Whole file through [EQ, master chain] at unity: the engine path the app would use, driven offline.
+        let mut engine = Engine::new(args.rate);
+        engine.set_ramp_in_seconds(0.0);
+        let (eq, eq_h) = GraphicEq::new(args.rate);
+        let (master, master_h) = MasterEffect::new(args.rate);
+        if let Some(g) = args.eq_gains {
+            eq_h.set_gains_db(&g);
+            eq_h.set_enabled(true);
+        }
+        // Parameter file: "name value" lines; a line "at N" starts a new full parameter set that takes effect at frame N.
+        let mut schedule: Vec<(usize, Vec<(String, f64)>)> = vec![];
+        if let Some(path) = &args.master_params {
+            let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                eprintln!("error: {}: {e}", path.display());
+                std::process::exit(1);
+            });
+            schedule.push((0, vec![]));
+            for l in text.lines() {
+                let mut it = l.split_whitespace();
+                match (it.next(), it.next()) {
+                    (Some("at"), Some(n)) => schedule.push((n.parse().unwrap_or(0), vec![])),
+                    (Some(k), Some(v)) => {
+                        if let Ok(v) = v.parse() {
+                            schedule.last_mut().unwrap().1.push((k.to_string(), v));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            master_h.set_enabled(true);
+        }
+        let apply = |pairs: &Vec<(String, f64)>| {
+            let refs: Vec<(&str, f64)> = pairs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            let unknown = master_h.set_named(&refs);
+            if !unknown.is_empty() {
+                eprintln!("error: unknown master parameter(s): {}", unknown.join(", "));
+                std::process::exit(1);
+            }
+        };
+        // the first section applies before any audio
+        if let Some((_, pairs)) = schedule.first() {
+            apply(pairs);
+        }
+        engine.set_effects(vec![Box::new(eq) as Box<dyn Effect>, Box::new(master) as Box<dyn Effect>]);
+        engine.load(Box::new(a.deck()), 1.0, false, Some(args.volume));
+        let total = a.frames() as usize;
+        let mut out: Vec<f32> = Vec::with_capacity(total * 2);
+        let mut buf = vec![0.0f32; 1024 * 2];
+        let mut done = 0usize;
+        let mut next_section = 1usize;
+        while done < total {
+            let mut n = (total - done).min(1024);
+            if let Some((at, _)) = schedule.get(next_section) {
+                if *at <= done {
+                    apply(&schedule[next_section].1);
+                    next_section += 1;
+                    continue;
+                }
+                n = n.min(*at - done);
+            }
+            engine.mix(&mut buf[..n * 2]);
+            out.extend_from_slice(&buf[..n * 2]);
+            done += n;
+        }
+        if let Err(e) = write_wav(&args.out, args.rate, &out) {
+            eprintln!("error: cannot write {}: {e}", args.out.display());
+            std::process::exit(1);
+        }
+        println!("processed {} frames -> {}", total, args.out.display());
+        return;
+    }
+
     let mut engine = Engine::new(args.rate);
     engine.load(Box::new(a.deck()), db_to_gain(args.norm_a_db), true, Some(args.volume));
     let xfade_at = args.xfade_at.unwrap_or((a.seconds() - 8.0).max(0.0));
@@ -151,6 +244,7 @@ fn main() {
         run(&mut engine, ((xfade_at - first) * rate).round() as u64, &mut out, &mut peak);
         let (tp, td) = engine.get_times();
         println!("times at fade start: pos {tp:.4} dur {td:.4}");
+        println!("meter at fade start: {:.4}", engine.meter_level());
         engine.start_crossfade(args.xfade_ms, 0.0);
         let limit = ((b.as_ref().unwrap().seconds() + 5.0) * rate) as u64;
         let mut after = 0u64;

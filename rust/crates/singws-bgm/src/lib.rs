@@ -6,6 +6,8 @@
 pub mod decode;
 pub mod device;
 pub mod engine;
+pub mod eq;
+pub mod fx;
 pub mod resample;
 pub mod ring;
 pub mod stream;

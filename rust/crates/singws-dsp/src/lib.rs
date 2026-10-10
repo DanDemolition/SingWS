@@ -7,4 +7,4 @@
 
 pub mod master;
 
-pub use master::{MAX_CHANNELS, MasterProcessor, PARAM_COUNT, PARAM_NAMES, Params};
+pub use master::{DEFAULTS, MAX_CHANNELS, MasterProcessor, PARAM_COUNT, PARAM_NAMES, Params};
