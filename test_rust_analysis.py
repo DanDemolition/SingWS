@@ -292,8 +292,14 @@ class HybridTests(unittest.TestCase):
         h = self.session("rust", lufs=-14.0)
         self.assertEqual(h.measure("a.mp3"), (-14.0, -1.0))                       # loudness verified -> Rust
         self.assertEqual(h.measure_karaoke_transition("a.mp3"), (-14.0, -1.0, 200.0, 1.0, 199.0))   # boundaries verified -> Rust
-        self.assertEqual(h.measure_transition("a.mp3")[2], [-20.0] * 10)          # envelope NOT equivalent -> libmpv
-        self.assertEqual(self.primary.calls, ["bgm"])
+        self.assertEqual(h.measure_transition("a.mp3")[2], [-60.0, -20.0, -10.0, -10.0, -30.0])    # envelope verified (2026-10-10) -> Rust
+        self.assertEqual(self.primary.calls, [])
+
+    def test_the_envelope_goes_back_to_libmpv_if_it_is_ever_unverified(self):
+        with mock.patch.object(ra, "RUST_ENVELOPE_VERIFIED", False):
+            h = self.session("rust", lufs=-14.0)
+            self.assertEqual(h.measure_transition("a.mp3")[2], [-20.0] * 10)
+            self.assertEqual(self.primary.calls, ["bgm"])
 
     def test_boundaries_go_back_to_libmpv_if_they_are_ever_unverified(self):
         with mock.patch.object(ra, "RUST_BOUNDARIES_VERIFIED", False):

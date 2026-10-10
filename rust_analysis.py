@@ -35,7 +35,9 @@ TIMEOUT_GRACE_S = 5.0     # extra wall-clock beyond the helper's own --timeout b
 # (tools/rust_analysis_parity.py). "rust" mode uses Rust only for verified kinds.
 RUST_LOUDNESS_VERIFIED = True        # integrated loudness + sample peak: 258/258 and 500/500 files within 0.1 LU
 RUST_BOUNDARIES_VERIFIED = True      # duration + first/last audible time: 150/150 files identical to libmpv (max difference 0.000 s)
-RUST_ENVELOPE_VERIFIED = False       # 100 ms RMS envelope: NOT equivalent - libmpv's windows are 4800 samples (109 ms at 44.1 kHz), Rust's are exactly 100 ms
+RUST_ENVELOPE_VERIFIED = True        # 100 ms RMS envelope. Was False while libmpv's 4800-sample windows were 109 ms at 44.1 kHz; since the
+                                     # 2026-10-09 aresample=48000 fix both are true 100 ms. 2026-10-10, 40 real tracks: derived audio_start
+                                     # identical (40/40), audio_end and fade_start within 0.1 s, envelope length ratio 0.9992-1.0000.
 
 # Shadow comparison tolerances (what counts as a disagreement worth a log line).
 LU_TOLERANCE = 0.1001
