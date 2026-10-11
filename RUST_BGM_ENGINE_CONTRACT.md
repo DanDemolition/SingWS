@@ -255,3 +255,15 @@ engine ready, pad loaded, no errors, clean shutdown (bundled ABI-2 library confi
   music crossfades: headless 261 clicks + 27 Shift-stops over 4 transitions, and on the real device 196 + 24 over 3 transitions: 0 xruns, 0 gaps, 0 underruns, 0 errors.
 * Memory: clips are held decoded; the operator's six pad clips total 16 MB (limit per clip 300 s, about 115 MB).
 * Still to do: S4 (decide the default / release), S5 (remove BASS), and a listening check of the real pads by the operator.
+
+## S4 results - hardening before any release (2026-10-11)
+
+Scope note: S4 as first written was "pads on Rust by default, BASS only on opt-out, then release". The default is already true since S2 (pads follow `bgm_engine`, default rust);
+the release is on hold by the operator, so S4 became hardening. The operator verified the pads by ear on the installed arm64 build (click, layering, Shift-click, slider, tone chain,
+latency "perfect").
+* **Format parity.** The pad file dialog offers mp3 wav m4a aac ogg flac aiff. Testing real files of each found AIFF failing on the Rust path (the decoder's `aiff` feature was off).
+  Fixed: `aiff`, `caf`, `mp1`, `mp2`, `adpcm` enabled in `singws-bgm`. Verified decoding + playing: wav (16/24-bit, float, mono, 44.1 kHz), aiff (big-endian), caf, flac, aac and alac in m4a,
+  raw aac (adts), mp3, ogg Vorbis. NOT supported (and not in the dialog): WMA, Opus-in-Ogg. `test_soundboard_formats.py` generates 13 variants with ffmpeg and keeps them working.
+* **A pad that cannot load or play now says so**: a warning mark on its label and the reason in its tooltip (it used to fail with only a log line); cleared by a good clip.
+* Open/decided: clips longer than 300 s are refused with a clear message (held decoded in memory; the operator's pads total 16 MB); Opus is unsupported; BASS stays only as the opt-out
+  (`bgm_engine = "bass"`) until S5.

@@ -19531,6 +19531,7 @@ class SoundboardPad(QPushButton):
         # device, so clips overlap BGM and karaoke without Python audio work.
         self._channel = SoundboardChannel(self._bass_runtime)
         self._last_press_modifiers = Qt.KeyboardModifier.NoModifier
+        self._load_error: str = ""       # why the clip could not be loaded/played (shown on the pad; empty when fine)
         self._playing = False
         self._channel_poll_timer = QTimer(self)
         self._channel_poll_timer.setInterval(80)
@@ -19570,16 +19571,19 @@ class SoundboardPad(QPushButton):
         self._clip_path = path
         self._label = label
         self._volume = max(0.0, min(1.0, float(volume)))
+        self._load_error = ""
         try:
             self._channel.load(path, self._channel_volume())
         except SoundboardError as e:
             # Keep the assignment; a later click retries after the audio output recovers.
+            self._load_error = str(e)
             _diag(f"[SOUNDBOARD] preload failed slot={self.slot_index}: {e}")
         self._refresh_face()
         self.cleared.emit(self.slot_index)
 
     def clear_clip(self, emit: bool = True):
         self._stop_channel(release=True)
+        self._load_error = ""
         self._clip_path = ""
         self._label = ""
         self._refresh_face()
@@ -19599,9 +19603,15 @@ class SoundboardPad(QPushButton):
         # via the pad's background colour so we save those characters for the
         # actual clip name (which is usually what runs out of space first).
         face = self._label or Path(self._clip_path).stem
+        if self._load_error:
+            # a pad that cannot play says so (it used to fail silently, with only a log line)
+            face = "\u26a0 " + face
         self._canonical_text = face
         self.setText(face)
-        self.setToolTip(f"{face}\n{self._clip_path}\nRight-click for options")
+        tip = f"{face}\n{self._clip_path}\nRight-click for options"
+        if self._load_error:
+            tip = f"This pad could not be loaded or played:\n{self._load_error}\n\n{self._clip_path}\nRight-click for options"
+        self.setToolTip(tip)
         self._apply_playing_style(playing)
         self._fit_font_to_pad()
 
@@ -19664,6 +19674,7 @@ class SoundboardPad(QPushButton):
             if self._channel.path != self._clip_path:
                 self._channel.load(self._clip_path, self._channel_volume())
             self._channel.play()
+            self._load_error = ""
             self._playing = True
             self._refresh_face()
             self._start_channel_polling()
@@ -19672,6 +19683,7 @@ class SoundboardPad(QPushButton):
             backend = "Rust" if getattr(self._channel, "supports_layering", False) else "BASS"
             _diag(f"[SOUNDBOARD] play backend={backend} slot={self.slot_index} output={selected} file={Path(self._clip_path).name}")
         except SoundboardError as e:
+            self._load_error = str(e)
             _diag(f"[SOUNDBOARD] play failed slot={self.slot_index}: {e}")
             self._stop_channel()
 

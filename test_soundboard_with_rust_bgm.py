@@ -161,6 +161,18 @@ class PadWidgetOnRustTests(unittest.TestCase):
         self.engine.render(4800)
         self.assertAlmostEqual(self.level() / full, 0.5, delta=0.03, msg="music volume is separate")
 
+    def test_a_clip_that_cannot_load_is_flagged_on_the_pad_and_recovers(self):
+        self.pad._set_clip("/nonexistent/missing.wav", "Gone", 1.0)
+        self.assertIn("\u26a0", self.pad.text(), "the pad shows a warning mark")
+        self.assertIn("could not be loaded", self.pad.toolTip())
+        self.click()                                   # clicking it must not crash
+        self.assertFalse(self.pad._playing)
+        self.pad._set_clip(self.clip, "Pad", 1.0)       # a good clip clears the warning
+        self.assertNotIn("\u26a0", self.pad.text())
+        self.assertEqual(self.pad._load_error, "")
+        self.click()
+        self.assertTrue(self.pad._playing)
+
     def test_the_slider_value_survives_an_engine_rebuild(self):
         self.player.set_soundboard_volume(0.4)
         self.host.settings["soundboard_volume"] = 0.4
