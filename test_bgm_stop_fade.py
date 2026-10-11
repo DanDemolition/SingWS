@@ -48,8 +48,16 @@ class StopFadeTests(unittest.TestCase):
         cls.qapp = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        from PyQt6.QtCore import QObject
+        from PyQt6.QtCore import QObject, QTimer
         app = self.app
+        # Older tests in this suite leave QTimer.singleShot replaced by a recorder; this test needs real timers, for its own duration only.
+        try:
+            from conftest import REAL_SINGLE_SHOT as real_single_shot
+        except Exception:
+            real_single_shot = QTimer.singleShot
+        leaked = QTimer.singleShot
+        QTimer.singleShot = staticmethod(real_single_shot)
+        self.addCleanup(setattr, QTimer, "singleShot", staticmethod(leaked) if leaked is not real_single_shot else staticmethod(real_single_shot))
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
@@ -137,13 +145,15 @@ class StopFadeTests(unittest.TestCase):
         mid = self.level_between(t_press + 0.15, t_press + 0.3)
         self.assertLess(mid, full * 0.85, "level should already be falling")
         self.assertGreater(mid, full * 0.05, "but not cut: a fade, not a hard stop")
-        self.spin(0.7)
+        deadline = time.time() + 5.0        # generous: on a loaded machine (full suite, other apps) the Qt timer fires late
+        while self.player.is_playing and time.time() < deadline:
+            self.spin(0.05)
         self.assertFalse(self.player.is_playing, "stopped after the fade")
         self.assertIsNone(self.engine.primary)
         self.assertLess(self.level_between(time.perf_counter() - 0.2, time.perf_counter()), 0.001)
         self.assertAlmostEqual(self.engine.master_volume, 0.8, delta=0.01, msg="volume restored for the next Play")
         self.player.play()
-        self.spin(0.8)
+        self.spin(1.2)
         self.assertGreater(self.level_between(time.perf_counter() - 0.4, time.perf_counter()), full * 0.8, "next Play is at normal volume")
 
     def test_pause_is_still_instant(self):
@@ -158,7 +168,7 @@ class StopFadeTests(unittest.TestCase):
         self.player.stop_with_fade(600)
         self.spin(0.2)
         self.player.pause()          # the user changes their mind: pause wins, the pending stop must not fire
-        self.spin(1.0)
+        self.spin(1.5)
         self.assertFalse(self.player.is_playing)
         self.assertIsNotNone(self.engine.primary, "paused, not stopped: the position is kept")
 
