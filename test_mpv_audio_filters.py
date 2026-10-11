@@ -86,7 +86,7 @@ class ChainStructureTests(unittest.TestCase):
             master_params=_host_master_params(exciter=100, exciter_on=True, gate=True),
         )
         order = ["rubberband", "volume=", "equalizer=f=31.5", "agate=",
-                 "bass=", "aexciter=", "acompressor=", "alimiter="]
+                 "bass=", "lavfi=graph=", "acompressor=", "alimiter="]
         positions = [chain.index(token) for token in order]
         self.assertEqual(positions, sorted(positions), chain)
 
@@ -101,7 +101,7 @@ class ChainStructureTests(unittest.TestCase):
             _host_master_params(gate=False, comp=False, exciter_on=False)))
         self.assertNotIn("agate=", chain)
         self.assertNotIn("acompressor=", chain)
-        self.assertNotIn("aexciter=", chain)
+        self.assertNotIn("asplit", chain)           # the exciter graph is absent when the exciter is off
 
     def test_single_limiter_and_guard_takes_over_when_limiter_off(self):
         on = ",".join(M.master_bus_filters(_host_master_params(limiter=True)))
@@ -145,12 +145,40 @@ class ChainStructureTests(unittest.TestCase):
         params["comp_knee_db"] = 6.0
         self.assertIn("knee=1.995262", ",".join(M.master_bus_filters(params)))
 
-    def test_exciter_frequency_is_clamped_to_the_filter_range(self):
+    def test_exciter_is_the_exact_algorithm_not_aexciter(self):
         params = _host_master_params(exciter=100, exciter_on=True)
-        params["exciter_hz"] = 500.0  # below aexciter's 2000 Hz floor
-        self.assertIn("freq=2000", ",".join(M.master_bus_filters(params)))
-        params["exciter_hz"] = 20000.0
-        self.assertIn("freq=12000", ",".join(M.master_bus_filters(params)))
+        params["exciter_hz"] = 4000.0
+        chain = ",".join(M.master_bus_filters(params))
+        self.assertNotIn("aexciter", chain)
+        self.assertIn("highpass=f=4000:poles=2", chain)
+        self.assertIn("tanh(2*val(0))*", chain)           # x + 0.5 * mix * tanh(2 * highpass(x))
+        self.assertIn("amix=inputs=2:weights=1 1:normalize=0", chain)
+        import re
+        m = re.search(r"lavfi=graph=%(\d+)%", chain)
+        self.assertIsNotNone(m)
+        body = chain[m.end(): m.end() + int(m.group(1))]            # mpv's length-prefixed quoting must cover exactly the graph
+        self.assertTrue(body.startswith("aformat=channel_layouts=stereo,asplit") and body.endswith("normalize=0"), body)
+
+    def test_exciter_frequency_is_only_range_limited(self):
+        params = _host_master_params(exciter=100, exciter_on=True)
+        params["exciter_hz"] = 5.0
+        self.assertIn("highpass=f=20:", ",".join(M.master_bus_filters(params)))
+        params["exciter_hz"] = 40000.0
+        self.assertIn("highpass=f=16000:", ",".join(M.master_bus_filters(params)))
+
+    def test_compressor_uses_the_measured_peak_detection_dynamics(self):
+        params = _host_master_params(comp=True)
+        params["comp_release_ms"] = 180.0
+        params["comp_makeup_db"] = 2.4
+        chain = ",".join(M.master_bus_filters(params))
+        self.assertIn("detection=peak:link=average", chain)
+        self.assertIn("attack=702", chain)               # 3.9 x the real 180 ms release
+        self.assertIn("release=792", chain)              # 4.4 x
+        self.assertIn(f"makeup={10 ** ((2.4 - 1.3) / 20.0):.6f}".rstrip("0"), chain)
+        params["comp_release_ms"] = 5000.0              # ffmpeg's limits are respected
+        chain = ",".join(M.master_bus_filters(params))
+        self.assertIn("attack=2000", chain)
+        self.assertIn("release=9000", chain)
 
     def test_master_params_ignored_when_master_is_off(self):
         chain = M.build_af_chain(master_enabled=False,
@@ -177,7 +205,7 @@ class ChainStructureTests(unittest.TestCase):
             master_params=_host_master_params(gate=True, exciter=50, exciter_on=True))
         self.assertEqual(
             M.chain_fidelity_notes(chain),
-            ["gate", "exciter", "compressor", "limiter"],
+            ["gate", "compressor", "limiter"],        # the exciter is an exact port now
         )
         # A pure EQ/normalize chain is a true port and must claim nothing.
         exact = M.build_af_chain(normalize_gain_db=-3.0, eq_enabled=True,

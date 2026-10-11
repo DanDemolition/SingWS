@@ -65,9 +65,22 @@ DEFAULT_Q = 1.4
 # spending CPU on a no-op biquad.
 _EPSILON_DB = 0.05
 
-# aexciter clamps freq to this range; singws_master_audio allows lower values.
-_EXCITER_FREQ_MIN = 2000.0
-_EXCITER_FREQ_MAX = 12000.0
+# The exciter is built as an exact port (see master_bus_filters), so its corner frequency only needs a sane range, not aexciter's 2-12 kHz.
+_EXCITER_FREQ_MIN = 20.0
+_EXCITER_FREQ_MAX = 16000.0
+
+# Compressor dynamics. The real compressor smooths the detected level over ~comp_attack_ms and then smooths the GAIN itself over
+# comp_release_ms in BOTH directions (a slow, symmetric ride). acompressor smooths the level with an asymmetric attack/release instead, so
+# passing the numbers through made it track the programme 1.3 dB (95th percentile) differently. Measured on real karaoke audio with the
+# operator's and a stress setting (tools/karaoke_comp_tune.py, 2026-10-11, three songs): peak detection with attack = 3.9 x the real
+# release time and release = 4.4 x it reproduces the real compressor's loudness tracking to 0.38 dB (95th percentile) and cuts the
+# residual from -17 dB to -29 dB. The make-up gain then needs about -1.0 dB on its own and -1.3 dB inside the full chain (checked against the exact chain on four songs; spread 0.29 dB). Measured, not derived.
+_COMP_DETECTION = "peak"
+_COMP_ATTACK_PER_REAL_RELEASE = 3.9
+_COMP_RELEASE_PER_REAL_RELEASE = 4.4
+_COMP_MAKEUP_TRIM_DB = -1.3
+_COMP_ATTACK_MAX_MS = 2000.0     # ffmpeg's limits
+_COMP_RELEASE_MAX_MS = 9000.0
 
 # MasterAudioProcessor's compressor detects on a smoothed mean-of-|x|;
 # acompressor detects on a smoothed RMS, which reads higher for the same
@@ -91,8 +104,8 @@ def _knee_factor(knee_db) -> float:
     db = max(0.0, _as_float(knee_db, 6.0))
     return max(_KNEE_FACTOR_MIN, min(_KNEE_FACTOR_MAX, 10.0 ** (db / 20.0)))
 
-# Stages whose lavfi equivalent is a different implementation, not a port.
-_APPROXIMATE_STAGES = ("gate", "exciter", "compressor", "limiter")
+# Stages whose lavfi equivalent is a different implementation, not a port. (The exciter is now an exact port.)
+_APPROXIMATE_STAGES = ("gate", "compressor", "limiter")
 
 
 def _f(value: float) -> str:
@@ -204,26 +217,37 @@ def master_bus_filters(params: dict | None) -> list[str]:
             )
 
     exciter_mix = _as_float(p.get("exciter_mix"), 0.0)
-    if exciter_mix > 0.0:
+    if exciter_mix > 0.001:
+        # An exact port of MasterAudioProcessor's exciter: x + 0.5 * mix * tanh(2 * highpass(x)). ffmpeg's aexciter is a different algorithm (it
+        # measured -10 to -26 dB away from the real one); this graph matches it to -90 dB and beyond. It is a graph (split, high-pass, per-sample
+        # tanh, mix back), passed with mpv's length-prefixed quoting so its commas and brackets survive the af parser. aformat first so a mono
+        # file gets two matching channels. aeval costs well under 1% of a core in real time.
         freq = min(_EXCITER_FREQ_MAX, max(_EXCITER_FREQ_MIN, _as_float(p.get("exciter_hz"), 4000.0)))
-        # MasterAudioProcessor caps mix at 0.5 (a blend ratio); aexciter's
-        # amount runs 0..64. Scale so a full-mix setting stays subtle.
-        out.append(
-            f"aexciter=amount={_f(max(0.0, min(64.0, exciter_mix * 2.0)))}:freq={_f(freq)}"
+        amp = _f(0.5 * exciter_mix)
+        graph = (
+            "aformat=channel_layouts=stereo,asplit[d][w];"
+            f"[w]highpass=f={_f(freq)}:poles=2,aeval=tanh(2*val(0))*{amp}|tanh(2*val(1))*{amp}[e];"
+            "[d][e]amix=inputs=2:weights=1 1:normalize=0"
         )
+        out.append(f"lavfi=graph=%{len(graph)}%{graph}")
 
     if _enabled(p, "comp_enabled", default=True):
         threshold_db = (
             _as_float(p.get("comp_threshold_db"), -20.0) + _COMP_DETECTOR_OFFSET_DB
         )
+        real_release_ms = max(1.0, _as_float(p.get("comp_release_ms"), 180.0))
+        attack_ms = min(_COMP_ATTACK_MAX_MS, max(0.01, real_release_ms * _COMP_ATTACK_PER_REAL_RELEASE))
+        release_ms = min(_COMP_RELEASE_MAX_MS, max(0.01, real_release_ms * _COMP_RELEASE_PER_REAL_RELEASE))
+        makeup_db = _as_float(p.get("comp_makeup_db"), 4.0) + _COMP_MAKEUP_TRIM_DB
         out.append(
             "acompressor="
             f"threshold={_f(min(0.0, threshold_db))}dB:"
             f"ratio={_f(max(1.0, _as_float(p.get('comp_ratio'), 2.0)))}:"
             f"knee={_f(_knee_factor(p.get('comp_knee_db', 6.0)))}:"
-            f"attack={_f(max(0.01, _as_float(p.get('comp_attack_ms'), 18.0)))}:"
-            f"release={_f(max(0.01, _as_float(p.get('comp_release_ms'), 180.0)))}:"
-            f"makeup={_f(max(1.0, _db_to_linear(_as_float(p.get('comp_makeup_db'), 4.0))))}"
+            f"attack={_f(attack_ms)}:"
+            f"release={_f(release_ms)}:"
+            f"makeup={_f(max(1.0, _db_to_linear(makeup_db)))}:"
+            f"detection={_COMP_DETECTION}:link=average"
         )
 
     # One limiter, not two. MasterAudioProcessor runs a limiter and then a hard
@@ -287,8 +311,6 @@ def chain_fidelity_notes(af_chain: str) -> list[str]:
     notes: list[str] = []
     if "agate=" in af_chain:
         notes.append("gate")
-    if "aexciter=" in af_chain:
-        notes.append("exciter")
     if "acompressor=" in af_chain:
         notes.append("compressor")
     if "alimiter=" in af_chain:
