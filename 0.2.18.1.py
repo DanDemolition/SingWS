@@ -3969,6 +3969,9 @@ DEFAULTS = {
     "seamless_transitions_enabled": True,  # master safety switch; OFF preserves normal physical EOS behavior
     "karaoke_bgm_crossfade_enabled": False, # allow intentional karaoke -> BGM overlap at song end
     "karaoke_trim_verified_tail": True,    # end promptly once the file scan confirms all audio has ended
+    # Seconds BEFORE the scanned end of a karaoke song's audio at which the background music starts fading in (0 = wait for the end of the
+    # audio plus the end-silence hold, the old behaviour). Audio-only; the song itself still ends by the lyric-aware rules.
+    "bgm_overlap_before_audio_end_sec": 2.0,
     "karaoke_allow_early_silence_trim": False, # advanced: may end karaoke early after sustained trailing silence
     "end_silence_trim_enabled": False,     # CDG/ZIP/MP4: optional early trim; off to preserve complete endings
     "end_silence_trim_threshold_sec": 2.5, # sustained low audio before intelligent karaoke early-end
@@ -38766,6 +38769,16 @@ class KaraokeApp(QWidget):
                     f"db={'n/a' if meterless else f'{db:.1f}'})"
                 )
             return False
+        # Start the background-music fade a little BEFORE the scanned audio ends, so the music overlaps the last notes instead of arriving
+        # after them (the fade-in is quiet for its first second, and the host's hold below comes on top of that). Audio-only: karaoke
+        # itself still ends only by the lyric-aware gates further down, so a song whose lyrics run on is never cut short.
+        try:
+            _overlap_s = float(self.settings.get("bgm_overlap_before_audio_end_sec", 2.0) or 0.0)
+        except Exception:
+            _overlap_s = 0.0
+        if (_overlap_s > 0.0 and bool(self.settings.get("karaoke_trim_verified_tail", True))
+                and float(audio_end) - _overlap_s <= elapsed < float(audio_end)):
+            self._prefire_bgm_at_verified_audio_end()
         if elapsed < float(audio_end):
             self._end_silence_accum_s = 0.0
             last_log = float(getattr(self, "_end_audio_hold_log_ts", 0.0) or 0.0)

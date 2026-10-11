@@ -680,6 +680,7 @@ impl Renderer {
             let Some(r) = weak.upgrade() else { return };
             r.bg_event_queued.store(false, Ordering::SeqCst);
             let Some(h) = *r.bg_core.lock().unwrap() else { return };
+            // (the handle is published right after mpv_initialize, so a wake that arrives earlier cannot belong to a live core)
             loop {
                 let e = r.api.wait_event(h, 0.0);
                 if e.is_null() {
@@ -800,6 +801,11 @@ impl Renderer {
             self.api.terminate_destroy(h);
             return None;
         }
+        // Publish the handle BEFORE anything can produce an event: mpv only calls the wakeup callback again once the app has drained its
+        // queue, and the event job (which runs on the render queue, possibly while this function is still running) must find the core. An
+        // earlier version stored the handle after this returned, so the first job found none, returned without draining, and mpv never
+        // woke us again: position stuck at 0, "ended" never seen, the app never advanced to the next background file.
+        *self.bg_core.lock().unwrap() = Some(h);
         self.api.observe(h, 101, "time-pos", mpvapi::FORMAT_DOUBLE);
         self.api.observe(h, 102, "pause", mpvapi::FORMAT_FLAG);
         self.api.observe(h, 103, "eof-reached", mpvapi::FORMAT_FLAG);
@@ -814,6 +820,7 @@ impl Renderer {
             }
         });
         if !ok {
+            *self.bg_core.lock().unwrap() = None;
             self.api.terminate_destroy(h);
             return None;
         }

@@ -1371,7 +1371,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         exec(textwrap.dedent(function_source("_maybe_trim_end_silence")), namespace)
         trim = namespace["_maybe_trim_end_silence"]
         host = types.SimpleNamespace(
-            settings={"karaoke_trim_verified_tail": True},
+            settings={"karaoke_trim_verified_tail": True, "bgm_overlap_before_audio_end_sec": 0},
             _karaoke_early_silence_trim_enabled=lambda: True,
             _end_silence_mode="cdg", _end_silence_min_elapsed_s=20,
             _end_silence_db_threshold=-38, _read_level_db=lambda: None,
@@ -1420,6 +1420,33 @@ class PerformanceSafetyTests(unittest.TestCase):
         timer.singleShot.assert_called_once()
         timer.singleShot.call_args.args[1]()
         host._handle_media_end_safe.assert_called_once_with("verified_silent_tail")
+
+    def test_bgm_fade_starts_before_the_audio_ends_but_never_ends_karaoke(self):
+        """The music fade begins `bgm_overlap_before_audio_end_sec` before the scanned audio end; the song itself is still ended only by the
+        lyric-aware gates (here the lyrics have not finished, so nothing is completed)."""
+        namespace = {"time": __import__("time"), "NS_PER_SECOND": 1_000_000_000, "QTimer": mock.Mock(), "_diag": lambda *args: None}
+        exec(textwrap.dedent(function_source("_maybe_trim_end_silence")), namespace)
+        trim = namespace["_maybe_trim_end_silence"]
+
+        def host(overlap):
+            return types.SimpleNamespace(
+                settings={"karaoke_trim_verified_tail": True, **({} if overlap is None else {"bgm_overlap_before_audio_end_sec": overlap})},
+                _karaoke_early_silence_trim_enabled=lambda: True, _end_silence_mode="cdg", _end_silence_min_elapsed_s=20,
+                _end_silence_db_threshold=-38, _read_level_db=lambda: None, _end_trim_threshold_sec=lambda: 3.0,
+                _karaoke_audio_end_s=100.0, _handle_media_end_safe=mock.Mock(), _prefire_bgm_at_verified_audio_end=mock.Mock(),
+                _karaoke_visual_end_s=130.0, _karaoke_visual_end_confidence=1.0,
+                karaoke_transport=types.SimpleNamespace(cdg_lyrics_finished=lambda: False),
+            )
+        ns = 1_000_000_000
+        h = host(None)                                    # default 2.0 s
+        trim(h, 140 * ns, 97 * ns)
+        h._prefire_bgm_at_verified_audio_end.assert_not_called()      # still earlier than audio_end - 2
+        trim(h, 140 * ns, int(98.2 * ns))
+        h._prefire_bgm_at_verified_audio_end.assert_called_once()     # inside the overlap window
+        h._handle_media_end_safe.assert_not_called()                  # and karaoke itself is untouched
+        off = host(0)
+        trim(off, 140 * ns, int(99.0 * ns))
+        off._prefire_bgm_at_verified_audio_end.assert_not_called()    # 0 = the old behaviour
 
     def test_verified_audio_tail_can_crossfade_while_cdg_final_card_remains(self):
         trim = function_source("_maybe_trim_end_silence")
