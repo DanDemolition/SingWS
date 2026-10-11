@@ -144,9 +144,11 @@ class RustVideoBridgeTests(unittest.TestCase):
         self.assertEqual(r["playing_after_stop"], 0)
         logs = "\n".join(r["logs"])
         # the af chain: DSP stages first, the stretch filter (signalsmith by default) last; key and DSP survive each other; tempo != 100 alone adds it
-        self.assertIn("signalsmith=pitch-scale=1.122462", logs)
-        self.assertIn("lavfi=[volume=0dB],signalsmith=pitch-scale=1.122462", logs)
-        self.assertIn("af key=0 dsp=18 chars -> lavfi=[volume=0dB]", logs)
+        self.assertIn("@stretch:signalsmith=pitch-scale=1.122462", logs)
+        self.assertIn("lavfi=[volume=0dB],@stretch:signalsmith=pitch-scale=1.122462", logs)
+        # once the stretch filter runs, key/tempo changes go to it live (rebuilding the chain restarts the stretcher = a click) and "no change" is pitch 1.0
+        self.assertIn("af key=2 live pitch-scale=1.122462 (chain kept)", logs)
+        self.assertIn("af key=0 live pitch-scale=1.000000 (chain kept)", logs)
         self.assertIn("audio-delay=0.500s", logs)
         self.assertIn("requested output unavailable: No Such Output Anywhere; refusing system default", logs)   # never the implicit default
         self.assertIn("clean shutdown", logs)

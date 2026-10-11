@@ -23,6 +23,8 @@ struct State {
     audio_delay: f64,
     pending_audio: Option<String>,
     serial: u64,
+    /// The DSP half of the `af` chain that the live stretch filter was built with; Some = the labelled stretch filter is in the chain.
+    stretch_dsp: Option<String>,
 }
 
 
@@ -95,32 +97,46 @@ impl Inner {
         if self.flags.loading.load(Ordering::SeqCst) {
             return;
         }
-        let (mut chain, semitones, tempo, dsp_len) = {
+        let (mut chain, semitones, tempo, dsp_len, live_dsp) = {
             let s = self.state.lock().unwrap();
-            (s.dsp_chain.clone(), s.semitones, s.tempo_percent, s.dsp_chain.len())
+            (s.dsp_chain.clone(), s.semitones, s.tempo_percent, s.dsp_chain.len(), s.stretch_dsp.clone())
         };
-        // Rubberband is inserted for a tempo change as well as a key change: with no rubberband mpv applies `speed` with
-        // scaletempo2 (time-domain WSOLA), which audibly lost quality against the phase vocoder the old engine used.
+        let pitch = 2f64.powf(semitones as f64 / 12.0);
+        // Once the labelled stretch filter is running with this same DSP half, a key change goes straight to the running filter. Rebuilding
+        // the whole `af` graph restarts the stretcher mid-song, which is audible as a click (measured: Signalsmith itself is click-free for
+        // abrupt key and tempo jumps). The filter then stays in the chain (at pitch 1.0 for "no key change") until the DSP half changes
+        // (next song) so that returning to 0 / 100% does not click either.
+        if live_dsp.as_deref() == Some(chain.as_str()) {
+            let r = self.api.command(h, &["af-command", "stretch", "set-pitch", &format!("{:.6}", pitch)]);
+            if r >= 0 {
+                bridge_log!("[bridge] af key={} live pitch-scale={:.6} (chain kept)", semitones, pitch);
+                return;
+            }
+            bridge_log!("[bridge] live pitch change failed ({}); rebuilding the chain", self.api.error_string(r));
+        }
         // The stretch filter takes the key ONLY from `pitch-scale` and the tempo ONLY from mpv's `speed`, so the two never touch.
         let dsp_only = chain.clone();
         let engine = stretch_engine();
+        let mut stretch_used = false;
         if semitones != 0 || tempo != 100 {
             if !chain.is_empty() {
                 chain.push(',');
             }
-            chain.push_str(&format!("{}=pitch-scale={:.6}", engine, 2f64.powf(semitones as f64 / 12.0)));
+            chain.push_str(&format!("@stretch:{}=pitch-scale={:.6}", engine, pitch));
+            stretch_used = true;
         }
         let mut r = self.api.set_string(h, "af", &chain);
-        if r < 0 && engine == "signalsmith" {
+        if r < 0 && stretch_used && engine == "signalsmith" {
             // A libmpv built before the Signalsmith filter existed: fall back to rubberband rather than lose the DSP chain too.
             bridge_log!("[bridge] signalsmith filter unavailable ({}); using rubberband", self.api.error_string(r));
-            chain = dsp_only;
+            chain = dsp_only.clone();
             if !chain.is_empty() {
                 chain.push(',');
             }
-            chain.push_str(&format!("rubberband=pitch-scale={:.6}", 2f64.powf(semitones as f64 / 12.0)));
+            chain.push_str(&format!("@stretch:rubberband=pitch-scale={:.6}", pitch));
             r = self.api.set_string(h, "af", &chain);
         }
+        self.state.lock().unwrap().stretch_dsp = if r >= 0 && stretch_used { Some(dsp_only) } else { None };
         if r < 0 {
             bridge_log!("[bridge] af chain rejected ({}): {}", self.api.error_string(r), chain);
         } else {
@@ -415,7 +431,7 @@ impl Player {
             flags,
             renderer: OnceLock::new(),
             play_when_loaded: AtomicBool::new(false),
-            state: Mutex::new(State { tempo_percent: 100, semitones: 0, dsp_chain: String::new(), audio_delay: 0.0, pending_audio: None, serial: 0 }),
+            state: Mutex::new(State { tempo_percent: 100, semitones: 0, dsp_chain: String::new(), audio_delay: 0.0, pending_audio: None, serial: 0, stretch_dsp: None }),
             tx: Mutex::new(None),
         });
         if let Some(r) = renderer {

@@ -71,6 +71,31 @@ class IndependenceTests(unittest.TestCase):
             self.assertLess(abs(e), 6.0, (semis, speed, e))
             self.assertAlmostEqual(ratio, 1.0, delta=0.03)
 
+    def test_live_pitch_command_changes_the_key_without_rebuilding_the_chain(self):
+        """The bridge sends `af-command stretch set-pitch` to the RUNNING filter (a chain rebuild would restart the stretcher = a click)."""
+        import time
+        from libmpv_media_jobs import OfflineMpvJob
+        T, np = self.T, self.np
+        out = os.path.join(tempfile.mkdtemp(prefix="singws-live-"), "o.wav")
+        job = OfflineMpvJob()
+        try:
+            for k, v in (("config", "no"), ("vid", "no"), ("ao", "pcm"), ("ao-pcm-file", out), ("ao-pcm-waveheader", "yes"),
+                         ("audio-format", "s16"), ("audio-samplerate", str(T.RATE)), ("audio-channels", "stereo"),
+                         ("pause", "yes"), ("af", "@stretch:signalsmith=pitch-scale=1.000000")):
+                job.option(k, v)
+            job.initialize()
+            job.command("loadfile", self.src, "replace")
+            time.sleep(1.0)
+            job.command("af-command", "stretch", "set-pitch", f"{2 ** (3 / 12.0):.6f}")
+            job.command("set", "pause", "no")
+            job.wait_for_end(60.0)
+        finally:
+            job.close()
+        y = T.read_wav_mono(out)
+        mid = y[len(y) // 4: 3 * len(y) // 4]
+        got = T.peak_hz(mid, 300, 900)
+        self.assertAlmostEqual(T.cents(got, T.F1 * 2 ** (3 / 12.0)), 0.0, delta=8, msg=got)
+
 
 if __name__ == "__main__":
     unittest.main()
