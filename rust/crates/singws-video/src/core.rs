@@ -627,6 +627,7 @@ impl Player {
                 return;
             }
             me.api.set_double(h, "speed", wanted as f64 / 100.0);
+            bridge_log!("[bridge] tempo={}%", wanted);
             // Crossing to or from 100% adds or removes rubberband from the chain, so the chain has to be recomposed.
             if (previous == 100) != (wanted == 100) {
                 me.apply_audio_filters();
