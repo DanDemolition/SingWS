@@ -4685,6 +4685,35 @@ class BackgroundMusicPlayer(QObject):
             _diag(f"[BG-BASS] no BASS/libmpv background engine available ({e})")
             return False
 
+    def soundboard_runtime(self):
+        """The engine whose BASS library the soundboard pads open their streams on.
+
+        BASS is the main engine's runtime. On the Rust (or libmpv) engine there is no BASS output, so the pads get a
+        private BASS instance on the same output device, created on first use and rebuilt if the output changes.
+        """
+        engine = getattr(self, "_bass_engine", None)
+        if engine is None:
+            return None
+        if hasattr(getattr(engine, "bass", None), "BASS_StreamCreateFile"):
+            return engine
+        wanted = str(getattr(engine, "output_name", "") or "")
+        sb = getattr(self, "_soundboard_bass_engine", None)
+        if sb is not None and (getattr(sb, "_closed", False) or sb.output_name != wanted):
+            try:
+                sb.close()
+            except Exception:
+                pass
+            sb = None
+        if sb is None:
+            try:
+                sb = BassBackgroundEngine(output_name=wanted)
+                _diag(f"[SOUNDBOARD] private BASS output opened for pads (background engine is {getattr(engine, 'backend_name', '?')})")
+            except Exception as exc:
+                _diag(f"[SOUNDBOARD] could not open a BASS output for pads: {exc}")
+                sb = None
+        self._soundboard_bass_engine = sb
+        return sb
+
     def _attach_host_audio_chain(self) -> None:
         """Attach the BGM graphic EQ, the master chain and the audio counters to the current engine, from the host's settings.
         Runs when the engine is created AND again once the host has finished loading its settings: the player is built before
@@ -19521,6 +19550,8 @@ class SoundboardPad(QPushButton):
     def _bass_runtime(self):
         owner = self._app_owner()
         bg_music = getattr(owner, "bg_music", None) if owner is not None else None
+        if bg_music is not None and hasattr(bg_music, "soundboard_runtime"):
+            return bg_music.soundboard_runtime()
         return getattr(bg_music, "_bass_engine", None)
 
     def _stop_channel(self, release: bool = False):

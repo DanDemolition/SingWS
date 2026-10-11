@@ -48,7 +48,7 @@ class BassSoundboardChannel:
         if runtime is None or getattr(runtime, "_closed", False):
             raise BassSoundboardError("BASS output is not available")
         bass = getattr(runtime, "bass", None)
-        if bass is None:
+        if bass is None or not hasattr(bass, "BASS_StreamCreateFile"):
             raise BassSoundboardError("BASS runtime is not loaded")
         return runtime, bass
 

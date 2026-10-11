@@ -2,6 +2,7 @@
 set -euo pipefail
 here=${0:A:h}
 sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+[[ -d "$sdk" ]] || sdk=$(xcrun --show-sdk-path)   # the pinned SDK is not on every Mac
 arch=${1:-arm64}
 extra_flags=()
 # Apple Silicon CLT omits the x86_64 Swift compatibility archives. The
