@@ -3866,10 +3866,11 @@ DEFAULTS = {
     # app before any release; proven so far only in tools/render_thread_probe.py on Apple Silicon). Set it to false in
     # settings.json to draw on the main thread exactly as before. Read once at launch, before the first song creates the bridge.
     "karaoke_render_thread": True,
-    # Which native video bridge draws the karaoke picture: "objc" (the long-standing Objective-C bridge, DEFAULT) or "rust" (the
-    # drop-in Rust replacement, roadmap item 2: pixel-identical to it on 22 on-screen images and proven in the freeze test, but not yet
-    # rehearsed in the real app or on the Intel Mac). Any problem loading the Rust one falls back to Objective-C. Read once at launch.
-    "video_bridge": "objc",
+    # Which native video bridge draws the karaoke picture: "rust" (DEFAULT since 2026-10-11, roadmap item 2: pixel-identical to the old one
+    # on 22 on-screen images, freeze test passes, rehearsed by the operator on Apple Silicon) or "objc" (the long-standing Objective-C
+    # bridge). Any problem loading the Rust one, or creating its renderer for a song, falls back to Objective-C. Read once at launch.
+    # NOT yet run on a physical Intel Mac: set "objc" there if it misbehaves.
+    "video_bridge": "rust",
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -20203,8 +20204,8 @@ class KaraokeApp(QWidget):
         _set_analysis_engine(self.settings.get("analysis_engine", "rust"))
         try:
             # Which bridge library mpv_playback_iina loads (first song). Never overrides an explicit env choice.
-            _video_bridge = str(self.settings.get("video_bridge", "objc") or "objc").strip().lower()
-            os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "rust" if _video_bridge == "rust" else "objc")
+            _video_bridge = str(self.settings.get("video_bridge", "rust") or "rust").strip().lower()
+            os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "objc" if _video_bridge == "objc" else "rust")
         except Exception:
             pass
         try:

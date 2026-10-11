@@ -219,6 +219,25 @@ def _log_bridge_choice_once(api, log) -> None:
         pass
 
 
+def _fallback_to_objc(log=None) -> "_BridgeApi":
+    """The Rust bridge loaded but could not create a renderer: switch the whole session to the Objective-C bridge and return its API.
+
+    Called at most once per session (after it the global API IS the Objective-C one, whose failures are not retried)."""
+    global _bridge_api, _bridge_log_thunk
+    os.environ["SINGWS_VIDEO_BRIDGE"] = "objc"
+    with _bridge_api_lock:
+        _bridge_api = _BridgeApi()
+        _bridge_log_thunk = None        # the new library needs the host log callback registered again
+        api = _bridge_api
+    if log is not None:
+        _install_bridge_log(api, log)
+        try:
+            log("[VIDEO-BRIDGE] the Rust video bridge could not create a renderer; using the Objective-C bridge for the rest of the session")
+        except Exception:
+            pass
+    return api
+
+
 def _get_bridge_api() -> _BridgeApi:
     global _bridge_api
     with _bridge_api_lock:
@@ -316,6 +335,12 @@ class MpvPlaybackPlugin:
                 else:
                     handle = self.api.lib.singws_bridge_create(
                         self._output_id, self._preview_id, source_b, audio_b)
+                    if not handle and getattr(self.api, "kind", "objc") == "rust":
+                        # Never leave a show with a black screen because the newer bridge could not start: retry this song on the
+                        # Objective-C bridge (the Rust one is gone for the rest of the session).
+                        self.api = _fallback_to_objc(self.log)
+                        handle = self.api.lib.singws_bridge_create(
+                            self._output_id, self._preview_id, source_b, audio_b)
                     if not handle:
                         raise RuntimeError("native libmpv bridge creation failed")
                     self._handle = handle

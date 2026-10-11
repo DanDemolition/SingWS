@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import types
 import unittest
 from pathlib import Path
 
@@ -46,10 +47,47 @@ class VideoBridgeSelectionTests(unittest.TestCase):
             have = {w[len("_singws_bridge_"):] for w in out.split() if w.startswith("_singws_bridge_")}
             self.assertEqual(have, set(m.BRIDGE_EXPORTS))
 
-    def test_default_setting_and_launch_hook_are_objective_c(self):
+    def test_default_setting_is_rust_and_the_launch_hook_maps_it(self):
         src = (ROOT / "0.2.18.1.py").read_text()
-        self.assertRegex(src, r'"video_bridge":\s*"objc"')
-        self.assertIn('os.environ.setdefault("SINGWS_VIDEO_BRIDGE"', src)
+        self.assertRegex(src, r'"video_bridge":\s*"rust"')
+        self.assertIn('os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "objc" if _video_bridge == "objc" else "rust")', src)
+
+    def test_a_failed_rust_renderer_falls_back_to_the_objective_c_bridge_for_that_song(self):
+        sys.path.insert(0, str(ROOT))
+        import mpv_playback_iina as m
+        from unittest import mock
+
+        def fake_api(kind, handle):
+            lib = mock.MagicMock()
+            lib.singws_bridge_create.return_value = handle
+            return types.SimpleNamespace(kind=kind, lib=lib, note="")
+
+        rust, objc = fake_api("rust", 0), fake_api("objc", 1234)
+        player = m.MpvPlaybackPlugin.__new__(m.MpvPlaybackPlugin)
+        player._lock = __import__("threading").RLock()
+        player.api = rust
+        player._handle = None
+        player._output_id, player._preview_id = 11, 22
+        player._volume, player._device = 0.5, "auto"
+        player._tempo_percent, player._semitones, player._dsp_chain = 100, 0, ""
+        player._video_offset_ms, player._sidefill = 0, 0
+        player._loaded, player._audio_only, player._error = False, False, ""
+        logs = []
+        player.log = logs.append
+        with mock.patch.object(m, "_fallback_to_objc", return_value=objc) as fb:
+            ok = player.loadSingWSMedia("/x/song.mp4", None, autoplay=False)
+        self.assertTrue(ok)
+        fb.assert_called_once()
+        self.assertIs(player.api, objc)
+        self.assertEqual(player._handle, 1234)
+        objc.lib.singws_bridge_create.assert_called_once()
+        # an Objective-C bridge that fails is NOT retried (and nothing is hidden: the load reports failure)
+        player2 = m.MpvPlaybackPlugin.__new__(m.MpvPlaybackPlugin)
+        player2.__dict__.update(player.__dict__)
+        player2.api, player2._handle = fake_api("objc", 0), None
+        with mock.patch.object(m, "_fallback_to_objc") as fb2:
+            self.assertFalse(player2.loadSingWSMedia("/x/song.mp4", None, autoplay=False))
+        fb2.assert_not_called()
 
     def test_nothing_asked_means_objective_c(self):
         r = choose({})
