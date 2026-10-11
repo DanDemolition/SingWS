@@ -279,19 +279,21 @@ class HostRecoverySelectionTests(unittest.TestCase):
             def close(self):
                 pass
 
-        def _bass_raises(output_name=None):
-            raise module.BassBackgroundError("simulated BASS init failure")
+        def _rust_raises(output_name=None):
+            raise RuntimeError("simulated Rust engine start-up failure")
 
         player = module.BackgroundMusicPlayer.__new__(module.BackgroundMusicPlayer)
         player._bass_engine = None
-        original_bass = module.BassBackgroundEngine
+        player._attach_host_audio_chain = lambda: None
+        import rust_bgm_engine
+        original_rust = rust_bgm_engine.RustBackgroundEngine
         original_libmpv = module.LibmpvBackgroundEngine
-        module.BassBackgroundEngine = _bass_raises
+        rust_bgm_engine.RustBackgroundEngine = _rust_raises
         module.LibmpvBackgroundEngine = _StubLibmpvEngine
         try:
             ok = module.BackgroundMusicPlayer._init_bass_engine(player)
         finally:
-            module.BassBackgroundEngine = original_bass
+            rust_bgm_engine.RustBackgroundEngine = original_rust
             module.LibmpvBackgroundEngine = original_libmpv
         self.assertTrue(ok)
         self.assertIsInstance(player._bass_engine, _StubLibmpvEngine)
@@ -300,22 +302,24 @@ class HostRecoverySelectionTests(unittest.TestCase):
     def test_both_engines_failing_reports_false(self):
         module = self.singws
 
-        def _bass_raises(output_name=None):
-            raise module.BassBackgroundError("simulated BASS init failure")
+        def _rust_raises(output_name=None):
+            raise RuntimeError("simulated Rust engine start-up failure")
 
         def _libmpv_raises(output_name=None):
             raise RuntimeError("simulated libmpv engine failure")
 
         player = module.BackgroundMusicPlayer.__new__(module.BackgroundMusicPlayer)
         player._bass_engine = None
-        original_bass = module.BassBackgroundEngine
+        player._attach_host_audio_chain = lambda: None
+        import rust_bgm_engine
+        original_rust = rust_bgm_engine.RustBackgroundEngine
         original_libmpv = module.LibmpvBackgroundEngine
-        module.BassBackgroundEngine = _bass_raises
+        rust_bgm_engine.RustBackgroundEngine = _rust_raises
         module.LibmpvBackgroundEngine = _libmpv_raises
         try:
             ok = module.BackgroundMusicPlayer._init_bass_engine(player)
         finally:
-            module.BassBackgroundEngine = original_bass
+            rust_bgm_engine.RustBackgroundEngine = original_rust
             module.LibmpvBackgroundEngine = original_libmpv
         self.assertFalse(ok)
         self.assertIsNone(player._bass_engine)

@@ -1,7 +1,7 @@
 """libmpv/Qt background-music recovery engine.
 
 Recovery backend for background music when BASS cannot initialize. Mirrors the
-public API of ``bass_background_engine.BassBackgroundEngine`` (decks, master
+public API of ``rust_bgm_engine.RustBackgroundEngine`` (and the removed BASS engine) (decks, master
 volume, crossfades, normalize gains, meter, EQ/master DSP hooks) so
 ``BackgroundMusicPlayer`` can use either engine through the same call sites,
 without requiring GStreamer.

@@ -201,16 +201,15 @@ class AdaptiveChannelTests(unittest.TestCase):
         self.assertIsInstance(ch._impl, RustSoundboardChannel)
         ch.close()
 
-    def test_a_runtime_without_pad_support_gets_the_bass_channel(self):
-        class FakeBass:
+    def test_a_runtime_without_pad_support_raises_a_pad_error(self):
+        class NoPads:
             _closed = False
-            bass = object()
 
-        ch = SoundboardChannel(lambda: FakeBass())
-        self.assertFalse(ch.supports_layering, "the BASS pad restarts instead of layering")
-        from bass_soundboard_engine import BassSoundboardChannel, BassSoundboardError
-        self.assertIsInstance(ch._impl, BassSoundboardChannel)
-        self.assertTrue(issubclass(BassSoundboardError, SoundboardError))
+        ch = SoundboardChannel(lambda: NoPads())
+        with self.assertRaises(SoundboardError):
+            ch.load("x.wav")
+        self.assertEqual(ch.path, "")
+        ch.stop()      # harmless with nothing loaded
 
 
 if __name__ == "__main__":

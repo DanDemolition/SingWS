@@ -223,7 +223,7 @@ class AdapterTests(unittest.TestCase):
         self.assertGreater(float(np.abs(e.render(RATE // 4)).max()), 0.9)
 
     def test_diagnostics_snapshot_has_the_shape_the_app_logs(self):
-        from bass_background_engine import format_audio_diag
+        from audio_diag import format_audio_diag
         e = self.e
         e.set_audio_diagnostics(True)
         e.load(self.f("a.wav"), paused=False, volume=1.0)
@@ -235,11 +235,10 @@ class AdapterTests(unittest.TestCase):
         e.set_audio_diagnostics(False)
         self.assertIsNone(e.audio_diagnostics_snapshot())
 
-    def test_bass_shim_play_and_close_are_safe(self):
+    def test_play_and_close_are_safe(self):
         e = self.e
         e.load(self.f("a.wav"), paused=True, volume=1.0)
-        self.assertTrue(e.mixer)
-        e.bass.BASS_ChannelPlay(e.mixer, False)
+        e.play()
         self.assertTrue(e.is_playing())
         e.close()
         e.close()
@@ -298,43 +297,37 @@ class AppSelectionTests(unittest.TestCase):
         p._attach_host_audio_chain = lambda: None
         return p
 
-    def test_default_is_rust_and_bass_is_the_only_way_out(self):
-        for setting in (None, "rust", " Rust ", "", "nonsense"):
-            self.assertEqual(self._player(setting)._bgm_engine_preference(), "rust", setting)
-        for setting in ("bass", "BASS", " bass "):
-            self.assertEqual(self._player(setting)._bgm_engine_preference(), "bass", setting)
+    def test_default_is_rust_and_a_saved_bass_value_is_only_noted(self):
         self.assertEqual(self.app.DEFAULTS["bgm_engine"], "rust")
+        for setting in (None, "rust", " Rust ", "", "nonsense"):
+            self.assertFalse(self._player(setting)._legacy_bass_setting(), setting)
+        for setting in ("bass", "BASS", " bass "):
+            self.assertTrue(self._player(setting)._legacy_bass_setting(), setting)
 
-    def test_rust_is_used_when_requested_and_available(self):
-        p = self._player("rust")
-        fake = mock.Mock()
-        fake.backend_name = "Rust"
-        fake.fell_back_to_default = False
-        with mock.patch.dict(sys.modules, {"rust_bgm_engine": mock.Mock(RustBackgroundEngine=mock.Mock(return_value=fake))}):
-            with mock.patch.object(self.app, "BassBackgroundEngine", side_effect=AssertionError("BASS must not be created")):
+    def test_rust_is_used_when_available_even_if_settings_still_say_bass(self):
+        for setting in ("rust", "bass"):
+            p = self._player(setting)
+            fake = mock.Mock()
+            fake.backend_name = "Rust"
+            fake.fell_back_to_default = False
+            with mock.patch.dict(sys.modules, {"rust_bgm_engine": mock.Mock(RustBackgroundEngine=mock.Mock(return_value=fake))}):
                 self.assertTrue(p._init_bass_engine("Some Device"))
-        self.assertIs(p._bass_engine, fake)
+            self.assertIs(p._bass_engine, fake)
 
-    def test_any_rust_failure_falls_back_to_bass(self):
+    def test_any_rust_failure_falls_back_to_libmpv(self):
         p = self._player("rust")
-        bass = mock.Mock()
-        bass.backend_name = "BASS"
+        libmpv = mock.Mock()
+        libmpv.backend_name = "libmpv"
         broken = mock.Mock(RustBackgroundEngine=mock.Mock(side_effect=RuntimeError("no device")))
         with mock.patch.dict(sys.modules, {"rust_bgm_engine": broken}):
-            with mock.patch.object(self.app, "BassBackgroundEngine", return_value=bass) as ctor:
+            with mock.patch.object(self.app, "LibmpvBackgroundEngine", return_value=libmpv) as ctor:
                 self.assertTrue(p._init_bass_engine("Some Device"))
         ctor.assert_called_once()
-        self.assertIs(p._bass_engine, bass)
+        self.assertIs(p._bass_engine, libmpv)
 
-    def test_bass_setting_never_touches_the_rust_module(self):
-        p = self._player("bass")
-        bass = mock.Mock()
-        bass.backend_name = "BASS"
-        poisoned = mock.Mock(RustBackgroundEngine=mock.Mock(side_effect=AssertionError("Rust must not be created")))
-        with mock.patch.dict(sys.modules, {"rust_bgm_engine": poisoned}):
-            with mock.patch.object(self.app, "BassBackgroundEngine", return_value=bass):
-                self.assertTrue(p._init_bass_engine(None))
-        self.assertIs(p._bass_engine, bass)
+    def test_no_bass_module_is_left_in_the_app(self):
+        self.assertFalse(hasattr(self.app, "BassBackgroundEngine"))
+        self.assertFalse(hasattr(self.app, "BassSoundboardChannel"))
 
 
 if __name__ == "__main__":

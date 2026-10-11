@@ -3,148 +3,12 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-import bass_background_engine as bbe
-
 
 def load_main_module():
     spec = importlib.util.spec_from_file_location("singws_main_bgm", "0.2.18.1.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-class FakeBass:
-    def __init__(self):
-        self.set_calls = []
-        self.remove_calls = []
-        self._h = 0
-
-    def BASS_ChannelSetFX(self, mixer, fxtype, prio):
-        self._h += 1
-        self.set_calls.append((mixer, fxtype, prio))
-        return self._h
-
-    def BASS_FXSetParameters(self, handle, ptr):
-        return 1
-
-    def BASS_ChannelRemoveFX(self, mixer, handle):
-        self.remove_calls.append((mixer, handle))
-        return 1
-
-    def BASS_ChannelSetDSP(self, mixer, proc, user, prio):
-        self._h += 1
-        self.set_calls.append((mixer, "DSP", prio))
-        return self._h
-
-    def BASS_ChannelRemoveDSP(self, mixer, handle):
-        self.remove_calls.append((mixer, handle))
-        return 1
-
-
-class FakeProc:
-    """Minimal MasterAudioProcessor stand-in for engine DSP wiring tests."""
-    def __init__(self):
-        self.configured = None
-
-    def configure_stream(self, sr, ch):
-        self.configured = (sr, ch)
-
-    def process_f32_array(self, frames):
-        return frames
-
-
-def bare_engine():
-    eng = bbe.BassBackgroundEngine.__new__(bbe.BassBackgroundEngine)
-    eng._master_params = None
-    eng._master_fx_handle = 0
-    eng._master_proc = None
-    eng._master_dsp_handle = 0
-    eng._master_dsp_callback = None
-    eng._master_proc_ref = {"proc": None}
-    eng.sample_rate = 44100
-    eng.bass = FakeBass()
-    eng.mixer = 0xABCD
-    # Attrs touched by __del__/close()/stop() during GC of this bare instance.
-    eng.primary = None
-    eng.secondary = None
-    eng._closed = True
-    eng._plugin_handles = []
-    eng._eq_fx_handles = []
-    eng._eq_dsp_handle = 0
-    eng._eq_dsp_callback = None
-    eng.mix = eng.bass
-    return eng
-
-
-class EngineCompressorTests(unittest.TestCase):
-    def test_attach_stores_and_creates_fx(self):
-        eng = bare_engine()
-        eng.set_master_compressor({"threshold_db": -18.0, "ratio": 2.5})
-        self.assertNotEqual(eng._master_fx_handle, 0)
-        self.assertEqual(eng._master_params["threshold_db"], -18.0)
-        self.assertEqual(eng.bass.set_calls[-1][1], bbe.BASS_FX_DX8_COMPRESSOR)
-
-    def test_detach_removes_fx(self):
-        eng = bare_engine()
-        eng.set_master_compressor({"ratio": 2.0})
-        handle = eng._master_fx_handle
-        eng.set_master_compressor(None)
-        self.assertEqual(eng._master_fx_handle, 0)
-        self.assertIsNone(eng._master_params)
-        self.assertIn((eng.mixer, handle), eng.bass.remove_calls)
-
-    def test_ensure_mixer_reattaches_when_configured(self):
-        eng = bare_engine()
-        eng.mixer = 0  # mixer not yet created
-        eng.set_master_compressor({"ratio": 2.0})  # stores params, can't attach yet
-        self.assertEqual(eng._master_fx_handle, 0)
-        self.assertTrue(eng._master_should_attach())
-        # Simulate mixer now existing and re-attach.
-        eng.mixer = 0x1234
-        eng._attach_master_fx()
-        self.assertNotEqual(eng._master_fx_handle, 0)
-
-
-class EngineMasterDspTests(unittest.TestCase):
-    def test_attach_configures_and_sets_dsp(self):
-        eng = bare_engine()
-        proc = FakeProc()
-        eng.set_master_processor(proc)
-        self.assertNotEqual(eng._master_dsp_handle, 0)
-        self.assertIs(eng._master_proc, proc)
-        self.assertIs(eng._master_proc_ref["proc"], proc)
-        self.assertEqual(proc.configured, (44100, 2))
-        # Master DSP runs after the EQ (priority 0), so it uses a lower priority.
-        self.assertEqual(eng.bass.set_calls[-1], (eng.mixer, "DSP", -1))
-
-    def test_detach_removes_dsp(self):
-        eng = bare_engine()
-        eng.set_master_processor(FakeProc())
-        handle = eng._master_dsp_handle
-        eng.set_master_processor(None)
-        self.assertEqual(eng._master_dsp_handle, 0)
-        self.assertIsNone(eng._master_proc)
-        self.assertIsNone(eng._master_proc_ref["proc"])
-        self.assertIn((eng.mixer, handle), eng.bass.remove_calls)
-
-    def test_same_instance_is_noop(self):
-        eng = bare_engine()
-        proc = FakeProc()
-        eng.set_master_processor(proc)
-        handle = eng._master_dsp_handle
-        calls_before = len(eng.bass.set_calls)
-        eng.set_master_processor(proc)  # same instance -> no re-wire
-        self.assertEqual(eng._master_dsp_handle, handle)
-        self.assertEqual(len(eng.bass.set_calls), calls_before)
-
-    def test_ensure_mixer_reattaches_when_configured(self):
-        eng = bare_engine()
-        eng.mixer = 0  # mixer not yet created
-        eng.set_master_processor(FakeProc())  # stores proc, can't attach yet
-        self.assertEqual(eng._master_dsp_handle, 0)
-        eng.mixer = 0x1234
-        eng._attach_master_dsp()
-        self.assertNotEqual(eng._master_dsp_handle, 0)
 
 
 class FakeEngine:
@@ -307,18 +171,7 @@ class BackgroundTrackCrossfadeTests(unittest.TestCase):
         self.assertEqual(player.get_active_track_path(), "/incoming.mp3")
 
 
-class BassSecondaryPreloadContractTests(unittest.TestCase):
-    def test_startup_primary_prescan_is_split_from_live_mixer_attachment(self):
-        source = Path("bass_background_engine.py").read_text(encoding="utf-8")
-        prepare = source[source.index("def prepare_primary"):]
-        prepare = prepare[:prepare.index("def _attach_prepared_deck")]
-        attach = source[source.index("def _attach_prepared_deck"):]
-        attach = attach[:attach.index("def install_prepared_primary")]
-
-        self.assertIn("BASS_StreamCreateFile", prepare)
-        self.assertNotIn("BASS_Mixer_StreamAddChannel", prepare)
-        self.assertIn("BASS_Mixer_StreamAddChannel", attach)
-
+class StartupPreloadContractTests(unittest.TestCase):
     def test_app_startup_uses_worker_preload_not_gui_thread_prescan(self):
         source = Path("0.2.18.1.py").read_text(encoding="utf-8")
         bootstrap = source[source.index("def _bootstrap_bg_playlist_on_startup"):]
@@ -341,30 +194,6 @@ class BassSecondaryPreloadContractTests(unittest.TestCase):
         stop = stop[:stop.index("def set_stop_after_current")]
         self.assertIn("_startup_preload_generation", stop)
         self.assertIn("_startup_preload_resume_request = None", stop)
-
-    def test_crossfade_reuses_only_the_exact_unchanged_preload(self):
-        source = Path("bass_background_engine.py").read_text(encoding="utf-8")
-        preload = source[source.index("def preload_secondary"):]
-        preload = preload[:preload.index("def invalidate_secondary_preload")]
-        crossfade = source[source.index("def start_crossfade"):]
-        crossfade = crossfade[:crossfade.index("def preload_secondary")]
-        identity = source[source.index("def _deck_matches_file"):]
-        identity = identity[:identity.index("def _gain")]
-        self.assertIn("deck.path != str(path)", identity)
-        self.assertIn("stat.st_mtime", identity)
-        self.assertIn("stat.st_size", identity)
-        self.assertIn("_deck_matches_file(self.secondary, path)", preload)
-        self.assertIn("_deck_matches_file(self.secondary, path)", crossfade)
-        self.assertIn("self._free_deck(self.secondary)", crossfade)
-        self.assertIn("self._make_deck(path, 0.0", crossfade)
-
-    def test_preload_is_silent_and_optional(self):
-        source = Path("bass_background_engine.py").read_text(encoding="utf-8")
-        preload = source[source.index("def preload_secondary"):]
-        preload = preload[:preload.index("def invalidate_secondary_preload")]
-        self.assertIn("self._make_deck(path, 0.0", preload)
-        self.assertIn("return False", preload)
-        self.assertIn("except Exception:", preload)
 
 
 if __name__ == "__main__":

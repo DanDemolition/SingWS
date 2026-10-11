@@ -1,14 +1,11 @@
-"""Soundboard pad channels: one interface, two engines (2026-10-11).
+"""Soundboard pad channels: Rust engine only (BASS removed, 2026-10-11).
 
 `SoundboardChannel` is what a pad (`SoundboardPad` in 0.2.18.1.py) talks to. It has exactly the interface the BASS pad channel had, and picks its
 implementation from the runtime the app hands it:
 
 * the Rust music engine (`rust_bgm_engine.RustBackgroundEngine`, the default): pads are voices inside the engine, mixed through the same EQ and master
   chain as the music, with their own soundboard volume; hitting a playing pad LAYERS another instance and `stop()` stops every instance;
-* anything else with real BASS stream functions (the BASS engine, when `bgm_engine = "bass"`): the old single-stream `BassSoundboardChannel`
-  (a hit while playing restarts the clip; no layering).
-
-Both raise `SoundboardError` (the BASS channel's `BassSoundboardError` is a subclass), so callers catch one type."""
+Without the Rust engine (the libmpv fallback) a pad raises `SoundboardError`, which the pad shows as its warning face. BASS was removed in S5."""
 from __future__ import annotations
 
 import time
@@ -155,39 +152,18 @@ class RustSoundboardChannel:
 
 
 class SoundboardChannel:
-    """The channel a pad uses: delegates to the Rust or the BASS implementation depending on the runtime it is given."""
+    """The channel a pad uses: delegates to the Rust implementation of the runtime it is given."""
 
     def __init__(self, runtime_provider: Callable[[], object | None]):
         self._provider = runtime_provider
         self._impl = None
-        self._kind = ""
-        self._pending_path = ""
-        self._pending_volume = 1.0
-
-    def _runtime_kind(self) -> str:
-        runtime = self._provider()
-        if runtime is not None and hasattr(runtime, "pad_play"):
-            return "rust"
-        return "bass"
 
     def _get(self):
-        kind = self._runtime_kind()
-        if self._impl is None or kind != self._kind:
-            old = self._impl
-            if old is not None:
-                try:
-                    old.stop(release=True)
-                except Exception:
-                    pass
-            if kind == "rust":
-                self._impl = RustSoundboardChannel(self._provider)
-            else:
-                from bass_soundboard_engine import BassSoundboardChannel
-                self._impl = BassSoundboardChannel(self._provider)
-            self._kind = kind
-            if old is not None and getattr(old, "path", ""):
-                self._impl._path = old.path           # the new implementation re-opens the same clip on first use
-                self._impl._volume = getattr(old, "_volume", 1.0)
+        runtime = self._provider()
+        if runtime is None or not hasattr(runtime, "pad_play"):
+            raise SoundboardError("the Rust audio engine is not running, so pads cannot play")
+        if self._impl is None:
+            self._impl = RustSoundboardChannel(self._provider)
         return self._impl
 
     @property

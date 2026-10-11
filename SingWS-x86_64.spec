@@ -26,7 +26,7 @@ dsp_dylib = project_root / "native" / "singws_dsp" / "x86_64" / "libsingws_dsp_f
 if dsp_dylib.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{dsp_dylib}'"):
     binaries.append((str(dsp_dylib), "."))
 
-# Rust background-music engine library (rust/build_bgm.sh). Optional: without it `bgm_engine = "rust"` falls back to BASS.
+# Rust background-music engine library (rust/build_bgm.sh). Optional: without it the app falls back to the libmpv music engine.
 bgm_dylib = project_root / "native" / "singws_bgm" / "x86_64" / "libsingws_bgm_ffi.dylib"
 if bgm_dylib.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{bgm_dylib}'"):
     binaries.append((str(bgm_dylib), "."))
@@ -41,9 +41,8 @@ for helper in (
     "libmpv_media_jobs.py",
     "mpv_playback_iina.py",
     "mpv_karaoke_transport.py",
-    "bass_background_engine.py",
+    "audio_diag.py",
     "libmpv_background_engine.py",
-    "bass_soundboard_engine.py",
     "song_index.py",
     "singws_eq.py",
     "singws_master_audio.py",
@@ -72,14 +71,6 @@ if not iina_dylibs:
 binaries.extend((str(path), ".") for path in iina_dylibs)
 binaries.append((str(bridge_dylib), "."))
 print(f"[spec] native mpv stack: {len(iina_dylibs)} dylibs + bridge")
-
-for bass_lib in (Path("vendor/bass") / name for name in (
-    "libbass.dylib",
-    "libbassmix.dylib",
-    "libbassflac.dylib",
-)):
-    if bass_lib.exists():
-        binaries.append((str(bass_lib), "vendor/bass"))
 
 # libssl and libcrypto MUST come from one OpenSSL build. libmpv links
 # Homebrew's, Python links the framework's, and the two share sonames, so
@@ -168,9 +159,8 @@ a = Analysis(
         'media_helpers',
         'libmpv_media_jobs',
         'libmpv_background_engine',
-        'bass_soundboard_engine',
+        'audio_diag',
         'mpv_karaoke_transport',
-        'bass_background_engine',
         'rust_master_dsp',
         'rust_bgm_engine',
         'soundboard_channels',

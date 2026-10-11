@@ -1426,9 +1426,8 @@ from media_helpers import NS_PER_SECOND, match_qt_audio_device
 GstKaraokeTransport = None
 GST_KARAOKE_IMPORT_ERROR = None
 
-from bass_background_engine import BassBackgroundEngine, BassBackgroundError, format_audio_diag
+from audio_diag import format_audio_diag
 from libmpv_background_engine import LibmpvBackgroundEngine
-from bass_soundboard_engine import BassSoundboardChannel, BassSoundboardError
 from soundboard_channels import SoundboardChannel, SoundboardError
 
 # ===== RESOURCE MANAGEMENT FOR PYINSTALLER =====
@@ -3853,7 +3852,7 @@ DEFAULTS = {
     # with zero over-budget blocks and zero gaps) or "python" (the reference, runs inside a BASS audio-thread callback).
     # Falls back to Python if the library is missing. Takes effect at the next launch.
     "master_dsp_engine": "rust",
-    "bgm_engine": "rust",   # "rust" (default, operator decision 2026-10-10) | "bass": the background-music engine; applies at next launch. A Rust start-up failure falls back to BASS.
+    "bgm_engine": "rust",   # Always the Rust engine now (BASS removed in S5); a saved "bass" is ignored with a log line. A Rust start-up failure falls back to libmpv.
     # Engine for loudness / silence-boundary analysis: "rust" (DEFAULT since 2026-10-10: Rust answers loudness, peak, duration and
     # silence boundaries, which matched libmpv on every real file tested; the BGM crossfade envelope and ANY Rust trouble fall back
     # to libmpv), "libmpv" (the old behaviour) or "shadow" (libmpv stays in charge; the Rust helper runs alongside and any
@@ -4635,17 +4634,16 @@ class BackgroundMusicPlayer(QObject):
                 pass
         self._bg_volume_diag("app-launch-init", extra=f"target={target:.3f}")
 
-    def _bgm_engine_preference(self) -> str:
-        """"rust" or "bass" (default). The player is built before the host's settings exist, so fall back to reading the settings file."""
+    def _legacy_bass_setting(self) -> bool:
+        """True when the saved settings still say `bgm_engine = "bass"` (BASS has been removed; the value is only logged and ignored)."""
         try:
             parent = self.parent()
             settings = getattr(parent, "settings", None) if parent is not None else None
             if not isinstance(settings, dict):
                 settings = _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
-            # "bass" is the only way to opt out; unset, empty or anything else means the default (rust)
-            return "bass" if str(settings.get("bgm_engine", "rust") or "rust").strip().lower() == "bass" else "rust"
+            return str(settings.get("bgm_engine", "rust") or "rust").strip().lower() == "bass"
         except Exception:
-            return "rust"
+            return False
 
     def _init_bass_engine(self, output_name: str | None = None) -> bool:
         try:
@@ -4659,33 +4657,26 @@ class BackgroundMusicPlayer(QObject):
                 self._bass_engine = None
             self._bass_engine = None    # also on the very first call, when no engine (and no attribute) exists yet
 
-            if self._bgm_engine_preference() == "rust":
-                # Opt-in Rust engine (setting `bgm_engine`, default "bass"). ANY failure keeps BASS: the show must never lose its
-                # music because the new engine could not start.
-                try:
-                    from rust_bgm_engine import RustBackgroundEngine
-                    self._bass_engine = RustBackgroundEngine(output_name=output_name)
-                    if getattr(self._bass_engine, "fell_back_to_default", False):
-                        _diag(f"[BG-RUST] saved output '{output_name}' not found; using the system default ({self._bass_engine.device_name})")
-                except Exception as rust_err:
-                    _diag(f"[BG-RUST] Rust background engine unavailable ({rust_err}); using BASS")
-                    self._bass_engine = None
-            if self._bass_engine is None:
-                try:
-                    self._bass_engine = BassBackgroundEngine(output_name=output_name)
-                except BassBackgroundError as bass_err:
-                    # BASS failure recovery: fall back to the libmpv/Qt background
-                    # engine (same deck/crossfade API) before ever considering the
-                    # retired pipeline implementation.
-                    _diag(f"[BG-BASS] unavailable ({bass_err}); trying libmpv/Qt background engine")
-                    self._bass_engine = LibmpvBackgroundEngine(output_name=output_name)
-            backend = getattr(self._bass_engine, "backend_name", "BASS")
+            if self._legacy_bass_setting() and not getattr(self, "_legacy_bass_logged", False):
+                self._legacy_bass_logged = True
+                _diag('[BG-RUST] settings say bgm_engine="bass"; BASS is no longer part of SingWS, using the Rust engine')
+            # The Rust engine is the music engine. If it cannot start, fall back to the libmpv/Qt engine (same deck/crossfade API)
+            # so the show never loses its music.
+            try:
+                from rust_bgm_engine import RustBackgroundEngine
+                self._bass_engine = RustBackgroundEngine(output_name=output_name)
+                if getattr(self._bass_engine, "fell_back_to_default", False):
+                    _diag(f"[BG-RUST] saved output '{output_name}' not found; using the system default ({self._bass_engine.device_name})")
+            except Exception as rust_err:
+                _diag(f"[BG-RUST] Rust background engine unavailable ({rust_err}); trying libmpv/Qt background engine")
+                self._bass_engine = LibmpvBackgroundEngine(output_name=output_name)
+            backend = getattr(self._bass_engine, "backend_name", "Rust")
             _diag(f"[BG-BASS] {backend} background engine ready platform={self._platform_audio_label()}")
             self._attach_host_audio_chain()
             return True
         except Exception as e:
             self._bass_engine = None
-            _diag(f"[BG-BASS] no BASS/libmpv background engine available ({e})")
+            _diag(f"[BG-BASS] no Rust/libmpv background engine available ({e})")
             return False
 
     def set_soundboard_volume(self, volume) -> None:
@@ -4704,35 +4695,10 @@ class BackgroundMusicPlayer(QObject):
             pass
 
     def soundboard_runtime(self):
-        """The engine whose BASS library the soundboard pads open their streams on.
-
-        BASS is the main engine's runtime. On the Rust (or libmpv) engine there is no BASS output, so the pads get a
-        private BASS instance on the same output device, created on first use and rebuilt if the output changes.
-        """
+        """The engine the soundboard pads play through: only the Rust engine has pads (layering, the same EQ/master chain, own volume).
+        None on the libmpv fallback, where pads report that they cannot play."""
         engine = getattr(self, "_bass_engine", None)
-        if engine is None:
-            return None
-        if hasattr(engine, "pad_play"):
-            return engine       # the Rust engine plays the pads itself (layering, same EQ/master chain, own volume)
-        if hasattr(getattr(engine, "bass", None), "BASS_StreamCreateFile"):
-            return engine
-        wanted = str(getattr(engine, "output_name", "") or "")
-        sb = getattr(self, "_soundboard_bass_engine", None)
-        if sb is not None and (getattr(sb, "_closed", False) or sb.output_name != wanted):
-            try:
-                sb.close()
-            except Exception:
-                pass
-            sb = None
-        if sb is None:
-            try:
-                sb = BassBackgroundEngine(output_name=wanted)
-                _diag(f"[SOUNDBOARD] private BASS output opened for pads (background engine is {getattr(engine, 'backend_name', '?')})")
-            except Exception as exc:
-                _diag(f"[SOUNDBOARD] could not open a BASS output for pads: {exc}")
-                sb = None
-        self._soundboard_bass_engine = sb
-        return sb
+        return engine if engine is not None and hasattr(engine, "pad_play") else None
 
     def _attach_host_audio_chain(self) -> None:
         """Attach the BGM graphic EQ, the master chain and the audio counters to the current engine, from the host's settings.
@@ -6024,7 +5990,7 @@ class BackgroundMusicPlayer(QObject):
             self._bass_fade_generation += 1  # cancel any pending stop-after-fade
             if paused or not really_playing:
                 eng.set_master_volume(0.0)
-                eng.bass.BASS_ChannelPlay(eng.mixer, False)
+                eng.play()
             eng.slide_master_volume(target, 500)
         except Exception as e:
             print(f"[BG-RECOVER] failed: {e}")

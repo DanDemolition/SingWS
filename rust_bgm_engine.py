@@ -179,16 +179,6 @@ class _Deck:
             return False
 
 
-class _BassShim:
-    """The application's volume-recovery code calls `eng.bass.BASS_ChannelPlay(eng.mixer, False)`; map it to `play()`."""
-
-    def __init__(self, engine):
-        self._engine = engine
-
-    def BASS_ChannelPlay(self, _mixer, _restart):  # noqa: N802 - name mirrors the BASS API
-        return 1 if self._engine.play() else 0
-
-
 def _clamp01(v) -> float:
     try:
         return max(0.0, min(1.0, float(v)))
@@ -228,8 +218,6 @@ class RustBackgroundEngine:
         self.master_volume = 0.8
         self.primary: _Deck | None = None
         self.secondary: _Deck | None = None
-        self.mixer = 1                      # truthy marker for code that checks `engine.mixer`
-        self.bass = _BassShim(self)
         self._playing = False
         self._paused = False
         self._closed = False
