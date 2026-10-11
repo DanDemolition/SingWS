@@ -82,6 +82,19 @@ _COMP_MAKEUP_TRIM_DB = -1.3
 _COMP_ATTACK_MAX_MS = 2000.0     # ffmpeg's limits
 _COMP_RELEASE_MAX_MS = 9000.0
 
+# Gate / expander dynamics, same story as the compressor: the real gate smooths the level in gate_attack_ms (5) and then the gain
+# symmetrically over gate_release_ms (140), where agate smooths the level asymmetrically. Measured on the quiet tails of real karaoke songs and
+# controlled quiet music (tools/karaoke_gate_tune.py, 2026-10-11, 256 candidates): peak detection, attack = 1.0 x and release = 4.3 x the real
+# release time, threshold +3 dB and a 9 dB knee follow the real gate to 0.79 dB (95th percentile, was 3.88 dB) with a song-to-song spread
+# of 0.14 dB (was 1.30 dB). Only matters below the threshold (-58 dBFS by default): fade tails and near-silence.
+_GATE_DETECTION = "peak"
+_GATE_ATTACK_PER_REAL_RELEASE = 1.0
+_GATE_RELEASE_PER_REAL_RELEASE = 4.3
+_GATE_THRESHOLD_OFFSET_DB = 3.0
+_GATE_KNEE_FACTOR = 2.8
+_GATE_MAX_MS = 9000.0
+_GATE_THRESHOLD_MIN = 0.000976563     # ffmpeg's limit (about -60 dBFS)
+
 # MasterAudioProcessor's compressor detects on a smoothed mean-of-|x|;
 # acompressor detects on a smoothed RMS, which reads higher for the same
 # programme. Passing the SingWS threshold through unchanged therefore started
@@ -187,15 +200,19 @@ def master_bus_filters(params: dict | None) -> list[str]:
 
     if _enabled(p, "gate_enabled"):
         # agate takes LINEAR threshold and range, not dB.
-        threshold = max(0.0, min(1.0, _db_to_linear(_as_float(p.get("gate_threshold_db"), -58.0))))
+        threshold = max(_GATE_THRESHOLD_MIN, min(1.0, _db_to_linear(
+            _as_float(p.get("gate_threshold_db"), -58.0) + _GATE_THRESHOLD_OFFSET_DB)))
         floor_lin = max(0.0, min(1.0, _db_to_linear(_as_float(p.get("gate_floor_db"), -18.0))))
+        real_release_ms = max(1.0, _as_float(p.get("gate_release_ms"), 140.0))
         out.append(
             "agate="
             f"threshold={_f(threshold)}:"
             f"range={_f(floor_lin)}:"
             f"ratio={_f(max(1.0, _as_float(p.get('gate_ratio'), 1.6)))}:"
-            f"attack={_f(max(0.01, _as_float(p.get('gate_attack_ms'), 5.0)))}:"
-            f"release={_f(max(0.01, _as_float(p.get('gate_release_ms'), 140.0)))}"
+            f"attack={_f(min(_GATE_MAX_MS, max(0.01, real_release_ms * _GATE_ATTACK_PER_REAL_RELEASE)))}:"
+            f"release={_f(min(_GATE_MAX_MS, max(0.01, real_release_ms * _GATE_RELEASE_PER_REAL_RELEASE)))}:"
+            f"knee={_f(_GATE_KNEE_FACTOR)}:"
+            f"detection={_GATE_DETECTION}:link=average"
         )
 
     if _enabled(p, "eq_enabled", default=True):

@@ -91,9 +91,11 @@ class ChainStructureTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions), chain)
 
     def test_gate_threshold_converts_db_to_linear(self):
-        # agate takes linear 0..1, not dB. -58 dB -> ~0.00126.
+        # agate takes linear 0..1, not dB. -58 dB + the measured 3 dB detector offset = -55 dB -> ~0.00178.
         chain = ",".join(M.master_bus_filters(_host_master_params(gate=True)))
-        self.assertIn("agate=threshold=0.001259", chain)
+        self.assertIn("agate=threshold=0.001778", chain)
+        self.assertIn("detection=peak:link=average", chain.split("agate=")[1].split(",")[0])
+        self.assertIn("attack=140:release=602:knee=2.8", chain)       # 1.0 x and 4.3 x the real 140 ms release
         self.assertIn("range=0.125893", chain)  # gate_floor_db -18 dB
 
     def test_disabled_stages_are_absent(self):
