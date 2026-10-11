@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 LIB_NAME = "libsingws_bgm_ffi.dylib"
-EXPECTED_ABI_VERSION = 1
+EXPECTED_ABI_VERSION = 2
 STAT_COUNT = 16
 
 FLAG_PLAYING, FLAG_PAUSED, FLAG_ENDED, FLAG_XFADE_ACTIVE, FLAG_XFADE_FINISHED, FLAG_HAS_PRIMARY, FLAG_HAS_SECONDARY = 1, 2, 4, 8, 16, 32, 64
@@ -130,6 +130,17 @@ def _declare(lib) -> None:
         "singws_bgm_set_master_enabled": ([V, I32], None),
         "singws_bgm_set_master_params": ([V, ctypes.POINTER(ctypes.c_double), U32], I32),
         "singws_bgm_stats": ([V, ctypes.POINTER(ctypes.c_uint64), I32], None),
+        "singws_bgm_clip_open": ([V, CP, ctypes.c_char_p, SZ], V),
+        "singws_bgm_clip_frames": ([V], ctypes.c_int64),
+        "singws_bgm_clip_free": ([V], None),
+        "singws_bgm_pad_set_clip": ([V, U32, V], I32),
+        "singws_bgm_pad_play": ([V, U32, ctypes.c_uint64], I32),
+        "singws_bgm_pad_stop": ([V, U32], I32),
+        "singws_bgm_pad_stop_all": ([V], I32),
+        "singws_bgm_pad_set_gain": ([V, U32, F32], I32),
+        "singws_bgm_pad_set_master": ([V, F32], I32),
+        "singws_bgm_pad_playing": ([V, U32], U32),
+        "singws_bgm_pad_position_frames": ([V, U32], ctypes.c_uint64),
     }
     for name, (args, res) in sig.items():
         fn = getattr(lib, name)
@@ -226,6 +237,7 @@ class RustBackgroundEngine:
         self._master_names: list[str] | None = None
         self._diag_enabled = False
         self._diag_last = None
+        self.soundboard_volume = 1.0
         self.master_attached = False        # a master processor's parameters have been pushed and the chain is on
         self._lock = threading.RLock()      # serialises Python-side bookkeeping only; the audio thread never sees it
 
@@ -576,6 +588,84 @@ class RustBackgroundEngine:
             "latency_ms": now[4] / 1000.0,
             "device_lost": bool(now[9]),
         }
+
+    # ---------------- soundboard pads (the app's SoundboardChannel talks to these) ----------------
+
+    MAX_PAD_SLOTS = 64
+    soundboard_supported = True
+
+    def pad_allocate_slot(self) -> int:
+        with self._lock:
+            used = getattr(self, "_pad_slots_used", None)
+            if used is None:
+                used = self._pad_slots_used = set()
+            for slot in range(self.MAX_PAD_SLOTS):
+                if slot not in used:
+                    used.add(slot)
+                    return slot
+        raise RustBgmUnavailable("no free soundboard slot")
+
+    def pad_release_slot(self, slot: int) -> None:
+        with self._lock:
+            getattr(self, "_pad_slots_used", set()).discard(slot)
+        if self._ok():
+            self._lib.singws_bgm_pad_stop(self._h, int(slot))
+            self._lib.singws_bgm_pad_set_clip(self._h, int(slot), None)
+
+    def pad_load(self, slot: int, path: str, volume: float) -> int:
+        """Decode `path` (slow: ms for a short clip) and assign it to the slot. Returns its length in frames."""
+        if not self._ok():
+            raise RustBgmUnavailable("the audio output is closed")
+        err = ctypes.create_string_buffer(512)
+        clip = self._lib.singws_bgm_clip_open(self._h, os.fsencode(path), err, len(err))
+        if not clip:
+            raise RustBgmUnavailable(err.value.decode(errors="replace") or "cannot decode the clip")
+        try:
+            frames = int(self._lib.singws_bgm_clip_frames(ctypes.c_void_p(clip)))
+            self._lib.singws_bgm_pad_set_clip(self._h, int(slot), ctypes.c_void_p(clip))
+        finally:
+            self._lib.singws_bgm_clip_free(ctypes.c_void_p(clip))     # the engine holds its own reference
+        self._lib.singws_bgm_pad_set_gain(self._h, int(slot), float(_clamp01(volume)))
+        self._sync()
+        return frames
+
+    def pad_clear(self, slot: int) -> None:
+        if self._ok():
+            self._lib.singws_bgm_pad_stop(self._h, int(slot))
+            self._lib.singws_bgm_pad_set_clip(self._h, int(slot), None)
+
+    def pad_play(self, slot: int, start_seconds: float = 0.0) -> bool:
+        """Start another instance of the slot's clip (hits layer)."""
+        if not self._ok():
+            return False
+        return bool(self._lib.singws_bgm_pad_play(self._h, int(slot), int(max(0.0, start_seconds) * self.sample_rate)))
+
+    def pad_stop(self, slot: int) -> None:
+        """Stop EVERY instance of the slot."""
+        if self._ok():
+            self._lib.singws_bgm_pad_stop(self._h, int(slot))
+
+    def pad_stop_all(self) -> None:
+        if self._ok():
+            self._lib.singws_bgm_pad_stop_all(self._h)
+
+    def pad_set_volume(self, slot: int, volume: float) -> None:
+        if self._ok():
+            self._lib.singws_bgm_pad_set_gain(self._h, int(slot), float(_clamp01(volume)))
+
+    def pad_instances(self, slot: int) -> int:
+        return int(self._lib.singws_bgm_pad_playing(self._h, int(slot))) if self._ok() else 0
+
+    def pad_position_seconds(self, slot: int) -> float:
+        if not self._ok():
+            return 0.0
+        return float(self._lib.singws_bgm_pad_position_frames(self._h, int(slot))) / float(self.sample_rate or 48000)
+
+    def set_soundboard_volume(self, volume: float) -> None:
+        """The soundboard volume slider: scales every pad, independent of the music volume."""
+        self.soundboard_volume = _clamp01(volume)
+        if self._ok():
+            self._lib.singws_bgm_pad_set_master(self._h, float(self.soundboard_volume))
 
     # ---------------- shutdown ----------------
 

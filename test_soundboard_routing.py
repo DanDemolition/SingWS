@@ -33,8 +33,11 @@ class SoundboardRoutingTests(unittest.TestCase):
         self.assertNotIn("from PyQt6.QtMultimedia import QMediaPlayer", source)
         self.assertNotIn("from PyQt6.QtMultimedia import QAudioOutput", source)
         self.assertNotIn("Gst.", source)
-        self.assertIn("BassSoundboardChannel", source)
-        self.assertIn("backend=BASS", source)
+        # pads use the native engine channel (Rust by default, BASS only as the opt-out fallback), never QtMultimedia/GStreamer
+        self.assertIn("SoundboardChannel(", source)
+        self.assertIn("backend={backend}", source)
+        self.assertIn('"Rust"', source)
+        self.assertIn('"BASS"', source)
 
     def test_soundboard_pad_playing_style_tracks_playback_state(self):
         source = inspect.getsource(self.singws.SoundboardPad)

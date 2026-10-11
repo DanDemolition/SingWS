@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 from collections.abc import Callable
 
+from soundboard_channels import SoundboardError
 from bass_background_engine import (
     BASS_ACTIVE_PLAYING,
     BASS_ATTRIB_VOL,
@@ -16,7 +17,7 @@ from bass_background_engine import (
 )
 
 
-class BassSoundboardError(RuntimeError):
+class BassSoundboardError(SoundboardError):
     pass
 
 
@@ -27,6 +28,8 @@ class BassSoundboardChannel:
     stream, which lets pads mix independently with the BGM mixer without
     adding a Python callback to the realtime audio path.
     """
+
+    supports_layering = False
 
     def __init__(self, runtime_provider: Callable[[], object | None]):
         self._runtime_provider = runtime_provider

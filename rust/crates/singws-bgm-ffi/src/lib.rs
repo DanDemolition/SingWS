@@ -15,17 +15,20 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use singws_bgm::engine::DeckSource;
+use singws_bgm::pads::{Clip, MAX_PAD_SLOTS};
 use singws_bgm::rt::{Command, FLAG_ENDED, FLAG_PAUSED, FLAG_PLAYING};
 use singws_bgm::system::BgmSystem;
 use singws_dsp::{PARAM_COUNT, PARAM_NAMES};
 
 /// Bump when any exported signature or the stats layout changes; the Python adapter checks it.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 /// Number of u64 values `singws_bgm_stats` writes.
 pub const STAT_COUNT: usize = 16;
 
 pub struct Sys(BgmSystem);
 pub struct Deck(Box<dyn DeckSource>);
+/// A decoded soundboard clip (shared with the engine once assigned to a pad slot).
+pub struct ClipHandle(Clip);
 
 fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
@@ -420,6 +423,143 @@ pub unsafe extern "C" fn singws_bgm_set_master_params(p: *mut Sys, values: *cons
         s.0.master.set_params(&v);
         0
     })
+}
+
+// ---- soundboard pads (ABI 2) --------------------------------------------------------------------------------------------------------
+
+/// Decode a clip to memory at the output rate (any format the decoder reads, AAC/M4A included). Slow: worker thread. NULL on failure (or when the
+/// clip is longer than 300 s) with a message in `err`.
+///
+/// # Safety
+/// `p` is a live handle; `path` is NUL-terminated UTF-8; `err` has `err_len` writable bytes (or is NULL).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_clip_open(p: *mut Sys, path: *const c_char, err: *mut c_char, err_len: usize) -> *mut ClipHandle {
+    guard(std::ptr::null_mut(), || {
+        // SAFETY: contract above.
+        let (Some(s), Some(path)) = (unsafe { sys(p) }, unsafe { cstr(path) }) else {
+            write_err(err, err_len, "bad handle or path");
+            return std::ptr::null_mut();
+        };
+        match s.0.load_clip(Path::new(&path)) {
+            Ok(c) => Box::into_raw(Box::new(ClipHandle(c))),
+            Err(e) => {
+                write_err(err, err_len, &e.to_string());
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Length of a decoded clip in frames.
+///
+/// # Safety
+/// `c` is a live clip handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_clip_frames(c: *mut ClipHandle) -> i64 {
+    // SAFETY: contract above.
+    unsafe { c.as_ref() }.map(|c| (c.0.len() / 2) as i64).unwrap_or(-1)
+}
+
+/// Free a clip handle. The engine keeps its own reference to a clip assigned to a pad, so this is always safe to call.
+///
+/// # Safety
+/// `c` is a clip handle from `singws_bgm_clip_open`, not used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_clip_free(c: *mut ClipHandle) {
+    if !c.is_null() {
+        // SAFETY: ownership returns from the caller. Dropping a reference is cheap; a freed last reference here is on the caller's thread.
+        let _ = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(c) })));
+    }
+}
+
+/// Assign a clip to a pad slot (0..63), or clear the slot with a NULL clip. Instances already playing keep the clip they started with.
+///
+/// # Safety
+/// `p` is a live handle; `c` is NULL or a live clip handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_set_clip(p: *mut Sys, slot: u32, c: *mut ClipHandle) -> i32 {
+    if slot as usize >= MAX_PAD_SLOTS {
+        return 0;
+    }
+    // SAFETY: contract above.
+    let clip = unsafe { c.as_ref() }.map(|c| c.0.clone());
+    send(p, move || Command::PadSetClip { slot: slot as u8, clip })
+}
+
+/// Start another instance of the slot's clip at `start_frame` (instances layer).
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_play(p: *mut Sys, slot: u32, start_frame: u64) -> i32 {
+    if slot as usize >= MAX_PAD_SLOTS {
+        return 0;
+    }
+    send(p, || Command::PadPlay { slot: slot as u8, start_frame })
+}
+
+/// Stop every instance of the slot.
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_stop(p: *mut Sys, slot: u32) -> i32 {
+    if slot as usize >= MAX_PAD_SLOTS {
+        return 0;
+    }
+    send(p, || Command::PadStop { slot: slot as u8 })
+}
+
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_stop_all(p: *mut Sys) -> i32 {
+    send(p, || Command::PadStopAll)
+}
+
+/// One pad's own volume (0..1).
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_set_gain(p: *mut Sys, slot: u32, gain: f32) -> i32 {
+    if slot as usize >= MAX_PAD_SLOTS {
+        return 0;
+    }
+    send(p, || Command::PadSetGain { slot: slot as u8, gain })
+}
+
+/// The soundboard volume (0..1): scales every pad, independent of the music volume.
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_set_master(p: *mut Sys, gain: f32) -> i32 {
+    send(p, || Command::PadSetMaster(gain))
+}
+
+/// Instances of the slot that are sounding (as of the last audio block).
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_playing(p: *mut Sys, slot: u32) -> u32 {
+    // SAFETY: contract above.
+    unsafe { sys(p) }
+        .and_then(|s| s.0.control.snapshot.pad_playing.get(slot as usize).map(|a| a.load(Relaxed)))
+        .unwrap_or(0)
+}
+
+/// Position in frames of the newest instance of the slot (0 when none is sounding).
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_pad_position_frames(p: *mut Sys, slot: u32) -> u64 {
+    // SAFETY: contract above.
+    unsafe { sys(p) }
+        .and_then(|s| s.0.control.snapshot.pad_position.get(slot as usize).map(|a| a.load(Relaxed)))
+        .unwrap_or(0)
 }
 
 /// Fill `out[..n]` with: callbacks, max callback us, total callback us, over-budget callbacks, driver latency us, buffer frames,

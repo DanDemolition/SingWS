@@ -1,8 +1,7 @@
-"""Soundboard pads while the Rust music engine is the background engine (found 2026-10-10: a pad press crashed the app).
-
-Uses the REAL BackgroundMusicPlayer on the real Rust engine and a real BASS output for the pads; every sound is silent (volume 0).
-Skipped when the Rust library or a BASS output is unavailable."""
+"""The real SoundboardPad widget on the Rust engine (2026-10-11): click fires, a second click LAYERS, Shift-click stops every instance, the soundboard
+slider scales the pads and the music volume does not. Real BackgroundMusicPlayer + real Rust engine, headless (no sound card, nothing audible)."""
 import importlib.util
+import math
 import os
 import sys
 import tempfile
@@ -10,6 +9,7 @@ import time
 import unittest
 import wave
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -17,39 +17,48 @@ import rust_bgm_engine as rbe
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _ROOT = Path(__file__).resolve().parent
+RATE = 48000
 
 
-def tone(path, seconds=3.0, hz=440, rate=48000):
-    n = int(seconds * rate)
-    pcm = (np.repeat((0.3 * np.sin(2 * np.pi * hz * np.arange(n) / rate))[:, None], 2, axis=1) * 32767).astype("<i2")
+def tone(path, hz=1000, amp=0.1, seconds=3.0):
+    n = int(seconds * RATE)
+    pcm = (np.repeat((amp * np.sin(2 * np.pi * hz * np.arange(n) / RATE))[:, None], 2, axis=1) * 32767).astype("<i2")
     with wave.open(str(path), "wb") as out:
         out.setnchannels(2)
         out.setsampwidth(2)
-        out.setframerate(rate)
+        out.setframerate(RATE)
         out.writeframes(pcm.tobytes())
     return str(path)
 
 
+def rms(x):
+    return float(np.sqrt(np.mean(np.square(x.astype(np.float64)))))
+
+
 @unittest.skipUnless(rbe.available(), "libsingws_bgm_ffi.dylib not built")
-class SoundboardWithRustBgmTests(unittest.TestCase):
+class PadWidgetOnRustTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        os.environ["SINGWS_HOME"] = tempfile.mkdtemp(prefix="singws-sbrust-")
-        spec = importlib.util.spec_from_file_location("singws_main_sbrust", _ROOT / "0.2.18.1.py")
+        os.environ["SINGWS_HOME"] = tempfile.mkdtemp(prefix="singws-padwidget-")
+        spec = importlib.util.spec_from_file_location("singws_main_padwidget", _ROOT / "0.2.18.1.py")
         cls.app = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = cls.app
         spec.loader.exec_module(cls.app)
         from PyQt6.QtWidgets import QApplication
         cls.qapp = QApplication.instance() or QApplication([])
 
-    def make_player(self):
+    def setUp(self):
         from PyQt6.QtCore import QObject
+        from PyQt6.QtWidgets import QWidget
+        app = self.app
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
 
         class Host(QObject):
             def __init__(h):
                 super().__init__()
-                h.settings = {"bgm_engine": "rust", "simple_audio_mode": True}
-                h._host_bgm_live_volume = 0.0
+                h.settings = {"bgm_engine": "rust", "simple_audio_mode": True, "soundboard_volume": 1.0}
+                h._host_bgm_live_volume = 0.8
                 h.karaoke_playing = False
                 h.bgm_eq = None
 
@@ -62,74 +71,110 @@ class SoundboardWithRustBgmTests(unittest.TestCase):
             def update_bg_button_state(h, *a, **k): pass
             def update_bg_track_display(h, *a, **k): pass
 
+        class Headless(rbe.RustBackgroundEngine):
+            def __init__(e, output_name=None, sample_rate=48000):
+                super().__init__(output_name, sample_rate, headless=True)
+
+        patcher = mock.patch.object(rbe, "RustBackgroundEngine", Headless)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.host = Host()
-        player = self.app.BackgroundMusicPlayer(self.host)
-        self.addCleanup(self._close, player)
-        return player
+        self.player = app.BackgroundMusicPlayer(self.host)
+        self.engine = self.player._bass_engine
+        self.assertEqual(self.engine.backend_name, "Rust")
 
-    @staticmethod
-    def _close(player):
-        for eng in (getattr(player, "_soundboard_bass_engine", None), getattr(player, "_bass_engine", None)):
-            try:
-                if eng is not None:
-                    eng.close()
-            except Exception:
-                pass
+        player = self.player
 
-    def test_a_pad_plays_while_the_rust_engine_runs_the_music(self):
-        from bass_soundboard_engine import BassSoundboardChannel
-        player = self.make_player()
-        self.assertEqual(player._bass_engine.backend_name, "Rust")
-        runtime = player.soundboard_runtime()
-        if runtime is None:
-            self.skipTest("no BASS output available for the pads on this machine")
-        self.assertTrue(hasattr(runtime.bass, "BASS_StreamCreateFile"), "pads must get a runtime with the real BASS stream functions")
-        self.assertIsNot(runtime, player._bass_engine, "the Rust engine is not a BASS runtime")
-        d = tempfile.mkdtemp()
-        clip = tone(Path(d) / "pad.wav")
-        channel = BassSoundboardChannel(player.soundboard_runtime)
-        channel.load(clip, 0.0)               # volume 0: nothing is heard
-        channel.play()
-        time.sleep(0.4)
-        self.assertTrue(channel.is_playing())
-        self.assertGreater(channel.position_seconds(), 0.1)
-        channel.stop()
-        self.assertFalse(channel.is_playing())
-        channel.close()
+        class Owner(QWidget):
+            """What SoundboardPad._app_owner() looks for."""
+            bg_music = player
 
-    def test_a_pad_press_while_music_plays_does_not_disturb_the_music(self):
-        from bass_soundboard_engine import BassSoundboardChannel
-        player = self.make_player()
-        d = tempfile.mkdtemp()
-        music = tone(Path(d) / "music.wav", seconds=20)
-        player.playlist = [music]
-        player.current_index = 0
-        player.set_enabled(True)
-        player.play()
-        time.sleep(0.6)
-        runtime = player.soundboard_runtime()
-        if runtime is None:
-            self.skipTest("no BASS output available for the pads on this machine")
-        channel = BassSoundboardChannel(player.soundboard_runtime)
-        before = player._bass_engine._stats()
-        for _ in range(5):
-            channel.load(tone(Path(d) / "pad.wav", seconds=1.0), 0.0)
-            channel.play()
-            time.sleep(0.25)
-            channel.stop()
-        time.sleep(0.3)
-        after = player._bass_engine._stats()
-        self.assertTrue(player.is_playing, "the music keeps playing")
-        self.assertEqual(after[6] - before[6], 0, "no xruns while pads fire")
-        self.assertEqual(after[12] - before[12], 0, "no silent frames in the music while pads fire")
-        channel.close()
+            def _get_selected_audio_output_id(o):
+                return "default"
 
-    def test_the_private_pad_output_follows_a_changed_output_and_is_reused(self):
-        player = self.make_player()
-        a = player.soundboard_runtime()
-        if a is None:
-            self.skipTest("no BASS output available for the pads on this machine")
-        self.assertIs(player.soundboard_runtime(), a, "created once, then reused")
+        self.owner = Owner()
+        self.addCleanup(self.owner.close)
+        self.pad = app.SoundboardPad(0, parent=self.owner)
+        self.addCleanup(lambda: self.pad._channel.close())
+        self.clip = tone(Path(self.tmp.name) / "pad.wav")
+        self.pad._set_clip(self.clip, "Pad", 1.0)
+        self.stopped = []
+        self.pad.stopped.connect(self.stopped.append)
+
+    def level(self, frames=2400):
+        return rms(self.engine.render(frames)[frames // 4:])
+
+    def click(self, shift=False):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        QTest.mouseClick(self.pad, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier if shift else Qt.KeyboardModifier.NoModifier)
+        self.qapp.processEvents()
+
+    def test_the_pad_uses_the_rust_engine_not_bass(self):
+        self.assertIs(self.player.soundboard_runtime(), self.engine)
+        self.assertTrue(self.pad._channel.supports_layering)
+
+    def test_click_plays_and_a_second_click_layers_instead_of_stopping(self):
+        one = 0.1 / math.sqrt(2)
+        self.click()
+        self.assertTrue(self.pad._playing)
+        self.assertAlmostEqual(self.level(), one, delta=0.01)
+        self.click()                                  # still playing: this must NOT stop it
+        self.assertTrue(self.pad._playing)
+        self.assertAlmostEqual(self.level(), 2 * one, delta=0.02, msg="two layered instances")
+        self.click()
+        self.assertAlmostEqual(self.level(), 3 * one, delta=0.03)
+        self.assertEqual(self.stopped, [], "a plain click never stops the pad")
+
+    def test_shift_click_stops_every_instance(self):
+        self.click()
+        self.click()
+        self.click()
+        self.engine.render(2400)
+        self.click(shift=True)
+        self.engine.render(1200)
+        time.sleep(0.12)
+        self.qapp.processEvents()
+        self.assertEqual(float(np.abs(self.engine.render(2400)).max()), 0.0, "all instances silenced")
+        self.assertFalse(self.pad._playing)
+        self.assertEqual(self.stopped, [0], "the pad reports it stopped once")
+
+    def test_shift_click_on_a_silent_pad_does_not_fire_it(self):
+        self.click(shift=True)
+        self.assertEqual(float(np.abs(self.engine.render(2400)).max()), 0.0)
+        self.assertFalse(self.pad._playing)
+
+    def test_the_soundboard_slider_scales_the_pads_and_the_music_volume_does_not(self):
+        host = self.host
+        host.soundboard_strip = mock.Mock()
+        host.bg_music = self.player
+        host._schedule_save_settings = mock.Mock()
+        self.click()
+        full = self.level()
+        self.app.KaraokeApp._apply_soundboard_volume(host, 0.5)
+        self.engine.render(480)
+        self.assertAlmostEqual(self.level() / full, 0.5, delta=0.03)
+        self.assertEqual(host.settings["soundboard_volume"], 0.5)
+        host._schedule_save_settings.assert_called_once()
+        host.soundboard_strip.refresh_volumes.assert_called_once()
+        self.player.set_volume(0.0)                   # the MUSIC slider to zero
+        self.engine.render(4800)
+        self.assertAlmostEqual(self.level() / full, 0.5, delta=0.03, msg="music volume is separate")
+
+    def test_the_slider_value_survives_an_engine_rebuild(self):
+        self.player.set_soundboard_volume(0.4)
+        self.host.settings["soundboard_volume"] = 0.4
+        self.player._init_bass_engine()               # what an output-device change does
+        self.assertAlmostEqual(self.player._bass_engine.soundboard_volume, 0.4, places=3)
+
+    def test_the_bgm_section_has_the_soundboard_slider_wired_to_the_host(self):
+        src = (_ROOT / "0.2.18.1.py").read_text()
+        self.assertIn('self.soundboard_slider.valueChanged.connect(self.on_soundboard_volume_changed)', src)
+        manager = mock.Mock()
+        manager._host.return_value = self.host
+        self.host._apply_soundboard_volume = mock.Mock()
+        self.app.BackgroundMusicManager.on_soundboard_volume_changed(manager, 37)
+        self.host._apply_soundboard_volume.assert_called_once_with(0.37)
 
 
 if __name__ == "__main__":

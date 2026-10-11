@@ -1429,6 +1429,7 @@ GST_KARAOKE_IMPORT_ERROR = None
 from bass_background_engine import BassBackgroundEngine, BassBackgroundError, format_audio_diag
 from libmpv_background_engine import LibmpvBackgroundEngine
 from bass_soundboard_engine import BassSoundboardChannel, BassSoundboardError
+from soundboard_channels import SoundboardChannel, SoundboardError
 
 # ===== RESOURCE MANAGEMENT FOR PYINSTALLER =====
 
@@ -3822,6 +3823,7 @@ DEFAULTS = {
     "bg_autoplay_on_idle": True,     # start BG when karaoke stops
     "bg_import_folders": [],         # list[str] of BG library roots
     "bg_volume": 0.8,                # persisted slider value
+    "soundboard_volume": 1.0,        # the soundboard slider in the BGM section: scales every pad (0..1), separate from bg_volume
     "list_font_scale": 1.0,          # queue/search text scaling (keeps native font family)
     "ticker_size_index": 2,          # 2 smaller, default, 2 larger
     "ticker_bold": False,            # ticker uses same OS/Qt font family; toggles weight only
@@ -4537,6 +4539,7 @@ class BackgroundMusicPlayer(QObject):
         # The signature makes an edited/replaced file eligible again without
         # requiring an application restart.
         self._bg_unplayable_signatures = {}
+        self.soundboard_volume = 1.0
         self._init_bass_engine()
 
     def _platform_audio_label(self) -> str:
@@ -4685,6 +4688,21 @@ class BackgroundMusicPlayer(QObject):
             _diag(f"[BG-BASS] no BASS/libmpv background engine available ({e})")
             return False
 
+    def set_soundboard_volume(self, volume) -> None:
+        """The soundboard slider (0..1): scales every pad, independent of the music volume. Applied to the Rust engine's pad bus; the BASS fallback
+        pads get it multiplied into their own volume by SoundboardPad.refresh_volume()."""
+        try:
+            v = max(0.0, min(1.0, float(volume)))
+        except Exception:
+            v = 1.0
+        self.soundboard_volume = v
+        engine = getattr(self, "_bass_engine", None)
+        try:
+            if engine is not None and hasattr(engine, "set_soundboard_volume"):
+                engine.set_soundboard_volume(v)
+        except Exception:
+            pass
+
     def soundboard_runtime(self):
         """The engine whose BASS library the soundboard pads open their streams on.
 
@@ -4694,6 +4712,8 @@ class BackgroundMusicPlayer(QObject):
         engine = getattr(self, "_bass_engine", None)
         if engine is None:
             return None
+        if hasattr(engine, "pad_play"):
+            return engine       # the Rust engine plays the pads itself (layering, same EQ/master chain, own volume)
         if hasattr(getattr(engine, "bass", None), "BASS_StreamCreateFile"):
             return engine
         wanted = str(getattr(engine, "output_name", "") or "")
@@ -4749,6 +4769,12 @@ class BackgroundMusicPlayer(QObject):
             pass
         try:
             self._start_audio_diag_counters(parent)
+        except Exception:
+            pass
+        # the soundboard volume lives on the engine; a freshly created engine needs it pushed again
+        try:
+            settings = getattr(parent, "settings", None)
+            self.set_soundboard_volume(settings.get("soundboard_volume", 1.0) if isinstance(settings, dict) else getattr(self, "soundboard_volume", 1.0))
         except Exception:
             pass
 
@@ -9784,6 +9810,38 @@ class BackgroundMusicManager(QMainWindow):
         lower_controls_row.addLayout(toggle_row, 3)
         lower_controls_row.addWidget(vol_group, 2)
         player_layout.addLayout(lower_controls_row)
+
+        # --- Soundboard volume: scales the soundboard pads, separate from the music Volume above ---
+        sb_row = QHBoxLayout()
+        sb_row.setContentsMargins(0, 0, 0, 0)
+        sb_row.setSpacing(9)
+        sb_row.addStretch(3)
+        sb_group = QWidget()
+        sb_h = QHBoxLayout(sb_group)
+        sb_h.setContentsMargins(0, 0, 0, 0)
+        sb_h.setSpacing(6)
+        self.soundboard_text_label = QLabel("Soundboard")
+        self.soundboard_text_label.setToolTip("Volume of the soundboard pads. Separate from the music volume.")
+        sb_h.addWidget(self.soundboard_text_label)
+        self.soundboard_slider = QSlider(Qt.Orientation.Horizontal)
+        self.soundboard_slider.setRange(0, 100)
+        initial_sb = 100
+        if parent and hasattr(parent, "settings"):
+            try:
+                initial_sb = int(round(float(parent.settings.get("soundboard_volume", 1.0)) * 100))
+            except Exception:
+                initial_sb = 100
+        self.soundboard_slider.setValue(max(0, min(100, initial_sb)))
+        self.soundboard_slider.setToolTip("Volume of the soundboard pads. Separate from the music volume.")
+        self.soundboard_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sb_h.addWidget(self.soundboard_slider)
+        self.soundboard_label = QLabel(str(self.soundboard_slider.value()))
+        self.soundboard_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.soundboard_label.setMinimumWidth(28)
+        self.soundboard_label.setMaximumWidth(36)
+        sb_h.addWidget(self.soundboard_label)
+        sb_row.addWidget(sb_group, 2)
+        player_layout.addLayout(sb_row)
         shell_layout.addWidget(player_frame)
         
         # === MIDDLE: Splitter with Library and Playlist ===
@@ -9984,6 +10042,8 @@ class BackgroundMusicManager(QMainWindow):
         self.seek_slider.sliderReleased.connect(self._on_seek_released)
         self.seek_slider.valueChanged.connect(self._on_seek_value_changed)
         self.volume_slider.valueChanged.connect(self.on_volume_changed)
+        self.soundboard_slider.valueChanged.connect(self.on_soundboard_volume_changed)
+        self.soundboard_slider.valueChanged.connect(lambda v: self.soundboard_label.setText(str(v)))
         self.volume_slider.valueChanged.connect(lambda v: self.volume_label.setText(str(v)))
 
         # One-time sync at window open (paranoia guard)
@@ -10603,6 +10663,13 @@ class BackgroundMusicManager(QMainWindow):
                 p.save_settings()
             except Exception:
                 pass
+
+    def on_soundboard_volume_changed(self, value):
+        """The soundboard slider: applied to the pads live and saved (the music volume is a different slider)."""
+        vol = max(0.0, min(1.0, value / 100.0))
+        p = self._host()
+        if p is not None and hasattr(p, "_apply_soundboard_volume"):
+            p._apply_soundboard_volume(vol)
 
     def _toggle_bg_enabled(self, checked: bool):
         p = self._host()
@@ -19461,7 +19528,8 @@ class SoundboardPad(QPushButton):
         # BASS owns the native realtime mixing/output path used by background
         # music. Each pad gets an independent preloaded stream on that same
         # device, so clips overlap BGM and karaoke without Python audio work.
-        self._channel = BassSoundboardChannel(self._bass_runtime)
+        self._channel = SoundboardChannel(self._bass_runtime)
+        self._last_press_modifiers = Qt.KeyboardModifier.NoModifier
         self._playing = False
         self._channel_poll_timer = QTimer(self)
         self._channel_poll_timer.setInterval(80)
@@ -19502,9 +19570,9 @@ class SoundboardPad(QPushButton):
         self._label = label
         self._volume = max(0.0, min(1.0, float(volume)))
         try:
-            self._channel.load(path, self._volume)
-        except BassSoundboardError as e:
-            # Keep the assignment; a later click retries after BASS recovers.
+            self._channel.load(path, self._channel_volume())
+        except SoundboardError as e:
+            # Keep the assignment; a later click retries after the audio output recovers.
             _diag(f"[SOUNDBOARD] preload failed slot={self.slot_index}: {e}")
         self._refresh_face()
         self.cleared.emit(self.slot_index)
@@ -19563,19 +19631,46 @@ class SoundboardPad(QPushButton):
         if was_playing:
             self.stopped.emit(self.slot_index)
 
+    def _soundboard_master(self) -> float:
+        owner = self._app_owner()
+        bg_music = getattr(owner, "bg_music", None) if owner is not None else None
+        try:
+            return max(0.0, min(1.0, float(getattr(bg_music, "soundboard_volume", 1.0))))
+        except Exception:
+            return 1.0
+
+    def _channel_volume(self) -> float:
+        """The volume handed to the channel. The Rust engine applies the soundboard slider itself (its pad bus); the BASS fallback has no pad bus,
+        so the slider is multiplied in here."""
+        if getattr(self._channel, "supports_layering", False):
+            return self._volume
+        return self._volume * self._soundboard_master()
+
+    def refresh_volume(self):
+        """Called when the soundboard slider moves (BASS fallback pads need it; harmless for Rust pads)."""
+        try:
+            if self._clip_path:
+                self._channel.set_volume(self._channel_volume())
+        except SoundboardError as e:
+            _diag(f"[SOUNDBOARD] volume failed slot={self.slot_index}: {e}")
+
     def _play_from_start(self):
-        self._stop_channel()
+        # A pad that can layer (the Rust engine) starts ANOTHER instance and leaves the ones already sounding alone; the BASS fallback has a
+        # single stream, so there a hit restarts the clip.
+        if not getattr(self._channel, "supports_layering", False):
+            self._stop_channel()
         try:
             if self._channel.path != self._clip_path:
-                self._channel.load(self._clip_path, self._volume)
+                self._channel.load(self._clip_path, self._channel_volume())
             self._channel.play()
             self._playing = True
             self._refresh_face()
             self._start_channel_polling()
             owner = self._app_owner()
             selected = owner._get_selected_audio_output_id() if owner is not None and hasattr(owner, "_get_selected_audio_output_id") else "default"
-            _diag(f"[SOUNDBOARD] play backend=BASS slot={self.slot_index} output={selected} file={Path(self._clip_path).name}")
-        except BassSoundboardError as e:
+            backend = "Rust" if getattr(self._channel, "supports_layering", False) else "BASS"
+            _diag(f"[SOUNDBOARD] play backend={backend} slot={self.slot_index} output={selected} file={Path(self._clip_path).name}")
+        except SoundboardError as e:
             _diag(f"[SOUNDBOARD] play failed slot={self.slot_index}: {e}")
             self._stop_channel()
 
@@ -19611,7 +19706,7 @@ class SoundboardPad(QPushButton):
             self._playing = self._channel.is_playing()
             if self._playing:
                 self._start_channel_polling()
-        except BassSoundboardError as e:
+        except SoundboardError as e:
             _diag(f"[SOUNDBOARD] output rebind failed slot={self.slot_index}: {e}")
             self._playing = False
         self._refresh_face()
@@ -19723,16 +19818,24 @@ class SoundboardPad(QPushButton):
         super().showEvent(event)
         self._fit_font_to_pad()
 
+    def mousePressEvent(self, event):
+        # remember the modifiers at the moment of the click (clicked() fires on release)
+        try:
+            self._last_press_modifiers = event.modifiers()
+        except Exception:
+            self._last_press_modifiers = Qt.KeyboardModifier.NoModifier
+        super().mousePressEvent(event)
+
     def _toggle_play(self):
         if not self._clip_path:
             self._browse_for_clip()
             return
-        if bool(getattr(self, "_playing", False)):
+        if bool(self._last_press_modifiers & Qt.KeyboardModifier.ShiftModifier):
+            # Shift-click: stop EVERY instance of this pad
             self._stop_channel()
-        else:
-            # Always restart from the beginning so quick re-taps re-fire the
-            # clip rather than resuming mid-way through.
-            self._play_from_start()
+            return
+        # A plain click always fires the pad: each hit starts another instance (layered), even while it is still playing.
+        self._play_from_start()
 
 
     # ---- drag & drop ----
@@ -19794,8 +19897,8 @@ class SoundboardPad(QPushButton):
                 if chosen is a:
                     self._volume = v
                     try:
-                        self._channel.set_volume(self._volume)
-                    except BassSoundboardError as e:
+                        self._channel.set_volume(self._channel_volume())
+                    except SoundboardError as e:
                         _diag(f"[SOUNDBOARD] volume failed slot={self.slot_index}: {e}")
                     self.cleared.emit(self.slot_index)
                     break
@@ -19866,6 +19969,14 @@ class SoundboardStrip(QWidget):
         for pad in list(getattr(self, "pads", []) or []):
             try:
                 pad.prepare_audio_output_change()
+            except Exception:
+                pass
+
+    def refresh_volumes(self):
+        """The soundboard slider moved: let every pad re-apply its volume (the BASS fallback pads need it)."""
+        for pad in self.pads:
+            try:
+                pad.refresh_volume()
             except Exception:
                 pass
 
@@ -22650,6 +22761,7 @@ class KaraokeApp(QWidget):
             bg = getattr(self, "bg_music", None)
             if bg is not None and hasattr(bg, "_attach_host_audio_chain"):
                 bg._attach_host_audio_chain()
+                self._apply_soundboard_volume(self.settings.get("soundboard_volume", 1.0), save=False)
                 eng = getattr(bg, "_bass_engine", None)
                 _diag(f"[MASTER-AUDIO] BGM chain attached at launch master={int(bool(self._bgm_master_active()))} "
                       f"proc={int(bool(getattr(eng, 'master_attached', getattr(eng, '_master_proc', None) is not None)))}")
@@ -22981,6 +23093,25 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         return updated
+
+    def _apply_soundboard_volume(self, vol, save: bool = True):
+        """Set the soundboard volume (0..1): the Rust engine's pad bus, the BASS fallback pads, and the saved setting."""
+        try:
+            vol = max(0.0, min(1.0, float(vol)))
+        except Exception:
+            vol = 1.0
+        self.settings["soundboard_volume"] = vol
+        bg = getattr(self, "bg_music", None)
+        if bg is not None and hasattr(bg, "set_soundboard_volume"):
+            bg.set_soundboard_volume(vol)
+        strip = getattr(self, "soundboard_strip", None)
+        if strip is not None and hasattr(strip, "refresh_volumes"):
+            strip.refresh_volumes()
+        if save:
+            try:
+                self._schedule_save_settings()
+            except Exception:
+                pass
 
     def _on_soundboard_changed(self):
         """Persist soundboard pad assignments whenever they change."""
