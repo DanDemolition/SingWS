@@ -41,6 +41,8 @@ fn probe(args: Vec<String>) {
     let (mut device, mut seconds, mut rate, mut buffer) = (None::<String>, 20u64, 48_000u32, None::<u32>);
     let (mut hammer, mut audible, mut no_seek) = (false, false, false);
     let mut pad_clip: Option<PathBuf> = None;
+    let mut pad_period_ms = 250u64;
+    let mut pad_latency = 0usize;
     let mut files: Vec<PathBuf> = vec![];
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -53,6 +55,8 @@ fn probe(args: Vec<String>) {
             "--audible" => audible = true,
             "--no-seek" => no_seek = true,
             "--pads" => pad_clip = it.next().map(PathBuf::from),
+            "--pad-period-ms" => pad_period_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(250),
+            "--pad-latency" => pad_latency = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             _ => files.push(PathBuf::from(a)),
         }
     }
@@ -125,11 +129,52 @@ fn probe(args: Vec<String>) {
                 }
                 sys.control.collect_garbage();
                 let _ = t0;
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(Duration::from_millis(pad_period_ms));
             }
             hits
         })
     });
+    if pad_latency > 0 {
+        // Trigger latency: how long after `PadPlay` is sent does the audio thread report the pad sounding? (it picks the command up at the start
+        // of its next block, so this is 0..one buffer). The driver's own output latency comes on top of it.
+        let clip_path = pad_clip.clone().unwrap_or_else(|| files[0].clone());
+        let clip = match sys.load_clip(&clip_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        };
+        sys.control.send(Command::PadSetClip { slot: 0, clip: Some(clip) });
+        sys.control.send(Command::PadSetMaster(0.0));
+        let snap = &sys.control.snapshot;
+        let mut samples: Vec<f64> = Vec::new();
+        let mut seed = 0x1234567u32;
+        for _ in 0..pad_latency {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            std::thread::sleep(Duration::from_millis(40 + ((seed >> 24) % 23) as u64)); // random phase against the audio blocks
+            let before = snap.pad_playing[0].load(Ordering::Relaxed);
+            let t = Instant::now();
+            sys.control.send(Command::PadPlay { slot: 0, start_frame: 0 });
+            while snap.pad_playing[0].load(Ordering::Relaxed) <= before {
+                if t.elapsed() > Duration::from_millis(200) {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+            samples.push(t.elapsed().as_secs_f64() * 1000.0);
+            sys.control.send(Command::PadStop { slot: 0 });
+            sys.control.collect_garbage();
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |f: f64| samples[((samples.len() - 1) as f64 * f) as usize];
+        let buf_ms = sys.stats().buffer_frames.load(Ordering::Relaxed) as f64 * 1000.0 / sys.rate as f64;
+        let drv_ms = sys.stats().latency_us.load(Ordering::Relaxed) as f64 / 1000.0;
+        println!("pad trigger -> engine ({} hits, buffer {:.1} ms): min {:.2} ms, median {:.2} ms, p95 {:.2} ms, max {:.2} ms", samples.len(), buf_ms, q(0.0), q(0.5), q(0.95), q(1.0));
+        println!("driver-reported output latency {:.1} ms  =>  estimated hit-to-sound: median {:.1} ms, worst {:.1} ms", drv_ms, q(0.5) + drv_ms, q(1.0) + drv_ms);
+        println!("RESULT: PASS");
+        return;
+    }
     println!("running {seconds} s{}{}...", if audible { " AUDIBLE" } else { " (silent)" }, if hammer { " with control-thread hammering" } else { "" });
     let hammer_thread = hammer.then(|| {
         let (sys, stop) = (sys.clone(), stop.clone());

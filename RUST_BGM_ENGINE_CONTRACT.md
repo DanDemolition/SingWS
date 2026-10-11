@@ -231,3 +231,27 @@ music volume or its fades but by their own SOUNDBOARD volume slider (new, to be 
   callback mean 67-73 us / max 238-264 us of a 10.7 ms budget, 0 xruns, 0 gaps, 0 underruns, 0 dropped commands.
 * Not done (S2 onward): the C ABI calls, the Python `RustSoundboardChannel`, the Shift-click behaviour in `SoundboardPad`, the soundboard volume slider and
   its setting, pad latency measurement, output-change handling, deleting the private-BASS stopgap.
+
+## S2 + S3 results - pads wired into the app and verified on the real sound card (2026-10-11)
+
+**S2 (wiring).** C ABI 2 (`singws_bgm_clip_*`, `singws_bgm_pad_*`; a library with another ABI is refused and the app falls back to BASS), `soundboard_channels.py`
+(`SoundboardChannel` = the BASS pad channel's interface, picks `RustSoundboardChannel` when the runtime is the Rust engine, else the old `BassSoundboardChannel`),
+`SoundboardPad`: a plain click ALWAYS fires (another instance, layered, even while playing; on the BASS fallback it restarts the clip), Shift-click stops every
+instance; per-pad volume as before (right-click menu); NEW soundboard slider in the BGM section under the music Volume (`soundboard_volume`, default 1.0,
+saved, applied to the Rust engine's pad bus, re-applied after an engine rebuild; on the BASS fallback it is multiplied into each pad's volume). Pads go through
+the same EQ + master chain as the music and ignore the music volume and its fades. Tests: 12 channel tests (real engine, headless), 7 real-widget tests
+(click, layering, Shift-click, slider, rebuild), routing guard updated. Full suite 1,480 pass. Packaged arm64 app on a scratch profile with a configured pad: Rust
+engine ready, pad loaded, no errors, clean shutdown (bundled ABI-2 library confirmed).
+
+**S3 (real sound card, MacBook Pro Speakers, everything silent: soundboard volume 0).**
+* Trigger latency (`singws-bgm-device probe --pad-latency N`): send -> engine reports the pad sounding: median 5.4 ms at the default 512-frame buffer (max 10.7),
+  1.3 ms at 128 frames. With the driver's reported output latency: estimated hit-to-sound median 19 ms / worst 24 ms (512), 12 / 14 ms (256), 7 / 8 ms (128).
+  NOT measured: the Python/Qt click-delivery time, and nothing acoustic (no loopback here). The buffer size is the lever (cpal default today; a setting could expose it).
+* Stress: 6,278 layered pad hits in 40 s (all 64 voices saturated, voice stealing exercised) over playing music with a control thread hammering: callback mean 212 us,
+  max 456 us of 10.7 ms; 0 xruns, 0 gaps, 0 underruns, 0 dropped commands. At a 128-frame buffer with 50 hits/s: max 63 us of 2.7 ms.
+* Output change (real device): a playing pad survives the engine rebuild (`prepare/complete_output_change`): resumed on the new engine from where it was. Only the newest of
+  several layered instances resumes (BASS had one stream). A named device that is missing falls back to the default and is flagged.
+* App-level harness (`tools/bgm_player_rehearsal.py --pads N`): the real BackgroundMusicPlayer + real SoundboardPad widgets clicked at random (12% Shift-clicks) while the
+  music crossfades: headless 261 clicks + 27 Shift-stops over 4 transitions, and on the real device 196 + 24 over 3 transitions: 0 xruns, 0 gaps, 0 underruns, 0 errors.
+* Memory: clips are held decoded; the operator's six pad clips total 16 MB (limit per clip 300 s, about 115 MB).
+* Still to do: S4 (decide the default / release), S5 (remove BASS), and a listening check of the real pads by the operator.

@@ -77,6 +77,7 @@ def main() -> int:
     ap.add_argument("--playlist", default=os.path.expanduser("~/SingWS/bg_playlist.json"), help="read-only: only the file names are used")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--exercise", action="store_true", help="also pause/play/seek/fade/volume-change between transitions")
+    ap.add_argument("--pads", type=int, default=0, help="also click this many REAL SoundboardPad widgets at random (layering, Shift-click stops all) while the music runs")
     args = ap.parse_args()
 
     out = Tee(sys.stdout)
@@ -161,6 +162,33 @@ def main() -> int:
     player.current_index = 0
     player.volume = host._host_bgm_live_volume
     player.set_enabled(True)
+
+    pad_widgets = []
+    owner = None
+    if args.pads > 0:
+        from PyQt6.QtWidgets import QWidget
+        from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtTest import QTest
+
+        class Owner(QWidget):
+            """What SoundboardPad._app_owner() looks for."""
+            bg_music = player
+
+            def _get_selected_audio_output_id(o):
+                return "default"
+
+        owner = Owner()
+        host.soundboard_strip = None
+        player.set_soundboard_volume(0.0 if args.mode == "device" else 0.5)     # device mode must stay inaudible
+        clip = files[1]
+        for i in range(args.pads):
+            pad = app_mod.SoundboardPad(i, parent=owner)
+            pad._set_clip(clip, f"pad{i}", 1.0)
+            pad_widgets.append(pad)
+        print(f"[REHEARSAL] {len(pad_widgets)} real SoundboardPad widgets loaded (layering={pad_widgets[0]._channel.supports_layering})")
+    pad_rng = random.Random(args.seed + 1)
+    pad_stats = {"clicks": 0, "shift_stops": 0}
+    last_pad = [0.0]
 
     stop_pump = threading.Event()
     pump = None
@@ -251,6 +279,12 @@ def main() -> int:
                 if dur > args.tail + 15 and pos > 3:
                     player.seek_seconds(max(0.0, dur - args.tail))
                     jumped_for = player.current_index
+            if pad_widgets and now - last_pad[0] >= 0.3:
+                last_pad[0] = now
+                pad = pad_rng.choice(pad_widgets)
+                shift = pad_rng.random() < 0.12
+                QTest.mouseClick(pad, _Qt.MouseButton.LeftButton, _Qt.KeyboardModifier.ShiftModifier if shift else _Qt.KeyboardModifier.NoModifier)
+                pad_stats["shift_stops" if shift else "clicks"] += 1
             if now - last_report >= (30 if args.mode == "headless" else 600):
                 last_report = now
                 report()
@@ -281,6 +315,9 @@ def main() -> int:
     check("never fell back to BASS", not fallbacks, f"{len(fallbacks)} fallback line(s)")
     limit = 60.0 if not args.minutes else 150.0
     check("memory growth", growth < limit, f"{rss0:.0f} -> peak {peak_rss:.0f} MB (+{growth:.0f}, limit {limit:.0f})")
+    if pad_widgets:
+        pad_errors = [l for l in lines if "[SOUNDBOARD]" in l and ("failed" in l or "could not" in l)]
+        check("pads fired without errors", not pad_errors, f"{pad_stats['clicks']} clicks, {pad_stats['shift_stops']} Shift-click stops, {len(pad_errors)} error line(s)" + (": " + pad_errors[0][:140] if pad_errors else ""))
     transitions_logged = [l for l in lines if "[TRANSITION] BGM crossfade selected" in l]
     print(f"  (info) player logged {len(transitions_logged)} scheduled crossfade selections; {host.ui_updates} UI refresh calls")
     try:
