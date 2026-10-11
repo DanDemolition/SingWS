@@ -1,0 +1,44 @@
+operator karaoke EQ on=True gains=[5.0, 4.0, 3.0, 1.0, -1.0, -1.0, 1.0, 3.0, 4.0, 5.0] | master settings: {"master_audio_ceiling_db": -1.0, "master_audio_comp_amount": 30, "master_audio_comp_enabled": true, "master_audio_enabled": true, "master_audio_eq_enabled": true, "master_audio_exciter_enabled": true, "master_audio_exciter_mix": 15, "master_audio_gate_enabled": true, "master_audio_limiter_enabled": true, "master_audio_params": {}, "master_audio_tilt": 10}
+3 real karaoke tracks, loudest 30 s of each
+
+SC24849 - Wreckx N Effect - Rump Shaker
+  operator settings                  A  -14.9 B  -13.8 dB rms | diff +1.10 | peaks A  -1.0 B  -1.0 | worst octave  4.1 dB | dynamics p95 1.09 dB | null  -13.4 dB LEVEL SPECTRUM DYNAMICS
+  stress settings                    A  -13.6 B  -13.1 dB rms | diff +0.48 | peaks A  -3.0 B  -3.0 | worst octave  5.3 dB | dynamics p95 1.13 dB | null  -11.2 dB SPECTRUM DYNAMICS
+  EQ only                            A  -12.6 B  -12.5 dB rms | diff +0.06 | peaks A   3.8 B   4.1 | worst octave  2.7 dB | dynamics p95 0.42 dB | null  -24.3 dB SPECTRUM
+  gate only                          A  -16.7 B  -16.7 dB rms | diff -0.00 | peaks A  -0.3 B  -0.3 | worst octave  0.0 dB | dynamics p95 0.00 dB | null  -63.5 dB
+  tilt EQ only                       A  -16.2 B  -16.3 dB rms | diff -0.01 | peaks A  -0.2 B  -0.1 | worst octave  0.1 dB | dynamics p95 0.04 dB | null  -41.6 dB
+  exciter only                       A  -16.7 B  -16.7 dB rms | diff +0.05 | peaks A  -0.4 B  -0.2 | worst octave  2.2 dB | dynamics p95 0.12 dB | null  -24.5 dB SPECTRUM
+  compressor only                    A  -17.3 B  -15.1 dB rms | diff +2.22 | peaks A  -2.2 B  -0.1 | worst octave  3.6 dB | dynamics p95 1.87 dB | null   -8.2 dB LEVEL SPECTRUM DYNAMICS
+  limiter only                       A  -16.7 B  -16.7 dB rms | diff -0.01 | peaks A  -1.0 B  -1.0 | worst octave  0.0 dB | dynamics p95 0.02 dB | null  -51.0 dB
+
+SC17631 - PM Dawn - Set Adrift On Memory Bliss
+  operator settings                  A  -11.6 B  -10.9 dB rms | diff +0.79 | peaks A  -1.0 B  -1.0 | worst octave  4.7 dB | dynamics p95 0.66 dB | null  -18.2 dB LEVEL SPECTRUM
+  stress settings                    A  -11.0 B  -11.0 dB rms | diff -0.04 | peaks A  -3.0 B  -3.0 | worst octave  6.5 dB | dynamics p95 0.25 dB | null  -21.3 dB SPECTRUM
+  EQ only                            A   -8.8 B   -8.8 dB rms | diff -0.02 | peaks A   3.5 B   3.6 | worst octave  2.8 dB | dynamics p95 0.02 dB | null  -32.1 dB SPECTRUM
+  gate only                          A  -13.4 B  -13.4 dB rms | diff +0.00 | peaks A  -0.1 B  -0.1 | worst octave  0.0 dB | dynamics p95 0.00 dB | null  -67.9 dB
+  tilt EQ only                       A  -12.9 B  -12.9 dB rms | diff -0.02 | peaks A  -0.1 B  -0.1 | worst octave  0.0 dB | dynamics p95 0.03 dB | null  -40.8 dB
+  exciter only                       A  -13.4 B  -13.3 dB rms | diff +0.00 | peaks A  -0.1 B  -0.1 | worst octave  2.2 dB | dynamics p95 0.00 dB | null  -32.6 dB SPECTRUM
+  compressor only                    A  -14.3 B  -13.2 dB rms | diff +1.13 | peaks A  -1.9 B  -0.1 | worst octave  2.2 dB | dynamics p95 0.69 dB | null  -15.7 dB LEVEL SPECTRUM
+  limiter only                       A  -13.4 B  -13.4 dB rms | diff -0.00 | peaks A  -1.0 B  -1.0 | worst octave  0.0 dB | dynamics p95 0.00 dB | null  -52.5 dB
+
+SC3408 - Van Hunt - Dust
+  operator settings                  A  -12.3 B  -11.5 dB rms | diff +0.77 | peaks A  -1.0 B  -1.0 | worst octave  4.1 dB | dynamics p95 0.79 dB | null  -16.2 dB LEVEL SPECTRUM
+  stress settings                    A  -11.9 B  -11.9 dB rms | diff +0.04 | peaks A  -3.0 B  -3.0 | worst octave  5.0 dB | dynamics p95 0.77 dB | null  -14.7 dB SPECTRUM
+  EQ only                            A   -8.3 B   -8.2 dB rms | diff +0.04 | peaks A   5.2 B   6.0 | worst octave  2.3 dB | dynamics p95 0.21 dB | null  -25.7 dB SPECTRUM
+  gate only                          A  -11.9 B  -11.8 dB rms | diff +0.07 | peaks A  -0.1 B  -0.1 | worst octave  0.1 dB | dynamics p95 0.12 dB | null  -35.5 dB
+  tilt EQ only                       A  -11.7 B  -11.5 dB rms | diff +0.15 | peaks A  -0.1 B  -0.1 | worst octave  0.2 dB | dynamics p95 0.20 dB | null  -30.6 dB
+  exciter only                       A  -11.9 B  -11.8 dB rms | diff +0.08 | peaks A  -0.1 B  -0.1 | worst octave  1.8 dB | dynamics p95 0.12 dB | null  -27.3 dB SPECTRUM
+  compressor only                    A  -13.8 B  -12.1 dB rms | diff +1.74 | peaks A  -0.1 B  -0.1 | worst octave  3.0 dB | dynamics p95 1.70 dB | null  -10.6 dB LEVEL SPECTRUM DYNAMICS
+  limiter only                       A  -12.2 B  -12.3 dB rms | diff -0.07 | peaks A  -1.0 B  -1.0 | worst octave  0.1 dB | dynamics p95 0.09 dB | null  -36.8 dB
+
+AVERAGE over the tracks (B = exact Rust chain, A = what karaoke uses today):
+  operator settings                  A  -12.9 B  -12.1 dB rms | diff +0.89 | peaks A  -1.0 B  -1.0 | worst octave  4.3 dB | dynamics p95 0.84 dB | null  -15.9 dB LEVEL SPECTRUM
+  stress settings                    A  -12.2 B  -12.0 dB rms | diff +0.16 | peaks A  -3.0 B  -3.0 | worst octave  5.6 dB | dynamics p95 0.72 dB | null  -15.8 dB SPECTRUM
+  EQ only                            A   -9.9 B   -9.8 dB rms | diff +0.03 | peaks A   4.2 B   4.6 | worst octave  2.6 dB | dynamics p95 0.22 dB | null  -27.4 dB SPECTRUM
+  gate only                          A  -14.0 B  -14.0 dB rms | diff +0.02 | peaks A  -0.2 B  -0.2 | worst octave  0.0 dB | dynamics p95 0.04 dB | null  -55.6 dB
+  tilt EQ only                       A  -13.6 B  -13.6 dB rms | diff +0.04 | peaks A  -0.1 B  -0.1 | worst octave  0.1 dB | dynamics p95 0.09 dB | null  -37.7 dB
+  exciter only                       A  -14.0 B  -14.0 dB rms | diff +0.04 | peaks A  -0.2 B  -0.1 | worst octave  2.0 dB | dynamics p95 0.08 dB | null  -28.2 dB SPECTRUM
+  compressor only                    A  -15.1 B  -13.5 dB rms | diff +1.69 | peaks A  -1.4 B  -0.1 | worst octave  2.3 dB | dynamics p95 1.42 dB | null  -11.5 dB LEVEL SPECTRUM DYNAMICS
+  limiter only                       A  -14.1 B  -14.1 dB rms | diff -0.03 | peaks A  -1.0 B  -1.0 | worst octave  0.0 dB | dynamics p95 0.04 dB | null  -46.8 dB
+
+band-by-band (B - A, dB) for 'operator settings': {31.5: np.float64(0.96), 63: np.float64(0.94), 125: np.float64(0.92), 250: np.float64(0.32), 500: np.float64(0.22), 1000: np.float64(0.21), 2000: np.float64(0.35), 4000: np.float64(0.83), 8000: np.float64(4.31), 16000: np.float64(2.54)}
