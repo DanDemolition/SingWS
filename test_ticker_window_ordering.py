@@ -55,7 +55,7 @@ class TickerWindowOrderingTests(unittest.TestCase):
     def test_mac_orders_only_ticker_above_audience_not_host_or_desktop(self):
         self.order()
         self.assertEqual(self.ticker_ns.mock_calls, [
-            mock.call.setLevel_(0), mock.call.setIgnoresMouseEvents_(True),
+            mock.call.setLevel_(0), mock.call.setHidesOnDeactivate_(False), mock.call.setIgnoresMouseEvents_(True),
             mock.call.orderWindow_relativeTo_(1, 123)])
         self.assertEqual(self.output_ns.mock_calls, [mock.call.level(), mock.call.windowNumber()])
         self.host.raise_.assert_not_called()
