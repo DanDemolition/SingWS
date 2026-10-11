@@ -18,6 +18,7 @@ pub const EVENT_LOG_MESSAGE: c_int = 2;
 pub const EVENT_END_FILE: c_int = 7;
 pub const EVENT_FILE_LOADED: c_int = 8;
 pub const EVENT_VIDEO_RECONFIG: c_int = 17;
+pub const EVENT_PROPERTY_CHANGE: c_int = 22;
 
 pub const RENDER_PARAM_API_TYPE: c_int = 1;
 pub const RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
@@ -98,6 +99,19 @@ pub struct NodeList {
     pub keys: *mut *mut c_char,
 }
 
+#[repr(C)]
+pub struct MpvEventProperty {
+    pub name: *const c_char,
+    pub format: c_int,
+    pub data: *mut c_void,
+}
+
+#[repr(C)]
+pub struct ByteArray {
+    pub data: *mut c_void,
+    pub size: usize,
+}
+
 pub type WakeupFn = unsafe extern "C" fn(*mut c_void);
 
 /// An initialized client handle. mpv's client API is thread-safe (except that only one thread may call `wait_event`).
@@ -124,6 +138,9 @@ pub struct Mpv {
     error_string: unsafe extern "C" fn(c_int) -> *const c_char,
     free: unsafe extern "C" fn(*mut c_void),
     free_node_contents: unsafe extern "C" fn(*mut Node),
+    observe_property: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int,
+    set_property_async: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int, *mut c_void) -> c_int,
+    command_ret: unsafe extern "C" fn(*mut c_void, *const *const c_char, *mut Node) -> c_int,
     render_context_create: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *mut RenderParam) -> c_int,
     render_context_set_update_callback: unsafe extern "C" fn(*mut c_void, Option<RenderUpdateFn>, *mut c_void),
     render_context_update: unsafe extern "C" fn(*mut c_void) -> u64,
@@ -207,6 +224,9 @@ impl Mpv {
             error_string: sym!(b"mpv_error_string"),
             free: sym!(b"mpv_free"),
             free_node_contents: sym!(b"mpv_free_node_contents"),
+            observe_property: sym!(b"mpv_observe_property"),
+            set_property_async: sym!(b"mpv_set_property_async"),
+            command_ret: sym!(b"mpv_command_ret"),
             render_context_create: sym!(b"mpv_render_context_create"),
             render_context_set_update_callback: sym!(b"mpv_render_context_set_update_callback"),
             render_context_update: sym!(b"mpv_render_context_update"),
@@ -375,6 +395,62 @@ impl Mpv {
     }
     pub fn render_free(&self, rc: *mut c_void) {
         unsafe { (self.render_context_free)(rc) }
+    }
+    pub fn observe(&self, h: Handle, userdata: u64, name: &str, format: c_int) {
+        let n = cstr(name);
+        unsafe { (self.observe_property)(h.0, userdata, n.as_ptr(), format) };
+    }
+    pub fn set_flag_async(&self, h: Handle, userdata: u64, name: &str, value: bool) -> c_int {
+        let n = cstr(name);
+        let mut v: c_int = value as c_int;
+        unsafe { (self.set_property_async)(h.0, userdata, n.as_ptr(), FORMAT_FLAG, &mut v as *mut c_int as *mut c_void) }
+    }
+    pub fn set_wakeup_callback(&self, h: Handle, cb: WakeupFn, ctx: *mut c_void) {
+        unsafe { (self.set_wakeup_callback)(h.0, Some(cb), ctx) };
+    }
+    /// `screenshot-raw video`: (BGRA bytes, w, h, stride) of the picture as decoded.
+    pub fn screenshot_raw(&self, h: Handle) -> Result<Option<(Vec<u8>, i64, i64, i64)>, c_int> {
+        let args = [cstr("screenshot-raw"), cstr("video")];
+        let mut ptrs: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        let mut node = Node { u: NodeValue { int64: 0 }, format: 0 };
+        let r = unsafe { (self.command_ret)(h.0, ptrs.as_ptr(), &mut node) };
+        if r < 0 {
+            return Err(r);
+        }
+        let mut out = None;
+        unsafe {
+            if node.format == FORMAT_NODE_MAP && !node.u.list.is_null() {
+                let map = &*node.u.list;
+                let (mut w, mut hh, mut stride) = (0i64, 0i64, 0i64);
+                let mut data: Option<(*const u8, usize)> = None;
+                for i in 0..map.num as isize {
+                    let key = *map.keys.offset(i);
+                    if key.is_null() {
+                        continue;
+                    }
+                    let v = &*map.values.offset(i);
+                    match CStr::from_ptr(key).to_bytes() {
+                        b"w" if v.format == FORMAT_INT64 => w = v.u.int64,
+                        b"h" if v.format == FORMAT_INT64 => hh = v.u.int64,
+                        b"stride" if v.format == FORMAT_INT64 => stride = v.u.int64,
+                        b"data" if v.format == 9 && !v.u.ba.is_null() => {
+                            let ba = &*(v.u.ba as *const ByteArray);
+                            data = Some((ba.data as *const u8, ba.size));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((p, n)) = data {
+                    let need = (stride * hh) as usize;
+                    if w > 0 && hh > 0 && stride > 0 && n >= need {
+                        out = Some((std::slice::from_raw_parts(p, need).to_vec(), w, hh, stride));
+                    }
+                }
+            }
+            (self.free_node_contents)(&mut node);
+        }
+        Ok(out)
     }
     pub fn set_wakeup_callback_none(&self, h: Handle) {
         unsafe { (self.set_wakeup_callback)(h.0, None, std::ptr::null_mut()) };

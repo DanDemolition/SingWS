@@ -31,6 +31,28 @@ OUT_RECT = (60, 80, 640, 360)       # x, y, w, h in screen points
 PREV_RECT = (60, 460, 320, 180)
 
 
+def make_static_clips(directory: Path):
+    """Two static 60 s clips with real detail (so a screenshot is the same whatever the clock says)."""
+    from PIL import Image, ImageDraw
+    paths = []
+    for name, c1, c2 in (("bgA", (30, 90, 200), (240, 220, 60)), ("bgB", (200, 40, 90), (40, 200, 160))):
+        img = Image.new("RGB", (1280, 720))
+        d = ImageDraw.Draw(img)
+        for x in range(1280):
+            t = x / 1279
+            d.line([(x, 0), (x, 719)], fill=tuple(int(c1[i] * (1 - t) + c2[i] * t) for i in range(3)))
+        for k in range(0, 720, 60):
+            d.rectangle([0, k, 1279, k + 8], fill=(255, 255, 255))
+        d.ellipse([440, 160, 840, 560], outline=(0, 0, 0), width=14)
+        png = directory / f"{name}.png"
+        img.save(png)
+        mp4 = directory / f"{name}.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-t", "60", "-framerate", "10", "-i", str(png), "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", "-an", str(mp4)], check=True)
+        paths.append(str(mp4))
+    return paths
+
+
 def shoot(rect, path: Path) -> None:
     x, y, w, h = rect
     subprocess.run(["screencapture", "-x", "-R", f"{x},{y},{w},{h}", str(path)], check=True)
@@ -54,6 +76,7 @@ def run(args) -> int:
     cdg = next(str(f) for f in files if f.suffix.lower() == ".cdg")
     mp3 = next(str(f) for f in files if f.suffix.lower() == ".mp3")
 
+    clip_a, clip_b = make_static_clips(Path(tmp))
     app = QApplication([])
     out_w, prev_w = QWidget(), QWidget()
     for w, rect in ((out_w, OUT_RECT), (prev_w, PREV_RECT)):
@@ -136,6 +159,35 @@ def run(args) -> int:
             time.sleep(0.4)
             take(h, "cdg_sidefill2", with_preview=False)
             B.singws_bridge_set_sidefill(h, 0)
+            # grab_frame of a CDG comes from the retained 300x216 texture: the bytes themselves must match
+            import hashlib
+            def grab():
+                w_, h_, s_ = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+                p_ = B.singws_bridge_grab_frame(h, ctypes.byref(w_), ctypes.byref(h_), ctypes.byref(s_))
+                if not p_:
+                    return None
+                data = ctypes.string_at(p_, s_.value * h_.value)
+                B.singws_bridge_free_frame(p_)
+                return {"w": w_.value, "h": h_.value, "stride": s_.value, "sha1": hashlib.sha1(data).hexdigest()}
+            result["notes"]["grab_cdg"] = grab()
+            # background animation under the CDG: static clips, opacity, outgoing-frame dissolve, stop
+            B.singws_bridge_load_background(h, clip_a.encode(), 0.6)
+            wait_for(lambda: B.singws_bridge_background_position(h) > 300, 6.0)
+            time.sleep(0.6)
+            result["notes"]["bg_playing"] = {"pos_advancing": B.singws_bridge_background_position(h) > 0,
+                                             "paused": bool(B.singws_bridge_background_paused(h)), "at_end": bool(B.singws_bridge_background_at_end(h))}
+            take(h, "cdg_bg_a")
+            B.singws_bridge_load_background(h, clip_b.encode(), 0.6)
+            B.singws_bridge_set_background_opacity(h, 0.3)      # mix = 0.3 / 0.6 = 0.5: halfway through the dissolve
+            time.sleep(1.0)
+            take(h, "cdg_bg_crossfade")
+            B.singws_bridge_set_background_opacity(h, 0.6)       # dissolve complete
+            time.sleep(0.5)
+            take(h, "cdg_bg_b")
+            B.singws_bridge_stop_background(h)
+            time.sleep(0.6)
+            result["notes"]["bg_after_stop"] = {"pos": B.singws_bridge_background_position(h), "at_end": bool(B.singws_bridge_background_at_end(h))}
+            take(h, "cdg_after_bg_stop")
             # Qt hides and re-shows the audience window: the retained texture must come back without recreating anything
             def qt(fn):
                 main.call.emit({"fn": fn, "args": ()})
@@ -161,6 +213,8 @@ def run(args) -> int:
             wait_for(lambda: B.singws_bridge_visual_ready(h), 10.0)
             settle_at(h, 30000)
             take(h, "mp4")
+            g = grab()
+            result["notes"]["grab_mp4"] = g and {"w": g["w"], "h": g["h"], "stride": g["stride"]}
             result["notes"]["present_count"] = int(B.singws_bridge_present_count(h))
             B.singws_bridge_destroy(h)
         except Exception as exc:  # noqa: BLE001

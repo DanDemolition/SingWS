@@ -60,6 +60,16 @@ def bind(path: str):
     L.singws_bridge_begin_transition.argtypes = [P, I]
     L.singws_bridge_present_count.restype = ctypes.c_uint64
     L.singws_bridge_present_count.argtypes = [P]
+    L.singws_bridge_load_background.restype = I
+    L.singws_bridge_load_background.argtypes = [P, S, D]
+    L.singws_bridge_set_background_opacity.argtypes = [P, D]
+    L.singws_bridge_stop_background.argtypes = [P]
+    for n, rt in (("background_at_end", I), ("background_position", I64), ("background_paused", I)):
+        f = getattr(L, f"singws_bridge_{n}")
+        f.restype, f.argtypes = rt, [P]
+    L.singws_bridge_grab_frame.restype = P
+    L.singws_bridge_grab_frame.argtypes = [P, ctypes.POINTER(I), ctypes.POINTER(I), ctypes.POINTER(I)]
+    L.singws_bridge_free_frame.argtypes = [P]
     L.singws_bridge_scan_silence.restype = I
     L.singws_bridge_scan_silence.argtypes = [S, D, D, D, ctypes.POINTER(D), ctypes.POINTER(D), ctypes.POINTER(D)]
     L.singws_bridge_scanner_shutdown.argtypes = []

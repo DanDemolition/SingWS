@@ -38,6 +38,9 @@ pub const GL_TEXTURE0: GLenum = 0x84C0;
 pub const GL_TEXTURE1: GLenum = 0x84C1;
 pub const GL_TEXTURE2: GLenum = 0x84C2;
 pub const GL_SYNC_GPU_COMMANDS_COMPLETE: GLenum = 0x9117;
+pub const GL_READ_FRAMEBUFFER: GLenum = 0x8CA8;
+pub const GL_BGRA: GLenum = 0x80E1;
+pub const GL_PACK_ALIGNMENT: GLenum = 0x0D05;
 pub const GL_TIMEOUT_IGNORED: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 #[cfg(target_os = "macos")]
@@ -79,6 +82,9 @@ extern "C" {
     pub fn glUniform2f(location: GLint, v0: GLfloat, v1: GLfloat);
     pub fn glActiveTexture(texture: GLenum);
     pub fn glDrawArrays(mode: GLenum, first: GLint, count: GLsizei);
+    pub fn glCopyTexSubImage2D(target: GLenum, level: GLint, xoffset: GLint, yoffset: GLint, x: GLint, y: GLint, w: GLsizei, h: GLsizei);
+    pub fn glPixelStorei(pname: GLenum, param: GLint);
+    pub fn glReadPixels(x: GLint, y: GLint, w: GLsizei, h: GLsizei, format: GLenum, ty: GLenum, pixels: *mut c_void);
     pub fn glEnable(cap: GLenum);
     pub fn glDisable(cap: GLenum);
     pub fn glBlendFunc(sfactor: GLenum, dfactor: GLenum);

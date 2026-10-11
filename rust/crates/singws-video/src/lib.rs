@@ -175,7 +175,7 @@ pub extern "C" fn singws_bridge_set_audio_delay(h: *mut c_void, seconds: c_doubl
     }
 }
 
-// ---- picture surface (V3-V5: not implemented yet; see the module comment) --------------------------------------------------
+// ---- picture surface ---------------------------------------------------------------------------------------------------------
 
 #[no_mangle]
 pub extern "C" fn singws_bridge_set_sidefill(h: *mut c_void, mode: c_int) {
@@ -190,32 +190,62 @@ pub extern "C" fn singws_bridge_begin_transition(h: *mut c_void, ms: c_int) {
     }
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_load_background(_h: *mut c_void, _path: *const c_char, _opacity: c_double) -> c_int {
-    0
+pub extern "C" fn singws_bridge_load_background(h: *mut c_void, path: *const c_char, opacity: c_double) -> c_int {
+    let (Some(r), Some(p)) = (player(h).and_then(|p| p.renderer()), text(path)) else { return 0 };
+    r.load_background(&p, opacity) as c_int
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_background_at_end(_h: *mut c_void) -> c_int {
-    0
+pub extern "C" fn singws_bridge_background_at_end(h: *mut c_void) -> c_int {
+    player(h).and_then(|p| p.renderer()).map(|r| r.background_at_end() as c_int).unwrap_or(0)
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_background_position(_h: *mut c_void) -> i64 {
-    0
+pub extern "C" fn singws_bridge_background_position(h: *mut c_void) -> i64 {
+    player(h).and_then(|p| p.renderer()).map(|r| r.background_position_ms()).unwrap_or(0)
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_background_paused(_h: *mut c_void) -> c_int {
-    0
+pub extern "C" fn singws_bridge_background_paused(h: *mut c_void) -> c_int {
+    player(h).and_then(|p| p.renderer()).map(|r| r.background_paused() as c_int).unwrap_or(0)
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_set_background_opacity(_h: *mut c_void, _opacity: c_double) {}
+pub extern "C" fn singws_bridge_set_background_opacity(h: *mut c_void, opacity: c_double) {
+    if let Some(r) = player(h).and_then(|p| p.renderer()) {
+        r.set_background_opacity(opacity);
+    }
+}
 #[no_mangle]
-pub extern "C" fn singws_bridge_stop_background(_h: *mut c_void) {}
+pub extern "C" fn singws_bridge_stop_background(h: *mut c_void) {
+    if let Some(r) = player(h).and_then(|p| p.renderer()) {
+        r.stop_background();
+    }
+}
 #[no_mangle]
 pub extern "C" fn singws_bridge_set_rotation_host(_h: *mut c_void, _host: usize, _enabled: c_int) {}
 #[no_mangle]
 pub extern "C" fn singws_bridge_set_rotation_spotlight(_h: *mut c_void, _host: usize, _enabled: c_int) {}
+/// Caller owns the returned malloc'd buffer and must pass it to `singws_bridge_free_frame`.
 #[no_mangle]
-pub extern "C" fn singws_bridge_grab_frame(_h: *mut c_void, _w: *mut c_int, _hh: *mut c_int, _stride: *mut c_int) -> *mut c_void {
-    std::ptr::null_mut()
+pub extern "C" fn singws_bridge_grab_frame(h: *mut c_void, w: *mut c_int, hh: *mut c_int, stride: *mut c_int) -> *mut c_void {
+    extern "C" {
+        fn malloc(n: usize) -> *mut c_void;
+    }
+    let Some((bytes, fw, fh, fs)) = player(h).and_then(|p| p.grab_frame()) else { return std::ptr::null_mut() };
+    unsafe {
+        let buf = malloc(bytes.len());
+        if buf.is_null() {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
+        if !w.is_null() {
+            *w = fw;
+        }
+        if !hh.is_null() {
+            *hh = fh;
+        }
+        if !stride.is_null() {
+            *stride = fs;
+        }
+        buf
+    }
 }
 #[no_mangle]
 pub extern "C" fn singws_bridge_free_frame(buf: *mut c_void) {

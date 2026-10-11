@@ -635,6 +635,29 @@ impl Player {
         self.inner.renderer.get()
     }
 
+    /// The current picture as BGRA: (bytes, width, height, stride). CDG comes from the retained 300x216 texture; other video via mpv's
+    /// `screenshot-raw video` (no full-HD GPU readback of our own).
+    pub fn grab_frame(&self) -> Option<(Vec<u8>, i32, i32, i32)> {
+        let inner = &self.inner;
+        let h = inner.handle()?;
+        if inner.flags.is_cdg.load(Ordering::SeqCst) && inner.flags.has_frame.load(Ordering::SeqCst) {
+            if let Some(r) = inner.renderer.get() {
+                return r.grab_cdg().map(|b| (b, 300, 216, 1200));
+            }
+        }
+        match inner.api.screenshot_raw(h) {
+            Ok(Some((bytes, w, hh, stride))) => Some((bytes, w as i32, hh as i32, stride as i32)),
+            Ok(None) => {
+                bridge_log!("[bridge] screenshot-raw gave no usable image");
+                None
+            }
+            Err(e) => {
+                bridge_log!("[bridge] screenshot-raw failed: {}", inner.api.error_string(e));
+                None
+            }
+        }
+    }
+
     /// Fraction of the shared texture the picture occupies (used by the compositor from V4).
     pub fn picture_span(&self) -> f64 {
         f64::from_bits(self.inner.flags.span_x.load(Ordering::SeqCst))

@@ -9,7 +9,7 @@ use crate::gl::*;
 use crate::mpvapi::{self, Handle, Mpv, OpenglInitParams};
 use crate::shaders;
 use std::ffi::{c_char, c_int, c_void, CString};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 extern "C" {
@@ -70,6 +70,7 @@ struct GlState {
     cdg_tex: GLuint,
     cdg_fbo: GLuint,
     bg_tex: GLuint,
+    bg_fbo: GLuint,
     prev_bg_tex: GLuint,
     program: GLuint,
     u: Uniforms,
@@ -93,6 +94,19 @@ pub struct Renderer {
     transitioning: AtomicBool,
     transition_serial: AtomicU64,
     last_skip: [AtomicI32; 2],
+    // background animation (a second libmpv core, muted, software decode) and its single-decoder crossfade
+    bg_core: Mutex<Option<Handle>>,
+    bg_render_ctx: AtomicPtr<c_void>,
+    bg_render_queued: AtomicBool,
+    bg_event_queued: AtomicBool,
+    bg_has_frame: AtomicBool,
+    prev_bg_has_frame: AtomicBool,
+    bg_at_end: AtomicBool,
+    bg_paused: AtomicBool,
+    bg_position_ms: AtomicI64,
+    bg_opacity: AtomicU64,
+    prev_bg_opacity: AtomicU64,
+    bg_mix: AtomicU64,
     weak: Weak<Renderer>,
     cb_ctx: *mut Weak<Renderer>,
 }
@@ -181,6 +195,18 @@ unsafe extern "C" fn render_wake(ctx: *mut c_void) {
     }
 }
 
+unsafe extern "C" fn bg_render_wake(ctx: *mut c_void) {
+    if let Some(r) = (*(ctx as *const Weak<Renderer>)).upgrade() {
+        r.schedule_bg_render();
+    }
+}
+
+unsafe extern "C" fn bg_event_wake(ctx: *mut c_void) {
+    if let Some(r) = (*(ctx as *const Weak<Renderer>)).upgrade() {
+        r.schedule_bg_events();
+    }
+}
+
 unsafe extern "C" fn view_event(user: *mut c_void, view: *mut c_void, kind: c_int) {
     let Some(r) = (*(user as *const Weak<Renderer>)).upgrade() else { return };
     match kind {
@@ -206,7 +232,7 @@ impl Renderer {
             // CDG is natively 300x216. Render it at that exact size so libmpv cannot soften the palette pixels while scaling into the
             // 1080p video surface; presentation performs the one and only enlargement.
             let (cdg_tex, cdg_fbo, b) = make_texture(CDG_W, CDG_H, GL_NEAREST, true);
-            let (bg_tex, _bg_fbo, c) = make_texture(TEXTURE_W, TEXTURE_H, GL_LINEAR, true);
+            let (bg_tex, bg_fbo, c) = make_texture(TEXTURE_W, TEXTURE_H, GL_LINEAR, true);
             let (prev_bg_tex, _, _) = make_texture(TEXTURE_W, TEXTURE_H, GL_LINEAR, false);
             let program = make_program();
             let u = Uniforms {
@@ -224,7 +250,7 @@ impl Renderer {
             };
             shim_master_unlock(master);
             (
-                GlState { tex, fbo, cdg_tex, cdg_fbo, bg_tex, prev_bg_tex, program, u, vao_out: 0, vao_prev: 0, fence: std::ptr::null_mut() },
+                GlState { tex, fbo, cdg_tex, cdg_fbo, bg_tex, bg_fbo, prev_bg_tex, program, u, vao_out: 0, vao_prev: 0, fence: std::ptr::null_mut() },
                 a && b && c && program != 0,
             )
         };
@@ -247,6 +273,18 @@ impl Renderer {
             transitioning: AtomicBool::new(false),
             transition_serial: AtomicU64::new(0),
             last_skip: [AtomicI32::new(-1), AtomicI32::new(-1)],
+            bg_core: Mutex::new(None),
+            bg_render_ctx: AtomicPtr::new(std::ptr::null_mut()),
+            bg_render_queued: AtomicBool::new(false),
+            bg_event_queued: AtomicBool::new(false),
+            bg_has_frame: AtomicBool::new(false),
+            prev_bg_has_frame: AtomicBool::new(false),
+            bg_at_end: AtomicBool::new(false),
+            bg_paused: AtomicBool::new(false),
+            bg_position_ms: AtomicI64::new(0),
+            bg_opacity: AtomicU64::new(0f64.to_bits()),
+            prev_bg_opacity: AtomicU64::new(0f64.to_bits()),
+            bg_mix: AtomicU64::new(1f64.to_bits()),
             weak: weak.clone(),
             cb_ctx: Box::into_raw(Box::new(weak.clone())),
         });
@@ -463,6 +501,264 @@ impl Renderer {
         });
     }
 
+    fn f(&self, a: &AtomicU64) -> f64 {
+        f64::from_bits(a.load(Ordering::SeqCst))
+    }
+
+    fn schedule_bg_render(&self) {
+        if self.flags.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.bg_render_queued.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return;
+        }
+        let weak = self.weak.clone();
+        dispatch_main(move || {
+            let Some(r) = weak.upgrade() else { return };
+            r.bg_render_queued.store(false, Ordering::SeqCst);
+            let rc = r.bg_render_ctx.load(Ordering::SeqCst);
+            if r.flags.stopping.load(Ordering::SeqCst) || rc.is_null() {
+                return;
+            }
+            if r.api.render_update(rc) & mpvapi::RENDER_UPDATE_FRAME != 0 {
+                unsafe {
+                    shim_master_make_current(r.master);
+                    shim_master_lock(r.master);
+                    {
+                        let gl = r.gl.lock().unwrap();
+                        glBindFramebuffer(GL_FRAMEBUFFER, gl.bg_fbo);
+                        glViewport(0, 0, TEXTURE_W, TEXTURE_H);
+                        r.api.render_into_fbo(rc, gl.bg_fbo as c_int, TEXTURE_W, TEXTURE_H);
+                        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                        glFlush();
+                    }
+                    shim_master_unlock(r.master);
+                }
+                r.bg_has_frame.store(true, Ordering::SeqCst);
+            }
+            // The decorative decoder has its own continuous clock: present every background frame to BOTH surfaces here, otherwise
+            // the host preview only updated when a lyric packet changed and its MP4 looked paused through static CDG spans.
+            r.present(r.output.load(Ordering::SeqCst));
+            r.present(r.preview.load(Ordering::SeqCst));
+        });
+    }
+
+    fn schedule_bg_events(&self) {
+        if self.flags.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.bg_event_queued.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return;
+        }
+        let weak = self.weak.clone();
+        dispatch_main(move || {
+            let Some(r) = weak.upgrade() else { return };
+            r.bg_event_queued.store(false, Ordering::SeqCst);
+            let Some(h) = *r.bg_core.lock().unwrap() else { return };
+            loop {
+                let e = r.api.wait_event(h, 0.0);
+                if e.is_null() {
+                    break;
+                }
+                let ev = unsafe { &*e };
+                match ev.event_id {
+                    mpvapi::EVENT_NONE => break,
+                    mpvapi::EVENT_PROPERTY_CHANGE => {
+                        let p = ev.data as *const mpvapi::MpvEventProperty;
+                        if !p.is_null() && unsafe { !(*p).data.is_null() } {
+                            let (format, data) = unsafe { ((*p).format, (*p).data) };
+                            if ev.reply_userdata == 101 && format == mpvapi::FORMAT_DOUBLE {
+                                let secs = unsafe { *(data as *const f64) };
+                                r.bg_position_ms.store((secs * 1000.0).round() as i64, Ordering::SeqCst);
+                            } else if ev.reply_userdata == 102 && format == mpvapi::FORMAT_FLAG {
+                                r.bg_paused.store(unsafe { *(data as *const c_int) } != 0, Ordering::SeqCst);
+                            } else if ev.reply_userdata == 103 && format == mpvapi::FORMAT_FLAG {
+                                r.bg_at_end.store(unsafe { *(data as *const c_int) } != 0, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    mpvapi::EVENT_FILE_LOADED => bridge_log!("[background] native animation loaded"),
+                    mpvapi::EVENT_END_FILE => {
+                        r.bg_at_end.store(true, Ordering::SeqCst);
+                        bridge_log!("[background] native animation ended");
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    /// Starts (or replaces) the muted background animation. The outgoing frame is retained for a true dissolve without a second decoder.
+    pub fn load_background(&self, path: &str, opacity: f64) -> bool {
+        if path.is_empty() || self.flags.stopping.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.bg_has_frame.load(Ordering::SeqCst) && self.f(&self.bg_opacity) > 0.0 {
+            unsafe {
+                shim_master_make_current(self.master);
+                shim_master_lock(self.master);
+                {
+                    let gl = self.gl.lock().unwrap();
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, gl.bg_fbo);
+                    glActiveTexture(GL_TEXTURE2);
+                    glBindTexture(GL_TEXTURE_2D, gl.prev_bg_tex);
+                    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, TEXTURE_W, TEXTURE_H);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+                    glFlush();
+                }
+                shim_master_unlock(self.master);
+            }
+            self.prev_bg_has_frame.store(true, Ordering::SeqCst);
+            self.prev_bg_opacity.store(self.bg_opacity.load(Ordering::SeqCst), Ordering::SeqCst);
+            self.bg_mix.store(0f64.to_bits(), Ordering::SeqCst);
+            bridge_log!("[background] outgoing frame retained for single-decoder crossfade");
+        } else {
+            self.prev_bg_has_frame.store(false, Ordering::SeqCst);
+            self.prev_bg_opacity.store(0f64.to_bits(), Ordering::SeqCst);
+            self.bg_mix.store(1f64.to_bits(), Ordering::SeqCst);
+        }
+        self.bg_opacity.store(opacity.clamp(0.0, 1.0).to_bits(), Ordering::SeqCst);
+        self.bg_has_frame.store(false, Ordering::SeqCst);
+        self.bg_at_end.store(false, Ordering::SeqCst);
+        self.bg_position_ms.store(0, Ordering::SeqCst);
+        self.bg_paused.store(false, Ordering::SeqCst);
+        let h = {
+            let mut core = self.bg_core.lock().unwrap();
+            if core.is_none() {
+                match self.create_bg_core() {
+                    Some(h) => *core = Some(h),
+                    None => return false,
+                }
+            }
+            core.unwrap()
+        };
+        // An EOF may leave pause asserted: every replacement animation must explicitly resume, without touching the karaoke core.
+        self.api.set_flag_async(h, 91, "pause", false);
+        let r = self.api.command_async(h, 90, &["loadfile", path, "replace"]);
+        bridge_log!("[background] native animation queued file={} opacity={:.2}", path, self.f(&self.bg_opacity));
+        r >= 0
+    }
+
+    fn create_bg_core(&self) -> Option<Handle> {
+        let h = self.api.create()?;
+        for (k, v) in [
+            ("config", "no"),
+            ("vo", "libmpv"),
+            ("ao", "null"),
+            ("mute", "yes"),
+            // Decorative MP4s fill the 16:9 shared texture (their aspect may distort, but no edge is cropped or letterboxed).
+            ("video-aspect-override", "16:9"),
+            // Keep an embedded audio stream as mpv's timing master, routed to the null device and muted: disabling audio entirely
+            // left some short AAC-backed VJ loops parked on their first rendered frame.
+            // Software decode: VideoToolbox cannot export several older H.264 VJ-loop formats into this secondary render context on
+            // Intel (hwaccel setup fails before a frame); these clips are decorative and muted, reliable beats fast.
+            ("hwdec", "no"),
+            ("pause", "no"),
+            // keep-open would park a finished loop on its last frame with pause=yes; END_FILE / eof-reached must stay observable so
+            // Python's shuffle bag can advance, while idle keeps this core alive.
+            ("keep-open", "no"),
+            ("idle", "yes"),
+        ] {
+            self.api.set_option(h, k, v);
+        }
+        self.api.set_wakeup_callback(h, bg_event_wake, self.cb_ctx as *mut c_void);
+        if self.api.initialize(h) < 0 {
+            self.api.terminate_destroy(h);
+            return None;
+        }
+        self.api.observe(h, 101, "time-pos", mpvapi::FORMAT_DOUBLE);
+        self.api.observe(h, 102, "pause", mpvapi::FORMAT_FLAG);
+        self.api.observe(h, 103, "eof-reached", mpvapi::FORMAT_FLAG);
+        unsafe {
+            shim_master_make_current(self.master);
+            let mut init = OpenglInitParams { get_proc_address: get_proc, get_proc_address_ctx: std::ptr::null_mut() };
+            match self.api.render_context_create_gl(h, &mut init) {
+                Ok(rc) => {
+                    self.bg_render_ctx.store(rc, Ordering::SeqCst);
+                    self.api.render_set_update_callback(rc, Some(bg_render_wake), self.cb_ctx as *mut c_void);
+                }
+                Err(_) => {
+                    self.api.terminate_destroy(h);
+                    return None;
+                }
+            }
+        }
+        Some(h)
+    }
+
+    pub fn stop_background(&self) {
+        self.bg_opacity.store(0f64.to_bits(), Ordering::SeqCst);
+        self.bg_has_frame.store(false, Ordering::SeqCst);
+        self.bg_at_end.store(false, Ordering::SeqCst);
+        self.bg_position_ms.store(0, Ordering::SeqCst);
+        self.bg_paused.store(false, Ordering::SeqCst);
+        self.prev_bg_has_frame.store(false, Ordering::SeqCst);
+        self.prev_bg_opacity.store(0f64.to_bits(), Ordering::SeqCst);
+        self.bg_mix.store(1f64.to_bits(), Ordering::SeqCst);
+        if let Some(h) = *self.bg_core.lock().unwrap() {
+            self.api.command_async(h, 92, &["stop"]);
+        }
+        let out = self.output.load(Ordering::SeqCst);
+        if !out.is_null() {
+            unsafe { shim_view_set_needs_display(out) };
+        }
+    }
+
+    /// Fade the animation (and drive the dissolve from the outgoing frame while one is retained).
+    pub fn set_background_opacity(&self, opacity: f64) {
+        let value = opacity.clamp(0.0, 1.0);
+        self.bg_opacity.store(value.to_bits(), Ordering::SeqCst);
+        if self.prev_bg_has_frame.load(Ordering::SeqCst) {
+            let old = self.f(&self.prev_bg_opacity).max(0.001);
+            let mix = (value / old).clamp(0.0, 1.0);
+            self.bg_mix.store(mix.to_bits(), Ordering::SeqCst);
+            if mix >= 0.999 {
+                self.prev_bg_has_frame.store(false, Ordering::SeqCst);
+                self.prev_bg_opacity.store(0f64.to_bits(), Ordering::SeqCst);
+                self.bg_mix.store(1f64.to_bits(), Ordering::SeqCst);
+            }
+        }
+        self.needs_display_all();
+    }
+
+    // UI timers read observed state: querying the decoder core synchronously could block the GUI while an animation opens or ends.
+    pub fn background_at_end(&self) -> bool {
+        self.bg_at_end.load(Ordering::SeqCst)
+    }
+    pub fn background_position_ms(&self) -> i64 {
+        self.bg_position_ms.load(Ordering::SeqCst)
+    }
+    pub fn background_paused(&self) -> bool {
+        self.bg_paused.load(Ordering::SeqCst)
+    }
+
+    /// The CDG picture as BGRA, top row first, read from the retained 300x216 texture (libmpv's screenshot-raw of a CDG FBO is black).
+    pub fn grab_cdg(&self) -> Option<Vec<u8>> {
+        let (w, h) = (CDG_W as usize, CDG_H as usize);
+        let stride = w * 4;
+        let mut out = vec![0u8; stride * h];
+        unsafe {
+            shim_master_make_current(self.master);
+            shim_master_lock(self.master);
+            {
+                let gl = self.gl.lock().unwrap();
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, gl.cdg_fbo);
+                glPixelStorei(GL_PACK_ALIGNMENT, 4);
+                glReadPixels(0, 0, CDG_W, CDG_H, GL_BGRA, GL_UNSIGNED_BYTE, out.as_mut_ptr() as *mut c_void);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            }
+            shim_master_unlock(self.master);
+        }
+        // OpenGL rows start at the lower-left; images start at the top.
+        for y in 0..h / 2 {
+            let (a, b) = out.split_at_mut((h - 1 - y) * stride);
+            a[y * stride..(y + 1) * stride].swap_with_slice(&mut b[..stride]);
+        }
+        Some(out)
+    }
+
     /// Draw the retained texture into one view.
     fn present(&self, view: *mut c_void) {
         if view.is_null() || self.flags.stopping.load(Ordering::SeqCst) {
@@ -556,7 +852,7 @@ impl Renderer {
             }
         }
         // Decorative fills belong to the main audience screen only.
-        let sidefill = if is_output && is_cdg { self.sidefill.load(Ordering::SeqCst) } else { 0 };
+        let mut sidefill = if is_output && is_cdg { self.sidefill.load(Ordering::SeqCst) } else { 0 };
         glUseProgram(gl.program);
         let vao = if is_output { &mut gl.vao_out } else { &mut gl.vao_prev };
         if *vao == 0 {
@@ -574,14 +870,40 @@ impl Renderer {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, gl.bg_tex);
         glUniform1i(u.bg_texture, 1);
-        glUniform1f(u.bg_opacity, 0.0); // background video: V4
+        let (bg_opacity, prev_opacity, mix) = (self.f(&self.bg_opacity), self.f(&self.prev_bg_opacity), self.f(&self.bg_mix));
+        let (bg_has, prev_has) = (self.bg_has_frame.load(Ordering::SeqCst), self.prev_bg_has_frame.load(Ordering::SeqCst));
+        glUniform1f(u.bg_opacity, bg_opacity as f32);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, gl.prev_bg_tex);
         glUniform1i(u.prev_bg_texture, 2);
-        glUniform1f(u.prev_bg_opacity, 0.0);
-        glUniform1f(u.bg_mix, 1.0);
-        let background_active = false;
-        if sidefill != 0 {
+        glUniform1f(u.prev_bg_opacity, if prev_has { prev_opacity as f32 } else { 0.0 });
+        glUniform1f(u.bg_mix, mix as f32);
+        // Both surfaces show what the room sees: the preview must represent the animation composite too.
+        let background_active = is_cdg && ((bg_has && bg_opacity > 0.0) || (prev_has && prev_opacity > 0.0));
+        if background_active {
+            // One full-texture GPU draw: stretch to every host edge without a crop, intermediate pixmap, decoder change or clock cost.
+            glUniform2f(u.scale, 1.0, 1.0);
+            glUniform2f(u.uv_scale, 1.0, 1.0);
+            glUniform2f(u.uv_offset, 0.0, 0.0);
+            glUniform1i(u.sidefill, 4);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            uvx = span as f32;
+            uox = panel_l;
+            uvy = 1.0;
+            uoy = 0.0;
+            sx = 1.0;
+            sy = 1.0;
+            let ca = sa * span;
+            if va > ca {
+                sx = (ca / va) as f32;
+            } else {
+                sy = (va / ca) as f32;
+            }
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            sidefill = 0;
+        }
+        else if sidefill != 0 {
             // Background pass: cover the actual host, not the bridge's fixed 16:9 texture. Crop only this decorative copy.
             let ca = sa * span;
             let (mut buvx, mut buvy, mut buox, mut buoy) = (span as f32, 1.0f32, panel_l, 0.0f32);
@@ -650,6 +972,15 @@ impl Renderer {
             shim_master_make_current(self.master);
             if !rc.is_null() {
                 self.api.render_free(rc);
+            }
+            let brc = self.bg_render_ctx.swap(std::ptr::null_mut(), Ordering::SeqCst);
+            if !brc.is_null() {
+                self.api.render_set_update_callback(brc, None, std::ptr::null_mut());
+                self.api.render_free(brc);
+            }
+            if let Some(h) = self.bg_core.lock().unwrap().take() {
+                self.api.set_wakeup_callback_none(h);
+                self.api.terminate_destroy(h);
             }
             let gl = &mut *self.gl.lock().unwrap();
             if !gl.fence.is_null() {
