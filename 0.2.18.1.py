@@ -9667,8 +9667,9 @@ class BackgroundMusicManager(QMainWindow):
         self.bg_player_frame = player_frame
         player_frame.setObjectName("bgPlayerFrame")
         player_frame.setStyleSheet(content_card_css("bgPlayerFrame", radius=12))
-        player_frame.setMinimumHeight(128)
-        player_frame.setMaximumHeight(154)
+        # 128/154 before the Soundboard slider row was added (2026-10-11); that row needs about 30 px more or the Shuffle / Clear Playlist buttons get squashed
+        player_frame.setMinimumHeight(158)
+        player_frame.setMaximumHeight(188)
         player_layout = QVBoxLayout(player_frame)
         player_layout.setContentsMargins(12, 10, 12, 10)
         player_layout.setSpacing(6)
