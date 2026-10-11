@@ -74,6 +74,19 @@ if ! grep -Fq '#include <cstddef>' \
     patch -p1 -d "$SOURCES/rubberband-$RUBBERBAND_VERSION" < patches/rubberband-clang-size-t.patch
 fi
 
+# Signalsmith Stretch pitch/tempo filter (replaces mpv's rubberband filter in the chain): a static C wrapper library from the vendored MIT
+# header, plus the af_signalsmith.c filter and the small meson/registration patch.
+mkdir -p "$PREFIX/lib"
+clang++ -std=c++14 -O2 -fPIC -arch "$ARCH" -mmacosx-version-min="$MACOS_DEPLOYMENT_TARGET" \
+    -I "$ROOT/vendor/signalsmith-stretch" -I "$ROOT/vendor" \
+    -c signalsmith/singws_stretch.cpp -o "$WORK/singws_stretch.o"
+rm -f "$PREFIX/lib/libsingws_stretch.a"
+ar rcs "$PREFIX/lib/libsingws_stretch.a" "$WORK/singws_stretch.o"
+cp signalsmith/af_signalsmith.c "$SOURCES/mpv-$MPV_VERSION/audio/filter/af_signalsmith.c"
+if ! grep -Fq 'af_signalsmith' "$SOURCES/mpv-$MPV_VERSION/meson.build"; then
+    patch -p1 -d "$SOURCES/mpv-$MPV_VERSION" < patches/mpv-signalsmith-filter.patch
+fi
+
 CROSS=()
 if [[ "$ARCH" == x86_64 ]]; then
     CROSS_FILE="$WORK/x86_64.ini"

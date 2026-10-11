@@ -1,0 +1,33 @@
+--- a/meson.build
++++ b/meson.build
+@@ -738,6 +738,10 @@
+     dependencies += rubberband
+     sources += files('audio/filter/af_rubberband.c')
+ endif
++
++# SingWS: Signalsmith Stretch pitch/tempo filter (static wrapper library built by build_runtime.sh before this step).
++sources += files('audio/filter/af_signalsmith.c')
++dependencies += cc.find_library('singws_stretch', dirs: [get_option('prefix') / 'lib'], required: true)
+ 
+ sdl2 = dependency('sdl2', required: false)
+ 
+--- a/filters/user_filters.c
++++ b/filters/user_filters.c
+@@ -39,6 +39,7 @@
+ #if HAVE_RUBBERBAND
+     &af_rubberband,
+ #endif
++    &af_signalsmith,
+     &af_lavcac3enc,
+     &af_drop,
+ };
+--- a/filters/user_filters.h
++++ b/filters/user_filters.h
+@@ -24,6 +24,7 @@
+ extern const struct mp_user_filter_entry af_scaletempo2;
+ extern const struct mp_user_filter_entry af_format;
+ extern const struct mp_user_filter_entry af_rubberband;
++extern const struct mp_user_filter_entry af_signalsmith;
+ extern const struct mp_user_filter_entry af_lavcac3enc;
+ extern const struct mp_user_filter_entry af_drop;
+ 

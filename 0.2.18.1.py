@@ -3871,6 +3871,7 @@ DEFAULTS = {
     # bridge). Any problem loading the Rust one, or creating its renderer for a song, falls back to Objective-C. Read once at launch.
     # NOT yet run on a physical Intel Mac: set "objc" there if it misbehaves.
     "video_bridge": "rust",
+    "key_engine": "signalsmith",
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -20206,6 +20207,13 @@ class KaraokeApp(QWidget):
             # Which bridge library mpv_playback_iina loads (first song). Never overrides an explicit env choice.
             _video_bridge = str(self.settings.get("video_bridge", "rust") or "rust").strip().lower()
             os.environ.setdefault("SINGWS_VIDEO_BRIDGE", "objc" if _video_bridge == "objc" else "rust")
+        except Exception:
+            pass
+        try:
+            # Which mpv filter carries key and tempo: "signalsmith" (default) or "rubberband" (the way back). Read by the Rust bridge
+            # whenever it composes the audio chain; a libmpv without the Signalsmith filter falls back to rubberband by itself.
+            _key_engine = str(self.settings.get("key_engine", "signalsmith") or "signalsmith").strip().lower()
+            os.environ.setdefault("SINGWS_KEY_ENGINE", "rubberband" if _key_engine == "rubberband" else "signalsmith")
         except Exception:
             pass
         try:

@@ -25,6 +25,15 @@ struct State {
     serial: u64,
 }
 
+
+/// Which mpv audio filter carries key/tempo: "signalsmith" (default) or "rubberband" (SINGWS_KEY_ENGINE=rubberband).
+fn stretch_engine() -> &'static str {
+    match std::env::var("SINGWS_KEY_ENGINE").ok().as_deref() {
+        Some("rubberband") => "rubberband",
+        _ => "signalsmith",
+    }
+}
+
 pub struct Inner {
     api: &'static Mpv,
     mpv: OnceLock<Handle>,
@@ -92,13 +101,26 @@ impl Inner {
         };
         // Rubberband is inserted for a tempo change as well as a key change: with no rubberband mpv applies `speed` with
         // scaletempo2 (time-domain WSOLA), which audibly lost quality against the phase vocoder the old engine used.
+        // The stretch filter takes the key ONLY from `pitch-scale` and the tempo ONLY from mpv's `speed`, so the two never touch.
+        let dsp_only = chain.clone();
+        let engine = stretch_engine();
         if semitones != 0 || tempo != 100 {
             if !chain.is_empty() {
                 chain.push(',');
             }
-            chain.push_str(&format!("rubberband=pitch-scale={:.6}", 2f64.powf(semitones as f64 / 12.0)));
+            chain.push_str(&format!("{}=pitch-scale={:.6}", engine, 2f64.powf(semitones as f64 / 12.0)));
         }
-        let r = self.api.set_string(h, "af", &chain);
+        let mut r = self.api.set_string(h, "af", &chain);
+        if r < 0 && engine == "signalsmith" {
+            // A libmpv built before the Signalsmith filter existed: fall back to rubberband rather than lose the DSP chain too.
+            bridge_log!("[bridge] signalsmith filter unavailable ({}); using rubberband", self.api.error_string(r));
+            chain = dsp_only;
+            if !chain.is_empty() {
+                chain.push(',');
+            }
+            chain.push_str(&format!("rubberband=pitch-scale={:.6}", 2f64.powf(semitones as f64 / 12.0)));
+            r = self.api.set_string(h, "af", &chain);
+        }
         if r < 0 {
             bridge_log!("[bridge] af chain rejected ({}): {}", self.api.error_string(r), chain);
         } else {
