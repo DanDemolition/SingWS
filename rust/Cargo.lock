@@ -880,6 +880,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-stretch"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "singws-transport"
 version = "0.1.0"
 dependencies = [

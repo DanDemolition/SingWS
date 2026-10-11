@@ -1,0 +1,13 @@
+[package]
+name = "singws-stretch"
+version = "0.1.0"
+edition = "2024"
+description = "Safe wrapper around Signalsmith Stretch (MIT): key (pitch) and tempo (time ratio) as two independent inputs. Shares its C++ wrapper with the mpv audio filter."
+publish = false
+
+[lib]
+name = "singws_stretch"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
