@@ -29,6 +29,8 @@ from video_bridge_parity import DEFAULT_MP4, DEFAULT_ZIP, bind  # noqa: E402
 
 OUT_RECT = (60, 80, 640, 360)       # x, y, w, h in screen points
 PREV_RECT = (60, 460, 320, 180)
+ROT_RECT = (760, 80, 320, 180)       # rotation underlay host (translucent Qt window, the view sits behind its content)
+SPOT_RECT = (760, 300, 320, 180)     # spotlight host
 
 
 def make_static_clips(directory: Path):
@@ -83,6 +85,24 @@ def run(args) -> int:
         w.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         w.setGeometry(*rect)
         w.show()
+    # solid black backdrops under the translucent underlay hosts, so a screenshot never contains whatever is on the desktop behind them
+    backdrops = []
+    for rect in (ROT_RECT, SPOT_RECT):
+        b = QWidget()
+        b.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        b.setStyleSheet("background-color: black;")
+        b.setGeometry(*rect)
+        b.show()
+        backdrops.append(b)
+    app.processEvents()
+    rot_w, spot_w = QWidget(), QWidget()
+    for w, rect in ((rot_w, ROT_RECT), (spot_w, SPOT_RECT)):
+        w.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        w.setGeometry(*rect)
+    rot_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)   # so the underlay behind Qt's content view can show through
+    spot_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    rot_w.show()
+    spot_w.show()
     app.processEvents()
 
     class Main(QObject):
@@ -152,6 +172,19 @@ def run(args) -> int:
             settle_at(h, 45000)
             result["notes"]["cdg_visual_ready"] = bool(B.singws_bridge_visual_ready(h))
             take(h, "cdg_plain")
+            # rotation underlay (behind Qt's translucent content view, 4% opacity) and the between-singers spotlight (AppKit fades it in)
+            B.singws_bridge_set_rotation_host(h, int(rot_w.winId()), 1)
+            B.singws_bridge_set_rotation_spotlight(h, int(spot_w.winId()), 1)
+            time.sleep(1.2)
+            shoot(ROT_RECT, outdir / "cdg_rotation_underlay.png")
+            shoot(SPOT_RECT, outdir / "cdg_spotlight_on.png")
+            result["shots"] += ["cdg_rotation_underlay.png", "cdg_spotlight_on.png"]
+            B.singws_bridge_set_rotation_spotlight(h, int(spot_w.winId()), 0)
+            time.sleep(0.9)
+            shoot(SPOT_RECT, outdir / "cdg_spotlight_off.png")
+            result["shots"].append("cdg_spotlight_off.png")
+            B.singws_bridge_set_rotation_host(h, int(rot_w.winId()), 0)
+            result["notes"]["render_thread_active"] = int(B.singws_bridge_render_thread_active(h))
             B.singws_bridge_set_sidefill(h, 1)
             time.sleep(0.4)
             take(h, "cdg_sidefill1", with_preview=False)
@@ -213,6 +246,13 @@ def run(args) -> int:
             wait_for(lambda: B.singws_bridge_visual_ready(h), 10.0)
             settle_at(h, 30000)
             take(h, "mp4")
+            # the rotation/spotlight underlays keep the picture's aspect (no edge fill for MP4)
+            B.singws_bridge_set_rotation_host(h, int(rot_w.winId()), 1)
+            B.singws_bridge_set_rotation_spotlight(h, int(spot_w.winId()), 1)
+            time.sleep(1.2)
+            shoot(ROT_RECT, outdir / "mp4_rotation_underlay.png")
+            shoot(SPOT_RECT, outdir / "mp4_spotlight_on.png")
+            result["shots"] += ["mp4_rotation_underlay.png", "mp4_spotlight_on.png"]
             g = grab()
             result["notes"]["grab_mp4"] = g and {"w": g["w"], "h": g["h"], "stride": g["stride"]}
             result["notes"]["present_count"] = int(B.singws_bridge_present_count(h))

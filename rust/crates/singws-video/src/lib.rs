@@ -20,7 +20,7 @@ pub mod shaders;
 
 use crate::core::Player;
 use std::ffi::{c_char, c_double, c_int, c_void, CStr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 fn text(p: *const c_char) -> Option<String> {
     if p.is_null() {
@@ -38,7 +38,6 @@ fn player<'a>(h: *mut c_void) -> Option<&'a Player> {
     }
 }
 
-static RENDER_THREAD_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // ---- lifecycle ---------------------------------------------------------------------------------------------------------------
 
@@ -48,11 +47,11 @@ pub extern "C" fn singws_bridge_set_log_callback(cb: Option<log::LogFn>) {
 }
 #[no_mangle]
 pub extern "C" fn singws_bridge_set_render_thread(enabled: c_int) {
-    RENDER_THREAD_REQUESTED.store(enabled != 0, Ordering::SeqCst);
+    render::RENDER_THREAD_REQUESTED.store(enabled != 0, Ordering::SeqCst);
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_render_thread_active(_h: *mut c_void) -> c_int {
-    0 // V5
+pub extern "C" fn singws_bridge_render_thread_active(h: *mut c_void) -> c_int {
+    player(h).and_then(|p| p.renderer()).map(|r| r.render_thread_active() as c_int).unwrap_or(0)
 }
 #[no_mangle]
 pub extern "C" fn singws_bridge_present_count(h: *mut c_void) -> u64 {
@@ -219,9 +218,17 @@ pub extern "C" fn singws_bridge_stop_background(h: *mut c_void) {
     }
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_set_rotation_host(_h: *mut c_void, _host: usize, _enabled: c_int) {}
+pub extern "C" fn singws_bridge_set_rotation_host(h: *mut c_void, host: usize, enabled: c_int) {
+    if let Some(r) = player(h).and_then(|p| p.renderer()) {
+        r.set_rotation_host(host, enabled != 0);
+    }
+}
 #[no_mangle]
-pub extern "C" fn singws_bridge_set_rotation_spotlight(_h: *mut c_void, _host: usize, _enabled: c_int) {}
+pub extern "C" fn singws_bridge_set_rotation_spotlight(h: *mut c_void, host: usize, enabled: c_int) {
+    if let Some(r) = player(h).and_then(|p| p.renderer()) {
+        r.set_spotlight_host(host, enabled != 0);
+    }
+}
 /// Caller owns the returned malloc'd buffer and must pass it to `singws_bridge_free_frame`.
 #[no_mangle]
 pub extern "C" fn singws_bridge_grab_frame(h: *mut c_void, w: *mut c_int, hh: *mut c_int, stride: *mut c_int) -> *mut c_void {

@@ -70,6 +70,10 @@ def bind(path: str):
     L.singws_bridge_grab_frame.restype = P
     L.singws_bridge_grab_frame.argtypes = [P, ctypes.POINTER(I), ctypes.POINTER(I), ctypes.POINTER(I)]
     L.singws_bridge_free_frame.argtypes = [P]
+    L.singws_bridge_set_rotation_host.argtypes = [P, ctypes.c_size_t, I]
+    L.singws_bridge_set_rotation_spotlight.argtypes = [P, ctypes.c_size_t, I]
+    L.singws_bridge_render_thread_active.restype = I
+    L.singws_bridge_render_thread_active.argtypes = [P]
     L.singws_bridge_scan_silence.restype = I
     L.singws_bridge_scan_silence.argtypes = [S, D, D, D, ctypes.POINTER(D), ctypes.POINTER(D), ctypes.POINTER(D)]
     L.singws_bridge_scanner_shutdown.argtypes = []

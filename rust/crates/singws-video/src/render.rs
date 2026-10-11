@@ -9,7 +9,7 @@ use crate::gl::*;
 use crate::mpvapi::{self, Handle, Mpv, OpenglInitParams};
 use crate::shaders;
 use std::ffi::{c_char, c_int, c_void, CString};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 extern "C" {
@@ -29,6 +29,23 @@ extern "C" {
     fn shim_view_set_needs_display(v: *mut c_void);
     fn shim_view_attach(v: *mut c_void) -> c_int;
     fn shim_view_refresh(v: *mut c_void, parent: usize) -> c_int;
+    fn shim_view_create_behind(master: *mut c_void, host: usize, cb: Option<ViewEventFn>, user: *mut c_void) -> *mut c_void;
+    fn shim_view_set_ignores_mouse(v: *mut c_void, on: c_int);
+    fn shim_view_set_lock_update(v: *mut c_void, on: c_int);
+    fn shim_view_set_alpha(v: *mut c_void, a: f64);
+    fn shim_view_set_hidden(v: *mut c_void, hidden: c_int);
+    fn shim_view_is_hidden(v: *mut c_void) -> c_int;
+    fn shim_view_animate_alpha(v: *mut c_void, alpha: f64, seconds: f64, done: extern "C" fn(*mut c_void), ctx: *mut c_void);
+    fn shim_view_probe(v: *mut c_void, w: *mut c_int, h: *mut c_int) -> c_int;
+    fn shim_view_update_locked(v: *mut c_void);
+    fn shim_queue_create() -> *mut c_void;
+    fn shim_queue_async(q: *mut c_void, f: extern "C" fn(*mut c_void), ctx: *mut c_void);
+    fn shim_queue_sync(q: *mut c_void, f: extern "C" fn(*mut c_void), ctx: *mut c_void);
+    fn shim_queue_after_ms(q: *mut c_void, ms: c_int, f: extern "C" fn(*mut c_void), ctx: *mut c_void);
+    fn shim_queue_is_current(q: *mut c_void) -> c_int;
+    fn shim_queue_release(q: *mut c_void);
+    fn shim_timer_start(seconds: f64, f: extern "C" fn(*mut c_void), ctx: *mut c_void) -> *mut c_void;
+    fn shim_timer_stop(t: *mut c_void);
     fn shim_dispatch_main(f: extern "C" fn(*mut c_void), ctx: *mut c_void);
     fn shim_dispatch_main_after_ms(ms: c_int, f: extern "C" fn(*mut c_void), ctx: *mut c_void);
 }
@@ -49,6 +66,38 @@ fn dispatch_main_after(ms: i32, f: impl FnOnce() + Send + 'static) {
     let boxed: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
     unsafe { shim_dispatch_main_after_ms(ms, run_boxed, Box::into_raw(boxed) as *mut c_void) };
 }
+
+/// Set by `singws_bridge_set_render_thread` (or the SINGWS_RENDER_THREAD env var), read once when a renderer is created.
+pub static RENDER_THREAD_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn render_thread_wanted() -> bool {
+    RENDER_THREAD_REQUESTED.load(Ordering::SeqCst)
+        || std::env::var("SINGWS_RENDER_THREAD").map(|v| !v.is_empty() && v != "0").unwrap_or(false)
+}
+
+fn dispatch_queue(q: *mut c_void, f: impl FnOnce() + Send + 'static) {
+    let boxed: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
+    unsafe { shim_queue_async(q, run_boxed, Box::into_raw(boxed) as *mut c_void) };
+}
+fn dispatch_queue_after(q: *mut c_void, ms: i32, f: impl FnOnce() + Send + 'static) {
+    let boxed: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
+    unsafe { shim_queue_after_ms(q, ms, run_boxed, Box::into_raw(boxed) as *mut c_void) };
+}
+
+/// What the render thread may know about a view without touching AppKit (render-thread mode); refreshed on the main thread.
+struct ViewCache {
+    presentable: AtomicBool,
+    w: AtomicI32,
+    h: AtomicI32,
+}
+
+const KIND_OUTPUT: usize = 0;
+const KIND_PREVIEW: usize = 1;
+#[allow(dead_code)]
+const KIND_ROTATION: usize = 2;
+#[allow(dead_code)]
+const KIND_SPOTLIGHT: usize = 3;
+const KIND_NAMES: [&str; 4] = ["output", "preview", "rotation", "spotlight"];
 
 struct Uniforms {
     scale: GLint,
@@ -74,8 +123,7 @@ struct GlState {
     prev_bg_tex: GLuint,
     program: GLuint,
     u: Uniforms,
-    vao_out: GLuint,
-    vao_prev: GLuint,
+    vao: [GLuint; 4],
     fence: GLsync,
 }
 unsafe impl Send for GlState {}
@@ -88,12 +136,22 @@ pub struct Renderer {
     render_ctx: AtomicPtr<c_void>,
     output: AtomicPtr<c_void>,
     preview: AtomicPtr<c_void>,
+    rotation: AtomicPtr<c_void>,
+    spotlight: AtomicPtr<c_void>,
+    rotation_host: AtomicUsize,
+    spotlight_host: AtomicUsize,
+    spotlight_revision: AtomicU64,
+    last_rotation_present: Mutex<Option<std::time::Instant>>,
+    /// Render-thread mode: the private serial queue that owns ALL OpenGL work (null = the main queue, the long-standing behaviour).
+    gl_queue: *mut c_void,
+    cache: [ViewCache; 4],
+    cache_timer: AtomicPtr<c_void>,
     render_queued: AtomicBool,
     present_count: AtomicU64,
     sidefill: AtomicI32,
     transitioning: AtomicBool,
     transition_serial: AtomicU64,
-    last_skip: [AtomicI32; 2],
+    last_skip: [AtomicI32; 4],
     // background animation (a second libmpv core, muted, software decode) and its single-decoder crossfade
     bg_core: Mutex<Option<Handle>>,
     bg_render_ctx: AtomicPtr<c_void>,
@@ -207,12 +265,26 @@ unsafe extern "C" fn bg_event_wake(ctx: *mut c_void) {
     }
 }
 
+extern "C" fn cache_tick(ctx: *mut c_void) {
+    if let Some(r) = unsafe { (*(ctx as *const Weak<Renderer>)).upgrade() } {
+        if !r.flags.stopping.load(Ordering::SeqCst) {
+            r.refresh_all_caches();
+        }
+    }
+}
+
 unsafe extern "C" fn view_event(user: *mut c_void, view: *mut c_void, kind: c_int) {
     let Some(r) = (*(user as *const Weak<Renderer>)).upgrade() else { return };
     match kind {
         0 => r.present(view),
         2 => r.native_view_attached(view),
-        _ => {} // geometry changes only matter in render-thread mode (V5)
+        _ => {
+            // Geometry changes only matter in render-thread mode: refresh what the render thread knows, then redraw.
+            if !r.gl_queue.is_null() && !r.flags.stopping.load(Ordering::SeqCst) {
+                r.refresh_view_cache(view);
+                r.present(view);
+            }
+        }
     }
 }
 
@@ -250,7 +322,7 @@ impl Renderer {
             };
             shim_master_unlock(master);
             (
-                GlState { tex, fbo, cdg_tex, cdg_fbo, bg_tex, bg_fbo, prev_bg_tex, program, u, vao_out: 0, vao_prev: 0, fence: std::ptr::null_mut() },
+                GlState { tex, fbo, cdg_tex, cdg_fbo, bg_tex, bg_fbo, prev_bg_tex, program, u, vao: [0; 4], fence: std::ptr::null_mut() },
                 a && b && c && program != 0,
             )
         };
@@ -259,6 +331,7 @@ impl Renderer {
             unsafe { shim_master_destroy(master) };
             return None;
         }
+        let render_mode = render_thread_wanted();
         let renderer = Arc::new_cyclic(|weak: &Weak<Renderer>| Renderer {
             api,
             flags,
@@ -267,12 +340,21 @@ impl Renderer {
             render_ctx: AtomicPtr::new(std::ptr::null_mut()),
             output: AtomicPtr::new(std::ptr::null_mut()),
             preview: AtomicPtr::new(std::ptr::null_mut()),
+            rotation: AtomicPtr::new(std::ptr::null_mut()),
+            spotlight: AtomicPtr::new(std::ptr::null_mut()),
+            rotation_host: AtomicUsize::new(0),
+            spotlight_host: AtomicUsize::new(0),
+            spotlight_revision: AtomicU64::new(0),
+            last_rotation_present: Mutex::new(None),
+            gl_queue: if render_mode { unsafe { shim_queue_create() } } else { std::ptr::null_mut() },
+            cache: std::array::from_fn(|_| ViewCache { presentable: AtomicBool::new(false), w: AtomicI32::new(1), h: AtomicI32::new(1) }),
+            cache_timer: AtomicPtr::new(std::ptr::null_mut()),
             render_queued: AtomicBool::new(false),
             present_count: AtomicU64::new(0),
             sidefill: AtomicI32::new(0),
             transitioning: AtomicBool::new(false),
             transition_serial: AtomicU64::new(0),
-            last_skip: [AtomicI32::new(-1), AtomicI32::new(-1)],
+            last_skip: std::array::from_fn(|_| AtomicI32::new(-1)),
             bg_core: Mutex::new(None),
             bg_render_ctx: AtomicPtr::new(std::ptr::null_mut()),
             bg_render_queued: AtomicBool::new(false),
@@ -300,7 +382,15 @@ impl Renderer {
         }
         renderer.output.store(out, Ordering::SeqCst);
         renderer.preview.store(prev, Ordering::SeqCst);
-        bridge_log!("[bridge] render thread mode=off (main thread)");
+        bridge_log!("[bridge] render thread mode={}", if render_mode { "ON (private render queue)" } else { "off (main thread)" });
+        if render_mode {
+            for v in [out, prev] {
+                unsafe { shim_view_set_lock_update(v, 1) };
+            }
+            renderer.refresh_all_caches();
+            let t = unsafe { shim_timer_start(0.1, cache_tick, renderer.cb_ctx as *mut c_void) };
+            renderer.cache_timer.store(t, Ordering::SeqCst);
+        }
         Some(renderer)
     }
 
@@ -310,6 +400,12 @@ impl Renderer {
 
     /// Called from the core once mpv is initialised (vo=libmpv). The master GL context must be current on this thread.
     pub fn create_render_context(&self, mpv: Handle) -> bool {
+        let mut ok = false;
+        self.on_gl_sync(|| ok = self.create_render_context_gl(mpv));
+        ok
+    }
+
+    fn create_render_context_gl(&self, mpv: Handle) -> bool {
         unsafe {
             shim_master_make_current(self.master);
             let mut init = OpenglInitParams { get_proc_address: get_proc, get_proc_address_ctx: std::ptr::null_mut() };
@@ -335,7 +431,7 @@ impl Renderer {
             return;
         }
         let weak = self.weak.clone();
-        dispatch_main(move || {
+        self.dispatch_gl(move || {
             if let Some(r) = weak.upgrade() {
                 r.render_queued.store(false, Ordering::SeqCst);
                 if !r.flags.stopping.load(Ordering::SeqCst) {
@@ -385,11 +481,32 @@ impl Renderer {
         }
         self.present(self.output.load(Ordering::SeqCst));
         self.present(self.preview.load(Ordering::SeqCst));
+        // The rotation screen is an additional full-display consumer of the same retained texture: keep its underlay fluid without
+        // making every 60/120 Hz source callback pay for another OpenGL flush (the main lyrics output stays uncapped).
+        let due = {
+            let mut last = self.last_rotation_present.lock().unwrap();
+            let now = std::time::Instant::now();
+            if last.map(|t| now.duration_since(t) >= std::time::Duration::from_millis(33)).unwrap_or(true) {
+                *last = Some(now);
+                true
+            } else {
+                false
+            }
+        };
+        if due {
+            self.present(self.rotation.load(Ordering::SeqCst));
+        }
+        self.present(self.spotlight.load(Ordering::SeqCst));
     }
 
     /// GUI-thread half of a load: clear both retained karaoke targets so a stopped song cannot flash during the next decoder's
     /// startup, and CDG tiles of the previous song cannot show through the next one's first packets.
     pub fn clear_for_load(&self) {
+        self.on_gl_sync(|| self.clear_for_load_gl());
+        self.needs_display_all();
+    }
+
+    fn clear_for_load_gl(&self) {
         unsafe {
             shim_master_make_current(self.master);
             shim_master_lock(self.master);
@@ -407,11 +524,10 @@ impl Renderer {
             }
             shim_master_unlock(self.master);
         }
-        self.needs_display_all();
     }
 
     pub fn needs_display_all(&self) {
-        for v in [self.output.load(Ordering::SeqCst), self.preview.load(Ordering::SeqCst)] {
+        for v in [self.output.load(Ordering::SeqCst), self.preview.load(Ordering::SeqCst), self.rotation.load(Ordering::SeqCst)] {
             if !v.is_null() {
                 unsafe { shim_view_set_needs_display(v) };
             }
@@ -447,6 +563,7 @@ impl Renderer {
         if unsafe { shim_view_attach(view) } == 0 {
             return;
         }
+        self.refresh_view_cache(view);
         unsafe { shim_view_set_needs_display(view) };
         self.present(view);
         let name = if view == self.output.load(Ordering::SeqCst) { "output" } else { "preview" };
@@ -467,9 +584,11 @@ impl Renderer {
         } else if preview_host == 0 {
             unsafe { shim_view_refresh(prev, 0) };
         }
+        self.refresh_all_caches();
         self.needs_display_all();
-        self.present(out);
-        self.present(prev);
+        for v in [out, prev, self.rotation.load(Ordering::SeqCst), self.spotlight.load(Ordering::SeqCst)] {
+            self.present(v);
+        }
         let bits = |v: *mut c_void| (unsafe { shim_view_state(v, std::ptr::null_mut(), std::ptr::null_mut()) } & 4 != 0) as i32;
         bridge_log!("[bridge] retained views refresh requested output_window={} preview_window={}", bits(out), bits(prev));
     }
@@ -484,19 +603,17 @@ impl Renderer {
         let settle = duration_ms.max(100) + 80;
         bridge_log!("[bridge] output transition hold serial={} duration={}ms", serial, settle);
         let weak = self.weak.clone();
-        dispatch_main_after(settle, move || {
+        self.dispatch_gl_after(settle, move || {
             let Some(r) = weak.upgrade() else { return };
             if r.flags.stopping.load(Ordering::SeqCst) || r.transition_serial.load(Ordering::SeqCst) != serial {
                 return;
             }
             r.transitioning.store(false, Ordering::SeqCst);
             // CDG may have no new graphics packet after the resize: present the latest texture at settled geometry.
-            r.present(r.output.load(Ordering::SeqCst));
-            r.present(r.preview.load(Ordering::SeqCst));
-            let out = r.output.load(Ordering::SeqCst);
-            if !out.is_null() {
-                unsafe { shim_view_set_needs_display(out) };
+            for v in [&r.output, &r.preview, &r.rotation, &r.spotlight] {
+                r.present(v.load(Ordering::SeqCst));
             }
+            r.needs_display_async();
             bridge_log!("[bridge] output transition released serial={}", serial);
         });
     }
@@ -513,7 +630,7 @@ impl Renderer {
             return;
         }
         let weak = self.weak.clone();
-        dispatch_main(move || {
+        self.dispatch_gl(move || {
             let Some(r) = weak.upgrade() else { return };
             r.bg_render_queued.store(false, Ordering::SeqCst);
             let rc = r.bg_render_ctx.load(Ordering::SeqCst);
@@ -538,8 +655,9 @@ impl Renderer {
             }
             // The decorative decoder has its own continuous clock: present every background frame to BOTH surfaces here, otherwise
             // the host preview only updated when a lyric packet changed and its MP4 looked paused through static CDG spans.
-            r.present(r.output.load(Ordering::SeqCst));
-            r.present(r.preview.load(Ordering::SeqCst));
+            for v in [&r.output, &r.preview, &r.rotation, &r.spotlight] {
+                r.present(v.load(Ordering::SeqCst));
+            }
         });
     }
 
@@ -551,7 +669,7 @@ impl Renderer {
             return;
         }
         let weak = self.weak.clone();
-        dispatch_main(move || {
+        self.dispatch_gl(move || {
             let Some(r) = weak.upgrade() else { return };
             r.bg_event_queued.store(false, Ordering::SeqCst);
             let Some(h) = *r.bg_core.lock().unwrap() else { return };
@@ -594,7 +712,7 @@ impl Renderer {
             return false;
         }
         if self.bg_has_frame.load(Ordering::SeqCst) && self.f(&self.bg_opacity) > 0.0 {
-            unsafe {
+            self.on_gl_sync(|| unsafe {
                 shim_master_make_current(self.master);
                 shim_master_lock(self.master);
                 {
@@ -609,7 +727,7 @@ impl Renderer {
                     glFlush();
                 }
                 shim_master_unlock(self.master);
-            }
+            });
             self.prev_bg_has_frame.store(true, Ordering::SeqCst);
             self.prev_bg_opacity.store(self.bg_opacity.load(Ordering::SeqCst), Ordering::SeqCst);
             self.bg_mix.store(0f64.to_bits(), Ordering::SeqCst);
@@ -624,15 +742,18 @@ impl Renderer {
         self.bg_at_end.store(false, Ordering::SeqCst);
         self.bg_position_ms.store(0, Ordering::SeqCst);
         self.bg_paused.store(false, Ordering::SeqCst);
-        let h = {
-            let mut core = self.bg_core.lock().unwrap();
-            if core.is_none() {
-                match self.create_bg_core() {
-                    Some(h) => *core = Some(h),
-                    None => return false,
+        // Never hold the core mutex while creating the core: creation syncs onto the render queue, whose background-event handler takes
+        // the same mutex (a lock-order inversion that hung the render-thread mode).
+        let existing = *self.bg_core.lock().unwrap();
+        let h = match existing {
+            Some(h) => h,
+            None => match self.create_bg_core() {
+                Some(h) => {
+                    *self.bg_core.lock().unwrap() = Some(h);
+                    h
                 }
-            }
-            core.unwrap()
+                None => return false,
+            },
         };
         // An EOF may leave pause asserted: every replacement animation must explicitly resume, without touching the karaoke core.
         self.api.set_flag_async(h, 91, "pause", false);
@@ -671,19 +792,19 @@ impl Renderer {
         self.api.observe(h, 101, "time-pos", mpvapi::FORMAT_DOUBLE);
         self.api.observe(h, 102, "pause", mpvapi::FORMAT_FLAG);
         self.api.observe(h, 103, "eof-reached", mpvapi::FORMAT_FLAG);
-        unsafe {
+        let mut ok = false;
+        self.on_gl_sync(|| unsafe {
             shim_master_make_current(self.master);
             let mut init = OpenglInitParams { get_proc_address: get_proc, get_proc_address_ctx: std::ptr::null_mut() };
-            match self.api.render_context_create_gl(h, &mut init) {
-                Ok(rc) => {
-                    self.bg_render_ctx.store(rc, Ordering::SeqCst);
-                    self.api.render_set_update_callback(rc, Some(bg_render_wake), self.cb_ctx as *mut c_void);
-                }
-                Err(_) => {
-                    self.api.terminate_destroy(h);
-                    return None;
-                }
+            if let Ok(rc) = self.api.render_context_create_gl(h, &mut init) {
+                self.bg_render_ctx.store(rc, Ordering::SeqCst);
+                self.api.render_set_update_callback(rc, Some(bg_render_wake), self.cb_ctx as *mut c_void);
+                ok = true;
             }
+        });
+        if !ok {
+            self.api.terminate_destroy(h);
+            return None;
         }
         Some(h)
     }
@@ -736,6 +857,12 @@ impl Renderer {
 
     /// The CDG picture as BGRA, top row first, read from the retained 300x216 texture (libmpv's screenshot-raw of a CDG FBO is black).
     pub fn grab_cdg(&self) -> Option<Vec<u8>> {
+        let mut out = None;
+        self.on_gl_sync(|| out = self.grab_cdg_gl());
+        out
+    }
+
+    fn grab_cdg_gl(&self) -> Option<Vec<u8>> {
         let (w, h) = (CDG_W as usize, CDG_H as usize);
         let stride = w * 4;
         let mut out = vec![0u8; stride * h];
@@ -759,45 +886,152 @@ impl Renderer {
         Some(out)
     }
 
-    /// Draw the retained texture into one view.
+    // ---- threading helpers -------------------------------------------------------------------------------------------------------
+
+    /// Run GL work where it belongs: the private render queue in render-thread mode, otherwise the main queue (the old behaviour).
+    fn dispatch_gl(&self, f: impl FnOnce() + Send + 'static) {
+        if self.gl_queue.is_null() {
+            dispatch_main(f)
+        } else {
+            dispatch_queue(self.gl_queue, f)
+        }
+    }
+    fn dispatch_gl_after(&self, ms: i32, f: impl FnOnce() + Send + 'static) {
+        if self.gl_queue.is_null() {
+            dispatch_main_after(ms, f)
+        } else {
+            dispatch_queue_after(self.gl_queue, ms, f)
+        }
+    }
+    /// Inline when render-thread mode is off or already on the render queue; otherwise synchronously on that queue. Never called FROM the
+    /// render queue towards the main thread, so the two cannot deadlock.
+    fn on_gl_sync<F: FnOnce()>(&self, f: F) {
+        if self.gl_queue.is_null() || unsafe { shim_queue_is_current(self.gl_queue) } != 0 {
+            f();
+            return;
+        }
+        extern "C" fn tramp<F: FnOnce()>(ctx: *mut c_void) {
+            let slot = unsafe { &mut *(ctx as *mut Option<F>) };
+            if let Some(f) = slot.take() {
+                f();
+            }
+        }
+        let mut slot = Some(f);
+        unsafe { shim_queue_sync(self.gl_queue, tramp::<F>, &mut slot as *mut Option<F> as *mut c_void) };
+    }
+
+    pub fn render_thread_active(&self) -> bool {
+        !self.gl_queue.is_null()
+    }
+
+    fn kind_of(&self, view: *mut c_void) -> Option<usize> {
+        if view.is_null() {
+            return None;
+        }
+        [&self.output, &self.preview, &self.rotation, &self.spotlight].iter().position(|a| a.load(Ordering::SeqCst) == view)
+    }
+
+    /// Main thread only: capture what the render thread needs to know about a view (drawable? how big?).
+    fn refresh_view_cache(&self, view: *mut c_void) {
+        let Some(kind) = self.kind_of(view) else { return };
+        let (mut w, mut h) = (1, 1);
+        let ok = unsafe { shim_view_probe(view, &mut w, &mut h) } != 0;
+        let c = &self.cache[kind];
+        if w != c.w.load(Ordering::SeqCst) || h != c.h.load(Ordering::SeqCst) {
+            c.w.store(w, Ordering::SeqCst);
+            c.h.store(h, Ordering::SeqCst);
+            // The drawable changed size: tell the context, serialized with the render thread's drawing.
+            unsafe { shim_view_update_locked(view) };
+        }
+        c.presentable.store(ok, Ordering::SeqCst);
+    }
+    fn refresh_all_caches(&self) {
+        for a in [&self.output, &self.preview, &self.rotation, &self.spotlight] {
+            let v = a.load(Ordering::SeqCst);
+            if !v.is_null() {
+                self.refresh_view_cache(v);
+            }
+        }
+    }
+
+    /// Entry point for every present. Main-thread mode: draw now on the calling thread, as before. Render-thread mode: hand the draw to the
+    /// render queue (or draw inline when already there), so AppKit callbacks and main-thread events never draw themselves.
     fn present(&self, view: *mut c_void) {
         if view.is_null() || self.flags.stopping.load(Ordering::SeqCst) {
             return;
         }
-        let is_output = view == self.output.load(Ordering::SeqCst);
-        let which = if is_output { 0 } else { 1 };
+        if self.gl_queue.is_null() || unsafe { shim_queue_is_current(self.gl_queue) } != 0 {
+            self.present_now(view);
+            return;
+        }
+        let (weak, v) = (self.weak.clone(), view as usize);
+        dispatch_queue(self.gl_queue, move || {
+            if let Some(r) = weak.upgrade() {
+                if !r.flags.stopping.load(Ordering::SeqCst) {
+                    r.present_now(v as *mut c_void);
+                }
+            }
+        });
+    }
+
+    /// Draw the retained texture into one view.
+    fn present_now(&self, view: *mut c_void) {
+        // A view replaced or destroyed while this draw was queued is no longer one of ours: skip it.
+        let Some(kind) = self.kind_of(view) else { return };
+        let render_mode = !self.gl_queue.is_null();
+        let is_output = kind == KIND_OUTPUT;
         let has_frame = self.flags.has_frame.load(Ordering::SeqCst);
-        let bits = unsafe { shim_view_state(view, std::ptr::null_mut(), std::ptr::null_mut()) };
         // Why a present was skipped is the whole question when one window goes blank while the other keeps drawing, so name the
-        // reason (one log line per view per reason change: this runs at frame rate).
-        let state = if bits & 1 == 0 {
-            1
-        } else if is_output && self.transitioning.load(Ordering::SeqCst) {
-            2
-        } else if bits & 2 != 0 {
-            3
-        } else if bits & 4 == 0 {
-            4
-        } else if bits & 8 == 0 {
-            5
-        } else if !has_frame {
-            6
+        // reason (one log line per view per reason change: this runs at frame rate). Render-thread mode must not read AppKit state
+        // (hidden / window / visible are main-thread questions): it trusts the cache the main thread keeps.
+        let state = if render_mode {
+            if is_output && self.transitioning.load(Ordering::SeqCst) {
+                2
+            } else if !self.cache[kind].presentable.load(Ordering::SeqCst) {
+                3
+            } else if !has_frame {
+                6
+            } else {
+                0
+            }
         } else {
-            0
+            let bits = unsafe { shim_view_state(view, std::ptr::null_mut(), std::ptr::null_mut()) };
+            if bits & 1 == 0 {
+                1
+            } else if is_output && self.transitioning.load(Ordering::SeqCst) {
+                2
+            } else if bits & 2 != 0 {
+                3
+            } else if bits & 4 == 0 {
+                4
+            } else if bits & 8 == 0 {
+                5
+            } else if !has_frame {
+                6
+            } else {
+                0
+            }
         };
-        if self.last_skip[which].swap(state, Ordering::SeqCst) != state {
+        if self.last_skip[kind].swap(state, Ordering::SeqCst) != state {
             const WHY: [&str; 7] = ["presenting", "no-gl-context", "window-transition", "view-hidden", "no-window", "window-not-visible", "no-frame (black)"];
-            bridge_log!("[bridge] {} view {}", if is_output { "output" } else { "preview" }, WHY[state as usize]);
+            bridge_log!("[bridge] {} view {}", KIND_NAMES[kind], WHY[state as usize]);
         }
         if state != 0 && state != 6 {
             return;
         }
         unsafe {
             shim_view_make_current(view);
-            shim_view_update(view);
+            if !render_mode {
+                shim_view_update(view);
+            }
             shim_view_lock(view);
             let (mut w, mut h) = (1, 1);
-            shim_view_state(view, &mut w, &mut h);
+            if render_mode {
+                w = self.cache[kind].w.load(Ordering::SeqCst).max(1);
+                h = self.cache[kind].h.load(Ordering::SeqCst).max(1);
+            } else {
+                shim_view_state(view, &mut w, &mut h);
+            }
             {
                 let gl = &mut *self.gl.lock().unwrap();
                 // The fence was inserted by the master producer context: queue a server-side wait in this consumer context.
@@ -809,7 +1043,7 @@ impl Renderer {
                 glClearColor(0.0, 0.0, 0.0, 1.0);
                 glClear(GL_COLOR_BUFFER_BIT);
                 if has_frame {
-                    self.draw_picture(gl, is_output, w, h);
+                    self.draw_picture(gl, kind, w, h);
                 }
             }
             shim_view_flush(view);
@@ -819,7 +1053,7 @@ impl Renderer {
     }
 
     /// The geometry and passes of `presentViewNow` for the output and preview views.
-    unsafe fn draw_picture(&self, gl: &mut GlState, is_output: bool, w: i32, h: i32) {
+    unsafe fn draw_picture(&self, gl: &mut GlState, kind: usize, w: i32, h: i32) {
         let is_cdg = self.flags.is_cdg.load(Ordering::SeqCst);
         let frame_texture = if is_cdg { gl.cdg_tex } else { gl.tex };
         let sa = if is_cdg { CDG_W as f64 / CDG_H as f64 } else { TEXTURE_W as f64 / TEXTURE_H as f64 };
@@ -831,7 +1065,8 @@ impl Renderer {
             sy = (va / sa) as f32;
         }
         // MP4 karaoke deliberately fills every display edge (the core already stretched it into the shared 16:9 texture).
-        if !is_cdg {
+        // (The rotation and spotlight underlays keep the picture's aspect instead.)
+        if !is_cdg && kind <= KIND_PREVIEW {
             sx = 1.0;
             sy = 1.0;
         }
@@ -840,7 +1075,7 @@ impl Renderer {
         let span = if is_cdg { 1.0 } else { f64::from_bits(self.flags.span_x.load(Ordering::SeqCst)).clamp(0.05, 1.0) };
         let panel_l = ((1.0 - span) / 2.0) as f32;
         let panel_r = panel_l + span as f32;
-        if !is_output && is_cdg {
+        if kind == KIND_PREVIEW && is_cdg {
             // Discard the generated pillar bars, then letterbox what is left against the host's real aspect.
             uvx = span as f32;
             uox = panel_l;
@@ -852,9 +1087,9 @@ impl Renderer {
             }
         }
         // Decorative fills belong to the main audience screen only.
-        let mut sidefill = if is_output && is_cdg { self.sidefill.load(Ordering::SeqCst) } else { 0 };
+        let mut sidefill = if kind == KIND_OUTPUT && is_cdg { self.sidefill.load(Ordering::SeqCst) } else { 0 };
         glUseProgram(gl.program);
-        let vao = if is_output { &mut gl.vao_out } else { &mut gl.vao_prev };
+        let vao = &mut gl.vao[kind];
         if *vao == 0 {
             glGenVertexArrays(1, vao);
         }
@@ -879,7 +1114,7 @@ impl Renderer {
         glUniform1f(u.prev_bg_opacity, if prev_has { prev_opacity as f32 } else { 0.0 });
         glUniform1f(u.bg_mix, mix as f32);
         // Both surfaces show what the room sees: the preview must represent the animation composite too.
-        let background_active = is_cdg && ((bg_has && bg_opacity > 0.0) || (prev_has && prev_opacity > 0.0));
+        let background_active = kind <= KIND_PREVIEW && is_cdg && ((bg_has && bg_opacity > 0.0) || (prev_has && prev_opacity > 0.0));
         if background_active {
             // One full-texture GPU draw: stretch to every host edge without a crop, intermediate pixmap, decoder change or clock cost.
             glUniform2f(u.scale, 1.0, 1.0);
@@ -964,6 +1199,10 @@ impl Renderer {
 
     /// Step 1 of shutdown (before the mpv core is destroyed): stop callbacks, free the render context and the fence.
     pub fn free_render_context(&self) {
+        self.on_gl_sync(|| self.free_render_context_gl());
+    }
+
+    fn free_render_context_gl(&self) {
         let rc = self.render_ctx.swap(std::ptr::null_mut(), Ordering::SeqCst);
         unsafe {
             if !rc.is_null() {
@@ -990,13 +1229,122 @@ impl Renderer {
         }
     }
 
-    /// Step 2 of shutdown (after the mpv core is destroyed): remove the views.
+    /// Step 2 of shutdown (after the mpv core is destroyed): stop the cache timer and remove the views.
     pub fn destroy_views(&self) {
-        for slot in [&self.output, &self.preview] {
-            let v = slot.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        let t = self.cache_timer.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if !t.is_null() {
+            unsafe { shim_timer_stop(t) };
+        }
+        for slot in [&self.output, &self.preview, &self.rotation, &self.spotlight] {
+            self.destroy_view_slot(slot);
+        }
+    }
+
+    /// Detach a view from its slot, wait out any draw already queued for it on the render queue, then destroy it.
+    fn destroy_view_slot(&self, slot: &AtomicPtr<c_void>) {
+        let v = slot.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if !v.is_null() {
+            self.on_gl_sync(|| {});
+            unsafe { shim_view_destroy(v) };
+        }
+    }
+
+    // ---- rotation / spotlight underlays (V5) -----------------------------------------------------------------------------------------
+
+    /// The rotation screen's picture: an extra consumer of the same retained texture, directly behind Qt's translucent content view.
+    pub fn set_rotation_host(&self, host: usize, enabled: bool) {
+        if self.flags.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        if host == 0 {
+            let v = self.rotation.load(Ordering::SeqCst);
             if !v.is_null() {
-                unsafe { shim_view_destroy(v) };
+                unsafe { shim_view_set_hidden(v, 1) };
             }
+            return;
+        }
+        let current = self.rotation.load(Ordering::SeqCst);
+        if current.is_null() || self.rotation_host.load(Ordering::SeqCst) != host {
+            if !current.is_null() {
+                self.destroy_view_slot(&self.rotation);
+            }
+            let created = unsafe { shim_view_create_behind(self.master, host, Some(view_event), self.cb_ctx as *mut c_void) };
+            self.rotation.store(created, Ordering::SeqCst);
+            if !created.is_null() && !self.gl_queue.is_null() {
+                unsafe { shim_view_set_lock_update(created, 1) };
+            }
+        }
+        let v = self.rotation.load(Ordering::SeqCst);
+        if !self.gl_queue.is_null() {
+            self.refresh_view_cache(v);
+        }
+        self.rotation_host.store(host, Ordering::SeqCst);
+        if v.is_null() {
+            return;
+        }
+        unsafe { shim_view_set_hidden(v, !enabled as c_int) };
+        if enabled {
+            *self.last_rotation_present.lock().unwrap() = None;
+            unsafe { shim_view_set_needs_display(v) };
+            self.present(v);
+            self.present(self.spotlight.load(Ordering::SeqCst));
+        }
+    }
+
+    /// The between-singers spotlight: a normal child view above the picture, faded by AppKit (Python only schedules the interval).
+    pub fn set_spotlight_host(&self, host: usize, enabled: bool) {
+        if self.flags.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        let revision = self.spotlight_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        if host == 0 {
+            let v = self.spotlight.load(Ordering::SeqCst);
+            if !v.is_null() {
+                unsafe { shim_view_set_hidden(v, 1) };
+            }
+            return;
+        }
+        if self.spotlight.load(Ordering::SeqCst).is_null() || self.spotlight_host.load(Ordering::SeqCst) != host {
+            self.destroy_view_slot(&self.spotlight);
+            let created = unsafe { shim_view_create(self.master, host, Some(view_event), self.cb_ctx as *mut c_void) };
+            self.spotlight.store(created, Ordering::SeqCst);
+            if !created.is_null() {
+                unsafe {
+                    if !self.gl_queue.is_null() {
+                        shim_view_set_lock_update(created, 1);
+                    }
+                    shim_view_set_ignores_mouse(created, 1);
+                    shim_view_set_alpha(created, 0.0);
+                }
+                if !self.gl_queue.is_null() {
+                    self.refresh_view_cache(created);
+                }
+            }
+            self.spotlight_host.store(host, Ordering::SeqCst);
+        }
+        let v = self.spotlight.load(Ordering::SeqCst);
+        if v.is_null() {
+            return;
+        }
+        unsafe {
+            if enabled {
+                if shim_view_is_hidden(v) != 0 {
+                    shim_view_set_alpha(v, 0.0);
+                }
+                shim_view_set_hidden(v, 0);
+                self.present(v);
+            }
+            // AppKit owns this one opacity transition.
+            let weak = self.weak.clone();
+            let done: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(move || {
+                if let Some(r) = weak.upgrade() {
+                    let cur = r.spotlight.load(Ordering::SeqCst);
+                    if !enabled && !cur.is_null() && r.spotlight_revision.load(Ordering::SeqCst) == revision {
+                        shim_view_set_hidden(cur, 1);
+                    }
+                }
+            }));
+            shim_view_animate_alpha(v, if enabled { 1.0 } else { 0.0 }, 0.35, run_boxed, Box::into_raw(done) as *mut c_void);
         }
     }
 }
@@ -1004,6 +1352,9 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            if !self.gl_queue.is_null() {
+                shim_queue_release(self.gl_queue);
+            }
             shim_master_destroy(self.master);
             drop(Box::from_raw(self.cb_ctx));
         }
