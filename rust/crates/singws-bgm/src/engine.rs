@@ -86,7 +86,7 @@ pub fn envelope_gain(frame: u64, total: u64, incoming: bool) -> f32 {
 }
 
 /// A volume that can slide logarithmically (linear in dB), like `BASS_ChannelSlideAttribute(BASS_SLIDE_LOG)`.
-struct VolumeSlide {
+pub(crate) struct VolumeSlide {
     gain: f32,
     target: f32,
     ratio: f32,
@@ -95,15 +95,15 @@ struct VolumeSlide {
 
 impl VolumeSlide {
     const FLOOR: f32 = 1.0e-3; // -60 dB: where a slide from silence starts. MEASURED against real BASS_SLIDE_LOG (2026-10-11): -60 dB, not -80
-    fn new(gain: f32) -> Self {
+    pub(crate) fn new(gain: f32) -> Self {
         Self { gain, target: gain, ratio: 1.0, frames_left: 0 }
     }
-    fn set(&mut self, gain: f32) {
+    pub(crate) fn set(&mut self, gain: f32) {
         self.gain = gain;
         self.target = gain;
         self.frames_left = 0;
     }
-    fn slide_to(&mut self, target: f32, frames: u64) {
+    pub(crate) fn slide_to(&mut self, target: f32, frames: u64) {
         if frames == 0 || (target - self.gain).abs() < 1.0e-9 {
             self.set(target);
             return;
@@ -115,8 +115,11 @@ impl VolumeSlide {
         self.ratio = (to / from).powf(1.0 / frames as f32);
         self.gain = from;
     }
+    pub(crate) fn current(&self) -> f32 {
+        self.gain
+    }
     #[inline]
-    fn next(&mut self) -> f32 {
+    pub(crate) fn next(&mut self) -> f32 {
         if self.frames_left == 0 {
             return self.gain;
         }
@@ -232,10 +235,13 @@ pub struct Engine {
     /// must not do). Preallocated: pushing within capacity never allocates.
     discarded: Vec<Box<dyn DeckSource>>,
     pads: PadBank,
+    karaoke: crate::karaoke::KaraokeVoice,
+    karaoke_handles: crate::karaoke::KaraokeHandles,
 }
 
 impl Engine {
     pub fn new(sample_rate: u32) -> Self {
+        let (karaoke, karaoke_handles) = crate::karaoke::KaraokeVoice::new(sample_rate);
         Self {
             rate: sample_rate as f32,
             primary: None,
@@ -251,6 +257,8 @@ impl Engine {
             ramp_s: RAMP_IN_S,
             discarded: Vec::with_capacity(16),
             pads: PadBank::new(sample_rate),
+            karaoke,
+            karaoke_handles,
         }
     }
 
@@ -268,6 +276,32 @@ impl Engine {
             return Some(Retired::Deck(d));
         }
         self.pads.take_garbage().map(Retired::Clip)
+    }
+
+    // ---- karaoke voice --------------------------------------------------------------------------------------------
+    /// The karaoke chain's parameter handles (EQ gains/enable, master-chain parameters); clone them to the control side.
+    pub fn karaoke_handles(&self) -> crate::karaoke::KaraokeHandles {
+        self.karaoke_handles.clone()
+    }
+    pub fn karaoke_load(&mut self, src: Box<dyn DeckSource>, norm: f32, paused: bool, volume: Option<f32>) {
+        if let Some(old) = self.karaoke.load(src, norm, paused, volume) {
+            if self.discarded.len() < self.discarded.capacity() {
+                self.discarded.push(old);
+            }
+        }
+    }
+    pub fn karaoke_stop(&mut self) {
+        if let Some(old) = self.karaoke.stop() {
+            if self.discarded.len() < self.discarded.capacity() {
+                self.discarded.push(old);
+            }
+        }
+    }
+    pub fn karaoke(&self) -> &crate::karaoke::KaraokeVoice {
+        &self.karaoke
+    }
+    pub fn karaoke_mut(&mut self) -> &mut crate::karaoke::KaraokeVoice {
+        &mut self.karaoke
     }
 
     // ---- soundboard pads ------------------------------------------------------------------------------------------
@@ -499,6 +533,12 @@ impl Engine {
     }
 
     fn mix_chunk(&mut self, out: &mut [f32]) {
+        self.mix_music_chunk(out);
+        // The karaoke song has its own chain and joins AFTER the music chain (so the music can fade underneath it).
+        self.karaoke.mix_into(out);
+    }
+
+    fn mix_music_chunk(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
         out.fill(0.0);
         if !self.playing || self.primary.is_none() {

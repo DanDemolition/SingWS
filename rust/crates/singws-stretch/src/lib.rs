@@ -35,11 +35,27 @@ unsafe impl Send for Stretcher {}
 
 impl Stretcher {
     pub fn new(rate: u32) -> Option<Self> {
+        Self::with_capacity(rate, 0, 0)
+    }
+
+    /// Like [`new`](Self::new) but pre-sizes the scratch buffers for blocks of up to `max_in_frames` input and `max_out_frames` output
+    /// frames, so that `process_into` / `flush_into` never allocate on the audio thread for blocks within those limits.
+    pub fn with_capacity(rate: u32, max_in_frames: usize, max_out_frames: usize) -> Option<Self> {
         let h = unsafe { singws_stretch_new(2, rate as c_int) };
         if h.is_null() {
             return None;
         }
-        Some(Self { h, rate, pitch: 1.0, speed: 1.0, carry: 0.0, l_in: Vec::new(), r_in: Vec::new(), l_out: Vec::new(), r_out: Vec::new() })
+        Some(Self {
+            h,
+            rate,
+            pitch: 1.0,
+            speed: 1.0,
+            carry: 0.0,
+            l_in: Vec::with_capacity(max_in_frames),
+            r_in: Vec::with_capacity(max_in_frames),
+            l_out: Vec::with_capacity(max_out_frames.max(max_in_frames)),
+            r_out: Vec::with_capacity(max_out_frames.max(max_in_frames)),
+        })
     }
 
     pub fn rate(&self) -> u32 {
@@ -105,6 +121,56 @@ impl Stretcher {
             out.push(self.l_out[i]);
             out.push(self.r_out[i]);
         }
+    }
+
+    /// Pull-model processing: feeds ALL of `input` (interleaved stereo) and writes exactly `out.len() / 2` frames to `out`. The caller
+    /// decides the ratio by choosing the sizes (input frames per output frame = the speed). Allocation-free within the capacity given to
+    /// [`with_capacity`](Self::with_capacity).
+    pub fn process_into(&mut self, input: &[f32], out: &mut [f32]) {
+        let n = input.len() / 2;
+        let m = out.len() / 2;
+        if m == 0 {
+            return;
+        }
+        self.l_in.clear();
+        self.r_in.clear();
+        for f in input.chunks_exact(2) {
+            self.l_in.push(f[0]);
+            self.r_in.push(f[1]);
+        }
+        self.l_out.resize(m, 0.0);
+        self.r_out.resize(m, 0.0);
+        let ip = [self.l_in.as_ptr(), self.r_in.as_ptr()];
+        let op = [self.l_out.as_mut_ptr(), self.r_out.as_mut_ptr()];
+        unsafe { singws_stretch_process(self.h, ip.as_ptr(), n as c_int, op.as_ptr(), m as c_int) };
+        for i in 0..m {
+            out[2 * i] = self.l_out[i];
+            out[2 * i + 1] = self.r_out[i];
+        }
+    }
+
+    /// Frames of tail still inside the stretcher when the input ends (what `flush` returns).
+    pub fn tail_frames(&self) -> usize {
+        unsafe { singws_stretch_output_latency(self.h).max(0) as usize }
+    }
+
+    /// Writes up to `out.len() / 2` frames of the tail (call at the end of a song; zero-fills what is not needed). Allocation-free within
+    /// the capacity. Returns the number of tail frames written.
+    pub fn flush_into(&mut self, out: &mut [f32]) -> usize {
+        let m = (out.len() / 2).min(self.tail_frames());
+        out.fill(0.0);
+        if m == 0 {
+            return 0;
+        }
+        self.l_out.resize(m, 0.0);
+        self.r_out.resize(m, 0.0);
+        let op = [self.l_out.as_mut_ptr(), self.r_out.as_mut_ptr()];
+        unsafe { singws_stretch_flush(self.h, op.as_ptr(), m as c_int) };
+        for i in 0..m {
+            out[2 * i] = self.l_out[i];
+            out[2 * i + 1] = self.r_out[i];
+        }
+        m
     }
 
     /// Drains the tail that is still inside the stretcher (call once at the end of a song).
@@ -231,6 +297,33 @@ mod tests {
         let skip = RATE as usize / 2; // warm-up
         let worst = mono[skip..].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
         assert!(worst < 0.05, "largest sample step {worst} (a clean 440 Hz tone at this level is ~0.019, up to ~0.03 shifted up)");
+    }
+
+    #[test]
+    fn process_into_matches_process() {
+        let input = sine(440.0, 3.0);
+        let mut a = Stretcher::new(RATE).unwrap();
+        a.set_semitones(2.0);
+        a.set_speed(0.8);
+        let mut want = Vec::new();
+        for block in input.chunks(2048) {
+            a.process(block, &mut want);
+        }
+        let mut b = Stretcher::with_capacity(RATE, 4096, 4096).unwrap();
+        b.set_semitones(2.0);
+        let mut got = Vec::new();
+        let mut carry = 0.0f64;
+        for block in input.chunks(2048) {
+            let n = block.len() / 2;
+            let w = n as f64 / 0.8 + carry;
+            let m = w.floor() as usize;
+            carry = w - m as f64;
+            let mut o = vec![0.0f32; m * 2];
+            b.process_into(block, &mut o);
+            got.extend_from_slice(&o);
+        }
+        assert_eq!(want.len(), got.len());
+        assert!(want.iter().zip(&got).all(|(x, y)| (x - y).abs() < 1e-6));
     }
 
     #[test]
