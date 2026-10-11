@@ -12,7 +12,8 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::engine::{DeckSource, Engine};
+use crate::engine::{DeckSource, Engine, Retired};
+use crate::pads::{Clip, MAX_PAD_SLOTS};
 
 /// Bounded single-producer / single-consumer queue of owned values (no allocation after construction).
 pub struct SpscQueue<T> {
@@ -71,6 +72,12 @@ pub enum Command {
     CancelCrossfade,
     Seek(f32),
     SetRampIn(f32),
+    PadSetClip { slot: u8, clip: Option<Clip> },
+    PadSetGain { slot: u8, gain: f32 },
+    PadSetMaster(f32),
+    PadPlay { slot: u8, start_frame: u64 },
+    PadStop { slot: u8 },
+    PadStopAll,
 }
 
 pub const FLAG_PLAYING: u32 = 1;
@@ -95,6 +102,9 @@ pub struct Snapshot {
     /// Commands dropped because the queue was full (should stay 0).
     pub commands_dropped: AtomicU64,
     pub blocks: AtomicU64,
+    /// Per pad slot: instances sounding, and the position (frames) of the newest one.
+    pub pad_playing: Box<[AtomicU32]>,
+    pub pad_position: Box<[AtomicU64]>,
 }
 
 impl Snapshot {
@@ -110,6 +120,8 @@ impl Snapshot {
             commands_done: AtomicU64::new(0),
             commands_dropped: AtomicU64::new(0),
             blocks: AtomicU64::new(0),
+            pad_playing: (0..MAX_PAD_SLOTS).map(|_| AtomicU32::new(0)).collect(),
+            pad_position: (0..MAX_PAD_SLOTS).map(|_| AtomicU64::new(0)).collect(),
         }
     }
     fn f(&self, a: &AtomicU32) -> f32 {
@@ -133,7 +145,7 @@ impl Snapshot {
 pub struct RtEngine {
     engine: Engine,
     commands: Arc<SpscQueue<Command>>,
-    outbox: Arc<SpscQueue<Box<dyn DeckSource>>>,
+    outbox: Arc<SpscQueue<Retired>>,
     snap: Arc<Snapshot>,
     done: u64,
 }
@@ -141,7 +153,7 @@ pub struct RtEngine {
 /// Held by the control side (clone-able via `Arc`).
 pub struct RtControl {
     commands: Arc<SpscQueue<Command>>,
-    outbox: Arc<SpscQueue<Box<dyn DeckSource>>>,
+    outbox: Arc<SpscQueue<Retired>>,
     pub snapshot: Arc<Snapshot>,
     producers: Mutex<()>,
     consumers: Mutex<()>,
@@ -231,6 +243,14 @@ impl RtEngine {
                 e.seek(s);
             }
             Command::SetRampIn(s) => e.set_ramp_in_seconds(s),
+            Command::PadSetClip { slot, clip } => e.pad_set_clip(slot as usize, clip),
+            Command::PadSetGain { slot, gain } => e.pad_set_gain(slot as usize, gain),
+            Command::PadSetMaster(g) => e.pad_set_master(g),
+            Command::PadPlay { slot, start_frame } => {
+                e.pad_play(slot as usize, start_frame as usize);
+            }
+            Command::PadStop { slot } => e.pad_stop(slot as usize),
+            Command::PadStopAll => e.pad_stop_all(),
         }
         self.done += 1;
     }
@@ -288,6 +308,10 @@ impl RtEngine {
         s.flags.store(f, Ordering::Relaxed);
         s.gap_frames.store(e.gap_frames, Ordering::Relaxed);
         s.pending_frames.store(e.pending_frames, Ordering::Relaxed);
+        for slot in 0..MAX_PAD_SLOTS {
+            s.pad_playing[slot].store(e.pad_playing(slot), Ordering::Relaxed);
+            s.pad_position[slot].store(e.pad_position_frames(slot), Ordering::Relaxed);
+        }
         s.blocks.fetch_add(1, Ordering::Relaxed);
         s.commands_done.store(self.done, Ordering::Release);
     }
@@ -414,6 +438,28 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         let _rt = audio.join().unwrap();
         assert_eq!(ctl.snapshot.commands_done.load(Ordering::Relaxed), sent);
+    }
+
+    #[test]
+    fn pad_commands_run_on_the_audio_thread_and_the_snapshot_reports_each_pad() {
+        let (mut rt, ctl) = pair();
+        let clip = Arc::new(vec![0.25f32; 2 * 4800]);
+        ctl.send(Command::PadSetClip { slot: 4, clip: Some(clip) });
+        ctl.send(Command::PadPlay { slot: 4, start_frame: 0 });
+        ctl.send(Command::PadPlay { slot: 4, start_frame: 0 });
+        let mut buf = vec![0.0f32; 480 * 2];
+        rt.process(&mut buf);
+        assert!(buf[2 * 100] > 0.4, "two layered instances of 0.25");
+        assert_eq!(ctl.snapshot.pad_playing[4].load(Ordering::Relaxed), 2);
+        assert_eq!(ctl.snapshot.pad_position[4].load(Ordering::Relaxed), 480);
+        assert_eq!(ctl.snapshot.pad_playing[5].load(Ordering::Relaxed), 0);
+        ctl.send(Command::PadStop { slot: 4 });
+        rt.process(&mut buf);
+        rt.process(&mut buf);
+        assert_eq!(ctl.snapshot.pad_playing[4].load(Ordering::Relaxed), 0);
+        ctl.send(Command::PadSetClip { slot: 4, clip: None });
+        rt.process(&mut buf);
+        assert!(ctl.collect_garbage() >= 1, "the clip comes back for the control thread to free");
     }
 
     fn c_clone(c: &Command) -> Command {

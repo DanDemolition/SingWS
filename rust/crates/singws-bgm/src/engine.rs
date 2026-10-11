@@ -15,6 +15,8 @@
 //! Realtime rules for `mix`: no allocation, no locks, no I/O. Decks are expected to be fed by a decoder thread through a ring
 //! buffer in the real engine; here a [`DeckSource`] is simply asked for frames.
 
+use crate::pads::{Clip, PadBank};
+
 /// Maximum frames per `mix` call (scratch buffers are sized once).
 pub const MAX_BLOCK_FRAMES: usize = 8192;
 /// Nodes in a crossfade envelope, as in the BASS engine (64 segments).
@@ -26,6 +28,12 @@ pub const MIN_CROSSFADE_S: f32 = 0.05;
 pub const RAMP_IN_S: f32 = 0.005;
 /// The meter looks at this much audio (BASS_Mixer_ChannelGetLevelEx window).
 pub const METER_WINDOW_S: f32 = 0.05;
+
+/// Something the audio thread has finished with and must not free itself: handed to a control thread to drop.
+pub enum Retired {
+    Deck(Box<dyn DeckSource>),
+    Clip(Clip),
+}
 
 /// A stream of stereo f32 frames at the engine rate.
 pub trait DeckSource: Send {
@@ -223,6 +231,7 @@ pub struct Engine {
     /// Decks taken out of play, waiting to be freed by the control thread (dropping a deck frees its buffers, which the audio thread
     /// must not do). Preallocated: pushing within capacity never allocates.
     discarded: Vec<Box<dyn DeckSource>>,
+    pads: PadBank,
 }
 
 impl Engine {
@@ -241,6 +250,7 @@ impl Engine {
             pending_frames: 0,
             ramp_s: RAMP_IN_S,
             discarded: Vec::with_capacity(16),
+            pads: PadBank::new(sample_rate),
         }
     }
 
@@ -252,9 +262,38 @@ impl Engine {
         }
     }
 
-    /// A deck the engine no longer uses, to be dropped by the caller on a non-realtime thread.
-    pub fn take_discarded(&mut self) -> Option<Box<dyn DeckSource>> {
-        self.discarded.pop()
+    /// Something the engine no longer uses (a deck, a pad clip), to be dropped by the caller on a non-realtime thread.
+    pub fn take_discarded(&mut self) -> Option<Retired> {
+        if let Some(d) = self.discarded.pop() {
+            return Some(Retired::Deck(d));
+        }
+        self.pads.take_garbage().map(Retired::Clip)
+    }
+
+    // ---- soundboard pads ------------------------------------------------------------------------------------------
+    pub fn pad_set_clip(&mut self, slot: usize, clip: Option<Clip>) {
+        self.pads.set_clip(slot, clip);
+    }
+    pub fn pad_set_gain(&mut self, slot: usize, gain: f32) {
+        self.pads.set_gain(slot, gain);
+    }
+    pub fn pad_set_master(&mut self, gain: f32) {
+        self.pads.set_master(gain);
+    }
+    pub fn pad_play(&mut self, slot: usize, start_frame: usize) -> bool {
+        self.pads.play(slot, start_frame)
+    }
+    pub fn pad_stop(&mut self, slot: usize) {
+        self.pads.stop_slot(slot);
+    }
+    pub fn pad_stop_all(&mut self) {
+        self.pads.stop_all();
+    }
+    pub fn pad_playing(&self, slot: usize) -> u32 {
+        self.pads.playing(slot)
+    }
+    pub fn pad_position_frames(&self, slot: usize) -> u64 {
+        self.pads.position_frames(slot)
     }
 
     /// Length of the fade-in after a start or seek, in seconds (default [`RAMP_IN_S`]; 0 disables it).
@@ -463,6 +502,13 @@ impl Engine {
         let frames = out.len() / 2;
         out.fill(0.0);
         if !self.playing || self.primary.is_none() {
+            // The music is silent, but pads may be sounding: they still go through the effect chain.
+            if self.pads.any_playing() {
+                self.pads.mix_into(out);
+                for fx in self.effects.iter_mut() {
+                    fx.process(out);
+                }
+            }
             return;
         }
         let a = &mut self.scratch_a[..frames * 2];
@@ -554,6 +600,8 @@ impl Engine {
         } else if audible < frames {
             self.gap_frames += (frames - audible) as u64;
         }
+        // Pads join here: after the music volume, before the effects (EQ, master chain), so they get the same tone and limiting as the music.
+        self.pads.mix_into(out);
         for fx in self.effects.iter_mut() {
             fx.process(out);
         }
@@ -936,5 +984,107 @@ mod tests {
         e.stop();
         assert!(!e.is_playing() && e.source_ended());
         assert!(!e.play());
+    }
+
+    // ---- pads in the engine ---------------------------------------------------------------------------------------------------------
+
+    /// Halves whatever passes through it (a stand-in for the EQ / master chain).
+    struct Half;
+    impl Effect for Half {
+        fn process(&mut self, buf: &mut [f32]) {
+            for s in buf.iter_mut() {
+                *s *= 0.5;
+            }
+        }
+    }
+
+    fn pad_clip(frames: usize, v: f32) -> crate::pads::Clip {
+        std::sync::Arc::new(vec![v; frames * 2])
+    }
+
+    #[test]
+    fn pads_go_through_the_same_effect_chain_as_the_music() {
+        let mut e = quiet_engine();
+        e.set_effects(vec![Box::new(Half)]);
+        e.pad_set_clip(0, Some(pad_clip(48_000, 0.4)));
+        assert!(e.pad_play(0, 0));
+        let out = render(&mut e, 2000);
+        assert!((out[2 * 1000] - 0.2).abs() < 1e-6, "0.4 pad through the 0.5 effect = 0.2, got {}", out[2 * 1000]);
+    }
+
+    #[test]
+    fn pads_ignore_the_music_volume_and_its_fades() {
+        let mut e = quiet_engine();
+        e.load(Box::new(Flat(1_000_000)), 1.0, false, Some(0.0)); // music playing at volume 0
+        e.pad_set_clip(0, Some(pad_clip(48_000, 0.3)));
+        e.pad_play(0, 0);
+        let out = render(&mut e, 2000);
+        assert!((out[2 * 1000] - 0.3).abs() < 1e-6, "music volume 0 must not silence the pad, got {}", out[2 * 1000]);
+        e.slide_master_volume(0.0, 100);
+        let out = render(&mut e, 2000);
+        assert!((out[2 * 1000] - 0.3).abs() < 1e-6, "a music fade-out must not fade the pad");
+    }
+
+    #[test]
+    fn pads_play_while_the_music_is_stopped_or_paused_and_still_get_the_effects() {
+        let mut e = quiet_engine();
+        e.set_effects(vec![Box::new(Half)]);
+        e.pad_set_clip(0, Some(pad_clip(48_000, 0.4)));
+        e.pad_play(0, 0);
+        assert!((render(&mut e, 2000)[2 * 1000] - 0.2).abs() < 1e-6, "nothing loaded");
+        e.pad_stop_all(); // the first hit is still sounding (hits layer): clear it so the level below is one instance
+        render(&mut e, 480);
+        e.load(Box::new(Flat(1_000_000)), 1.0, true, Some(1.0)); // loaded but paused
+        e.pad_play(0, 0);
+        assert!((render(&mut e, 2000)[2 * 1000] - 0.2).abs() < 1e-6, "music paused");
+    }
+
+    #[test]
+    fn the_soundboard_volume_is_separate_from_the_music_volume() {
+        let mut e = quiet_engine();
+        e.load(Box::new(Flat(1_000_000)), 1.0, false, Some(0.8));
+        e.pad_set_clip(0, Some(pad_clip(48_000, 0.4)));
+        e.pad_set_master(0.5);
+        e.pad_play(0, 0);
+        let out = render(&mut e, 2000);
+        assert!((out[2 * 1000] - (0.8 + 0.2)).abs() < 1e-6, "music 1.0 x 0.8 + pad 0.4 x 0.5, got {}", out[2 * 1000]);
+        e.set_master_volume(0.0);
+        let out = render(&mut e, 2000);
+        assert!((out[2 * 1000] - 0.2).abs() < 1e-6, "music volume to 0 leaves only the pad at its own volume");
+    }
+
+    #[test]
+    fn a_hot_pad_over_music_is_caught_by_the_limiter_in_the_chain() {
+        let mut e = quiet_engine();
+        let (fx, h) = crate::fx::MasterEffect::new(RATE);
+        h.set_named(&[("limiter_enabled", 1.0), ("limiter_ceiling_db", -6.0), ("comp_enabled", 0.0), ("eq_enabled", 0.0), ("output_ceiling_db", -0.1)]);
+        h.set_enabled(true);
+        e.set_effects(vec![Box::new(fx)]);
+        e.pad_set_clip(0, Some(pad_clip(96_000, 1.4)));
+        e.pad_play(0, 0);
+        let mut peak = 0.0f32;
+        for _ in 0..40 {
+            let out = render(&mut e, 1024);
+            peak = out.iter().fold(peak, |m, v| m.max(v.abs()));
+        }
+        let late = render(&mut e, 1024);
+        let late_peak = late.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(late_peak <= 10f32.powf(-6.0 / 20.0) + 1e-3, "settled peak {late_peak} over the -6 dB ceiling");
+        assert!(peak > 0.0);
+    }
+
+    #[test]
+    fn retired_pad_clips_come_back_through_take_discarded() {
+        let mut e = quiet_engine();
+        let first = pad_clip(100, 0.5);
+        e.pad_set_clip(0, Some(first.clone()));
+        e.pad_set_clip(0, Some(pad_clip(100, 0.1)));
+        let mut got = false;
+        while let Some(r) = e.take_discarded() {
+            if let Retired::Clip(c) = r {
+                got |= std::sync::Arc::ptr_eq(&c, &first);
+            }
+        }
+        assert!(got, "the replaced clip is handed back, not dropped on the audio thread");
     }
 }

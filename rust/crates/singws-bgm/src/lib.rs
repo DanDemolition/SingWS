@@ -8,6 +8,7 @@ pub mod device;
 pub mod engine;
 pub mod eq;
 pub mod fx;
+pub mod pads;
 pub mod resample;
 pub mod rt;
 pub mod ring;

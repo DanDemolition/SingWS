@@ -5,13 +5,17 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::decode::DecodeError;
+use crate::decode::{decode_file, DecodeError};
+use crate::pads::Clip;
 use crate::device::{negotiate, AudioOutput, DeviceError, Stats};
 use crate::engine::{DeckSource, Effect, Engine};
 use crate::eq::{EqHandle, GraphicEq};
 use crate::fx::{MasterEffect, MasterHandle};
 use crate::rt::{new_pair, RtControl, RtEngine};
 use crate::stream::StreamingDeck;
+
+/// Longest soundboard clip (held decoded in memory: 300 s of stereo f32 at 48 kHz is about 115 MB).
+pub const MAX_CLIP_SECONDS: f64 = 300.0;
 
 pub struct BgmSystem {
     pub control: Arc<RtControl>,
@@ -96,6 +100,16 @@ impl BgmSystem {
 
     pub fn device_lost(&self) -> bool {
         self.stats().device_lost.load(Ordering::Relaxed)
+    }
+
+    /// Decode a soundboard clip to memory at the output rate (any format symphonia reads, AAC/M4A included). Slow: worker thread.
+    /// Clips longer than [`MAX_CLIP_SECONDS`] are refused: a pad is a short effect, and the whole clip is held in memory.
+    pub fn load_clip(&self, path: &Path) -> Result<Clip, DecodeError> {
+        let d = decode_file(path, self.rate)?;
+        if d.seconds() > MAX_CLIP_SECONDS {
+            return Err(DecodeError::Unsupported(format!("clip is {:.0} s long; soundboard clips are limited to {MAX_CLIP_SECONDS:.0} s", d.seconds())));
+        }
+        Ok(d.samples.clone())
     }
 
     /// Open a streaming deck for `path` at the output rate. Slow (opens the file, waits for the first audio): call it from a worker thread.

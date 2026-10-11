@@ -40,6 +40,7 @@ fn main() {
 fn probe(args: Vec<String>) {
     let (mut device, mut seconds, mut rate, mut buffer) = (None::<String>, 20u64, 48_000u32, None::<u32>);
     let (mut hammer, mut audible, mut no_seek) = (false, false, false);
+    let mut pad_clip: Option<PathBuf> = None;
     let mut files: Vec<PathBuf> = vec![];
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -51,6 +52,7 @@ fn probe(args: Vec<String>) {
             "--hammer" => hammer = true,
             "--audible" => audible = true,
             "--no-seek" => no_seek = true,
+            "--pads" => pad_clip = it.next().map(PathBuf::from),
             _ => files.push(PathBuf::from(a)),
         }
     }
@@ -85,8 +87,50 @@ fn probe(args: Vec<String>) {
     if let Some(p) = files.get(1) {
         sys.control.send(Command::Preload { deck: open(p), norm: 1.0 });
     }
-    println!("running {seconds} s{}{}...", if audible { " AUDIBLE" } else { " (silent)" }, if hammer { " with control-thread hammering" } else { "" });
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_flag = stop.clone();
+    // --pads CLIP: four pad slots share one clip; every ~250 ms a random slot is hit (layering on itself), every 3 s one slot is stopped (all its
+    // instances), every 7 s everything is stopped. Pad volume is 0 unless --audible, so it is silent but fully processed.
+    let pads_thread = pad_clip.as_ref().map(|p| {
+        let clip = match sys.load_clip(p) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {}: {e}", p.display());
+                std::process::exit(1);
+            }
+        };
+        for slot in 0..4u8 {
+            sys.control.send(Command::PadSetClip { slot, clip: Some(clip.clone()) });
+        }
+        sys.control.send(Command::PadSetMaster(if audible { 0.5 } else { 0.0 }));
+        let (sys, stop) = (sys.clone(), stop_flag.clone());
+        std::thread::spawn(move || {
+            let mut hits = 0u64;
+            let mut seed = 0x2545F491u32;
+            let t0 = Instant::now();
+            let mut last_stop = Instant::now();
+            let mut last_all = Instant::now();
+            while !stop.load(Ordering::Relaxed) {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let slot = ((seed >> 24) % 4) as u8;
+                sys.control.send(Command::PadPlay { slot, start_frame: 0 });
+                hits += 1;
+                if last_stop.elapsed() > Duration::from_secs(3) {
+                    sys.control.send(Command::PadStop { slot: ((seed >> 20) % 4) as u8 });
+                    last_stop = Instant::now();
+                }
+                if last_all.elapsed() > Duration::from_secs(7) {
+                    sys.control.send(Command::PadStopAll);
+                    last_all = Instant::now();
+                }
+                sys.control.collect_garbage();
+                let _ = t0;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            hits
+        })
+    });
+    println!("running {seconds} s{}{}...", if audible { " AUDIBLE" } else { " (silent)" }, if hammer { " with control-thread hammering" } else { "" });
     let hammer_thread = hammer.then(|| {
         let (sys, stop) = (sys.clone(), stop.clone());
         std::thread::spawn(move || {
@@ -125,6 +169,7 @@ fn probe(args: Vec<String>) {
         }
     }
     stop.store(true, Ordering::Relaxed);
+    let pad_hits = pads_thread.map(|h| h.join().unwrap_or(0));
     let calls = hammer_thread.map(|h| h.join().unwrap_or(0));
     let s = sys.stats();
     let snap = &sys.control.snapshot;
@@ -138,6 +183,11 @@ fn probe(args: Vec<String>) {
     println!("xruns {} | route changes {} | other errors {} | device lost {} | engine gap frames {} | seek-pending frames {} | deck underruns {} | commands dropped {}",
         s.xruns.load(Ordering::Relaxed), s.route_changes.load(Ordering::Relaxed), s.other_errors.load(Ordering::Relaxed), s.device_lost.load(Ordering::Relaxed),
         gap, snap.pending_frames.load(Ordering::Relaxed), underruns, dropped);
+    if let Some(h) = pad_hits {
+        let snap = &sys.control.snapshot;
+        let peak_layers = (0..4).map(|i| snap.pad_playing[i].load(Ordering::Relaxed)).max().unwrap_or(0);
+        println!("pad hits sent: {h} (layered on 4 slots; a stop every 3 s, stop-all every 7 s); instances still sounding at the end: {peak_layers}");
+    }
     if let Some(c) = calls {
         println!("control-thread iterations during the run: {c}");
     }

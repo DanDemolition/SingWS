@@ -210,3 +210,24 @@ outstanding). `"bass"` opts out. A start-up failure still falls back to BASS aut
 
 **M6 acceptance (operator, 2026-10-10):** one real show, preferably on the Intel venue Mac, instead of two. Listening checks on the Apple Silicon Mac passed
 (crossfades, volume, fade in/out, EQ and master chain, pause/resume/skip).
+
+## S1 results - soundboard pads inside the Rust engine (2026-10-11)
+
+Operator rules (2026-10-11): several pads at once; a pad hit while it is still playing LAYERS another instance (the old BASS pad restarted instead);
+a stop (the UI will do it on Shift-click) stops EVERY instance of that pad; pads follow the SAME EQ and master chain as the music; pads are NOT scaled by the
+music volume or its fades but by their own SOUNDBOARD volume slider (new, to be added in S2 to settings / the BGM section).
+
+* `pads.rs`: `PadBank` with 64 slots and a fixed pool of 64 voices (no allocation while playing). A voice per hit; slot volume (0..1) and a soundboard-bus
+  volume; start offset; 1 ms fade-in, 5 ms fade-out on stop (no click); when the pool is full the oldest instance of the same pad is stolen first.
+  Clips are decoded to memory by the control side (`BgmSystem::load_clip`, any format symphonia reads incl. AAC/M4A, limited to 300 s) and handed over
+  as an `Arc`; clips the audio thread finishes with come back through the retired-items outbox (`Retired::Clip`), never freed in the callback.
+* Engine order: music -> music volume -> PADS ADDED -> effect chain (EQ, then master chain). Pads sound even when no music is loaded, stopped or paused,
+  and still pass through the chain. Commands: `PadSetClip/PadSetGain/PadSetMaster/PadPlay/PadStop/PadStopAll`; the snapshot reports instances sounding and
+  the newest instance's position per slot.
+* Tests: 12 in `pads.rs` (play-through, simultaneous pads, layering, stop-all-instances, no-click fade, start offset, live volumes, soundboard volume,
+  steal order, clip replacement + retirement, no allocation), 6 engine tests (chain applies, ignores music volume/fades, plays while music stopped/paused,
+  soundboard volume separate, limiter catches a hot pad over music, retired clips returned), 1 real-time queue test. 75 crate tests, stable over repeats.
+* Real sound card (`singws-bgm-device probe --pads CLIP`, silent): music + 158 layered pad hits over 40 s, with and without a control thread hammering:
+  callback mean 67-73 us / max 238-264 us of a 10.7 ms budget, 0 xruns, 0 gaps, 0 underruns, 0 dropped commands.
+* Not done (S2 onward): the C ABI calls, the Python `RustSoundboardChannel`, the Shift-click behaviour in `SoundboardPad`, the soundboard volume slider and
+  its setting, pad latency measurement, output-change handling, deleting the private-BASS stopgap.
