@@ -3,17 +3,16 @@
 //! Behaviour is the Objective-C bridge's, line for line; the comments name the show-found reasons so they are not "tidied" away.
 use crate::audio_device::device_for_label;
 use crate::bridge_log;
+use crate::flags::{Flags, TEXTURE_H, TEXTURE_W};
 use crate::mpvapi::{self, Handle, Mpv, MpvEventEndFile, MpvEventLogMessage};
+use crate::render::Renderer;
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// The shared-texture size the compositor will use (V3+); only its aspect ratio matters for the pillarbox measurement.
-const TEXTURE_W: f64 = 1920.0;
-const TEXTURE_H: f64 = 1080.0;
 
 type Job = Box<dyn FnOnce(&Arc<Inner>) + Send>;
 
@@ -29,13 +28,9 @@ struct State {
 pub struct Inner {
     api: &'static Mpv,
     mpv: OnceLock<Handle>,
-    loading: AtomicBool,
+    flags: Arc<Flags>,
+    renderer: OnceLock<Arc<Renderer>>,
     play_when_loaded: AtomicBool,
-    is_cdg: AtomicBool,
-    has_frame: AtomicBool,
-    stopping: AtomicBool,
-    /// f64 bits: fraction of the shared texture the (pillarboxed) picture occupies.
-    span_x: AtomicU64,
     state: Mutex<State>,
     tx: Mutex<Option<Sender<Job>>>,
 }
@@ -45,13 +40,16 @@ pub struct Player {
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
+const TW: f64 = TEXTURE_W as f64;
+const TH: f64 = TEXTURE_H as f64;
+
 fn f64_bits(v: f64) -> u64 {
     v.to_bits()
 }
 
 impl Inner {
     fn handle(&self) -> Option<Handle> {
-        if self.stopping.load(Ordering::SeqCst) {
+        if self.flags.stopping.load(Ordering::SeqCst) {
             return None; // the core is being / has been freed
         }
         self.mpv.get().copied()
@@ -60,7 +58,7 @@ impl Inner {
     /// Fire-and-forget mpv work from the caller's thread. Serial, so ordering against a pending load is preserved; async, so the
     /// GUI thread never waits on the core (mpv can hold its core lock for hundreds of ms while an MP3 and a CDG open).
     fn on_control(self: &Arc<Self>, job: Job) {
-        if self.stopping.load(Ordering::SeqCst) {
+        if self.flags.stopping.load(Ordering::SeqCst) {
             return;
         }
         if std::env::var_os("SINGWS_MPV_SYNC_LOAD").is_some() {
@@ -85,7 +83,7 @@ impl Inner {
     /// Callers are on the control queue, which owns `dsp_chain` / `semitones`.
     fn apply_audio_filters(&self) {
         let Some(h) = self.handle() else { return };
-        if self.loading.load(Ordering::SeqCst) {
+        if self.flags.loading.load(Ordering::SeqCst) {
             return;
         }
         let (mut chain, semitones, tempo, dsp_len) = {
@@ -119,9 +117,15 @@ impl Inner {
         let dh = self.api.get_int64(h, "dheight");
         match (dw, dh) {
             (Ok(w), Ok(hh)) if w > 0 && hh > 0 => {
-                let target = TEXTURE_W / TEXTURE_H;
+                let target = TW / TH;
                 let span = ((w as f64 / hh as f64) / target).clamp(0.05, 1.0);
-                self.span_x.store(f64_bits(span), Ordering::SeqCst);
+                let previous = f64::from_bits(self.flags.span_x.swap(f64_bits(span), Ordering::SeqCst));
+                if (previous - span).abs() > 1e-4 {
+                    // FILE_LOADED measures from the control queue, so the redraw request hops to the thread AppKit allows.
+                    if let Some(r) = self.renderer.get() {
+                        r.needs_display_async();
+                    }
+                }
                 bridge_log!("[bridge] picture {}x{} span={:.5} panel={:.5} at {}", w, hh, span, (1.0 - span) / 2.0, reason);
             }
             (rw, rh) => {
@@ -134,7 +138,7 @@ impl Inner {
                     reason,
                     text(&rw),
                     text(&rh),
-                    f64::from_bits(self.span_x.load(Ordering::SeqCst))
+                    f64::from_bits(self.flags.span_x.load(Ordering::SeqCst))
                 );
             }
         }
@@ -142,23 +146,32 @@ impl Inner {
 
     /// GUI-thread half of a load: state only, no mpv call that can block on the core lock.
     fn prepare_for_load(&self, video: &str) {
-        self.loading.store(true, Ordering::SeqCst);
+        self.flags.loading.store(true, Ordering::SeqCst);
         self.play_when_loaded.store(false, Ordering::SeqCst);
-        self.has_frame.store(false, Ordering::SeqCst);
+        self.flags.has_frame.store(false, Ordering::SeqCst);
         let cdg = std::path::Path::new(video).extension().map(|e| e.eq_ignore_ascii_case("cdg")).unwrap_or(false);
-        self.is_cdg.store(cdg, Ordering::SeqCst);
+        self.flags.is_cdg.store(cdg, Ordering::SeqCst);
         // Until FILE_LOADED reports the real dwidth/dheight assume the format's nominal geometry rather than carrying the
         // previous song's over.
-        let target = TEXTURE_W / TEXTURE_H;
+        let target = TW / TH;
         let nominal = if cdg { 300.0 / 216.0 } else { target };
-        self.span_x.store(f64_bits(nominal / target), Ordering::SeqCst);
+        self.flags.span_x.store(f64_bits(nominal / target), Ordering::SeqCst);
+        // CDG packets update tiles on a retained canvas that merely hiding the surface does not erase: clear both retained targets
+        // before the new decoder may draw, so the previous song's lyrics cannot show through the next song's first packets.
+        if let Some(r) = self.renderer.get() {
+            r.clear_for_load();
+        }
     }
 
     fn init_core(self: &Arc<Self>, events: &mut Vec<JoinHandle<()>>) -> Option<Handle> {
         let h = self.api.create()?;
-        let headless_vo = std::env::var("SINGWS_BRIDGE_VO").unwrap_or_else(|_| "null".to_string());
+        let vo = if self.renderer.get().is_some() {
+            "libmpv".to_string()
+        } else {
+            std::env::var("SINGWS_BRIDGE_VO").unwrap_or_else(|_| "null".to_string())
+        };
         self.set_option(h, "config", "no");
-        self.set_option(h, "vo", &headless_vo);
+        self.set_option(h, "vo", &vo);
         if let Ok(ao) = std::env::var("SINGWS_BRIDGE_AO") {
             if !ao.is_empty() {
                 self.set_option(h, "ao", &ao);
@@ -184,6 +197,12 @@ impl Inner {
             return None;
         }
         bridge_log!("[bridge] playback buffering audio=1.0s readahead=10s cache=256MiB");
+        if let Some(r) = self.renderer.get() {
+            if !r.create_render_context(h) {
+                self.api.terminate_destroy(h);
+                return None;
+            }
+        }
         let _ = self.mpv.set(h);
         let me = Arc::clone(self);
         events.push(std::thread::Builder::new().name("singws-video-events".into()).spawn(move || me.event_loop()).ok()?);
@@ -211,7 +230,7 @@ impl Inner {
         // unsafe (ordinary CDG packet bytes can false-positive as another raw format: LG126-03 and SF113-03 reported bogus
         // durations and no frame), so force ONLY the graphics input to the CDG demuxer. For CDG the MP3 is attached after
         // FILE_LOADED, otherwise the forced demuxer would also apply to --audio-files.
-        let cdg = self.is_cdg.load(Ordering::SeqCst);
+        let cdg = self.flags.is_cdg.load(Ordering::SeqCst);
         let main_format = if cdg {
             "cdg".to_string()
         } else {
@@ -235,13 +254,13 @@ impl Inner {
         let r = self.api.clear_audio_files(h);
         if r < 0 {
             bridge_log!("[bridge] audio-files failed: {}", self.api.error_string(r));
-            self.loading.store(false, Ordering::SeqCst);
+            self.flags.loading.store(false, Ordering::SeqCst);
             return false;
         }
         bridge_log!("[bridge] load queued serial={} video={} audio={}", serial, video, audio.filter(|a| !a.is_empty()).unwrap_or("(internal)"));
         let r = self.api.command_async(h, serial, &["loadfile", video, "replace"]);
         if r < 0 {
-            self.loading.store(false, Ordering::SeqCst);
+            self.flags.loading.store(false, Ordering::SeqCst);
             bridge_log!("[bridge] loadfile rejected: {}", self.api.error_string(r));
         }
         r >= 0
@@ -249,7 +268,7 @@ impl Inner {
 
     fn on_file_loaded(self: &Arc<Self>) {
         let Some(h) = self.handle() else { return };
-        self.loading.store(false, Ordering::SeqCst);
+        self.flags.loading.store(false, Ordering::SeqCst);
         if let Some(format) = self.api.get_string(h, "file-format") {
             bridge_log!("[bridge] detected media format={}", format);
         }
@@ -259,7 +278,7 @@ impl Inner {
         self.on_control(Box::new(|me: &Arc<Inner>| {
             let Some(h) = me.handle() else { return };
             let external = me.state.lock().unwrap().pending_audio.take();
-            if me.is_cdg.load(Ordering::SeqCst) {
+            if me.flags.is_cdg.load(Ordering::SeqCst) {
                 if let Some(audio) = external.filter(|a| !a.is_empty()) {
                     let audio_format = std::path::Path::new(&audio).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                     let fr = me.api.set_string(h, "demuxer-lavf-format", &audio_format);
@@ -276,13 +295,13 @@ impl Inner {
                 let s = me.state.lock().unwrap();
                 (s.tempo_percent, s.semitones)
             };
-            if !me.loading.load(Ordering::SeqCst) {
+            if !me.flags.loading.load(Ordering::SeqCst) {
                 me.api.set_double(h, "speed", tempo as f64 / 100.0);
             }
             // Re-composes key AND the DSP chain: without the DSP half the EQ/master bus would survive only until the next song.
             me.apply_audio_filters();
             // loadfile resets audio-delay, so the CDG calibration must be re-asserted or it would apply only to the first song.
-            if !me.loading.load(Ordering::SeqCst) {
+            if !me.flags.loading.load(Ordering::SeqCst) {
                 let delay = me.state.lock().unwrap().audio_delay;
                 me.api.set_double(h, "audio-delay", delay);
                 bridge_log!("[bridge] audio-delay={:.3}s (CDG visual lead)", delay);
@@ -297,7 +316,7 @@ impl Inner {
     fn event_loop(self: Arc<Self>) {
         let Some(h) = self.handle() else { return };
         let (mut last, mut repeated): (String, u32) = (String::new(), 0);
-        while !self.stopping.load(Ordering::SeqCst) {
+        while !self.flags.stopping.load(Ordering::SeqCst) {
             let e = self.api.wait_event(h, 0.1);
             if e.is_null() {
                 continue;
@@ -332,15 +351,17 @@ impl Inner {
                 }
                 mpvapi::EVENT_FILE_LOADED => self.on_file_loaded(),
                 mpvapi::EVENT_VIDEO_RECONFIG => {
-                    // Headless stand-in for "a frame was drawn" (V3 sets has_frame from the real render).
-                    self.has_frame.store(true, Ordering::SeqCst);
+                    // Headless stand-in for "a frame was drawn"; with a renderer has_frame is set by the real render.
+                    if self.renderer.get().is_none() {
+                        self.flags.has_frame.store(true, Ordering::SeqCst);
+                    }
                     // The event that actually carries dwidth/dheight for a CDG.
                     self.on_control(Box::new(|me: &Arc<Inner>| me.measure_pillarbox("video_reconfig")));
                 }
-                mpvapi::EVENT_END_FILE if self.loading.load(Ordering::SeqCst) => {
+                mpvapi::EVENT_END_FILE if self.flags.loading.load(Ordering::SeqCst) => {
                     let end = ev.data as *const MpvEventEndFile;
                     if !end.is_null() && unsafe { (*end).reason } == mpvapi::END_FILE_ERROR {
-                        self.loading.store(false, Ordering::SeqCst);
+                        self.flags.loading.store(false, Ordering::SeqCst);
                         bridge_log!("[bridge] load ended with error: {}", self.api.error_string(unsafe { (*end).error }));
                     }
                 }
@@ -352,20 +373,32 @@ impl Inner {
 
 impl Player {
     /// Equivalent of `singws_bridge_create` minus the views: initialises the core and starts the first load inline.
-    pub fn create(video: &str, audio: Option<&str>) -> Option<Box<Player>> {
+    pub fn create(video: &str, audio: Option<&str>, views: Option<(usize, usize)>) -> Option<Box<Player>> {
         let api = mpvapi::api().map_err(|e| bridge_log!("[bridge] {}", e)).ok()?;
-        let inner = Arc::new(Inner {
-            api,
-            mpv: OnceLock::new(),
+        let flags = Arc::new(Flags {
             loading: AtomicBool::new(false),
-            play_when_loaded: AtomicBool::new(false),
             is_cdg: AtomicBool::new(false),
             has_frame: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
-            span_x: AtomicU64::new(f64_bits((300.0 / 216.0) / (TEXTURE_W / TEXTURE_H))),
+            span_x: std::sync::atomic::AtomicU64::new(f64_bits((300.0 / 216.0) / (TW / TH))),
+        });
+        // With views the picture path is live (vo=libmpv + the renderer); without them the core runs headless (vo=null).
+        let renderer = match views {
+            Some((out, prev)) if out != 0 && prev != 0 => Some(Renderer::new(Arc::clone(&flags), out, prev)?),
+            _ => None,
+        };
+        let inner = Arc::new(Inner {
+            api,
+            mpv: OnceLock::new(),
+            flags,
+            renderer: OnceLock::new(),
+            play_when_loaded: AtomicBool::new(false),
             state: Mutex::new(State { tempo_percent: 100, semitones: 0, dsp_chain: String::new(), audio_delay: 0.0, pending_audio: None, serial: 0 }),
             tx: Mutex::new(None),
         });
+        if let Some(r) = renderer {
+            let _ = inner.renderer.set(r);
+        }
         let (tx, rx): (Sender<Job>, Receiver<Job>) = mpsc::channel();
         *inner.tx.lock().unwrap() = Some(tx);
         let worker = Arc::clone(&inner);
@@ -419,7 +452,7 @@ impl Player {
             return;
         }
         inner.play_when_loaded.store(!paused, Ordering::SeqCst);
-        if inner.loading.load(Ordering::SeqCst) && !paused {
+        if inner.flags.loading.load(Ordering::SeqCst) && !paused {
             return;
         }
         inner.on_control(Box::new(move |me: &Arc<Inner>| {
@@ -434,14 +467,17 @@ impl Player {
         if inner.handle().is_none() {
             return;
         }
-        inner.loading.store(false, Ordering::SeqCst);
+        inner.flags.loading.store(false, Ordering::SeqCst);
         inner.play_when_loaded.store(false, Ordering::SeqCst);
         inner.on_control(Box::new(|me: &Arc<Inner>| {
             if let Some(h) = me.handle() {
                 me.api.command_async(h, 3, &["stop"]);
             }
         }));
-        inner.has_frame.store(false, Ordering::SeqCst);
+        inner.flags.has_frame.store(false, Ordering::SeqCst);
+        if let Some(r) = inner.renderer.get() {
+            r.needs_display_async();
+        }
     }
 
     pub fn seek_ms(&self, ms: i64) {
@@ -465,7 +501,7 @@ impl Player {
 
     /// Report "not ready" until FILE_LOADED rather than making the Qt timers that poll these getters wait on mpv's core lock.
     pub fn position_ms(&self) -> i64 {
-        if self.inner.loading.load(Ordering::SeqCst) {
+        if self.inner.flags.loading.load(Ordering::SeqCst) {
             return 0;
         }
         // CDG packets update sparsely, so the general time-pos can look frozen between graphics commands. External MP3 audio
@@ -475,25 +511,25 @@ impl Player {
         (seconds * 1000.0).round() as i64
     }
     pub fn duration_ms(&self) -> i64 {
-        if self.inner.loading.load(Ordering::SeqCst) {
+        if self.inner.flags.loading.load(Ordering::SeqCst) {
             return 0;
         }
         (self.double("duration", 0.0) * 1000.0).round() as i64
     }
     pub fn is_playing(&self) -> bool {
-        if self.inner.loading.load(Ordering::SeqCst) {
+        if self.inner.flags.loading.load(Ordering::SeqCst) {
             return false;
         }
         self.inner.handle().is_some() && !self.flag("pause", true) && !self.flag("idle-active", true)
     }
     pub fn at_end(&self) -> bool {
-        if self.inner.loading.load(Ordering::SeqCst) {
+        if self.inner.flags.loading.load(Ordering::SeqCst) {
             return false;
         }
         self.inner.handle().is_some() && self.flag("eof-reached", false)
     }
     pub fn visual_ready(&self) -> bool {
-        self.inner.has_frame.load(Ordering::SeqCst)
+        self.inner.flags.has_frame.load(Ordering::SeqCst)
     }
 
     pub fn set_volume_percent(&self, value: f64) {
@@ -549,7 +585,7 @@ impl Player {
                 p
             };
             let Some(h) = me.handle() else { return };
-            if me.loading.load(Ordering::SeqCst) {
+            if me.flags.loading.load(Ordering::SeqCst) {
                 return;
             }
             me.api.set_double(h, "speed", wanted as f64 / 100.0);
@@ -583,7 +619,7 @@ impl Player {
         self.inner.on_control(Box::new(move |me: &Arc<Inner>| {
             me.state.lock().unwrap().audio_delay = wanted;
             let Some(h) = me.handle() else { return };
-            if me.loading.load(Ordering::SeqCst) {
+            if me.flags.loading.load(Ordering::SeqCst) {
                 return;
             }
             let r = me.api.set_double(h, "audio-delay", wanted);
@@ -595,14 +631,18 @@ impl Player {
         }));
     }
 
+    pub fn renderer(&self) -> Option<&Arc<Renderer>> {
+        self.inner.renderer.get()
+    }
+
     /// Fraction of the shared texture the picture occupies (used by the compositor from V4).
     pub fn picture_span(&self) -> f64 {
-        f64::from_bits(self.inner.span_x.load(Ordering::SeqCst))
+        f64::from_bits(self.inner.flags.span_x.load(Ordering::SeqCst))
     }
 
     pub fn shutdown(&self) {
         let inner = &self.inner;
-        if inner.stopping.swap(true, Ordering::SeqCst) {
+        if inner.flags.stopping.swap(true, Ordering::SeqCst) {
             return;
         }
         // NOTE: `handle()` returns None once `stopping` is set, so read the raw handle here. (An earlier version used handle() and
@@ -617,9 +657,15 @@ impl Player {
         for t in threads {
             let _ = t.join();
         }
+        if let Some(r) = inner.renderer.get() {
+            r.free_render_context(); // must precede destroying the core it renders for
+        }
         if let Some(h) = core {
             inner.api.set_wakeup_callback_none(h);
             inner.api.terminate_destroy(h);
+        }
+        if let Some(r) = inner.renderer.get() {
+            r.destroy_views();
         }
         bridge_log!("[bridge] clean shutdown");
     }

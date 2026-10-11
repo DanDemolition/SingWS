@@ -13,3 +13,7 @@ crate-type = ["cdylib", "rlib"]
 libloading = "0.8"
 # Runtime only: folds diacritics when matching an audio output's name (the Objective-C bridge used NSString folding).
 unicode-normalization = "0.1"
+
+[build-dependencies]
+# Build-time only: compiles the thin Objective-C view shim.
+cc = "1"

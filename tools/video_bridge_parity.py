@@ -55,6 +55,11 @@ def bind(path: str):
     L.singws_bridge_set_key.argtypes = [P, I]
     L.singws_bridge_set_dsp_chain.argtypes = [P, S]
     L.singws_bridge_set_audio_delay.argtypes = [P, D]
+    L.singws_bridge_refresh_views.argtypes = [P, ctypes.c_size_t, ctypes.c_size_t]
+    L.singws_bridge_set_sidefill.argtypes = [P, I]
+    L.singws_bridge_begin_transition.argtypes = [P, I]
+    L.singws_bridge_present_count.restype = ctypes.c_uint64
+    L.singws_bridge_present_count.argtypes = [P]
     L.singws_bridge_scan_silence.restype = I
     L.singws_bridge_scan_silence.argtypes = [S, D, D, D, ctypes.POINTER(D), ctypes.POINTER(D), ctypes.POINTER(D)]
     L.singws_bridge_scanner_shutdown.argtypes = []
@@ -66,8 +71,9 @@ def bind(path: str):
 def normalise(line: str) -> str:
     line = re.sub(r"serial=\d+", "serial=N", line)
     if line.startswith("[scanner] ready"):
-        head, _, path = line.partition(" /")
-        line = head + " " + os.path.basename("/" + path)
+        head, sep, path = line.partition(" /")
+        if sep:
+            line = head + " " + os.path.basename("/" + path)
     line = re.sub(r"(video|file)=\S+", lambda m: f"{m.group(1)}=" + os.path.basename(m.group(0).split("=", 1)[1]), line)
     line = re.sub(r"audio=\S+", lambda m: "audio=" + os.path.basename(m.group(0)[6:]), line)
     return line

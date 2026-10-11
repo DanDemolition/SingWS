@@ -19,6 +19,34 @@ pub const EVENT_END_FILE: c_int = 7;
 pub const EVENT_FILE_LOADED: c_int = 8;
 pub const EVENT_VIDEO_RECONFIG: c_int = 17;
 
+pub const RENDER_PARAM_API_TYPE: c_int = 1;
+pub const RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
+pub const RENDER_PARAM_OPENGL_FBO: c_int = 3;
+pub const RENDER_PARAM_FLIP_Y: c_int = 4;
+pub const RENDER_UPDATE_FRAME: u64 = 1;
+
+#[repr(C)]
+pub struct RenderParam {
+    pub ty: c_int,
+    pub data: *mut c_void,
+}
+
+#[repr(C)]
+pub struct OpenglInitParams {
+    pub get_proc_address: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void,
+    pub get_proc_address_ctx: *mut c_void,
+}
+
+#[repr(C)]
+pub struct OpenglFbo {
+    pub fbo: c_int,
+    pub w: c_int,
+    pub h: c_int,
+    pub internal_format: c_int,
+}
+
+pub type RenderUpdateFn = unsafe extern "C" fn(*mut c_void);
+
 pub const END_FILE_EOF: c_int = 0;
 pub const END_FILE_ERROR: c_int = 4;
 
@@ -96,6 +124,11 @@ pub struct Mpv {
     error_string: unsafe extern "C" fn(c_int) -> *const c_char,
     free: unsafe extern "C" fn(*mut c_void),
     free_node_contents: unsafe extern "C" fn(*mut Node),
+    render_context_create: unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *mut RenderParam) -> c_int,
+    render_context_set_update_callback: unsafe extern "C" fn(*mut c_void, Option<RenderUpdateFn>, *mut c_void),
+    render_context_update: unsafe extern "C" fn(*mut c_void) -> u64,
+    render_context_render: unsafe extern "C" fn(*mut c_void, *mut RenderParam) -> c_int,
+    render_context_free: unsafe extern "C" fn(*mut c_void),
 }
 
 fn cstr(s: &str) -> CString {
@@ -174,6 +207,11 @@ impl Mpv {
             error_string: sym!(b"mpv_error_string"),
             free: sym!(b"mpv_free"),
             free_node_contents: sym!(b"mpv_free_node_contents"),
+            render_context_create: sym!(b"mpv_render_context_create"),
+            render_context_set_update_callback: sym!(b"mpv_render_context_set_update_callback"),
+            render_context_update: sym!(b"mpv_render_context_update"),
+            render_context_render: sym!(b"mpv_render_context_render"),
+            render_context_free: sym!(b"mpv_render_context_free"),
             _lib: lib,
         })
     }
@@ -306,6 +344,37 @@ impl Mpv {
     }
     pub fn error_string(&self, code: c_int) -> String {
         unsafe { CStr::from_ptr((self.error_string)(code)).to_string_lossy().into_owned() }
+    }
+    /// Creates the OpenGL render context. The caller's GL context must be current.
+    pub fn render_context_create_gl(&self, h: Handle, init: &mut OpenglInitParams) -> Result<*mut c_void, c_int> {
+        let mut api_type = b"opengl\0".to_vec();
+        let mut params = [
+            RenderParam { ty: RENDER_PARAM_API_TYPE, data: api_type.as_mut_ptr() as *mut c_void },
+            RenderParam { ty: RENDER_PARAM_OPENGL_INIT_PARAMS, data: init as *mut OpenglInitParams as *mut c_void },
+            RenderParam { ty: 0, data: std::ptr::null_mut() },
+        ];
+        let mut ctx: *mut c_void = std::ptr::null_mut();
+        let r = unsafe { (self.render_context_create)(&mut ctx, h.0, params.as_mut_ptr()) };
+        if r >= 0 { Ok(ctx) } else { Err(r) }
+    }
+    pub fn render_set_update_callback(&self, rc: *mut c_void, cb: Option<RenderUpdateFn>, ctx: *mut c_void) {
+        unsafe { (self.render_context_set_update_callback)(rc, cb, ctx) }
+    }
+    pub fn render_update(&self, rc: *mut c_void) -> u64 {
+        unsafe { (self.render_context_update)(rc) }
+    }
+    pub fn render_into_fbo(&self, rc: *mut c_void, fbo: c_int, w: c_int, h: c_int) -> c_int {
+        let mut target = OpenglFbo { fbo, w, h, internal_format: 0x8058 /* GL_RGBA8 */ };
+        let mut flip: c_int = 1;
+        let mut params = [
+            RenderParam { ty: RENDER_PARAM_OPENGL_FBO, data: &mut target as *mut OpenglFbo as *mut c_void },
+            RenderParam { ty: RENDER_PARAM_FLIP_Y, data: &mut flip as *mut c_int as *mut c_void },
+            RenderParam { ty: 0, data: std::ptr::null_mut() },
+        ];
+        unsafe { (self.render_context_render)(rc, params.as_mut_ptr()) }
+    }
+    pub fn render_free(&self, rc: *mut c_void) {
+        unsafe { (self.render_context_free)(rc) }
     }
     pub fn set_wakeup_callback_none(&self, h: Handle) {
         unsafe { (self.set_wakeup_callback)(h.0, None, std::ptr::null_mut()) };

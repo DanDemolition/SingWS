@@ -1,14 +1,22 @@
 //! Rust replacement for the Objective-C mpv bridge (roadmap item 2), exporting the SAME `singws_bridge_*` C ABI so
 //! `mpv_playback_iina.py` needs no change. See RUST_VIDEO_BRIDGE_PLAN.md.
 //!
-//! V2 (this milestone): the control plane runs headless (`vo=null`). Every function that needs a picture surface (views, background
-//! video, transitions, rotation hosts, frame grab) exists with the right signature but is a documented no-op until V3-V5; the
-//! Python side already tolerates that (it checks `visual_ready` and the optional exports).
+//! V2: the control plane (headless, `vo=null` when created with no views). V3: with two native views the picture path is live (output +
+//! preview, one shared texture, one shader). Still no-ops until V4-V5: background video, rotation/spotlight hosts, frame grab, the
+//! private render thread; the Python side tolerates that (it checks `visual_ready` and the optional exports).
 pub mod audio_device;
 pub mod core;
+pub mod flags;
 pub mod log;
 pub mod mpvapi;
 pub mod scanner;
+
+#[cfg(target_os = "macos")]
+pub mod gl;
+#[cfg(target_os = "macos")]
+pub mod render;
+#[cfg(target_os = "macos")]
+pub mod shaders;
 
 use crate::core::Player;
 use std::ffi::{c_char, c_double, c_int, c_void, CStr};
@@ -47,15 +55,15 @@ pub extern "C" fn singws_bridge_render_thread_active(_h: *mut c_void) -> c_int {
     0 // V5
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_present_count(_h: *mut c_void) -> u64 {
-    0 // V3
+pub extern "C" fn singws_bridge_present_count(h: *mut c_void) -> u64 {
+    player(h).and_then(|p| p.renderer().map(|r| r.present_count())).unwrap_or(0)
 }
 
-/// `outputView` / `previewView` are ignored until V3 (no picture surface yet).
+/// With two native views the picture path is live; with 0 / 0 the core runs headless (no picture), as in V2.
 #[no_mangle]
-pub extern "C" fn singws_bridge_create(_output_view: usize, _preview_view: usize, video: *const c_char, audio: *const c_char) -> *mut c_void {
+pub extern "C" fn singws_bridge_create(output_view: usize, preview_view: usize, video: *const c_char, audio: *const c_char) -> *mut c_void {
     let (Some(v), a) = (text(video), text(audio).filter(|s| !s.is_empty())) else { return std::ptr::null_mut() };
-    match Player::create(&v, a.as_deref()) {
+    match Player::create(&v, a.as_deref(), Some((output_view, preview_view))) {
         Some(p) => Box::into_raw(p) as *mut c_void,
         None => std::ptr::null_mut(),
     }
@@ -75,7 +83,11 @@ pub extern "C" fn singws_bridge_destroy(h: *mut c_void) {
     }
 }
 #[no_mangle]
-pub extern "C" fn singws_bridge_refresh_views(_h: *mut c_void, _output_view: usize, _preview_view: usize) {}
+pub extern "C" fn singws_bridge_refresh_views(h: *mut c_void, output_view: usize, preview_view: usize) {
+    if let Some(r) = player(h).and_then(|p| p.renderer()) {
+        r.refresh_views(output_view, preview_view);
+    }
+}
 
 // ---- transport ---------------------------------------------------------------------------------------------------------------
 
@@ -166,9 +178,17 @@ pub extern "C" fn singws_bridge_set_audio_delay(h: *mut c_void, seconds: c_doubl
 // ---- picture surface (V3-V5: not implemented yet; see the module comment) --------------------------------------------------
 
 #[no_mangle]
-pub extern "C" fn singws_bridge_set_sidefill(_h: *mut c_void, _mode: c_int) {}
+pub extern "C" fn singws_bridge_set_sidefill(h: *mut c_void, mode: c_int) {
+    if let Some(r) = player(h).and_then(|p| p.renderer()) {
+        r.set_sidefill(mode);
+    }
+}
 #[no_mangle]
-pub extern "C" fn singws_bridge_begin_transition(_h: *mut c_void, _ms: c_int) {}
+pub extern "C" fn singws_bridge_begin_transition(h: *mut c_void, ms: c_int) {
+    if let Some(r) = player(h).and_then(|p| p.renderer()) {
+        r.begin_transition(ms);
+    }
+}
 #[no_mangle]
 pub extern "C" fn singws_bridge_load_background(_h: *mut c_void, _path: *const c_char, _opacity: c_double) -> c_int {
     0
