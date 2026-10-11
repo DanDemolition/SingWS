@@ -80,3 +80,4 @@ native/singws_dsp/*/*.dylib
 # Built Rust analysis helper; produced by rust/build_analyze.sh
 native/singws_analyze/*/singws-analyze
 native/singws_bgm/
+native/singws_video/

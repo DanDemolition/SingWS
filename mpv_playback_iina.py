@@ -62,12 +62,74 @@ def _install_bridge_log(api, log):
     api.lib.singws_bridge_set_log_callback(_bridge_log_thunk)
 
 
+# Every function the Objective-C bridge exports and the Rust bridge (rust/crates/singws-video) must export identically.
+BRIDGE_EXPORTS = (
+    "create", "destroy", "load", "play", "pause", "stop", "seek", "position", "duration", "is_playing", "at_end", "visual_ready",
+    "set_volume", "set_device", "set_tempo", "set_key", "set_dsp_chain", "set_audio_delay", "set_sidefill", "load_background",
+    "background_at_end", "background_position", "background_paused", "set_background_opacity", "stop_background", "refresh_views",
+    "begin_transition", "grab_frame", "free_frame", "scan_silence", "scanner_shutdown", "set_rotation_host", "set_rotation_spotlight",
+    "set_log_callback", "set_render_thread", "render_thread_active", "present_count",
+)
+
+
+def _arch_name() -> str:
+    import platform
+    return "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
+
+
+def _find_libmpv_for_rust() -> Path | None:
+    """The Rust bridge dlopens singws_libmpv.2.dylib from beside itself; in a source checkout that folder is the runtime artifacts one."""
+    for candidate in (
+        _runtime_root() / "singws_libmpv.2.dylib",
+        Path(__file__).resolve().parent / "native" / "mpv_runtime" / "artifacts" / _arch_name() / "Frameworks" / "singws_libmpv.2.dylib",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _rust_bridge_path() -> Path | None:
+    explicit = os.environ.get("SINGWS_VIDEO_LIB")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
+    for candidate in (
+        _runtime_root() / "libsingws_video.dylib",
+        Path(__file__).resolve().parent / "native" / "singws_video" / _arch_name() / "libsingws_video.dylib",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _open_bridge_library():
+    """(ctypes library, "objc" | "rust", note). SINGWS_VIDEO_BRIDGE=rust (set at launch from the `video_bridge` setting) asks for the Rust
+    bridge; ANY problem with it (missing file, will not load, missing exports) falls back to the Objective-C one with the reason in `note`."""
+    note = ""
+    if os.environ.get("SINGWS_VIDEO_BRIDGE", "objc").strip().lower() == "rust":
+        path = _rust_bridge_path()
+        if path is None:
+            note = "the Rust video bridge library was not found"
+        else:
+            try:
+                libmpv = _find_libmpv_for_rust()
+                if libmpv is not None:
+                    os.environ.setdefault("SINGWS_LIBMPV", str(libmpv))
+                lib = ctypes.CDLL(str(path), mode=os.RTLD_LAZY | os.RTLD_LOCAL)
+                missing = [n for n in BRIDGE_EXPORTS if not hasattr(lib, f"singws_bridge_{n}")]
+                if missing:
+                    raise RuntimeError(f"it does not export {', '.join(missing)}")
+                return lib, "rust", f"{path}"
+            except Exception as exc:  # noqa: BLE001 - never let the experimental bridge take the show down
+                note = f"the Rust video bridge could not be used ({exc})"
+    path = _runtime_root() / "libsingws_mpv_bridge.dylib"
+    if not path.is_file():
+        raise RuntimeError(f"native bridge missing: {path}")
+    return ctypes.CDLL(str(path), mode=os.RTLD_LAZY | os.RTLD_LOCAL), "objc", note
+
+
 class _BridgeApi:
     def __init__(self):
-        path = _runtime_root() / "libsingws_mpv_bridge.dylib"
-        if not path.is_file():
-            raise RuntimeError(f"native bridge missing: {path}")
-        self.lib = ctypes.CDLL(str(path), mode=os.RTLD_LAZY | os.RTLD_LOCAL)
+        self.lib, self.kind, self.note = _open_bridge_library()
         L = self.lib
         L.singws_bridge_create.restype = ctypes.c_void_p
         L.singws_bridge_create.argtypes = [ctypes.c_size_t, ctypes.c_size_t,
@@ -138,6 +200,25 @@ _bridge_api = None
 _bridge_api_lock = threading.Lock()
 
 
+_bridge_choice_logged = False
+
+
+def _log_bridge_choice_once(api, log) -> None:
+    global _bridge_choice_logged
+    if _bridge_choice_logged:
+        return
+    _bridge_choice_logged = True
+    try:
+        if api.kind == "rust":
+            log(f"[VIDEO-BRIDGE] using the Rust video bridge ({api.note})")
+        elif api.note:
+            log(f"[VIDEO-BRIDGE] using the Objective-C bridge: {api.note}")
+        else:
+            log("[VIDEO-BRIDGE] using the Objective-C bridge")
+    except Exception:
+        pass
+
+
 def _get_bridge_api() -> _BridgeApi:
     global _bridge_api
     with _bridge_api_lock:
@@ -175,6 +256,7 @@ class MpvPlaybackPlugin:
         self.log = log
         self.api = _get_bridge_api()
         _install_bridge_log(self.api, log)
+        _log_bridge_choice_once(self.api, log)
         self._handle = None
         self._preview_id = 0
         self._output_id = 0

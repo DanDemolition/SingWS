@@ -31,6 +31,11 @@ bgm_dylib = project_root / "native" / "singws_bgm" / "arm64" / "libsingws_bgm_ff
 if bgm_dylib.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{bgm_dylib}'"):
     binaries.append((str(bgm_dylib), "."))
 
+# Rust video bridge (rust/build_video.sh). Optional: used only when the `video_bridge` setting is "rust"; it dlopens singws_libmpv.2.dylib from beside itself.
+video_dylib = project_root / "native" / "singws_video" / "arm64" / "libsingws_video.dylib"
+if video_dylib.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{video_dylib}'"):
+    binaries.append((str(video_dylib), "."))
+
 # Rust analysis helper (rust/build_analyze.sh). Optional: without it analysis_engine stays on libmpv.
 analyze_bin = project_root / "native" / "singws_analyze" / "arm64" / "singws-analyze"
 if analyze_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{analyze_bin}'"):
