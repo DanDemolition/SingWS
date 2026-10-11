@@ -23,6 +23,8 @@ path = "src/device_main.rs"
 
 [dependencies]
 singws-dsp = { path = "../singws-dsp" }
+# Key (pitch) and tempo for karaoke audio; the same Signalsmith wrapper as the mpv filter.
+singws-stretch = { path = "../singws-stretch" }
 # Decoding: the same container/codec set the analyzer already uses.
 symphonia = { version = "0.6.1", features = ["mp3", "mp2", "mp1", "flac", "wav", "aiff", "caf", "aac", "isomp4", "ogg", "vorbis", "pcm", "alac", "adpcm"] }
 # Sample-rate conversion (44.1 kHz files into a 48 kHz engine). Runtime dependency, MIT, pure Rust.

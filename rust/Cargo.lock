@@ -856,6 +856,7 @@ dependencies = [
  "cpal",
  "rubato",
  "singws-dsp",
+ "singws-stretch",
  "symphonia",
 ]
 

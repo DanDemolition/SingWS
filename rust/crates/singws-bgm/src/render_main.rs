@@ -30,6 +30,9 @@ struct Args {
     /// Play the single file through the effect chain, start to finish (no crossfade), and write the result.
     process: bool,
     eq_gains: Option<[f32; 10]>,
+    /// Karaoke key (semitones) and tempo (percent); applied BEFORE the effect chain, in --process mode.
+    key: f64,
+    tempo: f64,
     master_params: Option<PathBuf>,
     files: Vec<PathBuf>,
 }
@@ -48,6 +51,8 @@ fn parse() -> Result<Args, String> {
         volume: 0.8,
         process: false,
         eq_gains: None,
+        key: 0.0,
+        tempo: 100.0,
         master_params: None,
         files: vec![],
     };
@@ -66,6 +71,8 @@ fn parse() -> Result<Args, String> {
             "--norm-b" => a.norm_b_db = val("--norm-b")?.parse().map_err(|e| format!("--norm-b: {e}"))?,
             "--volume" => a.volume = val("--volume")?.parse().map_err(|e| format!("--volume: {e}"))?,
             "--process" => a.process = true,
+            "--key" => a.key = val("--key")?.parse().map_err(|e| format!("--key: {e}"))?,
+            "--tempo" => a.tempo = val("--tempo")?.parse().map_err(|e| format!("--tempo: {e}"))?,
             "--eq" => {
                 let v: Vec<f32> = val("--eq")?.split(',').map(|x| x.trim().parse().map_err(|e| format!("--eq: {e}"))).collect::<Result<_, _>>()?;
                 if v.len() != 10 {
@@ -182,6 +189,23 @@ fn main() {
             apply(pairs);
         }
         engine.set_effects(vec![Box::new(eq) as Box<dyn Effect>, Box::new(master) as Box<dyn Effect>]);
+        // Karaoke key/tempo: stretch first (the effects then act on what is heard), a no-op at key 0 / 100%.
+        let a = if args.key != 0.0 || args.tempo != 100.0 {
+            let mut st = singws_stretch::Stretcher::new(args.rate).unwrap_or_else(|| {
+                eprintln!("error: cannot start the stretcher");
+                std::process::exit(1);
+            });
+            st.set_semitones(args.key);
+            st.set_speed(args.tempo / 100.0);
+            let mut stretched: Vec<f32> = Vec::with_capacity(a.samples.len());
+            for block in a.samples.chunks(2048) {
+                st.process(block, &mut stretched);
+            }
+            st.flush(&mut stretched);
+            singws_bgm::decode::Decoded { rate: a.rate, samples: std::sync::Arc::new(stretched), skipped_packets: a.skipped_packets }
+        } else {
+            a
+        };
         engine.load(Box::new(a.deck()), 1.0, false, Some(args.volume));
         let total = a.frames() as usize;
         let mut out: Vec<f32> = Vec::with_capacity(total * 2);
