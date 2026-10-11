@@ -125,6 +125,8 @@ struct GlState {
     u: Uniforms,
     vao: [GLuint; 4],
     fence: GLsync,
+    /// Fence for the BACKGROUND texture (the old bridge had none: consumer contexts could keep sampling a stale copy of it).
+    bg_fence: GLsync,
 }
 unsafe impl Send for GlState {}
 
@@ -322,7 +324,7 @@ impl Renderer {
             };
             shim_master_unlock(master);
             (
-                GlState { tex, fbo, cdg_tex, cdg_fbo, bg_tex, bg_fbo, prev_bg_tex, program, u, vao: [0; 4], fence: std::ptr::null_mut() },
+                GlState { tex, fbo, cdg_tex, cdg_fbo, bg_tex, bg_fbo, prev_bg_tex, program, u, vao: [0; 4], fence: std::ptr::null_mut(), bg_fence: std::ptr::null_mut() },
                 a && b && c && program != 0,
             )
         };
@@ -637,16 +639,21 @@ impl Renderer {
             if r.flags.stopping.load(Ordering::SeqCst) || rc.is_null() {
                 return;
             }
-            if r.api.render_update(rc) & mpvapi::RENDER_UPDATE_FRAME != 0 {
+            let uflags = r.api.render_update(rc);
+            if uflags & mpvapi::RENDER_UPDATE_FRAME != 0 {
                 unsafe {
                     shim_master_make_current(r.master);
                     shim_master_lock(r.master);
                     {
-                        let gl = r.gl.lock().unwrap();
+                        let mut gl = r.gl.lock().unwrap();
                         glBindFramebuffer(GL_FRAMEBUFFER, gl.bg_fbo);
                         glViewport(0, 0, TEXTURE_W, TEXTURE_H);
                         r.api.render_into_fbo(rc, gl.bg_fbo as c_int, TEXTURE_W, TEXTURE_H);
                         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                        if !gl.bg_fence.is_null() {
+                            glDeleteSync(gl.bg_fence);
+                        }
+                        gl.bg_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
                         glFlush();
                     }
                     shim_master_unlock(r.master);
@@ -716,7 +723,7 @@ impl Renderer {
                 shim_master_make_current(self.master);
                 shim_master_lock(self.master);
                 {
-                    let gl = self.gl.lock().unwrap();
+                    let mut gl = self.gl.lock().unwrap();
                     glBindFramebuffer(GL_READ_FRAMEBUFFER, gl.bg_fbo);
                     glActiveTexture(GL_TEXTURE2);
                     glBindTexture(GL_TEXTURE_2D, gl.prev_bg_tex);
@@ -724,6 +731,10 @@ impl Renderer {
                     glBindTexture(GL_TEXTURE_2D, 0);
                     glActiveTexture(GL_TEXTURE0);
                     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+                    if !gl.bg_fence.is_null() {
+                        glDeleteSync(gl.bg_fence);
+                    }
+                    gl.bg_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
                     glFlush();
                 }
                 shim_master_unlock(self.master);
@@ -1038,6 +1049,9 @@ impl Renderer {
                 if !gl.fence.is_null() {
                     glWaitSync(gl.fence, 0, GL_TIMEOUT_IGNORED);
                 }
+                if !gl.bg_fence.is_null() {
+                    glWaitSync(gl.bg_fence, 0, GL_TIMEOUT_IGNORED);
+                }
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
                 glViewport(0, 0, w, h);
                 glClearColor(0.0, 0.0, 0.0, 1.0);
@@ -1225,6 +1239,10 @@ impl Renderer {
             if !gl.fence.is_null() {
                 glDeleteSync(gl.fence);
                 gl.fence = std::ptr::null_mut();
+            }
+            if !gl.bg_fence.is_null() {
+                glDeleteSync(gl.bg_fence);
+                gl.bg_fence = std::ptr::null_mut();
             }
         }
     }
