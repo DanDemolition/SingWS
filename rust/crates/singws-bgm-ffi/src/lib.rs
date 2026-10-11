@@ -21,7 +21,7 @@ use singws_bgm::system::BgmSystem;
 use singws_dsp::{PARAM_COUNT, PARAM_NAMES};
 
 /// Bump when any exported signature or the stats layout changes; the Python adapter checks it.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 /// Number of u64 values `singws_bgm_stats` writes.
 pub const STAT_COUNT: usize = 16;
 
@@ -606,3 +606,138 @@ pub const FLAGS: (u32, u32, u32) = (FLAG_PLAYING, FLAG_PAUSED, FLAG_ENDED);
 
 #[allow(dead_code)]
 fn _assert_c_void_used(_: *mut c_void) {}
+
+// ---- karaoke voice (ABI 3) ----------------------------------------------------------------------------------------------------------
+
+/// Replace the karaoke song. Consumes `deck`. `has_volume` 0 keeps the current karaoke volume.
+///
+/// # Safety
+/// `p` live handle; `deck` an unconsumed deck pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_load(p: *mut Sys, deck: *mut Deck, norm: f32, paused: i32, volume: f32, has_volume: i32) -> i32 {
+    if deck.is_null() {
+        return 0;
+    }
+    // SAFETY: ownership of the deck moves into the command.
+    let d = unsafe { Box::from_raw(deck) };
+    send(p, move || Command::KaraokeLoad { deck: d.0, norm, paused: paused != 0, volume: if has_volume != 0 { Some(volume) } else { None } })
+}
+
+simple_cmd!(singws_bgm_karaoke_play, Command::KaraokePlay);
+simple_cmd!(singws_bgm_karaoke_pause, Command::KaraokePause);
+simple_cmd!(singws_bgm_karaoke_stop, Command::KaraokeStop);
+f32_cmd!(singws_bgm_karaoke_seek, KaraokeSeek);
+// Tempo in percent (100 = normal), independent of the key.
+f32_cmd!(singws_bgm_karaoke_set_tempo, KaraokeTempo);
+// Key in semitones, independent of the tempo.
+f32_cmd!(singws_bgm_karaoke_set_key, KaraokeKey);
+f32_cmd!(singws_bgm_karaoke_set_volume, KaraokeVolume);
+f32_cmd!(singws_bgm_karaoke_set_norm, KaraokeNorm);
+
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_slide_volume(p: *mut Sys, volume: f32, ms: u32) -> i32 {
+    send(p, || Command::KaraokeSlideVolume { volume, ms })
+}
+
+/// Audible SONG position and duration, seconds (the position follows the lyrics, not the output clock, so it stays right at any tempo).
+///
+/// # Safety
+/// `p` is a live handle; `pos` and `dur` are writable (or NULL).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_times(p: *mut Sys, pos: *mut f32, dur: *mut f32) {
+    // SAFETY: contract above.
+    if let Some(s) = unsafe { sys(p) } {
+        let snap = &s.0.control.snapshot;
+        // SAFETY: the caller supplies writable pointers.
+        unsafe {
+            if !pos.is_null() {
+                *pos = f32::from_bits(snap.karaoke_position_s.load(Relaxed));
+            }
+            if !dur.is_null() {
+                *dur = f32::from_bits(snap.karaoke_duration_s.load(Relaxed));
+            }
+        }
+    }
+}
+
+/// `KFLAG_*` bits: loaded 1, playing 2, paused 4, finished 8.
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_flags(p: *mut Sys) -> u32 {
+    // SAFETY: contract above.
+    unsafe { sys(p) }.map(|s| s.0.control.snapshot.karaoke_flags.load(Relaxed)).unwrap_or(0)
+}
+
+/// Frames of silence the karaoke voice produced while its source was not ready (a seek in progress).
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_pending_frames(p: *mut Sys) -> u64 {
+    // SAFETY: contract above.
+    unsafe { sys(p) }.map(|s| s.0.control.snapshot.karaoke_pending_frames.load(Relaxed)).unwrap_or(0)
+}
+
+/// Current karaoke volume (the fade moves it).
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_volume(p: *mut Sys) -> f32 {
+    // SAFETY: contract above.
+    unsafe { sys(p) }.map(|s| f32::from_bits(s.0.control.snapshot.karaoke_volume.load(Relaxed))).unwrap_or(0.0)
+}
+
+/// The karaoke song's graphic EQ (separate from the music's).
+///
+/// # Safety
+/// `p` is a live handle; `gains` points at 10 floats (dB) or is NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_set_eq(p: *mut Sys, enabled: i32, gains: *const f32) -> i32 {
+    guard(0, || {
+        // SAFETY: contract above.
+        let Some(s) = (unsafe { sys(p) }) else { return 0 };
+        if !gains.is_null() {
+            let mut g = [0.0f32; 10];
+            // SAFETY: the caller promises 10 floats.
+            g.copy_from_slice(unsafe { std::slice::from_raw_parts(gains, 10) });
+            s.0.karaoke_eq.set_gains_db(&g);
+        }
+        s.0.karaoke_eq.set_enabled(enabled != 0);
+        1
+    })
+}
+
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_set_master_enabled(p: *mut Sys, enabled: i32) {
+    // SAFETY: contract above.
+    if let Some(s) = unsafe { sys(p) } {
+        s.0.karaoke_master.set_enabled(enabled != 0);
+    }
+}
+
+/// The karaoke song's master-chain parameters (`PARAM_NAMES` order); 0 on success, -1 otherwise.
+///
+/// # Safety
+/// `p` is a live handle; `values` points at `n` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_set_master_params(p: *mut Sys, values: *const f64, n: u32) -> i32 {
+    guard(-1, || {
+        // SAFETY: contract above.
+        let Some(s) = (unsafe { sys(p) }) else { return -1 };
+        if values.is_null() || n as usize != PARAM_COUNT {
+            return -1;
+        }
+        let mut v = [0.0f64; PARAM_COUNT];
+        // SAFETY: `n` doubles are readable.
+        v.copy_from_slice(unsafe { std::slice::from_raw_parts(values, PARAM_COUNT) });
+        s.0.karaoke_master.set_params(&v);
+        0
+    })
+}

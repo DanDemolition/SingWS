@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 LIB_NAME = "libsingws_bgm_ffi.dylib"
-EXPECTED_ABI_VERSION = 2
+EXPECTED_ABI_VERSION = 3
 STAT_COUNT = 16
 
 FLAG_PLAYING, FLAG_PAUSED, FLAG_ENDED, FLAG_XFADE_ACTIVE, FLAG_XFADE_FINISHED, FLAG_HAS_PRIMARY, FLAG_HAS_SECONDARY = 1, 2, 4, 8, 16, 32, 64
@@ -141,6 +141,24 @@ def _declare(lib) -> None:
         "singws_bgm_pad_set_master": ([V, F32], I32),
         "singws_bgm_pad_playing": ([V, U32], U32),
         "singws_bgm_pad_position_frames": ([V, U32], ctypes.c_uint64),
+        # karaoke voice (ABI 3)
+        "singws_bgm_karaoke_load": ([V, V, F32, I32, F32, I32], I32),
+        "singws_bgm_karaoke_play": ([V], I32),
+        "singws_bgm_karaoke_pause": ([V], I32),
+        "singws_bgm_karaoke_stop": ([V], I32),
+        "singws_bgm_karaoke_seek": ([V, F32], I32),
+        "singws_bgm_karaoke_set_tempo": ([V, F32], I32),
+        "singws_bgm_karaoke_set_key": ([V, F32], I32),
+        "singws_bgm_karaoke_set_volume": ([V, F32], I32),
+        "singws_bgm_karaoke_set_norm": ([V, F32], I32),
+        "singws_bgm_karaoke_slide_volume": ([V, F32, U32], I32),
+        "singws_bgm_karaoke_times": ([V, ctypes.POINTER(F32), ctypes.POINTER(F32)], None),
+        "singws_bgm_karaoke_flags": ([V], U32),
+        "singws_bgm_karaoke_pending_frames": ([V], ctypes.c_uint64),
+        "singws_bgm_karaoke_volume": ([V], F32),
+        "singws_bgm_karaoke_set_eq": ([V, I32, ctypes.POINTER(F32)], I32),
+        "singws_bgm_karaoke_set_master_enabled": ([V, I32], None),
+        "singws_bgm_karaoke_set_master_params": ([V, ctypes.POINTER(ctypes.c_double), U32], I32),
     }
     for name, (args, res) in sig.items():
         fn = getattr(lib, name)

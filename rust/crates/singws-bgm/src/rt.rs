@@ -78,6 +78,16 @@ pub enum Command {
     PadPlay { slot: u8, start_frame: u64 },
     PadStop { slot: u8 },
     PadStopAll,
+    KaraokeLoad { deck: Box<dyn DeckSource>, norm: f32, paused: bool, volume: Option<f32> },
+    KaraokePlay,
+    KaraokePause,
+    KaraokeStop,
+    KaraokeSeek(f32),
+    KaraokeTempo(f32),
+    KaraokeKey(f32),
+    KaraokeVolume(f32),
+    KaraokeSlideVolume { volume: f32, ms: u32 },
+    KaraokeNorm(f32),
 }
 
 pub const FLAG_PLAYING: u32 = 1;
@@ -87,6 +97,13 @@ pub const FLAG_XFADE_ACTIVE: u32 = 8;
 pub const FLAG_XFADE_FINISHED: u32 = 16;
 pub const FLAG_HAS_PRIMARY: u32 = 32;
 pub const FLAG_HAS_SECONDARY: u32 = 64;
+
+/// Karaoke voice flags (`Snapshot::karaoke_flags`).
+pub const KFLAG_LOADED: u32 = 1;
+pub const KFLAG_PLAYING: u32 = 2;
+pub const KFLAG_PAUSED: u32 = 4;
+/// The song played to its end (tail drained).
+pub const KFLAG_FINISHED: u32 = 8;
 
 /// What the audio thread publishes after each block (all relaxed atomics; a reader may see values from two adjacent blocks).
 pub struct Snapshot {
@@ -105,6 +122,13 @@ pub struct Snapshot {
     /// Per pad slot: instances sounding, and the position (frames) of the newest one.
     pub pad_playing: Box<[AtomicU32]>,
     pub pad_position: Box<[AtomicU64]>,
+    /// Karaoke voice: audible SONG position and duration (seconds, f32 bits), `KFLAG_*`, volume, frames of silence while the source was
+    /// not ready, and the source-underrun count.
+    pub karaoke_position_s: AtomicU32,
+    pub karaoke_duration_s: AtomicU32,
+    pub karaoke_flags: AtomicU32,
+    pub karaoke_volume: AtomicU32,
+    pub karaoke_pending_frames: AtomicU64,
 }
 
 impl Snapshot {
@@ -122,6 +146,11 @@ impl Snapshot {
             blocks: AtomicU64::new(0),
             pad_playing: (0..MAX_PAD_SLOTS).map(|_| AtomicU32::new(0)).collect(),
             pad_position: (0..MAX_PAD_SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            karaoke_position_s: AtomicU32::new(0),
+            karaoke_duration_s: AtomicU32::new(0),
+            karaoke_flags: AtomicU32::new(0),
+            karaoke_volume: AtomicU32::new(1.0f32.to_bits()),
+            karaoke_pending_frames: AtomicU64::new(0),
         }
     }
     fn f(&self, a: &AtomicU32) -> f32 {
@@ -251,6 +280,22 @@ impl RtEngine {
             }
             Command::PadStop { slot } => e.pad_stop(slot as usize),
             Command::PadStopAll => e.pad_stop_all(),
+            Command::KaraokeLoad { deck, norm, paused, volume } => e.karaoke_load(deck, norm, paused, volume),
+            Command::KaraokePlay => {
+                e.karaoke_mut().play();
+            }
+            Command::KaraokePause => {
+                e.karaoke_mut().pause();
+            }
+            Command::KaraokeStop => e.karaoke_stop(),
+            Command::KaraokeSeek(s) => {
+                e.karaoke_mut().seek_seconds(s);
+            }
+            Command::KaraokeTempo(pct) => e.karaoke_mut().set_tempo_percent(pct as f64),
+            Command::KaraokeKey(semis) => e.karaoke_mut().set_semitones(semis as f64),
+            Command::KaraokeVolume(v) => e.karaoke_mut().set_volume(v),
+            Command::KaraokeSlideVolume { volume, ms } => e.karaoke_mut().slide_volume(volume, ms),
+            Command::KaraokeNorm(f) => e.karaoke_mut().set_norm(f),
         }
         self.done += 1;
     }
@@ -312,6 +357,25 @@ impl RtEngine {
             s.pad_playing[slot].store(e.pad_playing(slot), Ordering::Relaxed);
             s.pad_position[slot].store(e.pad_position_frames(slot), Ordering::Relaxed);
         }
+        let k = e.karaoke();
+        s.karaoke_position_s.store(k.audible_position_s().to_bits(), Ordering::Relaxed);
+        s.karaoke_duration_s.store(k.duration_s().to_bits(), Ordering::Relaxed);
+        s.karaoke_volume.store(k.volume_now().to_bits(), Ordering::Relaxed);
+        s.karaoke_pending_frames.store(k.pending_frames, Ordering::Relaxed);
+        let mut kf = 0;
+        if k.has_song() {
+            kf |= KFLAG_LOADED;
+        }
+        if k.is_playing() {
+            kf |= KFLAG_PLAYING;
+        }
+        if k.is_paused() {
+            kf |= KFLAG_PAUSED;
+        }
+        if k.is_finished() {
+            kf |= KFLAG_FINISHED;
+        }
+        s.karaoke_flags.store(kf, Ordering::Relaxed);
         s.blocks.fetch_add(1, Ordering::Relaxed);
         s.commands_done.store(self.done, Ordering::Release);
     }

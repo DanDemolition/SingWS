@@ -21,6 +21,9 @@ pub struct BgmSystem {
     pub control: Arc<RtControl>,
     pub eq: EqHandle,
     pub master: MasterHandle,
+    /// The karaoke song's own EQ and master chain (separate from the music's).
+    pub karaoke_eq: EqHandle,
+    pub karaoke_master: MasterHandle,
     output: Option<AudioOutput>,
     /// Headless mode (tests, tools): no sound card; the caller pulls audio with [`BgmSystem::render`].
     headless: Option<Mutex<RtEngine>>,
@@ -41,12 +44,15 @@ impl BgmSystem {
         let (eq_fx, eq) = GraphicEq::new(rate);
         let (master_fx, master) = MasterEffect::new(rate);
         engine.set_effects(vec![Box::new(eq_fx) as Box<dyn Effect>, Box::new(master_fx) as Box<dyn Effect>]);
+        let kh = engine.karaoke_handles();
         let (rt, control) = new_pair(engine);
         let output = AudioOutput::start(n, rt)?;
         Ok(Self {
             control,
             eq,
             master,
+            karaoke_eq: kh.eq,
+            karaoke_master: kh.master,
             output: Some(output),
             headless: None,
             headless_stats: Arc::new(Stats::default()),
@@ -64,11 +70,14 @@ impl BgmSystem {
         let (eq_fx, eq) = GraphicEq::new(rate);
         let (master_fx, master) = MasterEffect::new(rate);
         engine.set_effects(vec![Box::new(eq_fx) as Box<dyn Effect>, Box::new(master_fx) as Box<dyn Effect>]);
+        let kh = engine.karaoke_handles();
         let (rt, control) = new_pair(engine);
         Self {
             control,
             eq,
             master,
+            karaoke_eq: kh.eq,
+            karaoke_master: kh.master,
             output: None,
             headless: Some(Mutex::new(rt)),
             headless_stats: Arc::new(Stats::default()),
