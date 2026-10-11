@@ -94,7 +94,7 @@ struct VolumeSlide {
 }
 
 impl VolumeSlide {
-    const FLOOR: f32 = 1.0e-4; // -80 dB: the start of a slide from silence
+    const FLOOR: f32 = 1.0e-3; // -60 dB: where a slide from silence starts. MEASURED against real BASS_SLIDE_LOG (2026-10-11): -60 dB, not -80
     fn new(gain: f32) -> Self {
         Self { gain, target: gain, ratio: 1.0, frames_left: 0 }
     }

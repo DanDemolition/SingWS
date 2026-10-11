@@ -5,6 +5,7 @@ Rust library has not been built (`cd rust && cargo build --release -p singws-bgm
 import importlib.util
 import math
 import os
+import time
 import sys
 import tempfile
 import unittest
@@ -244,6 +245,26 @@ class AdapterTests(unittest.TestCase):
         e.close()
         self.assertFalse(e.play())
         self.assertEqual(e.meter_level(), 0.0)
+
+    def test_fade_in_from_silence_follows_the_curve_measured_on_real_bass(self):
+        """BASS_SLIDE_LOG starts a slide from silence at -60 dB (measured 2026-10-11) and is linear in dB. The engine once started at -80 dB,
+        which pushed the audible part of a 3 s fade-in about a second later (the operator heard silence instead of an overlap)."""
+        e = self.e
+        e.load(self.f("c.wav", seconds=6.0), paused=True, volume=1.0)
+        e.set_master_volume(0.0)
+        e.play()
+        e.slide_master_volume(0.75, 3000)
+        blocks = []
+        for _ in range(120):                      # 144,000 frames = 3 s, paced so the streaming decoder keeps up
+            blocks.append(e.render(1200))
+            time.sleep(0.002)
+        r = [rms(b) for b in blocks]
+        full = r[-1]
+        db = lambda i: 20 * math.log10(max(r[i], 1e-9) / full)
+        self.assertLess(db(2), -50.0)             # 0.05 s in: still near the -60 dB start
+        self.assertAlmostEqual(db(59), -28.7, delta=2.0)   # half way = half the dB span (57.5 dB)
+        self.assertGreater(db(100), -10.0)        # last half second is clearly audible
+        self.assertGreater(db(80), -22.0)         # 2 s in: with the old -80 dB floor this was about -33 dB
 
     def test_a_bad_file_raises_the_unavailable_error(self):
         with self.assertRaises(rbe.RustBgmUnavailable):

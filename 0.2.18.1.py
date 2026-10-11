@@ -60869,6 +60869,10 @@ class DetachedPainterTicker(QFrame):
         if host_window is None or ticker_window is None:
             raise RuntimeError("Ticker/output native window unavailable")
         ticker_window.setLevel_(host_window.level())
+        # macOS hides Tool windows whenever the app is not frontmost (NSWindow.hidesOnDeactivate, on by default), so opening
+        # another app's window made the audience ticker vanish (reported 2026-10-11; reproduced with a probe window).
+        # WA_MacAlwaysShowToolWindow is no use here: it also drops the window to level 0.
+        ticker_window.setHidesOnDeactivate_(False)
         ticker_window.setIgnoresMouseEvents_(True)
         ticker_window.orderWindow_relativeTo_(NSWindowAbove, host_window.windowNumber())
 

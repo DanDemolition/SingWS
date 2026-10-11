@@ -222,6 +222,12 @@ class RecentRegressionTests(unittest.TestCase):
         self.assertIn("WindowDoesNotAcceptFocus", ticker_init)
         self.assertIn("setTransientParent", ticker_sync)
 
+    def test_detached_ticker_stays_up_when_another_app_is_active(self):
+        """NSWindow.hidesOnDeactivate is on for a Qt Tool window, so the audience ticker vanished whenever another app's window was in
+        front (2026-10-11). The ordering code must turn it off (reproduced with a probe window; not reachable headlessly)."""
+        order = inspect.getsource(self.singws.DetachedPainterTicker._order_surface_above_output)
+        self.assertIn("setHidesOnDeactivate_(False)", order)
+
     def test_ticker_effects_checkbox_is_live_after_switching_surfaces_on(self):
         """A pending on-at-next-launch state must not grey the control out.
 
