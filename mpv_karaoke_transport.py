@@ -282,7 +282,12 @@ class MpvKaraokeTransport(QObject):
             self._voice_norm = 10.0 ** (gain_db / 20.0)
             voice.set_norm_gain(self._voice_norm)
             voice.set_eq_gains(bool(spec.get("eq_enabled")), spec.get("eq_gains_db") or [])
-            voice.set_master_params(bool(spec.get("master_enabled")), spec.get("master_params"))
+            params = spec.get("master_params")
+            if params:
+                # the host passes the stage settings it derived; the chain needs every parameter, so fill the rest from the defaults
+                from singws_master_audio import DEFAULT_PARAMS
+                params = {**DEFAULT_PARAMS, **dict(params)}
+            voice.set_master_params(bool(spec.get("master_enabled")), params)
         except Exception as exc:
             try:
                 self._voice_log(f"[KARAOKE-RUST] audio chain not applied: {exc}")

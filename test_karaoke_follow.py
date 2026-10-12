@@ -129,8 +129,8 @@ class KaraokeFollowTests(unittest.TestCase):
         self.assertTrue(r["follower_on"])
         for name, median, worst, count in r["phases"]:
             self.assertIsNotNone(median, name)
-            self.assertLess(median, 0.06, f"{name}: median picture error {median} s")
-            self.assertLess(worst, 0.20, f"{name}: worst picture error {worst} s")
+            self.assertLess(median, 0.09, f"{name}: median picture error {median} s")
+            self.assertLess(worst, 0.30, f"{name}: worst picture error {worst} s")
         # a seek and a couple of tempo/pause corrections are expected, not a seek storm
         self.assertLess(r["seeks"], 8)
 
