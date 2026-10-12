@@ -9,11 +9,29 @@
 //! held inside the stretcher, so it stays correct while the tempo changes. Nothing here allocates on the audio thread: scratch buffers are
 //! sized at construction (tempo is limited to 0.25x..4x so the source block is bounded).
 
+use std::time::{Duration, Instant};
+
 use singws_stretch::Stretcher;
 
 use crate::engine::{DeckSource, Effect, MAX_BLOCK_FRAMES, VolumeSlide};
 use crate::eq::{EqHandle, GraphicEq};
 use crate::fx::{MasterEffect, MasterHandle};
+
+/// The master's clock as last reported by the control side.
+#[derive(Clone, Copy)]
+pub struct SlaveClock {
+    /// Song seconds the picture is at, `rate` song seconds per wall second (0 = paused), read at `at`.
+    pub pos: f64,
+    pub rate: f64,
+    pub at: Instant,
+}
+
+/// Largest tempo trim the voice applies to stay on the clock (0.8%: inaudible, no pitch change).
+const MAX_TRIM: f64 = 0.008;
+/// An error beyond this (seconds of song time) is not trimmed away but resynchronised with a seek.
+const RESYNC_ERR: f64 = 0.6;
+/// Time over which a trim removes an error (seconds).
+const TRIM_WINDOW_S: f64 = 4.0;
 
 pub const MIN_TEMPO: f64 = 0.25;
 pub const MAX_TEMPO: f64 = 4.0;
@@ -35,8 +53,10 @@ pub struct KaraokeVoice {
     carry: f64,
     /// Source frames consumed since the start of the song (absolute: a seek sets it to the target).
     in_pos: u64,
-    /// Source frames currently held inside the stretcher (latency bookkeeping for the audible position).
-    held: f64,
+    /// Output frames this voice has produced since the last start/seek (the audible position is zero until the stretcher has warmed up).
+    produced: u64,
+    /// Source frame the current run started from (a seek or the start): the audible position never goes before it.
+    seek_origin: u64,
     len_frames: Option<u64>,
     playing: bool,
     paused: bool,
@@ -51,6 +71,14 @@ pub struct KaraokeVoice {
     in_buf: Vec<f32>,
     out_buf: Vec<f32>,
     effects: Vec<Box<dyn Effect>>,
+    /// Slaved mode: the picture (mpv) is the master. `(song position, rate, when read, output offset)`; the voice trims its own tempo by a
+    /// tiny amount to stay on it (inaudible) and resynchronises with a seek only when it is badly off.
+    slave: Option<SlaveClock>,
+    /// Current tempo trim applied on top of the user's tempo (fraction, e.g. +0.004 = 0.4% faster).
+    trim: f64,
+    /// Output latency of the sound card in seconds: the mix runs this far AHEAD of what is heard, so the voice aims that far behind.
+    latency_s: f64,
+    last_resync: Option<Instant>,
     /// Frames of silence produced while the source could not deliver yet (a seek in progress).
     pub pending_frames: u64,
     pub underrun_frames: u64,
@@ -69,7 +97,8 @@ impl KaraokeVoice {
             speed: 1.0,
             carry: 0.0,
             in_pos: 0,
-            held: 0.0,
+            produced: 0,
+            seek_origin: 0,
             len_frames: None,
             playing: false,
             paused: false,
@@ -82,6 +111,10 @@ impl KaraokeVoice {
             in_buf: vec![0.0; max_in * 2],
             out_buf: vec![0.0; MAX_BLOCK_FRAMES * 2],
             effects: vec![Box::new(eq) as Box<dyn Effect>, Box::new(master) as Box<dyn Effect>],
+            slave: None,
+            trim: 0.0,
+            latency_s: 0.0,
+            last_resync: None,
             pending_frames: 0,
             underrun_frames: 0,
         };
@@ -91,7 +124,8 @@ impl KaraokeVoice {
     fn reset_stream(&mut self, at_frame: u64) {
         self.stretch.reset();
         self.carry = 0.0;
-        self.held = 0.0;
+        self.produced = 0;
+        self.seek_origin = at_frame;
         self.in_pos = at_frame;
         self.eos = false;
         self.finished = false;
@@ -120,7 +154,8 @@ impl KaraokeVoice {
         self.finished = false;
         self.len_frames = None;
         self.in_pos = 0;
-        self.held = 0.0;
+        self.produced = 0;
+        self.seek_origin = 0;
         self.src.take()
     }
 
@@ -170,6 +205,28 @@ impl KaraokeVoice {
         self.stretch.set_semitones(semitones.clamp(-24.0, 24.0));
     }
 
+    /// Slaved mode on (`Some`) or off. The control side calls this every few tens of milliseconds with the picture's position; between
+    /// calls the voice extrapolates, so a stalled GUI thread does not matter.
+    pub fn set_slave_clock(&mut self, clock: Option<(f64, f64)>) {
+        self.set_slave_clock_at(clock, Instant::now());
+    }
+
+    pub fn set_slave_clock_at(&mut self, clock: Option<(f64, f64)>, at: Instant) {
+        self.slave = clock.map(|(pos, rate)| SlaveClock { pos, rate, at });
+        if self.slave.is_none() {
+            self.trim = 0.0;
+            self.stretch.set_speed(self.speed);
+        }
+    }
+
+    pub fn set_output_latency_seconds(&mut self, s: f64) {
+        self.latency_s = s.clamp(0.0, 1.0);
+    }
+
+    pub fn is_slaved(&self) -> bool {
+        self.slave.is_some()
+    }
+
     pub fn set_volume(&mut self, v: f32) {
         self.volume.set(crate::engine::clamp_volume(v));
     }
@@ -203,9 +260,12 @@ impl KaraokeVoice {
         self.speed
     }
 
-    /// Song position in seconds as heard (source position minus what the stretcher still holds).
+    /// Song position in seconds as heard: the source position minus the audio still inside the stretcher. That is its input latency
+    /// plus its output latency in SONG time (`speed` times as long as in output time), so it stays right while the tempo changes.
     pub fn audible_position_s(&self) -> f32 {
-        (((self.in_pos as f64 - self.held).max(0.0)) / self.rate as f64) as f32
+        let inside = self.stretch.input_latency_frames() as f64 + self.speed * self.stretch.output_latency_frames() as f64;
+        let audible = (self.in_pos as f64 - inside).max(self.seek_origin as f64);
+        if self.produced == 0 { self.seek_origin as f32 / self.rate as f32 } else { (audible / self.rate as f64) as f32 }
     }
 
     pub fn duration_s(&self) -> f32 {
@@ -214,8 +274,40 @@ impl KaraokeVoice {
 
     /// Adds this voice's output for the block to `out` (interleaved stereo, at most MAX_BLOCK_FRAMES frames). No allocation.
     pub fn mix_into(&mut self, out: &mut [f32]) {
+        self.mix_into_at(out, Instant::now());
+    }
+
+    /// Slaved mode: compare where this voice is with where the master says the song should be NOW, and nudge the tempo.
+    fn follow_master(&mut self, now: Instant) {
+        let Some(c) = self.slave else { return };
+        if c.rate <= 0.0 {
+            self.trim = 0.0; // the master is paused; the control side pauses this voice too
+            return;
+        }
+        let expected = c.pos + now.saturating_duration_since(c.at).as_secs_f64() * c.rate;
+        // the mix runs ahead of the speakers by the device latency (in song time: latency * rate), so aim that far ahead
+        let aim = expected + self.latency_s * c.rate;
+        let err = self.audible_position_s() as f64 - aim; // + : this voice is ahead of the picture
+        if err.abs() > RESYNC_ERR {
+            let allowed = self.last_resync.map(|t| now.saturating_duration_since(t) > Duration::from_millis(800)).unwrap_or(true);
+            if allowed {
+                self.last_resync = Some(now);
+                self.seek_seconds(aim.max(0.0) as f32);
+                self.trim = 0.0;
+            }
+            return;
+        }
+        let want = (-err / TRIM_WINDOW_S).clamp(-MAX_TRIM, MAX_TRIM);
+        self.trim += (want - self.trim) * 0.05; // smooth: no audible wobble
+    }
+
+    pub fn mix_into_at(&mut self, out: &mut [f32], now: Instant) {
         if !self.playing || self.finished {
             return;
+        }
+        if self.slave.is_some() {
+            self.follow_master(now);
+            self.stretch.set_speed((self.speed * (1.0 + self.trim)).clamp(MIN_TEMPO, MAX_TEMPO));
         }
         let Some(src) = self.src.as_mut() else { return };
         let frames = out.len() / 2;
@@ -232,7 +324,8 @@ impl KaraokeVoice {
             self.stretch.flush_into(o);
             self.finished = true;
         } else {
-            let want = frames as f64 * self.speed + self.carry;
+            let eff = if self.slave.is_some() { (self.speed * (1.0 + self.trim)).clamp(MIN_TEMPO, MAX_TEMPO) } else { self.speed };
+            let want = frames as f64 * eff + self.carry;
             let n = (want.floor() as usize).min(self.in_buf.len() / 2);
             self.carry = want - n as f64;
             let ib = &mut self.in_buf[..n * 2];
@@ -243,10 +336,7 @@ impl KaraokeVoice {
             }
             self.stretch.process_into(ib, o);
             self.in_pos += got as u64;
-            self.held += n as f64 - frames as f64 * self.speed;
-            if self.held < 0.0 {
-                self.held = 0.0;
-            }
+            self.produced += frames as u64;
         }
         // volume (slide), normalization, and the start/seek fade-in
         let norm = self.norm;
@@ -403,6 +493,144 @@ mod tests {
         assert!(out.iter().any(|s| s.abs() > 0.1));
         let pos = v.audible_position_s();
         assert!((pos - 41.0).abs() < 0.2, "after the seek: {pos}");
+    }
+
+
+    /// A burst of 1 kHz tone starting at song time `at` seconds, silence elsewhere: the onset marks exactly which song instant is sounding.
+    struct Burst {
+        at: u64,
+        pos: u64,
+        total: u64,
+    }
+    impl DeckSource for Burst {
+        fn read(&mut self, out: &mut [f32]) -> usize {
+            let n = ((out.len() / 2) as u64).min(self.total - self.pos.min(self.total)) as usize;
+            for i in 0..n {
+                let p = self.pos + i as u64;
+                let v = if p >= self.at && p < self.at + RATE as u64 / 2 {
+                    (0.5 * (std::f64::consts::TAU * 1000.0 * (p - self.at) as f64 / RATE as f64).sin()) as f32
+                } else {
+                    0.0
+                };
+                out[2 * i] = v;
+                out[2 * i + 1] = v;
+            }
+            self.pos += n as u64;
+            n
+        }
+        fn seek(&mut self, frame: u64) -> bool {
+            self.pos = frame.min(self.total);
+            true
+        }
+        fn len_frames(&self) -> Option<u64> {
+            Some(self.total)
+        }
+    }
+
+    #[test]
+    fn the_reported_clock_is_the_song_instant_that_is_sounding() {
+        // At the moment the burst's onset leaves the voice, the reported song position must equal the burst's start (2.0 s) plus the part of
+        // the block that already played, at any tempo. (An earlier version reported the SOURCE position, ~100 ms ahead of what was heard.)
+        for (tempo, tol) in [(100.0, 0.03), (50.0, 0.04), (150.0, 0.05), (80.0, 0.04)] {
+            let (mut v, _h) = KaraokeVoice::new(RATE);
+            v.set_tempo_percent(tempo);
+            let at = 4 * RATE as u64;
+            v.load(Box::new(Burst { at, pos: 0, total: 20 * RATE as u64 }), 1.0, false, Some(1.0));
+            let block = 128usize;
+            let mut found = None;
+            for _ in 0..(RATE as usize * 12 / block) {
+                let mut b = vec![0.0f32; block * 2];
+                v.mix_into(&mut b);
+                if let Some(i) = (0..block).find(|&i| b[2 * i].abs() > 0.05) {
+                    // reported position is as of the END of this block; the onset was `block - i` output frames earlier
+                    let pos_end = v.audible_position_s() as f64;
+                    let onset_song_time = pos_end - (block - i) as f64 / RATE as f64 * (tempo / 100.0);
+                    found = Some(onset_song_time);
+                    break;
+                }
+            }
+            let onset = found.expect("the burst never sounded");
+            eprintln!("tempo {tempo}%: burst starts at 4.000 s, clock said {onset:.4} s ({:+.1} ms)", (onset - 4.0) * 1000.0);
+            assert!((onset - 4.0).abs() < tol, "tempo {tempo}%: the burst that starts at 4.000 s sounded when the clock said {onset:.3} s");
+        }
+    }
+
+
+    /// Drives a slaved voice with a synthetic clock: 10 ms blocks, `clock_at(t)` is where the master says the song is at time t.
+    fn run_slaved(v: &mut KaraokeVoice, seconds: f64, base: Instant, start_t: f64, clock_pos: impl Fn(f64) -> f64, rate: f64) -> f64 {
+        let blocks = (seconds * 100.0) as usize;
+        for i in 0..blocks {
+            let t = start_t + i as f64 * 0.01;
+            let now = base + Duration::from_secs_f64(t);
+            if i % 3 == 0 {
+                v.set_slave_clock_at(Some((clock_pos(t), rate)), now); // the control side reports every ~30 ms
+            }
+            let mut b = vec![0.0f32; 480 * 2];
+            v.mix_into_at(&mut b, now);
+        }
+        start_t + blocks as f64 * 0.01
+    }
+
+    #[test]
+    fn a_slaved_voice_closes_a_small_offset_with_an_inaudible_tempo_trim() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.load(Box::new(Song::new(440.0, 120.0)), 1.0, false, Some(1.0));
+        // the master is 120 ms BEHIND the voice from the start (the voice began early)
+        let _ = run_slaved(&mut v, 1.0, base, 0.0, |t| t - 0.12, 1.0);
+        let t = run_slaved(&mut v, 25.0, base, 1.0, |t| t - 0.12, 1.0);
+        let err = v.audible_position_s() as f64 - (t - 0.12);
+        assert!(err.abs() < 0.03, "still {err:.3} s off after 25 s");
+        assert!(v.trim.abs() <= MAX_TRIM + 1e-9, "trim {} exceeds the inaudible limit", v.trim);
+        assert!(v.last_resync.is_none(), "a small offset must not cause a seek");
+    }
+
+    #[test]
+    fn a_slaved_voice_resynchronises_after_the_master_jumps() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.load(Box::new(Song::new(440.0, 300.0)), 1.0, false, Some(1.0));
+        let t = run_slaved(&mut v, 3.0, base, 0.0, |t| t, 1.0);
+        // the picture is sought to 100 s: the master's clock jumps
+        let t = run_slaved(&mut v, 2.0, base, t, |x| 100.0 + (x - t), 1.0);
+        let err = v.audible_position_s() as f64 - (100.0 + 2.0);
+        assert!(err.abs() < 0.3, "after the jump the voice is {err:.3} s off");
+        assert!(v.last_resync.is_some());
+    }
+
+    #[test]
+    fn a_paused_master_does_not_move_the_voice_tempo() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.load(Box::new(Song::new(440.0, 60.0)), 1.0, false, Some(1.0));
+        run_slaved(&mut v, 2.0, base, 0.0, |_| 5.0, 0.0);
+        assert_eq!(v.trim, 0.0);
+    }
+
+    #[test]
+    fn a_slaved_voice_aims_ahead_by_the_device_latency() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.set_output_latency_seconds(0.080);
+        v.load(Box::new(Song::new(440.0, 120.0)), 1.0, false, Some(1.0));
+        let t = run_slaved(&mut v, 30.0, base, 0.0, |t| t, 1.0);
+        // the mix position must lead the master by the latency so that what is HEARD matches the picture
+        let lead = v.audible_position_s() as f64 - t;
+        assert!((lead - 0.080).abs() < 0.03, "the voice leads the master by {lead:.3} s, wanted 0.080");
+    }
+
+    #[test]
+    fn slaving_follows_a_tempo_change_of_the_master() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.load(Box::new(Song::new(440.0, 300.0)), 1.0, false, Some(1.0));
+        let t = run_slaved(&mut v, 5.0, base, 0.0, |t| t, 1.0);
+        // both go to 80%: the control side sets the voice's own tempo and reports the new rate
+        v.set_tempo_percent(80.0);
+        let p0 = t;
+        let t2 = run_slaved(&mut v, 20.0, base, t, |x| p0 + (x - t) * 0.8, 0.8);
+        let err = v.audible_position_s() as f64 - (p0 + (t2 - t) * 0.8);
+        assert!(err.abs() < 0.12, "after a tempo change the voice is {err:.3} s off");
     }
 
     #[test]

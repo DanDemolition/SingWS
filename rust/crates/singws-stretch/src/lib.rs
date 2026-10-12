@@ -90,6 +90,16 @@ impl Stretcher {
         unsafe { singws_stretch_latency(self.h).max(0) as usize }
     }
 
+    /// Frames of INPUT the stretcher must consume before its first output sample (independent of the tempo).
+    pub fn input_latency_frames(&self) -> usize {
+        unsafe { (singws_stretch_latency(self.h) - singws_stretch_output_latency(self.h)).max(0) as usize }
+    }
+
+    /// Frames of OUTPUT between a sample entering the processing window and leaving it. In SONG time this is `speed` times as long.
+    pub fn output_latency_frames(&self) -> usize {
+        unsafe { singws_stretch_output_latency(self.h).max(0) as usize }
+    }
+
     pub fn reset(&mut self) {
         unsafe { singws_stretch_reset(self.h) };
         self.carry = 0.0;

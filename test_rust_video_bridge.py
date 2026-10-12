@@ -92,10 +92,12 @@ class RustVideoBridgeTests(unittest.TestCase):
     def test_exports_exactly_the_objective_c_abi(self):
         out = subprocess.run(["nm", "-gU", str(RUST_DYLIB)], capture_output=True, text=True).stdout
         have = {w[len("_singws_bridge_"):] for w in out.split() if w.startswith("_singws_bridge_")}
-        self.assertEqual(have, set(EXPECTED_EXPORTS))
+        # Rust-only additions (the Objective-C bridge never gets them): follower mode for karaoke audio played by the Rust engine
+        rust_only = {"set_follow", "follow_clock"}
+        self.assertEqual(have, set(EXPECTED_EXPORTS) | rust_only)
         if OBJC_DYLIB.exists():
             objc = subprocess.run(["nm", "-gU", str(OBJC_DYLIB)], capture_output=True, text=True).stdout
-            self.assertEqual({w[len("_singws_bridge_"):] for w in objc.split() if w.startswith("_singws_bridge_")}, have)
+            self.assertEqual({w[len("_singws_bridge_"):] for w in objc.split() if w.startswith("_singws_bridge_")}, have - rust_only)
 
     def test_silence_scan_finds_lead_and_trail(self):
         r = run_scenario("R = {'scan': scan(sys.argv[2])}", self.clip)["scan"]

@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
+use std::time::Instant;
 use std::time::Duration;
 
 
@@ -25,6 +26,10 @@ struct State {
     serial: u64,
     /// The DSP half of the `af` chain that the live stretch filter was built with; Some = the labelled stretch filter is in the chain.
     stretch_dsp: Option<String>,
+    /// Follower mode (karaoke audio plays in the Rust audio engine): mpv shows the picture only and chases `fclock`.
+    follow: bool,
+    /// The audio clock as last reported: (song seconds, song seconds per wall second (0 = paused), when it was read).
+    fclock: Option<(f64, f64, std::time::Instant)>,
 }
 
 
@@ -94,8 +99,8 @@ impl Inner {
     /// Callers are on the control queue, which owns `dsp_chain` / `semitones`.
     fn apply_audio_filters(&self) {
         let Some(h) = self.handle() else { return };
-        if self.flags.loading.load(Ordering::SeqCst) {
-            return;
+        if self.flags.loading.load(Ordering::SeqCst) || self.state.lock().unwrap().follow {
+            return; // follower mode has no audio here
         }
         let (mut chain, semitones, tempo, dsp_len, live_dsp) = {
             let s = self.state.lock().unwrap();
@@ -244,6 +249,8 @@ impl Inner {
         let _ = self.mpv.set(h);
         let me = Arc::clone(self);
         events.push(std::thread::Builder::new().name("singws-video-events".into()).spawn(move || me.event_loop()).ok()?);
+        let me = Arc::clone(self);
+        events.push(std::thread::Builder::new().name("singws-video-follower".into()).spawn(move || me.follower_loop()).ok()?);
         Some(h)
     }
 
@@ -283,9 +290,12 @@ impl Inner {
         log_err("demuxer format", self.api.set_string(h, "demuxer-lavf-format", &main_format));
         // Ordinary MP4 karaoke is deliberately stretched to the 16:9 shared texture (operator decision); CDG keeps its aspect.
         log_err("video aspect override", self.api.set_string(h, "video-aspect-override", if cdg { "no" } else { "16:9" }));
+        let follow = self.state.lock().unwrap().follow;
+        // Follower mode: the picture only (the song's audio plays in the Rust engine). `aid` persists across files, so it is set every load.
+        log_err("audio track", self.api.set_string(h, "aid", if follow { "no" } else { "auto" }));
         let serial = {
             let mut s = self.state.lock().unwrap();
-            s.pending_audio = audio.filter(|a| !a.is_empty()).map(str::to_string);
+            s.pending_audio = if follow { None } else { audio.filter(|a| !a.is_empty()).map(str::to_string) };
             s.serial += 1;
             s.serial
         };
@@ -329,10 +339,17 @@ impl Inner {
                 }
             }
             me.measure_pillarbox("file_loaded");
-            let (tempo, semitones) = {
+            let (tempo, semitones, follow) = {
                 let s = me.state.lock().unwrap();
-                (s.tempo_percent, s.semitones)
+                (s.tempo_percent, s.semitones, s.follow)
             };
+            if follow {
+                // The follower thread owns pause and speed from here on (it unpauses once the audio clock says the song is playing).
+                me.api.set_double(h, "speed", 1.0);
+                me.api.set_flag(h, "pause", true);
+                bridge_log!("[bridge] media loaded (follower mode: picture only)");
+                return;
+            }
             if !me.flags.loading.load(Ordering::SeqCst) {
                 me.api.set_double(h, "speed", tempo as f64 / 100.0);
             }
@@ -349,6 +366,207 @@ impl Inner {
             let serial = me.state.lock().unwrap().serial;
             bridge_log!("[bridge] media loaded serial={} play={} tempo={} key={}", serial, should_play as i32, tempo, semitones);
         }));
+    }
+
+
+    /// Follower mode: keeps the picture on the audio clock. The clock is pushed in as (song position, rate, read time) and extrapolated,
+    /// so a stalled GUI thread cannot freeze or drift the picture.
+    ///
+    /// Two different jobs, because karaoke pictures are not a steady stream (a CDG only produces a new picture when the lyrics screen
+    /// changes, so `time-pos` stands still for seconds and then jumps):
+    /// * a JUMP in the pushed clock (a seek, the start of a song) seeks the picture at once, aiming slightly ahead by the measured seek time;
+    /// * drift is judged ONLY at the moments a new picture actually appears (then `time-pos` equals the playback clock), and corrected by
+    ///   nudging `speed` (invisible); an event error beyond `HARD_ERR` falls back to a seek.
+    fn follower_loop(self: Arc<Self>) {
+        const HARD_ERR: f64 = 0.45;
+        const JUMP: f64 = 0.25;
+        const SEEK_GAP: Duration = Duration::from_millis(250);
+        const TRIM_WINDOW: f64 = 0.6;
+        const MAX_TRIM: f64 = 0.12;
+        let mut last_seek = Instant::now() - Duration::from_secs(10);
+        let mut seek_started: Option<Instant> = None;
+        let mut lead = 0.15f64; // measured time a seek takes, so it can aim ahead
+        let mut last_speed = 0.0f64;
+        let mut trim_until: Option<Instant> = None;
+        let mut hold_until: Option<Instant> = None;
+        let mut hold_quiet_until = Instant::now();
+        let mut last_rate = 0.0f64;
+        let mut paused: Option<bool> = None;
+        let mut loaded_serial = 0u64;
+        let mut prev_clock: Option<(f64, f64, Instant)> = None;
+        let mut want_seek = false;
+        let mut skip_events = 0u32;
+        let mut last_vpos = f64::NAN;
+        let mut last_event = Instant::now() - Duration::from_secs(10);
+        let mut paused_target = f64::NAN;
+        let trace = std::env::var_os("SINGWS_FOLLOW_TRACE").is_some();
+        let mut last_trace = Instant::now();
+        while !self.flags.stopping.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(15));
+            let (follow, clock, offset, serial) = {
+                let s = self.state.lock().unwrap();
+                (s.follow, s.fclock, s.audio_delay, s.serial)
+            };
+            if !follow {
+                paused = None;
+                prev_clock = None;
+                continue;
+            }
+            let Some(h) = self.handle() else { continue };
+            if self.flags.loading.load(Ordering::SeqCst) {
+                continue;
+            }
+            if serial != loaded_serial {
+                loaded_serial = serial; // a new file: forget what we told the old one
+                paused = None;
+                last_speed = 0.0;
+                prev_clock = None;
+                want_seek = false;
+                skip_events = 0;
+                last_vpos = f64::NAN;
+                paused_target = f64::NAN;
+                seek_started = None;
+            }
+            let Some((pos, rate, stamp)) = clock else { continue };
+            let Ok(vpos) = self.api.get_double(h, "time-pos") else { continue };
+            let playing = rate > 0.0;
+            let target = (pos + stamp.elapsed().as_secs_f64() * rate + offset).max(0.0);
+
+            // A seek in flight: when it finishes, remember how long it took.
+            if let Some(t0) = seek_started {
+                if !self.api.get_flag(h, "seeking").unwrap_or(false) && t0.elapsed() > Duration::from_millis(30) {
+                    lead = (0.7 * lead + 0.3 * t0.elapsed().as_secs_f64()).clamp(0.05, 1.5);
+                    seek_started = None;
+                }
+            }
+
+            // 1. A jump in the clock the audio engine reported = the audio was moved: move the picture now.
+            match prev_clock {
+                Some((ppos, prate, pstamp)) if pstamp != stamp => {
+                    let expected = ppos + stamp.saturating_duration_since(pstamp).as_secs_f64() * prate;
+                    if (pos - expected).abs() > JUMP {
+                        want_seek = true;
+                    }
+                    prev_clock = Some((pos, rate, stamp));
+                }
+                None => {
+                    // first clock of this file: align only if the picture is clearly elsewhere (it starts at 0)
+                    if !playing {
+                        paused_target = target;
+                    }
+                    if (target - vpos).abs() > HARD_ERR {
+                        want_seek = true;
+                    }
+                    prev_clock = Some((pos, rate, stamp));
+                }
+                _ => {}
+            }
+            if want_seek && last_seek.elapsed() > SEEK_GAP {
+                let value = format!("{:.3}", if playing { target + lead } else { target });
+                self.api.command_async(h, 4, &["seek", &value, "absolute+exact"]);
+                last_seek = Instant::now();
+                seek_started = Some(last_seek);
+                want_seek = false;
+                skip_events = 1; // the picture that appears because of the seek is not a clock reading
+                paused_target = target;
+                bridge_log!("[follow] seek to {:.3}s (clock jump / start)", target);
+            }
+
+            // 2. Paused: the picture should show the paused position (a seek while paused moves the clock without any picture event).
+            if !playing && last_rate > 0.0 {
+                paused_target = target; // just paused: the picture is already where it should be
+            }
+            if !playing && !paused_target.is_nan() && (target - paused_target).abs() > 0.05 && last_seek.elapsed() > SEEK_GAP {
+                let value = format!("{:.3}", target);
+                self.api.command_async(h, 4, &["seek", &value, "absolute+exact"]);
+                last_seek = Instant::now();
+                seek_started = Some(last_seek);
+                skip_events = 1;
+                paused_target = target;
+            }
+
+            // 3. Playing: judge drift only when a new picture has just appeared.
+            let mut changed = !last_vpos.is_nan() && (vpos - last_vpos).abs() > 1e-4;
+            if last_vpos.is_nan() || changed {
+                last_vpos = vpos;
+            }
+            if changed {
+                // CDG redraws arrive as bursts of dozens of frames that mpv draws at the screen's rate, so frames after the first show up
+                // late (up to ~0.4 s) without the picture being out of sync: only the FIRST frame after a quiet gap is a clock reading.
+                // Continuous video (every frame an event) has no such gaps and is read frame by frame.
+                let quiet = last_event.elapsed() > Duration::from_millis(300);
+                last_event = Instant::now();
+                if self.flags.is_cdg.load(Ordering::SeqCst) && !quiet {
+                    changed = false;
+                }
+            }
+            let cdg = self.flags.is_cdg.load(Ordering::SeqCst);
+            // CDG: its pictures arrive only when the lyrics screen changes, and a seek shows the NEXT change, so a drift reading can never
+            // be turned into a seek there: speed trims only (they absorb the picture pipeline's start-up delay).
+            if playing && changed {
+                if skip_events > 0 {
+                    skip_events -= 1;
+                } else {
+                    let err = target - vpos;
+                    if trace {
+                        bridge_log!("[follow-trace] event vpos={:.3} target={:.3} err={:+.3} speed={:.3}", vpos, target, err, last_speed);
+                    }
+                    if std::env::var_os("SINGWS_FOLLOW_NO_TRIM").is_some() {
+                        // experiment switch: no drift correction at all
+                    } else if cdg {
+                        // CDG runs steadily at a constant offset from the clock once started (measured: +-15 ms over 40 s), and changing mpv's
+                        // speed on sparse pictures made that worse, so the only correction is a HOLD when the picture is ahead of the audio:
+                        // pause it for exactly the lead. A late picture is left alone (the CDG offset setting is for that).
+                        if err < -0.06 && Instant::now() >= hold_quiet_until && hold_until.is_none() {
+                            let lead_s = (-err).min(1.5);
+                            hold_until = Some(Instant::now() + Duration::from_secs_f64(lead_s / rate.max(0.1)));
+                            hold_quiet_until = Instant::now() + Duration::from_millis(2500);
+                            bridge_log!("[follow] holding the CDG picture {:.3}s (it was ahead of the audio)", lead_s);
+                        }
+                    } else if err.abs() > HARD_ERR && !cdg {
+                        want_seek = true;
+                    } else {
+                        let trim = (err / TRIM_WINDOW).clamp(-MAX_TRIM, MAX_TRIM);
+                        let wanted = (rate * (1.0 + trim)).max(0.05);
+                        if (wanted - last_speed).abs() > 0.003 {
+                            self.api.set_double(h, "speed", wanted);
+                            last_speed = wanted;
+                        }
+                        // Apply the correction only for as long as it takes to remove THIS error, then go back to the song's rate: with
+                        // sparse pictures (CDG) the next reading may be seconds away and a standing trim would overshoot.
+                        trim_until = if trim.abs() > 1e-3 { Some(Instant::now() + Duration::from_secs_f64((err.abs() / (rate * trim.abs())).min(8.0))) } else { None };
+                    }
+                }
+            }
+            if let Some(t) = trim_until {
+                if playing && Instant::now() >= t {
+                    self.api.set_double(h, "speed", rate);
+                    last_speed = rate;
+                    trim_until = None;
+                }
+            }
+            if playing && (last_speed == 0.0 || (rate - last_rate).abs() > 1e-6) {
+                trim_until = None;
+                // a tempo change (or the first play): the picture runs at the song's rate (drift trims then ride on top of it)
+                self.api.set_double(h, "speed", rate);
+                last_speed = rate;
+            }
+            last_rate = rate;
+            if trace && last_trace.elapsed() > Duration::from_millis(500) {
+                last_trace = Instant::now();
+                bridge_log!("[follow-trace] target={:.3} vpos={:.3} speed={:.3} rate={} lead={:.3}", target, vpos, last_speed, rate, lead);
+            }
+            if let Some(t) = hold_until {
+                if Instant::now() >= t {
+                    hold_until = None;
+                }
+            }
+            let want_paused = !playing || hold_until.is_some();
+            if paused != Some(want_paused) {
+                self.api.set_flag(h, "pause", want_paused);
+                paused = Some(want_paused);
+            }
+        }
     }
 
     fn event_loop(self: Arc<Self>) {
@@ -431,7 +649,7 @@ impl Player {
             flags,
             renderer: OnceLock::new(),
             play_when_loaded: AtomicBool::new(false),
-            state: Mutex::new(State { tempo_percent: 100, semitones: 0, dsp_chain: String::new(), audio_delay: 0.0, pending_audio: None, serial: 0, stretch_dsp: None }),
+            state: Mutex::new(State { tempo_percent: 100, semitones: 0, dsp_chain: String::new(), audio_delay: 0.0, pending_audio: None, serial: 0, stretch_dsp: None, follow: false, fclock: None }),
             tx: Mutex::new(None),
         });
         if let Some(r) = renderer {
@@ -484,10 +702,29 @@ impl Player {
         true
     }
 
+    /// Follower mode on/off (set BEFORE the load it applies to). On: the picture only, driven by [`set_follow_clock`].
+    pub fn set_follow(&self, on: bool) {
+        let mut s = self.inner.state.lock().unwrap();
+        s.follow = on;
+        if !on {
+            s.fclock = None;
+        }
+        drop(s);
+        bridge_log!("[bridge] follower mode {}", if on { "ON (picture follows the Rust audio clock)" } else { "off" });
+    }
+
+    /// The audio clock: `pos` song seconds as heard right now, `rate` song seconds per wall second (the tempo; 0 = paused).
+    pub fn set_follow_clock(&self, pos: f64, rate: f64) {
+        self.inner.state.lock().unwrap().fclock = Some((pos, rate.max(0.0), Instant::now()));
+    }
+
     pub fn set_paused(&self, paused: bool) {
         let inner = &self.inner;
         if inner.handle().is_none() {
             return;
+        }
+        if inner.state.lock().unwrap().follow {
+            return; // the audio clock decides whether the picture runs
         }
         inner.play_when_loaded.store(!paused, Ordering::SeqCst);
         if inner.flags.loading.load(Ordering::SeqCst) && !paused {
@@ -615,6 +852,10 @@ impl Player {
             return;
         }
         let wanted = percent.clamp(25, 400);
+        if self.inner.state.lock().unwrap().follow {
+            self.inner.state.lock().unwrap().tempo_percent = wanted; // the picture follows the clock's rate, not this
+            return;
+        }
         self.inner.on_control(Box::new(move |me: &Arc<Inner>| {
             let previous = {
                 let mut s = me.state.lock().unwrap();

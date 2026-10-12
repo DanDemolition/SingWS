@@ -167,6 +167,23 @@ pub extern "C" fn singws_bridge_set_dsp_chain(h: *mut c_void, chain: *const c_ch
         p.set_dsp_chain(&text(chain).unwrap_or_default())
     }
 }
+/// Follower mode (karaoke audio plays in the Rust audio engine): set BEFORE `singws_bridge_load`. 1 = picture only, driven by
+/// `singws_bridge_follow_clock`; 0 = mpv plays audio and video itself (the default).
+#[no_mangle]
+pub extern "C" fn singws_bridge_set_follow(h: *mut c_void, enabled: c_int) {
+    if let Some(p) = player(h) {
+        p.set_follow(enabled != 0)
+    }
+}
+
+/// The audio clock for follower mode: `pos` song seconds as heard now, `rate` song seconds per wall second (the tempo; 0 = paused).
+#[no_mangle]
+pub extern "C" fn singws_bridge_follow_clock(h: *mut c_void, pos: c_double, rate: c_double) {
+    if let Some(p) = player(h) {
+        p.set_follow_clock(pos, rate)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn singws_bridge_set_audio_delay(h: *mut c_void, seconds: c_double) {
     if let Some(p) = player(h) {
