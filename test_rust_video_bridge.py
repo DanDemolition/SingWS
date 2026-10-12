@@ -93,7 +93,7 @@ class RustVideoBridgeTests(unittest.TestCase):
         out = subprocess.run(["nm", "-gU", str(RUST_DYLIB)], capture_output=True, text=True).stdout
         have = {w[len("_singws_bridge_"):] for w in out.split() if w.startswith("_singws_bridge_")}
         # Rust-only additions (the Objective-C bridge never gets them): follower mode for karaoke audio played by the Rust engine
-        rust_only = {"set_follow", "follow_clock", "set_shadow_audio"}
+        rust_only = {"set_shadow_audio"}
         self.assertEqual(have, set(EXPECTED_EXPORTS) | rust_only)
         if OBJC_DYLIB.exists():
             objc = subprocess.run(["nm", "-gU", str(OBJC_DYLIB)], capture_output=True, text=True).stdout
