@@ -81,3 +81,6 @@ native/singws_dsp/*/*.dylib
 native/singws_analyze/*/singws-analyze
 native/singws_bgm/
 native/singws_video/
+
+# local copies of release assets
+SingWS-*-media-runtime-source.tar.xz

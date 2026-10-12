@@ -73,3 +73,12 @@ corresponding complete source archives with every distributed build. mpv and
 Rubber Band make the combined libmpv runtime GPL-covered; distribution must
 include the GPL notices and a compliant offer or copy of the complete
 corresponding source, including these patches and build instructions.
+
+## Signalsmith key/tempo filter
+
+Key (pitch) and tempo changes in karaoke playback are done by a new mpv audio filter, `signalsmith`, built on the MIT-licensed
+Signalsmith Stretch library. `patches/mpv-signalsmith-filter.patch` registers it in mpv's build and filter list;
+`signalsmith/af_signalsmith.c` is the filter (modelled on mpv's own `af_rubberband.c`) and `signalsmith/singws_stretch.cpp` is a small C
+wrapper around the vendored header. `build_runtime.sh` compiles the wrapper into a static library before mpv is built. The pitch comes only
+from the filter's `pitch-scale` and the tempo only from mpv's `speed`, so changing one never moves the other. Rubber Band is still built
+in (the previous behaviour, selectable with the `key_engine` setting) and will be removed in a later cleanup.
