@@ -17533,6 +17533,14 @@ Rectangle {
     property bool running: true
     property bool effectsEnabled: true
     property int spotlightSerial: 0
+    // Where the conveyor is. The animators run on the render thread and do not write strip.y back, so the position is tracked
+    // from the clock: phase0 pixels into the loop at startMs, moving at pxPerSec. A refresh restarts the animators at THAT
+    // position instead of the top, so the names keep moving where they were rather than vanishing and starting over.
+    property real scrollPhase0: 0
+    property real scrollStartMs: 0
+    property real scrollPxPerSec: 0
+    property real scrollCycle: 0
+    property bool suppressEntrance: false
     readonly property real cycleHeight: firstPass.height + cardGap
     readonly property bool overflow: rotationModel.count > 1 && firstPass.height > listHeight + 0.5
 
@@ -17601,14 +17609,18 @@ Rectangle {
         }
     }
 
-    function loadItems(payload) {
+    function loadItems(payload, keepPosition) {
         var parsed = []
         try { parsed = JSON.parse(payload || "[]") } catch (err) { parsed = [] }
+        // A refresh of a list that is already on screen must not replay every card's entrance.
+        suppressEntrance = !!keepPosition
         rotationModel.clear()
         for (var i = 0; i < parsed.length; ++i) rotationModel.append(parsed[i])
+        suppressEntrance = false
         itemsJson = payload || "[]"
         pendingJson = ""
-        Qt.callLater(restartScroll)
+        var keep = !!keepPosition
+        Qt.callLater(function() { restartScroll(keep) })
     }
 
     function submitItems(payload, forceNow) {
@@ -17624,7 +17636,9 @@ Rectangle {
             else if (delta < 0) updatePopupText = "ROTATION UPDATED"
             else updatePopupText = "LINEUP UPDATED"
             transitionJson = payload
-            queueTransition.restart()
+            loadItems(payload, true)
+            queuePopupAnimation.restart()
+            changeSweepAnimation.restart()
         }
     }
 
@@ -17637,14 +17651,40 @@ Rectangle {
         spotlightHaloAnimation.restart()
     }
 
-    function restartScroll() {
+    function currentPhase() {
+        if (scrollPxPerSec <= 0 || scrollCycle <= 0) return 0
+        var ph = scrollPhase0 + (Date.now() - scrollStartMs) / 1000 * scrollPxPerSec
+        return ph % scrollCycle
+    }
+
+    function restartScroll(keepPosition) {
+        var phase = (keepPosition === true) ? currentPhase() : 0
+        scrollFirst.stop()
         scrollAnim.stop()
-        strip.y = 0
-        if (!running || !overflow || cycleHeight <= 0) return
+        scrollPxPerSec = 0
+        if (!running || !overflow || cycleHeight <= 0) { strip.y = 0; return }
+        if (phase >= cycleHeight - 1) phase = 0
+        var speed = Math.max(1, speedPxPerSec)
+        scrollCycle = cycleHeight
+        scrollPxPerSec = speed
         scrollAnim.from = 0
         scrollAnim.to = -cycleHeight
-        scrollAnim.duration = Math.max(1200, Math.round((cycleHeight / Math.max(1, speedPxPerSec)) * 1000))
-        scrollAnim.start()
+        scrollAnim.duration = Math.max(1200, Math.round((cycleHeight / speed) * 1000))
+        if (phase < 1) {
+            strip.y = 0
+            scrollPhase0 = 0
+            scrollStartMs = Date.now()
+            scrollAnim.start()
+            return
+        }
+        // Finish the pass already under way from where it is, then run the normal endless loop.
+        strip.y = -phase
+        scrollPhase0 = phase
+        scrollStartMs = Date.now()
+        scrollFirst.from = -phase
+        scrollFirst.to = -cycleHeight
+        scrollFirst.duration = Math.max(50, Math.round(((cycleHeight - phase) / speed) * 1000))
+        scrollFirst.start()
     }
 
     Component {
@@ -17663,7 +17703,7 @@ Rectangle {
             transformOrigin: Item.Left
 
             Component.onCompleted: {
-                if (root.effectsEnabled) cardEntrance.start()
+                if (root.effectsEnabled && !root.suppressEntrance) cardEntrance.start()
                 else { opacity = 1; x = 0; scale = 1 }
             }
             SequentialAnimation {
@@ -17896,6 +17936,21 @@ Rectangle {
                 anchors.topMargin: root.cardGap
                 Repeater { model: rotationModel; delegate: cardComponent }
             }
+        }
+    }
+
+    YAnimator {
+        id: scrollFirst
+        target: strip
+        easing.type: Easing.Linear
+        // The remainder of the pass that was under way when the list was refreshed (see restartScroll). It ends exactly on the
+        // frame that looks identical to the top, so the hand-over to the endless loop below is invisible.
+        onFinished: {
+            if (!root.running || !root.overflow) return
+            root.scrollPhase0 = 0
+            root.scrollStartMs = Date.now()
+            strip.y = 0
+            scrollAnim.start()
         }
     }
 
@@ -18140,10 +18195,16 @@ Rectangle {
         }
     }
 
-    onWidthChanged: Qt.callLater(restartScroll)
-    onHeightChanged: Qt.callLater(restartScroll)
-    onRunningChanged: Qt.callLater(restartScroll)
-    onSpeedPxPerSecChanged: Qt.callLater(restartScroll)
+    onWidthChanged: Qt.callLater(function() { restartScroll(true) })
+    onHeightChanged: Qt.callLater(function() { restartScroll(true) })
+    onRunningChanged: Qt.callLater(function() { restartScroll(true) })
+    onEffectsEnabledChanged: Qt.callLater(function() { restartScroll(true) })
+    // The rows are sized after the first layout pass, so the list can start to overflow (or change length) AFTER the restart that
+    // followed the load had already decided there was nothing to scroll; without these the rail then sat still until some
+    // unrelated change happened to restart it.
+    onOverflowChanged: Qt.callLater(function() { restartScroll(true) })
+    onCycleHeightChanged: Qt.callLater(function() { restartScroll(true) })
+    onSpeedPxPerSecChanged: Qt.callLater(function() { restartScroll(true) })
 }
 """
 
@@ -28918,20 +28979,32 @@ class KaraokeApp(QWidget):
         reanalyze_lib_btn.clicked.connect(lambda: self.analyze_library(force=True, mode="full"))
 
         _search_actions_card = _section_card(tab_search, "Library Tools")
-        _search_actions = QHBoxLayout()
-        _search_actions.addWidget(scan_folder_btn)
-        _search_actions.addWidget(export_csv_btn)
-        _search_actions.addWidget(duplicate_manager_btn)
-        _search_actions.addStretch(1)
-        _search_actions_card.addLayout(_search_actions)
-        _analyze_row = QHBoxLayout()
-        _analyze_row.addWidget(fast_analyze_lib_btn)
-        _analyze_row.addWidget(analyze_lib_btn)
-        _analyze_row.addWidget(turbo_analyze_lib_btn)
-        _analyze_row.addWidget(analyze_transitions_btn)
-        _analyze_row.addWidget(reanalyze_lib_btn)
-        _analyze_row.addStretch(1)
-        _search_actions_card.addLayout(_analyze_row)
+        # Two equal columns: these labels are long, and a single row of five or three buttons is wider than a small
+        # settings window, which clipped the text of the ones at the end.
+        def _button_grid(buttons):
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(8)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            for i, b in enumerate(buttons):
+                b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                if i == len(buttons) - 1 and len(buttons) % 2 == 1:
+                    grid.addWidget(b, i // 2, 0, 1, 2)
+                else:
+                    grid.addWidget(b, i // 2, i % 2)
+            return grid
+
+        _search_actions_card.addLayout(_button_grid([scan_folder_btn, export_csv_btn, duplicate_manager_btn]))
+        _analyze_title = QLabel("Loudness scans")
+        try:
+            _analyze_title.setStyleSheet(section_meta_css())
+        except Exception:
+            pass
+        _search_actions_card.addWidget(_analyze_title)
+        _search_actions_card.addLayout(_button_grid([
+            fast_analyze_lib_btn, analyze_lib_btn, turbo_analyze_lib_btn, reanalyze_lib_btn, analyze_transitions_btn,
+        ]))
 
         _display_actions_card = _section_card(tab_display, "Display Tools")
         _display_actions = QHBoxLayout()
