@@ -11,7 +11,7 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
-## Singer notifications auto-clear - 2026-10-05 (server code committed and pushed, NOT deployed; no app change needed)
+## Singer notifications auto-clear - 2026-10-05 (server code committed and pushed; operator says it has been deployed, as of 2026-10-12; not re-verified live)
 Operator: notifications on the server should clear after ~18 h, or go away once seen. Server `a795678`: every singer notification (stage cues AND host/singer chat messages) now expires with the venue's
 retention (`chat_retention_hours`, default 18, the same setting that clears room chat) - on every singer fetch (`purge_stale_singer_notifications`) and in the hourly `tools/chat_cleanup.php`
 (`purge_expired_singer_notifications`). Opening the singer page's Notifications panel sends `mark_seen=1` (`singer_session_ui.js?v=15`): what it showed gets `read_at`, and rows with `read_at` are no longer listed
@@ -445,7 +445,7 @@ Full tracked-file comparison (178 files vs live): everything equal except (1) th
 (2) `tenants/_template/okjweb.db` and `settings.json` (runtime template data, left alone), and (3) **`global.inc`**: the live copy is the version before
 `06ed70d` (July 19, request identity/order sync); that commit was deployed except this one file. The repo version adds `PRAGMA busy_timeout=5000`
 and skips a write when the state row exists (server PHP 8.3 already throws on PDO errors by default). Low risk, fixes "database is locked" blank
-responses when phones submit at the same moment. One-file deploy prepared, NOT yet run: `server-deployments/global-inc-sync/deploy.sh`
+responses when phones submit at the same moment. One-file deploy prepared (operator says it has since been run, 2026-10-12; not re-verified live): `server-deployments/global-inc-sync/deploy.sh`
 (checks live == the old version first, backs up, php -l, hashes, undo script).
 
 ## Host chat pictures/GIFs + phone chat layout — 2026-10-03, committed locally, NOT built, NOT deployed, NOT pushed
