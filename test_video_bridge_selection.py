@@ -45,7 +45,9 @@ class VideoBridgeSelectionTests(unittest.TestCase):
         if RUST.is_file():
             out = subprocess.run(["nm", "-gU", str(RUST)], capture_output=True, text=True).stdout
             have = {w[len("_singws_bridge_"):] for w in out.split() if w.startswith("_singws_bridge_")}
-            self.assertEqual(have, set(m.BRIDGE_EXPORTS))
+            # Rust-only extras (never required of the Objective-C bridge): follower mode and shadow audio for karaoke audio played by the Rust engine
+            self.assertEqual(have - {"set_follow", "follow_clock", "set_shadow_audio"}, set(m.BRIDGE_EXPORTS))
+            self.assertTrue({"set_follow", "follow_clock", "set_shadow_audio"} <= have)
 
     def test_default_setting_is_rust_and_the_launch_hook_maps_it(self):
         src = (ROOT / "0.2.18.1.py").read_text()

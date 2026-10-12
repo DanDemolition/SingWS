@@ -23,7 +23,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen, renderer_raise_script
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.1.0"
+APP_VERSION = "1.0.1.1"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -3872,9 +3872,10 @@ DEFAULTS = {
     # NOT yet run on a physical Intel Mac: set "objc" there if it misbehaves.
     "video_bridge": "rust",
     "key_engine": "signalsmith",
-    # Who plays the KARAOKE sound: "mpv" (default: mpv plays audio and picture) or "rust" (the Rust audio engine plays the sound, with key/tempo
-    # by Signalsmith and the exact master chain; mpv keeps the picture and its audio clock). Read per song; any trouble falls back to mpv.
-    "karaoke_audio_engine": "mpv",
+    # Who plays the KARAOKE sound: "rust" (default: the Rust audio engine plays the sound, with key/tempo by Signalsmith and the exact master
+    # chain; mpv keeps the picture and its audio clock) or "mpv" (mpv plays audio and picture, the way back). Read per song; any trouble
+    # (no Rust engine, the Objective-C video bridge, a file the voice cannot open) plays that song with mpv audio automatically.
+    "karaoke_audio_engine": "rust",
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -24650,7 +24651,7 @@ class KaraokeApp(QWidget):
 
         Also switches the bridge's shadow-audio mode to match, BEFORE the song loads: with a voice, mpv keeps only its audio clock (null
         output); without one, mpv plays the sound through the selected device exactly as it always did."""
-        want = str(self.settings.get("karaoke_audio_engine", "mpv") or "mpv").strip().lower() == "rust"
+        want = str(self.settings.get("karaoke_audio_engine", "rust") or "rust").strip().lower() == "rust"
         voice = None
         reason = ""
         supports = False

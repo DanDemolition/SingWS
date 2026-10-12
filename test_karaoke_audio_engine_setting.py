@@ -1,6 +1,6 @@
 """The `karaoke_audio_engine` setting: which engine plays the karaoke SOUND for a song, and what happens when the Rust one is unavailable.
 
-Default "mpv" (nothing changes). "rust": the Rust audio engine plays the song and mpv keeps the picture and its audio clock (shadow audio);
+Default "rust": the Rust audio engine plays the song and mpv keeps the picture and its audio clock (shadow audio). "mpv" is the way back.
 ANY trouble (an Objective-C bridge, no Rust engine, a headless engine) means that song plays with mpv audio."""
 import importlib.util
 import os
@@ -49,8 +49,14 @@ class KaraokeAudioEngineSettingTests(unittest.TestCase):
     def call(self, h, plugin):
         return APP.KaraokeApp._karaoke_rust_voice_for_song(h, plugin)
 
-    def test_the_default_is_mpv(self):
-        self.assertEqual(APP.DEFAULTS["karaoke_audio_engine"], "mpv")
+    def test_the_default_is_rust(self):
+        self.assertEqual(APP.DEFAULTS["karaoke_audio_engine"], "rust")
+
+    def test_a_profile_without_the_key_gets_the_rust_voice(self):
+        p = FakePlugin()
+        h = SimpleNamespace(settings={}, bg_music=SimpleNamespace(soundboard_runtime=lambda: FakeEngine()))
+        self.assertIsNotNone(self.call(h, p))
+        self.assertEqual(p.shadow_calls, [True])
 
     def test_mpv_means_no_voice_and_shadow_audio_off(self):
         p = FakePlugin()
@@ -83,6 +89,10 @@ class KaraokeAudioEngineSettingTests(unittest.TestCase):
     def test_an_unknown_value_means_mpv(self):
         p = FakePlugin()
         self.assertIsNone(self.call(host("something", FakeEngine()), p))
+
+    def test_an_empty_value_means_the_default(self):
+        p = FakePlugin()
+        self.assertIsNotNone(self.call(host("", FakeEngine()), p))
 
     def test_a_replaced_engine_gets_a_new_voice(self):
         p = FakePlugin()
