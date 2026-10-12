@@ -36,6 +36,11 @@ const TRIM_WINDOW_S: f64 = 1.5;
 const BIG_ERR: f64 = 0.05;
 const MAX_TRIM_BIG: f64 = 0.10;
 
+/// The host's karaoke volume goes up to 2.0 (a boost), unlike the music's 0..1.
+fn clamp_karaoke_volume(v: f32) -> f32 {
+    if v.is_finite() { v.clamp(0.0, 2.0) } else { 0.0 }
+}
+
 pub const MIN_TEMPO: f64 = 0.25;
 pub const MAX_TEMPO: f64 = 4.0;
 /// Click-prevention fade-in after a start or seek (seconds).
@@ -146,7 +151,7 @@ impl KaraokeVoice {
         let old = self.src.replace(src);
         self.norm = crate::engine::clamp_norm(norm);
         if let Some(v) = volume {
-            self.volume.set(crate::engine::clamp_volume(v));
+            self.volume.set(clamp_karaoke_volume(v));
         }
         self.reset_stream(0);
         self.playing = !paused;
@@ -256,12 +261,12 @@ impl KaraokeVoice {
     }
 
     pub fn set_volume(&mut self, v: f32) {
-        self.volume.set(crate::engine::clamp_volume(v));
+        self.volume.set(clamp_karaoke_volume(v));
     }
 
     pub fn slide_volume(&mut self, v: f32, ms: u32) {
         let frames = (ms as u64 * self.rate as u64) / 1000;
-        self.volume.slide_to(crate::engine::clamp_volume(v), frames);
+        self.volume.slide_to(clamp_karaoke_volume(v), frames);
     }
 
     pub fn volume_now(&self) -> f32 {

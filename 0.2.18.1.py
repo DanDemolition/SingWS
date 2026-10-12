@@ -3872,6 +3872,9 @@ DEFAULTS = {
     # NOT yet run on a physical Intel Mac: set "objc" there if it misbehaves.
     "video_bridge": "rust",
     "key_engine": "signalsmith",
+    # Who plays the KARAOKE sound: "mpv" (default: mpv plays audio and picture) or "rust" (the Rust audio engine plays the sound, with key/tempo
+    # by Signalsmith and the exact master chain; mpv keeps the picture and its audio clock). Read per song; any trouble falls back to mpv.
+    "karaoke_audio_engine": "mpv",
     # Capture the GUI thread's Python stack when a stall is detected. The
     # watchdog thread has to walk live frames belonging to the running main
     # thread to do it, which is a use-after-free -- it segfaulted the app on
@@ -22672,6 +22675,12 @@ class KaraokeApp(QWidget):
         try:
             spec = self._mpv_audio_processing_spec(path)
             plugin.setAudioProcessing(spec)
+            try:
+                _tr = getattr(self, "karaoke_transport", None)
+                if _tr is not None and hasattr(_tr, "apply_audio_spec"):
+                    _tr.apply_audio_spec(spec)      # the Rust karaoke voice has its own copy of the chain (no-op without a voice)
+            except Exception:
+                pass
             _diag(
                 f"[MPV-AUDIO] chain pushed reason={reason} "
                 f"normalize={spec['normalize_gain_db']:+.1f}dB "
@@ -24636,6 +24645,56 @@ class KaraokeApp(QWidget):
             f"fill={2 if mode == 'blur' else (1 if mode == 'sidefill' else 0)}"
         )
 
+    def _karaoke_rust_voice_for_song(self, plugin):
+        """The Rust karaoke voice for the song about to start, or None (mpv plays the sound itself).
+
+        Also switches the bridge's shadow-audio mode to match, BEFORE the song loads: with a voice, mpv keeps only its audio clock (null
+        output); without one, mpv plays the sound through the selected device exactly as it always did."""
+        want = str(self.settings.get("karaoke_audio_engine", "mpv") or "mpv").strip().lower() == "rust"
+        voice = None
+        reason = ""
+        supports = False
+        try:
+            supports = bool(plugin.supportsShadowAudio())
+        except Exception:
+            supports = False
+        if want:
+            try:
+                if not supports:
+                    reason = "this video bridge cannot run shadow audio (the Objective-C bridge)"
+                else:
+                    engine = None
+                    try:
+                        engine = self.bg_music.soundboard_runtime()
+                    except Exception:
+                        engine = None
+                    if engine is None or getattr(engine, "_headless", False):
+                        reason = "the Rust audio engine is not running"
+                    else:
+                        from rust_karaoke_voice import RustKaraokeVoice
+                        cached = getattr(self, "_rust_karaoke_voice", None)
+                        if cached is None or getattr(cached, "_e", None) is not engine:
+                            cached = RustKaraokeVoice(engine)
+                            self._rust_karaoke_voice = cached
+                        voice = cached
+                        try:
+                            voice.set_output_latency_seconds(float(engine._stats()[4]) / 1_000_000.0)
+                        except Exception:
+                            pass
+            except Exception as exc:
+                reason = str(exc)
+                voice = None
+        try:
+            if supports:
+                plugin.setShadowAudio(voice is not None)
+        except Exception:
+            pass
+        if want and voice is None:
+            _diag(f"[KARAOKE-RUST] this song plays with mpv audio: {reason or 'unavailable'}")
+        elif voice is not None:
+            _diag("[KARAOKE-RUST] the Rust audio engine plays this song; mpv keeps the picture and its clock")
+        return voice
+
     @_perf_timed("ui_songstart_transport_setup")
     def _start_mpv_karaoke_transport(
         self, *, audio_path, video_path, mode, semitones,
@@ -24670,6 +24729,9 @@ class KaraokeApp(QWidget):
         )
         transport.set_volume(float(getattr(self, "_host_karaoke_live_volume", 1.0) or 0.0))
         transport.set_visual_timer_interval_ms(self._effective_visual_timer_interval_ms())
+        _rust_voice = self._karaoke_rust_voice_for_song(plugin)
+        if _rust_voice is not None:
+            transport.attach_voice(_rust_voice, log=_diag)
         self._apply_mpv_display_mode()
         # Persistent Metal surfaces can retain the preceding texture. Reveal
         # only from the readiness-gated started signal above.

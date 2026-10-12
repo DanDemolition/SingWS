@@ -128,11 +128,11 @@ class RustKaraokeVoice:
     # ---- level ----
     def set_volume(self, volume: float) -> None:
         if self._ok():
-            self._lib.singws_bgm_karaoke_set_volume(self._h, float(max(0.0, min(1.0, volume))))
+            self._lib.singws_bgm_karaoke_set_volume(self._h, float(max(0.0, min(2.0, volume))))
 
     def slide_volume(self, volume: float, ms: int) -> None:
         if self._ok():
-            self._lib.singws_bgm_karaoke_slide_volume(self._h, float(max(0.0, min(1.0, volume))), int(max(0, ms)))
+            self._lib.singws_bgm_karaoke_slide_volume(self._h, float(max(0.0, min(2.0, volume))), int(max(0, ms)))
 
     def set_norm_gain(self, gain: float) -> None:
         if self._ok():
@@ -192,6 +192,31 @@ class RustKaraokeVoice:
                 enabled = 0
         if self._ok():
             self._lib.singws_bgm_karaoke_set_eq(self._h, enabled, gains)
+
+    def set_eq_gains(self, enabled: bool, gains_db) -> None:
+        """The karaoke graphic EQ from plain values (ten gains in dB)."""
+        if not self._ok():
+            return
+        g = (ctypes.c_float * 10)()
+        for i, v in enumerate(list(gains_db or [])[:10]):
+            g[i] = max(-12.0, min(12.0, float(v or 0.0)))
+        self._lib.singws_bgm_karaoke_set_eq(self._h, int(bool(enabled)), g)
+
+    def set_master_params(self, enabled: bool, params: dict | None) -> None:
+        """The karaoke master chain from a plain parameter dict (the same names the Python processor and the Rust chain use)."""
+        if not self._ok():
+            return
+        if not enabled or not params:
+            self._lib.singws_bgm_karaoke_set_master_enabled(self._h, 0)
+            return
+        try:
+            names = self._e._param_names()
+            values = (ctypes.c_double * len(names))(*[float(params[n]) for n in names])
+            if self._lib.singws_bgm_karaoke_set_master_params(self._h, values, len(names)) != 0:
+                return
+            self._lib.singws_bgm_karaoke_set_master_enabled(self._h, 1)
+        except Exception:
+            self._lib.singws_bgm_karaoke_set_master_enabled(self._h, 0)
 
     def set_master_processor(self, processor) -> None:
         if not self._ok():
