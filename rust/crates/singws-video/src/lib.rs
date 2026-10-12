@@ -167,6 +167,15 @@ pub extern "C" fn singws_bridge_set_dsp_chain(h: *mut c_void, chain: *const c_ch
         p.set_dsp_chain(&text(chain).unwrap_or_default())
     }
 }
+/// Shadow audio, any time (per song): 1 = the Rust audio engine plays the karaoke sound and mpv only keeps its audio clock (null output);
+/// 0 = mpv plays the sound itself.
+#[no_mangle]
+pub extern "C" fn singws_bridge_set_shadow_audio(h: *mut c_void, enabled: c_int) {
+    if let Some(p) = player(h) {
+        p.set_shadow_audio(enabled != 0)
+    }
+}
+
 /// Follower mode (karaoke audio plays in the Rust audio engine): set BEFORE `singws_bridge_load`. 1 = picture only, driven by
 /// `singws_bridge_follow_clock`; 0 = mpv plays audio and video itself (the default).
 #[no_mangle]

@@ -44,6 +44,23 @@ class KaraokeVoiceTests(unittest.TestCase):
     def tearDown(self):
         self.engine.close()
 
+    def test_ready_flag_follows_loading_and_seeking(self):
+        self.assertFalse(self.k.is_ready())
+        self.k.load(self.song, paused=True)
+        for _ in range(200):
+            self.engine.render(480)
+            if self.k.is_ready():
+                break
+        self.assertTrue(self.k.is_ready(), "a loaded song's source must become ready (even while paused)")
+        self.k.seek_seconds(30.0)
+        self.engine.render(480)
+        for _ in range(300):
+            self.engine.render(480)
+            if self.k.is_ready():
+                break
+        self.assertTrue(self.k.is_ready(), "ready again after the seek, still paused")
+        self.assertTrue(self.k.is_paused())
+
     def test_plays_and_the_clock_follows_the_song(self):
         self.k.load(self.song, paused=False)
         out = self.engine.render(RATE * 2)

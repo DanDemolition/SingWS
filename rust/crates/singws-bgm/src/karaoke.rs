@@ -84,6 +84,7 @@ pub struct KaraokeVoice {
     /// Output latency of the sound card in seconds: the mix runs this far AHEAD of what is heard, so the voice aims that far behind.
     latency_s: f64,
     last_resync: Option<Instant>,
+    source_pending: bool,
     /// Frames of silence produced while the source could not deliver yet (a seek in progress).
     pub pending_frames: u64,
     pub underrun_frames: u64,
@@ -121,6 +122,7 @@ impl KaraokeVoice {
             cur_speed: 1.0,
             latency_s: 0.0,
             last_resync: None,
+            source_pending: false,
             pending_frames: 0,
             underrun_frames: 0,
         };
@@ -234,6 +236,19 @@ impl KaraokeVoice {
     fn slaved_speed(&self) -> f64 {
         let rate = self.slave.map(|c| c.rate).unwrap_or(self.speed);
         (rate.max(MIN_TEMPO) * (1.0 + self.trim)).clamp(MIN_TEMPO, MAX_TEMPO)
+    }
+
+    /// Polls the source even while paused (a seek finishes in `poll_pending`) and remembers whether it is still not ready.
+    pub fn poll_source(&mut self) {
+        self.source_pending = match self.src.as_mut() {
+            Some(src) => src.poll_pending(),
+            None => false,
+        };
+    }
+
+    /// True while the source cannot deliver audio yet (just loaded, or a seek in progress).
+    pub fn source_pending(&self) -> bool {
+        self.source_pending
     }
 
     pub fn is_slaved(&self) -> bool {

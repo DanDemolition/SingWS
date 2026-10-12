@@ -15,7 +15,7 @@ from pathlib import Path
 
 from rust_bgm_engine import RustBgmUnavailable, _norm
 
-KFLAG_LOADED, KFLAG_PLAYING, KFLAG_PAUSED, KFLAG_FINISHED = 1, 2, 4, 8
+KFLAG_LOADED, KFLAG_PLAYING, KFLAG_PAUSED, KFLAG_FINISHED, KFLAG_PENDING = 1, 2, 4, 8, 16
 
 
 class RustKaraokeVoice:
@@ -170,6 +170,11 @@ class RustKaraokeVoice:
     def is_finished(self) -> bool:
         """The song played to its end (its tail is drained)."""
         return bool(self._flags() & KFLAG_FINISHED)
+
+    def is_ready(self) -> bool:
+        """Loaded and its source can deliver audio now (not still opening, not in the middle of a seek)."""
+        f = self._flags()
+        return bool(f & KFLAG_LOADED) and not (f & KFLAG_PENDING)
 
     def pending_frames(self) -> int:
         return int(self._lib.singws_bgm_karaoke_pending_frames(self._h)) if self._ok() else 0

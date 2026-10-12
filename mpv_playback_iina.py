@@ -297,6 +297,7 @@ class MpvPlaybackPlugin:
         # property, so neither can clobber the other.
         self._dsp_chain = ""
         self._video_offset_ms = 0
+        self._shadow_audio = False
 
     def attach(self, preview_widget, output_widget) -> bool:
         try:
@@ -394,6 +395,26 @@ class MpvPlaybackPlugin:
     def setVolume(self, value) -> None:
         self._volume = max(0.0, min(2.0, float(value)))
         if self._handle: self.api.lib.singws_bridge_set_volume(self._handle, self._volume * 100.0)
+    def supportsShadowAudio(self) -> bool:
+        """True when the loaded bridge can run in shadow-audio mode (the Rust bridge; the Objective-C one cannot)."""
+        return hasattr(self.api.lib, "singws_bridge_set_shadow_audio")
+
+    def setShadowAudio(self, on) -> bool:
+        """Shadow audio: the Rust audio engine plays the karaoke sound and mpv only keeps its audio CLOCK (null output), so the picture keeps
+        its proven mpv timing. Off: mpv plays the sound itself. Call before loading each song. False when this bridge cannot do it."""
+        on = bool(on)
+        if not self.supportsShadowAudio():
+            return False
+        self._shadow_audio = on
+        # read when the native core is created (the first song of the session)
+        os.environ["SINGWS_BRIDGE_SHADOW_AUDIO"] = "1" if on else "0"
+        if self._handle:
+            fn = self.api.lib.singws_bridge_set_shadow_audio
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            fn(self._handle, 1 if on else 0)
+        self.log(f"[MPV-NATIVE] shadow audio {'ON' if on else 'off'}")
+        return True
+
     def setAudioDevice(self, name) -> None:
         self._device = str(name or "auto")
         if self._handle: self.api.lib.singws_bridge_set_device(self._handle, self._device.encode())

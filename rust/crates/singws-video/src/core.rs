@@ -28,6 +28,8 @@ struct State {
     stretch_dsp: Option<String>,
     /// Follower mode (karaoke audio plays in the Rust audio engine): mpv shows the picture only and chases `fclock`.
     follow: bool,
+    /// Shadow audio: the Rust engine plays the karaoke sound; mpv keeps only its audio clock (null output). Switchable per song.
+    shadow: bool,
     /// The audio clock as last reported: (song seconds, song seconds per wall second (0 = paused), when it was read).
     fclock: Option<(f64, f64, std::time::Instant)>,
 }
@@ -92,6 +94,14 @@ impl Inner {
         }
     }
 
+    /// Sets a property at runtime (options set before initialize use `set_option`).
+    fn set_option_rt(&self, h: Handle, name: &str, value: &str) {
+        let r = self.api.set_string(h, name, value);
+        if r < 0 {
+            bridge_log!("[bridge] setting {} failed: {}", name, self.api.error_string(r));
+        }
+    }
+
     fn set_option(&self, h: Handle, name: &str, value: &str) -> bool {
         let r = self.api.set_option(h, name, value);
         if r < 0 {
@@ -105,7 +115,7 @@ impl Inner {
     /// Callers are on the control queue, which owns `dsp_chain` / `semitones`.
     fn apply_audio_filters(&self) {
         let Some(h) = self.handle() else { return };
-        if self.flags.loading.load(Ordering::SeqCst) || self.state.lock().unwrap().follow || shadow_audio() {
+        if self.flags.loading.load(Ordering::SeqCst) || self.state.lock().unwrap().follow || self.state.lock().unwrap().shadow {
             return; // no audio of ours here: follower mode, or shadow audio (the Rust engine plays the song; mpv only keeps its clock)
         }
         let (mut chain, semitones, tempo, dsp_len, live_dsp) = {
@@ -236,7 +246,7 @@ impl Inner {
         self.set_option(h, "demuxer-max-bytes", "256MiB");
         // With a real output 1 s of audio is buffered ahead for glitch-free playback. With a NULL output (karaoke audio played by the Rust
         // engine, mpv only keeps its audio clock) that buffer would only delay how quickly a tempo change reaches the picture clock.
-        let null_audio = shadow_audio();
+        let null_audio = self.state.lock().unwrap().shadow;
         if null_audio {
             self.set_option(h, "ao", "null");
         }
@@ -665,7 +675,7 @@ impl Player {
             flags,
             renderer: OnceLock::new(),
             play_when_loaded: AtomicBool::new(false),
-            state: Mutex::new(State { tempo_percent: 100, semitones: 0, dsp_chain: String::new(), audio_delay: 0.0, pending_audio: None, serial: 0, stretch_dsp: None, follow: false, fclock: None }),
+            state: Mutex::new(State { tempo_percent: 100, semitones: 0, dsp_chain: String::new(), audio_delay: 0.0, pending_audio: None, serial: 0, stretch_dsp: None, follow: false, shadow: shadow_audio(), fclock: None }),
             tx: Mutex::new(None),
         });
         if let Some(r) = renderer {
@@ -732,6 +742,35 @@ impl Player {
     /// The audio clock: `pos` song seconds as heard right now, `rate` song seconds per wall second (the tempo; 0 = paused).
     pub fn set_follow_clock(&self, pos: f64, rate: f64) {
         self.inner.state.lock().unwrap().fclock = Some((pos, rate.max(0.0), Instant::now()));
+    }
+
+    /// Shadow audio on/off, any time (per song): ON = the Rust engine plays the karaoke sound and mpv only keeps its audio clock (null
+    /// output, no pitch preservation, no audio filters); OFF = mpv plays the sound itself through the selected device, as before.
+    pub fn set_shadow_audio(&self, on: bool) {
+        let changed = {
+            let mut s = self.inner.state.lock().unwrap();
+            let c = s.shadow != on;
+            s.shadow = on;
+            c
+        };
+        bridge_log!("[bridge] shadow audio {}", if on { "ON (mpv keeps only its audio clock; the Rust engine plays the sound)" } else { "off (mpv plays the sound)" });
+        if !changed || self.inner.handle().is_none() {
+            return;
+        }
+        self.inner.on_control(Box::new(move |me: &Arc<Inner>| {
+            let Some(h) = me.handle() else { return };
+            if on {
+                me.set_option_rt(h, "ao", "null");
+                me.set_option_rt(h, "audio-buffer", "0.1");
+                me.set_option_rt(h, "audio-pitch-correction", "no");
+            } else {
+                let ao = std::env::var("SINGWS_BRIDGE_AO").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "coreaudio".to_string());
+                me.set_option_rt(h, "ao", &ao);
+                me.set_option_rt(h, "audio-buffer", "1.0");
+                me.set_option_rt(h, "audio-pitch-correction", "yes");
+                me.apply_audio_filters();
+            }
+        }));
     }
 
     pub fn set_paused(&self, paused: bool) {

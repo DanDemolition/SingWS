@@ -108,6 +108,8 @@ pub const KFLAG_PLAYING: u32 = 2;
 pub const KFLAG_PAUSED: u32 = 4;
 /// The song played to its end (tail drained).
 pub const KFLAG_FINISHED: u32 = 8;
+/// The source cannot deliver audio yet (just loaded, or a seek in progress).
+pub const KFLAG_PENDING: u32 = 16;
 
 /// What the audio thread publishes after each block (all relaxed atomics; a reader may see values from two adjacent blocks).
 pub struct Snapshot {
@@ -317,6 +319,7 @@ impl RtEngine {
             }
             budget -= 1;
         }
+        self.engine.karaoke_mut().poll_source();
         self.engine.mix(out);
         self.publish();
         while let Some(d) = self.engine.take_discarded() {
@@ -381,6 +384,9 @@ impl RtEngine {
         }
         if k.is_finished() {
             kf |= KFLAG_FINISHED;
+        }
+        if k.source_pending() {
+            kf |= KFLAG_PENDING;
         }
         s.karaoke_flags.store(kf, Ordering::Relaxed);
         s.blocks.fetch_add(1, Ordering::Relaxed);
