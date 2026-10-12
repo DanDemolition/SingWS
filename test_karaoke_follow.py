@@ -1,4 +1,8 @@
-"""Roadmap item 3, step 3: the picture follows the Rust audio engine's clock.
+"""Roadmap item 3, step 3 (parked alternative): the picture follows the Rust audio engine's clock (bridge "follower mode").
+
+NOT the design in use: it works for continuous video (MP4, 10 ms) but not for CDG, because mpv re-bases its clock on a speed change during a static
+CDG screen and a CDG seek shows the NEXT screen change. The design in use is the opposite: mpv stays the picture master and the Rust voice is
+slaved to its clock (test_karaoke_slave.py). This test only keeps the follower mode honest while the code exists.
 
 The REAL pieces, headless: the Rust engine plays a tone as the karaoke voice (paced in real time by a thread, like a sound card would pull),
 the Rust video bridge loads a test video in follower mode (picture only) and is fed the voice's clock, and the video position reported by
@@ -129,38 +133,6 @@ class KaraokeFollowTests(unittest.TestCase):
             self.assertLess(worst, 0.20, f"{name}: worst picture error {worst} s")
         # a seek and a couple of tempo/pause corrections are expected, not a seek storm
         self.assertLess(r["seeks"], 8)
-
-
-    def test_a_real_cdg_disc_follows_its_mp3_played_by_the_rust_engine(self):
-        import glob
-        import zipfile
-        zips = sorted(glob.glob(str(Path.home() / "Music/Karaoke/Karaoke Library/*.zip")))
-        if not zips:
-            self.skipTest("no karaoke library on this machine")
-        d = Path(self.tmp.name)
-        for z in zips:
-            try:
-                with zipfile.ZipFile(z) as zf:
-                    mp3 = next((n for n in zf.namelist() if n.lower().endswith(".mp3") and "__MACOSX" not in n), None)
-                    cdg = next((n for n in zf.namelist() if n.lower().endswith(".cdg") and "__MACOSX" not in n), None)
-                    if not (mp3 and cdg):
-                        continue
-                    (d / "disc.mp3").write_bytes(zf.read(mp3))
-                    (d / "disc.cdg").write_bytes(zf.read(cdg))
-                    break
-            except Exception:
-                continue
-        else:
-            self.skipTest("no usable CDG disc found")
-        r = run_scenario(FOLLOW_SCENARIO % str(ROOT), str(d / "disc.cdg"), str(d / "disc.mp3"))
-        print("\nCDG follow:", json.dumps(r["phases"]), "hard seeks:", r["seeks"])
-        for name, median, worst, count in r["phases"]:
-            if name == "paused":
-                continue        # a CDG shows its last changed screen while paused; there is no frame to compare
-            if median is None:
-                continue        # no new picture appeared in this phase (a long static lyrics screen): nothing to judge
-            self.assertLess(median, 0.08, f"{name}: median picture error {median} s")
-            self.assertLess(worst, 0.30, f"{name}: worst picture error {worst} s")
 
 
 if __name__ == "__main__":

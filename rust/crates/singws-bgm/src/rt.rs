@@ -88,6 +88,10 @@ pub enum Command {
     KaraokeVolume(f32),
     KaraokeSlideVolume { volume: f32, ms: u32 },
     KaraokeNorm(f32),
+    /// Slave to a master clock (song position, rate); `KaraokeSlaveOff` goes back to free running.
+    KaraokeSlave { pos: f64, rate: f64 },
+    KaraokeSlaveOff,
+    KaraokeLatency(f32),
 }
 
 pub const FLAG_PLAYING: u32 = 1;
@@ -296,6 +300,9 @@ impl RtEngine {
             Command::KaraokeVolume(v) => e.karaoke_mut().set_volume(v),
             Command::KaraokeSlideVolume { volume, ms } => e.karaoke_mut().slide_volume(volume, ms),
             Command::KaraokeNorm(f) => e.karaoke_mut().set_norm(f),
+            Command::KaraokeSlave { pos, rate } => e.karaoke_mut().set_slave_clock(Some((pos, rate))),
+            Command::KaraokeSlaveOff => e.karaoke_mut().set_slave_clock(None),
+            Command::KaraokeLatency(l) => e.karaoke_mut().set_output_latency_seconds(l as f64),
         }
         self.done += 1;
     }

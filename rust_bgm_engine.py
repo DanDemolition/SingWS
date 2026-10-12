@@ -159,6 +159,9 @@ def _declare(lib) -> None:
         "singws_bgm_karaoke_set_eq": ([V, I32, ctypes.POINTER(F32)], I32),
         "singws_bgm_karaoke_set_master_enabled": ([V, I32], None),
         "singws_bgm_karaoke_set_master_params": ([V, ctypes.POINTER(ctypes.c_double), U32], I32),
+        "singws_bgm_karaoke_slave_clock": ([V, ctypes.c_double, ctypes.c_double], I32),
+        "singws_bgm_karaoke_slave_off": ([V], I32),
+        "singws_bgm_karaoke_set_output_latency": ([V, F32], I32),
     }
     for name, (args, res) in sig.items():
         fn = getattr(lib, name)

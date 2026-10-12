@@ -33,6 +33,12 @@ struct State {
 }
 
 
+/// Shadow audio (SINGWS_BRIDGE_SHADOW_AUDIO=1): the karaoke song is played by the Rust audio engine, so mpv decodes the audio only to keep its
+/// own audio CLOCK (the picture is synchronised to it exactly as in production) and sends it to a null output.
+fn shadow_audio() -> bool {
+    std::env::var_os("SINGWS_BRIDGE_SHADOW_AUDIO").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Which mpv audio filter carries key/tempo: "signalsmith" (default) or "rubberband" (SINGWS_KEY_ENGINE=rubberband).
 fn stretch_engine() -> &'static str {
     match std::env::var("SINGWS_KEY_ENGINE").ok().as_deref() {
@@ -99,8 +105,8 @@ impl Inner {
     /// Callers are on the control queue, which owns `dsp_chain` / `semitones`.
     fn apply_audio_filters(&self) {
         let Some(h) = self.handle() else { return };
-        if self.flags.loading.load(Ordering::SeqCst) || self.state.lock().unwrap().follow {
-            return; // follower mode has no audio here
+        if self.flags.loading.load(Ordering::SeqCst) || self.state.lock().unwrap().follow || shadow_audio() {
+            return; // no audio of ours here: follower mode, or shadow audio (the Rust engine plays the song; mpv only keeps its clock)
         }
         let (mut chain, semitones, tempo, dsp_len, live_dsp) = {
             let s = self.state.lock().unwrap();
@@ -228,7 +234,17 @@ impl Inner {
         // over 400 ms, so the former 400 ms audio buffer had no safety margin at all.
         self.set_option(h, "cache", "yes");
         self.set_option(h, "demuxer-max-bytes", "256MiB");
-        self.set_option(h, "audio-buffer", "1.0");
+        // With a real output 1 s of audio is buffered ahead for glitch-free playback. With a NULL output (karaoke audio played by the Rust
+        // engine, mpv only keeps its audio clock) that buffer would only delay how quickly a tempo change reaches the picture clock.
+        let null_audio = shadow_audio();
+        if null_audio {
+            self.set_option(h, "ao", "null");
+        }
+        self.set_option(h, "audio-buffer", if null_audio { "0.1" } else { "1.0" });
+        if null_audio {
+            // Its audio is discarded: skip the (CPU-heavy) pitch preservation. Only the CLOCK of this audio matters.
+            self.set_option(h, "audio-pitch-correction", "no");
+        }
         self.set_option(h, "demuxer-readahead-secs", "10");
         self.set_option(h, "input-default-bindings", "no");
         self.set_option(h, "pause", "yes");

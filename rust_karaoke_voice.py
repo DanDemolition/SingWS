@@ -91,6 +91,40 @@ class RustKaraokeVoice:
     def tempo_percent(self) -> float:
         return self._tempo
 
+    # ---- slaving to the picture (mpv is the master clock) ----
+    def _measured_rate(self, position_seconds: float, commanded: float) -> float:
+        """The pace the picture's clock is REALLY running at (mpv applies a speed change a little late), over the last ~0.6 s."""
+        import time
+        now = time.monotonic()
+        hist = self.__dict__.setdefault("_clock_hist", [])
+        if commanded <= 0.0:
+            hist.clear()
+            return 0.0
+        if hist and (now - hist[-1][0] > 0.5 or position_seconds < hist[-1][1] - 0.2 or position_seconds > hist[-1][1] + 2.0):
+            hist.clear()                                    # a gap or a jump (a seek): the old samples say nothing about the pace
+        hist.append((now, position_seconds))
+        while hist and now - hist[0][0] > 0.6:
+            hist.pop(0)
+        if len(hist) < 8 or hist[-1][0] - hist[0][0] < 0.3:
+            return commanded
+        rate = (hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0])
+        return max(0.2, min(5.0, rate))
+
+    def slave_to(self, position_seconds: float, rate: float) -> None:
+        """Tell the voice where the picture is NOW (song seconds) and how fast it runs (tempo/100; 0 = paused). Call every ~30 ms; the voice
+        extrapolates between calls and trims its own tempo by under 1% to stay on it. A big jump (a seek) is followed with one resync."""
+        if self._ok():
+            measured = self._measured_rate(float(position_seconds), float(max(0.0, rate)))
+            self._lib.singws_bgm_karaoke_slave_clock(self._h, float(position_seconds), measured)
+
+    def free_run(self) -> None:
+        if self._ok():
+            self._lib.singws_bgm_karaoke_slave_off(self._h)
+
+    def set_output_latency_seconds(self, seconds: float) -> None:
+        if self._ok():
+            self._lib.singws_bgm_karaoke_set_output_latency(self._h, float(max(0.0, seconds)))
+
     # ---- level ----
     def set_volume(self, volume: float) -> None:
         if self._ok():

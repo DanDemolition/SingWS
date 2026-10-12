@@ -26,12 +26,15 @@ pub struct SlaveClock {
     pub at: Instant,
 }
 
-/// Largest tempo trim the voice applies to stay on the clock (0.8%: inaudible, no pitch change).
-const MAX_TRIM: f64 = 0.008;
+/// Largest tempo trim the voice applies to stay on the clock (1.5%: not audible as a tempo change, and the pitch never moves).
+const MAX_TRIM: f64 = 0.015;
 /// An error beyond this (seconds of song time) is not trimmed away but resynchronised with a seek.
 const RESYNC_ERR: f64 = 0.6;
 /// Time over which a trim removes an error (seconds).
-const TRIM_WINDOW_S: f64 = 4.0;
+const TRIM_WINDOW_S: f64 = 1.5;
+/// For an error above this (seconds), e.g. right after a tempo change, the trim may go up to `MAX_TRIM_BIG` for a short while.
+const BIG_ERR: f64 = 0.05;
+const MAX_TRIM_BIG: f64 = 0.10;
 
 pub const MIN_TEMPO: f64 = 0.25;
 pub const MAX_TEMPO: f64 = 4.0;
@@ -74,8 +77,10 @@ pub struct KaraokeVoice {
     /// Slaved mode: the picture (mpv) is the master. `(song position, rate, when read, output offset)`; the voice trims its own tempo by a
     /// tiny amount to stay on it (inaudible) and resynchronises with a seek only when it is badly off.
     slave: Option<SlaveClock>,
-    /// Current tempo trim applied on top of the user's tempo (fraction, e.g. +0.004 = 0.4% faster).
+    /// Current tempo trim applied on top of the master's pace (fraction, e.g. +0.004 = 0.4% faster).
     trim: f64,
+    /// The speed actually in use for the current block (the user's tempo free-running; the master's measured pace plus the trim when slaved).
+    cur_speed: f64,
     /// Output latency of the sound card in seconds: the mix runs this far AHEAD of what is heard, so the voice aims that far behind.
     latency_s: f64,
     last_resync: Option<Instant>,
@@ -113,6 +118,7 @@ impl KaraokeVoice {
             effects: vec![Box::new(eq) as Box<dyn Effect>, Box::new(master) as Box<dyn Effect>],
             slave: None,
             trim: 0.0,
+            cur_speed: 1.0,
             latency_s: 0.0,
             last_resync: None,
             pending_frames: 0,
@@ -223,6 +229,13 @@ impl KaraokeVoice {
         self.latency_s = s.clamp(0.0, 1.0);
     }
 
+    /// Slaved: the master's own pace (what its clock is really doing, reported by the control side) with the trim on top. The user's
+    /// tempo is NOT used here: the picture's clock may take a moment to follow a tempo change, and the voice must change pace with it.
+    fn slaved_speed(&self) -> f64 {
+        let rate = self.slave.map(|c| c.rate).unwrap_or(self.speed);
+        (rate.max(MIN_TEMPO) * (1.0 + self.trim)).clamp(MIN_TEMPO, MAX_TEMPO)
+    }
+
     pub fn is_slaved(&self) -> bool {
         self.slave.is_some()
     }
@@ -263,7 +276,7 @@ impl KaraokeVoice {
     /// Song position in seconds as heard: the source position minus the audio still inside the stretcher. That is its input latency
     /// plus its output latency in SONG time (`speed` times as long as in output time), so it stays right while the tempo changes.
     pub fn audible_position_s(&self) -> f32 {
-        let inside = self.stretch.input_latency_frames() as f64 + self.speed * self.stretch.output_latency_frames() as f64;
+        let inside = self.stretch.input_latency_frames() as f64 + self.cur_speed * self.stretch.output_latency_frames() as f64;
         let audible = (self.in_pos as f64 - inside).max(self.seek_origin as f64);
         if self.produced == 0 { self.seek_origin as f32 / self.rate as f32 } else { (audible / self.rate as f64) as f32 }
     }
@@ -297,7 +310,9 @@ impl KaraokeVoice {
             }
             return;
         }
-        let want = (-err / TRIM_WINDOW_S).clamp(-MAX_TRIM, MAX_TRIM);
+        // authority grows with the error: a hair for a few milliseconds, more right after a tempo change (the picture's clock hiccups)
+        let limit = if err.abs() > BIG_ERR { (MAX_TRIM + err.abs() * 0.6).min(MAX_TRIM_BIG) } else { MAX_TRIM };
+        let want = (-err / TRIM_WINDOW_S).clamp(-limit, limit);
         self.trim += (want - self.trim) * 0.05; // smooth: no audible wobble
     }
 
@@ -307,7 +322,10 @@ impl KaraokeVoice {
         }
         if self.slave.is_some() {
             self.follow_master(now);
-            self.stretch.set_speed((self.speed * (1.0 + self.trim)).clamp(MIN_TEMPO, MAX_TEMPO));
+            self.cur_speed = self.slaved_speed();
+            self.stretch.set_speed(self.cur_speed);
+        } else {
+            self.cur_speed = self.speed;
         }
         let Some(src) = self.src.as_mut() else { return };
         let frames = out.len() / 2;
@@ -324,8 +342,7 @@ impl KaraokeVoice {
             self.stretch.flush_into(o);
             self.finished = true;
         } else {
-            let eff = if self.slave.is_some() { (self.speed * (1.0 + self.trim)).clamp(MIN_TEMPO, MAX_TEMPO) } else { self.speed };
-            let want = frames as f64 * eff + self.carry;
+            let want = frames as f64 * self.cur_speed + self.carry;
             let n = (want.floor() as usize).min(self.in_buf.len() / 2);
             self.carry = want - n as f64;
             let ib = &mut self.in_buf[..n * 2];
@@ -581,7 +598,7 @@ mod tests {
         let t = run_slaved(&mut v, 25.0, base, 1.0, |t| t - 0.12, 1.0);
         let err = v.audible_position_s() as f64 - (t - 0.12);
         assert!(err.abs() < 0.03, "still {err:.3} s off after 25 s");
-        assert!(v.trim.abs() <= MAX_TRIM + 1e-9, "trim {} exceeds the inaudible limit", v.trim);
+        assert!(v.trim.abs() <= MAX_TRIM_BIG + 1e-9, "trim {} exceeds the limit", v.trim);
         assert!(v.last_resync.is_none(), "a small offset must not cause a seek");
     }
 

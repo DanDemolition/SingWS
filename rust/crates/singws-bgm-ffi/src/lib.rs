@@ -741,3 +741,17 @@ pub unsafe extern "C" fn singws_bgm_karaoke_set_master_params(p: *mut Sys, value
         0
     })
 }
+
+/// Slave the karaoke voice to a master clock (the picture): `pos` is the song position the master is at NOW, `rate` song seconds per wall
+/// second (the tempo; 0 = paused). Call every few tens of milliseconds; between calls the voice extrapolates, so a stalled caller does no harm.
+///
+/// # Safety
+/// `p` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_slave_clock(p: *mut Sys, pos: f64, rate: f64) -> i32 {
+    send(p, || Command::KaraokeSlave { pos, rate })
+}
+
+simple_cmd!(singws_bgm_karaoke_slave_off, Command::KaraokeSlaveOff);
+// The sound card's output latency in seconds, so what is HEARD (not what is mixed) lines up with the picture.
+f32_cmd!(singws_bgm_karaoke_set_output_latency, KaraokeLatency);
