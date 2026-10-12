@@ -49,7 +49,7 @@ class EngineSelectionTests(unittest.TestCase):
         self.assertNotIn("SINGWS_KARAOKE_ENGINE", MAIN_SOURCE)
         start = MAIN_SOURCE.index("def _start_karaoke_transport")
         body = MAIN_SOURCE[start:MAIN_SOURCE.index("def _prepare_karaoke_start", start)]
-        self.assertIn("return self._start_mpv_karaoke_transport", body)
+        self.assertIn("self._start_mpv_karaoke_transport(", body)
         self.assertNotIn("falling back to FFmpeg", body)
 
 
