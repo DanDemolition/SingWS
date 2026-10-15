@@ -9251,6 +9251,21 @@ class BarLevelMeter(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(45)  # ~22 fps
         self._timer.timeout.connect(self._tick)
+        self._glow_style = False
+
+    def set_glow_style(self, on: bool):
+        """Show-tab redesign: slim rounded glowing bars (the last three amber) that rest low when silent."""
+        on = bool(on)
+        if on == self._glow_style:
+            return
+        self._glow_style = on
+        self._n_bars = 20 if on else 16
+        self._heights = self._rest_heights() if on and not self._active else [0.0] * self._n_bars
+        self.update()
+
+    def _rest_heights(self):
+        import math
+        return [0.22 + 0.2 * abs(math.sin(i * 0.9)) for i in range(self._n_bars)]
 
     def set_active(self, active: bool):
         active = bool(active)
@@ -9266,7 +9281,7 @@ class BarLevelMeter(QWidget):
         # consuming a substantial fraction of a CPU core for a static screen.
         # Stop the animation completely and draw the silent baseline once.
         self._timer.stop()
-        self._heights = [0.0] * self._n_bars
+        self._heights = self._rest_heights() if self._glow_style else [0.0] * self._n_bars
         self.update()
 
     def _sample_level(self) -> float:
@@ -9320,6 +9335,9 @@ class BarLevelMeter(QWidget):
         # If the meter is essentially silent, render a single faint baseline
         # instead of a row of identical floor-height bars (which look like
         # punctuation/dashes to a casual observer).
+        if self._glow_style:
+            self._paint_glow_bars(p, w, h)
+            return
         max_level = max(self._heights) if self._heights else 0.0
         if max_level < 0.04:
             base_y = h - margin - 2
@@ -9342,6 +9360,31 @@ class BarLevelMeter(QWidget):
             grad.setColorAt(0.0, QColor(110, 60, 240))
             grad.setColorAt(1.0, QColor(240, 90, 200))
             p.fillRect(x, top, bar_w, bar_h, QBrush(grad))
+            x += bar_w + gap
+
+
+    def _paint_glow_bars(self, p, w, h):
+        from PyQt6.QtGui import QColor, QLinearGradient, QBrush
+        n = len(self._heights)
+        gap, bar_w = 3, 6
+        total = n * bar_w + (n - 1) * gap
+        x = max(0, w - total)                       # right-aligned, like the mockup
+        for i, lvl in enumerate(self._heights):
+            bar_h = max(4, int(h * max(0.18, min(1.0, lvl))))
+            top = h - bar_h
+            amber = i >= n - 3
+            c1 = QColor(245, 200, 75) if amber else QColor(168, 85, 247)
+            c2 = QColor(168, 85, 247) if amber else QColor(139, 92, 246)
+            halo = QColor(c1)
+            halo.setAlpha(46 if self._active else 22)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(halo)
+            p.drawRoundedRect(QRectF(x - 2, top - 2, bar_w + 4, bar_h + 4), 4, 4)
+            grad = QLinearGradient(0, top, 0, h)
+            grad.setColorAt(0.0, c1)
+            grad.setColorAt(1.0, c2)
+            p.setBrush(QBrush(grad))
+            p.drawRoundedRect(QRectF(x, top, bar_w, bar_h), 2, 2)
             x += bar_w + gap
 
 
@@ -16180,11 +16223,10 @@ class QueueCardDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         kind = self._kind_at(index, index.row())
         base = index.data(Qt.ItemDataRole.SizeHintRole)
-        h = int(base.height()) if hasattr(base, "height") else (30 if kind == "song" else 34)
         if kind == "singer":
-            h = max(h, 34) + (self.GAP if index.row() > 0 else 2)
+            h = 30 + (self.GAP if index.row() > 0 else 2)
         else:
-            h = max(h, 28)
+            h = 26
         w = int(base.width()) if hasattr(base, "width") else 0
         return QSize(w, h + (4 if self.card_edges(index)[1] and kind != "singer" else 0))
 
@@ -16239,9 +16281,9 @@ class QueueCardDelegate(QStyledItemDelegate):
             bg = QColor(34, 197, 94, 28)
             line = QColor(34, 197, 94, 90)
         elif status == "next":
-            accent = QColor(245, 200, 75)
-            bg = QColor(245, 200, 75, 20)
-            line = QColor(245, 200, 75, 80)
+            accent = QColor(124, 61, 255)
+            bg = QColor(124, 61, 255, 40)
+            line = QColor(167, 139, 250, 120)
         painter.fillPath(path, bg)
         if selected:
             painter.fillPath(path, QColor(124, 61, 255, 46))
@@ -16272,43 +16314,62 @@ class QueueCardDelegate(QStyledItemDelegate):
             rcol.setAlpha(190 if kind == "singer" else 150)
             painter.setPen(rcol)
             painter.drawText(
-                QRect(inner.right() - right_w, inner.top(), right_w, inner.height()),
+                QRect(inner.right() - right_w, inner.top() - (4 if kind != "singer" else 0), right_w, inner.height()),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 rfm.elidedText(right, Qt.TextElideMode.ElideLeft, right_w),
             )
         left_rect = QRect(inner.left(), inner.top(), max(0, inner.width() - right_w - 10), inner.height())
 
         if kind == "singer":
+            m = re.match(r"^\s*(\d+)\.\s*(.*)$", left)
+            num, name = (m.group(1), m.group(2)) if m else ("", left.lstrip("\u2014 ").strip() or left)
+            x0 = left_rect.left()
+            if num:
+                chip = QRect(x0, card.top() + (card.height() - 26) // 2, 26, 26)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(124, 61, 255, 255) if status == "next" else QColor(255, 255, 255, 22))
+                painter.drawRoundedRect(chip, 7, 7)
+                cf = QFont(font)
+                cf.setBold(True)
+                cf.setPointSizeF(max(8.0, font.pointSizeF() - 1.5))
+                painter.setFont(cf)
+                painter.setPen(QColor("#FFFFFF") if status == "next" else QColor(200, 205, 225))
+                painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, num)
+                x0 += 26 + 12
             bfont = QFont(font)
             bfont.setBold(True)
             painter.setFont(bfont)
-            painter.setPen(base_color)
+            painter.setPen(QColor(230, 232, 240))
             fm = QFontMetrics(bfont)
-            painter.drawText(left_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                             fm.elidedText(left, Qt.TextElideMode.ElideRight, left_rect.width()))
+            name_rect = QRect(x0, left_rect.top() + 4, max(0, left_rect.right() - x0), left_rect.height() - 4)
+            painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             fm.elidedText(name, Qt.TextElideMode.ElideRight, name_rect.width()))
             duet = str(index.data(self.duet_role) or "").strip() if self.duet_role is not None else ""
             if duet:
-                nw = fm.horizontalAdvance(left)
-                if nw + 20 < left_rect.width():
+                nw = fm.horizontalAdvance(name)
+                if nw + 20 < name_rect.width():
                     ifont = QFont(font)
                     ifont.setItalic(True)
                     painter.setFont(ifont)
-                    dcol = QColor(base_color)
+                    dcol = QColor(230, 232, 240)
                     dcol.setAlpha(120)
                     painter.setPen(dcol)
                     painter.drawText(
-                        QRect(left_rect.left() + nw + 10, left_rect.top(), left_rect.width() - nw - 10, left_rect.height()),
+                        QRect(name_rect.left() + nw + 10, name_rect.top(), name_rect.width() - nw - 10, name_rect.height()),
                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                         "\u2022  " + duet,
                     )
         else:
+            text = re.sub(r"^\s*\u2022\s*", "", left).replace(" \u2022 ", " \u00b7 ")
             scol = QColor(base_color)
-            scol.setAlpha(215)
+            scol.setAlpha(200)
             painter.setPen(scol)
             painter.setFont(font)
             fm = QFontMetrics(font)
-            painter.drawText(left_rect.adjusted(14, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                             fm.elidedText(left, Qt.TextElideMode.ElideRight, max(0, left_rect.width() - 14)))
+            x0 = left_rect.left() + 26 + 12             # lines up under the singer's name
+            painter.drawText(QRect(x0, left_rect.top() - 5, max(0, left_rect.right() - x0), left_rect.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             fm.elidedText(text, Qt.TextElideMode.ElideRight, max(0, left_rect.right() - x0)))
         painter.restore()
 
 
@@ -24562,13 +24623,24 @@ class KaraokeApp(QWidget):
         self._hero_stage_timer.setInterval(250)
         self._hero_stage_timer.timeout.connect(self._hero_stage_sync)
 
-    def _apply_ui_show_redesign(self):
+    def _apply_ui_show_redesign(self, refit: bool = False):
         """Show or hide the redesigned hero pieces from the setting. Safe to call at any time."""
         try:
             on = self._ui_redesign_on()
             if getattr(self, "hero_stage_extras", None) is None:
                 return
             self.hero_stage_extras.setVisible(on)
+            if on and (refit or not self.settings.get("rotation_now_splitter_sizes")):
+                # No saved split: let the hero take only the height its content needs, so the queue gets the rest.
+                def _fit_hero():
+                    try:
+                        sp = self.rotation_now_splitter
+                        want = self.rotation_summary_card.sizeHint().height()
+                        total = sum(sp.sizes())
+                        sp.setSizes([want, max(0, total - want)])
+                    except Exception:
+                        pass
+                QTimer.singleShot(0, _fit_hero)
             try:
                 qd = self.queue_display
                 if on and not isinstance(qd.itemDelegate(), QueueCardDelegate):
@@ -24588,12 +24660,14 @@ class KaraokeApp(QWidget):
             except Exception as exc:
                 _diag(f"[SHOW-REDESIGN] queue cards failed: {exc}")
             self.last_sung_label.setVisible(not on)          # its NEXT line repeated the on-deck singer
-            self.rotation_summary_title.setStyleSheet(text_css("display" if on else "hero", "text_bright"))
-            self.rotation_summary_card.setMinimumHeight(330 if on else 248)
+            for _w, _css in ((self.rotation_summary_title, text_css("display" if on else "hero", "text_bright")),
+                             (self.rotation_summary_kicker, text_css("label", "success" if on else "accent_bright"))):
+                _w.setStyleSheet(_css)
+            self.rotation_summary_card.setMinimumHeight(200 if on else 248)
             try:
                 art = self.rotation_summary_art
                 if on:
-                    art.setFixedSize(190, 190)
+                    art.setFixedSize(150, 150)
                     art.set_vinyl(
                         True,
                         str(self.settings.get("ui_hero_glow", "soft") or "soft"),
@@ -24627,14 +24701,40 @@ class KaraokeApp(QWidget):
                         text_col.insertLayout(max(0, text_col.count() - 1), chips)    # before the trailing stretch
                     if not meter_in_text:
                         tr.removeWidget(meter)
-                        meter.setFixedSize(150, 30)
-                        text_col.insertWidget(max(0, text_col.count() - 1), meter, 0, Qt.AlignmentFlag.AlignLeft)
+                    meter.set_glow_style(True)
+                    meter.setFixedSize(140, 34)
+                    if getattr(self, "_hero_title_row", None) is None:
+                        row = QHBoxLayout()
+                        row.setContentsMargins(0, 0, 0, 0)
+                        row.setSpacing(10)
+                        self._hero_title_row = row
+                    row = self._hero_title_row
+                    if text_col.indexOf(row) < 0:
+                        text_col.removeWidget(self.rotation_summary_title)
+                        row.addWidget(self.rotation_summary_title, 1)
+                        row.addWidget(meter, 0, Qt.AlignmentFlag.AlignBottom)
+                        text_col.insertLayout(0, row)
+                    kick = self.rotation_summary_kicker
+                    if text_col.indexOf(kick) < 0:
+                        self.rotation_summary_card.layout().removeWidget(kick)
+                        text_col.insertWidget(0, kick)           # the mockup keeps "NOW SINGING" inside the card, above the name
                 else:
                     if chips_in_text:
                         text_col.removeItem(chips)
                         extras_col.insertLayout(0, chips)
+                    kick = self.rotation_summary_kicker
+                    if text_col.indexOf(kick) >= 0:
+                        text_col.removeWidget(kick)
+                        self.rotation_summary_card.layout().insertWidget(0, kick)
+                    row = getattr(self, "_hero_title_row", None)
+                    if row is not None and text_col.indexOf(row) >= 0:
+                        row.removeWidget(self.rotation_summary_title)
+                        row.removeWidget(meter)
+                        text_col.removeItem(row)
+                        text_col.insertWidget(0, self.rotation_summary_title)
+                        meter_in_text = True
+                    meter.set_glow_style(False)
                     if meter_in_text:
-                        text_col.removeWidget(meter)
                         meter.setFixedSize(150, 92)
                         tr.insertWidget(3, meter, 0, Qt.AlignmentFlag.AlignVCenter)
                         tr.setStretch(2, 1)
@@ -29777,7 +29877,7 @@ class KaraokeApp(QWidget):
                 self.save_settings()
             except Exception:
                 pass
-            self._apply_ui_show_redesign()
+            self._apply_ui_show_redesign(refit=True)
 
         redesign_cb.toggled.connect(on_redesign_toggled)
         _layout_card.addWidget(redesign_cb)
