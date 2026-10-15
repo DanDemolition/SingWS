@@ -90,6 +90,23 @@ class LibraryRowTests(unittest.TestCase):
         self.assertEqual(d.duration_from("CDG"), "")
         self.assertEqual(d.duration_from(""), "")
 
+    def test_the_magnifier_is_added_and_removed_without_touching_the_search_text(self):
+        from types import SimpleNamespace
+        from PyQt6.QtWidgets import QLineEdit
+        box = QLineEdit()
+        box.setText("landslide")
+        ns = SimpleNamespace(search_input=box)
+        KA = self.m.KaraokeApp
+        ns._magnifier_icon = KA._magnifier_icon
+        KA._apply_search_icon(ns, True)
+        self.assertEqual(len(box.actions()), 1)
+        self.assertFalse(box.actions()[0].icon().isNull())
+        KA._apply_search_icon(ns, True)                    # applying twice does not stack icons
+        self.assertEqual(len(box.actions()), 1)
+        KA._apply_search_icon(ns, False)
+        self.assertEqual(len(box.actions()), 0)
+        self.assertEqual(box.text(), "landslide")
+
     def test_song_count_is_read_only_and_zero_without_an_index(self):
         import song_index
         self.assertEqual(song_index.song_count(Path(tempfile.mkdtemp()) / "missing.db"), 0)

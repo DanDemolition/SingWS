@@ -25232,6 +25232,7 @@ class KaraokeApp(QWidget):
             self._apply_redesign_right_column(on)
             self._apply_redesign_bg_card(on)
             self._apply_redesign_polish(on)
+            self._apply_search_icon(on)
             try:
                 self.queue_summary_label.setVisible(on)
                 self._refresh_queue_summary()
@@ -25393,6 +25394,35 @@ class KaraokeApp(QWidget):
                 self._hero_stage_timer.stop()
         except Exception as exc:
             _diag(f"[SHOW-REDESIGN] apply failed: {exc}")
+
+    @staticmethod
+    def _magnifier_icon() -> QIcon:
+        """A small painted magnifier (no image file), drawn at 2x so it stays sharp on Retina."""
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.GlobalColor.transparent)
+        pm.setDevicePixelRatio(2.0)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(QColor(163, 168, 189), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawEllipse(QPointF(7.0, 7.0), 4.6, 4.6)
+        p.drawLine(QPointF(10.5, 10.5), QPointF(14.0, 14.0))
+        p.end()
+        return QIcon(pm)
+
+    def _apply_search_icon(self, on: bool):
+        """Redesign: a magnifier at the left of the library search box (the box itself and its search are untouched)."""
+        try:
+            act = getattr(self, "_search_icon_action", None)
+            if on and act is None:
+                act = QAction(self._magnifier_icon(), "", self.search_input)
+                act.setEnabled(False)
+                self.search_input.addAction(act, QLineEdit.ActionPosition.LeadingPosition)
+                self._search_icon_action = act
+            elif not on and act is not None:
+                self.search_input.removeAction(act)
+                self._search_icon_action = None
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] search icon failed: {exc}")
 
     def _apply_redesign_right_column(self, on: bool):
         """Right column under the preview: compact transport, TEMPO/KEY caption style, SOUNDBOARD caption, loaded pads big and empty slots slim."""
