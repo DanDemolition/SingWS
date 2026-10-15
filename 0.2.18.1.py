@@ -16219,8 +16219,8 @@ class QueueCardDelegate(QStyledItemDelegate):
     model itself are untouched; the setting just swaps which delegate paints."""
 
     GAP = 8          # space above each singer card
-    NAME_H = 30
-    SONG_H = 26
+    NAME_H = 28
+    SONG_H = 24
     LONG_SECS = 300      # a song this long or longer gets a 'Long' badge
     CARD_BG = QColor(255, 255, 255, 10)
     CARD_LINE = QColor(140, 150, 200, 40)
@@ -16376,6 +16376,7 @@ class QueueCardDelegate(QStyledItemDelegate):
         fg = index.data(Qt.ItemDataRole.ForegroundRole)
         base_color = fg.color() if hasattr(fg, "color") else QColor("#E6E8F0")
         font = QFont(option.font)
+        font.setPixelSize(12)          # songs and times: 12px, like the mockup
         pad = 14
         inner = card.adjusted(pad, 0, -pad, 0)
         painter.setFont(font)
@@ -16441,7 +16442,7 @@ class QueueCardDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(chip, 7, 7)
                 cf = QFont(font)
                 cf.setBold(True)
-                cf.setPointSizeF(max(8.0, font.pointSizeF() - 1.5))
+                cf.setPixelSize(12)
                 painter.setFont(cf)
                 painter.setPen(QColor("#FFFFFF") if nxt else QColor(200, 205, 225))
                 painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, sm.group(1))
@@ -16455,6 +16456,7 @@ class QueueCardDelegate(QStyledItemDelegate):
             if num:
                 x0 += 36                                  # chip (30) + gap (10), chip sits 4px left of the text edge
             bfont = QFont(font)
+            bfont.setPixelSize(14)         # the singer's name: 14px bold
             bfont.setBold(True)
             painter.setFont(bfont)
             painter.setPen(QColor(230, 232, 240))
@@ -16498,7 +16500,7 @@ class LibraryCardDelegate(QStyledItemDelegate):
     It paints from the same roles as TwoLineSearchDelegate. The '+' runs `add_callback(index)`, which is the same
     add-to-queue flow a double-click already uses."""
 
-    ROW_H = 58
+    ROW_H = 52
     PLUS = 28
 
     def __init__(self, left_role: int, right_role: int, disc_role: int, add_callback, parent=None, brand_fn=None):
@@ -20734,6 +20736,8 @@ class SoundboardPad(QPushButton):
         # via the pad's background colour so we save those characters for the
         # actual clip name (which is usually what runs out of space first).
         face = self._label or Path(self._clip_path).stem
+        if getattr(self, "redesign", False):
+            face = face.upper()                  # the mockup's pads are bold capitals
         if self._load_error:
             # a pad that cannot play says so (it used to fail silently, with only a log line)
             face = "\u26a0 " + face
@@ -20866,7 +20870,7 @@ class SoundboardPad(QPushButton):
             css = soundboard_pad_css_redesign(self.slot_index, "loaded") if redesign else soundboard_pad_css("loaded")
         self.setStyleSheet(css)
         # redesign: loaded pads keep their full height, empty slots are slim
-        self.setFixedHeight(int(self._full_height) if (not redesign or self._clip_path) else 30)
+        self.setFixedHeight(int(self._full_height) + (16 if redesign else 0) if (not redesign or self._clip_path) else 30)   # redesign: loaded pads are a bit taller
 
     def _fit_font_to_pad(self):
         """Shrink the pad's font, and wrap to two lines if necessary, so the
@@ -22066,6 +22070,7 @@ class KaraokeApp(QWidget):
         self.karaoke_tempo_label.setStyleSheet(text_css("label", "text_muted"))
         value_css = SINGWS_THEME.value_chip_css() if SINGWS_THEME is not None else f"QLabel {{ color:{_v('text_bright')}; background-color:rgba(255,255,255,0.055); border:1px solid rgba(255,255,255,0.048); border-radius:8px; font-size:13px; font-weight:800; }}"
         self.karaoke_tempo_value_label.setStyleSheet(value_css)
+        self._value_css = value_css
         self.karaoke_tempo_global_cb.setFixedSize(82, 30)
         self.karaoke_tempo_global_cb.setStyleSheet(
             f"""
@@ -22093,6 +22098,7 @@ class KaraokeApp(QWidget):
             }}
             """
         )
+        self._global_css = self.karaoke_tempo_global_cb.styleSheet()
         self.karaoke_key_label.setStyleSheet(text_css("label", "text_muted"))
         self.karaoke_key_value_label.setStyleSheet(value_css)
         self.karaoke_tempo_global_cb.setChecked(bool(self._karaoke_tempo_global))
@@ -22516,6 +22522,7 @@ class KaraokeApp(QWidget):
         btn_row1.addWidget(self.remove_button, 1)
         btn_row1.addWidget(self.clear_queue_button, 1)
         btn_row1.addWidget(self.rotation_lock_button, 1)
+        self._btn_row1 = btn_row1
 
         self.move_up_button.clicked.connect(self.move_up)
         self.move_down_button.clicked.connect(self.move_down)
@@ -22687,6 +22694,7 @@ class KaraokeApp(QWidget):
         rotation_divider.setFixedHeight(1)
         rotation_divider.setStyleSheet("background:rgba(115,144,180,0.14); border:none;")
         rotation_card_layout.addWidget(rotation_divider)
+        self._rotation_divider = rotation_divider
         self.rotation_summary_card = QFrame()
         self.rotation_summary_card.setObjectName("rotationSummaryCard")
         self.rotation_summary_card.setStyleSheet(
@@ -23028,6 +23036,8 @@ class KaraokeApp(QWidget):
         self._bg_ctrl_row = ctrl_row
         self._bg_top_info_row = top_info_row
         self._bg_card_layout = bg_card_layout
+        self._bg_text_col = text_col
+        self._bg_seek_row = seek_row
 
         # Redesign: the next few tracks, draggable (hidden unless ui_show_redesign is on)
         self.bg_upnext_box = QWidget()
@@ -23038,7 +23048,10 @@ class KaraokeApp(QWidget):
         _un_head.setContentsMargins(0, 0, 0, 0)
         self.bg_upnext_title = QLabel("UP NEXT IN BACKGROUND MUSIC")
         self.bg_upnext_count = QLabel("")
-        for _w in (self.bg_upnext_title, self.bg_upnext_count, self.library_song_count, self.preview_time_label, self.queue_summary_label):
+        self._bg_hint_label = QLabel("Drag to reorder \u00b7 right-click for Queue Next / Remove \u00b7 only upcoming tracks move")
+        self._bg_hint_label.setWordWrap(True)
+        self._bg_hint_label.setVisible(False)
+        for _w in (self.bg_upnext_title, self.bg_upnext_count, self.library_song_count, self.preview_time_label, self.queue_summary_label, self._bg_hint_label):
             _w.setStyleSheet(text_css("caption", "text_soft"))
         _un_head.addWidget(self.bg_upnext_title, 1)
         _un_head.addWidget(self.bg_upnext_count)
@@ -23047,6 +23060,7 @@ class KaraokeApp(QWidget):
         self.bg_upnext_list.reordered.connect(self._bg_upnext_reordered)
         self.bg_upnext_list.customContextMenuRequested.connect(self._bg_upnext_menu)
         _un.addWidget(self.bg_upnext_list)
+        _un.addWidget(self._bg_hint_label)
         self.bg_upnext_box.setVisible(False)
         bg_card_layout.addWidget(self.bg_upnext_box)
 
@@ -25208,6 +25222,11 @@ class KaraokeApp(QWidget):
         acts.addWidget(self.hero_btn_stop)
         self._hero_acts_layout = acts
         col.addLayout(acts)
+        # Redesign: the four buttons give way to a LAST / NEXT readout (the transport buttons live under the preview)
+        self.hero_lastnext_label = QLabel("")
+        self.hero_lastnext_label.setTextFormat(Qt.TextFormat.RichText)
+        self.hero_lastnext_label.setVisible(False)
+        col.addWidget(self.hero_lastnext_label)
 
         self.hero_seek_slider.sliderPressed.connect(self._hero_seek_pressed)
         self.hero_seek_slider.sliderReleased.connect(self._hero_seek_released)
@@ -25233,6 +25252,13 @@ class KaraokeApp(QWidget):
             self._apply_redesign_bg_card(on)
             self._apply_redesign_polish(on)
             self._apply_search_icon(on)
+            try:
+                # the mockup has no ROTATION title row: its facts live in the "UP NEXT" summary
+                for w in (self.rotation_title_label, self.queue_label, self._rotation_divider):
+                    w.setVisible(not on)
+                self.search_input.setMinimumHeight(38 if on else max(int(self.search_input.sizeHint().height() * 1.45), 42))
+            except Exception:
+                pass
             try:
                 self.queue_summary_label.setVisible(on)
                 self._refresh_queue_summary()
@@ -25453,6 +25479,10 @@ class KaraokeApp(QWidget):
                 self.video_controls_splitter.setHandleWidth(3 if on else 8)
             except Exception:
                 pass
+            # order in the mockup: transport, TEMPO, KEY, then SOUNDBOARD and its pads
+            rc = self._row_controls
+            rc.removeWidget(self._tempo_panel)
+            rc.insertWidget(rc.indexOf(self.soundboard_caption) if on else rc.indexOf(self.soundboard_strip) + 1, self._tempo_panel)
             self.soundboard_caption.setVisible(on)
             self.soundboard_strip.set_redesign(on)
         except Exception as exc:
@@ -41627,7 +41657,7 @@ class KaraokeApp(QWidget):
             # partner shows in italics).
             last_html = self._name_html_with_duet(last, name_css)
             next_html = self._name_html_with_duet(nxt, name_css, suffix_clause=next_suffix)
-            self.last_sung_label.setText(
+            _last_next_html = (
                 '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
                 '<tr>'
                 f'<td style="vertical-align:top; text-align:left; width:50%;">'
@@ -41638,6 +41668,10 @@ class KaraokeApp(QWidget):
                 '</td>'
                 '</tr></table>'
             )
+            self.last_sung_label.setText(_last_next_html)
+            _hero_lab = getattr(self, "hero_lastnext_label", None)
+            if _hero_lab is not None:
+                _hero_lab.setText(_last_next_html)          # the redesign shows the same LAST / NEXT in the hero
         except Exception:
             pass
 
@@ -51443,6 +51477,12 @@ class KaraokeApp(QWidget):
             count, _ends = getattr(self, "_header_summary", (0, ""))
             mins = int(getattr(self, "_queue_eta_minutes", 0) or 0)
             text = f"{count} singer{'s' if count != 1 else ''}" + (f" \u00b7 {mins} min" if mins > 0 else "")
+            flags = ["ROTATION" if self._is_rotation_mode() else "CLASSIC"]
+            if self._is_rotation_locked():
+                flags.append("LOCKED")
+            if getattr(self, "_intro_loop_active", False):
+                flags.append("LOOPING")
+            text += "".join(f" \u00b7 {f}" for f in flags)
             self.queue_summary_label.setText(text if count else "")
         except Exception as exc:
             _diag(f"[SHOW-REDESIGN] queue summary failed: {exc}")
@@ -60996,9 +61036,7 @@ class KaraokeApp(QWidget):
             if not playlist:
                 self.bg_main_art_label.clear()
                 self.bg_main_art_label.setText("♪")
-                self.bg_main_art_label.setStyleSheet(
-                    f"background:{_v('surface_alt')}; color:{_v('text_soft')}; border:1px solid rgba(115,144,180,0.14); border-radius:6px;"
-                )
+                self.bg_main_art_label.setStyleSheet(self._bg_art_css(True))
                 self._bg_panel_current_path = ""
                 self._render_bg_main_text()
                 self._refresh_bg_upnext()
@@ -61034,15 +61072,11 @@ class KaraokeApp(QWidget):
                         )
                     )
                     self.bg_main_art_label.setText("")
-                    self.bg_main_art_label.setStyleSheet(
-                        f"background:{_v('surface_alt')}; border:1px solid rgba(115,144,180,0.14); border-radius:6px;"
-                    )
+                    self.bg_main_art_label.setStyleSheet(self._bg_art_css(False))
                 else:
                     self.bg_main_art_label.clear()
                     self.bg_main_art_label.setText("♪")
-                    self.bg_main_art_label.setStyleSheet(
-                        f"background:{_v('surface_alt')}; color:{_v('text_soft')}; border:1px solid rgba(115,144,180,0.14); border-radius:6px;"
-                    )
+                    self.bg_main_art_label.setStyleSheet(self._bg_art_css(True))
 
             self._render_bg_main_text()
             self._refresh_bg_upnext()
@@ -61050,6 +61084,14 @@ class KaraokeApp(QWidget):
             self._update_bg_main_seek_ui(pos_sec, dur_sec)
         except Exception:
             pass
+
+    def _bg_art_css(self, note: bool) -> str:
+        """Style of the BGM art tile: the plain tile today; with the redesign a purple gradient tile with a white note."""
+        if self._ui_redesign_on():
+            return ("background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(49,46,129,1), stop:1 rgba(109,40,217,1));"
+                    f" color: {_v('text_bright')}; border: none; border-radius: 8px;" + (" font-size: 18px;" if note else ""))
+        return (f"background:{_v('surface_alt')}; " + (f"color:{_v('text_soft')}; " if note else "")
+                + "border:1px solid rgba(115,144,180,0.14); border-radius:6px;")
 
     def _restyle_seek_sliders(self, on: bool):
         css = (SINGWS_THEME.thin_slider_css() if SINGWS_THEME is not None else deck_seek_slider_css()) if on else deck_seek_slider_css()
@@ -61060,6 +61102,8 @@ class KaraokeApp(QWidget):
 
     def _apply_redesign_polish(self, on: bool):
         """Small finishing touches from the mockup: thin progress bars, small ghost queue buttons, a dot on the kicker, a glow on the hero."""
+        if not all(hasattr(self, n) for n in ("rotation_queue_section_label", "_btn_row1", "_bg_hint_label", "bg_main_art_label", "hero_glow")):
+            return                                  # an early settings apply, before the window is fully built
         try:
             self._restyle_seek_sliders(on)
             # queue buttons: ghost style and the mockup's short labels
@@ -61082,6 +61126,31 @@ class KaraokeApp(QWidget):
                 styled.append((b, (ghost_danger if name == "clear_queue_button" else ghost) if on else off_css[name]))
             # TEMPO and KEY become two separate row cards instead of one shared panel
             styled.append((self._tempo_panel, "QWidget#karaokeTempoKeyPanel { background: transparent; border: none; }" if on else self._tempo_panel_css))
+            # small spaced-caps labels and a compact stepper look, as in the mockup
+            cap = text_css("caption", "text_soft")
+            styled += [
+                (self.library_title_label, cap if on else text_css("title", "text_bright")),
+                (self.rotation_queue_section_label, text_css("caption", "text_soft", extra="padding: 0px 2px;") if on else text_css("section", "text_bright", extra="padding: 0px 2px;")),
+                (self.karaoke_tempo_label, cap if on else text_css("label", "text_muted")),
+                (self.karaoke_key_label, cap if on else text_css("label", "text_muted")),
+                (self.karaoke_tempo_value_label, text_css("large", "text_bright", extra="background: transparent; border: none;") if on else self._value_css),
+                (self.karaoke_key_value_label, text_css("large", "text_bright", extra="background: transparent; border: none;") if on else self._value_css),
+                (self.karaoke_tempo_global_cb, self._global_css.replace("border-radius: 8px;", "border-radius: 12px;") if on else self._global_css),
+                (self.bg_main_title_label, text_css("body", "text_bright") if on else text_css("title", "text_bright")),
+                (self.bg_main_artist_label, text_css("label", "text_muted") if on else text_css("caption", "text_muted")),
+            ]
+            for w in (self.library_title_label, self.rotation_queue_section_label, self.karaoke_tempo_label, self.karaoke_key_label,
+                      self.soundboard_caption, self.bg_upnext_title):
+                f = w.font()
+                f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2 if on else 0.0)
+                w.setFont(f)
+            for b in (self.karaoke_tempo_down_button, self.karaoke_tempo_up_button, self.karaoke_key_down_button, self.karaoke_key_up_button):
+                b.setFixedSize(*(28, 26) if on else (40, 29))
+            self.karaoke_tempo_global_cb.setFixedSize(*(70, 26) if on else (82, 30))
+            self.karaoke_tempo_value_label.setFixedSize(*(62, 28) if on else (62, 29))
+            self.karaoke_key_value_label.setFixedSize(*(62, 28) if on else (42, 29))
+            self.bg_main_art_label.setText("\u266a")
+            self._bg_hint_label.setVisible(on)
             for w, css in styled:
                 w.setStyleSheet(css)
             grid = self.karaoke_tempo_controls_grid
@@ -61093,10 +61162,33 @@ class KaraokeApp(QWidget):
             self.tempo_row_cards.setVisible(on)
             if hasattr(self, "_update_rotation_lock_button"):
                 self.rotation_lock_button.setMinimumHeight(34 if on else 38)
+            row = self._btn_row1
+            has_stretch = row.count() == 6
+            if on:
+                for b, w in ((self.move_up_button, 76), (self.move_down_button, 92), (self.remove_button, 96), (self.clear_queue_button, 130)):
+                    b.setFixedWidth(w)
+                if not has_stretch:
+                    row.insertStretch(3, 1)                    # Up / Down / Remove stay on the left, Clear queue goes right
+                for i in range(row.count()):
+                    row.setStretch(i, 0)
+                row.setStretch(3, 1)
+            else:
+                for b in (self.move_up_button, self.move_down_button, self.remove_button, self.clear_queue_button):
+                    b.setMinimumWidth(0)
+                    b.setMaximumWidth(16777215)
+                if has_stretch:
+                    row.takeAt(3)
+                for i in range(row.count()):
+                    row.setStretch(i, 1)
             # kicker dot
             self.hero_kicker_dot.setVisible(on)
             # purple glow in the hero's corner
             self.hero_glow.setVisible(on)
+            for b in (self.hero_btn_next, self.hero_btn_pause, self.hero_btn_restart, self.hero_btn_stop):
+                b.setVisible(not on)
+            self.hero_lastnext_label.setVisible(on)
+            if on:
+                self._update_last_sung_card()
         except Exception as exc:
             _diag(f"[SHOW-REDESIGN] polish failed: {exc}")
 
@@ -61128,6 +61220,13 @@ class KaraokeApp(QWidget):
                     b.setFixedSize(36, 30)
                 for i, b in enumerate(btns):
                     row.insertWidget(i, b)
+            tc, sr, sl = self._bg_text_col, self._bg_seek_row, self.bg_main_seek_slider
+            if on and tc.indexOf(sl) < 0:
+                sr.removeWidget(sl)
+                tc.addWidget(sl)                    # the progress bar sits under the title and artist, as in the mockup
+            elif (not on) and tc.indexOf(sl) >= 0:
+                tc.removeWidget(sl)
+                sr.insertWidget(1, sl, 1)
             self._bg_card_layout.setSpacing(8 if on else 11)
             self._bg_card_layout.setContentsMargins(*(14, 12, 14, 12) if on else (16, 16, 16, 16))
             self._bg_ctrl_row_hide(on)
@@ -61191,7 +61290,7 @@ class KaraokeApp(QWidget):
                     pass
                 lst.addItem(it)
             lst.setFixedHeight(max(1, 44 * len(shown)))
-            self.bg_upnext_count.setText(f"{len(shown)} of {len(upcoming)}" if upcoming else "")
+            self.bg_upnext_count.setText(f"{len(shown)} OF {len(upcoming)}" if upcoming else "")
             self.bg_upnext_box.setVisible(bool(shown))
             QTimer.singleShot(0, lambda: self._fit_right_column(True))
         except Exception as exc:

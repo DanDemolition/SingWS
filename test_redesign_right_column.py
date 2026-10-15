@@ -33,7 +33,7 @@ class RightColumnTests(unittest.TestCase):
     def test_redesign_makes_empty_pads_slim_and_keeps_loaded_pads_full(self):
         s = self.strip()
         s.set_redesign(True)
-        self.assertEqual(s.pads[0].height(), 58)
+        self.assertEqual(s.pads[0].height(), 58 + 16)          # a loaded pad is a little taller in the redesign
         self.assertTrue(all(p.height() == 30 for p in s.pads[1:]))
 
     def test_switching_back_restores_every_pad_to_the_original_height_and_style(self):

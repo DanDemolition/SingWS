@@ -66,6 +66,24 @@ class ShowRedesignTests(unittest.TestCase):
         apply_body = SRC[SRC.index("def _apply_ui_show_redesign"):SRC.index("def _apply_redesign_hero_text")]
         self.assertIn("self.queue_summary_label.setVisible(on)", apply_body)
 
+    def test_hero_buttons_give_way_to_a_last_and_next_readout(self):
+        body = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
+        self.assertIn("for b in (self.hero_btn_next, self.hero_btn_pause, self.hero_btn_restart, self.hero_btn_stop):", body)
+        self.assertIn("b.setVisible(not on)", body)
+        self.assertIn("self.hero_lastnext_label.setVisible(on)", body)
+        upd = SRC[SRC.index("def _update_last_sung_card"):SRC.index("def _remember_last_sung_from_current")]
+        self.assertIn("hero_lastnext_label", upd)            # the readout is fed by the same LAST / NEXT the footer used
+        # the buttons are only hidden: the transport row under the preview still has play / pause / restart / stop
+        for h in ("_on_play_control_clicked", "toggle_karaoke_pause", "restart_track", "stop_and_clear_now_singing"):
+            self.assertIn(f"self.{h}", SRC)
+
+    def test_the_rotation_title_row_is_hidden_with_the_redesign_and_its_facts_move_to_the_summary(self):
+        body = SRC[SRC.index("def _apply_ui_show_redesign"):SRC.index("def _apply_redesign_hero_text")]
+        self.assertIn("self.rotation_title_label, self.queue_label, self._rotation_divider", body)
+        summary = SRC[SRC.index("def _refresh_queue_summary"):SRC.index("    def update_queue_display")]
+        for flag in ("CLASSIC", "ROTATION", "LOCKED", "LOOPING"):
+            self.assertIn(flag, summary)
+
 
 if __name__ == "__main__":
     unittest.main()
