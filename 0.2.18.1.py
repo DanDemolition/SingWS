@@ -16450,6 +16450,84 @@ class QueueCardDelegate(QStyledItemDelegate):
 
 
 
+class LibraryCardDelegate(QStyledItemDelegate):
+    """Show-tab redesign: a library result as a card row (bold title, 'Artist \u00b7 disc' under it, a '+' button on the right).
+
+    It paints from the same roles as TwoLineSearchDelegate. The '+' runs `add_callback(index)`, which is the same
+    add-to-queue flow a double-click already uses."""
+
+    ROW_H = 58
+    PLUS = 28
+
+    def __init__(self, left_role: int, right_role: int, disc_role: int, add_callback, parent=None):
+        super().__init__(parent)
+        self.left_role, self.right_role, self.disc_role = left_role, right_role, disc_role
+        self.add_callback = add_callback
+
+    def sizeHint(self, option, index):
+        return QSize(0, self.ROW_H)
+
+    def _plus_rect(self, rect: QRect) -> QRect:
+        reserve = 14 if sys.platform == "darwin" else 0
+        return QRect(rect.right() - self.PLUS - 10 - reserve, rect.center().y() - self.PLUS // 2, self.PLUS, self.PLUS)
+
+    def paint(self, painter, option, index):
+        left = str(index.data(self.left_role) or "")
+        if not left:
+            super().paint(painter, option, index)
+            return
+        right = str(index.data(self.right_role) or "")
+        disc = str(index.data(self.disc_role) or "").strip()
+        artist, title = left.split(" \u2022 ", 1) if " \u2022 " in left else ("", left)
+        sub_bits = [b for b in (artist, disc) if b]
+        if not disc and "KaraFun" in right:
+            sub_bits.append("KaraFun")
+        sub = " \u00b7 ".join(sub_bits)
+        hot = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        r = option.rect.adjusted(2, 2, -2, -2)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if selected or hot:
+            painter.setBrush(QColor(124, 61, 255, 46) if selected else QColor(255, 255, 255, 14))
+            painter.drawRoundedRect(r, 8, 8)
+        plus = self._plus_rect(option.rect)
+        text_w = max(0, plus.left() - r.left() - 24)
+        font = QFont(option.font)
+        font.setPixelSize(13)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(230, 232, 240))
+        painter.drawText(QRect(r.left() + 12, r.top() + 8, text_w, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, text_w))
+        sf = QFont(option.font)
+        sf.setPixelSize(11)
+        sf.setBold(False)
+        painter.setFont(sf)
+        painter.setPen(QColor(163, 168, 189))
+        painter.drawText(QRect(r.left() + 12, r.top() + 29, text_w, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(sf).elidedText(sub, Qt.TextElideMode.ElideRight, text_w))
+        painter.setPen(QPen(QColor(167, 139, 250, 170) if hot else QColor(140, 150, 200, 70), 1))
+        painter.setBrush(QColor(124, 61, 255, 60) if hot else QColor(255, 255, 255, 12))
+        painter.drawRoundedRect(QRectF(plus).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+        painter.setPen(QPen(QColor(240, 236, 255), 1.6))
+        c = QPointF(plus.center())
+        painter.drawLine(QPointF(c.x() - 5, c.y()), QPointF(c.x() + 5, c.y()))
+        painter.drawLine(QPointF(c.x(), c.y() - 5), QPointF(c.x(), c.y() + 5))
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            if self._plus_rect(option.rect).contains(event.position().toPoint()):
+                try:
+                    self.add_callback(index)
+                except Exception as exc:
+                    _diag(f"[SHOW-REDESIGN] library + failed: {exc}")
+                return True
+        return super().editorEvent(event, model, option, index)
+
+
 class TwoLineSearchDelegate(QStyledItemDelegate):
     """Search-results delegate that paints two lines per row:
 
@@ -22413,6 +22491,10 @@ class KaraokeApp(QWidget):
         self.library_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         library_header_row.addWidget(self.library_title_label)
         library_header_row.addStretch(1)
+        self.library_song_count = QLabel("")
+        self.library_song_count.setStyleSheet(text_css("caption", "text_soft"))
+        self.library_song_count.setVisible(False)
+        library_header_row.addWidget(self.library_song_count)
         library_card_layout.addLayout(library_header_row)
         library_card_layout.addLayout(search_row)
         self.library_filter_bar = LibraryFilterBar()
@@ -25044,6 +25126,26 @@ class KaraokeApp(QWidget):
             self._apply_redesign_right_column(on)
             self._apply_redesign_bg_card(on)
             self._apply_redesign_polish(on)
+            try:
+                rl = self.results_list
+                if on and not isinstance(rl.itemDelegate(), LibraryCardDelegate):
+                    rl.setItemDelegate(LibraryCardDelegate(
+                        self._row_left_role, self._row_right_role, self._row_disc_role,
+                        lambda ix: self._on_search_result_double_clicked(rl.item(ix.row())), parent=rl))
+                    rl.setAlternatingRowColors(False)
+                    rl.setMouseTracking(True)
+                elif not on and isinstance(rl.itemDelegate(), LibraryCardDelegate):
+                    rl.setItemDelegate(TwoLineSearchDelegate(self._row_left_role, self._row_right_role, rl, disc_role=self._row_disc_role))
+                    rl.setAlternatingRowColors(True)
+                self.library_tabs_label.setVisible(not on)
+                self.library_song_count.setVisible(on)
+                if on:
+                    n = song_index.song_count()
+                    self.library_song_count.setText(f"{n:,} songs" if n else "")
+                rl.doItemsLayout()
+                rl.viewport().update()
+            except Exception as exc:
+                _diag(f"[SHOW-REDESIGN] library rows failed: {exc}")
             try:
                 self.library_filter_bar.setVisible(on)
                 if not on:

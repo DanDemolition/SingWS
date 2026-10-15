@@ -108,6 +108,21 @@ def _connect(dbfile: Path, *, read_only: bool = False) -> sqlite3.Connection:
     con.execute("PRAGMA busy_timeout=5000;")
     return con
 
+def song_count(dbfile: Optional[Path] = None) -> int:
+    """How many songs are in the index (0 when there is no index yet). Read-only."""
+    try:
+        dbfile = dbfile or db_path()
+        if not Path(dbfile).exists():
+            return 0
+        con = _connect(Path(dbfile), read_only=True)
+        try:
+            return int(con.execute("SELECT COUNT(*) FROM songs").fetchone()[0])
+        finally:
+            con.close()
+    except Exception:
+        return 0
+
+
 def normalize_text(s: str) -> str:
     return " ".join((s or "").lower().replace("\u00A0"," ").split())
 
