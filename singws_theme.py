@@ -74,6 +74,7 @@ TEXT_ROLES = {
     "title": (14, 850),
     "large": (18, 800),
     "hero": (24, 850),
+    "display": (32, 850),
 }
 
 
@@ -342,6 +343,21 @@ def value_chip_css() -> str:
             border-radius: {radius('md')}px;
             font-size: 13px;
             font-weight: 800;
+        }}
+    """
+
+
+def chip_pill_css() -> str:
+    """A small rounded 'pill' label (Key +2, Tempo 100%, CDG ...)."""
+    return f"""
+        QLabel {{
+            color: {color('text')};
+            background-color: rgba(255,255,255,0.06);
+            border: 1px solid rgba(115,144,180,0.16);
+            border-radius: 12px;
+            padding: 0px 11px;
+            font-size: 11px;
+            font-weight: 700;
         }}
     """
 

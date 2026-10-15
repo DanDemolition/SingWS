@@ -202,7 +202,13 @@ def content_card_css(object_name: str, radius: int = 14) -> str:
     r = min(8, max(0, int(radius)))
     return f"QFrame#{object_name} {{ background-color:{_v('surface_alt')}; border-radius:{r}px; border:1px solid {_v('border')}; }}"
 
-_FALLBACK_TEXT_ROLES = {"caption": (11, 700), "label": (12, 700), "body": (13, 700), "section": (13, 850), "title": (14, 850), "large": (18, 800), "hero": (24, 850)}
+_FALLBACK_TEXT_ROLES = {"caption": (11, 700), "label": (12, 700), "body": (13, 700), "section": (13, 850), "title": (14, 850), "large": (18, 800), "hero": (24, 850), "display": (32, 850)}
+
+def chip_pill_css() -> str:
+    """A small rounded 'pill' label (Key +2, Tempo 100%, CDG ...)."""
+    if SINGWS_THEME is not None:
+        return SINGWS_THEME.chip_pill_css()
+    return f"QLabel {{ color:{_v('text')}; background-color: rgba(255,255,255,0.06); border:1px solid rgba(115,144,180,0.16); border-radius:12px; padding:0px 11px; font-size:11px; font-weight:700; }}"
 
 def text_css(role: str, color_name: str = "text", extra: str = "") -> str:
     """A label style from a named role (caption/label/body/section/title/large/hero); see singws_theme.TEXT_ROLES."""
@@ -4025,6 +4031,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_show_redesign": False,             # new Show tab layout (experimental); off = the current look
     "session_location_latitude": "",      # current SingWS session venue latitude
     "session_location_longitude": "",     # current SingWS session venue longitude
     "session_location_auto_detect": True, # auto-detect current device location on macOS
@@ -21665,6 +21672,8 @@ class KaraokeApp(QWidget):
         top_row.addStretch(1)
 
         rotation_hero_layout.addLayout(top_row, 1)
+        self._hero_top_row = top_row
+        self._build_hero_stage_extras(rotation_hero_layout)   # chips, seek bar, actions (shown only with ui_show_redesign)
 
         # LAST / NEXT footer lives INSIDE the hero card so the whole on-deck
         # module is one card.
@@ -21673,6 +21682,7 @@ class KaraokeApp(QWidget):
         # Tall enough for the hero (avatar + title) AND the compact
         # LAST / NEXT footer inside it, so neither gets clipped.
         self.rotation_summary_card.setMinimumHeight(248)
+        self._apply_ui_show_redesign()
         self.rotation_queue_panel = QWidget()
         self.rotation_queue_panel.setObjectName("rotationQueuePanel")
         self.rotation_queue_panel.setStyleSheet(
@@ -23931,6 +23941,7 @@ class KaraokeApp(QWidget):
                 self.rotation_summary_meta.setText(
                     " · ".join([p for p in (current_title, current_brand) if p])
                 )
+                self._apply_redesign_hero_text(current_title, current_artist, current_brand, current_path)
                 self.rotation_summary_art.set_mode("live")
                 self.rotation_summary_art.set_name(current_singer)
                 try:
@@ -23951,6 +23962,7 @@ class KaraokeApp(QWidget):
                 self.rotation_summary_meta.setText(
                     " · ".join([p for p in (n_title, disc_id) if p])
                 )
+                self._apply_redesign_hero_text(n_title, n_artist, disc_id, "")
                 self.rotation_summary_art.set_mode("next")
                 self.rotation_summary_art.set_name(next_name or "")
                 try:
@@ -23971,6 +23983,202 @@ class KaraokeApp(QWidget):
                 pass
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ Show tab redesign (hero stage)
+    # Everything here is shown only with the `ui_show_redesign` setting; off (the default) leaves the current look untouched.
+    # The new buttons and the seek bar call the SAME handlers as the existing transport controls, so there is one behaviour.
+
+    def _ui_redesign_on(self) -> bool:
+        try:
+            return bool(self.settings.get("ui_show_redesign", False))
+        except Exception:
+            return False
+
+    def _build_hero_stage_extras(self, parent_layout):
+        box = QWidget(self.rotation_hero_card)
+        box.setObjectName("heroStageExtras")
+        box.setStyleSheet("QWidget#heroStageExtras { background: transparent; }")
+        col = QVBoxLayout(box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(10)
+
+        chips = QHBoxLayout()
+        chips.setContentsMargins(0, 0, 0, 0)
+        chips.setSpacing(8)
+        self.hero_chip_key = QLabel("Key 0")
+        self.hero_chip_tempo = QLabel("Tempo 100%")
+        self.hero_chip_format = QLabel("")
+        for c in (self.hero_chip_key, self.hero_chip_tempo, self.hero_chip_format):
+            c.setStyleSheet(chip_pill_css())
+            c.setFixedHeight(24)      # Qt ignores a border-radius larger than half the height, so the pill needs a fixed 24 px
+            chips.addWidget(c)
+        chips.addStretch(1)
+        self._hero_chips_layout = chips
+        col.addLayout(chips)
+
+        prog = QHBoxLayout()
+        prog.setContentsMargins(0, 0, 0, 0)
+        prog.setSpacing(10)
+        self.hero_seek_elapsed = QLabel("00:00")
+        self.hero_seek_elapsed.setStyleSheet(text_css("label", "text_muted"))
+        self.hero_seek_slider = SeekSlider(Qt.Orientation.Horizontal)
+        self.hero_seek_slider.setRange(0, 1000)
+        self.hero_seek_slider.setStyleSheet(deck_seek_slider_css())
+        self.hero_seek_slider.setToolTip("Click or drag to seek")
+        self.hero_seek_remaining = QLabel("-00:00")
+        self.hero_seek_remaining.setStyleSheet(text_css("label", "text_muted"))
+        prog.addWidget(self.hero_seek_elapsed)
+        prog.addWidget(self.hero_seek_slider, 1)
+        prog.addWidget(self.hero_seek_remaining)
+        col.addLayout(prog)
+
+        acts = QHBoxLayout()
+        acts.setContentsMargins(0, 0, 0, 0)
+        acts.setSpacing(8)
+        self.hero_btn_next = QPushButton("Next singer")
+        self.hero_btn_pause = QPushButton("Pause")
+        self.hero_btn_restart = QPushButton("Restart")
+        self.hero_btn_stop = QPushButton("Stop")
+        self.hero_btn_next.setStyleSheet(SINGWS_THEME.button_css(padding="9px 16px", radius_px=8, variant="primary") if SINGWS_THEME is not None else subtle_button_css(padding="9px 16px", radius=8))
+        self.hero_btn_pause.setStyleSheet(subtle_button_css(padding="9px 14px", radius=8))
+        self.hero_btn_restart.setStyleSheet(subtle_button_css(padding="9px 14px", radius=8))
+        self.hero_btn_stop.setStyleSheet(danger_button_css(padding="9px 14px", radius=8))
+        for b in (self.hero_btn_next, self.hero_btn_pause, self.hero_btn_restart, self.hero_btn_stop):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hero_btn_next.setToolTip("Play Next Singer")
+        self.hero_btn_pause.setToolTip("Pause / Resume")
+        self.hero_btn_restart.setToolTip("Restart Song")
+        self.hero_btn_stop.setToolTip("Stop Playback")
+        self.hero_btn_next.clicked.connect(self._on_play_control_clicked)
+        self.hero_btn_pause.clicked.connect(self.toggle_karaoke_pause)
+        self.hero_btn_restart.clicked.connect(self.restart_track)
+        self.hero_btn_stop.clicked.connect(self.stop_and_clear_now_singing)
+        acts.addWidget(self.hero_btn_next)
+        acts.addWidget(self.hero_btn_pause)
+        acts.addWidget(self.hero_btn_restart)
+        acts.addStretch(1)
+        acts.addWidget(self.hero_btn_stop)
+        col.addLayout(acts)
+
+        self.hero_seek_slider.sliderPressed.connect(self._hero_seek_pressed)
+        self.hero_seek_slider.sliderReleased.connect(self._hero_seek_released)
+        self.hero_seek_slider.valueChanged.connect(self._hero_seek_value_changed)
+
+        self.hero_stage_extras = box
+        parent_layout.addWidget(box)
+        box.setVisible(False)
+
+        self._hero_format_text = ""
+        self._hero_stage_timer = QTimer(self)
+        self._hero_stage_timer.setInterval(250)
+        self._hero_stage_timer.timeout.connect(self._hero_stage_sync)
+
+    def _apply_ui_show_redesign(self):
+        """Show or hide the redesigned hero pieces from the setting. Safe to call at any time."""
+        try:
+            on = self._ui_redesign_on()
+            if getattr(self, "hero_stage_extras", None) is None:
+                return
+            self.hero_stage_extras.setVisible(on)
+            self.last_sung_label.setVisible(not on)          # its NEXT line repeated the on-deck singer
+            self.rotation_summary_title.setStyleSheet(text_css("display" if on else "hero", "text_bright"))
+            self.rotation_summary_card.setMinimumHeight(330 if on else 248)
+            try:
+                # Items: 0 avatar, 1 text column, 2 spacer, 3 meter, 4 spacer. The two spacers shared the free width with the
+                # text column and squeezed the song line; with the redesign on the text column takes it and the meter sits right.
+                tr = self._hero_top_row
+                tr.setStretch(1, 1)
+                tr.setStretch(2, 0 if on else 1)
+                tr.setStretch(4, 0 if on else 1)
+                meter = self.rotation_summary_meter
+                in_chips = self._hero_chips_layout.indexOf(meter) >= 0
+                if on and not in_chips:
+                    tr.removeWidget(meter)
+                    meter.setFixedSize(132, 30)
+                    self._hero_chips_layout.addWidget(meter, 0, Qt.AlignmentFlag.AlignVCenter)
+                elif not on and in_chips:
+                    self._hero_chips_layout.removeWidget(meter)
+                    meter.setFixedSize(150, 92)
+                    tr.insertWidget(3, meter, 0, Qt.AlignmentFlag.AlignVCenter)
+                    tr.setStretch(2, 1)
+                    tr.setStretch(4, 1)
+            except Exception:
+                pass
+            if on:
+                self._hero_stage_timer.start()
+                self._hero_stage_sync()
+            else:
+                self._hero_stage_timer.stop()
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] apply failed: {exc}")
+
+    def _apply_redesign_hero_text(self, title, artist, brand, path):
+        """With the redesign on, the hero's second line reads 'Song · Artist' and the third line is just the disc."""
+        if not self._ui_redesign_on():
+            return
+        try:
+            title = str(title or "").strip()
+            artist = str(artist or "").strip()
+            self.rotation_summary_subtitle.setText(" · ".join([p for p in (title, artist) if p]) or "Ready to sing")
+            self.rotation_summary_subtitle.setStyleSheet(text_css("title", "text_muted"))
+            self.rotation_summary_meta.setText(str(brand or "").strip())
+            low = str(path or "").lower()
+            self._hero_format_text = "KaraFun" if low.startswith("karafun_streaming:") else (self._hero_media_badge_text(path) if path else "")
+        except Exception:
+            pass
+
+    def _hero_stage_sync(self):
+        """Mirror the transport state into the hero (every 250 ms while the redesign is on)."""
+        if not self._ui_redesign_on():
+            return
+        try:
+            if not self.hero_seek_slider.isSliderDown() and not getattr(self, "_karaoke_seek_dragging", False):
+                v = int(self.karaoke_seek_slider.value())
+                if self.hero_seek_slider.value() != v:
+                    self.hero_seek_slider.blockSignals(True)
+                    self.hero_seek_slider.setValue(v)
+                    self.hero_seek_slider.blockSignals(False)
+                self.hero_seek_elapsed.setText(self.karaoke_elapsed_label.text())
+                self.hero_seek_remaining.setText(self.karaoke_remaining_label.text())
+            try:
+                key = int(getattr(self, "_current_karaoke_semitones", 0) or 0)
+            except Exception:
+                key = 0
+            self.hero_chip_key.setText(f"Key {key:+d}" if key else "Key 0")
+            self.hero_chip_tempo.setText(f"Tempo {int(self._karaoke_tempo_percent)}%")
+            fmt = str(getattr(self, "_hero_format_text", "") or "")
+            self.hero_chip_format.setText(fmt)
+            self.hero_chip_format.setVisible(bool(fmt))
+            self.hero_btn_pause.setText("Resume" if self._is_karaoke_paused() else "Pause")
+        except Exception:
+            pass
+
+    def _hero_seek_pressed(self):
+        self._karaoke_seek_dragging = True
+
+    def _hero_seek_value_changed(self, value: int):
+        # While dragging, drive the existing slider's preview (it updates the elapsed/remaining text).
+        if not (self.hero_seek_slider.isSliderDown() or getattr(self, "_karaoke_seek_dragging", False)):
+            return
+        try:
+            self.karaoke_seek_slider.blockSignals(True)
+            self.karaoke_seek_slider.setValue(int(value))
+            self.karaoke_seek_slider.blockSignals(False)
+            self._on_karaoke_seek_value_changed(int(value))
+            self.hero_seek_elapsed.setText(self.karaoke_elapsed_label.text())
+            self.hero_seek_remaining.setText(self.karaoke_remaining_label.text())
+        except Exception:
+            pass
+
+    def _hero_seek_released(self):
+        # The one seek path: put the value on the existing slider and run its release handler (KaraFun or native).
+        try:
+            self.karaoke_seek_slider.blockSignals(True)
+            self.karaoke_seek_slider.setValue(int(self.hero_seek_slider.value()))
+            self.karaoke_seek_slider.blockSignals(False)
+        except Exception:
+            pass
+        self._on_karaoke_seek_released()
 
     def _hero_media_badge_text(self, song_path: str) -> str:
         try:
@@ -29018,6 +29226,24 @@ class KaraokeApp(QWidget):
         _search_actions_card.addLayout(_button_grid([
             fast_analyze_lib_btn, analyze_lib_btn, turbo_analyze_lib_btn, reanalyze_lib_btn, analyze_transitions_btn,
         ]))
+
+        _layout_card = _section_card(
+            tab_display, "Show tab layout",
+            "Experimental redesign of the host's Show tab. Off keeps the current look. Takes effect immediately.",
+        )
+        redesign_cb = QCheckBox("Use the new Show tab layout")
+        redesign_cb.setChecked(bool(self.settings.get("ui_show_redesign", False)))
+
+        def on_redesign_toggled(checked: bool):
+            self.settings["ui_show_redesign"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_ui_show_redesign()
+
+        redesign_cb.toggled.connect(on_redesign_toggled)
+        _layout_card.addWidget(redesign_cb)
 
         _display_actions_card = _section_card(tab_display, "Display Tools")
         _display_actions = QHBoxLayout()

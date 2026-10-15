@@ -15,7 +15,7 @@ BASELINE = {
     "font_off_scale_uses": 11,
     "radius_off_scale_uses": 6,
     "hex_off_palette_uses": 195,
-    "inline_stylesheets": 312,
+    "inline_stylesheets": 323,
 }
 
 
