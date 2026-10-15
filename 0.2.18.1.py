@@ -202,6 +202,15 @@ def content_card_css(object_name: str, radius: int = 14) -> str:
     r = min(8, max(0, int(radius)))
     return f"QFrame#{object_name} {{ background-color:{_v('surface_alt')}; border-radius:{r}px; border:1px solid {_v('border')}; }}"
 
+_FALLBACK_TEXT_ROLES = {"caption": (11, 700), "label": (12, 700), "body": (13, 700), "section": (13, 850), "title": (14, 850), "large": (18, 800), "hero": (24, 850)}
+
+def text_css(role: str, color_name: str = "text", extra: str = "") -> str:
+    """A label style from a named role (caption/label/body/section/title/large/hero); see singws_theme.TEXT_ROLES."""
+    if SINGWS_THEME is not None:
+        return SINGWS_THEME.text_css(role, color_name, extra)
+    size, weight = _FALLBACK_TEXT_ROLES.get(role, _FALLBACK_TEXT_ROLES["body"])
+    return f"color:{_v(color_name)}; font-size:{size}px; font-weight:{weight}; letter-spacing:0px;{(' ' + extra.strip()) if extra.strip() else ''}"
+
 def section_title_css() -> str:
     if SINGWS_THEME is not None:
         return SINGWS_THEME.section_title_css()
@@ -9660,7 +9669,7 @@ class BackgroundMusicManager(QMainWindow):
         self.bg_now_playing_kicker.setStyleSheet(section_meta_css())
         player_layout.addWidget(self.bg_now_playing_kicker)
         self.now_playing_label = QLabel("No track playing")
-        self.now_playing_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:13px; font-weight:750;")
+        self.now_playing_label.setStyleSheet(text_css("body", "text_bright"))
         player_layout.addWidget(self.now_playing_label)
 
         # Elapsed / seek / remaining
@@ -11183,13 +11192,13 @@ class BackgroundMusicManager(QMainWindow):
             pass
 
         try:
-            self.now_playing_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:13px; font-weight:750;")
+            self.now_playing_label.setStyleSheet(text_css("body", "text_bright"))
             self.bg_workspace_meta.setStyleSheet(section_meta_css())
-            self.seek_elapsed_label.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:700;")
-            self.seek_remaining_label.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:700;")
+            self.seek_elapsed_label.setStyleSheet(text_css("caption", "text_soft"))
+            self.seek_remaining_label.setStyleSheet(text_css("caption", "text_soft"))
             self.seek_slider.setStyleSheet(seek_slider_css())
-            self.volume_text_label.setStyleSheet(f"color:{_v('text')}; font-size:12px; font-weight:650;")
-            self.soundboard_text_label.setStyleSheet(f"color:{_v('text')}; font-size:12px; font-weight:650;")  # same as Volume
+            self.volume_text_label.setStyleSheet(text_css("label", "text"))
+            self.soundboard_text_label.setStyleSheet(text_css("label", "text"))  # same as Volume
             self.library_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
             try:
                 self.playlist_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
@@ -11221,14 +11230,14 @@ class BackgroundMusicManager(QMainWindow):
                 """
             )
             self.browser_root_combo.setStyleSheet(SINGWS_THEME.combo_css() if SINGWS_THEME is not None else "")
-            self.playlist_count.setStyleSheet(f"color:{_v('text_soft')}; font-size:12px; font-weight:600;")
+            self.playlist_count.setStyleSheet(text_css("label", "text_soft"))
             for lbl in (getattr(self, "bg_browser_label", None), getattr(self, "bg_playlist_label", None)):
                 if lbl is not None:
                     lbl.setStyleSheet(section_title_css())
             checkbox_style = SINGWS_THEME.checkbox_css() if SINGWS_THEME is not None else f"QCheckBox {{ color:{_v('text_soft')}; font-size:12px; }}"
             for cb in (self.enable_bg_cb, self.autoplay_cb, self.stop_after_current_cb):
                 cb.setStyleSheet(checkbox_style)
-            self.volume_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:12px; font-weight:700;")
+            self.volume_label.setStyleSheet(text_css("label", "text_bright"))
             for widget, size, weight in (
                 (self.bg_workspace_title, 12, QFont.Weight.Black),
                 (self.bg_workspace_meta, 11, QFont.Weight.DemiBold),
@@ -20770,7 +20779,7 @@ class KaraokeApp(QWidget):
         deck_header_row.setContentsMargins(0, 0, 0, 0)
         deck_header_row.setSpacing(8)
         self.performance_deck_title = QLabel("KARAOKE PREVIEW")
-        self.performance_deck_title.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:900; letter-spacing:0px;")
+        self.performance_deck_title.setStyleSheet(text_css("title", "text_bright"))
         self.performance_deck_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.performance_deck_status = QLabel("STANDBY")
         self.performance_deck_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -20799,7 +20808,7 @@ class KaraokeApp(QWidget):
         self.karaoke_elapsed_label = QLabel("00:00")
         self.karaoke_elapsed_label.setMinimumWidth(48)
         self.karaoke_elapsed_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.karaoke_elapsed_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:12px; font-weight:800;")
+        self.karaoke_elapsed_label.setStyleSheet(text_css("label", "text_muted"))
         self.karaoke_seek_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.karaoke_seek_slider.setRange(0, 1000)
         self.karaoke_seek_slider.setValue(0)
@@ -20807,7 +20816,7 @@ class KaraokeApp(QWidget):
         self.karaoke_remaining_label = QLabel("-00:00")
         self.karaoke_remaining_label.setMinimumWidth(50)
         self.karaoke_remaining_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.karaoke_remaining_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:12px; font-weight:800;")
+        self.karaoke_remaining_label.setStyleSheet(text_css("label", "text_muted"))
         seek_row.addWidget(self.karaoke_elapsed_label)
         seek_row.addWidget(self.karaoke_seek_slider, 1)
         seek_row.addWidget(self.karaoke_remaining_label)
@@ -20955,7 +20964,7 @@ class KaraokeApp(QWidget):
         self.karaoke_key_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.karaoke_tempo_label.setFixedWidth(50)
         self.karaoke_key_label.setFixedWidth(50)
-        self.karaoke_tempo_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:12px; font-weight:850;")
+        self.karaoke_tempo_label.setStyleSheet(text_css("label", "text_muted"))
         value_css = SINGWS_THEME.value_chip_css() if SINGWS_THEME is not None else f"QLabel {{ color:{_v('text_bright')}; background-color:rgba(255,255,255,0.055); border:1px solid rgba(255,255,255,0.048); border-radius:8px; font-size:13px; font-weight:800; }}"
         self.karaoke_tempo_value_label.setStyleSheet(value_css)
         self.karaoke_tempo_global_cb.setFixedSize(82, 30)
@@ -20985,7 +20994,7 @@ class KaraokeApp(QWidget):
             }}
             """
         )
-        self.karaoke_key_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:12px; font-weight:850;")
+        self.karaoke_key_label.setStyleSheet(text_css("label", "text_muted"))
         self.karaoke_key_value_label.setStyleSheet(value_css)
         self.karaoke_tempo_global_cb.setChecked(bool(self._karaoke_tempo_global))
         self.karaoke_tempo_down_button.setToolTip("Tempo Down")
@@ -21158,7 +21167,7 @@ class KaraokeApp(QWidget):
         # Don't add the search button to the layout since it's hidden
 
         self.library_hint_label = QLabel("Search by artist or title")
-        self.library_hint_label.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:750; padding: 2px 2px 0px 2px;")
+        self.library_hint_label.setStyleSheet(text_css("caption", "text_soft", extra="padding: 2px 2px 0px 2px;"))
         self.library_hint_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # --- Combined row: Key selector, Singer name, Add button ---
@@ -21199,7 +21208,7 @@ class KaraokeApp(QWidget):
             # Do NOT connect returnPressed / clicked when hidden
 
         self.processing_label = QLabel("")
-        self.processing_label.setStyleSheet(f"color: {_v('warning')}; font-size:11px; font-weight:750;")
+        self.processing_label.setStyleSheet(text_css("caption", "warning"))
         self.processing_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.processing_label.setMinimumHeight(16)
         self._processing_notification_text = ""
@@ -21477,7 +21486,7 @@ class KaraokeApp(QWidget):
         library_header_row.setContentsMargins(0, 0, 0, 0)
         library_header_row.setSpacing(8)
         self.library_title_label = QLabel("SONG LIBRARY")
-        self.library_title_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:900; letter-spacing:0px;")
+        self.library_title_label.setStyleSheet(text_css("title", "text_bright"))
         self.library_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         library_header_row.addWidget(self.library_title_label)
         library_header_row.addStretch(1)
@@ -21554,7 +21563,7 @@ class KaraokeApp(QWidget):
         rotation_header_row.setContentsMargins(0, 0, 0, 0)
         rotation_header_row.setSpacing(10)
         self.rotation_title_label = QLabel("ROTATION")
-        self.rotation_title_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:900; letter-spacing:0px;")
+        self.rotation_title_label.setStyleSheet(text_css("title", "text_bright"))
         self.rotation_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         rotation_header_row.addWidget(self.rotation_title_label)
         rotation_header_row.addStretch(1)
@@ -21580,7 +21589,7 @@ class KaraokeApp(QWidget):
         rotation_summary_layout.setSpacing(7)
 
         self.rotation_summary_kicker = QLabel("ROTATION WAITING")
-        self.rotation_summary_kicker.setStyleSheet(f"color:{_v('accent_bright')}; font-size:12px; font-weight:850; letter-spacing:0px;")
+        self.rotation_summary_kicker.setStyleSheet(text_css("label", "accent_bright"))
         rotation_summary_layout.addWidget(self.rotation_summary_kicker)
 
         self.rotation_hero_card = QFrame()
@@ -21609,15 +21618,15 @@ class KaraokeApp(QWidget):
         rotation_hero_text.setSpacing(2)
 
         self.rotation_summary_title = QLabel("No singer is active")
-        self.rotation_summary_title.setStyleSheet(f"color:{_v('text_bright')}; font-size:24px; font-weight:900;")
+        self.rotation_summary_title.setStyleSheet(text_css("hero", "text_bright"))
         rotation_hero_text.addWidget(self.rotation_summary_title)
 
         self.rotation_summary_subtitle = QLabel("Queue a song to start the rotation.")
-        self.rotation_summary_subtitle.setStyleSheet(f"color:{_v('text_muted')}; font-size:13px; font-weight:700;")
+        self.rotation_summary_subtitle.setStyleSheet(text_css("body", "text_muted"))
         rotation_hero_text.addWidget(self.rotation_summary_subtitle)
 
         self.rotation_summary_meta = QLabel("")
-        self.rotation_summary_meta.setStyleSheet(f"color:{_v('text_soft')}; font-size:12px; font-weight:700;")
+        self.rotation_summary_meta.setStyleSheet(text_css("label", "text_soft"))
         rotation_hero_text.addWidget(self.rotation_summary_meta)
 
         rotation_hero_text.addStretch(1)
@@ -21678,7 +21687,7 @@ class KaraokeApp(QWidget):
         rotation_queue_layout.setContentsMargins(0, 0, 0, 0)
         rotation_queue_layout.setSpacing(7)
         self.rotation_queue_section_label = QLabel("UP NEXT")
-        self.rotation_queue_section_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:13px; font-weight:850; letter-spacing:0px; padding: 0px 2px;")
+        self.rotation_queue_section_label.setStyleSheet(text_css("section", "text_bright", extra="padding: 0px 2px;"))
         rotation_queue_layout.addWidget(self.rotation_queue_section_label)
         rotation_queue_layout.addWidget(self.queue_display, 1)
         rotation_queue_layout.addLayout(btn_row1)
@@ -21817,19 +21826,19 @@ class KaraokeApp(QWidget):
         text_col.setSpacing(2)
 
         self.bg_main_title_label = QLabel("No Background Music")
-        self.bg_main_title_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:850;")
+        self.bg_main_title_label.setStyleSheet(text_css("title", "text_bright"))
         self.bg_main_title_label.setWordWrap(False)
         self.bg_main_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         text_col.addWidget(self.bg_main_title_label)
 
         self.bg_main_artist_label = QLabel("")
-        self.bg_main_artist_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:11px; font-weight:750;")
+        self.bg_main_artist_label.setStyleSheet(text_css("caption", "text_muted"))
         self.bg_main_artist_label.setWordWrap(False)
         self.bg_main_artist_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         text_col.addWidget(self.bg_main_artist_label)
 
         self.bg_main_next_label = QLabel("")
-        self.bg_main_next_label.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:650;")
+        self.bg_main_next_label.setStyleSheet(text_css("caption", "text_soft"))
         self.bg_main_next_label.setWordWrap(False)
         self.bg_main_next_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         text_col.addWidget(self.bg_main_next_label)
@@ -21846,14 +21855,14 @@ class KaraokeApp(QWidget):
         seek_row.setSpacing(8)
         self.bg_main_elapsed_label = QLabel("00:00")
         self.bg_main_elapsed_label.setMinimumWidth(40)
-        self.bg_main_elapsed_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:12px; font-weight:700;")
+        self.bg_main_elapsed_label.setStyleSheet(text_css("label", "text_muted"))
         self.bg_main_seek_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.bg_main_seek_slider.setRange(0, 1000)
         self.bg_main_seek_slider.setValue(0)
         self.bg_main_seek_slider.setStyleSheet(deck_seek_slider_css())
         self.bg_main_remaining_label = QLabel("-00:00")
         self.bg_main_remaining_label.setMinimumWidth(46)
-        self.bg_main_remaining_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:12px; font-weight:700;")
+        self.bg_main_remaining_label.setStyleSheet(text_css("label", "text_muted"))
         seek_row.addWidget(self.bg_main_elapsed_label)
         seek_row.addWidget(self.bg_main_seek_slider, 1)
         seek_row.addWidget(self.bg_main_remaining_label)
@@ -21930,7 +21939,7 @@ class KaraokeApp(QWidget):
         # the bottom nav, so they're not added to the right column anymore — that
         # was the "weird break section" pushing LAST/CURRENT/NEXT down.
         self.utility_section_label = QLabel("Show Controls")
-        self.utility_section_label.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:800; padding: 5px 2px 1px 2px;")
+        self.utility_section_label.setStyleSheet(text_css("caption", "text_soft", extra="padding: 5px 2px 1px 2px;"))
         self.utility_section_label.hide()
         bottom_controls = QGridLayout()
         bottom_controls.setContentsMargins(0, 0, 0, 0)
@@ -22087,11 +22096,11 @@ class KaraokeApp(QWidget):
             f'<span style="color:{accepting_color};">{accepting_dot}</span>  {accepting_text} • {waitlist_text}'
         )
         self.header_status_label.setTextFormat(Qt.TextFormat.RichText)
-        self.header_status_label.setStyleSheet(f"color:{_v('text')}; font-size:12px; font-weight:700;")
+        self.header_status_label.setStyleSheet(text_css("label", "text"))
         header_status_layout.addWidget(self.header_status_label)
 
         self.header_location_label = QLabel(f"• {tenant_name}")
-        self.header_location_label.setStyleSheet(f"color:{_v('text_muted')}; font-size:12px; font-weight:650;")
+        self.header_location_label.setStyleSheet(text_css("label", "text_muted"))
         header_status_layout.addWidget(self.header_location_label)
         header_layout.addWidget(self.header_status_group)
 
@@ -22949,7 +22958,7 @@ class KaraokeApp(QWidget):
 
             header = QHBoxLayout()
             ttl = QLabel(title)
-            ttl.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:900;")
+            ttl.setStyleSheet(text_css("title", "text_bright"))
             header.addWidget(ttl)
             header.addStretch(1)
             enable_cb = QCheckBox("Enabled")
@@ -22980,7 +22989,7 @@ class KaraokeApp(QWidget):
                 freq_label_text = f"{int(freq)}" if freq < 1000 else f"{int(freq/1000)}k"
                 freq_lbl = QLabel(freq_label_text)
                 freq_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                freq_lbl.setStyleSheet(f"color:{_v('text_muted')}; font-size:11px; font-weight:700;")
+                freq_lbl.setStyleSheet(text_css("caption", "text_muted"))
                 grid.addWidget(freq_lbl, 0, i)
 
                 s = QSlider(Qt.Orientation.Vertical)
@@ -22994,7 +23003,7 @@ class KaraokeApp(QWidget):
 
                 r = QLabel(f"{current_gains[i]:+.1f}" if i < len(current_gains) else "+0.0")
                 r.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                r.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:700;")
+                r.setStyleSheet(text_css("caption", "text_soft"))
                 grid.addWidget(r, 2, i)
                 readouts.append(r)
             col.addLayout(grid)
@@ -33555,7 +33564,7 @@ class KaraokeApp(QWidget):
         top_row = QHBoxLayout()
         top_row.setSpacing(7)
         self.singer_history_name_label = QLabel("Select a singer")
-        self.singer_history_name_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:18px; font-weight:750;")
+        self.singer_history_name_label.setStyleSheet(text_css("large", "text_bright"))
         top_row.addWidget(self.singer_history_name_label)
         top_row.addStretch(1)
         self.singer_history_rename_button = QPushButton("Rename Singer")
@@ -34754,7 +34763,7 @@ class KaraokeApp(QWidget):
 
         layout = QVBoxLayout(dlg)
         title = QLabel("Add song to tonight's queue")
-        title.setStyleSheet(f"color:{_v('text_bright')}; font-size:18px; font-weight:700;")
+        title.setStyleSheet(text_css("large", "text_bright"))
         layout.addWidget(title)
 
         summary = QLabel(self._history_song_display(song))
@@ -35989,7 +35998,7 @@ class KaraokeApp(QWidget):
         url_label = QLabel(url)
         url_label.setWordWrap(True)
         url_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        url_label.setStyleSheet(f"color:{_v('text_soft')}; font-size:12px; font-weight:600;")
+        url_label.setStyleSheet(text_css("label", "text_soft"))
         layout.addWidget(url_label)
 
         def save_qr_image():
@@ -44559,7 +44568,7 @@ class KaraokeApp(QWidget):
     def _build_chat_page(self):
         page = QWidget()
         layout = QVBoxLayout(page); layout.setContentsMargins(16, 16, 16, 16); layout.setSpacing(10)
-        title = QLabel("Chat"); title.setStyleSheet(f"color:{_v('text_bright')};font-size:18px;font-weight:850;")
+        title = QLabel("Chat"); title.setStyleSheet(text_css("large", "text_bright"))
         title_row = QHBoxLayout(); title_row.addWidget(title); title_row.addStretch(1)
         self.chat_clear_button = QPushButton("Clear Chat History")
         self.chat_clear_button.setToolTip("Permanently delete all singer chat messages from the server")
@@ -48775,7 +48784,7 @@ class KaraokeApp(QWidget):
                     pass
             self._processing_notification_text = ""
             if hasattr(self, "processing_label"):
-                self.processing_label.setStyleSheet(f"color: {_v('warning')}; font-size:11px; font-weight:750;")
+                self.processing_label.setStyleSheet(text_css("caption", "warning"))
         except Exception:
             pass
 
@@ -48852,7 +48861,7 @@ class KaraokeApp(QWidget):
                     pass
                 self.processing_label.setText("")
                 # Reset to yellow for future messages
-                self.processing_label.setStyleSheet(f"color: {_v('warning')}; font-size:11px; font-weight:750;")
+                self.processing_label.setStyleSheet(text_css("caption", "warning"))
         except Exception:
             pass
 
@@ -54908,11 +54917,11 @@ class KaraokeApp(QWidget):
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(10)
         heading = QLabel(f"{str(singer.get('name', '') or '').strip()}")
-        heading.setStyleSheet(f"color:{_v('text_bright')}; font-size:18px; font-weight:800;")
+        heading.setStyleSheet(text_css("large", "text_bright"))
         layout.addWidget(heading)
         song_label = QLabel(" - ".join([p for p in (artist, title) if p]) or "KaraFun Song")
         song_label.setWordWrap(True)
-        song_label.setStyleSheet(f"color:{_v('text')}; font-size:14px; font-weight:700;")
+        song_label.setStyleSheet(text_css("title", "text"))
         layout.addWidget(song_label)
         note = QLabel("SingWS is controlling KaraFun and will advance automatically when playback ends.")
         note.setObjectName("karafunActiveNote")

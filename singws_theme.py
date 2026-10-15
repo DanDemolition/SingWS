@@ -64,6 +64,24 @@ RADIUS_SCALE = (0, 4, 6, 8, 12, 999)             # px: square, chip, control, ca
 SPACING_SCALE = (2, 4, 6, 8, 12, 16, 20, 24)     # px
 
 
+# Named text roles: one size and one weight each, so the same kind of label looks the same everywhere. Change a role here
+# and every label that uses it follows. (size px, weight)
+TEXT_ROLES = {
+    "caption": (11, 700),
+    "label": (12, 700),
+    "body": (13, 700),
+    "section": (13, 850),
+    "title": (14, 850),
+    "large": (18, 800),
+    "hero": (24, 850),
+}
+
+
+def text_css(role: str, color_name: str = "text", extra: str = "") -> str:
+    size, weight = TEXT_ROLES.get(role, TEXT_ROLES["body"])
+    return f"color:{color(color_name)}; font-size:{size}px; font-weight:{weight}; letter-spacing:0px;{(' ' + extra.strip()) if extra.strip() else ''}"
+
+
 def font_px(size: int) -> int:
     """The nearest size on FONT_SCALE (ties round up), for migrating one-off sizes."""
     return min(FONT_SCALE, key=lambda s: (abs(s - int(size)), -s))

@@ -42,6 +42,16 @@ class UiTokenRatchetTests(unittest.TestCase):
     def test_inline_stylesheets_do_not_grow(self):
         self._check("inline_stylesheets", "inline setStyleSheet calls")
 
+    def test_text_roles_use_the_font_scale_and_render(self):
+        import singws_theme
+        for name, (size, weight) in singws_theme.TEXT_ROLES.items():
+            self.assertIn(size, singws_theme.FONT_SCALE, f"text role {name} uses an off-scale size")
+        css = singws_theme.text_css("title", "text_bright", "padding: 2px;")
+        self.assertIn("font-size:14px", css)
+        self.assertIn("font-weight:850", css)
+        self.assertIn("padding: 2px;", css)
+        self.assertTrue(css.startswith("color:#"))
+
     def test_scales_are_sorted_and_unique(self):
         import singws_theme
         for scale in (singws_theme.FONT_SCALE, singws_theme.RADIUS_SCALE, singws_theme.SPACING_SCALE):
