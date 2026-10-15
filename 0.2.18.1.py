@@ -16355,10 +16355,19 @@ class QueueCardDelegate(QStyledItemDelegate):
             line = QColor(167, 139, 250, 120)
         painter.fillPath(path, bg)
         if selected:
-            painter.fillPath(path, QColor(124, 61, 255, 46))
+            painter.fillPath(path, QColor(124, 61, 255, 30))        # the whole card is lit softly...
             line = QColor(167, 139, 250, 150)
         painter.setPen(QPen(line, 1))
         painter.drawPath(path)
+        if own_selected and selected:
+            # ...and the exact row you picked gets a clear band and an accent bar, so you can tell which song is meant
+            band = QRect(card.left() + 48, card.top() + 3, card.width() - 48 - 6, card.height() - 6)   # starts after the number chip
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(167, 139, 250, 78))
+            painter.drawRoundedRect(band, 7, 7)
+            painter.setBrush(QColor(196, 170, 255))
+            painter.drawRoundedRect(QRect(band.left() + 1, band.top() + 5, 3, max(6, band.height() - 10)), 1.5, 1.5)
+        text_alpha = 0.5 if (selected and not own_selected) else 1.0   # the other rows of a selected card step back
         if accent is not None and first:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(accent)
@@ -16373,6 +16382,7 @@ class QueueCardDelegate(QStyledItemDelegate):
 
         # right-hand text (status / duration), muted
         right_w = 0
+        painter.setOpacity(text_alpha)
         long_w = 0
         if right and kind == "song":
             tm = re.search(r"(\d{1,2}):(\d{2})\s*$", right)
@@ -16408,6 +16418,7 @@ class QueueCardDelegate(QStyledItemDelegate):
             )
         left_rect = QRect(inner.left(), inner.top(), max(0, inner.width() - right_w - 10), inner.height())
 
+        painter.setOpacity(1.0)
         # The number chip is centred on the singer's whole card, so every row of the card draws its slice of it.
         try:
             srow = index.row()
@@ -16436,6 +16447,7 @@ class QueueCardDelegate(QStyledItemDelegate):
                 painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, sm.group(1))
         except Exception:
             pass
+        painter.setOpacity(text_alpha)
         if kind == "singer":
             m = re.match(r"^\s*(\d+)\.\s*(.*)$", left)
             num, name = (m.group(1), m.group(2)) if m else ("", left.lstrip("\u2014 ").strip() or left)

@@ -116,6 +116,34 @@ class QueueCardTests(unittest.TestCase):
         covered = view.viewport().rect()
         self.assertTrue(any(r.contains(covered) for r in painted), f"only {[tuple(r.getRect()) for r in painted]} was repainted")
 
+    def test_the_exact_selected_row_stands_out_from_the_rest_of_its_lit_card(self):
+        view, model, d = self.build([3])
+        view.setCurrentIndex(model.index(2, 0))          # the second song
+        self.app.processEvents()
+        img = view.viewport().grab().toImage()
+        x = 200
+        def px(row):
+            return img.pixelColor(x, view.visualRect(model.index(row, 0)).top() + 4).name()
+        sibling = px(1)
+        self.assertEqual(px(0), sibling)                 # name row and the other songs share the soft card tint
+        self.assertEqual(px(3), sibling)
+        self.assertNotEqual(px(2), sibling)              # the picked song has its own band
+
+    def test_the_other_rows_of_a_selected_card_are_dimmed(self):
+        view, model, d = self.build([3])
+        def text_brightness(row):
+            img = view.viewport().grab().toImage()
+            rect = view.visualRect(model.index(row, 0))
+            best = 0
+            for xx in range(rect.left() + 60, rect.left() + 200):
+                for yy in range(rect.top() + 4, rect.bottom() - 2):
+                    c = img.pixelColor(xx, yy)
+                    best = max(best, c.red() + c.green() + c.blue())
+            return best
+        view.setCurrentIndex(model.index(2, 0))
+        self.app.processEvents()
+        self.assertGreater(text_brightness(2), text_brightness(3))     # picked song is brighter than its sibling
+
     def test_only_one_card_is_lit_at_a_time_after_many_clicks(self):
         view, model, d = self.build([2, 2, 2])
         for r in (1, 4, 2, 7, 5, 0):
