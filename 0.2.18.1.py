@@ -16269,15 +16269,25 @@ class QueueCardDelegate(QStyledItemDelegate):
         right = str(index.data(self.right_role) or "")
         status = str(index.data(self.status_role) or "") if self.status_role is not None else ""
         first, last = self.card_edges(index)
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        if kind == "song" and not selected:
-            # a singer's songs share the card, so they light up with the name row
+        own_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        selected = own_selected
+        if not selected:
+            # one card = a singer's name row plus all their songs: any selected row lights the whole card
             try:
-                r = index.row() - 1
-                while r >= 0 and self._kind_at(index, r) == "song":
-                    r -= 1
                 view = option.widget
-                selected = r >= 0 and view is not None and view.selectionModel().isSelected(index.model().index(r, 0))
+                sel = view.selectionModel() if view is not None else None
+                if sel is not None and sel.hasSelection():
+                    top = index.row() if kind == "singer" else index.row() - 1
+                    while top >= 0 and self._kind_at(index, top) == "song":
+                        top -= 1
+                    r = top
+                    while r >= 0 and r < index.model().rowCount():
+                        if sel.isSelected(index.model().index(r, 0)):
+                            selected = True
+                            break
+                        r += 1
+                        if self._kind_at(index, r) != "song":
+                            break
             except Exception:
                 selected = False
         selected = selected and status not in ("current", "next")
