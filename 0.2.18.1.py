@@ -16269,7 +16269,18 @@ class QueueCardDelegate(QStyledItemDelegate):
         right = str(index.data(self.right_role) or "")
         status = str(index.data(self.status_role) or "") if self.status_role is not None else ""
         first, last = self.card_edges(index)
-        selected = bool(option.state & QStyle.StateFlag.State_Selected) and status not in ("current", "next")
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if kind == "song" and not selected:
+            # a singer's songs share the card, so they light up with the name row
+            try:
+                r = index.row() - 1
+                while r >= 0 and self._kind_at(index, r) == "song":
+                    r -= 1
+                view = option.widget
+                selected = r >= 0 and view is not None and view.selectionModel().isSelected(index.model().index(r, 0))
+            except Exception:
+                selected = False
+        selected = selected and status not in ("current", "next")
 
         full = QRect(option.rect)
         top_gap = self.GAP if (kind == "singer" and index.row() > 0) else (2 if kind == "singer" else 0)
@@ -16347,7 +16358,7 @@ class QueueCardDelegate(QStyledItemDelegate):
                 sstatus = str(sidx.data(self.status_role) or "") if self.status_role is not None else ""
                 nxt = sstatus == "next"
                 mid = self._card_mid(sidx)
-                chip = QRect(left_rect.left(), card.top() - offset + mid - 13, 26, 26)
+                chip = QRect(left_rect.left() - 4, card.top() - offset + mid - 15, 30, 30)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(124, 61, 255) if nxt else QColor(255, 255, 255, 22))
                 painter.drawRoundedRect(chip, 7, 7)
@@ -16364,7 +16375,7 @@ class QueueCardDelegate(QStyledItemDelegate):
             num, name = (m.group(1), m.group(2)) if m else ("", left.lstrip("\u2014 ").strip() or left)
             x0 = left_rect.left()
             if num:
-                x0 += 26 + 12
+                x0 += 36                                  # chip (30) + gap (10), chip sits 4px left of the text edge
             bfont = QFont(font)
             bfont.setBold(True)
             painter.setFont(bfont)
@@ -16395,7 +16406,7 @@ class QueueCardDelegate(QStyledItemDelegate):
             painter.setPen(scol)
             painter.setFont(font)
             fm = QFontMetrics(font)
-            x0 = left_rect.left() + 26 + 12             # lines up under the singer's name
+            x0 = left_rect.left() + 36                  # lines up under the singer's name
             painter.drawText(QRect(x0, left_rect.top() - 5, max(0, left_rect.right() - x0), left_rect.height()),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              fm.elidedText(text, Qt.TextElideMode.ElideRight, max(0, left_rect.right() - x0)))
