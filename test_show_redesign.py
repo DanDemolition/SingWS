@@ -49,6 +49,15 @@ class ShowRedesignTests(unittest.TestCase):
         self.assertNotIn("setData(", cls)
         self.assertNotIn("setRows(", cls)
 
+    def test_polish_pieces_are_gated_and_reversible(self):
+        body = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
+        self.assertIn("self._restyle_seek_sliders(on)", body)
+        self.assertIn("self.hero_kicker_dot.setVisible(on)", body)
+        self.assertIn("self.hero_glow.setVisible(on)", body)
+        for old in ("Clear Queue", "Move Up", "Move Down"):
+            self.assertIn(old, body)                      # the original labels are restored when the setting is off
+        self.assertIn("self.hero_glow.setVisible(False)", SRC)   # and it starts hidden
+
 
 if __name__ == "__main__":
     unittest.main()

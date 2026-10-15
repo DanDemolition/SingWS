@@ -68,7 +68,7 @@ TYPOGRAPHY = {
 
 # The scales every UI value should come from. tools/ui_token_audit.py counts how many literals in the app fall outside
 # them, and test_ui_tokens_ratchet.py only lets that number go down.
-FONT_SCALE = (11, 12, 13, 14, 16, 18, 24, 32)   # px: caption, label, body, title, section, large, hero, display
+FONT_SCALE = (11, 12, 13, 14, 16, 18, 24, 32, 40)   # px: caption, label, body, title, section, large, hero, display, display-xl
 RADIUS_SCALE = (0, 4, 6, 8, 12, 999)             # px: square, chip, control, card, large card, pill
 SPACING_SCALE = (2, 4, 6, 8, 12, 16, 20, 24)     # px
 
@@ -83,7 +83,7 @@ TEXT_ROLES = {
     "title": (14, 850),
     "large": (18, 800),
     "hero": (24, 850),
-    "display": (32, 850),
+    "display": (40, 850),
 }
 
 
@@ -627,6 +627,19 @@ def list_css() -> str:
             font-weight: 750;
         }}
         {scroll_bar_css()}
+    """
+
+
+def thin_slider_css() -> str:
+    """Show-tab redesign progress bar: a thin track with a purple fill and no knob (it is still draggable)."""
+    return f"""
+        QSlider {{ min-height: 14px; }}
+        QSlider::groove:horizontal {{ height: 5px; background: rgba(255,255,255,0.10); border-radius: 3px; }}
+        QSlider::sub-page:horizontal {{
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {color('accent')}, stop:1 {color('accent_bright')});
+            border-radius: 3px;
+        }}
+        QSlider::handle:horizontal {{ width: 0px; height: 0px; margin: 0px; background: transparent; border: none; }}
     """
 
 

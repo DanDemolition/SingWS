@@ -883,7 +883,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItemIterator, QProgressDialog,
     QTextEdit, QPlainTextEdit
 )
-from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath
+from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath, QRadialGradient
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop
 
@@ -20176,6 +20176,51 @@ class RotationView(QMainWindow):
 # Right-click for a small per-pad menu (load, clear, rename, volume).
 # ============================================================================
 
+class HeroGlowOverlay(QWidget):
+    """Show-tab redesign: a soft purple radial glow in the hero card's top-left corner, painted behind the card's content."""
+
+    def __init__(self, card: QWidget):
+        super().__init__(card)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        card.installEventFilter(self)
+        self.setGeometry(card.rect())
+        self.lower()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            self.setGeometry(self.parentWidget().rect())
+            self.lower()
+        return False
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        g = QRadialGradient(QPointF(self.width() * 0.16, 0.0), max(240.0, self.width() * 0.6))
+        g.setColorAt(0.0, QColor(139, 92, 246, 86))
+        g.setColorAt(1.0, QColor(139, 92, 246, 0))
+        p.fillRect(self.rect(), g)
+
+
+class DotWidget(QWidget):
+    """A small glowing dot (the green dot before NOW SINGING)."""
+
+    def __init__(self, color: QColor, parent=None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self.setFixedSize(14, 14)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        halo = QColor(self._color)
+        halo.setAlpha(80)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(halo)
+        p.drawEllipse(QPointF(7, 7), 6.0, 6.0)
+        p.setBrush(self._color)
+        p.drawEllipse(QPointF(7, 7), 3.5, 3.5)
+
+
 class StatusChip(QWidget):
     """Show-tab redesign: a header pill with a coloured dot and a short text, painted directly."""
 
@@ -22443,6 +22488,10 @@ class KaraokeApp(QWidget):
 
         self.rotation_hero_card = QFrame()
         self.rotation_hero_card.setObjectName("rotationHeroCard")
+        self.hero_glow = HeroGlowOverlay(self.rotation_hero_card)
+        self.hero_glow.setVisible(False)
+        self.hero_kicker_dot = DotWidget(QColor(52, 224, 138))
+        self.hero_kicker_dot.setVisible(False)
         self.rotation_hero_card.setStyleSheet(
             SINGWS_THEME.performance_deck_css("rotationHeroCard") if SINGWS_THEME is not None else content_card_css("rotationHeroCard", radius=8)
         )
@@ -22712,7 +22761,7 @@ class KaraokeApp(QWidget):
         self.bg_main_seek_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.bg_main_seek_slider.setRange(0, 1000)
         self.bg_main_seek_slider.setValue(0)
-        self.bg_main_seek_slider.setStyleSheet(deck_seek_slider_css())
+        self._restyle_seek_sliders(False)
         self.bg_main_remaining_label = QLabel("-00:00")
         self.bg_main_remaining_label.setMinimumWidth(46)
         self.bg_main_remaining_label.setStyleSheet(text_css("label", "text_muted"))
@@ -24901,7 +24950,7 @@ class KaraokeApp(QWidget):
         self.hero_seek_elapsed.setStyleSheet(text_css("label", "text_muted"))
         self.hero_seek_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.hero_seek_slider.setRange(0, 1000)
-        self.hero_seek_slider.setStyleSheet(deck_seek_slider_css())
+        self._restyle_seek_sliders(False)
         self.hero_seek_slider.setToolTip("Click or drag to seek")
         self.hero_seek_remaining = QLabel("-00:00")
         self.hero_seek_remaining.setStyleSheet(text_css("label", "text_muted"))
@@ -24961,6 +25010,7 @@ class KaraokeApp(QWidget):
             self.hero_stage_extras.setVisible(on)
             self._apply_redesign_right_column(on)
             self._apply_redesign_bg_card(on)
+            self._apply_redesign_polish(on)
             try:
                 self.library_filter_bar.setVisible(on)
                 if not on:
@@ -25058,16 +25108,28 @@ class KaraokeApp(QWidget):
                     meter.set_glow_style(True)
                     meter.setFixedSize(180, 64)    # 20 bars x 6px + 19 gaps x 3px = 177
                     kick = self.rotation_summary_kicker
-                    if text_col.indexOf(kick) < 0:
+                    if getattr(self, "_hero_kick_row", None) is None:
+                        kr = QHBoxLayout()
+                        kr.setContentsMargins(0, 0, 0, 0)
+                        kr.setSpacing(6)
+                        self._hero_kick_row = kr
+                    kr = self._hero_kick_row
+                    if text_col.indexOf(kr) < 0:
                         self.rotation_summary_card.layout().removeWidget(kick)
-                        text_col.insertWidget(0, kick)           # the mockup keeps "NOW SINGING" inside the card, above the name
+                        kr.addWidget(self.hero_kicker_dot)
+                        kr.addWidget(kick)
+                        kr.addStretch(1)
+                        text_col.insertLayout(0, kr)             # the mockup keeps "\u25cf NOW SINGING" inside the card, above the name
                 else:
                     if chips_in_text:
                         text_col.removeItem(chips)
                         extras_col.insertLayout(0, chips)
                     kick = self.rotation_summary_kicker
-                    if text_col.indexOf(kick) >= 0:
-                        text_col.removeWidget(kick)
+                    kr = getattr(self, "_hero_kick_row", None)
+                    if kr is not None and text_col.indexOf(kr) >= 0:
+                        kr.removeWidget(kick)
+                        kr.removeWidget(self.hero_kicker_dot)
+                        text_col.removeItem(kr)
                         self.rotation_summary_card.layout().insertWidget(0, kick)
                     meter.set_glow_style(False)
                     meter.setFixedSize(150, 92)
@@ -60679,6 +60741,43 @@ class KaraokeApp(QWidget):
             self._update_bg_main_seek_ui(pos_sec, dur_sec)
         except Exception:
             pass
+
+    def _restyle_seek_sliders(self, on: bool):
+        css = (SINGWS_THEME.thin_slider_css() if SINGWS_THEME is not None else deck_seek_slider_css()) if on else deck_seek_slider_css()
+        for name in ("hero_seek_slider", "bg_main_seek_slider"):
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setStyleSheet(css)
+
+    def _apply_redesign_polish(self, on: bool):
+        """Small finishing touches from the mockup: thin progress bars, small ghost queue buttons, a dot on the kicker, a glow on the hero."""
+        try:
+            self._restyle_seek_sliders(on)
+            # queue buttons: ghost style and the mockup's short labels
+            ghost = (
+                "QPushButton { background: transparent; color: rgba(230,232,240,0.85); border: 1px solid rgba(140,150,200,0.22);"
+                " border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 700; }"
+                " QPushButton:hover { background: rgba(124,61,255,0.14); border-color: rgba(167,139,250,0.45); color: white; }"
+                " QPushButton:disabled { color: rgba(255,255,255,0.30); }"
+            )
+            ghost_danger = ghost.replace("rgba(140,150,200,0.22)", "rgba(255,92,92,0.45)").replace("rgba(230,232,240,0.85)", "rgba(255,150,150,0.95)")
+            labels_on = {"move_up_button": "\u2191 Up", "move_down_button": "\u2193 Down", "remove_button": "Remove", "clear_queue_button": "Clear queue\u2026"}
+            labels_off = {"move_up_button": "\u2191\ufe0e  Move Up", "move_down_button": "\u2193\ufe0e  Move Down", "remove_button": "\u2715  Remove", "clear_queue_button": "Clear Queue"}
+            off_css = {"move_up_button": self._reorder_btn_css, "move_down_button": self._reorder_btn_css,
+                       "remove_button": warning_button_css(padding="9px 12px", radius=8), "clear_queue_button": danger_button_css(padding="9px 12px", radius=8)}
+            for name in labels_on:
+                b = getattr(self, name)
+                b.setText((labels_on if on else labels_off)[name])
+                b.setMinimumHeight(34 if on else 38)
+                b.setStyleSheet((ghost_danger if name == "clear_queue_button" else ghost) if on else off_css[name])
+            if hasattr(self, "_update_rotation_lock_button"):
+                self.rotation_lock_button.setMinimumHeight(34 if on else 38)
+            # kicker dot
+            self.hero_kicker_dot.setVisible(on)
+            # purple glow in the hero's corner
+            self.hero_glow.setVisible(on)
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] polish failed: {exc}")
 
     def _restyle_bg_main_buttons(self, on: bool):
         plain = subtle_button_css(padding="4px 8px", radius=8)
