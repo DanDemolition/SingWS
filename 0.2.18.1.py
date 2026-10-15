@@ -20176,6 +20176,92 @@ class RotationView(QMainWindow):
 # Right-click for a small per-pad menu (load, clear, rename, volume).
 # ============================================================================
 
+class BgUpNextList(QListWidget):
+    """Show-tab redesign: the next few background-music tracks as an interactive list.
+
+    It only shows and asks: a drop is reported through `reordered(from_row, to_row)` and the app moves the track in the
+    one playlist the BGM tab already owns, so there is a single playlist and a single way to change it."""
+
+    reordered = pyqtSignal(int, int)      # shown row -> final shown row
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDropIndicatorShown(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.setItemDelegate(_BgUpNextDelegate(self))
+        self.viewport().setAutoFillBackground(False)       # let the card show through
+
+    def dropEvent(self, event):
+        # Qt would reorder the widget's own items; we ignore that and let the app move the real playlist, then redraw.
+        try:
+            src = self.currentRow()
+            pos = event.position().toPoint()
+            target = self.indexAt(pos)
+            if not target.isValid():
+                t = self.count()
+            else:
+                rect = self.visualRect(target)
+                t = target.row() + (1 if pos.y() > rect.center().y() else 0)
+            dest = t - 1 if t > src else t
+            event.ignore()
+            if src >= 0 and dest != src:
+                self.reordered.emit(src, max(0, min(dest, self.count() - 1)))
+        except Exception:
+            event.ignore()
+
+
+class _BgUpNextDelegate(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        return QSize(0, 44)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = option.rect.adjusted(2, 2, -2, -2)
+        hot = bool(option.state & QStyle.StateFlag.State_MouseOver) or bool(option.state & QStyle.StateFlag.State_Selected)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 22 if hot else 10))
+        painter.drawRoundedRect(r, 8, 8)
+        title = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        artist = str(index.data(Qt.ItemDataRole.UserRole + 1) or "")
+        right = str(index.data(Qt.ItemDataRole.UserRole + 2) or "")
+        font = QFont(option.font)
+        font.setPixelSize(12)
+        painter.setPen(QColor(150, 156, 184, 170))
+        painter.setFont(font)
+        painter.drawText(QRect(r.left() + 8, r.top(), 14, r.height()), Qt.AlignmentFlag.AlignCenter, "\u22ee\u22ee")
+        x0 = r.left() + 28
+        right_w = QFontMetrics(font).horizontalAdvance(right) + 6 if right else 0
+        text_w = max(0, r.right() - x0 - right_w - 10)
+        tf = QFont(font)
+        tf.setPixelSize(13)
+        tf.setBold(True)
+        painter.setFont(tf)
+        painter.setPen(QColor(230, 232, 240))
+        painter.drawText(QRect(x0, r.top() + 4, text_w, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(tf).elidedText(title, Qt.TextElideMode.ElideRight, text_w))
+        af = QFont(font)
+        af.setPixelSize(11)
+        painter.setFont(af)
+        painter.setPen(QColor(163, 168, 189))
+        painter.drawText(QRect(x0, r.top() + 22, text_w, 16), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(af).elidedText(artist, Qt.TextElideMode.ElideRight, text_w))
+        if right:
+            painter.setPen(QColor(163, 168, 189, 190))
+            painter.drawText(QRect(r.right() - right_w - 6, r.top(), right_w, r.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, right)
+        painter.restore()
+
+
 class SoundboardPad(QPushButton):
     cleared = pyqtSignal(int)  # emitted when the pad's clip changes; carries slot id
     stopped = pyqtSignal(int)  # emitted once when an active clip becomes inactive
@@ -22554,6 +22640,27 @@ class KaraokeApp(QWidget):
         ctrl_row.addStretch(1)
         bg_card_layout.addLayout(ctrl_row)
 
+        # Redesign: the next few tracks, draggable (hidden unless ui_show_redesign is on)
+        self.bg_upnext_box = QWidget()
+        _un = QVBoxLayout(self.bg_upnext_box)
+        _un.setContentsMargins(0, 4, 0, 0)
+        _un.setSpacing(4)
+        _un_head = QHBoxLayout()
+        _un_head.setContentsMargins(0, 0, 0, 0)
+        self.bg_upnext_title = QLabel("UP NEXT IN BACKGROUND MUSIC")
+        self.bg_upnext_count = QLabel("")
+        for _w in (self.bg_upnext_title, self.bg_upnext_count):
+            _w.setStyleSheet(text_css("caption", "text_soft"))
+        _un_head.addWidget(self.bg_upnext_title, 1)
+        _un_head.addWidget(self.bg_upnext_count)
+        _un.addLayout(_un_head)
+        self.bg_upnext_list = BgUpNextList()
+        self.bg_upnext_list.reordered.connect(self._bg_upnext_reordered)
+        self.bg_upnext_list.customContextMenuRequested.connect(self._bg_upnext_menu)
+        _un.addWidget(self.bg_upnext_list)
+        self.bg_upnext_box.setVisible(False)
+        bg_card_layout.addWidget(self.bg_upnext_box)
+
         self.bg_main_prev_button.clicked.connect(self._bg_main_prev)
         self.bg_main_play_button.clicked.connect(self._bg_main_toggle_playback)
         self.bg_main_next_button.clicked.connect(self._bg_main_next)
@@ -24723,6 +24830,14 @@ class KaraokeApp(QWidget):
                 return
             self.hero_stage_extras.setVisible(on)
             self._apply_redesign_right_column(on)
+            try:
+                self.bg_upnext_box.setVisible(False)
+                self._bg_upnext_sig = None
+                if on:
+                    self._refresh_bg_upnext()
+            except Exception:
+                pass
+            QTimer.singleShot(0, lambda: self._fit_right_column(on))
             if on and (refit or not self.settings.get("rotation_now_splitter_sizes")):
                 # No saved split: let the hero take only the height its content needs, so the queue gets the rest.
                 def _fit_hero():
@@ -60306,6 +60421,7 @@ class KaraokeApp(QWidget):
                 )
                 self._bg_panel_current_path = ""
                 self._render_bg_main_text()
+                self._refresh_bg_upnext()
                 return
 
             if idx < 0 or idx >= len(playlist):
@@ -60349,10 +60465,105 @@ class KaraokeApp(QWidget):
                     )
 
             self._render_bg_main_text()
+            self._refresh_bg_upnext()
             pos_sec, dur_sec = self.bg_music.get_playback_times()
             self._update_bg_main_seek_ui(pos_sec, dur_sec)
         except Exception:
             pass
+
+    def _fit_right_column(self, on: bool):
+        """The transport bar and the controls panel have fixed heights sized for today's layout; with the redesign they follow the content."""
+        try:
+            bar = self.transport_bar
+            if on:
+                self.bg_main_next_label.setVisible(False)       # the Up Next list shows what is next
+                bar.setFixedHeight(max(200, self._row_controls.sizeHint().height() + 4))
+                card_h = self.bg_main_card.sizeHint().height() if self.bg_main_card.isVisible() else 0
+                self.right_controls_panel.setMinimumHeight(bar.height() + 10 + card_h)
+            else:
+                self.bg_main_next_label.setVisible(True)
+                bar.setFixedHeight(344 if getattr(self, "_compact_deck", False) else 384)
+                self.right_controls_panel.setMinimumHeight(430 if getattr(self, "_compact_deck", False) else 514)
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] fit right column failed: {exc}")
+
+    def _bg_upnext_rows_wanted(self) -> int:
+        try:
+            return 3 if int(self.window().height()) <= 960 else 4
+        except Exception:
+            return 3
+
+    def _refresh_bg_upnext(self):
+        """Fill the redesign's Up Next list with the tracks after the current one (the same view the BGM tab shows)."""
+        try:
+            if not self._ui_redesign_on():
+                return
+            lst = self.bg_upnext_list
+            pl = list(getattr(self.bg_music, "playlist", []) or [])
+            cur = int(getattr(self.bg_music, "current_index", 0) or 0)
+            cur = max(0, min(cur, max(0, len(pl) - 1)))
+            upcoming = pl[cur + 1:] if pl else []
+            want = self._bg_upnext_rows_wanted()
+            shown = upcoming[:want]
+            sig = (tuple(shown), len(upcoming))
+            if sig == getattr(self, "_bg_upnext_sig", None):
+                return
+            self._bg_upnext_sig = sig
+            lst.clear()
+            for path in shown:
+                title, artist = self._bg_track_title_artist(str(path))
+                it = QListWidgetItem(title or "Unknown Title")
+                it.setData(Qt.ItemDataRole.UserRole + 1, artist or "")
+                lst.addItem(it)
+            lst.setFixedHeight(max(1, 44 * len(shown)))
+            self.bg_upnext_count.setText(f"{len(shown)} of {len(upcoming)}" if upcoming else "")
+            self.bg_upnext_box.setVisible(bool(shown))
+            QTimer.singleShot(0, lambda: self._fit_right_column(True))
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] bgm up next failed: {exc}")
+
+    def _bg_upnext_reordered(self, from_row: int, to_row: int):
+        """A drop in the Up Next list: move that track in the BGM tab's playlist (the one playlist), then redraw."""
+        try:
+            mgr = self.bg_manager
+            base = mgr._playlist_current_row() + 1
+            mgr._move_playlist_rows([base + int(from_row)], base + int(to_row))
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] bgm reorder failed: {exc}")
+        self._bg_upnext_sig = None
+        self._refresh_bg_upnext()
+
+    def _bg_upnext_menu(self, pos):
+        lst = self.bg_upnext_list
+        item = lst.itemAt(pos)
+        if item is None:
+            return
+        row = lst.row(item)
+        lst.setCurrentRow(row)
+        menu = QMenu(lst)
+        style_app_menu(menu)
+        act_next = menu.addAction("Queue Next")
+        act_next.setEnabled(row > 0)
+        act_end = menu.addAction("Move to End of Playlist")
+        act_remove = menu.addAction("Remove from Playlist")
+        chosen = menu.exec(lst.viewport().mapToGlobal(pos))
+        try:
+            mgr = self.bg_manager
+            base = mgr._playlist_current_row() + 1
+            if chosen == act_next:
+                mgr._move_playlist_rows([base + row], base)
+            elif chosen == act_end:
+                mgr._move_playlist_rows([base + row], None)
+            elif chosen == act_remove:
+                mgr.playlist_list.clearSelection()
+                it = mgr.playlist_list.item(base + row)
+                if it is not None:
+                    it.setSelected(True)
+                    mgr.remove_selected_from_playlist()
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] bgm menu failed: {exc}")
+        self._bg_upnext_sig = None
+        self._refresh_bg_upnext()
 
     def _bg_main_prev(self):
         try:
