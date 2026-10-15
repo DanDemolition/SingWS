@@ -20227,6 +20227,68 @@ class StatusChip(QWidget):
         p.drawText(QRectF(26, 0, self.width() - 32, self.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._text)
 
 
+class LibraryFilterBar(QWidget):
+    """Show-tab redesign: All / KaraFun / Local / MP4 pills over the song results.
+
+    Pure view filter: it only hides rows of the results already on screen; the search itself is not touched."""
+
+    changed = pyqtSignal(str)
+    CHOICES = (("all", "All"), ("karafun", "KaraFun"), ("local", "Local"), ("mp4", "MP4"))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mode = "all"
+        self._rects: list[tuple[str, QRectF]] = []
+        self.setFixedHeight(30)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def mode(self) -> str:
+        return self._mode
+
+    def set_mode(self, mode: str):
+        if mode == self._mode or mode not in dict(self.CHOICES):
+            return
+        self._mode = mode
+        self.update()
+        self.changed.emit(mode)
+
+    def _font(self) -> QFont:
+        f = QFont(self.font())
+        f.setPixelSize(12)
+        f.setWeight(QFont.Weight.DemiBold)
+        return f
+
+    def _layout_rects(self):
+        fm = QFontMetrics(self._font())
+        x, rects = 0.0, []
+        for key, label in self.CHOICES:
+            w = fm.horizontalAdvance(label) + 26
+            rects.append((key, QRectF(x, 2, w, 26)))
+            x += w + 8
+        self._rects = rects
+
+    def mousePressEvent(self, event):
+        self._layout_rects()
+        pos = event.position()
+        for key, r in self._rects:
+            if r.contains(pos):
+                self.set_mode(key)
+                return
+
+    def paintEvent(self, event):
+        self._layout_rects()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setFont(self._font())
+        for key, r in self._rects:
+            on = key == self._mode
+            p.setPen(QPen(QColor(167, 139, 250, 150) if on else QColor(140, 150, 200, 46), 1))
+            p.setBrush(QColor(124, 61, 255, 80) if on else QColor(255, 255, 255, 12))
+            p.drawRoundedRect(r, 13, 13)
+            p.setPen(QColor(240, 236, 255) if on else QColor(163, 168, 189))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, dict(self.CHOICES)[key])
+
+
 class BgUpNextList(QListWidget):
     """Show-tab redesign: the next few background-music tracks as an interactive list.
 
@@ -22275,6 +22337,10 @@ class KaraokeApp(QWidget):
         library_header_row.addStretch(1)
         library_card_layout.addLayout(library_header_row)
         library_card_layout.addLayout(search_row)
+        self.library_filter_bar = LibraryFilterBar()
+        self.library_filter_bar.setVisible(False)
+        self.library_filter_bar.changed.connect(lambda _m: self._apply_library_filter())
+        library_card_layout.addWidget(self.library_filter_bar)
         self.library_hint_label.hide()
         self.library_tabs_label = QLabel("Title        Artist        Brand")
         self.library_tabs_label.setStyleSheet(
@@ -24895,6 +24961,13 @@ class KaraokeApp(QWidget):
             self.hero_stage_extras.setVisible(on)
             self._apply_redesign_right_column(on)
             self._apply_redesign_bg_card(on)
+            try:
+                self.library_filter_bar.setVisible(on)
+                if not on:
+                    self.library_filter_bar.set_mode("all")
+                self._apply_library_filter()
+            except Exception:
+                pass
             try:
                 self.header_status_group.setVisible(not on)
                 self.header_chip_group.setVisible(on)
@@ -50133,6 +50206,8 @@ class KaraokeApp(QWidget):
                 # Re-enable updates
                 self.results_list.setUpdatesEnabled(True)
                 _perf_log_if_slow("ui_search_render_batch", (time.perf_counter() - _batch_started) * 1000.0)
+            if getattr(self, "library_filter_bar", None) is not None and self.library_filter_bar.mode() != "all":
+                self._apply_library_filter()
             if start == 0 and self.results_list.count() and self.results_list.currentRow() < 0:
                 try:
                     self.results_list.setCurrentRow(0)
@@ -50155,6 +50230,36 @@ class KaraokeApp(QWidget):
         else:
             _perf_log_if_slow("ui_apply_search_results", (time.perf_counter() - _apply_started) * 1000.0)
         self._start_pending_search_if_needed(job_id)
+
+    @staticmethod
+    def _library_row_matches(track, mode: str) -> bool:
+        if mode == "all" or not isinstance(track, dict):
+            return True
+        provider = str(track.get("provider") or "local").lower()
+        path = str(track.get("path") or "").lower()
+        kind = str(track.get("type") or "").lower()
+        if mode == "karafun":
+            return provider == "karafun" or bool(track.get("karafun_catalog_only"))
+        if mode == "local":
+            return provider != "karafun" and not track.get("karafun_catalog_only")
+        if mode == "mp4":
+            return kind in ("mp4", "video") or path.endswith((".mp4", ".m4v", ".mov"))
+        return True
+
+    def _apply_library_filter(self):
+        """Hide result rows that do not match the chip (nothing is removed; All shows everything again)."""
+        try:
+            mode = self.library_filter_bar.mode() if self._ui_redesign_on() else "all"
+            lst = self.results_list
+            lst.setUpdatesEnabled(False)
+            try:
+                for i in range(lst.count()):
+                    it = lst.item(i)
+                    it.setHidden(not self._library_row_matches(it.data(Qt.ItemDataRole.UserRole), mode))
+            finally:
+                lst.setUpdatesEnabled(True)
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] library filter failed: {exc}")
 
     def _start_pending_search_if_needed(self, completed_job_id: int):
         pending_query = str(getattr(self, "_pending_search_query", "") or "").strip()
