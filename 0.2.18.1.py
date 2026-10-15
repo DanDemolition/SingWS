@@ -16361,12 +16361,12 @@ class QueueCardDelegate(QStyledItemDelegate):
         painter.drawPath(path)
         if own_selected and selected:
             # ...and the exact row you picked gets a clear band and an accent bar, so you can tell which song is meant
-            band = QRect(card.left() + 48, card.top() + 3, card.width() - 48 - 6, card.height() - 6)   # starts after the number chip
+            band = QRect(card.left() + 42, card.top() + 3, card.width() - 42 - 6, card.height() - 6)   # starts after the number chip, before the text
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(167, 139, 250, 78))
             painter.drawRoundedRect(band, 7, 7)
             painter.setBrush(QColor(196, 170, 255))
-            painter.drawRoundedRect(QRect(band.left() + 1, band.top() + 5, 3, max(6, band.height() - 10)), 1.5, 1.5)
+            painter.drawRoundedRect(QRect(band.left() + 2, band.top() + 5, 3, max(6, band.height() - 10)), 1.5, 1.5)
         text_alpha = 0.5 if (selected and not own_selected) else 1.0   # the other rows of a selected card step back
         if accent is not None and first:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -16412,7 +16412,7 @@ class QueueCardDelegate(QStyledItemDelegate):
             rcol.setAlpha(190 if kind == "singer" else 150)
             painter.setPen(rcol)
             painter.drawText(
-                QRect(inner.right() - right_w, inner.top() - (4 if kind != "singer" else 0), right_w, inner.height()),
+                QRect(inner.right() - right_w, inner.top(), right_w, inner.height()),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 rfm.elidedText(right, Qt.TextElideMode.ElideLeft, right_w),
             )
@@ -16485,7 +16485,7 @@ class QueueCardDelegate(QStyledItemDelegate):
             painter.setFont(font)
             fm = QFontMetrics(font)
             x0 = left_rect.left() + 36                  # lines up under the singer's name
-            painter.drawText(QRect(x0, left_rect.top() - 5, max(0, left_rect.right() - x0), left_rect.height()),
+            painter.drawText(QRect(x0, left_rect.top(), max(0, left_rect.right() - x0), left_rect.height()),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                              fm.elidedText(text, Qt.TextElideMode.ElideRight, max(0, left_rect.right() - x0)))
         painter.restore()

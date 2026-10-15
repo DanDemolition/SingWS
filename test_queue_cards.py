@@ -129,6 +129,27 @@ class QueueCardTests(unittest.TestCase):
         self.assertEqual(px(3), sibling)
         self.assertNotEqual(px(2), sibling)              # the picked song has its own band
 
+    def test_the_band_is_centred_on_the_text_of_the_selected_row(self):
+        view, model, d = self.build([3])
+        view.setCurrentIndex(model.index(2, 0))
+        self.app.processEvents()
+        img = view.viewport().grab().toImage()
+        rect = view.visualRect(model.index(2, 0))
+        x_band, x_text = rect.left() + 80, None
+        band_rows = [y for y in range(rect.top(), rect.bottom() + 1) if img.pixelColor(x_band + 160, y).blue() > 120 and img.pixelColor(x_band + 160, y).red() > 55]
+        self.assertTrue(band_rows, "no band found")
+        band_mid = (band_rows[0] + band_rows[-1]) / 2.0
+        text_rows = []
+        for y in range(rect.top(), rect.bottom() + 1):
+            for x in range(rect.left() + 60, rect.left() + 200):
+                c = img.pixelColor(x, y)
+                if c.red() + c.green() + c.blue() > 560:           # the bright text pixels
+                    text_rows.append(y)
+                    break
+        self.assertTrue(text_rows, "no text found")
+        text_mid = (text_rows[0] + text_rows[-1]) / 2.0
+        self.assertLessEqual(abs(band_mid - text_mid), 3.0, f"band centre {band_mid} vs text centre {text_mid}")
+
     def test_the_other_rows_of_a_selected_card_are_dimmed(self):
         view, model, d = self.build([3])
         def text_brightness(row):
