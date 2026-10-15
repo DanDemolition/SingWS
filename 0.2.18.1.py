@@ -22492,7 +22492,6 @@ class KaraokeApp(QWidget):
         library_header_row.addWidget(self.library_title_label)
         library_header_row.addStretch(1)
         self.library_song_count = QLabel("")
-        self.library_song_count.setStyleSheet(text_css("caption", "text_soft"))
         self.library_song_count.setVisible(False)
         library_header_row.addWidget(self.library_song_count)
         library_card_layout.addLayout(library_header_row)
@@ -22932,7 +22931,7 @@ class KaraokeApp(QWidget):
         _un_head.setContentsMargins(0, 0, 0, 0)
         self.bg_upnext_title = QLabel("UP NEXT IN BACKGROUND MUSIC")
         self.bg_upnext_count = QLabel("")
-        for _w in (self.bg_upnext_title, self.bg_upnext_count):
+        for _w in (self.bg_upnext_title, self.bg_upnext_count, self.library_song_count):
             _w.setStyleSheet(text_css("caption", "text_soft"))
         _un_head.addWidget(self.bg_upnext_title, 1)
         _un_head.addWidget(self.bg_upnext_count)
