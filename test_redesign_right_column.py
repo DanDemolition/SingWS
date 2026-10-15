@@ -102,6 +102,27 @@ class RightColumnTests(unittest.TestCase):
         self.assertIn("self._ui_redesign_on()", body)
         self.assertIn("self._fit_right_column(True)", body)
 
+    def test_the_preview_is_inset_in_a_card_when_on_and_exactly_as_before_when_off(self):
+        pw = self.m.PreviewWindow()
+        off_css = pw.styleSheet()
+        margins_off = pw._main_layout.contentsMargins()
+        pw.set_card_style(True)
+        m = pw._main_layout.contentsMargins()
+        self.assertEqual((m.left(), m.top(), m.right(), m.bottom()), (8, 8, 8, 0))     # only the margins around the video change
+        self.assertIn("border-top-left-radius: 12px", pw.styleSheet())
+        self.assertIn("border-bottom-left-radius: 0px", pw.styleSheet())             # square bottom: it joins the transport bar
+        pw.set_card_style(False)
+        self.assertEqual(pw.styleSheet(), off_css)
+        m2 = pw._main_layout.contentsMargins()
+        self.assertEqual((m2.left(), m2.top(), m2.right(), m2.bottom()), (margins_off.left(), margins_off.top(), margins_off.right(), margins_off.bottom()))
+
+    def test_the_transport_bar_squares_its_top_corners_only_with_the_redesign(self):
+        from pathlib import Path
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        body = src[src.index("def _transport_bar_live_css(self"):src.index("def _transport_bar_live_css_base")]
+        self.assertIn("if self._ui_redesign_on():", body)
+        self.assertIn("border-top-left-radius: 0px", body)
+
 
 if __name__ == "__main__":
     unittest.main()

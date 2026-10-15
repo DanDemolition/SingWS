@@ -15558,9 +15558,7 @@ class PreviewWindow(QWidget):
         self.resize(400, 288)
         self.setMinimumSize(300, 216)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet(
-            "QWidget#previewWindow { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #02040A, stop:1 #000000); border: 1px solid rgba(124,61,255,0.36); border-radius: 8px; }"
-        )
+        self.set_card_style(False)
         self.force_black = True
         # No BackgroundMusicPlayer here. This window used to build one as part
         # of a block copied from KaraokeApp and never referenced it, but the
@@ -15594,6 +15592,22 @@ class PreviewWindow(QWidget):
         self._mpv_surface_refresh_timer = QTimer(self)
         self._mpv_surface_refresh_timer.setSingleShot(True)
         self._mpv_surface_refresh_timer.timeout.connect(self._refresh_mpv_surface)
+
+    def set_card_style(self, on: bool):
+        """Show-tab redesign: the video sits inset in a card (gradient, fine border, rounded top) that joins the transport bar below.
+        Off is exactly the old look. The video itself is untouched; only the margins around it change."""
+        if on:
+            css = ("QWidget#previewWindow { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(5,5,16,1), stop:1 rgba(18,10,42,1));"
+                   " border: 1px solid rgba(140,150,200,0.14); border-bottom: none; border-top-left-radius: 12px; border-top-right-radius: 12px;"
+                   " border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }")
+        else:
+            css = ("QWidget#previewWindow { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #02040A, stop:1 #000000);"
+                   " border: 1px solid rgba(124,61,255,0.36); border-radius: 8px; }")
+        self.setStyleSheet(css)
+        try:
+            self._main_layout.setContentsMargins(*(8, 8, 8, 0) if on else (0, 0, 0, 0))
+        except Exception:
+            pass
 
     def _schedule_mpv_surface_refresh(self):
         try:
@@ -25545,7 +25559,7 @@ class KaraokeApp(QWidget):
                 w.setVisible(not on)                 # the mockup's preview card has no title or STANDBY chip
             self.preview_time_label.setVisible(on)
             try:
-                self.video_controls_splitter.setHandleWidth(3 if on else 8)
+                self.video_controls_splitter.setHandleWidth(2 if on else 8)
             except Exception:
                 pass
             # order in the mockup: transport, TEMPO, KEY, then SOUNDBOARD and its pads
@@ -37199,6 +37213,13 @@ class KaraokeApp(QWidget):
         return 0.5 - (0.5 * math.cos((t / period) * math.tau))
 
     def _transport_bar_live_css(self, active: bool, pulse: float) -> str:
+        css = self._transport_bar_live_css_base(active, pulse)
+        if self._ui_redesign_on():
+            # joined to the preview above: square top corners, no top border, a rounder bottom
+            css = css.replace("border-radius: 8px;", "border-radius: 12px; border-top-left-radius: 0px; border-top-right-radius: 0px; border-top: none;")
+        return css
+
+    def _transport_bar_live_css_base(self, active: bool, pulse: float) -> str:
         if active:
             p = max(0.0, min(1.0, float(pulse)))
             accent_alpha = 0.15 + (0.10 * p)
@@ -61257,6 +61278,11 @@ class KaraokeApp(QWidget):
             grid.setRowMinimumHeight(1, 40 if on else 30)
             self._tempo_panel.setFixedHeight(100 if on else 78)
             self.tempo_row_cards.setVisible(on)
+            self.preview_window.set_card_style(on)           # video inset in a card that joins the transport bar below
+            try:
+                self._apply_live_state_styles()              # re-run the transport bar's style (square top corners when joined)
+            except Exception:
+                pass
             if hasattr(self, "_update_rotation_lock_button"):
                 self.rotation_lock_button.setMinimumHeight(34 if on else 38)
             row = self._btn_row1
