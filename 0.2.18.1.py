@@ -22630,8 +22630,7 @@ class KaraokeApp(QWidget):
         self.bg_main_play_button.setToolTip("Play/Pause BG Music")
         self.bg_main_next_button.setToolTip("Next BG Track")
         self.bg_main_stop_button.setToolTip("Stop BG Music")
-        for b in (self.bg_main_prev_button, self.bg_main_play_button, self.bg_main_next_button, self.bg_main_stop_button):
-            b.setStyleSheet(subtle_button_css(padding="4px 8px", radius=8))
+        self._restyle_bg_main_buttons(False)
 
         ctrl_row.addWidget(self.bg_main_prev_button)
         ctrl_row.addWidget(self.bg_main_play_button)
@@ -22639,6 +22638,9 @@ class KaraokeApp(QWidget):
         ctrl_row.addWidget(self.bg_main_stop_button)
         ctrl_row.addStretch(1)
         bg_card_layout.addLayout(ctrl_row)
+        self._bg_ctrl_row = ctrl_row
+        self._bg_top_info_row = top_info_row
+        self._bg_card_layout = bg_card_layout
 
         # Redesign: the next few tracks, draggable (hidden unless ui_show_redesign is on)
         self.bg_upnext_box = QWidget()
@@ -24830,6 +24832,7 @@ class KaraokeApp(QWidget):
                 return
             self.hero_stage_extras.setVisible(on)
             self._apply_redesign_right_column(on)
+            self._apply_redesign_bg_card(on)
             try:
                 self.bg_upnext_box.setVisible(False)
                 self._bg_upnext_sig = None
@@ -60280,6 +60283,9 @@ class KaraokeApp(QWidget):
     def _sync_bg_main_art_size(self):
         """Keep artwork square roughly as tall as the 3 text lines."""
         try:
+            if self._ui_redesign_on():
+                self.bg_main_art_label.setFixedSize(44, 44)
+                return
             h1 = int(self.bg_main_title_label.fontMetrics().height())
             h2 = int(self.bg_main_artist_label.fontMetrics().height())
             h3 = int(self.bg_main_next_label.fontMetrics().height())
@@ -60471,6 +60477,46 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _restyle_bg_main_buttons(self, on: bool):
+        plain = subtle_button_css(padding="4px 8px", radius=8)
+        accent = SINGWS_THEME.button_css(padding="4px 8px", radius_px=8, variant="primary") if SINGWS_THEME is not None else plain
+        for b in (self.bg_main_prev_button, self.bg_main_play_button, self.bg_main_next_button, self.bg_main_stop_button):
+            b.setStyleSheet(accent if (on and b is self.bg_main_play_button) else plain)
+
+    def _apply_redesign_bg_card(self, on: bool):
+        """Mockup layout for the background-music card: art, title/artist and the four buttons on one row, a thin progress bar, then the Up Next list."""
+        if not hasattr(self, "bg_main_prev_button") or not hasattr(self, "_bg_ctrl_row"):
+            return                                  # called before the card exists (early settings apply)
+        try:
+            btns = (self.bg_main_prev_button, self.bg_main_play_button, self.bg_main_next_button, self.bg_main_stop_button)
+            row, top = self._bg_ctrl_row, self._bg_top_info_row
+            self._restyle_bg_main_buttons(on)
+            for w in (self.bg_main_elapsed_label, self.bg_main_remaining_label):
+                w.setVisible(not on)
+            self.bg_main_art_label.setFixedSize(44, 44) if on else self._sync_bg_main_art_size()
+            if on and row.indexOf(self.bg_main_play_button) >= 0:
+                for b in btns:
+                    row.removeWidget(b)
+                    b.setFixedSize(34, 30)
+                    top.addWidget(b, 0, Qt.AlignmentFlag.AlignVCenter)
+            elif (not on) and top.indexOf(self.bg_main_play_button) >= 0:
+                for b in btns:
+                    top.removeWidget(b)
+                    b.setFixedSize(36, 30)
+                for i, b in enumerate(btns):
+                    row.insertWidget(i, b)
+            self._bg_card_layout.setSpacing(8 if on else 11)
+            self._bg_card_layout.setContentsMargins(*(14, 12, 14, 12) if on else (16, 16, 16, 16))
+            self._bg_ctrl_row_hide(on)
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] bgm card failed: {exc}")
+
+    def _bg_ctrl_row_hide(self, on: bool):
+        # the (now empty) button row keeps no height when the redesign is on
+        row = self._bg_ctrl_row
+        row.setSpacing(0)
+        row.setContentsMargins(0, 0, 0, 0)
+
     def _fit_right_column(self, on: bool):
         """The transport bar and the controls panel have fixed heights sized for today's layout; with the redesign they follow the content."""
         try:
@@ -60507,10 +60553,19 @@ class KaraokeApp(QWidget):
                 return
             self._bg_upnext_sig = sig
             lst.clear()
+            try:
+                dur_by_path = {str(t.get("path")): t.get("duration") for t in self.bg_manager.current_playlist}
+            except Exception:
+                dur_by_path = {}
             for path in shown:
                 title, artist = self._bg_track_title_artist(str(path))
                 it = QListWidgetItem(title or "Unknown Title")
                 it.setData(Qt.ItemDataRole.UserRole + 1, artist or "")
+                try:
+                    d = float(dur_by_path.get(str(path)) or 0)
+                    it.setData(Qt.ItemDataRole.UserRole + 2, f"{int(d // 60)}:{int(d % 60):02d}" if d > 0 else "")
+                except Exception:
+                    pass
                 lst.addItem(it)
             lst.setFixedHeight(max(1, 44 * len(shown)))
             self.bg_upnext_count.setText(f"{len(shown)} of {len(upcoming)}" if upcoming else "")
