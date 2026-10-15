@@ -12,9 +12,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "too
 import ui_token_audit  # noqa: E402
 
 BASELINE = {
-    "font_off_scale_uses": 27,
-    "radius_off_scale_uses": 24,
-    "hex_off_palette_uses": 236,
+    "font_off_scale_uses": 11,
+    "radius_off_scale_uses": 6,
+    "hex_off_palette_uses": 195,
     "inline_stylesheets": 312,
 }
 

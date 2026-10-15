@@ -332,7 +332,7 @@ def soundboard_pad_css(state: str = "loaded") -> str:
                     stop:1 rgba(26,160,88,0.96));
                 color: #04230f;
                 border: 1px solid rgba(176,255,206,0.96);
-                border-radius: 10px;
+                border-radius: 8px;
                 padding: 3px 9px;
                 font-weight: 800;
             }
@@ -348,9 +348,9 @@ def soundboard_pad_css(state: str = "loaded") -> str:
                     stop:1 rgba(255,255,255,0.006));
                 color: rgba(172,182,206,0.50);
                 border: 1px dashed rgba(124,61,255,0.34);
-                border-radius: 10px;
+                border-radius: 8px;
                 padding: 3px 9px;
-                font-size: 17px;
+                font-size: 16px;
                 font-weight: 800;
             }
             QPushButton:hover {
@@ -368,9 +368,9 @@ def soundboard_pad_css(state: str = "loaded") -> str:
             background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
                 stop:0 rgba(30,25,55,0.96),
                 stop:1 rgba(14,14,28,0.96));
-            color: #e9e6f7;
+            color: #E6E8F0;
             border: 1px solid rgba(124,61,255,0.45);
-            border-radius: 10px;
+            border-radius: 8px;
             padding: 3px 9px;
             font-weight: 750;
         }
@@ -427,7 +427,7 @@ def scroll_bar_css() -> str:
         QScrollBar::handle:vertical {{
             background: rgba(255,255,255,0.12);
             min-height: 28px;
-            border-radius: 5px;
+            border-radius: 6px;
         }}
         QScrollBar::handle:vertical:hover {{
             background: {_v('accent_bright')};
@@ -446,7 +446,7 @@ def scroll_bar_css() -> str:
         QScrollBar::handle:horizontal {{
             background: rgba(255,255,255,0.12);
             min-width: 28px;
-            border-radius: 5px;
+            border-radius: 6px;
         }}
         QScrollBar::handle:horizontal:hover {{
             background: {_v('accent_bright')};
@@ -525,7 +525,7 @@ def seek_slider_css() -> str:
             margin: -4px 0;
             background: {_v('text_bright')};
             border: 1px solid {_v('accent_bright')};
-            border-radius: 7px;
+            border-radius: 8px;
         }}
     """
 
@@ -540,13 +540,13 @@ def deck_seek_slider_css() -> str:
             height: 9px;
             background: rgba(4,7,14,0.88);
             border: 1px solid rgba(255,255,255,0.040);
-            border-radius: 5px;
+            border-radius: 6px;
         }}
         QSlider::sub-page:horizontal {{
             background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                 stop:0 {_v('accent')},
                 stop:1 {_v('accent_bright')});
-            border-radius: 5px;
+            border-radius: 6px;
         }}
         QSlider::handle:horizontal {{
             width: 18px;
@@ -554,7 +554,7 @@ def deck_seek_slider_css() -> str:
             margin: -6px 0;
             background: {_v('text_bright')};
             border: 2px solid {_v('accent_bright')};
-            border-radius: 9px;
+            border-radius: 8px;
         }}
         QSlider::handle:horizontal:hover {{
             background: {_v('accent_text')};
@@ -579,6 +579,7 @@ def dialog_stylesheet(win, base, txtc) -> str:
                 font-weight: 600;
                 padding: 2px 0px;
                 spacing: 7px;
+                outline: none;
             }}
             QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
                 background-color: {_v('surface_input')};
@@ -662,7 +663,7 @@ def dialog_stylesheet(win, base, txtc) -> str:
             }}
             QMenu::item {{
                 padding: 6px 18px;
-                border-radius: 5px;
+                border-radius: 6px;
             }}
             QMenu::item:selected {{
                 background-color: {_v('accent')};
@@ -711,7 +712,7 @@ def app_stylesheet() -> str:
         }}
         QMenu::item {{
             padding: 6px 18px;
-            border-radius: 5px;
+            border-radius: 6px;
         }}
         QMenu::item:selected {{
             background-color: {_v('accent')};
@@ -7876,7 +7877,7 @@ class VideoAreaWidget(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(246, 201, 69, max(0, int(230 * (1.0 - burst_t)))), max(2, int(self.height() * 0.009))))
             painter.drawEllipse(QPointF(cx, cy), wave_radius, wave_radius)
-            colors = (QColor("#F6C945"), QColor("#FF5D8F"), QColor("#7FDBFF"), QColor("#B388FF"), QColor("#FFFFFF"))
+            colors = (QColor("#F5C84B"), QColor("#FF5D8F"), QColor("#7FDBFF"), QColor("#B388FF"), QColor("#FFFFFF"))
             for i in range(30):
                 angle = (i / 30.0) * math.tau + (i % 4) * 0.11
                 distance = min(self.width(), self.height()) * (0.10 + 0.52 * burst_t) * (0.72 + (i % 5) * 0.07)
@@ -7901,7 +7902,7 @@ class VideoAreaWidget(QWidget):
         detail_font.setBold(True)
         detail_font.setPixelSize(max(10, int(self.height() * 0.055)))
         painter.setFont(heading_font)
-        painter.setPen(QColor("#F6C945"))
+        painter.setPen(QColor("#F5C84B"))
         painter.drawText(
             QRect(left, center_y - int(self.height() * 0.25), width, int(self.height() * 0.10)),
             Qt.AlignmentFlag.AlignCenter,
@@ -8532,12 +8533,12 @@ class VideoAreaWidget(QWidget):
         title_y = top_y + title_metrics.ascent()
         artist_y = title_y + max(2, int(card_h * 0.02)) + artist_metrics.ascent()
 
-        painter.setPen(QColor("#F4F4F4"))
+        painter.setPen(QColor("#E6E8F0"))
         painter.setFont(title_font)
         painter.drawText(text_x, title_y, title_text)
 
         if artist_text:
-            painter.setPen(QColor("#C8C8C8"))
+            painter.setPen(QColor("#B4B8C6"))
             painter.setFont(artist_font)
             painter.drawText(text_x, artist_y, artist_text)
 
@@ -8631,7 +8632,7 @@ class VideoAreaWidget(QWidget):
         try:
             accent = QColor(_v("accent_bright"))
         except Exception:
-            accent = QColor("#8B5CF6")
+            accent = QColor("#8D5CFF")
         accent.setAlpha(a(255))
 
         label_font = painter.font()
@@ -11118,7 +11119,7 @@ class BackgroundMusicManager(QMainWindow):
                     color: {_v('text_soft')};
                     border: none;
                     padding: 4px 6px;
-                    font-size: 10px;
+                    font-size: 11px;
                     font-weight: 800;
                 }}
                 QComboBox {{
@@ -11160,7 +11161,7 @@ class BackgroundMusicManager(QMainWindow):
                 QCheckBox::indicator {{
                     width: 14px;
                     height: 14px;
-                    border-radius: 5px;
+                    border-radius: 6px;
                     border: 1px solid rgba(255,255,255,0.12);
                     background: rgba(255,255,255,0.05);
                 }}
@@ -15673,7 +15674,7 @@ class RightAlignedMetaDelegate(QStyledItemDelegate):
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
         if status in {"current", "next"}:
             painter.save()
-            marker = QColor("#22C55E" if status == "current" else "#F4C542")
+            marker = QColor("#22C55E" if status == "current" else "#F5C84B")
             marker_w = 6 if status == "current" else 3
             painter.fillRect(QRect(option.rect.left(), option.rect.top(), marker_w, option.rect.height()), marker)
             painter.restore()
@@ -16421,7 +16422,7 @@ class SingerHistoryDirectoryBuildWorker(QObject):
                     "text": f"Showing {len(matched_rows)} of {total_matches} singers. Refine search to narrow results.",
                     "singer_key": "",
                     "selectable": False,
-                    "foreground_hex": "#94a3b8",
+                    "foreground_hex": "#B4B8C6",
                     "height": 52,
                 })
             timings["rows_ms"] = (time.perf_counter() - rows_t0) * 1000.0
@@ -16536,7 +16537,7 @@ class SingerHistorySongsBuildWorker(QObject):
                     "text": f"Showing {self.render_limit} of {total} songs. Use search or edit history to narrow this list.",
                     "song_key": "",
                     "selectable": False,
-                    "foreground_hex": "#94a3b8",
+                    "foreground_hex": "#B4B8C6",
                     "height": 44,
                 })
             timings["rows_ms"] = (time.perf_counter() - rows_t0) * 1000.0
@@ -20769,7 +20770,7 @@ class KaraokeApp(QWidget):
         deck_header_row.setContentsMargins(0, 0, 0, 0)
         deck_header_row.setSpacing(8)
         self.performance_deck_title = QLabel("KARAOKE PREVIEW")
-        self.performance_deck_title.setStyleSheet(f"color:{_v('text_bright')}; font-size:15px; font-weight:900; letter-spacing:0px;")
+        self.performance_deck_title.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:900; letter-spacing:0px;")
         self.performance_deck_title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.performance_deck_status = QLabel("STANDBY")
         self.performance_deck_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -20779,7 +20780,7 @@ class KaraokeApp(QWidget):
             else f"color:{_v('text_muted')}; font-size:11px; font-weight:850;"
         )
         self.performance_deck_status.setStyleSheet(
-            f"QLabel {{ {status_font_rule} padding: 3px 8px; background: rgba(255,255,255,0.020); border: 1px solid rgba(115,144,180,0.12); border-radius: 7px; }}"
+            f"QLabel {{ {status_font_rule} padding: 3px 8px; background: rgba(255,255,255,0.020); border: 1px solid rgba(115,144,180,0.12); border-radius: 8px; }}"
         )
         deck_header_row.addWidget(self.performance_deck_title)
         deck_header_row.addStretch(1)
@@ -21256,7 +21257,7 @@ class KaraokeApp(QWidget):
         self.now_singing_label.setText(
             f'<span style="color:{_v("text_soft")}; font-size:11px; font-weight:700;">NOW SINGING</span>'
             '<br><span style="color:#FFFFFF; font-size:18px; font-weight:700;">&nbsp;</span>'
-            '<br><span style="color:#C8CCD4; font-size:14px; font-weight:600;">&nbsp;</span>'
+            '<br><span style="color:#B4B8C6; font-size:14px; font-weight:600;">&nbsp;</span>'
         )
         self.now_singing_label.hide()
         self.last_sung_label = QLabel("")
@@ -21283,7 +21284,7 @@ class KaraokeApp(QWidget):
         self.last_sung_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.last_sung_label.setMinimumWidth(0)
         self.last_sung_label.setMaximumWidth(9999)
-        _init_label_css = f"color:{_v('text_soft')}; font-size:10px; font-weight:800; letter-spacing:1px;"
+        _init_label_css = f"color:{_v('text_soft')}; font-size:11px; font-weight:800; letter-spacing:1px;"
         _init_name_css = f"color:{_v('text')}; font-size:16px; font-weight:700;"
         self.last_sung_label.setText(
             '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
@@ -21333,7 +21334,7 @@ class KaraokeApp(QWidget):
             QListView::item:selected, QListView::item:selected:active,
             QListView::item:selected:!active {
                 background-color: rgba(124,61,255,0.18);
-                color: #E8E4F5;
+                color: #E6E8F0;
                 border: 1px solid rgba(167,139,250,0.28);
             }
         """)
@@ -21420,7 +21421,7 @@ class KaraokeApp(QWidget):
                     stop:1 rgba(255,255,255,0.022));
                 color: {_v('text')};
                 border: 1px solid rgba(115,144,180,0.20);
-                border-radius: 9px;
+                border-radius: 8px;
                 padding: 9px 12px;
                 font-size: 12px;
                 font-weight: 700;
@@ -21476,7 +21477,7 @@ class KaraokeApp(QWidget):
         library_header_row.setContentsMargins(0, 0, 0, 0)
         library_header_row.setSpacing(8)
         self.library_title_label = QLabel("SONG LIBRARY")
-        self.library_title_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:15px; font-weight:900; letter-spacing:0px;")
+        self.library_title_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:900; letter-spacing:0px;")
         self.library_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         library_header_row.addWidget(self.library_title_label)
         library_header_row.addStretch(1)
@@ -21553,7 +21554,7 @@ class KaraokeApp(QWidget):
         rotation_header_row.setContentsMargins(0, 0, 0, 0)
         rotation_header_row.setSpacing(10)
         self.rotation_title_label = QLabel("ROTATION")
-        self.rotation_title_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:15px; font-weight:900; letter-spacing:0px;")
+        self.rotation_title_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:14px; font-weight:900; letter-spacing:0px;")
         self.rotation_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         rotation_header_row.addWidget(self.rotation_title_label)
         rotation_header_row.addStretch(1)
@@ -22940,7 +22941,7 @@ class KaraokeApp(QWidget):
             card = QFrame()
             card.setStyleSheet(
                 "QFrame { background: rgba(5,9,18,0.46); border: 1px solid "
-                "rgba(255,255,255,0.06); border-radius: 10px; padding: 6px; }"
+                "rgba(255,255,255,0.06); border-radius: 8px; padding: 6px; }"
             )
             col = QVBoxLayout(card)
             col.setContentsMargins(12, 10, 12, 12)
@@ -22979,7 +22980,7 @@ class KaraokeApp(QWidget):
                 freq_label_text = f"{int(freq)}" if freq < 1000 else f"{int(freq/1000)}k"
                 freq_lbl = QLabel(freq_label_text)
                 freq_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                freq_lbl.setStyleSheet(f"color:{_v('text_muted')}; font-size:10px; font-weight:700;")
+                freq_lbl.setStyleSheet(f"color:{_v('text_muted')}; font-size:11px; font-weight:700;")
                 grid.addWidget(freq_lbl, 0, i)
 
                 s = QSlider(Qt.Orientation.Vertical)
@@ -22993,7 +22994,7 @@ class KaraokeApp(QWidget):
 
                 r = QLabel(f"{current_gains[i]:+.1f}" if i < len(current_gains) else "+0.0")
                 r.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                r.setStyleSheet(f"color:{_v('text_soft')}; font-size:10px; font-weight:700;")
+                r.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:700;")
                 grid.addWidget(r, 2, i)
                 readouts.append(r)
             col.addLayout(grid)
@@ -27722,7 +27723,7 @@ class KaraokeApp(QWidget):
             dst.fill(Qt.GlobalColor.transparent)
             p = QPainter(dst)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            color = QColor("#F2F2F2")
+            color = QColor("#E6E8F0")
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(color))
             p.drawPolygon(
@@ -27992,7 +27993,7 @@ class KaraokeApp(QWidget):
                     background: transparent;
                     color: {_v('text_soft')};
                     border: 1px solid transparent;
-                    border-radius: 9px;
+                    border-radius: 8px;
                     padding: 8px 14px;
                     margin: 4px 2px;
                     font-size: 12px;
@@ -31057,7 +31058,7 @@ class KaraokeApp(QWidget):
         pending_header.addStretch(1)
         self.deferred_remote_add_now_button = QPushButton("Add Pending Now")
         self.deferred_remote_add_now_button.setStyleSheet(
-            "QPushButton { background: rgba(14,165,233,0.28); color:#e0f2fe; border:1px solid rgba(125,211,252,0.48); border-radius:8px; padding:7px 12px; font-weight:850; }"
+            "QPushButton { background: rgba(14,165,233,0.28); color:#E6E8F0; border:1px solid rgba(125,211,252,0.48); border-radius:8px; padding:7px 12px; font-weight:850; }"
             "QPushButton:hover { background: rgba(14,165,233,0.40); }"
             "QPushButton:disabled { color:rgba(224,242,254,0.42); border-color:rgba(125,211,252,0.18); background:rgba(14,165,233,0.10); }"
         )
@@ -32191,14 +32192,14 @@ class KaraokeApp(QWidget):
         if waiting_list is not None and waiting_model is not None:
             colors = {
                 "pending_acceptance": QColor("#bae6fd"),
-                "waitlist": QColor("#e2e8f0"),
+                "waitlist": QColor("#E6E8F0"),
                 "needs_review": QColor("#86efac"),
                 "sung": QColor("#c4b5fd"),
                 "removed": QColor("#fca5a5"),
             }
             header_colors = {
                 "pending_acceptance": (QColor("#7dd3fc"), QColor(14, 165, 233, 42)),
-                "waitlist": (QColor("#e2e8f0"), QColor(71, 85, 105, 36)),
+                "waitlist": (QColor("#E6E8F0"), QColor(71, 85, 105, 36)),
                 "completed": (QColor("#c4b5fd"), QColor(124, 58, 237, 30)),
                 "removed": (QColor("#fca5a5"), QColor(220, 38, 38, 28)),
             }
@@ -32211,7 +32212,7 @@ class KaraokeApp(QWidget):
                 if not rows:
                     continue
                 total_rows += len(rows)
-                header_fg, header_bg = header_colors.get(section.get("key"), (QColor("#e2e8f0"), QColor(51, 65, 85, 32)))
+                header_fg, header_bg = header_colors.get(section.get("key"), (QColor("#E6E8F0"), QColor(51, 65, 85, 32)))
                 model_rows.append({
                     "text": f"{section.get('title') or 'Requests'} ({len(rows)})",
                     "request_id": 0,
@@ -32245,7 +32246,7 @@ class KaraokeApp(QWidget):
                         "text": self._waiting_for_add_row_text(row),
                         "request_id": rid,
                         "selectable": bool(row.get("selectable")),
-                        "foreground": colors.get(status_kind, QColor("#e2e8f0")),
+                        "foreground": colors.get(status_kind, QColor("#E6E8F0")),
                         "background": row_bg,
                         "tooltip": tooltip,
                         "height": 76,
@@ -32256,7 +32257,7 @@ class KaraokeApp(QWidget):
                     "text": "No pending or waitlisted requests.",
                     "request_id": 0,
                     "selectable": False,
-                    "foreground": QColor("#64748b"),
+                    "foreground": QColor("#7F8496"),
                     "height": 44,
                 })
             if total_rows > rendered:
@@ -32264,7 +32265,7 @@ class KaraokeApp(QWidget):
                     "text": f"Showing {rendered} of {total_rows} requests.",
                     "request_id": 0,
                     "selectable": False,
-                    "foreground": QColor("#94a3b8"),
+                    "foreground": QColor("#B4B8C6"),
                     "height": 44,
                 })
             try:
@@ -33554,7 +33555,7 @@ class KaraokeApp(QWidget):
         top_row = QHBoxLayout()
         top_row.setSpacing(7)
         self.singer_history_name_label = QLabel("Select a singer")
-        self.singer_history_name_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:19px; font-weight:750;")
+        self.singer_history_name_label.setStyleSheet(f"color:{_v('text_bright')}; font-size:18px; font-weight:750;")
         top_row.addWidget(self.singer_history_name_label)
         top_row.addStretch(1)
         self.singer_history_rename_button = QPushButton("Rename Singer")
@@ -38053,7 +38054,7 @@ class KaraokeApp(QWidget):
             self.now_singing_label.setText(
                 f'<span style="color:{_v("text_soft")}; font-size:11px; font-weight:700;">NOW SINGING</span>'
                 '<br><span style="color:#FFFFFF; font-size:18px; font-weight:700;">&nbsp;</span>'
-                '<br><span style="color:#C8CCD4; font-size:14px; font-weight:600;">&nbsp;</span>'
+                '<br><span style="color:#B4B8C6; font-size:14px; font-weight:600;">&nbsp;</span>'
             )
             self.now_singing_label.hide()
         except Exception:
@@ -39509,7 +39510,7 @@ class KaraokeApp(QWidget):
 
             singer_html = f'<span style="color:#FFFFFF; font-size:18px; font-weight:700;">{singer_el or "&nbsp;"}</span>'
             artist_html = f'<span style="color:#FFFFFF; font-size:14px; font-weight:700;">{artist_el or "&nbsp;"}</span>'
-            title_html  = f'<span style="color:#C8CCD4; font-size:14px; font-weight:600;">{title_el  or "&nbsp;"}</span>'
+            title_html  = f'<span style="color:#B4B8C6; font-size:14px; font-weight:600;">{title_el  or "&nbsp;"}</span>'
 
             html = f'{prefix} {singer_html}<br>{artist_html}<br>{title_html}'
 
@@ -39983,7 +39984,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
             self.last_sung_label.setStyleSheet(getattr(self, "_last_sung_card_css", ""))
-            label_css = f"color:{_v('text_soft')}; font-size:10px; font-weight:800; letter-spacing:1px;"
+            label_css = f"color:{_v('text_soft')}; font-size:11px; font-weight:800; letter-spacing:1px;"
             name_css = f"color:{_v('text')}; font-size:16px; font-weight:700;"
             # CURRENT is intentionally omitted: the hero above already shows the
             # current / on-deck singer, so this footer just flanks it with LAST
@@ -41942,10 +41943,10 @@ class KaraokeApp(QWidget):
             btn.setStyleSheet("""
                 QPushButton {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #f7d735, stop:1 #f3cb00);
+                        stop:0 #F7D046, stop:1 #f3cb00);
                     color: #1a1606;
                     border: 1px solid #ffe066;
-                    border-radius: 9px;
+                    border-radius: 8px;
                     padding: 9px 12px;
                     font-size: 12px;
                     font-weight: 700;
@@ -41953,7 +41954,7 @@ class KaraokeApp(QWidget):
                 }
                 QPushButton:hover {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #ffe04a, stop:1 #f7d735);
+                        stop:0 #F7D046, stop:1 #F7D046);
                     border-color: #fff0a6;
                 }
                 QPushButton:pressed {
@@ -44558,7 +44559,7 @@ class KaraokeApp(QWidget):
     def _build_chat_page(self):
         page = QWidget()
         layout = QVBoxLayout(page); layout.setContentsMargins(16, 16, 16, 16); layout.setSpacing(10)
-        title = QLabel("Chat"); title.setStyleSheet(f"color:{_v('text_bright')};font-size:20px;font-weight:850;")
+        title = QLabel("Chat"); title.setStyleSheet(f"color:{_v('text_bright')};font-size:18px;font-weight:850;")
         title_row = QHBoxLayout(); title_row.addWidget(title); title_row.addStretch(1)
         self.chat_clear_button = QPushButton("Clear Chat History")
         self.chat_clear_button.setToolTip("Permanently delete all singer chat messages from the server")
@@ -44618,10 +44619,10 @@ class KaraokeApp(QWidget):
                 background: rgba(255,255,255,0.08);
                 color: {_v('text_bright')};
                 border: 1px solid rgba(255,255,255,0.22);
-                border-radius: 10px;
+                border-radius: 8px;
                 padding: 9px 22px;
                 margin: 2px 8px 6px 0px;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 800;
                 min-height: 22px;
             }}
@@ -44867,12 +44868,12 @@ class KaraokeApp(QWidget):
         if not rows:
             view.setHtml(f"<p style='color:{_v('text_muted')};'>No messages{' match this filter' if (mode or needle) else ' yet'}.</p>")
             return
-        muted_color = {"group": "#8b5cf6", "dm": "#38bdf8", "held": "#f59e0b", "removed": "#6b7280", "blocked": "#ef4444"}
+        muted_color = {"group": "#8D5CFF", "dm": "#38bdf8", "held": "#f59e0b", "removed": "#7F8496", "blocked": "#ef4444"}
         bar = view.verticalScrollBar(); was_bottom = bar.value() >= bar.maximum() - 4; old_value = bar.value()
         out = []
         for m in rows:
             mid = int(m["id"]); status = str(m.get("status") or "visible"); channel = str(m.get("channel") or "group")
-            color = muted_color.get(status if status in muted_color else channel, "#8b5cf6")
+            color = muted_color.get(status if status in muted_color else channel, "#8D5CFF")
             sender = _html.escape(str(m.get("from") or m.get("from_key") or ""))
             who = f"<b style='color:{_v('text_bright')}'>{sender}</b>"
             tags = []
@@ -44884,14 +44885,14 @@ class KaraokeApp(QWidget):
             elif channel == "dm":
                 tags.append(f"<span style='color:#38bdf8'>PRIVATE → {_html.escape(self._room_display_name(str(m.get('to_key') or '')))}</span>")
             else:
-                tags.append("<span style='color:#8b5cf6'>GROUP</span>")
+                tags.append("<span style='color:#8D5CFF'>GROUP</span>")
             if status == "held": tags.append(f"<span style='color:#f59e0b'>HELD ({_html.escape(str(m.get('flag') or ''))})</span>")
-            if status == "removed": tags.append("<span style='color:#9ca3af'>REMOVED</span>")
+            if status == "removed": tags.append("<span style='color:#B4B8C6'>REMOVED</span>")
             if status == "blocked": tags.append("<span style='color:#ef4444'>BLOCKED BY RECIPIENT (they never saw it)</span>")
             if int(m.get("reports") or 0): tags.append(f"<span style='color:#ef4444'>REPORTED ×{int(m['reports'])}</span>")
             stamp = time.strftime("%I:%M:%S %p", time.localtime(int(m.get("created_at") or 0))) if m.get("created_at") else ""
             text = _html.escape(str(m.get("message") or "")).replace("\n", "<br>")
-            if status == "removed" and text: text = f"<s style='color:#9ca3af'>{text}</s>"
+            if status == "removed" and text: text = f"<s style='color:#B4B8C6'>{text}</s>"
             body = text + self._room_attachment_html(m)
             sender_key = quote(str(m.get("from_key") or ""), safe="")
             acts = []
@@ -44907,8 +44908,8 @@ class KaraokeApp(QWidget):
             out.append(
                 f"<table width='100%' cellspacing='0' cellpadding='6' style='margin-bottom:6px'><tr>"
                 f"<td width='4' bgcolor='{color}'></td>"
-                f"<td bgcolor='#1c1c2a'>{who}  {' · '.join(tags)}  <span style='color:#9ca3af'>{stamp}</span><br>{body}"
-                f"<br><span style='font-size:11px;color:#9ca3af'>{'  |  '.join(acts)}</span></td></tr></table>")
+                f"<td bgcolor='#1c1c2a'>{who}  {' · '.join(tags)}  <span style='color:#B4B8C6'>{stamp}</span><br>{body}"
+                f"<br><span style='font-size:11px;color:#B4B8C6'>{'  |  '.join(acts)}</span></td></tr></table>")
         view.setHtml("".join(out))
         bar.setValue(bar.maximum() if was_bottom else old_value)
 
@@ -44920,7 +44921,7 @@ class KaraokeApp(QWidget):
         if m.get("kind") == "image" and media_id:
             img = self._room_media.get(media_id)
             if img is None:
-                body += "<br><i style='color:#9ca3af'>loading picture…</i>"; self._room_fetch_media(media_id)
+                body += "<br><i style='color:#B4B8C6'>loading picture…</i>"; self._room_fetch_media(media_id)
             else:
                 uri = self._room_media_thumb.get(media_id)
                 if uri is None:
@@ -44937,9 +44938,9 @@ class KaraokeApp(QWidget):
             self._room_gif_full[gid] = str(gif.get("full") or gif.get("url") or "")
             uri = self._room_media_thumb.get("gif:" + gid)
             if uri is None:
-                body += "<br><i style='color:#9ca3af'>loading GIF…</i>"; self._room_fetch_gif(gid, str(gif["preview"]))
+                body += "<br><i style='color:#B4B8C6'>loading GIF…</i>"; self._room_fetch_gif(gid, str(gif["preview"]))
             else:
-                body += f"<br><a href='room://gif/{quote(gid, safe='')}'><img src='{uri}'></a> <span style='color:#9ca3af;font-size:11px'>GIF · GIPHY (click to open)</span>"
+                body += f"<br><a href='room://gif/{quote(gid, safe='')}'><img src='{uri}'></a> <span style='color:#B4B8C6;font-size:11px'>GIF · GIPHY (click to open)</span>"
         return body
 
     def _on_room_anchor(self, url):
@@ -44994,7 +44995,7 @@ class KaraokeApp(QWidget):
             grid = QGridLayout(); grid.setSpacing(2)
             for index, emoji in enumerate(chars.split()):
                 button = QToolButton(); button.setText(emoji); button.setAutoRaise(True)
-                button.setFixedSize(38, 34); button.setStyleSheet("QToolButton { font-size: 20px; }")
+                button.setFixedSize(38, 34); button.setStyleSheet("QToolButton { font-size: 18px; }")
                 button.setToolTip(emoji)
 
                 def pick(_checked=False, e=emoji):
@@ -45374,13 +45375,13 @@ class KaraokeApp(QWidget):
             if is_media:
                 mine = bool(m.get("host")) or str(m.get("from_key") or "") == "@host"
                 if m.get("status") == "removed":
-                    body = "<i style='color:#9ca3af'>(removed)</i>"
+                    body = "<i style='color:#B4B8C6'>(removed)</i>"
                 else:
                     body = _html.escape(str(m.get("message") or "")).replace("\n", "<br>") + self._room_attachment_html(m)
             else:
                 mine = m.get("direction") != "in"
                 body = _html.escape(str(m.get("message") or "")).replace("\n", "<br>")
-            out.append(f"<p style='margin:0 0 12px 0'><b>{'You' if mine else 'Singer'}</b> <span style='color:#9ca3af'>{stamp}</span><br>{body}</p>")
+            out.append(f"<p style='margin:0 0 12px 0'><b>{'You' if mine else 'Singer'}</b> <span style='color:#B4B8C6'>{stamp}</span><br>{body}</p>")
         view.setHtml("".join(out))
         bar.setValue(bar.maximum() if was_bottom else old_value)
 
@@ -49751,10 +49752,10 @@ class KaraokeApp(QWidget):
                 )
 
         self.queue_label.setText(
-            f'<span style="color:#9CA3B5; font-weight:700;">SINGERS</span> '
+            f'<span style="color:#B4B8C6; font-weight:700;">SINGERS</span> '
             f'<span style="color:#FFFFFF; font-weight:800;">{singer_count}</span>'
             f'<span style="color:#5C6170;"> • </span>'
-            f'<span style="color:#9CA3B5; font-weight:700;">ETA</span> '
+            f'<span style="color:#B4B8C6; font-weight:700;">ETA</span> '
             f'<span style="color:#FFFFFF; font-weight:800;">{eta_mss}</span>'
             f'{end_html}'
             f'<span style="color:#5C6170;"> • </span>'
@@ -54976,8 +54977,8 @@ class KaraokeApp(QWidget):
                 "then press Ready when it becomes available."
             )
             note.setStyleSheet(
-                "QLabel { background:#b00020; color:#ffffff; border:2px solid #ff526f; "
-                "border-radius:8px; padding:10px; font-size:15px; font-weight:900; }"
+                "QLabel { background:#b00020; color:#ffffff; border:2px solid #FF5F7A; "
+                "border-radius:8px; padding:10px; font-size:14px; font-weight:900; }"
             )
             ready_btn.setText("Finding Song…")
             ready_btn.setVisible(True)
@@ -55012,8 +55013,8 @@ class KaraokeApp(QWidget):
                 "until you press Ready."
             )
             note.setStyleSheet(
-                "QLabel { background:#b00020; color:#ffffff; border:2px solid #ff526f; "
-                "border-radius:8px; padding:10px; font-size:15px; font-weight:900; }"
+                "QLabel { background:#b00020; color:#ffffff; border:2px solid #FF5F7A; "
+                "border-radius:8px; padding:10px; font-size:14px; font-weight:900; }"
             )
         if ready_btn is not None:
             ready_btn.setText("Ready — Start Song")
@@ -59117,7 +59118,7 @@ class KaraokeApp(QWidget):
                 button_css(padding="4px 10px", radius=8)
                 + f"""
                 QPushButton, QToolButton {{
-                    font-size: 15px;
+                    font-size: 14px;
                     font-weight: 800;
                     background-color: rgba(255,255,255,0.026);
                     border-color: rgba(115,144,180,0.14);
