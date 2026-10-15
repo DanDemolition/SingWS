@@ -58,6 +58,14 @@ class ShowRedesignTests(unittest.TestCase):
             self.assertIn(old, body)                      # the original labels are restored when the setting is off
         self.assertIn("self.hero_glow.setVisible(False)", SRC)   # and it starts hidden
 
+    def test_queue_summary_is_redesign_only_and_built_from_the_header_numbers(self):
+        body = SRC[SRC.index("def _refresh_queue_summary"):SRC.index("    def update_queue_display")]
+        self.assertIn("if not self._ui_redesign_on():", body)
+        self.assertIn("_header_summary", body)
+        self.assertIn("_queue_eta_minutes", body)
+        apply_body = SRC[SRC.index("def _apply_ui_show_redesign"):SRC.index("def _apply_redesign_hero_text")]
+        self.assertIn("self.queue_summary_label.setVisible(on)", apply_body)
+
 
 if __name__ == "__main__":
     unittest.main()

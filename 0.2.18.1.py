@@ -16221,6 +16221,7 @@ class QueueCardDelegate(QStyledItemDelegate):
     GAP = 8          # space above each singer card
     NAME_H = 30
     SONG_H = 26
+    LONG_SECS = 300      # a song this long or longer gets a 'Long' badge
     CARD_BG = QColor(255, 255, 255, 10)
     CARD_LINE = QColor(140, 150, 200, 40)
 
@@ -16372,9 +16373,28 @@ class QueueCardDelegate(QStyledItemDelegate):
 
         # right-hand text (status / duration), muted
         right_w = 0
+        long_w = 0
+        if right and kind == "song":
+            tm = re.search(r"(\d{1,2}):(\d{2})\s*$", right)
+            if tm and int(tm.group(1)) * 60 + int(tm.group(2)) >= self.LONG_SECS:
+                lf = QFont(font)
+                lf.setPixelSize(10)
+                lf.setBold(True)
+                lfm = QFontMetrics(lf)
+                tfont = QFont(font)
+                tfont.setPixelSize(11)
+                time_w = QFontMetrics(tfont).horizontalAdvance(right) + 2
+                long_w = lfm.horizontalAdvance("Long") + 14
+                badge = QRect(inner.right() - time_w - 8 - long_w, card.center().y() - 9, long_w, 18)
+                painter.setPen(QPen(QColor(245, 200, 75, 120), 1))
+                painter.setBrush(QColor(245, 200, 75, 40))
+                painter.drawRoundedRect(badge, 9, 9)
+                painter.setFont(lf)
+                painter.setPen(QColor(250, 214, 110))
+                painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "Long")
         if right:
             rfont = QFont(font)
-            rfont.setPointSizeF(max(8.0, font.pointSizeF() - 1.5))
+            rfont.setPixelSize(11)
             painter.setFont(rfont)
             rfm = QFontMetrics(rfont)
             right_w = min(int(inner.width() * 0.45), rfm.horizontalAdvance(right) + 2)
@@ -22717,7 +22737,14 @@ class KaraokeApp(QWidget):
         rotation_queue_layout.setSpacing(7)
         self.rotation_queue_section_label = QLabel("UP NEXT")
         self.rotation_queue_section_label.setStyleSheet(text_css("section", "text_bright", extra="padding: 0px 2px;"))
-        rotation_queue_layout.addWidget(self.rotation_queue_section_label)
+        _q_head = QHBoxLayout()
+        _q_head.setContentsMargins(0, 0, 0, 0)
+        _q_head.addWidget(self.rotation_queue_section_label)
+        _q_head.addStretch(1)
+        self.queue_summary_label = QLabel("")
+        self.queue_summary_label.setVisible(False)
+        _q_head.addWidget(self.queue_summary_label)
+        rotation_queue_layout.addLayout(_q_head)
         rotation_queue_layout.addWidget(self.queue_display, 1)
         rotation_queue_layout.addLayout(btn_row1)
 
@@ -22944,7 +22971,7 @@ class KaraokeApp(QWidget):
         _un_head.setContentsMargins(0, 0, 0, 0)
         self.bg_upnext_title = QLabel("UP NEXT IN BACKGROUND MUSIC")
         self.bg_upnext_count = QLabel("")
-        for _w in (self.bg_upnext_title, self.bg_upnext_count, self.library_song_count, self.preview_time_label):
+        for _w in (self.bg_upnext_title, self.bg_upnext_count, self.library_song_count, self.preview_time_label, self.queue_summary_label):
             _w.setStyleSheet(text_css("caption", "text_soft"))
         _un_head.addWidget(self.bg_upnext_title, 1)
         _un_head.addWidget(self.bg_upnext_count)
@@ -25138,6 +25165,11 @@ class KaraokeApp(QWidget):
             self._apply_redesign_right_column(on)
             self._apply_redesign_bg_card(on)
             self._apply_redesign_polish(on)
+            try:
+                self.queue_summary_label.setVisible(on)
+                self._refresh_queue_summary()
+            except Exception:
+                pass
             try:
                 rl = self.results_list
                 if on and not isinstance(rl.itemDelegate(), LibraryCardDelegate):
@@ -51301,7 +51333,21 @@ class KaraokeApp(QWidget):
             f'<span style="color:#B994FF; font-weight:800;">{mode_label}</span>'
             f'{start_html}{locked_html}{loop_html}'
         )
+        self._queue_eta_minutes = int(round(total_secs / 60.0)) if total_secs > 0 else 0
         self._refresh_header_chips()
+        self._refresh_queue_summary()
+
+    def _refresh_queue_summary(self):
+        """'7 singers \u00b7 24 min' beside UP NEXT (redesign only)."""
+        try:
+            if not self._ui_redesign_on():
+                return
+            count, _ends = getattr(self, "_header_summary", (0, ""))
+            mins = int(getattr(self, "_queue_eta_minutes", 0) or 0)
+            text = f"{count} singer{'s' if count != 1 else ''}" + (f" \u00b7 {mins} min" if mins > 0 else "")
+            self.queue_summary_label.setText(text if count else "")
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] queue summary failed: {exc}")
 
     def update_queue_display(self):
         _perf_t0 = time.perf_counter()

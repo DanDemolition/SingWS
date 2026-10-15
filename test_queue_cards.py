@@ -129,6 +129,37 @@ class QueueCardTests(unittest.TestCase):
                 lit_cards += 1
         self.assertEqual(lit_cards, 1)
 
+    def _amber_pixels(self, view, row):
+        img = view.viewport().grab().toImage()
+        rect = view.visualRect(view.model().index(row, 0))
+        count = 0
+        for x in range(rect.left(), rect.right()):
+            for y in range(rect.top(), rect.bottom(), 2):
+                c = img.pixelColor(x, y)
+                if c.red() > 200 and 160 < c.green() < 235 and c.blue() < 150:
+                    count += 1
+        return count
+
+    def test_a_song_of_five_minutes_or_more_gets_a_long_badge_and_a_shorter_one_does_not(self):
+        from PyQt6.QtCore import Qt
+        view, model, d = self.build([2])
+        R = int(Qt.ItemDataRole.UserRole) + 21
+        model._rows[1]["roles"][R] = "04:59"
+        model._rows[2]["roles"][R] = "05:00"
+        model.layoutChanged.emit()
+        self.app.processEvents()
+        self.assertEqual(self._amber_pixels(view, 1), 0)
+        self.assertGreater(self._amber_pixels(view, 2), 20)
+
+    def test_the_badge_never_appears_on_a_singer_row(self):
+        from PyQt6.QtCore import Qt
+        view, model, d = self.build([1])
+        R = int(Qt.ItemDataRole.UserRole) + 21
+        model._rows[0]["roles"][R] = "09:00"
+        model.layoutChanged.emit()
+        self.app.processEvents()
+        self.assertEqual(self._amber_pixels(view, 0), 0)
+
     def test_a_long_queue_paints_and_scrolls(self):
         view, model, d = self.build([2] * 60)
         view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
