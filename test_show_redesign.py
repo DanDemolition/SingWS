@@ -101,6 +101,15 @@ class ShowRedesignTests(unittest.TestCase):
         apply_body = SRC[SRC.index("def _apply_ui_show_redesign"):SRC.index("def _apply_redesign_hero_text")]
         self.assertIn("self._set_bottom_nav_active(getattr(self, \"_bottom_nav_mode\", \"main\"))", apply_body)
 
+    def test_hero_progress_bar_is_thicker_with_a_glow_and_gentler_time_labels(self):
+        body = SRC[SRC.index("def _restyle_seek_sliders"):SRC.index("def _apply_redesign_polish")]
+        self.assertIn('("hero_seek_slider", 6)', body)            # the mockup's 6 px bar
+        self.assertIn('("bg_main_seek_slider", 4)', body)
+        self.assertIn("glow.setVisible(on)", body)
+        self.assertIn("self.hero_seek_glow = SliderGlow(self.hero_seek_slider)", SRC)
+        polish = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
+        self.assertIn("self.hero_seek_elapsed", polish)
+
 
 if __name__ == "__main__":
     unittest.main()

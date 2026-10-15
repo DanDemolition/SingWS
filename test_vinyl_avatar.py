@@ -110,5 +110,34 @@ class VinylAvatarTests(unittest.TestCase):
             a.hide()
 
 
+class SliderGlowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        cls.m = load_main()
+
+    def test_the_glow_follows_the_fill_and_is_absent_at_zero(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QSlider
+        sl = QSlider(Qt.Orientation.Horizontal)
+        sl.setRange(0, 1000)
+        sl.setFixedSize(400, 22)
+        sl.setStyleSheet("QSlider { background: black; }")
+        self.m.SliderGlow(sl)
+        sl.show()
+        self.app.processEvents()
+        def glow_pixels(x):
+            img = sl.grab().toImage()
+            return sum(1 for y in range(img.height()) if img.pixelColor(x, y).red() > 15 and img.pixelColor(x, y).blue() > 15)
+        sl.setValue(0)
+        self.app.processEvents()
+        self.assertEqual(glow_pixels(100), 0)
+        sl.setValue(500)                                    # half way: glow at x=100 (inside the fill), none at x=300
+        self.app.processEvents()
+        self.assertGreater(glow_pixels(100), 0)
+        self.assertEqual(glow_pixels(300), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

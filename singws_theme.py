@@ -669,14 +669,15 @@ def list_css() -> str:
     """
 
 
-def thin_slider_css() -> str:
+def thin_slider_css(groove: int = 5) -> str:
     """Show-tab redesign progress bar: a thin track with a purple fill and no knob (it is still draggable)."""
+    r = max(2, groove // 2)
     return f"""
-        QSlider {{ min-height: 14px; }}
-        QSlider::groove:horizontal {{ height: 5px; background: rgba(255,255,255,0.10); border-radius: 3px; }}
+        QSlider {{ min-height: {max(14, groove + 8)}px; }}
+        QSlider::groove:horizontal {{ height: {groove}px; background: rgba(255,255,255,0.08); border-radius: {r}px; }}
         QSlider::sub-page:horizontal {{
             background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {color('accent')}, stop:1 {color('accent_bright')});
-            border-radius: 3px;
+            border-radius: {r}px;
         }}
         QSlider::handle:horizontal {{ width: 0px; height: 0px; margin: 0px; background: transparent; border: none; }}
     """

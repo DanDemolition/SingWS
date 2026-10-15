@@ -20382,6 +20382,38 @@ class RowCardsOverlay(QWidget):
             p.drawRoundedRect(card, 10, 10)
 
 
+class SliderGlow(QWidget):
+    """Show-tab redesign: a soft purple glow around the filled part of a progress slider (a stylesheet cannot draw one)."""
+
+    def __init__(self, slider: QSlider):
+        super().__init__(slider)
+        self._slider = slider
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        slider.installEventFilter(self)
+        slider.valueChanged.connect(lambda *_: self.update())
+        self.setGeometry(slider.rect())
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            self.setGeometry(self._slider.rect())
+        return False
+
+    def paintEvent(self, event):
+        sl = self._slider
+        span = max(1, sl.maximum() - sl.minimum())
+        fill = self.width() * (sl.value() - sl.minimum()) / span
+        if fill < 3:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(Qt.PenStyle.NoPen)
+        cy = self.height() / 2.0
+        for grow, alpha in ((9, 18), (6, 30), (3, 48)):          # three translucent layers read as a soft glow
+            h = 6 + grow
+            p.setBrush(QColor(168, 85, 247, alpha))
+            p.drawRoundedRect(QRectF(0, cy - h / 2.0, fill, h), h / 2.0, h / 2.0)
+
+
 class CanvasGlowOverlay(QWidget):
     """Show-tab redesign: the page background glow (purple top-right, green bottom-left) painted behind every other widget."""
 
@@ -25218,6 +25250,8 @@ class KaraokeApp(QWidget):
         self.hero_seek_slider.setRange(0, 1000)
         self._restyle_seek_sliders(False)
         self.hero_seek_slider.setToolTip("Click or drag to seek")
+        self.hero_seek_glow = SliderGlow(self.hero_seek_slider)
+        self.hero_seek_glow.setVisible(False)
         self.hero_seek_remaining = QLabel("-00:00")
         self.hero_seek_remaining.setStyleSheet(text_css("label", "text_muted"))
         prog.addWidget(self.hero_seek_elapsed)
@@ -61134,11 +61168,14 @@ class KaraokeApp(QWidget):
                 + "border:1px solid rgba(115,144,180,0.14); border-radius:6px;")
 
     def _restyle_seek_sliders(self, on: bool):
-        css = (SINGWS_THEME.thin_slider_css() if SINGWS_THEME is not None else deck_seek_slider_css()) if on else deck_seek_slider_css()
-        for name in ("hero_seek_slider", "bg_main_seek_slider"):
+        for name, groove in (("hero_seek_slider", 6), ("bg_main_seek_slider", 4)):
             w = getattr(self, name, None)
             if w is not None:
+                css = (SINGWS_THEME.thin_slider_css(groove) if SINGWS_THEME is not None else deck_seek_slider_css()) if on else deck_seek_slider_css()
                 w.setStyleSheet(css)
+        glow = getattr(self, "hero_seek_glow", None)
+        if glow is not None:
+            glow.setVisible(on)
 
     def _apply_redesign_polish(self, on: bool):
         """Small finishing touches from the mockup: thin progress bars, small ghost queue buttons, a dot on the kicker, a glow on the hero."""
@@ -61194,6 +61231,8 @@ class KaraokeApp(QWidget):
                 (self.karaoke_tempo_value_label, text_css("large", "text_bright", extra="background: transparent; border: none;") if on else self._value_css),
                 (self.karaoke_key_value_label, text_css("large", "text_bright", extra="background: transparent; border: none;") if on else self._value_css),
                 (self.karaoke_tempo_global_cb, self._global_css.replace("border-radius: 8px;", "border-radius: 12px;") if on else self._global_css),
+                (self.hero_seek_elapsed, text_css("label", "text_muted", extra="font-weight: 500;") if on else text_css("label", "text_muted")),
+                (self.hero_seek_remaining, text_css("label", "text_muted", extra="font-weight: 500;") if on else text_css("label", "text_muted")),
                 (self.bg_main_title_label, text_css("body", "text_bright") if on else text_css("title", "text_bright")),
                 (self.bg_main_artist_label, text_css("label", "text_muted") if on else text_css("caption", "text_muted")),
             ]
