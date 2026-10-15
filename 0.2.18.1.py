@@ -21856,6 +21856,9 @@ class KaraokeApp(QWidget):
         ctrl_row.addWidget(self.stop_button)
         ctrl_row.addWidget(self.add_file_icon_button)
         ctrl_row.addStretch(1)
+        self.preview_time_label = QLabel("")
+        self.preview_time_label.setVisible(False)
+        ctrl_row.addWidget(self.preview_time_label)
         ctrl_row.addWidget(self.audio_output_button)
         row_controls.addLayout(ctrl_row)
         for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button, self.audio_output_button):
@@ -22931,7 +22934,7 @@ class KaraokeApp(QWidget):
         _un_head.setContentsMargins(0, 0, 0, 0)
         self.bg_upnext_title = QLabel("UP NEXT IN BACKGROUND MUSIC")
         self.bg_upnext_count = QLabel("")
-        for _w in (self.bg_upnext_title, self.bg_upnext_count, self.library_song_count):
+        for _w in (self.bg_upnext_title, self.bg_upnext_count, self.library_song_count, self.preview_time_label):
             _w.setStyleSheet(text_css("caption", "text_soft"))
         _un_head.addWidget(self.bg_upnext_title, 1)
         _un_head.addWidget(self.bg_upnext_count)
@@ -25301,6 +25304,13 @@ class KaraokeApp(QWidget):
             for w in (self.karaoke_tempo_down_button, self.karaoke_key_down_button):
                 grid.setAlignment(w, Qt.AlignmentFlag.AlignRight if on else Qt.AlignmentFlag(0))
             self.karaoke_key_value_label.setFixedSize(62 if on else 42, 29)
+            for w in (self.performance_deck_title, self.performance_deck_status):
+                w.setVisible(not on)                 # the mockup's preview card has no title or STANDBY chip
+            self.preview_time_label.setVisible(on)
+            try:
+                self.video_controls_splitter.setHandleWidth(3 if on else 8)
+            except Exception:
+                pass
             self.soundboard_caption.setVisible(on)
             self.soundboard_strip.set_redesign(on)
         except Exception as exc:
@@ -25344,6 +25354,15 @@ class KaraokeApp(QWidget):
             self.hero_chip_format.setText(fmt)
             self.hero_chip_format.setVisible(bool(fmt))
             self.hero_btn_pause.setText("Resume" if self._is_karaoke_paused() else "Pause")
+            try:
+                def _mss(v):
+                    v = max(0, int(v or 0))
+                    return f"{v // 60}:{v % 60:02d}"
+                dur = float(getattr(self, "_karaoke_last_dur", 0.0) or 0.0)
+                pos = float(getattr(self, "_karaoke_last_pos", 0.0) or 0.0)
+                self.preview_time_label.setText(f"{_mss(pos)} / {_mss(dur)}" if dur > 0 else "")
+            except Exception:
+                pass
         except Exception:
             pass
 

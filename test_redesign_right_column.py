@@ -82,6 +82,17 @@ class RightColumnTests(unittest.TestCase):
             self.assertLessEqual(cell.bottom() + 2, panel.height())
         self.assertFalse(panel.grab().toImage().isNull())
 
+    def test_preview_card_drops_its_title_and_shows_elapsed_over_total(self):
+        from pathlib import Path
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        body = src[src.index("def _apply_redesign_right_column"):src.index("def _apply_redesign_hero_text")]
+        self.assertIn("self.performance_deck_title, self.performance_deck_status", body)
+        self.assertIn("w.setVisible(not on)", body)
+        self.assertIn("self.preview_time_label.setVisible(on)", body)
+        sync = src[src.index("def _hero_stage_sync"):src.index("def _hero_seek_pressed")]
+        self.assertIn('f"{_mss(pos)} / {_mss(dur)}"', sync)
+        self.assertIn("_karaoke_last_dur", sync)             # same position/duration the seek bar already uses
+
 
 if __name__ == "__main__":
     unittest.main()
