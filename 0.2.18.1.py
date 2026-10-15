@@ -24739,21 +24739,12 @@ class KaraokeApp(QWidget):
                     if not chips_in_text:
                         extras_col.removeItem(chips)
                         text_col.insertLayout(max(0, text_col.count() - 1), chips)    # before the trailing stretch
-                    if not meter_in_text:
-                        tr.removeWidget(meter)
+                    # The meter stays in its own spot at the right of the hero, centred on the card's height.
+                    if meter_in_text:
+                        text_col.removeWidget(meter)
+                        tr.insertWidget(3, meter, 0, Qt.AlignmentFlag.AlignVCenter)
                     meter.set_glow_style(True)
-                    meter.setFixedSize(180, 34)    # 20 bars x 6px + 19 gaps x 3px = 177
-                    if getattr(self, "_hero_title_row", None) is None:
-                        row = QHBoxLayout()
-                        row.setContentsMargins(0, 0, 0, 0)
-                        row.setSpacing(10)
-                        self._hero_title_row = row
-                    row = self._hero_title_row
-                    if text_col.indexOf(row) < 0:
-                        text_col.removeWidget(self.rotation_summary_title)
-                        row.addWidget(self.rotation_summary_title, 1)
-                        row.addWidget(meter, 0, Qt.AlignmentFlag.AlignBottom)
-                        text_col.insertLayout(0, row)
+                    meter.setFixedSize(180, 64)    # 20 bars x 6px + 19 gaps x 3px = 177
                     kick = self.rotation_summary_kicker
                     if text_col.indexOf(kick) < 0:
                         self.rotation_summary_card.layout().removeWidget(kick)
@@ -24766,19 +24757,10 @@ class KaraokeApp(QWidget):
                     if text_col.indexOf(kick) >= 0:
                         text_col.removeWidget(kick)
                         self.rotation_summary_card.layout().insertWidget(0, kick)
-                    row = getattr(self, "_hero_title_row", None)
-                    if row is not None and text_col.indexOf(row) >= 0:
-                        row.removeWidget(self.rotation_summary_title)
-                        row.removeWidget(meter)
-                        text_col.removeItem(row)
-                        text_col.insertWidget(0, self.rotation_summary_title)
-                        meter_in_text = True
                     meter.set_glow_style(False)
-                    if meter_in_text:
-                        meter.setFixedSize(150, 92)
-                        tr.insertWidget(3, meter, 0, Qt.AlignmentFlag.AlignVCenter)
-                        tr.setStretch(2, 1)
-                        tr.setStretch(4, 1)
+                    meter.setFixedSize(150, 92)
+                    tr.setStretch(2, 1)
+                    tr.setStretch(4, 1)
             except Exception:
                 pass
             if on:
