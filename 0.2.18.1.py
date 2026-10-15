@@ -9380,7 +9380,7 @@ class BarLevelMeter(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(halo)
             p.drawRoundedRect(QRectF(x - 2, top - 2, bar_w + 4, bar_h + 4), 4, 4)
-            grad = QLinearGradient(0, top, 0, h)
+            grad = QLinearGradient(0, top, 0, top + bar_h)
             grad.setColorAt(0.0, c1)
             grad.setColorAt(1.0, c2)
             p.setBrush(QBrush(grad))
@@ -16193,6 +16193,8 @@ class QueueCardDelegate(QStyledItemDelegate):
     model itself are untouched; the setting just swaps which delegate paints."""
 
     GAP = 8          # space above each singer card
+    NAME_H = 30
+    SONG_H = 26
     CARD_BG = QColor(255, 255, 255, 10)
     CARD_LINE = QColor(140, 150, 200, 40)
 
@@ -16213,6 +16215,15 @@ class QueueCardDelegate(QStyledItemDelegate):
         except Exception:
             return ""
 
+    def _card_mid(self, index) -> int:
+        """Vertical middle of this singer's whole card (name row + every song row), relative to the singer row's card top."""
+        n = 0
+        r = index.row() + 1
+        while self._kind_at(index, r) == "song":
+            n += 1
+            r += 1
+        return (self.NAME_H + n * self.SONG_H) // 2
+
     def card_edges(self, index):
         """(is_first_in_card, is_last_in_card) for this row."""
         kind = self._kind_at(index, index.row())
@@ -16224,9 +16235,9 @@ class QueueCardDelegate(QStyledItemDelegate):
         kind = self._kind_at(index, index.row())
         base = index.data(Qt.ItemDataRole.SizeHintRole)
         if kind == "singer":
-            h = 30 + (self.GAP if index.row() > 0 else 2)
+            h = self.NAME_H + (self.GAP if index.row() > 0 else 2)
         else:
-            h = 26
+            h = self.SONG_H
         w = int(base.width()) if hasattr(base, "width") else 0
         return QSize(w, h + (4 if self.card_edges(index)[1] and kind != "singer" else 0))
 
@@ -16320,21 +16331,39 @@ class QueueCardDelegate(QStyledItemDelegate):
             )
         left_rect = QRect(inner.left(), inner.top(), max(0, inner.width() - right_w - 10), inner.height())
 
-        if kind == "singer":
-            m = re.match(r"^\s*(\d+)\.\s*(.*)$", left)
-            num, name = (m.group(1), m.group(2)) if m else ("", left.lstrip("\u2014 ").strip() or left)
-            x0 = left_rect.left()
-            if num:
-                chip = QRect(x0, card.top() + (card.height() - 26) // 2, 26, 26)
+        # The number chip is centred on the singer's whole card, so every row of the card draws its slice of it.
+        try:
+            srow = index.row()
+            offset = 0
+            if kind == "song":
+                srow -= 1
+                offset = self.NAME_H
+                while srow >= 0 and self._kind_at(index, srow) == "song":
+                    offset += self.SONG_H
+                    srow -= 1
+            sidx = index.model().index(srow, 0) if srow >= 0 else None
+            sm = re.match(r"^\s*(\d+)\.", str(sidx.data(self.left_role) or "")) if sidx is not None else None
+            if sm:
+                sstatus = str(sidx.data(self.status_role) or "") if self.status_role is not None else ""
+                nxt = sstatus == "next"
+                mid = self._card_mid(sidx)
+                chip = QRect(left_rect.left(), card.top() - offset + mid - 13, 26, 26)
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(124, 61, 255, 255) if status == "next" else QColor(255, 255, 255, 22))
+                painter.setBrush(QColor(124, 61, 255) if nxt else QColor(255, 255, 255, 22))
                 painter.drawRoundedRect(chip, 7, 7)
                 cf = QFont(font)
                 cf.setBold(True)
                 cf.setPointSizeF(max(8.0, font.pointSizeF() - 1.5))
                 painter.setFont(cf)
-                painter.setPen(QColor("#FFFFFF") if status == "next" else QColor(200, 205, 225))
-                painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, num)
+                painter.setPen(QColor("#FFFFFF") if nxt else QColor(200, 205, 225))
+                painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, sm.group(1))
+        except Exception:
+            pass
+        if kind == "singer":
+            m = re.match(r"^\s*(\d+)\.\s*(.*)$", left)
+            num, name = (m.group(1), m.group(2)) if m else ("", left.lstrip("\u2014 ").strip() or left)
+            x0 = left_rect.left()
+            if num:
                 x0 += 26 + 12
             bfont = QFont(font)
             bfont.setBold(True)
@@ -24702,7 +24731,7 @@ class KaraokeApp(QWidget):
                     if not meter_in_text:
                         tr.removeWidget(meter)
                     meter.set_glow_style(True)
-                    meter.setFixedSize(140, 34)
+                    meter.setFixedSize(180, 34)    # 20 bars x 6px + 19 gaps x 3px = 177
                     if getattr(self, "_hero_title_row", None) is None:
                         row = QHBoxLayout()
                         row.setContentsMargins(0, 0, 0, 0)
