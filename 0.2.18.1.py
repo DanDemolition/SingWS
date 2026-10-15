@@ -20176,6 +20176,57 @@ class RotationView(QMainWindow):
 # Right-click for a small per-pad menu (load, clear, rename, volume).
 # ============================================================================
 
+class StatusChip(QWidget):
+    """Show-tab redesign: a header pill with a coloured dot and a short text, painted directly."""
+
+    def __init__(self, text: str = "", dot: QColor | None = None, parent=None):
+        super().__init__(parent)
+        self._text = str(text)
+        self._dot = QColor(dot) if dot is not None else QColor(150, 156, 184)
+        self.setFixedHeight(28)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._resize_to_text()
+
+    def set_state(self, text: str, dot: QColor | None = None):
+        text = str(text)
+        dot = QColor(dot) if dot is not None else self._dot
+        if text == self._text and dot == self._dot:
+            return
+        self._text, self._dot = text, dot
+        self._resize_to_text()
+        self.update()
+
+    def text(self) -> str:
+        return self._text
+
+    def _chip_font(self) -> QFont:
+        f = QFont(self.font())
+        f.setPixelSize(12)
+        f.setWeight(QFont.Weight.DemiBold)
+        return f
+
+    def _resize_to_text(self):
+        self.setFixedWidth(QFontMetrics(self._chip_font()).horizontalAdvance(self._text) + 40)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(140, 150, 200, 46), 1))
+        p.setBrush(QColor(255, 255, 255, 12))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        p.setPen(Qt.PenStyle.NoPen)
+        halo = QColor(self._dot)
+        halo.setAlpha(70)
+        p.setBrush(halo)
+        p.drawEllipse(QPointF(15, r.center().y()), 5.0, 5.0)
+        p.setBrush(self._dot)
+        p.drawEllipse(QPointF(15, r.center().y()), 3.0, 3.0)
+        p.setFont(self._chip_font())
+        p.setPen(QColor(230, 232, 240))
+        p.drawText(QRectF(26, 0, self.width() - 32, self.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._text)
+
+
 class BgUpNextList(QListWidget):
     """Show-tab redesign: the next few background-music tracks as an interactive list.
 
@@ -22863,6 +22914,17 @@ class KaraokeApp(QWidget):
         header_status_layout.addWidget(self.header_location_label)
         header_layout.addWidget(self.header_status_group)
 
+        # Redesign: the same facts as four separate pills (hidden unless ui_show_redesign is on)
+        self.header_chip_group = QWidget()
+        _hc = QHBoxLayout(self.header_chip_group)
+        _hc.setContentsMargins(0, 0, 0, 0)
+        _hc.setSpacing(8)
+        self.header_chips = {k: StatusChip("") for k in ("requests", "waitlist", "online", "summary")}
+        for _chip in self.header_chips.values():
+            _hc.addWidget(_chip)
+        self.header_chip_group.setVisible(False)
+        header_layout.addWidget(self.header_chip_group)
+
         header_layout.addStretch(1)
 
         self.header_qr_widget = ClickableImageLabel("QR")
@@ -24834,6 +24896,12 @@ class KaraokeApp(QWidget):
             self._apply_redesign_right_column(on)
             self._apply_redesign_bg_card(on)
             try:
+                self.header_status_group.setVisible(not on)
+                self.header_chip_group.setVisible(on)
+                self._refresh_header_chips()
+            except Exception:
+                pass
+            try:
                 self.bg_upnext_box.setVisible(False)
                 self._bg_upnext_sig = None
                 if on:
@@ -24957,6 +25025,13 @@ class KaraokeApp(QWidget):
                 b.setFont(f)
             for lab, text in ((self.karaoke_tempo_label, "TEMPO" if on else "Tempo"), (self.karaoke_key_label, "KEY" if on else "Key")):
                 lab.setText(text)
+            # TEMPO / KEY: the label stays left, the steppers move to the right edge (Global ends the tempo row)
+            grid = self.karaoke_tempo_controls_grid
+            grid.setColumnStretch(1, 1 if on else 0)
+            grid.setColumnStretch(5, 0 if on else 1)
+            for w in (self.karaoke_tempo_down_button, self.karaoke_key_down_button):
+                grid.setAlignment(w, Qt.AlignmentFlag.AlignRight if on else Qt.AlignmentFlag(0))
+            self.karaoke_key_value_label.setFixedSize(62 if on else 42, 29)
             self.soundboard_caption.setVisible(on)
             self.soundboard_strip.set_redesign(on)
         except Exception as exc:
@@ -36999,8 +37074,28 @@ class KaraokeApp(QWidget):
         self.save_settings()
         self._update_header_qr_widget()
 
+    def _refresh_header_chips(self):
+        """Fill the redesign's header pills from the same state the single status pill uses."""
+        try:
+            if not self._ui_redesign_on():
+                return
+            accepting = bool(self.settings.get("requests_accepting", True))
+            waitlist = bool(self.settings.get("use_waiting_for_add", False))
+            connection = str(getattr(self, "_server_connection_state", "") or ("Connected" if self.is_network_configured() else "Offline"))
+            good, warn, mute = QColor(52, 224, 138), QColor(245, 200, 75), QColor(150, 156, 184)
+            chips = self.header_chips
+            chips["requests"].set_state("Requests open" if accepting else "Requests closed", good if accepting else warn)
+            chips["waitlist"].set_state("Waitlist on" if waitlist else "Waitlist off", good if waitlist else mute)
+            online = connection == "Connected"
+            chips["online"].set_state("Online" if online else connection, good if online else warn)
+            count, ends = getattr(self, "_header_summary", (0, ""))
+            chips["summary"].set_state(f"{count} singer{'s' if count != 1 else ''}" + (f" \u00b7 ends {ends}" if ends else ""), QColor(168, 85, 247))
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] header chips failed: {exc}")
+
     def _refresh_header_status(self):
         try:
+            self._refresh_header_chips()
             accepting = bool(self.settings.get("requests_accepting", True))
             waitlist_enabled = bool(self.settings.get("use_waiting_for_add", False))
             accepting_dot = "●"
@@ -50823,9 +50918,11 @@ class KaraokeApp(QWidget):
 
         SHOW_END_TIME = True
         end_html = ""
+        self._header_summary = (singer_count, "")
         if SHOW_END_TIME and total_secs > 0:
             end_time = datetime.now() + timedelta(seconds=total_secs)
             time_str = end_time.strftime("%I:%M %p").lstrip("0")
+            self._header_summary = (singer_count, time_str)
             end_html = (
                 '<span style="color:#5C6170;"> • </span>'
                 '<span style="color:#FF5C5C; font-weight:700;">ENDS</span> '
@@ -50872,6 +50969,7 @@ class KaraokeApp(QWidget):
             f'<span style="color:#B994FF; font-weight:800;">{mode_label}</span>'
             f'{start_html}{locked_html}{loop_html}'
         )
+        self._refresh_header_chips()
 
     def update_queue_display(self):
         _perf_t0 = time.perf_counter()
