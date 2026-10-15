@@ -16250,6 +16250,16 @@ class QueueCardDelegate(QStyledItemDelegate):
             r += 1
         return (self.NAME_H + n * self.SONG_H) // 2
 
+    def attach(self, view):
+        """A whole card lights up when any of its rows is selected, so when the selection moves the whole viewport must repaint
+        (Qt only repaints the two rows involved, which left the old card's other rows stuck highlighted)."""
+        sel = view.selectionModel()
+        if sel is None or getattr(view, "_qcards_repaint_connected", False):
+            return
+        sel.selectionChanged.connect(lambda *_: view.viewport().update())
+        sel.currentChanged.connect(lambda *_: view.viewport().update())
+        view._qcards_repaint_connected = True
+
     def card_edges(self, index):
         """(is_first_in_card, is_last_in_card) for this row."""
         kind = self._kind_at(index, index.row())
@@ -25184,9 +25194,11 @@ class KaraokeApp(QWidget):
                 qd = self.queue_display
                 if on and not isinstance(qd.itemDelegate(), QueueCardDelegate):
                     qd.setAlternatingRowColors(False)
-                    qd.setItemDelegate(QueueCardDelegate(
+                    _cards = QueueCardDelegate(
                         self._row_left_role, self._row_right_role, self._queue_row_kind_role,
-                        self._queue_presentation_role, duet_role=self._row_duet_role, parent=qd))
+                        self._queue_presentation_role, duet_role=self._row_duet_role, parent=qd)
+                    qd.setItemDelegate(_cards)
+                    _cards.attach(qd)
                 elif not on and isinstance(qd.itemDelegate(), QueueCardDelegate):
                     qd.setAlternatingRowColors(True)
                     qd.setItemDelegate(RightAlignedMetaDelegate(

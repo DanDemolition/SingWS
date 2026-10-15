@@ -37,6 +37,7 @@ class QueueCardTests(unittest.TestCase):
         view.setModel(model)
         d = m.QueueCardDelegate(L, R, K, P, parent=view)
         view.setItemDelegate(d)
+        d.attach(view)
         view.setSpacing(0)
         view.setStyleSheet("QListView { background: #0a1422; border: none; }")   # a dark ground, so the translucent cards show
         view.resize(520, 700)
@@ -78,6 +79,55 @@ class QueueCardTests(unittest.TestCase):
             self.assertNotEqual(view.viewport().grab().toImage().pixelColor(200, y).name(), plain, f"row {r} did not light up")
         other = view.viewport().grab().toImage().pixelColor(200, view.visualRect(model.index(4, 0)).top() + 12).name()
         self.assertEqual(other, plain)               # the next singer's card is untouched
+
+    def test_moving_the_selection_to_another_card_clears_the_old_card_completely(self):
+        view, model, d = self.build([3, 2])
+        plain = view.viewport().grab().toImage().pixelColor(200, view.visualRect(model.index(4, 0)).top() + 12).name()
+        view.setCurrentIndex(model.index(2, 0))          # a song of the first card
+        self.app.processEvents()
+        lit = view.viewport().grab().toImage().pixelColor(200, view.visualRect(model.index(1, 0)).top() + 6).name()
+        view.setCurrentIndex(model.index(5, 0))          # a song of the second card
+        self.app.processEvents()
+        img = view.viewport().grab().toImage()
+        for r in (0, 1, 2, 3):                           # every row of the first card is back to normal...
+            self.assertNotEqual(img.pixelColor(200, view.visualRect(model.index(r, 0)).top() + 6).name(), lit, f"row {r} stayed lit")
+        for r in (4, 5, 6):                              # ...and the second card is lit as one block
+            self.assertNotEqual(img.pixelColor(200, view.visualRect(model.index(r, 0)).top() + 12).name(), plain)
+
+    def test_a_selection_change_repaints_the_whole_viewport_not_just_two_rows(self):
+        # This is the "stays highlighted" bug: Qt repaints only the old and new rows, the other rows of the old card keep their tint.
+        from PyQt6.QtCore import QEvent, QObject
+        view, model, d = self.build([3, 3])
+        painted = []
+
+        class Spy(QObject):
+            def eventFilter(self, obj, ev):
+                if ev.type() == QEvent.Type.Paint:
+                    painted.append(ev.rect())
+                return False
+
+        spy = Spy(view)
+        view.viewport().installEventFilter(spy)
+        view.setCurrentIndex(model.index(1, 0))
+        self.app.processEvents()
+        painted.clear()
+        view.setCurrentIndex(model.index(6, 0))
+        self.app.processEvents()
+        covered = view.viewport().rect()
+        self.assertTrue(any(r.contains(covered) for r in painted), f"only {[tuple(r.getRect()) for r in painted]} was repainted")
+
+    def test_only_one_card_is_lit_at_a_time_after_many_clicks(self):
+        view, model, d = self.build([2, 2, 2])
+        for r in (1, 4, 2, 7, 5, 0):
+            view.setCurrentIndex(model.index(r, 0))
+            self.app.processEvents()
+        img = view.viewport().grab().toImage()
+        lit_cards = 0
+        base = img.pixelColor(200, view.visualRect(model.index(0, 0)).top() + 6).name()   # row 0 is selected last: this is the "lit" colour
+        for singer_row in (0, 3, 6):
+            if img.pixelColor(200, view.visualRect(model.index(singer_row, 0)).top() + 6).name() == base:
+                lit_cards += 1
+        self.assertEqual(lit_cards, 1)
 
     def test_a_long_queue_paints_and_scrolls(self):
         view, model, d = self.build([2] * 60)
