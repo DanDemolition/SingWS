@@ -402,6 +402,32 @@ def soundboard_pad_css(state: str = "loaded") -> str:
         }
     """
 
+_REDESIGN_PAD_ACCENTS = (
+    ("168,85,247", "124,61,255"),      # purple
+    ("52,224,138", "20,160,96"),       # green
+    ("245,200,75", "224,140,40"),      # amber
+    ("244,114,182", "219,39,119"),     # pink
+)
+
+
+def soundboard_pad_css_redesign(slot: int, state: str) -> str:
+    """Show-tab redesign: a loaded pad is a solid accent-coloured tile (colour cycles by slot); empty slots stay slim and quiet."""
+    if state == "empty":
+        return """
+            QPushButton { background: transparent; color: rgba(172,182,206,0.45); border: 1px dashed rgba(124,61,255,0.34);
+                          border-radius: 8px; padding: 0px; font-size: 14px; font-weight: 800; }
+            QPushButton:hover { background: rgba(124,61,255,0.16); border: 1px dashed rgba(178,150,255,0.74); color: rgba(228,231,244,0.92); }
+        """
+    c1, c2 = _REDESIGN_PAD_ACCENTS[int(slot) % len(_REDESIGN_PAD_ACCENTS)]
+    return f"""
+        QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba({c1},0.96), stop:1 rgba({c2},0.96));
+                       color: rgba(255,255,255,0.98); border: 1px solid rgba({c1},0.55); border-radius: 12px;
+                       padding: 3px 9px; font-weight: 850; }}
+        QPushButton:hover {{ border: 1px solid rgba(255,255,255,0.85); }}
+        QPushButton:pressed {{ background: rgba({c2},1.0); }}
+    """
+
+
 def button_css(*, padding: str = "6px 12px", radius: int = 8) -> str:
     if SINGWS_THEME is not None:
         return SINGWS_THEME.button_css(padding=padding, radius_px=radius, variant="default")
@@ -20165,6 +20191,8 @@ class SoundboardPad(QPushButton):
         # Square-ish pads: fixed height (caller-tunable so the deck can shrink on
         # short displays), expanding width (the grid's column stretch keeps them
         # ~square at the strip's typical width).
+        self._full_height = int(pad_height)
+        self.redesign = False
         self.setFixedHeight(int(pad_height))
         self.setMinimumWidth(58)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -20381,12 +20409,16 @@ class SoundboardPad(QPushButton):
 
     def _apply_playing_style(self, playing: bool):
         """Style the pad for its current state (playing / loaded / empty)."""
+        redesign = bool(getattr(self, "redesign", False))
         if playing:
-            self.setStyleSheet(soundboard_pad_css("playing"))
+            css = soundboard_pad_css("playing")
         elif not self._clip_path:
-            self.setStyleSheet(soundboard_pad_css("empty"))
+            css = soundboard_pad_css_redesign(self.slot_index, "empty") if redesign else soundboard_pad_css("empty")
         else:
-            self.setStyleSheet(soundboard_pad_css("loaded"))
+            css = soundboard_pad_css_redesign(self.slot_index, "loaded") if redesign else soundboard_pad_css("loaded")
+        self.setStyleSheet(css)
+        # redesign: loaded pads keep their full height, empty slots are slim
+        self.setFixedHeight(int(self._full_height) if (not redesign or self._clip_path) else 30)
 
     def _fit_font_to_pad(self):
         """Shrink the pad's font, and wrap to two lines if necessary, so the
@@ -20607,7 +20639,7 @@ class SoundboardStrip(QWidget):
             pad.stopped.connect(self._on_pad_stopped)
             self.pads.append(pad)
             r, c = divmod(i, cols)
-            grid.addWidget(pad, r, c)
+            grid.addWidget(pad, r, c, Qt.AlignmentFlag.AlignTop)
         # Equal column stretch so the pads stay evenly spaced at any strip width.
         for c in range(cols):
             grid.setColumnStretch(c, 1)
@@ -20615,6 +20647,11 @@ class SoundboardStrip(QWidget):
     def _on_pad_stopped(self, _slot_index: int):
         if not any(bool(getattr(pad, "_playing", False)) for pad in self.pads):
             self.became_inactive.emit()
+
+    def set_redesign(self, on: bool):
+        for pad in self.pads:
+            pad.redesign = bool(on)
+            pad._refresh_face()
 
     def to_list(self) -> list[dict]:
         return [pad.to_dict() for pad in self.pads]
@@ -21519,6 +21556,11 @@ class KaraokeApp(QWidget):
             pass
         self.soundboard_strip.changed.connect(self._on_soundboard_changed)
         self.soundboard_strip.became_inactive.connect(self._on_soundboard_inactive)
+        self._row_controls = row_controls
+        self.soundboard_caption = QLabel("SOUNDBOARD")
+        self.soundboard_caption.setStyleSheet(text_css("caption", "text_soft", "padding-top: 8px;"))
+        self.soundboard_caption.setVisible(False)
+        row_controls.addWidget(self.soundboard_caption)
         row_controls.addWidget(self.soundboard_strip)
 
         # Karaoke tempo/key controls (karaoke-only; never touches BG music).
@@ -24680,6 +24722,7 @@ class KaraokeApp(QWidget):
             if getattr(self, "hero_stage_extras", None) is None:
                 return
             self.hero_stage_extras.setVisible(on)
+            self._apply_redesign_right_column(on)
             if on and (refit or not self.settings.get("rotation_now_splitter_sizes")):
                 # No saved split: let the hero take only the height its content needs, so the queue gets the rest.
                 def _fit_hero():
@@ -24780,6 +24823,26 @@ class KaraokeApp(QWidget):
                 self._hero_stage_timer.stop()
         except Exception as exc:
             _diag(f"[SHOW-REDESIGN] apply failed: {exc}")
+
+    def _apply_redesign_right_column(self, on: bool):
+        """Right column under the preview: compact transport, TEMPO/KEY caption style, SOUNDBOARD caption, loaded pads big and empty slots slim."""
+        try:
+            for w in (self.karaoke_elapsed_label, self.karaoke_seek_slider, self.karaoke_remaining_label):
+                w.setVisible(not on)                 # the hero's progress bar is the seek control now
+            w_btn, h_btn = (38, 32) if on else (48, 38)
+            for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button, self.audio_output_button):
+                b.setFixedSize(w_btn, h_btn)
+                b.setMaximumWidth(w_btn)
+            for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button):
+                f = b.font()
+                f.setPointSize(14 if on else 18)
+                b.setFont(f)
+            for lab, text in ((self.karaoke_tempo_label, "TEMPO" if on else "Tempo"), (self.karaoke_key_label, "KEY" if on else "Key")):
+                lab.setText(text)
+            self.soundboard_caption.setVisible(on)
+            self.soundboard_strip.set_redesign(on)
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] right column failed: {exc}")
 
     def _apply_redesign_hero_text(self, title, artist, brand, path):
         """With the redesign on, the hero's second line reads 'Song · Artist' and the third line is just the disc."""
