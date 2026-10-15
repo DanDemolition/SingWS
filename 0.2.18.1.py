@@ -857,7 +857,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItemIterator, QProgressDialog,
     QTextEdit, QPlainTextEdit
 )
-from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat
+from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop
 
@@ -16143,6 +16143,176 @@ class RightAlignedMetaDelegate(QStyledItemDelegate):
 # QueueItemDelegate removed
 
 
+class QueueCardDelegate(QStyledItemDelegate):
+    """Show-tab redesign: one rounded card per singer (name row on top, their songs underneath).
+
+    Paints from the same model roles as RightAlignedMetaDelegate, so selection, drag and the
+    model itself are untouched; the setting just swaps which delegate paints."""
+
+    GAP = 8          # space above each singer card
+    CARD_BG = QColor(255, 255, 255, 10)
+    CARD_LINE = QColor(140, 150, 200, 40)
+
+    def __init__(self, left_role, right_role, kind_role, status_role, duet_role=None, parent=None):
+        super().__init__(parent)
+        self.left_role = left_role
+        self.right_role = right_role
+        self.kind_role = kind_role
+        self.status_role = status_role
+        self.duet_role = duet_role
+
+    def _kind_at(self, index, row: int) -> str:
+        try:
+            m = index.model()
+            if row < 0 or row >= m.rowCount():
+                return ""
+            return str(m.index(row, 0).data(self.kind_role) or "")
+        except Exception:
+            return ""
+
+    def card_edges(self, index):
+        """(is_first_in_card, is_last_in_card) for this row."""
+        kind = self._kind_at(index, index.row())
+        first = kind == "singer"
+        last = self._kind_at(index, index.row() + 1) in ("singer", "")
+        return first, last
+
+    def sizeHint(self, option, index):
+        kind = self._kind_at(index, index.row())
+        base = index.data(Qt.ItemDataRole.SizeHintRole)
+        h = int(base.height()) if hasattr(base, "height") else (30 if kind == "song" else 34)
+        if kind == "singer":
+            h = max(h, 34) + (self.GAP if index.row() > 0 else 2)
+        else:
+            h = max(h, 28)
+        w = int(base.width()) if hasattr(base, "width") else 0
+        return QSize(w, h + (4 if self.card_edges(index)[1] and kind != "singer" else 0))
+
+    @staticmethod
+    def _card_path(rect: QRect, first: bool, last: bool, r: float = 10.0) -> QPainterPath:
+        rt = r if first else 0.0
+        rb = r if last else 0.0
+        x, y, w, h = float(rect.left()), float(rect.top()), float(rect.width()), float(rect.height())
+        path = QPainterPath()
+        path.moveTo(x + rt, y)
+        path.lineTo(x + w - rt, y)
+        if rt:
+            path.arcTo(x + w - 2 * rt, y, 2 * rt, 2 * rt, 90, -90)
+        path.lineTo(x + w, y + h - rb)
+        if rb:
+            path.arcTo(x + w - 2 * rb, y + h - 2 * rb, 2 * rb, 2 * rb, 0, -90)
+        path.lineTo(x + rb, y + h)
+        if rb:
+            path.arcTo(x, y + h - 2 * rb, 2 * rb, 2 * rb, -90, -90)
+        path.lineTo(x, y + rt)
+        if rt:
+            path.arcTo(x, y, 2 * rt, 2 * rt, 180, -90)
+        path.closeSubpath()
+        return path
+
+    def paint(self, painter, option, index):
+        kind = self._kind_at(index, index.row())
+        left = str(index.data(self.left_role) or "")
+        right = str(index.data(self.right_role) or "")
+        status = str(index.data(self.status_role) or "") if self.status_role is not None else ""
+        first, last = self.card_edges(index)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected) and status not in ("current", "next")
+
+        full = QRect(option.rect)
+        top_gap = self.GAP if (kind == "singer" and index.row() > 0) else (2 if kind == "singer" else 0)
+        bottom_gap = 4 if (last and kind != "singer") else 0
+        card = QRect(full.left() + 4, full.top() + top_gap, full.width() - 12, full.height() - top_gap - bottom_gap)
+        if card.height() <= 0:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Joined rows: stretch the path past the row edge where the card continues and clip to the row,
+        # so the outline has no seam between a singer's name row and their songs.
+        painter.setClipRect(card.adjusted(-1, -1 if first else 0, 1, 1 if last else 0))
+        path = self._card_path(card.adjusted(0, 0 if first else -3, 0, 0 if last else 3), first, last)
+        bg = QColor(self.CARD_BG)
+        line = QColor(self.CARD_LINE)
+        accent = None
+        if status == "current":
+            accent = QColor(34, 197, 94)
+            bg = QColor(34, 197, 94, 28)
+            line = QColor(34, 197, 94, 90)
+        elif status == "next":
+            accent = QColor(245, 200, 75)
+            bg = QColor(245, 200, 75, 20)
+            line = QColor(245, 200, 75, 80)
+        painter.fillPath(path, bg)
+        if selected:
+            painter.fillPath(path, QColor(124, 61, 255, 46))
+            line = QColor(167, 139, 250, 150)
+        painter.setPen(QPen(line, 1))
+        painter.drawPath(path)
+        if accent is not None and first:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(accent)
+            painter.drawRoundedRect(QRect(card.left() + 1, card.top() + 8, 3, max(8, card.height() - 16)), 1.5, 1.5)
+
+        fg = index.data(Qt.ItemDataRole.ForegroundRole)
+        base_color = fg.color() if hasattr(fg, "color") else QColor("#E6E8F0")
+        font = QFont(option.font)
+        pad = 14
+        inner = card.adjusted(pad, 0, -pad, 0)
+        painter.setFont(font)
+
+        # right-hand text (status / duration), muted
+        right_w = 0
+        if right:
+            rfont = QFont(font)
+            rfont.setPointSizeF(max(8.0, font.pointSizeF() - 1.5))
+            painter.setFont(rfont)
+            rfm = QFontMetrics(rfont)
+            right_w = min(int(inner.width() * 0.45), rfm.horizontalAdvance(right) + 2)
+            rcol = QColor(base_color)
+            rcol.setAlpha(190 if kind == "singer" else 150)
+            painter.setPen(rcol)
+            painter.drawText(
+                QRect(inner.right() - right_w, inner.top(), right_w, inner.height()),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                rfm.elidedText(right, Qt.TextElideMode.ElideLeft, right_w),
+            )
+        left_rect = QRect(inner.left(), inner.top(), max(0, inner.width() - right_w - 10), inner.height())
+
+        if kind == "singer":
+            bfont = QFont(font)
+            bfont.setBold(True)
+            painter.setFont(bfont)
+            painter.setPen(base_color)
+            fm = QFontMetrics(bfont)
+            painter.drawText(left_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             fm.elidedText(left, Qt.TextElideMode.ElideRight, left_rect.width()))
+            duet = str(index.data(self.duet_role) or "").strip() if self.duet_role is not None else ""
+            if duet:
+                nw = fm.horizontalAdvance(left)
+                if nw + 20 < left_rect.width():
+                    ifont = QFont(font)
+                    ifont.setItalic(True)
+                    painter.setFont(ifont)
+                    dcol = QColor(base_color)
+                    dcol.setAlpha(120)
+                    painter.setPen(dcol)
+                    painter.drawText(
+                        QRect(left_rect.left() + nw + 10, left_rect.top(), left_rect.width() - nw - 10, left_rect.height()),
+                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                        "\u2022  " + duet,
+                    )
+        else:
+            scol = QColor(base_color)
+            scol.setAlpha(215)
+            painter.setPen(scol)
+            painter.setFont(font)
+            fm = QFontMetrics(font)
+            painter.drawText(left_rect.adjusted(14, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             fm.elidedText(left, Qt.TextElideMode.ElideRight, max(0, left_rect.width() - 14)))
+        painter.restore()
+
+
+
 class TwoLineSearchDelegate(QStyledItemDelegate):
     """Search-results delegate that paints two lines per row:
 
@@ -24399,6 +24569,24 @@ class KaraokeApp(QWidget):
             if getattr(self, "hero_stage_extras", None) is None:
                 return
             self.hero_stage_extras.setVisible(on)
+            try:
+                qd = self.queue_display
+                if on and not isinstance(qd.itemDelegate(), QueueCardDelegate):
+                    qd.setAlternatingRowColors(False)
+                    qd.setItemDelegate(QueueCardDelegate(
+                        self._row_left_role, self._row_right_role, self._queue_row_kind_role,
+                        self._queue_presentation_role, duet_role=self._row_duet_role, parent=qd))
+                elif not on and isinstance(qd.itemDelegate(), QueueCardDelegate):
+                    qd.setAlternatingRowColors(True)
+                    qd.setItemDelegate(RightAlignedMetaDelegate(
+                        self._row_left_role, self._row_right_role, qd,
+                        duet_role=self._row_duet_role, status_role=self._queue_presentation_role))
+                qd.setUniformItemSizes(not on)
+                qd.setSpacing(0 if on else 2)       # the cards draw their own gaps
+                qd.doItemsLayout()
+                qd.viewport().update()
+            except Exception as exc:
+                _diag(f"[SHOW-REDESIGN] queue cards failed: {exc}")
             self.last_sung_label.setVisible(not on)          # its NEXT line repeated the on-deck singer
             self.rotation_summary_title.setStyleSheet(text_css("display" if on else "hero", "text_bright"))
             self.rotation_summary_card.setMinimumHeight(330 if on else 248)

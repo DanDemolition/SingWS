@@ -36,6 +36,19 @@ class ShowRedesignTests(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertGreaterEqual(int(m.group(1)), 24)
 
+    def test_queue_cards_swap_in_with_the_setting_and_restore_the_old_delegate(self):
+        body = SRC[SRC.index("def _apply_ui_show_redesign"):SRC.index("def _apply_redesign_hero_text")]
+        self.assertIn("QueueCardDelegate(", body)
+        self.assertIn("RightAlignedMetaDelegate(", body)       # the way back when the setting is off
+        self.assertIn("qd.setSpacing(0 if on else 2)", body)    # view spacing would show as a seam inside a card
+
+    def test_queue_card_delegate_paints_from_the_same_roles_and_never_touches_the_model(self):
+        cls = SRC[SRC.index("class QueueCardDelegate"):SRC.index("class TwoLineSearchDelegate")]
+        for token in ("self.left_role", "self.right_role", "self.status_role", "self.kind_role"):
+            self.assertIn(token, cls)
+        self.assertNotIn("setData(", cls)
+        self.assertNotIn("setRows(", cls)
+
 
 if __name__ == "__main__":
     unittest.main()
