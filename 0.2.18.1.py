@@ -16489,10 +16489,33 @@ class LibraryCardDelegate(QStyledItemDelegate):
     ROW_H = 58
     PLUS = 28
 
-    def __init__(self, left_role: int, right_role: int, disc_role: int, add_callback, parent=None):
+    def __init__(self, left_role: int, right_role: int, disc_role: int, add_callback, parent=None, brand_fn=None):
         super().__init__(parent)
         self.left_role, self.right_role, self.disc_role = left_role, right_role, disc_role
         self.add_callback = add_callback
+        self.brand_fn = brand_fn          # raw disc id -> canonical company ("SC", "CC", "KV" ...)
+
+    COMPANY_COLOURS = ((168, 85, 247), (52, 224, 138), (245, 200, 75), (244, 114, 182), (96, 165, 250), (251, 146, 60))
+
+    def company_for(self, disc: str, right: str) -> str:
+        """The company shown on a row: KaraFun for the online catalogue, else the canonical brand of the disc id."""
+        if "KaraFun" in (right or "") and not disc:
+            return "KaraFun"
+        if not disc:
+            return ""
+        try:
+            brand = str(self.brand_fn(disc) if self.brand_fn else "").strip()
+        except Exception:
+            brand = ""
+        if not brand or re.search(r"\d", brand):      # an unknown disc id comes back whole ("ZZ208"): show just its letters
+            m = re.match(r"[A-Za-z]+", brand or disc)
+            brand = m.group(0) if m else (brand or disc)
+        return "KaraFun" if brand.upper() == "KARAFUN" else brand.upper()
+
+    @staticmethod
+    def duration_from(right: str) -> str:
+        m = re.search(r"(\d{1,3}:\d{2})\s*$", right or "")
+        return m.group(1) if m else ""
 
     def sizeHint(self, option, index):
         return QSize(0, self.ROW_H)
@@ -16510,9 +16533,12 @@ class LibraryCardDelegate(QStyledItemDelegate):
         disc = str(index.data(self.disc_role) or "").strip()
         artist, title = left.split(" \u2022 ", 1) if " \u2022 " in left else ("", left)
         sub_bits = [b for b in (artist, disc) if b]
-        if not disc and "KaraFun" in right:
-            sub_bits.append("KaraFun")
+        media = re.search(r"\b(CDG|MP4|MP3|KAR|MID)\b", right or "")
+        if media:
+            sub_bits.append(media.group(1))
         sub = " \u00b7 ".join(sub_bits)
+        company = self.company_for(disc, right)
+        duration = self.duration_from(right)
         hot = bool(option.state & QStyle.StateFlag.State_MouseOver)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         r = option.rect.adjusted(2, 2, -2, -2)
@@ -16523,7 +16549,24 @@ class LibraryCardDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(124, 61, 255, 46) if selected else QColor(255, 255, 255, 14))
             painter.drawRoundedRect(r, 8, 8)
         plus = self._plus_rect(option.rect)
-        text_w = max(0, plus.left() - r.left() - 24)
+        # right cluster, from the "+" leftwards: duration, then the company pill
+        x_right = plus.left() - 10
+        dur_w = 0
+        if duration:
+            df = QFont(option.font)
+            df.setPixelSize(11)
+            df.setBold(False)
+            dur_w = QFontMetrics(df).horizontalAdvance(duration) + 2
+            x_right -= dur_w
+        pill = QRect()
+        if company:
+            pf = QFont(option.font)
+            pf.setPixelSize(10)
+            pf.setBold(True)
+            pw = QFontMetrics(pf).horizontalAdvance(company) + 16
+            pill = QRect(x_right - (10 if duration else 0) - pw, plus.center().y() - 9, pw, 18)
+            x_right = pill.left()
+        text_w = max(0, x_right - r.left() - 24)
         font = QFont(option.font)
         font.setPixelSize(13)
         font.setBold(True)
@@ -16538,6 +16581,18 @@ class LibraryCardDelegate(QStyledItemDelegate):
         painter.setPen(QColor(163, 168, 189))
         painter.drawText(QRect(r.left() + 12, r.top() + 29, text_w, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                          QFontMetrics(sf).elidedText(sub, Qt.TextElideMode.ElideRight, text_w))
+        if duration:
+            painter.setFont(df)
+            painter.setPen(QColor(163, 168, 189))
+            painter.drawText(QRect(plus.left() - 10 - dur_w, plus.top(), dur_w, plus.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, duration)
+        if company:
+            cr, cg, cb = self.COMPANY_COLOURS[sum(ord(ch) for ch in company) % len(self.COMPANY_COLOURS)]
+            painter.setPen(QPen(QColor(cr, cg, cb, 150), 1))
+            painter.setBrush(QColor(cr, cg, cb, 38))
+            painter.drawRoundedRect(QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+            painter.setFont(pf)
+            painter.setPen(QColor(min(255, cr + 60), min(255, cg + 60), min(255, cb + 60)))
+            painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, company)
         painter.setPen(QPen(QColor(167, 139, 250, 170) if hot else QColor(140, 150, 200, 70), 1))
         painter.setBrush(QColor(124, 61, 255, 60) if hot else QColor(255, 255, 255, 12))
         painter.drawRoundedRect(QRectF(plus).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
@@ -25175,7 +25230,8 @@ class KaraokeApp(QWidget):
                 if on and not isinstance(rl.itemDelegate(), LibraryCardDelegate):
                     rl.setItemDelegate(LibraryCardDelegate(
                         self._row_left_role, self._row_right_role, self._row_disc_role,
-                        lambda ix: self._on_search_result_double_clicked(rl.item(ix.row())), parent=rl))
+                        lambda ix: self._on_search_result_double_clicked(rl.item(ix.row())), parent=rl,
+                        brand_fn=canonical_disc_brand))
                     rl.setAlternatingRowColors(False)
                     rl.setMouseTracking(True)
                 elif not on and isinstance(rl.itemDelegate(), LibraryCardDelegate):

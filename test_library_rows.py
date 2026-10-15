@@ -74,6 +74,22 @@ class LibraryRowTests(unittest.TestCase):
         self.assertIn("TwoLineSearchDelegate(", body)
         self.assertIn("self.library_tabs_label.setVisible(not on)", body)
 
+    def test_company_is_the_canonical_brand_and_karafun_for_the_online_catalogue(self):
+        d = self.m.LibraryCardDelegate(0, 0, 0, lambda ix: None, brand_fn=self.m.canonical_disc_brand)
+        self.assertEqual(d.company_for("SC8671", "CDG"), "SC")
+        self.assertEqual(d.company_for("CC1234", ""), "CC")
+        self.assertEqual(d.company_for("KV 43403", ""), "KV")
+        self.assertEqual(d.company_for("ZZ208", ""), "ZZ")                 # unknown brand: just its letters
+        self.assertEqual(d.company_for("", "KaraFun ONLINE  3:20"), "KaraFun")
+        self.assertEqual(d.company_for("", "CDG"), "")                    # nothing known: no pill rather than a guess
+
+    def test_duration_is_read_from_the_end_of_the_row_text_only(self):
+        d = self.m.LibraryCardDelegate(0, 0, 0, lambda ix: None)
+        self.assertEqual(d.duration_from("SC8671  CDG  3:20"), "3:20")
+        self.assertEqual(d.duration_from("KaraFun ONLINE  04:17"), "04:17")
+        self.assertEqual(d.duration_from("CDG"), "")
+        self.assertEqual(d.duration_from(""), "")
+
     def test_song_count_is_read_only_and_zero_without_an_index(self):
         import song_index
         self.assertEqual(song_index.song_count(Path(tempfile.mkdtemp()) / "missing.db"), 0)
