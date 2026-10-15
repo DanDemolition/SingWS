@@ -300,6 +300,7 @@ def _network_state_button_css(kind: str) -> str:
             border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.08);
             padding: 10px;
+            outline: none;
         }}
         QPushButton:hover {{
             background-color: {hover_bg};
@@ -9776,26 +9777,22 @@ class BackgroundMusicManager(QMainWindow):
         transport_row.addWidget(self.clear_playlist_button)
         player_layout.addLayout(transport_row)
 
-        lower_controls_row = QHBoxLayout()
-        lower_controls_row.setContentsMargins(0, 0, 0, 0)
-        lower_controls_row.setSpacing(9)
-
+        # The three toggles get a row of their own: sharing one row with the Volume slider made their labels run into each other.
         toggle_row = QHBoxLayout()
         toggle_row.setContentsMargins(0, 0, 0, 0)
-        toggle_row.setSpacing(9)
+        toggle_row.setSpacing(18)
         toggle_row.addWidget(self.enable_bg_cb)
         toggle_row.addWidget(self.autoplay_cb)
         toggle_row.addWidget(self.stop_after_current_cb)
         toggle_row.addStretch(1)
-        lower_controls_row.addLayout(toggle_row, 3)
-        lower_controls_row.addWidget(vol_group, 2)
-        player_layout.addLayout(lower_controls_row)
+        player_layout.addLayout(toggle_row)
+        # Volume and Soundboard share one label width so their sliders start at the same x.
+        _vol_label_w = 92
+        self.volume_text_label.setMinimumWidth(_vol_label_w)
+        vol_group.setMaximumWidth(620)
+        player_layout.addWidget(vol_group)
 
         # --- Soundboard volume: scales the soundboard pads, separate from the music Volume above ---
-        sb_row = QHBoxLayout()
-        sb_row.setContentsMargins(0, 0, 0, 0)
-        sb_row.setSpacing(9)
-        sb_row.addStretch(3)
         sb_group = QWidget()
         sb_h = QHBoxLayout(sb_group)
         sb_h.setContentsMargins(0, 0, 0, 0)
@@ -9820,8 +9817,9 @@ class BackgroundMusicManager(QMainWindow):
         self.soundboard_label.setMinimumWidth(28)
         self.soundboard_label.setMaximumWidth(36)
         sb_h.addWidget(self.soundboard_label)
-        sb_row.addWidget(sb_group, 2)
-        player_layout.addLayout(sb_row)
+        self.soundboard_text_label.setMinimumWidth(_vol_label_w)
+        sb_group.setMaximumWidth(620)
+        player_layout.addWidget(sb_group)
         shell_layout.addWidget(player_frame)
         
         # === MIDDLE: Splitter with Library and Playlist ===
@@ -11190,6 +11188,7 @@ class BackgroundMusicManager(QMainWindow):
             self.seek_remaining_label.setStyleSheet(f"color:{_v('text_soft')}; font-size:11px; font-weight:700;")
             self.seek_slider.setStyleSheet(seek_slider_css())
             self.volume_text_label.setStyleSheet(f"color:{_v('text')}; font-size:12px; font-weight:650;")
+            self.soundboard_text_label.setStyleSheet(f"color:{_v('text')}; font-size:12px; font-weight:650;")  # same as Volume
             self.library_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
             try:
                 self.playlist_search.setStyleSheet(line_edit_css(padding="8px 10px", radius=8))
@@ -11240,7 +11239,9 @@ class BackgroundMusicManager(QMainWindow):
                 (self.autoplay_cb, 12, QFont.Weight.DemiBold),
                 (self.stop_after_current_cb, 12, QFont.Weight.DemiBold),
                 (self.volume_text_label, 12, QFont.Weight.DemiBold),
+                (self.soundboard_text_label, 12, QFont.Weight.DemiBold),
                 (self.volume_label, 12, QFont.Weight.Bold),
+                (self.soundboard_label, 12, QFont.Weight.Bold),
                 (self.browser_root_combo, 12, QFont.Weight.DemiBold),
                 (self.library_search, 12, QFont.Weight.DemiBold),
                 (self.fs_tree, 12, QFont.Weight.Normal),
@@ -28307,7 +28308,7 @@ class KaraokeApp(QWidget):
         venue_row = QHBoxLayout()
         venue_row.addWidget(QLabel("Venue:"))
         venue_combo = QComboBox(dlg)
-        venue_combo.setMinimumWidth(240)
+        venue_combo.setMinimumWidth(120)  # was 240: with the three buttons the row was wider than the dialog and got clipped
         venue_row.addWidget(venue_combo, 1)
         venue_save_btn = QPushButton("Save As…")
         venue_update_btn = QPushButton("Update")
@@ -28663,9 +28664,11 @@ class KaraokeApp(QWidget):
 
         v = _section_card(tab_audio, "Playback")  # ---- Audio ----
         mpv_engine_note = QLabel(
-            "The bundled native mpv engine permanently owns karaoke audio and "
-            "video, including live seek, tempo, key, EQ and master processing."
+            "Karaoke sound is played by SingWS's Rust audio engine; the bundled mpv engine draws the picture and keeps time. "
+            "Live seek, tempo, key, EQ and master processing all apply. If a song can't start on the Rust engine it plays "
+            "with mpv audio instead."
         )
+        mpv_engine_note.setStyleSheet(section_meta_css())
         mpv_engine_note.setWordWrap(True)
         v.addWidget(mpv_engine_note)
 
@@ -36794,19 +36797,25 @@ class KaraokeApp(QWidget):
             scroll.setWidget(settings_page)
             outer.addWidget(scroll, 1)
     
+            def _form_label(text):
+                """One shared label width so every field in this dialog starts at the same x."""
+                lbl = QLabel(text)
+                lbl.setMinimumWidth(150)
+                return lbl
+
             # Base URL row
             connection_title = QLabel("Connection")
             connection_title.setStyleSheet(section_title_css())
             v.addWidget(connection_title)
             row1 = QHBoxLayout()
-            row1.addWidget(QLabel("Base URL:"))
+            row1.addWidget(_form_label("Base URL:"))
             base_edit = QLineEdit(self.settings.get("base_url", "https://beta.wskar.com"))
             row1.addWidget(base_edit)
             v.addLayout(row1)
     
             # User ID row
             row2 = QHBoxLayout()
-            row2.addWidget(QLabel("User ID:"))
+            row2.addWidget(_form_label("User ID:"))
             saved_uid = (self.settings.get("user") or self.settings.get("tenant") or "").strip()
             user_edit = QLineEdit(saved_uid)
             row2.addWidget(user_edit)
@@ -36814,7 +36823,7 @@ class KaraokeApp(QWidget):
 
             # API Key row
             row2b = QHBoxLayout()
-            row2b.addWidget(QLabel("API Key:"))
+            row2b.addWidget(_form_label("API Key:"))
             key_edit = QLineEdit(self.settings.get("api_key", ""))
             key_edit.setPlaceholderText("")
             # Always hidden: the venue API key must never be readable on screen (operator request 2026-10-05).
@@ -36824,7 +36833,7 @@ class KaraokeApp(QWidget):
 
             # Chat name row: what singers see when the host speaks in Everyone / Private chat
             row2e = QHBoxLayout()
-            row2e.addWidget(QLabel("Chat name:"))
+            row2e.addWidget(_form_label("Chat name:"))
             chat_name_edit = QLineEdit(str(self.settings.get("host_chat_name", "Host") or "Host"))
             chat_name_edit.setMaxLength(24)
             chat_name_edit.setPlaceholderText("Host")
@@ -36838,7 +36847,7 @@ class KaraokeApp(QWidget):
 
             # Session venue location row
             row2c = QHBoxLayout()
-            row2c.addWidget(QLabel("Venue Lat:"))
+            row2c.addWidget(_form_label("Venue Lat:"))
             lat_edit = QLineEdit(str(self.settings.get("session_location_latitude", "") or ""))
             lat_edit.setPlaceholderText("34.052235")
             row2c.addWidget(lat_edit)
@@ -36870,10 +36879,10 @@ class KaraokeApp(QWidget):
             v.addWidget(qr_title)
 
             qr_row = QHBoxLayout()
-            qr_row.addWidget(QLabel("Request QR URL:"))
+            qr_row.addWidget(_form_label("Request QR URL:"))
             qr_edit = QLineEdit(str(self.settings.get("header_qr_url", "") or ""))
             qr_edit.setPlaceholderText("https://your-request-page.example")
-            qr_edit.setMinimumWidth(360)
+            qr_edit.setMinimumWidth(60)  # was 360: wider than the dialog so the row was clipped; the field still stretches to fill
             qr_row.addWidget(qr_edit, 1)
             qr_preview_btn = QPushButton("Preview")
             qr_clear_btn = QPushButton("Clear")
@@ -36917,7 +36926,7 @@ class KaraokeApp(QWidget):
             v.addWidget(rotation_qr_cb)
 
             rotation_caption_row = QHBoxLayout()
-            rotation_caption_row.addWidget(QLabel("Rotation QR message:"))
+            rotation_caption_row.addWidget(_form_label("Rotation QR message:"))
             rotation_caption_edit = QLineEdit(dlg)
             rotation_caption_edit.setText(self._rotation_request_qr_caption())
             rotation_caption_edit.setPlaceholderText(
@@ -44561,11 +44570,11 @@ class KaraokeApp(QWidget):
         split.addWidget(self.chat_singer_list)
         right = QWidget(); right_layout = QVBoxLayout(right); right_layout.setContentsMargins(8,0,0,0)
         from PyQt6.QtWidgets import QTextBrowser as _QTextBrowser
-        self.chat_transcript = _QTextBrowser(); self.chat_transcript.setReadOnly(True); self.chat_transcript.setPlaceholderText("Select a singer conversation.")
+        self.chat_transcript = _QTextBrowser(); self.chat_transcript.setStyleSheet(line_edit_css()); self.chat_transcript.setReadOnly(True); self.chat_transcript.setPlaceholderText("Select a singer conversation.")
         self.chat_transcript.setOpenLinks(False); self.chat_transcript.setOpenExternalLinks(False)
         self.chat_transcript.anchorClicked.connect(self._on_room_anchor)      # click a picture / GIF to open it
         right_layout.addWidget(self.chat_transcript, 1)
-        send_row = QHBoxLayout(); self.chat_message_input = QLineEdit(); self.chat_message_input.setPlaceholderText("Message singer…")
+        send_row = QHBoxLayout(); self.chat_message_input = QLineEdit(); self.chat_message_input.setStyleSheet(line_edit_css()); self.chat_message_input.setPlaceholderText("Message singer…")
         self.chat_send_button = QPushButton("Send"); self.chat_send_button.clicked.connect(self._send_chat_message)
         self.chat_message_input.returnPressed.connect(self._send_chat_message)
         self.chat_emoji_button = QPushButton("😀"); self.chat_emoji_button.setToolTip("Emoji")
@@ -44645,8 +44654,8 @@ class KaraokeApp(QWidget):
         page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(0, 8, 0, 0); layout.setSpacing(8)
         top = QHBoxLayout()
         self.room_status_label = QLabel("Room chat: connecting…"); self.room_status_label.setStyleSheet(section_meta_css())
-        self.room_filter_combo = QComboBox(); self.room_filter_combo.addItems(["Everything", "Group room", "Private messages", "Needs attention"])
-        self.room_search_input = QLineEdit(); self.room_search_input.setPlaceholderText("Find a singer or word…")
+        self.room_filter_combo = QComboBox(); self.room_filter_combo.setStyleSheet(SINGWS_THEME.combo_css() if SINGWS_THEME is not None else ""); self.room_filter_combo.addItems(["Everything", "Group room", "Private messages", "Needs attention"])
+        self.room_search_input = QLineEdit(); self.room_search_input.setStyleSheet(line_edit_css()); self.room_search_input.setPlaceholderText("Find a singer or word…")
         self.room_refresh_button = QPushButton("Refresh"); self.room_clear_button = QPushButton("Clear Room Chat")
         self.room_clear_button.setToolTip("Delete every room message, picture, mute and block for this venue (also happens automatically after the retention time)")
         top.addWidget(self.room_status_label, 1)
@@ -44659,7 +44668,7 @@ class KaraokeApp(QWidget):
         self.room_mutes_label.setOpenExternalLinks(False); self.room_mutes_label.setWordWrap(True)
         self.room_mutes_label.linkActivated.connect(lambda href: self._on_room_anchor(QUrl(href)))
         layout.addWidget(self.room_mutes_label)
-        self.room_view = QTextBrowser(); self.room_view.setOpenLinks(False); self.room_view.setOpenExternalLinks(False)
+        self.room_view = QTextBrowser(); self.room_view.setStyleSheet(line_edit_css()); self.room_view.setOpenLinks(False); self.room_view.setOpenExternalLinks(False)
         self.room_view.anchorClicked.connect(self._on_room_anchor)
         layout.addWidget(self.room_view, 1)
         # The host can speak too. Everyone posts to the group room; on Private, the "Interject" link under a
@@ -44668,7 +44677,7 @@ class KaraokeApp(QWidget):
         self.room_say_target_label = QLabel(""); self.room_say_target_label.setStyleSheet(section_meta_css())
         layout.addWidget(self.room_say_target_label)
         say_row = QHBoxLayout()
-        self.room_say_input = QLineEdit(); self.room_say_input.setMaxLength(300); self.room_say_input.setPlaceholderText("Type a message… (emoji work too)")
+        self.room_say_input = QLineEdit(); self.room_say_input.setStyleSheet(line_edit_css()); self.room_say_input.setMaxLength(300); self.room_say_input.setPlaceholderText("Type a message… (emoji work too)")
         self.room_say_emoji_button = QPushButton("😀"); self.room_say_emoji_button.setToolTip("Emoji")
         self.room_say_gif_button = QPushButton("GIF"); self.room_say_photo_button = QPushButton("Photo"); self.room_say_send_button = QPushButton("Send")
         say_row.addWidget(self.room_say_input, 1)

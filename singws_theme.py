@@ -361,6 +361,7 @@ def button_css(*, padding: str = "6px 12px", radius_px: int = 8, variant: str = 
             padding: {padding};
             font-weight: 650;
             font-size: 13px;
+            outline: none;
         }}
         QPushButton:hover, QToolButton:hover {{
             background: {hover};
@@ -455,6 +456,7 @@ def checkbox_css(*, size: int = 13) -> str:
             font-size: 12px;
             font-weight: 650;
             background: transparent;
+            outline: none;
         }}
         QCheckBox::indicator {{
             width: {size}px;

@@ -399,7 +399,7 @@ class HostSpeaksTests(unittest.TestCase):
         source = Path('0.2.18.1.py').read_text()
         self.assertIn('"host_chat_name": "Host"', source)
         self.assertIn('self.settings["host_chat_name"] = (chat_name_edit.text().strip() or "Host")[:24]', source)
-        self.assertIn('QLabel("Chat name:")', source)
+        self.assertIn('_form_label("Chat name:")', source)
 
 
 if __name__ == '__main__':
