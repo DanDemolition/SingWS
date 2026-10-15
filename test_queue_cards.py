@@ -38,6 +38,7 @@ class QueueCardTests(unittest.TestCase):
         d = m.QueueCardDelegate(L, R, K, P, parent=view)
         view.setItemDelegate(d)
         view.setSpacing(0)
+        view.setStyleSheet("QListView { background: #0a1422; border: none; }")   # a dark ground, so the translucent cards show
         view.resize(520, 700)
         view.show()
         self.app.processEvents()
