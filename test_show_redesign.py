@@ -91,6 +91,16 @@ class ShowRedesignTests(unittest.TestCase):
         self.assertIn("self.canvas_glow.setVisible(on)", body)
         self.assertIn("lw._css_off", body)                       # the two lists get their own old style back
 
+    def test_bottom_nav_is_a_glass_strip_with_dim_labels_and_goes_back_when_off(self):
+        body = SRC[SRC.index("def _set_bottom_nav_active"):SRC.index("def _playback_safe_ui_delay_ms")]
+        self.assertIn("glass_nav_item_css", body)
+        self.assertIn('w.setStyleSheet(css if glass else "")', body)       # off: the labels' own styles are cleared
+        self.assertIn("self._bottom_nav_mode = mode", body)                # the active tab survives a switch of the setting
+        polish = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
+        self.assertIn("glass_nav_css(\"operatorBottomNav\")", polish)
+        apply_body = SRC[SRC.index("def _apply_ui_show_redesign"):SRC.index("def _apply_redesign_hero_text")]
+        self.assertIn("self._set_bottom_nav_active(getattr(self, \"_bottom_nav_mode\", \"main\"))", apply_body)
+
 
 if __name__ == "__main__":
     unittest.main()

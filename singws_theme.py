@@ -305,6 +305,32 @@ def bottom_nav_css(object_name: str) -> str:
     """
 
 
+def glass_nav_css(object_name: str) -> str:
+    """Show-tab redesign: the bottom nav strip as a fine-bordered glass bar."""
+    return f"""
+        QFrame#{object_name} {{
+            background: rgba(255,255,255,0.030);
+            border: 1px solid rgba(140,150,200,0.14);
+            border-radius: 16px;
+        }}
+    """
+
+
+def glass_nav_item_css(*, active: bool = False) -> str:
+    """Show-tab redesign nav cell: a soft hover tint, and a purple gradient for the active one (the labels are styled directly)."""
+    if active:
+        bg = f"qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {color('accent_bright')}, stop:1 {color('accent')})"
+        border = "rgba(200,180,255,0.50)"
+        hover = bg
+    else:
+        bg, border, hover = "transparent", "transparent", "rgba(139,92,246,0.10)"
+    return f"""
+        QPushButton {{ background: {bg}; border: 1px solid {border}; border-radius: 12px; padding: 3px 4px 4px 4px; }}
+        QPushButton:hover {{ background: {hover}; }}
+        QPushButton:pressed {{ background: rgba(46,16,101,0.85); }}
+    """
+
+
 def nav_item_css(*, active: bool = False) -> str:
     # Icon-above-label nav cell. Each button holds two child QLabels:
     #   QLabel#navIcon  (large glyph) and QLabel#navLabel (small caption).

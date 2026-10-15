@@ -22303,7 +22303,6 @@ class KaraokeApp(QWidget):
         # Don't add the search button to the layout since it's hidden
 
         self.library_hint_label = QLabel("Search by artist or title")
-        self.library_hint_label.setStyleSheet(text_css("caption", "text_soft", extra="padding: 2px 2px 0px 2px;"))
         self.library_hint_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         # --- Combined row: Key selector, Singer name, Add button ---
@@ -25284,6 +25283,10 @@ class KaraokeApp(QWidget):
             self._apply_redesign_bg_card(on)
             self._apply_redesign_polish(on)
             self._apply_search_icon(on)
+            try:
+                self._set_bottom_nav_active(getattr(self, "_bottom_nav_mode", "main"))
+            except Exception:
+                pass
             try:
                 # the mockup has no ROTATION title row: its facts live in the "UP NEXT" summary
                 for w in (self.rotation_title_label, self.queue_label, self._rotation_divider):
@@ -32467,16 +32470,11 @@ class KaraokeApp(QWidget):
     def _set_bottom_nav_active(self, mode: str):
         try:
             mode = str(mode or "main").lower()
-            active_css = (
-                SINGWS_THEME.nav_item_css(active=True)
-                if SINGWS_THEME is not None and hasattr(SINGWS_THEME, "nav_item_css")
-                else button_css(padding="9px 12px", radius=8)
-            )
-            inactive_css = (
-                SINGWS_THEME.nav_item_css(active=False)
-                if SINGWS_THEME is not None and hasattr(SINGWS_THEME, "nav_item_css")
-                else subtle_button_css(padding="9px 12px", radius=8)
-            )
+            self._bottom_nav_mode = mode
+            glass = self._ui_redesign_on() and SINGWS_THEME is not None and hasattr(SINGWS_THEME, "glass_nav_item_css")
+            _item = (SINGWS_THEME.glass_nav_item_css if glass else SINGWS_THEME.nav_item_css) if SINGWS_THEME is not None and hasattr(SINGWS_THEME, "nav_item_css") else None
+            active_css = _item(active=True) if _item else button_css(padding="9px 12px", radius=8)
+            inactive_css = _item(active=False) if _item else subtle_button_css(padding="9px 12px", radius=8)
             for nav_mode, button in (
                 ("main", getattr(self, "bottom_show_button", None)),
                 ("bg", getattr(self, "bottom_bgm_button", None)),
@@ -32495,6 +32493,16 @@ class KaraokeApp(QWidget):
             ):
                 if button is not None:
                     button.setStyleSheet(inactive_css)
+            # the redesign sets the icon and label colours on the labels themselves (the button's descendant rules left them white and bold)
+            active_btn = {"main": getattr(self, "bottom_show_button", None), "bg": getattr(self, "bottom_bgm_button", None),
+                          "history": getattr(self, "bottom_history_button", None), "chat": getattr(self, "bottom_chat_button", None),
+                          "waiting": getattr(self, "bottom_waiting_for_add_button", None)}.get(mode)
+            for btn, text_label in self._nav_text_labels.items():
+                lit = btn is active_btn
+                pairs = ((self._nav_icon_labels[btn], text_css("body", "text_bright" if lit else "text_muted", extra="font-size: 16px; font-weight: 600; background: transparent; border: none;")),
+                         (text_label, text_css("caption", "text_bright" if lit else "text_soft", extra="font-weight: 650; background: transparent; border: none;")))
+                for w, css in pairs:
+                    w.setStyleSheet(css if glass else "")
             self._update_waiting_for_add_nav_state(active=(mode == "waiting"))
         except Exception:
             pass
@@ -61162,6 +61170,10 @@ class KaraokeApp(QWidget):
             for name, attr in (("libraryCard", "library_card"), ("rotationCard", "rotation_card")):
                 off = SINGWS_THEME.card_css(name) if SINGWS_THEME is not None else content_card_css(name, radius=8)
                 styled.append((getattr(self, attr), SINGWS_THEME.glass_card_css(name) if (on and SINGWS_THEME is not None) else off))
+            styled.append((self.operator_bottom_nav,
+                           SINGWS_THEME.glass_nav_css("operatorBottomNav") if (on and SINGWS_THEME is not None)
+                           else (SINGWS_THEME.bottom_nav_css("operatorBottomNav") if SINGWS_THEME is not None and hasattr(SINGWS_THEME, "bottom_nav_css")
+                                 else content_card_css("operatorBottomNav", radius=8))))
             # the two lists lose their own boxes: the cards around them are the frame
             for attr in ("results_list", "queue_display"):
                 lw = getattr(self, attr)
