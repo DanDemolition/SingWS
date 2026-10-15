@@ -69,7 +69,7 @@ TYPOGRAPHY = {
 # The scales every UI value should come from. tools/ui_token_audit.py counts how many literals in the app fall outside
 # them, and test_ui_tokens_ratchet.py only lets that number go down.
 FONT_SCALE = (11, 12, 13, 14, 16, 18, 24, 32, 40)   # px: caption, label, body, title, section, large, hero, display, display-xl
-RADIUS_SCALE = (0, 4, 6, 8, 12, 999)             # px: square, chip, control, card, large card, pill
+RADIUS_SCALE = (0, 4, 6, 8, 12, 14, 999)         # px: square, chip, control, card, large card, glass card, pill
 SPACING_SCALE = (2, 4, 6, 8, 12, 16, 20, 24)     # px
 
 
@@ -161,6 +161,19 @@ def card_css(object_name: str, radius_px: int = 8) -> str:
                 stop:1 rgba(2,7,14,0.99));
             border-radius: {r}px;
             border: 1px solid rgba(115,144,180,0.14);
+        }}
+    """
+
+
+def glass_card_css(object_name: str) -> str:
+    """Show-tab redesign card: a faint glass gradient over the canvas, a fine border and a 14 px corner."""
+    return f"""
+        QFrame#{object_name} {{
+            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                stop:0 rgba(255,255,255,0.040),
+                stop:1 rgba(255,255,255,0.016));
+            border-radius: 14px;
+            border: 1px solid rgba(140,150,200,0.14);
         }}
     """
 

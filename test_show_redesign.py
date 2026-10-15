@@ -84,6 +84,13 @@ class ShowRedesignTests(unittest.TestCase):
         for flag in ("CLASSIC", "ROTATION", "LOCKED", "LOOPING"):
             self.assertIn(flag, summary)
 
+    def test_glass_cards_and_the_page_glow_are_redesign_only_and_reversible(self):
+        body = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
+        self.assertIn("glass_card_css(name)", body)
+        self.assertIn("card_css(name)", body)                    # today's card style is what comes back
+        self.assertIn("self.canvas_glow.setVisible(on)", body)
+        self.assertIn("lw._css_off", body)                       # the two lists get their own old style back
+
 
 if __name__ == "__main__":
     unittest.main()

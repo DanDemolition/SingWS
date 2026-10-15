@@ -20382,6 +20382,35 @@ class RowCardsOverlay(QWidget):
             p.drawRoundedRect(card, 10, 10)
 
 
+class CanvasGlowOverlay(QWidget):
+    """Show-tab redesign: the page background glow (purple top-right, green bottom-left) painted behind every other widget."""
+
+    def __init__(self, window: QWidget):
+        super().__init__(window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        window.installEventFilter(self)
+        self.setGeometry(window.rect())
+        self.lower()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            self.setGeometry(self.parentWidget().rect())
+            self.lower()
+        return False
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        w, h = float(self.width()), float(self.height())
+        purple = QRadialGradient(QPointF(w * 0.70, -h * 0.10), max(w, h) * 0.62)
+        purple.setColorAt(0.0, QColor(139, 92, 246, 56))
+        purple.setColorAt(1.0, QColor(139, 92, 246, 0))
+        p.fillRect(self.rect(), purple)
+        green = QRadialGradient(QPointF(0.0, h), max(w, h) * 0.42)
+        green.setColorAt(0.0, QColor(52, 224, 138, 22))
+        green.setColorAt(1.0, QColor(52, 224, 138, 0))
+        p.fillRect(self.rect(), green)
+
+
 class HeroGlowOverlay(QWidget):
     """Show-tab redesign: a soft purple radial glow in the hero card's top-left corner, painted behind the card's content."""
 
@@ -61126,6 +61155,20 @@ class KaraokeApp(QWidget):
                 styled.append((b, (ghost_danger if name == "clear_queue_button" else ghost) if on else off_css[name]))
             # TEMPO and KEY become two separate row cards instead of one shared panel
             styled.append((self._tempo_panel, "QWidget#karaokeTempoKeyPanel { background: transparent; border: none; }" if on else self._tempo_panel_css))
+            # glass cards and the page glow
+            for name, attr in (("libraryCard", "library_card"), ("rotationCard", "rotation_card")):
+                off = SINGWS_THEME.card_css(name) if SINGWS_THEME is not None else content_card_css(name, radius=8)
+                styled.append((getattr(self, attr), SINGWS_THEME.glass_card_css(name) if (on and SINGWS_THEME is not None) else off))
+            # the two lists lose their own boxes: the cards around them are the frame
+            for attr in ("results_list", "queue_display"):
+                lw = getattr(self, attr)
+                if getattr(lw, "_css_off", None) is None:
+                    lw._css_off = lw.styleSheet()
+                styled.append((lw, "QAbstractItemView { background: transparent; border: none; }" if on else lw._css_off))
+            if getattr(self, "canvas_glow", None) is None:
+                self.canvas_glow = CanvasGlowOverlay(self)
+            self.canvas_glow.setVisible(on)
+            self.canvas_glow.lower()
             # small spaced-caps labels and a compact stepper look, as in the mockup
             cap = text_css("caption", "text_soft")
             styled += [
