@@ -24404,6 +24404,9 @@ class KaraokeApp(QWidget):
                 return
             self.settings["soundboard_pads"] = strip.to_list()
             self.save_settings()
+            if self._ui_redesign_on():
+                # a loaded pad is taller than an empty slot: the fixed-height card must grow or shrink with the pads, or they overlap
+                QTimer.singleShot(0, lambda: self._fit_right_column(True))
         except Exception:
             pass
 

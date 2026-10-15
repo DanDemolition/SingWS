@@ -93,6 +93,15 @@ class RightColumnTests(unittest.TestCase):
         self.assertIn('f"{_mss(pos)} / {_mss(dur)}"', sync)
         self.assertIn("_karaoke_last_dur", sync)             # same position/duration the seek bar already uses
 
+    def test_changing_a_pad_refits_the_fixed_height_card_so_pads_never_overlap(self):
+        # Found on screen: with the redesign on, loading pads made loaded pads (taller) overlap the next row, because the
+        # transport card has a fixed height computed when the layout was applied.
+        from pathlib import Path
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        body = src[src.index("def _on_soundboard_changed"):src.index("def _apply_tooltip_visibility")]
+        self.assertIn("self._ui_redesign_on()", body)
+        self.assertIn("self._fit_right_column(True)", body)
+
 
 if __name__ == "__main__":
     unittest.main()
