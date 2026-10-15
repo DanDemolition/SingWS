@@ -1590,7 +1590,10 @@ class PerformanceSafetyTests(unittest.TestCase):
         video_start = MAIN_SOURCE.index("class VideoWindow(QWidget)")
         video_end = MAIN_SOURCE.index("class AddToQueueDialog", video_start)
         video = MAIN_SOURCE[video_start:video_end]
-        show_event = function_source("showEvent")
+        # The video window's own showEvent (the file has others, e.g. the record avatar's, which come earlier).
+        _se = video.index("    def showEvent(self, event")
+        _next = video.find("\n    def ", _se + 10)
+        show_event = video[_se:_next if _next != -1 else len(video)]
         self.assertIn("self._ticker_surface_guard_timer.start(1000)", video)
         guard = function_source("_tick_ticker_surface_guard")
         self.assertIn("self._raise_ticker_surface()", guard)

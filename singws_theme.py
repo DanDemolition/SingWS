@@ -26,6 +26,15 @@ VISUAL = {
     "danger": "#FF5F7A",
     "now_singing": "#8DFFB1",
     "ticker": "#F7D046",
+    # the spinning record on the Show tab hero
+    "record_ring_a": "#C084FC",
+    "record_ring_b": "#34E08A",
+    "record_ring_c": "#A855F7",
+    "record_label_a": "#A855F7",
+    "record_label_b": "#6D28D9",
+    "record_label_c": "#2E1065",
+    "record_name_a": "#1A1944",
+    "record_name_b": "#0A0A1C",
 }
 
 SPACING = {

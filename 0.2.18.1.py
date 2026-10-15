@@ -4032,6 +4032,8 @@ DEFAULTS = {
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
     "ui_show_redesign": False,             # new Show tab layout (experimental); off = the current look
+    "ui_hero_glow": "soft",                # redesign: strength of the record's glow: off | soft | medium | strong
+    "ui_hero_record_animate": True,        # redesign: animate the record's ring/halo and spin it while a song plays
     "session_location_latitude": "",      # current SingWS session venue latitude
     "session_location_longitude": "",     # current SingWS session venue longitude
     "session_location_auto_detect": True, # auto-detect current device location on macOS
@@ -8837,6 +8839,294 @@ class MusicDatabaseWidget(QListWidget):
 # On Deck / Rotation Waiting card.
 # ============================================================================
 
+class _VinylRenderer:
+    """The spinning record for the Show tab hero (only used with the `ui_show_redesign` setting).
+
+    Everything heavy is drawn ONCE into cached pixmaps (the grooved disc with SingWS carved into it, the green/purple
+    ring, the halo); a frame only rotates those pixmaps, so it is cheap. The name circle in the middle is drawn fresh and
+    never rotates, so it stays readable. The record eases up to 33 1/3 rpm while a karaoke track plays and coasts to a stop;
+    the ring keeps turning slowly and the halo pulses, like the original design.
+    """
+    RPM_DEG_PER_SEC = 200.0          # 33 1/3 rpm
+    RING_DEG_PER_SEC = 40.0          # one lap every 9 s
+    PULSE_SECONDS = 2.6
+    GLOW_LEVELS = {"off": 0.05, "soft": 0.25, "medium": 0.45, "strong": 0.8}
+
+    @staticmethod
+    def _c(name: str, rgb):
+        """A record colour from the theme (singws_theme.VISUAL); `rgb` is only a fallback if the theme is missing."""
+        from PyQt6.QtGui import QColor
+        v = VISUAL.get(name)
+        return QColor(v) if v else QColor(*rgb)
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.glow = self.GLOW_LEVELS["soft"]
+        self.animate = True
+        self.playback_provider = None
+        self.disc_angle = 0.0
+        self.ring_angle = 0.0
+        self.pulse_phase = 0.0
+        self.velocity = 0.0
+        self._last = None
+        self._cache_key = None
+        self._disc_pm = self._ring_pm = self._halo_pm = self._sheen_pm = None
+        self._glow_pm = self._overlay_pm = None
+        self._glow_t = 0.0
+        self._overlay_key = None
+        self.timer = QTimer(owner)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)      # the default coarse timer drifts and makes the spin judder
+        self.timer.timeout.connect(self._on_timer)
+
+    # ---- state -------------------------------------------------------------
+    def configure(self, glow="soft", animate=True):
+        self.glow = self.GLOW_LEVELS.get(str(glow or "soft").lower(), self.GLOW_LEVELS["soft"])
+        self.animate = bool(animate)
+        self._cache_key = None
+        self.sync_timer()
+        self.owner.update()
+
+    def playing(self) -> bool:
+        try:
+            return bool(self.playback_provider()) if self.playback_provider is not None else False
+        except Exception:
+            return False
+
+    def sync_timer(self):
+        """Run the timer only while the widget is visible and animation is on."""
+        want = self.animate and self.owner.isVisible()
+        if want and not self.timer.isActive():
+            self._last = time.monotonic()
+            self.timer.start(16)
+        elif not want and self.timer.isActive():
+            self.timer.stop()
+
+    def _on_timer(self):
+        now = time.monotonic()
+        dt = 0.0 if self._last is None else min(0.12, max(0.0, now - self._last))
+        self._last = now
+        self.step(dt, self.playing())
+        # faster frames while the record is actually turning, slow ones for the idle ring and halo
+        self.timer.setInterval(16 if (self.velocity > 0.0 or self.playing()) else 66)
+        self.owner.update()
+
+    def step(self, dt: float, playing: bool):
+        """Advance the animation by dt seconds (separate from the timer so it can be tested)."""
+        import math
+        target = self.RPM_DEG_PER_SEC if playing else 0.0
+        tau = 0.6 if playing else 0.9
+        self.velocity += (target - self.velocity) * (1.0 - math.exp(-dt / tau))
+        if target == 0.0 and abs(self.velocity) < 3.0:
+            self.velocity = 0.0
+        self.disc_angle = (self.disc_angle + self.velocity * dt) % 360.0
+        self.ring_angle = (self.ring_angle + self.RING_DEG_PER_SEC * dt) % 360.0
+        self.pulse_phase = (self.pulse_phase + dt * 2.0 * math.pi / self.PULSE_SECONDS) % (2.0 * math.pi)
+
+    # ---- cached drawing -----------------------------------------------------
+    def _build(self, side: int, dpr: float):
+        import math
+        from PyQt6.QtCore import QPointF, QRectF
+        from PyQt6.QtGui import (QPixmap, QPainter, QPainterPath, QColor, QPen, QBrush, QRadialGradient,
+                                 QConicalGradient, QFont, QFontMetricsF, QTransform)
+
+        def canvas():
+            pm = QPixmap(int(side * dpr), int(side * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            return pm
+
+        c = side / 2.0
+        r = side * 0.38                      # record radius; the rest is room for the ring and halo
+        k = r / 113.0                        # the mockup was drawn on a 226 px record
+        # --- disc: grooves, label, carved logo
+        disc = canvas()
+        p = QPainter(disc)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(7, 7, 13))
+        p.drawEllipse(QPointF(c, c), r, r)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        step_px = 2.8 * k
+        rr = r - 1.0
+        i = 0
+        while rr > 56 * k:
+            p.setPen(QPen(QColor(21, 21, 35) if i % 2 == 0 else QColor(7, 7, 13), max(0.6, 1.4 * k)))
+            p.drawEllipse(QPointF(c, c), rr, rr)
+            rr -= step_px / 2.0
+            i += 1
+        lab = QRadialGradient(QPointF(c - r * 0.22, c - r * 0.28), r * 0.7)
+        lab.setColorAt(0.0, self._c("record_label_a", (168, 85, 247)))
+        lab.setColorAt(0.55, self._c("record_label_b", (109, 40, 217)))
+        lab.setColorAt(1.0, self._c("record_label_c", (46, 16, 101)))
+        p.setPen(QPen(QColor(255, 255, 255, 41), max(1.0, 1.5 * k)))
+        p.setBrush(QBrush(lab))
+        p.drawEllipse(QPointF(c, c), 56 * k, 56 * k)
+        # carved SingWS at the bottom, centred in the vinyl band, italic, in the app's own font
+        font = QFont(QApplication.font())
+        font.setBold(True)
+        font.setWeight(QFont.Weight.Black)
+        font.setItalic(True)
+        font.setPixelSize(max(8, int(23 * k)))
+        fm = QFontMetricsF(font)
+        text = "SingWS"
+        widths = [fm.horizontalAdvance(ch) for ch in text]
+        total = sum(widths)
+        band_r = 88 * k
+        pos = 0.0
+        p.setFont(font)
+        for idx, ch in enumerate(text):
+            mid = pos + widths[idx] / 2.0
+            pos += widths[idx]
+            ang = math.degrees((total / 2.0 - mid) / band_r)
+            for dx, dy, col in ((-0.7, -0.7, QColor(0, 0, 0, 217)), (0.7, 0.7, QColor(255, 255, 255, 41)),
+                                (0.0, 0.0, QColor(170, 146, 222, 168) if idx >= 4 else QColor(160, 164, 186, 140))):
+                p.save()
+                p.translate(c, c)
+                p.rotate(ang)
+                p.translate(0, band_r)
+                p.setPen(col)
+                p.drawText(QPointF(-widths[idx] / 2.0 + dx, dy), ch)
+                p.restore()
+        p.end()
+        self._disc_pm = disc
+        # --- ring: green/purple conic ring just outside the record
+        ring = canvas()
+        p = QPainter(ring)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        grad = QConicalGradient(QPointF(c, c), 0)
+        ra, rb, rc = self._c("record_ring_a", (192, 132, 252)), self._c("record_ring_b", (52, 224, 138)), self._c("record_ring_c", (168, 85, 247))
+        for stop, col in ((0.0, ra), (0.33, rb), (0.66, rc), (1.0, ra)):
+            grad.setColorAt(stop, col)
+        ro, ri = r + 6 * k, r + 6 * k - max(2.0, 5 * k)
+        path = QPainterPath()
+        path.addEllipse(QPointF(c, c), ro, ro)
+        inner = QPainterPath()
+        inner.addEllipse(QPointF(c, c), ri, ri)
+        p.fillPath(path.subtracted(inner), QBrush(grad))
+        p.end()
+        self._ring_pm = ring
+        # --- halo: soft purple glow outside the ring; strength follows the glow level
+        halo = canvas()
+        p = QPainter(halo)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        g = self.glow
+        peak = min(0.85, 0.05 + 1.3 * g)
+        reach = min((16 + 40 * g) * k * 1.4, c - ro - 1.0)   # never past the widget edge (it would show as a square)
+        rg = QRadialGradient(QPointF(c, c), ro + reach)
+        inner_stop = max(0.0, min(0.95, ro / (ro + reach)))
+        rg.setColorAt(0.0, QColor(168, 85, 247, 0))
+        rg.setColorAt(inner_stop * 0.97, QColor(168, 85, 247, 0))
+        rg.setColorAt(inner_stop, QColor(168, 85, 247, int(255 * peak)))
+        rg.setColorAt(min(1.0, inner_stop + (1 - inner_stop) * 0.35), QColor(139, 92, 246, int(255 * peak * 0.45)))
+        rg.setColorAt(1.0, QColor(139, 92, 246, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(rg))
+        p.drawEllipse(QPointF(c, c), ro + reach, ro + reach)
+        p.end()
+        self._halo_pm = halo
+        # --- sheen: the fixed highlight that does not turn with the record
+        sheen = canvas()
+        p = QPainter(sheen)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        sg = QConicalGradient(QPointF(c, c), 70)
+        for stop, a in ((0.0, 0), (0.08, 44), (0.20, 0), (0.50, 0), (0.58, 31), (0.70, 0), (1.0, 0)):
+            sg.setColorAt(stop, QColor(255, 255, 255, a))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(sg))
+        p.drawEllipse(QPointF(c, c), r, r)
+        p.end()
+        self._sheen_pm = sheen
+        self._geometry = (c, r, k)
+
+    def _canvas(self, side: int, dpr: float):
+        from PyQt6.QtGui import QPixmap
+        pm = QPixmap(int(side * dpr), int(side * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        return pm
+
+    def _build_glow(self, side: int, dpr: float):
+        """Halo (pulsing) and ring (turning slowly) composed into ONE pixmap; refreshed ~15x a second, not every frame."""
+        import math
+        c = self._geometry[0]
+        pm = self._canvas(side, dpr)
+        q = QPainter(pm)
+        q.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        q.setOpacity(0.75 + 0.25 * math.cos(self.pulse_phase) if self.animate else 1.0)
+        q.drawPixmap(0, 0, self._halo_pm)
+        q.setOpacity(1.0)
+        q.translate(c, c)
+        q.rotate(self.ring_angle if self.animate else 0.0)
+        q.translate(-c, -c)
+        q.drawPixmap(0, 0, self._ring_pm)
+        q.end()
+        self._glow_pm = pm
+
+    def _build_overlay(self, side: int, dpr: float, name: str, font):
+        """The fixed highlight and the still name circle: drawn once per name, never per frame."""
+        from PyQt6.QtCore import QPointF, QRectF
+        from PyQt6.QtGui import QColor, QFont, QFontMetrics, QRadialGradient, QBrush
+        c, r, k = self._geometry
+        pm = self._canvas(side, dpr)
+        q = QPainter(pm)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        q.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        q.drawPixmap(0, 0, self._sheen_pm)
+        rn = 50 * k
+        q.setPen(Qt.PenStyle.NoPen)
+        q.setBrush(QColor(109, 40, 217, 153))
+        q.drawEllipse(QPointF(c, c), rn + 6 * k, rn + 6 * k)
+        q.setBrush(QColor(255, 255, 255, 41))
+        q.drawEllipse(QPointF(c, c), rn + 2 * k, rn + 2 * k)
+        fill = QRadialGradient(QPointF(c - rn * 0.3, c - rn * 0.4), rn * 1.5)
+        fill.setColorAt(0.0, self._c("record_name_a", (26, 25, 68)))
+        fill.setColorAt(0.72, self._c("record_name_b", (10, 10, 28)))
+        q.setBrush(QBrush(fill))
+        q.drawEllipse(QPointF(c, c), rn, rn)
+        if name:
+            f = QFont(font)
+            f.setBold(True)
+            avail = rn * 2 - 14 * k
+            for px in (30, 26, 22, 19, 16, 14, 12, 10, 9):
+                f.setPixelSize(max(8, int(px * k * 1.1)))
+                if QFontMetrics(f).horizontalAdvance(name) <= avail:
+                    break
+            q.setFont(f)
+            q.setPen(self._c("text_bright", (255, 255, 255)))
+            q.drawText(QRectF(c - rn, c - rn, rn * 2, rn * 2), Qt.AlignmentFlag.AlignCenter, name)
+        q.end()
+        self._overlay_pm = pm
+
+    def paint(self, widget, p, name: str):
+        side = int(min(widget.width(), widget.height()))
+        dpr = float(widget.devicePixelRatioF())
+        key = (side, round(dpr, 2), round(self.glow, 3))
+        if key != self._cache_key:
+            self._build(side, dpr)
+            self._cache_key = key
+            self._glow_pm = None
+            self._overlay_key = None
+        if self._overlay_key != (key, name):
+            self._build_overlay(side, dpr, name, widget.font())
+            self._overlay_key = (key, name)
+        now = time.monotonic()
+        if self._glow_pm is None or (now - self._glow_t) >= 0.06:
+            self._build_glow(side, dpr)
+            self._glow_t = now
+        c = self._geometry[0]
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.drawPixmap(0, 0, self._glow_pm)
+        p.save()
+        p.translate(c, c)
+        p.rotate(self.disc_angle)
+        p.translate(-c, -c)
+        p.drawPixmap(0, 0, self._disc_pm)
+        p.restore()
+        p.drawPixmap(0, 0, self._overlay_pm)
+
+
 class CircularAvatar(QWidget):
     """A round badge displaying the current singer's first name.
 
@@ -8850,8 +9140,31 @@ class CircularAvatar(QWidget):
         super().__init__(parent)
         self._name = ""
         self._mode = "idle"
+        self._vinyl = None          # a _VinylRenderer while the Show tab redesign is on
         self.setMinimumSize(80, 80)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_vinyl(self, enabled: bool, glow: str = "soft", animate: bool = True, playback_provider=None):
+        """Draw the spinning record instead of the plain ring. Off restores the original look exactly."""
+        if enabled:
+            if self._vinyl is None:
+                self._vinyl = _VinylRenderer(self)
+            self._vinyl.playback_provider = playback_provider
+            self._vinyl.configure(glow, animate)
+        elif self._vinyl is not None:
+            self._vinyl.timer.stop()
+            self._vinyl = None
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._vinyl is not None:
+            self._vinyl.sync_timer()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self._vinyl is not None:
+            self._vinyl.sync_timer()
 
     # ---- legacy API shims (kept so existing code doesn't have to change) ----
     def set_mode(self, mode: str):
@@ -8877,6 +9190,9 @@ class CircularAvatar(QWidget):
     def paintEvent(self, event):
         from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QLinearGradient
         p = QPainter(self)
+        if self._vinyl is not None:
+            self._vinyl.paint(self, p, self._name)
+            return
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         side = min(self.width(), self.height())
         pad = 6
@@ -21637,6 +21953,7 @@ class KaraokeApp(QWidget):
         rotation_hero_text.addWidget(self.rotation_summary_meta)
 
         rotation_hero_text.addStretch(1)
+        self._hero_text_col = rotation_hero_text
         top_row.addLayout(rotation_hero_text, 1)
 
         # --- Level meter (right) ---
@@ -24014,6 +24331,7 @@ class KaraokeApp(QWidget):
             chips.addWidget(c)
         chips.addStretch(1)
         self._hero_chips_layout = chips
+        self._hero_extras_col = col
         col.addLayout(chips)
 
         prog = QHBoxLayout()
@@ -24058,6 +24376,7 @@ class KaraokeApp(QWidget):
         acts.addWidget(self.hero_btn_restart)
         acts.addStretch(1)
         acts.addWidget(self.hero_btn_stop)
+        self._hero_acts_layout = acts
         col.addLayout(acts)
 
         self.hero_seek_slider.sliderPressed.connect(self._hero_seek_pressed)
@@ -24084,6 +24403,23 @@ class KaraokeApp(QWidget):
             self.rotation_summary_title.setStyleSheet(text_css("display" if on else "hero", "text_bright"))
             self.rotation_summary_card.setMinimumHeight(330 if on else 248)
             try:
+                art = self.rotation_summary_art
+                if on:
+                    art.setFixedSize(190, 190)
+                    art.set_vinyl(
+                        True,
+                        str(self.settings.get("ui_hero_glow", "soft") or "soft"),
+                        bool(self.settings.get("ui_hero_record_animate", True)),
+                        # spins only while a karaoke track is actually playing (same test the level meter uses)
+                        lambda: bool(getattr(self, "karaoke_playing", False)) and not self._is_karaoke_paused(),
+                    )
+                else:
+                    art.set_vinyl(False)
+                    art.setFixedSize(96, 96)
+                self.rotation_summary_subtitle.setWordWrap(on)
+            except Exception as exc:
+                _diag(f"[SHOW-REDESIGN] record failed: {exc}")
+            try:
                 # Items: 0 avatar, 1 text column, 2 spacer, 3 meter, 4 spacer. The two spacers shared the free width with the
                 # text column and squeezed the song line; with the redesign on the text column takes it and the meter sits right.
                 tr = self._hero_top_row
@@ -24091,17 +24427,30 @@ class KaraokeApp(QWidget):
                 tr.setStretch(2, 0 if on else 1)
                 tr.setStretch(4, 0 if on else 1)
                 meter = self.rotation_summary_meter
-                in_chips = self._hero_chips_layout.indexOf(meter) >= 0
-                if on and not in_chips:
-                    tr.removeWidget(meter)
-                    meter.setFixedSize(132, 30)
-                    self._hero_chips_layout.addWidget(meter, 0, Qt.AlignmentFlag.AlignVCenter)
-                elif not on and in_chips:
-                    self._hero_chips_layout.removeWidget(meter)
-                    meter.setFixedSize(150, 92)
-                    tr.insertWidget(3, meter, 0, Qt.AlignmentFlag.AlignVCenter)
-                    tr.setStretch(2, 1)
-                    tr.setStretch(4, 1)
+                chips = self._hero_chips_layout
+                text_col = self._hero_text_col
+                extras_col = self._hero_extras_col
+                meter_in_text = text_col.indexOf(meter) >= 0
+                chips_in_text = text_col.indexOf(chips) >= 0
+                if on:
+                    # Under the song line: chips, then the level meter (the button row has no room for it).
+                    if not chips_in_text:
+                        extras_col.removeItem(chips)
+                        text_col.insertLayout(max(0, text_col.count() - 1), chips)    # before the trailing stretch
+                    if not meter_in_text:
+                        tr.removeWidget(meter)
+                        meter.setFixedSize(150, 30)
+                        text_col.insertWidget(max(0, text_col.count() - 1), meter, 0, Qt.AlignmentFlag.AlignLeft)
+                else:
+                    if chips_in_text:
+                        text_col.removeItem(chips)
+                        extras_col.insertLayout(0, chips)
+                    if meter_in_text:
+                        text_col.removeWidget(meter)
+                        meter.setFixedSize(150, 92)
+                        tr.insertWidget(3, meter, 0, Qt.AlignmentFlag.AlignVCenter)
+                        tr.setStretch(2, 1)
+                        tr.setStretch(4, 1)
             except Exception:
                 pass
             if on:
@@ -29244,6 +29593,31 @@ class KaraokeApp(QWidget):
 
         redesign_cb.toggled.connect(on_redesign_toggled)
         _layout_card.addWidget(redesign_cb)
+
+        glow_row = QHBoxLayout()
+        glow_row.addWidget(QLabel("Record glow:"))
+        glow_combo = QComboBox()
+        for label, key in (("Off", "off"), ("Soft", "soft"), ("Medium", "medium"), ("Strong", "strong")):
+            glow_combo.addItem(label, key)
+        glow_combo.setCurrentIndex(max(0, glow_combo.findData(str(self.settings.get("ui_hero_glow", "soft") or "soft"))))
+        glow_row.addWidget(glow_combo)
+        glow_row.addStretch(1)
+        _layout_card.addLayout(glow_row)
+        animate_cb = QCheckBox("Animate the record (it spins only while a karaoke song plays)")
+        animate_cb.setChecked(bool(self.settings.get("ui_hero_record_animate", True)))
+        _layout_card.addWidget(animate_cb)
+
+        def on_hero_look_changed(*_):
+            self.settings["ui_hero_glow"] = str(glow_combo.currentData() or "soft")
+            self.settings["ui_hero_record_animate"] = bool(animate_cb.isChecked())
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_ui_show_redesign()
+
+        glow_combo.currentIndexChanged.connect(on_hero_look_changed)
+        animate_cb.toggled.connect(on_hero_look_changed)
 
         _display_actions_card = _section_card(tab_display, "Display Tools")
         _display_actions = QHBoxLayout()
