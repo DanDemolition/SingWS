@@ -55,6 +55,33 @@ class RightColumnTests(unittest.TestCase):
         # the click wiring is untouched by the redesign (one behaviour)
         self.assertGreater(s.pads[0].receivers(s.pads[0].clicked), 0)
 
+    def test_tempo_and_key_become_two_row_cards_and_come_back_as_one_panel(self):
+        from pathlib import Path
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        body = src[src.index("def _apply_redesign_polish"):src.index("def _restyle_bg_main_buttons")]
+        self.assertIn("self.tempo_row_cards.setVisible(on)", body)
+        self.assertIn("self._tempo_panel_css", body)           # the original panel style is what comes back
+        self.assertIn("self._tempo_panel.setFixedHeight(100 if on else 78)", body)
+
+    def test_row_cards_paint_inside_their_panel(self):
+        from PyQt6.QtWidgets import QWidget, QGridLayout, QLabel
+        panel = QWidget()
+        grid = QGridLayout(panel)
+        grid.setContentsMargins(14, 4, 14, 4)
+        grid.setVerticalSpacing(12)
+        for r in range(2):
+            grid.addWidget(QLabel("x"), r, 0)
+            grid.setRowMinimumHeight(r, 40)
+        panel.setFixedSize(300, 100)
+        overlay = self.m.RowCardsOverlay(panel, grid, 2)
+        panel.show()
+        self.app.processEvents()
+        for r in range(2):
+            cell = grid.cellRect(r, 0)
+            self.assertGreaterEqual(cell.top() - 2, 0)
+            self.assertLessEqual(cell.bottom() + 2, panel.height())
+        self.assertFalse(panel.grab().toImage().isNull())
+
 
 if __name__ == "__main__":
     unittest.main()

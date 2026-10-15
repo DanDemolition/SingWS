@@ -20176,6 +20176,35 @@ class RotationView(QMainWindow):
 # Right-click for a small per-pad menu (load, clear, rename, volume).
 # ============================================================================
 
+class RowCardsOverlay(QWidget):
+    """Show-tab redesign: paints each row of a grid as its own rounded card, behind the row's widgets."""
+
+    def __init__(self, panel: QWidget, grid: QGridLayout, rows: int = 2):
+        super().__init__(panel)
+        self._grid, self._rows = grid, rows
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        panel.installEventFilter(self)
+        self.setGeometry(panel.rect())
+        self.lower()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            self.setGeometry(self.parentWidget().rect())
+            self.lower()
+        return False
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(QColor(140, 150, 200, 40), 1))
+        p.setBrush(QColor(255, 255, 255, 10))
+        last = max(0, self._grid.columnCount() - 1)
+        for r in range(self._rows):
+            cell = self._grid.cellRect(r, 0).united(self._grid.cellRect(r, last))
+            card = QRectF(0.5, cell.top() - 2, self.width() - 1.0, cell.height() + 4)
+            p.drawRoundedRect(card, 10, 10)
+
+
 class HeroGlowOverlay(QWidget):
     """Show-tab redesign: a soft purple radial glow in the hero card's top-left corner, painted behind the card's content."""
 
@@ -21823,6 +21852,8 @@ class KaraokeApp(QWidget):
         tempo_controls_grid.setHorizontalSpacing(8)
         tempo_controls_grid.setVerticalSpacing(6)
         self.karaoke_tempo_controls_grid = tempo_controls_grid
+        self.tempo_row_cards = RowCardsOverlay(tempo_panel, tempo_controls_grid, 2)
+        self.tempo_row_cards.setVisible(False)
 
         self.karaoke_tempo_label = QLabel("Tempo")
         self.karaoke_tempo_down_button = QToolButton()
@@ -21921,6 +21952,8 @@ class KaraokeApp(QWidget):
         tempo_controls_grid.setRowMinimumHeight(0, 30)
         tempo_controls_grid.setRowMinimumHeight(1, 30)
 
+        self._tempo_panel = tempo_panel
+        self._tempo_panel_css = tempo_panel.styleSheet()
         row_controls.addWidget(tempo_panel)
         # Absorb the vertical space freed by removing the performance waveform so
         # the transport controls stay grouped instead of spreading apart inside
@@ -60765,11 +60798,23 @@ class KaraokeApp(QWidget):
             labels_off = {"move_up_button": "\u2191\ufe0e  Move Up", "move_down_button": "\u2193\ufe0e  Move Down", "remove_button": "\u2715  Remove", "clear_queue_button": "Clear Queue"}
             off_css = {"move_up_button": self._reorder_btn_css, "move_down_button": self._reorder_btn_css,
                        "remove_button": warning_button_css(padding="9px 12px", radius=8), "clear_queue_button": danger_button_css(padding="9px 12px", radius=8)}
+            styled = []
             for name in labels_on:
                 b = getattr(self, name)
                 b.setText((labels_on if on else labels_off)[name])
                 b.setMinimumHeight(34 if on else 38)
-                b.setStyleSheet((ghost_danger if name == "clear_queue_button" else ghost) if on else off_css[name])
+                styled.append((b, (ghost_danger if name == "clear_queue_button" else ghost) if on else off_css[name]))
+            # TEMPO and KEY become two separate row cards instead of one shared panel
+            styled.append((self._tempo_panel, "QWidget#karaokeTempoKeyPanel { background: transparent; border: none; }" if on else self._tempo_panel_css))
+            for w, css in styled:
+                w.setStyleSheet(css)
+            grid = self.karaoke_tempo_controls_grid
+            grid.setContentsMargins(*(14, 4, 14, 4) if on else (10, 8, 10, 8))
+            grid.setVerticalSpacing(12 if on else 6)
+            grid.setRowMinimumHeight(0, 40 if on else 30)
+            grid.setRowMinimumHeight(1, 40 if on else 30)
+            self._tempo_panel.setFixedHeight(100 if on else 78)
+            self.tempo_row_cards.setVisible(on)
             if hasattr(self, "_update_rotation_lock_button"):
                 self.rotation_lock_button.setMinimumHeight(34 if on else 38)
             # kicker dot
