@@ -57,6 +57,18 @@ TYPOGRAPHY = {
     "display": {"size": 24, "weight": 850},
 }
 
+# The scales every UI value should come from. tools/ui_token_audit.py counts how many literals in the app fall outside
+# them, and test_ui_tokens_ratchet.py only lets that number go down.
+FONT_SCALE = (11, 12, 13, 14, 16, 18, 24, 32)   # px: caption, label, body, title, section, large, hero, display
+RADIUS_SCALE = (0, 4, 6, 8, 12, 999)             # px: square, chip, control, card, large card, pill
+SPACING_SCALE = (2, 4, 6, 8, 12, 16, 20, 24)     # px
+
+
+def font_px(size: int) -> int:
+    """The nearest size on FONT_SCALE (ties round up), for migrating one-off sizes."""
+    return min(FONT_SCALE, key=lambda s: (abs(s - int(size)), -s))
+
+
 ELEVATION = {
     "flat": "rgba(255,255,255,0.012)",
     "raised": "rgba(255,255,255,0.024)",
