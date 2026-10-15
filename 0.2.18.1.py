@@ -60488,10 +60488,7 @@ class KaraokeApp(QWidget):
             _diag(f"[SHOW-REDESIGN] fit right column failed: {exc}")
 
     def _bg_upnext_rows_wanted(self) -> int:
-        try:
-            return 3 if int(self.window().height()) <= 960 else 4
-        except Exception:
-            return 3
+        return 3
 
     def _refresh_bg_upnext(self):
         """Fill the redesign's Up Next list with the tracks after the current one (the same view the BGM tab shows)."""
