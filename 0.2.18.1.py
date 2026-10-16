@@ -23319,7 +23319,7 @@ class KaraokeApp(QWidget):
         _un.setSpacing(4)
         _un_head = QHBoxLayout()
         _un_head.setContentsMargins(0, 0, 0, 0)
-        self.bg_upnext_title = SpacedCapsLabel("UP NEXT IN BACKGROUND MUSIC")
+        self.bg_upnext_title = SpacedCapsLabel("UP NEXT")
         self.bg_upnext_count = QLabel("")
         self._bg_hint_label = QLabel("Drag to reorder \u00b7 right-click for Queue Next / Remove \u00b7 only upcoming tracks move")
         self._bg_hint_label.setWordWrap(True)

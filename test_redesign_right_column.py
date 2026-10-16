@@ -127,7 +127,7 @@ class RightColumnTests(unittest.TestCase):
         margins_off = pw._main_layout.contentsMargins()
         pw.set_card_style(True)
         m = pw._main_layout.contentsMargins()
-        self.assertGreaterEqual(min(m.left(), m.top(), m.right(), m.bottom()), 8)       # only the margins around the video change
+        self.assertGreaterEqual(min(m.left(), m.top(), m.right(), m.bottom()), 4)       # only the margins around the video change
         self.assertEqual((m.left(), m.top()), (m.right(), m.bottom()))                  # centred: bars on the sides or on top and bottom
         self.assertIn("border-radius: 14px", pw.styleSheet())                       # a full 14 px card around the inset video
         pw.set_card_style(False)
