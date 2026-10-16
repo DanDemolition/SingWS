@@ -16437,6 +16437,15 @@ class QueueCardDelegate(QStyledItemDelegate):
         left = str(index.data(self.left_role) or "")
         right = str(index.data(self.right_role) or "")
         status = str(index.data(self.status_role) or "") if self.status_role is not None else ""
+        if kind == "song" and status not in ("current", "next") and self.status_role is not None:
+            # the green/purple tint belongs to the whole card, not just the singer's name row
+            up = index.row() - 1
+            while up >= 0 and self._kind_at(index, up) == "song":
+                up -= 1
+            if up >= 0:
+                head = str(index.model().index(up, 0).data(self.status_role) or "")
+                if head in ("current", "next"):
+                    status = head
         first, last = self.card_edges(index)
         own_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         selected = own_selected
@@ -16501,10 +16510,12 @@ class QueueCardDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(196, 170, 255))
             painter.drawRoundedRect(QRect(band.left() + 2, band.top() + 5, 3, max(6, band.height() - 10)), 1.5, 1.5)
         text_alpha = 0.5 if (selected and not own_selected) else 1.0   # the other rows of a selected card step back
-        if accent is not None and first:
+        if accent is not None:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(accent)
-            painter.drawRoundedRect(QRect(card.left() + 1, card.top() + 8, 3, max(8, card.height() - 16)), 1.5, 1.5)
+            bar_top = card.top() + (8 if first else 0)
+            bar_bot = card.bottom() - (8 if last else 0)
+            painter.drawRoundedRect(QRect(card.left() + 1, bar_top, 3, max(8, bar_bot - bar_top + 1)), 1.5, 1.5)   # one bar down the whole card
 
         fg = index.data(Qt.ItemDataRole.ForegroundRole)
         base_color = fg.color() if hasattr(fg, "color") else QColor("#E6E8F0")

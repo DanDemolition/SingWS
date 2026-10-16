@@ -229,6 +229,33 @@ class QueueCardTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(self._amber_pixels(view, 0), 0)
 
+    def test_the_current_singers_green_tint_covers_the_whole_card_not_just_the_name_row(self):
+        from PyQt6.QtCore import Qt
+        L, R, K, P = [int(Qt.ItemDataRole.UserRole) + n for n in (20, 21, 30, 33)]
+        rows = []
+        for i, st in enumerate(("current", "")):
+            rows.append({"kind": "singer", "roles": {L: f"{i + 1}. S{i}", R: "", K: "singer", P: st}, "height": 34})
+            for j in range(2):
+                rows.append({"kind": "song", "roles": {L: f"- A - T{j}", R: "03:20", K: "song", P: ""}, "height": 31})
+        view = self.m.QueueListView()
+        model = self.m.QueueListModel(view)
+        model.setRows(rows)
+        view.setModel(model)
+        d = self.m.QueueCardDelegate(L, R, K, P, parent=view)
+        view.setItemDelegate(d)
+        view.setSpacing(0)
+        view.setStyleSheet("QListView { background: #0a0a14; border: none; }")
+        view.resize(520, 400)
+        view.show()
+        self.app.processEvents()
+        img = view.grab().toImage()
+        def green_excess(row):
+            r = view.visualRect(model.index(row, 0))
+            c = img.pixelColor(r.center().x() + 60, r.center().y())          # the middle of the row, away from text
+            return c.green() - c.red()
+        self.assertGreater(green_excess(2), green_excess(5) + 6)               # the current card's LAST song row is tinted like its name row
+        self.assertGreater(green_excess(0), green_excess(3) + 6)
+
     def test_a_long_queue_paints_and_scrolls(self):
         view, model, d = self.build([2] * 60)
         view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
