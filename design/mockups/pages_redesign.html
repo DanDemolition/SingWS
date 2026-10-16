@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SingWS page mockups</title>
+<style>
+:root{
+  --bg0:#07070f; --bg1:#0d0b1c; --card:rgba(255,255,255,.04); --card2:rgba(255,255,255,.06);
+  --line:rgba(140,150,200,.16); --line2:rgba(140,150,200,.28);
+  --text:#e8eaf4; --soft:#9aa0bd; --mute:#6f7590;
+  --purple:#7c3dff; --purple2:#a78bfa; --green:#22c55e; --amber:#f5c84b; --pink:#ff4fa3; --red:#ff6b6b;
+  --r:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;color:var(--text);
+  background:radial-gradient(1200px 700px at 8% -10%,rgba(124,61,255,.22),transparent 60%),radial-gradient(900px 600px at 100% 110%,rgba(34,197,94,.10),transparent 55%),var(--bg0);min-height:100vh}
+.tabs{position:sticky;top:0;z-index:5;display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px;background:rgba(7,7,15,.88);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.tabs button{background:var(--card);border:1px solid var(--line);color:var(--soft);padding:7px 12px;border-radius:999px;font:600 12px inherit;cursor:pointer}
+.tabs button.on{background:linear-gradient(180deg,#8b4dff,#6a2fe6);color:#fff;border-color:transparent}
+.tabs .sep{width:1px;background:var(--line);margin:0 6px}
+.note{padding:8px 16px;color:var(--mute);font-size:12px}
+.page{display:none;padding:14px 16px 24px}.page.on{display:block}
+.app{max-width:1500px;margin:0 auto;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,.015),transparent)}
+.topbar{display:flex;align-items:center;gap:16px;padding:14px 20px}
+.logo{font-size:24px;font-weight:800}.logo b{color:#a24dff}
+.pills{display:flex;gap:8px;margin:0 auto}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);font-size:12px;font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green)}.dot.a{background:var(--amber)}.dot.p{background:var(--purple2)}.dot.g{background:#666}
+.body{display:grid;grid-template-columns:1fr 360px;gap:14px;padding:0 14px 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.card h3,.cap{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--soft);font-weight:700}
+.row{display:flex;align-items:center;gap:10px}.sp{flex:1}
+.btn{background:transparent;border:1px solid var(--line2);color:var(--text);padding:7px 14px;border-radius:9px;font:600 12px inherit;cursor:pointer}
+.btn.pr{background:linear-gradient(180deg,#8b4dff,#6a2fe6);border-color:transparent}
+.btn.dg{color:#ff9a9a;border-color:rgba(255,92,92,.4)}
+.btn.sm{padding:5px 10px}
+.chip{display:inline-block;padding:3px 10px;border-radius:999px;border:1px solid var(--line);background:var(--card2);font-size:11px;font-weight:600;color:var(--soft)}
+.chip.g{color:#6df0a0;border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.1)}
+.chip.a{color:var(--amber);border-color:rgba(245,200,75,.4);background:rgba(245,200,75,.1)}
+.chip.p{color:var(--purple2);border-color:rgba(167,139,250,.4);background:rgba(124,61,255,.14)}
+input.s{width:100%;background:rgba(0,0,0,.28);border:1px solid var(--line);color:var(--text);padding:9px 12px 9px 34px;border-radius:10px;font:13px inherit}
+.sw{position:relative}.sw:before{content:"\2315";position:absolute;left:12px;top:8px;color:var(--mute);font-size:14px}
+.slider{height:6px;border-radius:3px;background:rgba(255,255,255,.1);position:relative;flex:1}
+.slider i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:linear-gradient(90deg,#6a2fe6,#a78bfa);box-shadow:0 0 10px rgba(167,139,250,.6)}
+.slider b{position:absolute;top:-4px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 0 0 3px rgba(124,61,255,.5)}
+.list>div{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px}
+.list>div:nth-child(even){background:rgba(255,255,255,.025)}
+.list .on{background:rgba(124,61,255,.18)!important;box-shadow:inset 2px 0 0 var(--purple2)}
+.grip{color:var(--mute);letter-spacing:-2px}
+.avatar{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:13px;background:linear-gradient(135deg,#6a2fe6,#22c55e)}
+.sub{color:var(--soft);font-size:12px}.mute{color:var(--mute);font-size:12px}
+.nav{display:grid;grid-template-columns:repeat(10,1fr);gap:4px;margin:0 14px 14px;padding:4px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.03)}
+.nav div{text-align:center;padding:9px 2px;border-radius:11px;font-size:11px;font-weight:700;color:var(--soft)}.nav div span{display:block;font-size:15px}
+.nav .on{background:linear-gradient(180deg,#9b5cff,#7a2cf0);color:#fff}
+/* right column */
+.rc>*+*{margin-top:12px}
+.prev{aspect-ratio:16/9;border-radius:12px;background:radial-gradient(circle at 30% 40%,#2a1a5c,#07070f);position:relative;overflow:hidden;display:grid;place-items:center;color:var(--mute)}
+.prev .bar{position:absolute;left:10px;right:10px;bottom:10px;height:42px;border-radius:21px;background:rgba(30,41,59,.72);border:1px solid rgba(148,163,184,.3);display:flex;align-items:center;gap:6px;padding:0 10px}
+.ib{width:30px;height:26px;border-radius:7px;border:1px solid var(--line);display:grid;place-items:center;font-size:11px;background:rgba(255,255,255,.05)}.ib.pr{background:#5b21b6}
+.pads{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.pad{height:44px;border-radius:12px;display:grid;place-items:center;font-size:10px;font-weight:800;color:#fff;text-transform:uppercase}
+.pad.p{background:linear-gradient(135deg,#9b5cff,#6a2fe6)}.pad.g{background:linear-gradient(135deg,#19d281,#0fa968)}.pad.a{background:linear-gradient(135deg,#f6c445,#e69b18)}.pad.k{background:linear-gradient(135deg,#ff5fae,#e0306f)}
+.mrow{display:flex;align-items:center;padding:8px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.mrow .cap{flex:1}.mrow b{font-size:18px;margin:0 12px}
+/* audience */
+.tv{aspect-ratio:16/9;max-width:1100px;margin:0 auto;border-radius:12px;overflow:hidden;position:relative;border:1px solid var(--line2);background:#05050c}
+.tv.rot{background:radial-gradient(700px 400px at 70% 30%,rgba(124,61,255,.5),transparent 60%),radial-gradient(500px 400px at 100% 80%,rgba(34,197,94,.25),transparent 60%),#07060f}
+.ticker{position:absolute;left:0;right:0;bottom:0;height:11%;background:rgba(5,5,12,.92);border-top:2px solid #b6ff3d;display:flex;align-items:center;overflow:hidden;font-weight:800;font-size:clamp(14px,2.4vw,26px)}
+.ticker .tag{background:#b6ff3d;color:#0a0a14;height:100%;display:grid;place-items:center;padding:0 2%;font-size:.7em;letter-spacing:.08em}
+.ticker .txt{padding-left:3%;white-space:nowrap;color:#4dff6a}
+.ticker .clock{margin-left:auto;margin-right:2%;background:#7b2ff0;color:#fff;border-radius:10px;padding:2px 12px;font-variant-numeric:tabular-nums}
+.lyrics{position:absolute;top:10%;left:0;right:0;text-align:center;font:700 clamp(18px,3.4vw,38px)/1.45 ui-monospace,Menlo,monospace}
+.lyrics .d{color:#6f66ff}
+.big{font-size:clamp(26px,5.6vw,64px);font-weight:800}
+.rail div{display:flex;align-items:baseline;gap:3%;padding:1.1% 3%;border-left:3px solid var(--purple2);background:linear-gradient(90deg,rgba(124,61,255,.25),transparent)}
+.rail div + div{margin-top:1%}
+.legend{max-width:1100px;margin:12px auto 0;color:var(--soft);font-size:13px}
+.legend li{margin:4px 0 4px 18px}
+.eq{display:flex;gap:14px;align-items:flex-end;height:230px;padding:10px 6px}
+.eq div{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%}
+.eq .tr{flex:1;width:6px;border-radius:3px;background:rgba(255,255,255,.1);position:relative}
+.eq .tr i{position:absolute;left:-4px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 0 0 3px rgba(124,61,255,.5)}
+.eq .tr:before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:var(--line2)}
+.msg{max-width:70%;padding:9px 13px;border-radius:14px;background:var(--card2);margin:8px 0}
+.msg.me{margin-left:auto;background:rgba(124,61,255,.3)}.msg small{display:block;color:var(--mute);margin-bottom:2px}
+.g2{display:grid;grid-template-columns:300px 1fr;gap:14px}
+@media(max-width:1100px){.body{grid-template-columns:1fr}.g2{grid-template-columns:1fr}.nav{grid-template-columns:repeat(5,1fr)}}
+</style>
+</head>
+<body>
+<div class="tabs" id="tabs">
+  <button data-p="bgm" class="on">BGM</button><button data-p="hist">Singer History</button><button data-p="wait">Waitlist</button><button data-p="chat">Chat</button><button data-p="eq">EQ</button>
+  <span class="sep"></span>
+  <button data-p="rot">Show Rotation (TV)</button><button data-p="kar">Show Karaoke + ticker (TV)</button><button data-p="tick">Ticker styles (TV)</button>
+</div>
+<div class="note">Mockup only: same look as the new Show tab (glass cards, 14 px corners, purple/green accents). Nothing here is built yet. Tell me what to change on any page.</div>
+
+<!-- shared right column + chrome built by JS -->
+<template id="rc">
+  <div class="rc">
+    <div class="card" style="padding:10px">
+      <div class="prev">Karaoke preview<div class="bar"><span class="ib pr">&#9654;</span><span class="ib">&#10074;&#10074;</span><span class="ib">&#8634;</span><span class="ib">&#9632;</span><span class="ib">+</span><span class="sp"></span><span class="mute">0:00 / 0:00</span><span class="ib">&#128266;</span></div></div>
+    </div>
+    <div class="mrow"><span class="cap">Tempo</span><span class="ib">&minus;</span><b>100%</b><span class="ib">+</span><span class="chip" style="margin-left:8px">Global</span></div>
+    <div class="mrow"><span class="cap">Key</span><span class="ib">&minus;</span><b>0</b><span class="ib">+</span></div>
+    <div class="cap">Soundboard</div>
+    <div class="pads"><div class="pad p">Applause</div><div class="pad g">Ding Ding</div><div class="pad a">Sports Horn</div><div class="pad k">DJ Air Horn</div><div class="pad p">Buzzer</div><div class="pad g">Gong</div><div class="pad a">Womp Womp</div><div class="pad k">Exitlude</div></div>
+    <div class="card"><div class="row"><div class="avatar" style="border-radius:10px;background:#2a1a5c">&#9834;</div><div><b>Motley Crew</b><div class="sub">Post Malone</div></div><span class="sp"></span><span class="ib">&#9198;</span><span class="ib">&#9654;</span><span class="ib">&#9197;</span><span class="ib">&#9632;</span></div>
+    <div class="cap" style="margin-top:10px;display:flex">Up next<span class="sp"></span><span>2 of 210</span></div>
+    <div class="list" style="margin-top:6px"><div><span class="grip">&#8942;&#8942;</span><div><b>Training Season</b><div class="sub">Dua Lipa</div></div></div><div><span class="grip">&#8942;&#8942;</span><div><b>Unholy</b><div class="sub">Sam Smith</div></div></div></div></div>
+  </div>
+</template>
+<template id="chrome-top">
+  <div class="topbar"><div class="logo">Sing<b>WS</b></div><div class="pills"><span class="pill"><i class="dot a"></i>Requests closed</span><span class="pill"><i class="dot g"></i>Waitlist off</span><span class="pill"><i class="dot"></i>Online</span><span class="pill"><i class="dot p"></i>10 singers · ends 1:40 AM</span></div><span class="pill">QR</span></div>
+</template>
+<template id="chrome-nav">
+  <div class="nav"><div data-n="Show"><span>&#8962;</span>Show</div><div data-n="BGM"><span>&#9834;</span>BGM</div><div data-n="Singer History"><span>&#9823;</span>Singer History</div><div data-n="Chat"><span>&#9993;</span>Chat</div><div data-n="Waitlist"><span>&#9672;</span>Waitlist</div><div data-n="Network"><span>&#9678;</span>Network</div><div data-n="Show Rotation"><span>&#8635;</span>Show Rotation</div><div data-n="Show Karaoke"><span>&#9635;</span>Show Karaoke</div><div data-n="EQ"><span>&#9835;</span>EQ</div><div data-n="Settings"><span>&#9881;</span>Settings</div></div>
+</template>
+
+<!-- BGM -->
+<section class="page on" id="bgm" data-nav="BGM"><div class="app"><div class="chrome-top"></div><div class="body"><div>
+  <div class="card" style="background:linear-gradient(135deg,rgba(124,61,255,.28),rgba(20,16,50,.6));border-color:rgba(167,139,250,.35)">
+    <div class="row" style="align-items:flex-start;gap:16px"><div class="avatar" style="width:84px;height:84px;border-radius:14px;background:linear-gradient(135deg,#3a1d8f,#101030);font-size:30px">&#9834;</div>
+    <div class="sp"><div class="row"><span class="chip g">&#9679; Now playing</span><span class="sp"></span><span class="chip">Enable BG music</span><span class="chip p">Autoplay after karaoke &#10003;</span><span class="chip">Stop after this song</span></div>
+      <div style="font-size:26px;font-weight:800;margin-top:6px">Losing It</div><div class="sub">FISHER · crossfade in 0:42</div>
+      <div class="row" style="margin-top:12px"><span class="sub">1:12</span><div class="slider"><i style="width:34%"></i><b style="left:34%"></b></div><span class="sub">-2:18</span></div>
+      <div class="row" style="margin-top:12px"><span class="ib">&#9198;</span><span class="ib pr">&#10074;&#10074;</span><span class="ib">&#9197;</span><span class="ib">&#9632;</span><span class="sp"></span><span class="btn sm">Shuffle</span><span class="btn sm dg">Clear playlist</span></div></div></div>
+    <div class="row" style="margin-top:14px;gap:22px"><div class="row sp"><span class="cap" style="width:90px">Volume</span><div class="slider"><i style="width:80%"></i><b style="left:80%"></b></div><b>80</b></div><div class="row sp"><span class="cap" style="width:90px">Soundboard</span><div class="slider"><i style="width:100%"></i><b style="left:98%"></b></div><b>100</b></div></div>
+  </div>
+  <div class="g2" style="margin-top:14px">
+    <div class="card"><div class="row"><h3>Browser</h3><span class="sp"></span><span class="chip">Home &#9662;</span></div>
+      <div class="sw" style="margin-top:10px"><input class="s" placeholder="Search folders and music"></div>
+      <div class="list" style="margin-top:8px"><div><span>&#128193;</span>Music</div><div class="on"><span>&#128193;</span>DJ Sets</div><div><span>&#128193;</span>Downloads</div><div><span>&#128193;</span>iCloud Drive (Archive)</div><div><span>&#128193;</span>Karaoke</div></div>
+      <div class="row" style="margin-top:10px"><span class="sp"></span><span class="btn pr">Add selected &rarr;</span></div></div>
+    <div class="card"><div class="row"><h3>Playlist</h3><span class="sp"></span><span class="mute">211 tracks</span></div>
+      <div class="sw" style="margin-top:10px"><input class="s" placeholder="Search playlist"></div>
+      <div class="list" style="margin-top:8px"><div class="on"><span class="grip">&#8942;&#8942;</span><div class="sp"><b>Motley Crew</b><div class="sub">Post Malone</div></div><span class="chip p">Up next</span><span class="mute">3:34</span></div>
+      <div><span class="grip">&#8942;&#8942;</span><div class="sp"><b>Training Season</b><div class="sub">Dua Lipa</div></div><span class="mute">3:29</span></div>
+      <div><span class="grip">&#8942;&#8942;</span><div class="sp"><b>Unholy</b><div class="sub">Sam Smith</div></div><span class="mute">2:36</span></div>
+      <div><span class="grip">&#8942;&#8942;</span><div class="sp"><b>Boots on the Ground</b><div class="sub">803Fresh</div></div><span class="mute">3:10</span></div></div>
+      <div class="row" style="margin-top:10px"><span class="mute">Drag to reorder · right-click: Queue next, Move to end</span><span class="sp"></span><span class="btn sm">&uarr; Up</span><span class="btn sm">&darr; Down</span><span class="btn sm dg">Remove</span></div></div>
+  </div></div><div class="rcol"></div></div><div class="chrome-nav"></div></div></section>
+
+<!-- History -->
+<section class="page" id="hist" data-nav="Singer History"><div class="app"><div class="chrome-top"></div><div class="body"><div>
+  <div class="row" style="padding:0 4px 10px"><h3 class="cap" style="font-size:13px">Singer history</h3><span class="sp"></span><span class="mute">92 singers</span><span class="btn sm">Sync now</span></div>
+  <div class="g2">
+    <div class="card"><div class="sw"><input class="s" placeholder="Search singers"></div>
+      <div class="list" style="margin-top:8px"><div class="on"><div class="avatar">DT</div><div class="sp"><b>Dan T</b><div class="sub">19 songs · last 2 days ago</div></div></div><div><div class="avatar">BF</div><div class="sp"><b>Bill F</b><div class="sub">19 songs</div></div></div><div><div class="avatar">AA</div><div class="sp"><b>Aryana A.</b><div class="sub">7 songs</div></div></div><div><div class="avatar">JS</div><div class="sp"><b>Justin S</b><div class="sub">4 songs</div></div></div></div>
+      <details style="margin-top:12px"><summary class="cap" style="cursor:pointer">Admin tools</summary><div style="display:grid;gap:8px;margin-top:8px"><span class="btn dg">Clear all singers</span><span class="btn dg">Clear &lt; 3 songs</span><span class="btn dg">Clear inactive 6 months</span></div></details></div>
+    <div class="card"><div class="row"><div class="avatar" style="width:52px;height:52px;font-size:18px">DT</div><div class="sp"><div style="font-size:24px;font-weight:800">Dan T</div><div class="sub">19 songs · 31 performances</div></div><span class="btn sm">Rename</span><span class="btn sm">Preferred brand</span><span class="btn sm dg">Delete singer</span></div>
+      <div class="row" style="margin-top:10px"><span class="chip p">Preferred: Karaoke Version</span></div>
+      <div class="sw" style="margin-top:12px"><input class="s" placeholder="Search this singer's songs"></div>
+      <div class="list" style="margin-top:8px"><div><div class="sp"><b>Shallow</b><div class="sub">Lady Gaga &amp; Bradley Cooper</div></div><span class="chip">KV</span><span class="chip a">&times;3</span><span class="mute">3:36</span></div><div><div class="sp"><b>Landslide</b><div class="sub">Fleetwood Mac</div></div><span class="chip">SC</span><span class="chip a">&times;2</span><span class="mute">3:20</span></div><div class="on"><div class="sp"><b>Dancing Queen</b><div class="sub">ABBA</div></div><span class="chip">KaraFun</span><span class="chip a">&times;1</span><span class="mute">3:50</span></div></div>
+      <div class="row" style="margin-top:10px"><span class="btn sm pr">Add to queue</span><span class="btn sm">Add song</span><span class="btn sm">Edit song</span><span class="btn sm dg">Delete song</span></div></div>
+  </div></div><div class="rcol"></div></div><div class="chrome-nav"></div></div></section>
+
+<!-- Waitlist -->
+<section class="page" id="wait" data-nav="Waitlist"><div class="app"><div class="chrome-top"></div><div class="body"><div>
+  <div class="card"><div class="row"><span class="chip g" style="padding:6px 14px">Waitlist: ON</span><span class="chip">Removed tonight (2)</span><span class="sp"></span><span class="btn sm dg">Clear all</span></div>
+    <div class="list" style="margin-top:12px"><div class="on"><div class="avatar">AB</div><div class="sp"><b>Abby</b><div class="sub">Shake It Off · Taylor Swift</div></div><span class="chip a">waiting 6 min</span><span class="btn sm pr">Add now</span><span class="btn sm">Find song</span><span class="btn sm dg">Remove</span></div>
+    <div><div class="avatar">MT</div><div class="sp"><b>Matt</b><div class="sub">Mr. Brightside · The Killers</div></div><span class="chip a">waiting 11 min</span><span class="btn sm pr">Add now</span><span class="btn sm">Find song</span><span class="btn sm dg">Remove</span></div>
+    <div><div class="avatar">KT</div><div class="sp"><b>Katy</b><div class="sub">no song picked yet</div></div><span class="chip">pending</span><span class="btn sm pr">Add now</span><span class="btn sm">Find song</span><span class="btn sm dg">Remove</span></div></div>
+    <div class="mute" style="margin-top:12px">3 waitlisted songs · they move into the rotation only when you add them</div></div>
+  </div><div class="rcol"></div></div><div class="chrome-nav"></div></div></section>
+
+<!-- Chat -->
+<section class="page" id="chat" data-nav="Chat"><div class="app"><div class="chrome-top"></div><div class="body"><div>
+  <div class="card" style="min-height:560px;display:flex;flex-direction:column"><div class="row"><span class="chip p" style="padding:7px 16px">Everyone</span><span class="chip" style="padding:7px 16px">Private <span class="chip a" style="margin-left:4px">2</span></span><span class="chip" style="padding:7px 16px">Host chat</span><span class="sp"></span><span class="btn sm">Refresh</span><span class="btn sm dg">Clear room chat</span></div>
+    <div class="sw" style="margin-top:12px"><input class="s" placeholder="Find a singer or word"></div>
+    <div class="sp" style="margin-top:6px;overflow:hidden"><div class="msg"><small>Katy · 1:12 AM</small>Can we get Mr. Brightside next?</div><div class="msg me"><small>Host · 1:13 AM</small>You are 3rd up, Katy!</div><div class="msg"><small>Stanley · 1:20 AM</small>That was awesome &#127908;</div></div>
+    <div class="mute">Speaking to everyone as “Host”: everyone in the room sees this</div>
+    <div class="row" style="margin-top:6px"><div class="sw sp"><input class="s" style="padding-left:12px" placeholder="Type a message"></div><span class="btn sm">&#128512;</span><span class="btn sm">GIF</span><span class="btn sm">Photo</span><span class="btn sm pr">Send</span></div></div>
+  </div><div class="rcol"></div></div><div class="chrome-nav"></div></div></section>
+
+<!-- EQ -->
+<section class="page" id="eq" data-nav="EQ"><div class="app"><div class="chrome-top"></div><div class="body"><div>
+  <div class="card"><div class="row"><h3>Equalizer</h3><span class="sp"></span><span class="chip g">Karaoke &#10003;</span><span class="chip">Background music</span><span class="btn sm">Reset</span></div>
+    <div class="eq" id="eqbars"></div>
+    <div class="row" style="margin-top:6px"><span class="mute">Hz: 31 · 62 · 125 · 250 · 500 · 1k · 2k · 4k · 8k · 16k</span><span class="sp"></span><span class="chip p">Preset: Warm vocal</span></div></div>
+  <div class="card" style="margin-top:12px"><div class="row"><h3>Master chain</h3><span class="sp"></span><span class="chip g">On</span></div><div class="row" style="margin-top:10px;gap:22px;flex-wrap:wrap"><div class="row"><span class="cap">Compressor</span><div class="slider" style="width:140px"><i style="width:20%"></i><b style="left:20%"></b></div></div><div class="row"><span class="cap">Tilt</span><div class="slider" style="width:140px"><i style="width:60%"></i><b style="left:60%"></b></div></div><div class="row"><span class="cap">Exciter</span><div class="slider" style="width:140px"><i style="width:15%"></i><b style="left:15%"></b></div></div><div class="row"><span class="cap">Limiter</span><span class="chip">&minus;1 dB</span></div></div></div>
+  </div><div class="rcol"></div></div><div class="chrome-nav"></div></div></section>
+
+<!-- Rotation TV -->
+<section class="page" id="rot"><div class="tv rot"><div style="position:absolute;inset:5% 4% 14% 4%;display:grid;grid-template-columns:1fr 24%;gap:3%">
+  <div><div class="cap" style="font-size:clamp(10px,1.5vw,16px)">SingWS · Singer rotation</div>
+  <div style="margin-top:2%;padding:2.2% 3%;border:1px solid var(--line2);border-radius:16px;background:rgba(10,8,30,.55)"><div class="cap" style="color:#6df0a0">&#9679; Now singing</div><div class="big">Diamond</div><div style="color:var(--soft);font-size:clamp(12px,2vw,22px)">Shallow · Lady Gaga &amp; Bradley Cooper</div></div>
+  <div class="rail" style="margin-top:2%"><div><span class="big" style="color:var(--purple2)">01</span><span class="cap">Up next</span><span class="big">April</span></div><div><span class="big" style="color:var(--purple2)">02</span><span class="big">Justin S</span></div><div><span class="big" style="color:var(--purple2)">03</span><span class="big">Boo Boo Head</span></div></div></div>
+  <div style="border:1px solid var(--line);border-radius:16px;background:rgba(10,8,30,.5);display:grid;place-items:center;text-align:center;padding:6%"><div><div style="width:70%;aspect-ratio:1;background:#fff;margin:0 auto 10%;border-radius:10px"></div><div class="cap">Scan to request</div><div class="big" style="font-size:clamp(14px,2.6vw,30px);margin-top:6%">Full for the night</div></div></div></div>
+  <div class="ticker"><div class="tag">SPECIALS</div><div class="txt">SPECIAL FOR KARAOKE NIGHTS! $5 Shots of Fireball &nbsp;&nbsp; $4 Domestic Bottles when you pay in cash!</div></div></div>
+  <ul class="legend"><li>Same glass cards and accents as the host app, rail with big numbers, QR column, ticker unchanged in behavior.</li><li>This screen sits on native video layers: I would check every change on the real TV before a show.</li></ul></section>
+
+<!-- Karaoke TV -->
+<section class="page" id="kar"><div class="tv"><div class="lyrics"><span class="d">In all the good times</span><br><span class="d">I find myself lon</span>ging<br>for change</div>
+  <div style="position:absolute;left:3%;top:48%;width:94%;display:flex;justify-content:space-between;opacity:.85"><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div></div>
+  <div style="position:absolute;left:2%;bottom:15%;padding:8px 14px;border-radius:12px;background:rgba(15,12,40,.7);border:1px solid var(--line2);backdrop-filter:blur(6px)"><div class="cap" style="color:#6df0a0">Now singing</div><b style="font-size:clamp(14px,2.2vw,26px)">Diamond</b><span class="sub"> · Shallow</span></div>
+  <div class="ticker"><div class="tag">NEXT</div><div class="txt">Gaga &amp; Bradley Cooper) · Shallow | Next: April | Sign up se</div><div class="clock">02:52</div></div></div>
+  <ul class="legend"><li>Karaoke picture stays full screen and untouched; only the ticker and a small singer card get the new look.</li><li>The countdown pill becomes a rounded purple clock; &quot;Now singing&quot; card fades out after 8 seconds.</li></ul></section>
+
+<!-- Ticker styles -->
+<section class="page" id="tick"><div style="max-width:1100px;margin:0 auto;display:grid;gap:18px">
+  <div><div class="cap" style="margin-bottom:6px">A · Lime tag (today, polished)</div><div class="tv" style="aspect-ratio:12/1.3"><div class="ticker" style="height:100%"><div class="tag">SPECIALS</div><div class="txt">SPECIAL FOR KARAOKE NIGHTS! $5 Shots of Fireball</div><div class="clock">--:--</div></div></div></div>
+  <div><div class="cap" style="margin-bottom:6px">B · Glass pill</div><div class="tv" style="aspect-ratio:12/1.3;background:linear-gradient(90deg,#1a0f3f,#07060f)"><div class="ticker" style="height:70%;bottom:15%;left:2%;right:2%;border:1px solid var(--line2);border-radius:999px;background:rgba(255,255,255,.07);backdrop-filter:blur(8px)"><div class="tag" style="border-radius:999px;margin:4px;height:calc(100% - 8px)">NEXT</div><div class="txt" style="color:#fff">April · Of Monsters and Men, Little Talks | Justin S | Boo Boo Head</div><div class="clock">02:52</div></div></div></div>
+  <div><div class="cap" style="margin-bottom:6px">C · Purple bar, green text</div><div class="tv" style="aspect-ratio:12/1.3"><div class="ticker" style="height:100%;border-top-color:#a78bfa;background:linear-gradient(90deg,#2a1068,#12082b)"><div class="tag" style="background:#a78bfa">LIVE</div><div class="txt">Sign up at wskar.com · requests are open</div><div class="clock">02:52</div></div></div></div></div>
+  <ul class="legend"><li>Pick one (or tell me what to change). Scrolling speed, queue-change flash and the countdown stay as they are.</li></ul></section>
+
+<script>
+const rc=document.getElementById('rc').innerHTML, top_=document.getElementById('chrome-top').innerHTML, nav=document.getElementById('chrome-nav').innerHTML;
+document.querySelectorAll('.rcol').forEach(e=>e.outerHTML=rc);
+document.querySelectorAll('.chrome-top').forEach(e=>e.outerHTML=top_);
+document.querySelectorAll('.chrome-nav').forEach(e=>{const w=document.createElement('div');w.innerHTML=nav;const n=w.firstElementChild;const name=e.closest('.page').dataset.nav;n.querySelectorAll('[data-n]').forEach(d=>{if(d.dataset.n===name)d.classList.add('on')});e.replaceWith(n)});
+const vals=[.5,.55,.6,.5,.45,.5,.62,.68,.6,.55];
+document.getElementById('eqbars').innerHTML=vals.map(v=>`<div><div class="tr"><i style="top:${(1-v)*92}%"></i></div></div>`).join('');
+document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('on'));b.classList.add('on');document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===b.dataset.p));window.scrollTo(0,0)});
+</script>
+</body>
+</html>
