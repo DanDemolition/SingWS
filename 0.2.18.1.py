@@ -16612,14 +16612,14 @@ class LibraryCardDelegate(QStyledItemDelegate):
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor(230, 232, 240))
-        painter.drawText(QRect(r.left() + 12, r.top() + 8, text_w, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+        painter.drawText(QRect(r.left() + 8, r.top() + 8, text_w, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                          QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, text_w))
         sf = QFont(option.font)
         sf.setPixelSize(11)
         sf.setBold(False)
         painter.setFont(sf)
         painter.setPen(QColor(163, 168, 189))
-        painter.drawText(QRect(r.left() + 12, r.top() + 29, text_w, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+        painter.drawText(QRect(r.left() + 8, r.top() + 29, text_w, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                          QFontMetrics(sf).elidedText(sub, Qt.TextElideMode.ElideRight, text_w))
         if duration:
             painter.setFont(df)
@@ -16636,10 +16636,10 @@ class LibraryCardDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(167, 139, 250, 170) if hot else QColor(140, 150, 200, 70), 1))
         painter.setBrush(QColor(124, 61, 255, 60) if hot else QColor(255, 255, 255, 12))
         painter.drawRoundedRect(QRectF(plus).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
-        painter.setPen(QPen(QColor(240, 236, 255), 1.6))
+        painter.setPen(QPen(QColor(240, 236, 255), 1.5))
         c = QPointF(plus.center())
-        painter.drawLine(QPointF(c.x() - 5, c.y()), QPointF(c.x() + 5, c.y()))
-        painter.drawLine(QPointF(c.x(), c.y() - 5), QPointF(c.x(), c.y() + 5))
+        painter.drawLine(QPointF(c.x() - 4, c.y()), QPointF(c.x() + 4, c.y()))
+        painter.drawLine(QPointF(c.x(), c.y() - 4), QPointF(c.x(), c.y() + 4))
         painter.restore()
 
     def editorEvent(self, event, model, option, index):
@@ -20652,7 +20652,7 @@ class LibraryFilterBar(QWidget):
         super().__init__(parent)
         self._mode = "all"
         self._rects: list[tuple[str, QRectF]] = []
-        self.setFixedHeight(30)
+        self.setFixedHeight(28)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def mode(self) -> str:
@@ -20667,7 +20667,7 @@ class LibraryFilterBar(QWidget):
 
     def _font(self) -> QFont:
         f = QFont(self.font())
-        f.setPixelSize(12)
+        f.setPixelSize(11)
         f.setWeight(QFont.Weight.DemiBold)
         return f
 
@@ -20675,9 +20675,9 @@ class LibraryFilterBar(QWidget):
         fm = QFontMetrics(self._font())
         x, rects = 0.0, []
         for key, label in self.CHOICES:
-            w = fm.horizontalAdvance(label) + 26
-            rects.append((key, QRectF(x, 2, w, 26)))
-            x += w + 8
+            w = fm.horizontalAdvance(label) + 22
+            rects.append((key, QRectF(x, 2, w, 24)))
+            x += w + 6
         self._rects = rects
 
     def mousePressEvent(self, event):
@@ -20697,7 +20697,7 @@ class LibraryFilterBar(QWidget):
             on = key == self._mode
             p.setPen(QPen(QColor(167, 139, 250, 150) if on else QColor(140, 150, 200, 46), 1))
             p.setBrush(QColor(124, 61, 255, 80) if on else QColor(255, 255, 255, 12))
-            p.drawRoundedRect(r, 13, 13)
+            p.drawRoundedRect(r, 12, 12)
             p.setPen(QColor(240, 236, 255) if on else QColor(163, 168, 189))
             p.drawText(r, Qt.AlignmentFlag.AlignCenter, dict(self.CHOICES)[key])
 
@@ -61335,6 +61335,11 @@ class KaraokeApp(QWidget):
                            else (SINGWS_THEME.bottom_nav_css("operatorBottomNav") if SINGWS_THEME is not None and hasattr(SINGWS_THEME, "bottom_nav_css")
                                  else content_card_css("operatorBottomNav", radius=8))))
             # the two lists lose their own boxes: the cards around them are the frame
+            if getattr(self, "_search_css_off", None) is None:
+                self._search_css_off = self.search_input.styleSheet()
+            styled.append((self.search_input, ("QLineEdit#librarySearchInput { background: rgba(5,6,13,0.85); border: 1px solid rgba(140,150,200,0.16); border-radius: 8px;"
+                                " padding: 6px 10px; font-size: 13px; font-weight: 500; color: " + _v("text") + "; }"
+                                " QLineEdit#librarySearchInput:focus { border-color: rgba(167,139,250,0.55); }") if on else self._search_css_off))
             for attr in ("results_list", "queue_display"):
                 lw = getattr(self, attr)
                 if getattr(lw, "_css_off", None) is None:
