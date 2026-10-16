@@ -123,6 +123,17 @@ class RightColumnTests(unittest.TestCase):
         self.assertIn("if self._ui_redesign_on():", body)
         self.assertIn("border-top-left-radius: 0px", body)
 
+    def test_the_music_card_follows_the_controls_card_closely_and_the_old_spacer_comes_back(self):
+        from pathlib import Path
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        body = src[src.index("def _fit_right_column"):src.index("fit right column failed")]
+        self.assertIn("lay.takeAt(i)", body)                      # on: the spacer that pushed the card to the bottom is removed
+        self.assertIn("lay.insertStretch(1, 1)", body)            # off: and put back exactly where it was
+        self.assertIn("lay.setSpacing(12)", body)
+        self.assertIn("lay.setSpacing(10)", body)                 # the original spacing returns
+        self.assertIn("setMaximumHeight(bar.height() + gap + card_h)", body)
+        self.assertIn("setMaximumHeight(16777215)", body)
+
 
 if __name__ == "__main__":
     unittest.main()

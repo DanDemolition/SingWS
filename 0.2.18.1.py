@@ -61368,10 +61368,27 @@ class KaraokeApp(QWidget):
             bar = self.transport_bar
             if on:
                 self.bg_main_next_label.setVisible(False)       # the Up Next list shows what is next
+                self._row_controls.activate()                    # sizes must be current before they are read
                 bar.setFixedHeight(max(200, self._row_controls.sizeHint().height() + 4))
+                bg_layout = self.bg_main_card.layout()
+                if bg_layout is not None:
+                    bg_layout.activate()
                 card_h = self.bg_main_card.sizeHint().height() if self.bg_main_card.isVisible() else 0
-                self.right_controls_panel.setMinimumHeight(bar.height() + 10 + card_h)
+                lay = self.right_controls_panel.layout()
+                for i in range(lay.count() - 1, -1, -1):
+                    if lay.itemAt(i).spacerItem() is not None:
+                        lay.takeAt(i)               # the spacer that pushed the music card to the bottom (and added a second gap)
+                lay.setSpacing(12)
+                gap = lay.spacing()
+                self.right_controls_panel.setMinimumHeight(bar.height() + gap + card_h)
+                # exactly its content tall: the music card follows the controls card closely and any spare height goes to the video above
+                self.right_controls_panel.setMaximumHeight(bar.height() + gap + card_h)
             else:
+                self.right_controls_panel.setMaximumHeight(16777215)
+                lay = self.right_controls_panel.layout()
+                if not any(lay.itemAt(i).spacerItem() is not None for i in range(lay.count())):
+                    lay.insertStretch(1, 1)         # back to how it was: the music card pinned to the bottom
+                lay.setSpacing(10)
                 self.bg_main_next_label.setVisible(True)
                 bar.setFixedHeight(344 if getattr(self, "_compact_deck", False) else 384)
                 self.right_controls_panel.setMinimumHeight(430 if getattr(self, "_compact_deck", False) else 514)
