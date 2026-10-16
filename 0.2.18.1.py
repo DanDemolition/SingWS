@@ -883,7 +883,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItemIterator, QProgressDialog,
     QTextEdit, QPlainTextEdit
 )
-from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath, QRadialGradient
+from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath, QRadialGradient, QLinearGradient
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop
 
@@ -7730,6 +7730,7 @@ class RenderThreadShowScreenVfx(QFrame):
 
 
 class VideoAreaWidget(QWidget):
+    idle_placeholder = False       # redesign: a gradient and 'Karaoke preview' while nothing is showing
     def __init__(self, parent=None):
         super().__init__(parent)
         self.background_pixmap = QPixmap()
@@ -8752,6 +8753,17 @@ class VideoAreaWidget(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("black"))
+        if getattr(self, "idle_placeholder", False) and self.karaoke_frame.isNull() and self.background_pixmap.isNull():
+            g = QLinearGradient(0, 0, self.width(), self.height())
+            g.setColorAt(0.0, QColor(5, 5, 16))
+            g.setColorAt(1.0, QColor(18, 10, 42))
+            painter.fillRect(self.rect(), g)
+            pf = QFont(self.font())
+            pf.setPixelSize(12)
+            painter.setFont(pf)
+            painter.setPen(QColor(111, 117, 144))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Karaoke preview")
+            return
 
         if not self.karaoke_frame.isNull():
             if bool(self.karaoke_side_fill and self.karaoke_frame_is_cdg):
@@ -15598,7 +15610,7 @@ class PreviewWindow(QWidget):
         Off is exactly the old look. The video itself is untouched; only the margins around it change."""
         if on:
             css = ("QWidget#previewWindow { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(5,5,16,1), stop:1 rgba(18,10,42,1));"
-                   " border: 1px solid rgba(140,150,200,0.14); border-bottom: none; border-top-left-radius: 12px; border-top-right-radius: 12px;"
+                   " border: 1px solid rgba(140,150,200,0.14); border-bottom: none; border-top-left-radius: 14px; border-top-right-radius: 14px;"
                    " border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }")
         else:
             css = ("QWidget#previewWindow { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #02040A, stop:1 #000000);"
@@ -16236,7 +16248,7 @@ class QueueCardDelegate(QStyledItemDelegate):
     NAME_H = 28
     SONG_H = 24
     LONG_SECS = 300      # a song this long or longer gets a 'Long' badge
-    CARD_BG = QColor(255, 255, 255, 10)
+    CARD_BG = QColor(255, 255, 255, 6)
     CARD_LINE = QColor(140, 150, 200, 40)
 
     def __init__(self, left_role, right_role, kind_role, status_role, duet_role=None, parent=None):
@@ -16293,7 +16305,7 @@ class QueueCardDelegate(QStyledItemDelegate):
         return QSize(w, h + (4 if self.card_edges(index)[1] and kind != "singer" else 0))
 
     @staticmethod
-    def _card_path(rect: QRect, first: bool, last: bool, r: float = 10.0) -> QPainterPath:
+    def _card_path(rect: QRect, first: bool, last: bool, r: float = 12.0) -> QPainterPath:
         rt = r if first else 0.0
         rb = r if last else 0.0
         x, y, w, h = float(rect.left()), float(rect.top()), float(rect.width()), float(rect.height())
@@ -20396,6 +20408,35 @@ class RowCardsOverlay(QWidget):
             p.drawRoundedRect(card, 10, 10)
 
 
+class BarBackdrop(QWidget):
+    """Show-tab redesign: a dark translucent rounded bar behind a row of controls (the mockup's transport bar), painted under the buttons."""
+
+    def __init__(self, parent: QWidget, rect_fn):
+        super().__init__(parent)
+        self._rect_fn = rect_fn
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+        self.lower()
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            self.setGeometry(self.parentWidget().rect())
+            self.lower()
+            self.update()
+        return False
+
+    def paintEvent(self, event):
+        r = self._rect_fn()
+        if r is None or r.isEmpty():
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(QColor(140, 150, 200, 40), 1))
+        p.setBrush(QColor(5, 6, 13, 184))
+        p.drawRoundedRect(QRectF(r).adjusted(-6, -5, 6, 5), 10, 10)
+
+
 class SliderGlow(QWidget):
     """Show-tab redesign: a soft purple glow around the filled part of a progress slider (a stylesheet cannot draw one)."""
 
@@ -20447,12 +20488,13 @@ class CanvasGlowOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         w, h = float(self.width()), float(self.height())
-        purple = QRadialGradient(QPointF(w * 0.70, -h * 0.10), max(w, h) * 0.62)
-        purple.setColorAt(0.0, QColor(139, 92, 246, 56))
+        p.fillRect(self.rect(), QColor(5, 6, 13))                  # the mockup's canvas: a deep blue-black
+        purple = QRadialGradient(QPointF(w * 0.70, -h * 0.10), max(w, h) * 0.55)
+        purple.setColorAt(0.0, QColor(139, 92, 246, 46))
         purple.setColorAt(1.0, QColor(139, 92, 246, 0))
         p.fillRect(self.rect(), purple)
-        green = QRadialGradient(QPointF(0.0, h), max(w, h) * 0.42)
-        green.setColorAt(0.0, QColor(52, 224, 138, 22))
+        green = QRadialGradient(QPointF(0.0, h), max(w, h) * 0.40)
+        green.setColorAt(0.0, QColor(52, 224, 138, 18))
         green.setColorAt(1.0, QColor(52, 224, 138, 0))
         p.fillRect(self.rect(), green)
 
@@ -20476,8 +20518,11 @@ class HeroGlowOverlay(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 13, 13)     # the card's rounded corners
+        p.setClipPath(clip)
         g = QRadialGradient(QPointF(self.width() * 0.16, 0.0), max(240.0, self.width() * 0.6))
-        g.setColorAt(0.0, QColor(139, 92, 246, 86))
+        g.setColorAt(0.0, QColor(139, 92, 246, 66))
         g.setColorAt(1.0, QColor(139, 92, 246, 0))
         p.fillRect(self.rect(), g)
 
@@ -22079,6 +22124,7 @@ class KaraokeApp(QWidget):
         ctrl_row.addWidget(self.preview_time_label)
         ctrl_row.addWidget(self.audio_output_button)
         row_controls.addLayout(ctrl_row)
+        self._transport_backdrop = None            # created with the transport bar frame below
         for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button, self.audio_output_button):
             b.setStyleSheet(subtle_button_css(padding="4px 8px", radius=8))
         self.audio_output_button.setStyleSheet(subtle_button_css(padding="0px", radius=8))
@@ -23043,6 +23089,8 @@ class KaraokeApp(QWidget):
         # preview video). The controls panel now starts directly with the
         # transport bar.
         right_controls_layout.addWidget(transport_bar)
+        self._transport_backdrop = BarBackdrop(transport_bar, lambda: self.karaoke_transport_button_row.geometry())
+        self._transport_backdrop.setVisible(False)
 
         # Compact BG card under "Now Singing" (keeps right column width fixed by sync helper).
         self.bg_main_card = QFrame()
@@ -25580,7 +25628,9 @@ class KaraokeApp(QWidget):
         try:
             for w in (self.karaoke_elapsed_label, self.karaoke_seek_slider, self.karaoke_remaining_label):
                 w.setVisible(not on)                 # the hero's progress bar is the seek control now
-            w_btn, h_btn = (38, 32) if on else (48, 38)
+            w_btn, h_btn = (34, 30) if on else (48, 38)
+            if getattr(self, "_transport_backdrop", None) is not None:
+                self._transport_backdrop.setVisible(on)
             for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button, self.audio_output_button):
                 b.setFixedSize(w_btn, h_btn)
                 b.setMaximumWidth(w_btn)
@@ -37258,7 +37308,7 @@ class KaraokeApp(QWidget):
         css = self._transport_bar_live_css_base(active, pulse)
         if self._ui_redesign_on():
             # joined to the preview above: square top corners, no top border, a rounder bottom
-            css = css.replace("border-radius: 8px;", "border-radius: 12px; border-top-left-radius: 0px; border-top-right-radius: 0px; border-top: none;")
+            css = css.replace("border-radius: 8px;", "border-radius: 14px; border-top-left-radius: 0px; border-top-right-radius: 0px; border-top: none;")
         return css
 
     def _transport_bar_live_css_base(self, active: bool, pulse: float) -> str:
@@ -37288,6 +37338,12 @@ class KaraokeApp(QWidget):
         """
 
     def _rotation_hero_live_css(self, active: bool, pulse: float) -> str:
+        if self._ui_redesign_on() and SINGWS_THEME is not None and hasattr(SINGWS_THEME, "hero_card_css"):
+            p = max(0.0, min(1.0, float(pulse))) if active else 0.0
+            return SINGWS_THEME.hero_card_css("rotationHeroCard", 0.32 + 0.12 * p)      # the border breathes with the live pulse
+        return self._rotation_hero_live_css_base(active, pulse)
+
+    def _rotation_hero_live_css_base(self, active: bool, pulse: float) -> str:
         if active:
             p = max(0.0, min(1.0, float(pulse)))
             accent_alpha = 0.18 + (0.10 * p)
@@ -61266,6 +61322,10 @@ class KaraokeApp(QWidget):
                 styled.append((b, (ghost_danger if name == "clear_queue_button" else ghost) if on else off_css[name]))
             # TEMPO and KEY become two separate row cards instead of one shared panel
             styled.append((self._tempo_panel, "QWidget#karaokeTempoKeyPanel { background: transparent; border: none; }" if on else self._tempo_panel_css))
+            # the hero and the music card get the same 14 px corner as the glass cards
+            if SINGWS_THEME is not None:
+                styled.append((self.rotation_hero_card, SINGWS_THEME.hero_card_css("rotationHeroCard") if on else SINGWS_THEME.performance_deck_css("rotationHeroCard")))
+                styled.append((self.bg_main_card, SINGWS_THEME.deck_css("bgMainCard", radius_px=14, accent=True) if on else SINGWS_THEME.deck_css("bgMainCard", accent=True)))
             # glass cards and the page glow
             for name, attr in (("libraryCard", "library_card"), ("rotationCard", "rotation_card")):
                 off = SINGWS_THEME.card_css(name) if SINGWS_THEME is not None else content_card_css(name, radius=8)
@@ -61319,6 +61379,8 @@ class KaraokeApp(QWidget):
             self._tempo_panel.setFixedHeight(100 if on else 78)
             self.tempo_row_cards.setVisible(on)
             self.preview_window.set_card_style(on)           # video inset in a card that joins the transport bar below
+            self.preview_window.video_area.idle_placeholder = on
+            self.preview_window.video_area.update()
             try:
                 self._apply_live_state_styles()              # re-run the transport bar's style (square top corners when joined)
             except Exception:

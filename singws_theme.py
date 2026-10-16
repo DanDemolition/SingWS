@@ -305,6 +305,19 @@ def bottom_nav_css(object_name: str) -> str:
     """
 
 
+def hero_card_css(object_name: str, border_alpha: float = 0.32) -> str:
+    """Show-tab redesign hero: the mockup's deep purple gradient with a violet border and a 14 px corner."""
+    return f"""
+        QFrame#{object_name} {{
+            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                stop:0 rgba(20,16,58,1),
+                stop:1 rgba(12,12,32,1));
+            border: 1px solid rgba(160,140,255,{border_alpha:.3f});
+            border-radius: 14px;
+        }}
+    """
+
+
 def glass_nav_css(object_name: str) -> str:
     """Show-tab redesign: the bottom nav strip as a fine-bordered glass bar."""
     return f"""

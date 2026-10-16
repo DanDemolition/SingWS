@@ -110,6 +110,15 @@ class ShowRedesignTests(unittest.TestCase):
         polish = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
         self.assertIn("self.hero_seek_elapsed", polish)
 
+    def test_rounder_corners_darker_canvas_and_the_purple_hero_are_redesign_only(self):
+        polish = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
+        self.assertIn('hero_card_css("rotationHeroCard")', polish)
+        self.assertIn('deck_css("bgMainCard", radius_px=14, accent=True)', polish)
+        live = SRC[SRC.index("def _rotation_hero_live_css(self"):SRC.index("def _rotation_hero_live_css_base")]
+        self.assertIn("self._ui_redesign_on()", live)
+        canvas = SRC[SRC.index("class CanvasGlowOverlay"):SRC.index("class HeroGlowOverlay")]
+        self.assertIn("QColor(5, 6, 13)", canvas)                # the mockup's deeper canvas
+
 
 if __name__ == "__main__":
     unittest.main()

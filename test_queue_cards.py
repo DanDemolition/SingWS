@@ -136,7 +136,8 @@ class QueueCardTests(unittest.TestCase):
         img = view.viewport().grab().toImage()
         rect = view.visualRect(model.index(2, 0))
         x_band, x_text = rect.left() + 80, None
-        band_rows = [y for y in range(rect.top(), rect.bottom() + 1) if img.pixelColor(x_band + 160, y).blue() > 120 and img.pixelColor(x_band + 160, y).red() > 55]
+        base = img.pixelColor(x_band + 160, view.visualRect(model.index(1, 0)).top() + 2)      # a lit-card row that is not the band
+        band_rows = [y for y in range(rect.top(), rect.bottom() + 1) if img.pixelColor(x_band + 160, y).blue() - base.blue() > 25]
         self.assertTrue(band_rows, "no band found")
         band_mid = (band_rows[0] + band_rows[-1]) / 2.0
         text_rows = []

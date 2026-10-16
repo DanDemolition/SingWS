@@ -109,7 +109,7 @@ class RightColumnTests(unittest.TestCase):
         pw.set_card_style(True)
         m = pw._main_layout.contentsMargins()
         self.assertEqual((m.left(), m.top(), m.right(), m.bottom()), (8, 8, 8, 0))     # only the margins around the video change
-        self.assertIn("border-top-left-radius: 12px", pw.styleSheet())
+        self.assertIn("border-top-left-radius: 14px", pw.styleSheet())
         self.assertIn("border-bottom-left-radius: 0px", pw.styleSheet())             # square bottom: it joins the transport bar
         pw.set_card_style(False)
         self.assertEqual(pw.styleSheet(), off_css)
@@ -133,6 +133,40 @@ class RightColumnTests(unittest.TestCase):
         self.assertIn("lay.setSpacing(10)", body)                 # the original spacing returns
         self.assertIn("setMaximumHeight(bar.height() + gap + card_h)", body)
         self.assertIn("setMaximumHeight(16777215)", body)
+
+    def test_the_idle_preview_shows_a_gradient_and_label_only_when_nothing_else_is_showing(self):
+        from PyQt6.QtGui import QPixmap
+        va = self.m.VideoAreaWidget()
+        va.resize(300, 180)
+        va.show()
+        self.app.processEvents()
+        plain = va.grab().toImage().pixelColor(150, 90).name()
+        self.assertEqual(plain, "#000000")                       # as before: black
+        va.idle_placeholder = True
+        va.update()
+        self.app.processEvents()
+        img = va.grab().toImage()
+        self.assertNotEqual(img.pixelColor(290, 170).name(), "#000000")      # the gradient is there (bottom right is the purple end)
+        pm = QPixmap(300, 180)
+        pm.fill()
+        va.background_pixmap = pm                                # a real idle background wins over the placeholder
+        va.update()
+        self.app.processEvents()
+        self.assertNotEqual(va.grab().toImage().pixelColor(290, 170).name(), img.pixelColor(290, 170).name())
+
+    def test_the_transport_bar_backdrop_sits_under_the_buttons_and_paints_a_rounded_bar(self):
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtWidgets import QWidget
+        host = QWidget()
+        host.resize(300, 100)
+        host.setStyleSheet("background: rgb(30,30,60);")
+        bd = self.m.BarBackdrop(host, lambda: QRect(20, 30, 260, 40))
+        host.show()
+        self.app.processEvents()
+        img = host.grab().toImage()
+        inside, outside = img.pixelColor(150, 50), img.pixelColor(150, 5)
+        self.assertNotEqual(inside.name(), outside.name())
+        self.assertLess(inside.red() + inside.green() + inside.blue(), outside.red() + outside.green() + outside.blue())   # darker bar
 
 
 if __name__ == "__main__":
