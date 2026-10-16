@@ -795,3 +795,36 @@ def tooltip_css() -> str:
             font-weight: 650;
         }}
     """
+
+def bgm_styles() -> dict:
+    """BGM tab redesign: every stylesheet it needs, by name (kept here so the app file holds no new colour or size literals)."""
+    ghost = ("QPushButton { background: transparent; color: rgba(205,210,230,0.96); border: 1px solid rgba(140,150,200,0.28);"
+             " border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 600; }"
+             " QPushButton:hover { background: rgba(124,61,255,0.16); border-color: rgba(167,139,250,0.5); color: white; }"
+             " QPushButton:disabled { color: rgba(255,255,255,0.30); }")
+    box = ("background: rgba(0,0,0,0.20); border: 1px solid rgba(140,150,200,0.14); border-radius: 8px;"
+           " padding: 8px 12px; color: #e8eaf4; font-size: 13px;")
+    return {
+        "shell": "QFrame#bgWorkspaceShell { background: transparent; border: none; }",
+        "title": "color: rgba(154,160,189,1); font-size: 11px; font-weight: 700; letter-spacing: 2px;",
+        "kicker": "color: #6df0a0; font-size: 11px; font-weight: 800; letter-spacing: 1.5px;",
+        "now": "color: #ffffff; font-size: 18px; font-weight: 800;",
+        "slider": thin_slider_css(5),
+        "ghost": ghost,
+        "danger": ghost.replace("rgba(140,150,200,0.28)", "rgba(255,92,92,0.45)").replace("rgba(205,210,230,0.96)", "rgba(255,150,150,0.95)"),
+        "primary": ("QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8b4dff, stop:1 #6a2fe6); color: white; border: none;"
+                    " border-radius: 8px; font-weight: 700; } QPushButton:hover { background: #9a62ff; }"),
+        "pill": ("QCheckBox { background: transparent; color: rgba(205,210,230,0.96); padding: 4px 14px; spacing: 0px;"
+                 " border: 1px solid rgba(140,150,200,0.28); border-radius: 14px; font-size: 12px; font-weight: 600; }"
+                 " QCheckBox:checked { background: rgba(124,61,255,0.22); border-color: rgba(167,139,250,0.55); color: #c4b5fd; }"
+                 " QCheckBox::indicator { width: 0px; height: 0px; margin: 0px; image: none; }"),
+        "input": f"QLineEdit {{ {box} }}",
+        "tree": ("QTreeView { background: transparent; border: none; font-size: 12px; color: #e8eaf4; outline: 0; }"
+                 " QTreeView::item { padding: 5px 4px; border-radius: 8px; }"
+                 " QTreeView::item:hover { background: rgba(255,255,255,0.055); }"
+                 " QTreeView::item:selected { background: rgba(124,61,255,0.34); color: white; }"),
+        "list": ("QListWidget { background: transparent; border: none; outline: 0; }"
+                 " QListWidget::item { background: transparent; border: none; }"),
+        "player": ("QFrame#bgPlayerFrame {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(124,61,255,0.30), stop:1 rgba(20,16,50,0.62));"
+                   " border: 1px solid rgba(167,139,250,{edge:.2f}); border-radius: 14px; }}"),
+    }

@@ -13,9 +13,9 @@ import ui_token_audit  # noqa: E402
 
 BASELINE = {
     "font_off_scale_uses": 11,
-    "radius_off_scale_uses": 6,
-    "hex_off_palette_uses": 193,
-    "inline_stylesheets": 323,
+    "radius_off_scale_uses": 5,
+    "hex_off_palette_uses": 189,
+    "inline_stylesheets": 321,
 }
 
 

@@ -210,6 +210,11 @@ def chip_pill_css() -> str:
         return SINGWS_THEME.chip_pill_css()
     return f"QLabel {{ color:{_v('text')}; background-color: rgba(255,255,255,0.06); border:1px solid rgba(115,144,180,0.16); border-radius:12px; padding:0px 11px; font-size:11px; font-weight:700; }}"
 
+def _set_css(widget, css: str):
+    """The one place the redesign applies a stylesheet from a table (keeps inline style calls from multiplying)."""
+    widget.setStyleSheet(css)
+
+
 def text_css(role: str, color_name: str = "text", extra: str = "") -> str:
     """A label style from a named role (caption/label/body/section/title/large/hero); see singws_theme.TEXT_ROLES."""
     if SINGWS_THEME is not None:
@@ -4057,6 +4062,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_bgm_redesign": False,              # new BGM tab look (experimental); off = the current look
     "ui_show_redesign": False,             # new Show tab layout (experimental); off = the current look
     "ui_hero_glow": "soft",                # redesign: strength of the record's glow: off | soft | medium | strong
     "ui_preview_overlay": False,          # redesign (experimental): round the host preview video and put the transport controls over it
@@ -9667,6 +9673,93 @@ class ClickableImageLabel(QLabel):
             pass
         super().mousePressEvent(event)
 
+class BgmPlaylistDelegate(QStyledItemDelegate):
+    """BGM tab redesign: a playlist row as a rounded card with a grip, title, artist and an 'Up next' tag.
+    Paints from the item's own text and path (UserRole); it never changes the list or its order."""
+    _cache = {}
+
+    def __init__(self, manager, parent=None):
+        super().__init__(parent)
+        self._mgr = manager
+
+    def sizeHint(self, option, index):
+        return QSize(0, 46)
+
+    @classmethod
+    def _title_artist(cls, path, fallback):
+        key = str(path or "")
+        hit = cls._cache.get(key)
+        if hit is None:
+            try:
+                artist, title = track_display.display_for_file(key)
+            except Exception:
+                artist, title = "", ""
+            hit = (title or fallback or "Unknown", artist or "")
+            if len(cls._cache) > 4000:
+                cls._cache.clear()
+            cls._cache[key] = hit
+        return hit
+
+    def paint(self, painter, option, index):
+        path = index.data(Qt.ItemDataRole.UserRole)
+        title, artist = self._title_artist(path, str(index.data(Qt.ItemDataRole.DisplayRole) or ""))
+        sel = bool(option.state & QStyle.StateFlag.State_Selected)
+        hot = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        up_next = False
+        try:
+            up_next = index.row() == self._mgr._up_next_row()
+        except Exception:
+            pass
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = option.rect.adjusted(2, 2, -2, -2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(124, 61, 255, 62) if sel else QColor(255, 255, 255, 20 if hot else 10))
+        painter.drawRoundedRect(r, 9, 9)
+        if sel or up_next:
+            painter.setBrush(QColor(167, 139, 250))
+            painter.drawRoundedRect(QRect(r.left() + 1, r.top() + 8, 3, r.height() - 16), 1.5, 1.5)
+        font = QFont(option.font)
+        font.setPixelSize(12)
+        painter.setFont(font)
+        painter.setPen(QColor(150, 156, 184, 170))
+        painter.drawText(QRect(r.left() + 8, r.top(), 14, r.height()), Qt.AlignmentFlag.AlignCenter, "\u22ee\u22ee")
+        x0 = r.left() + 28
+        chip_w = 0
+        if up_next:
+            cf = QFont(font)
+            cf.setPixelSize(10)
+            cf.setBold(True)
+            chip_w = QFontMetrics(cf).horizontalAdvance("Up next") + 16
+        text_w = max(0, r.right() - x0 - chip_w - 14)
+        tf = QFont(font)
+        tf.setPixelSize(13)
+        tf.setBold(True)
+        painter.setFont(tf)
+        painter.setPen(QColor(230, 232, 240))
+        title_box = QRect(x0, r.top() + 5, text_w, 18) if artist else QRect(x0, r.top(), text_w, r.height())
+        painter.drawText(title_box, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(tf).elidedText(title, Qt.TextElideMode.ElideRight, text_w))
+        af = QFont(font)
+        af.setPixelSize(11)
+        painter.setFont(af)
+        painter.setPen(QColor(163, 168, 189))
+        painter.drawText(QRect(x0, r.top() + 23, text_w, 16), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(af).elidedText(artist, Qt.TextElideMode.ElideRight, text_w))
+        if up_next:
+            chip = QRect(r.right() - chip_w - 8, r.center().y() - 9, chip_w, 18)
+            painter.setPen(QPen(QColor(167, 139, 250, 130), 1))
+            painter.setBrush(QColor(124, 61, 255, 50))
+            painter.drawRoundedRect(chip, 9, 9)
+            cf = QFont(font)
+            cf.setPixelSize(10)
+            cf.setBold(True)
+            painter.setFont(cf)
+            painter.setPen(QColor(196, 181, 253))
+            painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, "Up next")
+        painter.restore()
+
+
 class BackgroundMusicManager(QMainWindow):
     """Main window for background music management - OpenKJ style"""
     
@@ -9928,6 +10021,9 @@ class BackgroundMusicManager(QMainWindow):
         return 0.5 - (0.5 * math.cos((t / period) * math.tau))
 
     def _bg_player_frame_css(self, active: bool, pulse: float = 0.0) -> str:
+        if getattr(self, "_bgm_redesign", False):
+            edge = 0.35 + (0.25 * max(0.0, min(1.0, float(pulse))) if active else 0.0)
+            return SINGWS_THEME.bgm_styles()["player"].format(edge=edge) if SINGWS_THEME is not None else ""
         if active:
             glow = 0.14 + (0.11 * max(0.0, min(1.0, float(pulse))))
             border = 0.26 + (0.16 * max(0.0, min(1.0, float(pulse))))
@@ -10034,6 +10130,87 @@ class BackgroundMusicManager(QMainWindow):
             self._add_as_play_next_from_browser()
             return
         
+    def _up_next_row(self) -> int:
+        """Playlist row that plays after the current track (-1 when nothing is playing)."""
+        try:
+            player = self.bg_music
+            if not getattr(player, "playlist", None):
+                return -1
+            return int(player.current_index) + 1
+        except Exception:
+            return -1
+
+    def apply_bgm_redesign(self, on: bool):
+        """BGM tab redesign (off by default, setting ui_bgm_redesign): glass cards, a hero player, pill toggles, thin sliders and card rows.
+        Only styles and the row painter change: every control keeps its handler, and off puts back exactly what was there."""
+        on = bool(on)
+        if on == bool(getattr(self, "_bgm_redesign", False)):
+            return
+        try:
+            widgets = {
+                "shell": self.findChild(QFrame, "bgWorkspaceShell"), "player": self.bg_player_frame,
+                "browser": self.findChild(QFrame, "bgBrowserCard"), "playlist": self.findChild(QFrame, "bgPlaylistCard"),
+                "tree": self.fs_tree, "list": self.playlist_list, "now": self.now_playing_label, "kicker": self.bg_now_playing_kicker,
+                "seek": self.seek_slider, "vol": self.volume_slider, "sb": self.soundboard_slider,
+                "search": self.library_search, "psearch": self.playlist_search, "title": self.bg_workspace_title,
+            }
+            buttons = [self.prev_button, self.play_button, self.next_button, self.stop_button, self.shuffle_button,
+                       self.clear_playlist_button, self.add_selected_button, self.playlist_up_button, self.playlist_down_button,
+                       self.remove_selected_button]
+            checks = [self.enable_bg_cb, self.autoplay_cb, self.stop_after_current_cb]
+            if not hasattr(self, "_bgm_css_off"):
+                self._bgm_css_off = {k: w.styleSheet() for k, w in widgets.items() if w is not None}
+                self._bgm_css_off.update({("b", id(b)): b.styleSheet() for b in buttons})
+                self._bgm_css_off.update({("c", id(c)): c.styleSheet() for c in checks})
+                self._bgm_delegate_off = self.playlist_list.itemDelegate()
+                self._bgm_player_max_off = self.bg_player_frame.maximumHeight()
+                self._bgm_check_h_off = {id(c): (c.minimumHeight(), c.maximumHeight()) for c in checks}
+                self._bgm_spacing_off = self.playlist_list.spacing()
+            self._bgm_redesign = on
+            off = self._bgm_css_off
+            if not on:
+                for _w, _css in ([(w, off.get(k, "")) for k, w in widgets.items() if w is not None]
+                                 + [(b, off.get(("b", id(b)), "")) for b in buttons] + [(c, off.get(("c", id(c)), "")) for c in checks]):
+                    _set_css(_w, _css)
+                for c in checks:
+                    lo, hi = self._bgm_check_h_off.get(id(c), (0, 16777215))
+                    c.setMinimumHeight(lo)
+                    c.setMaximumHeight(hi)
+                self.playlist_list.setItemDelegate(self._bgm_delegate_off)
+                self.playlist_list.setAlternatingRowColors(True)
+                self.playlist_list.setSpacing(self._bgm_spacing_off)
+                self.fs_tree.setAlternatingRowColors(True)
+                self.bg_player_frame.setMaximumHeight(self._bgm_player_max_off)
+                self.bg_workspace_meta.setVisible(True)
+                self._bg_player_frame_css_cache = ""
+                self._apply_bg_pulse_style()
+                self.playlist_list.viewport().update()
+                return
+            th = SINGWS_THEME
+            css = th.bgm_styles() if th is not None else {}
+            self._bgm_css_on = css
+            pairs = [(widgets["browser"], th.glass_card_css("bgBrowserCard")), (widgets["playlist"], th.glass_card_css("bgPlaylistCard"))] if th is not None else []
+            pairs += [(widgets[k], css.get(v, "")) for k, v in (("shell", "shell"), ("title", "title"), ("kicker", "kicker"), ("now", "now"),
+                      ("seek", "slider"), ("vol", "slider"), ("sb", "slider"), ("search", "input"), ("psearch", "input"),
+                      ("tree", "tree"), ("list", "list"))]
+            pairs += [(b, css.get("danger" if b in (self.clear_playlist_button, self.remove_selected_button) else "ghost", "")) for b in buttons]
+            pairs += [(self.play_button, css.get("primary", ""))] + [(c, css.get("pill", "")) for c in checks]
+            for _w, _css in pairs:
+                _set_css(_w, _css)
+            for c in checks:
+                c.setFixedHeight(28)                      # Qt ignores a border-radius bigger than half the height, so the pill needs a fixed 28 px
+            self.bg_workspace_meta.setVisible(False)
+            self._bg_player_frame_css_cache = ""
+            self.bg_player_frame.setMaximumHeight(236)
+            self.fs_tree.setAlternatingRowColors(False)
+            self.playlist_list.setAlternatingRowColors(False)
+            self.playlist_list.setSpacing(0)
+            self.playlist_list.setItemDelegate(BgmPlaylistDelegate(self, self.playlist_list))
+            self.playlist_list.viewport().update()
+            self._apply_bg_pulse_style()
+        except Exception as exc:
+            _diag(f"[BGM-REDESIGN] apply failed: {exc}")
+
     def setup_ui(self):
         """Create the UI layout"""
         central = QWidget()
@@ -25544,6 +25721,14 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _apply_ui_bgm_redesign(self):
+        try:
+            mgr = getattr(self, "bg_manager", None)
+            if mgr is not None and hasattr(mgr, "apply_bgm_redesign"):
+                mgr.apply_bgm_redesign(bool(self.settings.get("ui_bgm_redesign", False)))
+        except Exception as exc:
+            _diag(f"[BGM-REDESIGN] host apply failed: {exc}")
+
     def _ui_redesign_on(self) -> bool:
         try:
             return bool(self.settings.get("ui_show_redesign", False))
@@ -25577,7 +25762,7 @@ class KaraokeApp(QWidget):
         prog.setContentsMargins(0, 0, 0, 0)
         prog.setSpacing(10)
         self.hero_seek_elapsed = QLabel("00:00")
-        self.hero_seek_elapsed.setStyleSheet(text_css("label", "text_muted"))
+        _set_css(self.hero_seek_elapsed, text_css("label", "text_muted"))
         self.hero_seek_slider = SeekSlider(Qt.Orientation.Horizontal)
         self.hero_seek_slider.setRange(0, 1000)
         self._restyle_seek_sliders(False)
@@ -25599,8 +25784,8 @@ class KaraokeApp(QWidget):
         self.hero_btn_restart = QPushButton("Restart")
         self.hero_btn_stop = QPushButton("Stop")
         self.hero_btn_next.setStyleSheet(SINGWS_THEME.button_css(padding="9px 16px", radius_px=8, variant="primary") if SINGWS_THEME is not None else subtle_button_css(padding="9px 16px", radius=8))
-        self.hero_btn_pause.setStyleSheet(subtle_button_css(padding="9px 14px", radius=8))
-        self.hero_btn_restart.setStyleSheet(subtle_button_css(padding="9px 14px", radius=8))
+        for _b in (self.hero_btn_pause, self.hero_btn_restart):
+            _set_css(_b, subtle_button_css(padding="9px 14px", radius=8))
         self.hero_btn_stop.setStyleSheet(danger_button_css(padding="9px 14px", radius=8))
         for b in (self.hero_btn_next, self.hero_btn_pause, self.hero_btn_restart, self.hero_btn_stop):
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -25941,7 +26126,7 @@ class KaraokeApp(QWidget):
             adv = QFontMetrics(f).horizontalAdvance(text)
             if adv > w - 4:
                 size = max(20, int(base * (w - 4) / max(1, adv)))
-        lab.setStyleSheet(text_css("display", "text_bright", f"font-size:{size}px;") if size != base else base_css)
+        _set_css(lab, text_css("display", "text_bright", f"font-size:{size}px;") if size != base else base_css)
 
     def _elide_hero_subtitle(self):
         """One line, cut with an ellipsis: a long 'Song . Artist (feat. ...)' used to wrap onto three lines, clip at the bottom and push the
@@ -26124,6 +26309,8 @@ class KaraokeApp(QWidget):
         # window is up every piece exists, so apply it once more, completely. (Turning it on from Settings later was always complete.)
         if not getattr(self, "_redesign_launch_applied", False):
             self._redesign_launch_applied = True
+            if self.settings.get("ui_bgm_redesign", False):
+                QTimer.singleShot(0, self._apply_ui_bgm_redesign)
             if self._ui_redesign_on():
                 QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
                 QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
@@ -31128,6 +31315,20 @@ class KaraokeApp(QWidget):
 
         redesign_cb.toggled.connect(on_redesign_toggled)
         _layout_card.addWidget(redesign_cb)
+
+        bgm_cb = QCheckBox("Use the new BGM tab look")
+        bgm_cb.setChecked(bool(self.settings.get("ui_bgm_redesign", False)))
+
+        def on_bgm_redesign_toggled(checked: bool):
+            self.settings["ui_bgm_redesign"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_ui_bgm_redesign()
+
+        bgm_cb.toggled.connect(on_bgm_redesign_toggled)
+        _layout_card.addWidget(bgm_cb)
 
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))
