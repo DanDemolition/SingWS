@@ -25922,6 +25922,32 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _elide_hero_subtitle(self):
+        """One line, cut with an ellipsis: a long 'Song . Artist (feat. ...)' used to wrap onto three lines, clip at the bottom and push the
+        brand line over the chips. The full text is kept so a wider window gets it back."""
+        lab = self.rotation_summary_subtitle
+        cur = lab.text()
+        shown = getattr(self, "_hero_sub_shown", None)
+        full = getattr(self, "_hero_sub_full", cur) if (shown is not None and cur == shown) else cur
+        w = max(40, lab.width())
+        fm = lab.fontMetrics()
+        limit = fm.lineSpacing() * 2 + 2               # two lines at most
+        def _fits(s):
+            return fm.boundingRect(QRect(0, 0, w, 10000), int(Qt.TextFlag.TextWordWrap), s).height() <= limit
+        out = full
+        if not _fits(out):
+            lo, hi = 0, len(full)                       # longest prefix that still fits with the ellipsis
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if _fits(full[:mid].rstrip() + "\u2026"):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            out = full[:lo].rstrip() + "\u2026"
+        self._hero_sub_full, self._hero_sub_shown = full, out
+        if out != cur:
+            lab.setText(out)
+
     def _hero_stage_sync(self):
         """Mirror the transport state into the hero (every 250 ms while the redesign is on)."""
         if not self._ui_redesign_on():
@@ -25953,6 +25979,17 @@ class KaraokeApp(QWidget):
             fmt = str(getattr(self, "_hero_format_text", "") or "")
             self.hero_chip_format.setText(fmt)
             self.hero_chip_format.setVisible(bool(fmt))
+            for _chip in (self.hero_chip_key, self.hero_chip_tempo, self.hero_chip_format):
+                _chip.setMinimumWidth(_chip.sizeHint().width())      # a pill never shows half its text ("Temp", "ZIP"), whatever the column does
+            if fmt:
+                try:
+                    # not enough room for all three pills: drop the format one rather than squash the others over each other
+                    room = self._hero_chips_layout.geometry().width() or self.hero_chip_key.parentWidget().width()
+                    need = sum(c.sizeHint().width() for c in (self.hero_chip_key, self.hero_chip_tempo, self.hero_chip_format)) + 2 * 8
+                    self.hero_chip_format.setVisible(need <= room)
+                except Exception:
+                    pass
+            self._elide_hero_subtitle()
             self.hero_btn_pause.setText("Resume" if self._is_karaoke_paused() else "Pause")
             try:
                 def _mss(v):

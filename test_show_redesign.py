@@ -130,5 +130,18 @@ class BlankHeroTitleGuard(unittest.TestCase):
 
 
 
+class HeroTextFitGuard(unittest.TestCase):
+    def test_the_hero_subtitle_is_cut_to_two_lines_and_the_chips_never_overlap(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()
+        body = src[src.index("def _elide_hero_subtitle"):src.index("def _hero_stage_sync")]
+        self.assertIn("lineSpacing() * 2", body)                                   # two lines at most
+        self.assertIn("self._hero_sub_full", body)                                 # the full text is kept for a wider window
+        sync = src[src.index("def _hero_stage_sync"):src.index("def _hero_seek_pressed")]
+        self.assertIn("self._elide_hero_subtitle()", sync)
+        self.assertIn("_chip.setMinimumWidth(_chip.sizeHint().width())", sync)     # a pill never shows half its text
+        self.assertIn("self.hero_chip_format.setVisible(need <= room)", sync)      # no room for all three: drop the format pill
+
+
+
 if __name__ == "__main__":
     unittest.main()
