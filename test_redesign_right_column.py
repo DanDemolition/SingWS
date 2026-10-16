@@ -229,18 +229,41 @@ class RightColumnTests(unittest.TestCase):
         refresh = src[src.index("def _refresh_mpv_video_views"):src.index("def _reveal_mpv_hosts_if_allowed")]
         self.assertIn("self._preview_overlay_resettle()", refresh)                      # re-raised after every native surface change
 
-    def test_the_overlay_is_placed_at_the_bottom_of_the_preview_and_raised(self):
-        from PyQt6.QtWidgets import QFrame
+    def test_the_overlay_window_sits_over_the_bottom_of_the_picture_and_hides_with_the_preview(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QWidget, QVBoxLayout
+        host = QWidget()
+        lay = QVBoxLayout(host)
         pw = self.m.PreviewWindow()
-        pw.resize(400, 300)
-        pw.show()
+        lay.addWidget(pw)
+        host.resize(500, 400)
+        host.show()
         self.app.processEvents()
-        pw.overlay = QFrame(pw)
-        pw.overlay.show()
+        pw.overlay = self.m.PreviewControlsWindow(host)
         pw.place_overlay()
         g = pw.overlay.geometry()
-        self.assertEqual((g.height(), g.x()), (46, pw._main_layout.contentsMargins().left() + 10))
-        self.assertLessEqual(g.bottom(), 300 - 10)
+        m = pw._main_layout.contentsMargins()
+        want = pw.mapToGlobal(QPoint(m.left() + 10, 0))
+        self.assertEqual((g.height(), g.x()), (46, want.x()))
+        self.assertTrue(pw.overlay.isVisible())
+        self.assertLessEqual(g.bottom(), pw.mapToGlobal(QPoint(0, pw.height())).y())          # inside the preview, not below it
+        host.hide()
+        self.app.processEvents()
+        pw.place_overlay()
+        self.assertFalse(pw.overlay.isVisible())                                             # preview not showing: no floating controls
+        pw.overlay.close()
+
+    def test_the_overlay_window_is_transparent_and_never_takes_focus(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QWidget
+        host = QWidget()
+        ov = self.m.PreviewControlsWindow(host)
+        self.assertTrue(ov.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+        self.assertTrue(bool(ov.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus))
+        self.assertGreater(ov.BAR.alpha(), 100)
+        self.assertLess(ov.BAR.alpha(), 215)                                                 # see-through, not solid
+        self.assertGreaterEqual(ov.RADIUS, 18.0)                                             # well rounded
+        ov.close()
 
 
 if __name__ == "__main__":

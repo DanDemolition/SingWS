@@ -15668,35 +15668,45 @@ class PreviewWindow(QWidget):
             _diag(f"[PREVIEW-ROUND] failed: {exc}")
 
     def place_overlay(self):
+        """Put the controls window over the bottom of the picture (global coordinates), just above the main window; hide it whenever the
+        preview itself is not showing (other tab, minimized, closed)."""
         ov = getattr(self, "overlay", None)
-        if ov is not None and ov.isVisible():
+        if ov is None:
+            return
+        try:
+            host = self.window()
+            if not (self.isVisible() and host is not None and host.isVisible() and not host.isMinimized()):
+                ov.hide()
+                return
             m = self._main_layout.contentsMargins()
-            ov.setGeometry(m.left() + 10, max(0, self.height() - m.bottom() - 10 - 46), max(0, self.width() - m.left() - m.right() - 20), 46)
-            ov.raise_()
-            self._style_overlay_layer(ov)
+            top_left = self.mapToGlobal(QPoint(m.left() + 10, max(0, self.height() - m.bottom() - 10 - 46)))
+            ov.setGeometry(top_left.x(), top_left.y(), max(0, self.width() - m.left() - m.right() - 20), 46)
+            if not ov.isVisible():
+                ov.show()
+            self._order_overlay_above_host(ov, host)
+        except Exception as exc:
+            _diag(f"[PREVIEW-OVERLAY] place failed: {exc}")
 
     @staticmethod
-    def _style_overlay_layer(ov):
-        """The overlay bar: slate, about 58% opaque (the video shows through), well rounded, with a fine slate border. Drawn by the view's own
-        layer, since a Qt stylesheet cannot make a native child translucent."""
+    def _order_overlay_above_host(ov, host):
+        """Same recipe as the ticker: right above this app's main window, never raising anything else, never hidden when another app is in front."""
+        if sys.platform != "darwin" or QGuiApplication.platformName() != "cocoa":
+            ov.raise_()
+            return
         try:
-            if QGuiApplication.platformName() != "cocoa":
-                return                      # the layer styling is for the real macOS windows only (headless test platforms have no NSView)
             import objc
             from ctypes import c_void_p
-            from AppKit import NSColor
-            view = objc.objc_object(c_void_p=c_void_p(int(ov.winId())))
-            view.setWantsLayer_(True)
-            layer = view.layer()
-            if layer is None:
+            from AppKit import NSWindowAbove
+            host_w = objc.objc_object(c_void_p=c_void_p(int(host.winId()))).window()
+            ov_w = objc.objc_object(c_void_p=c_void_p(int(ov.winId()))).window()
+            if host_w is None or ov_w is None:
                 return
-            layer.setBackgroundColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(30 / 255.0, 41 / 255.0, 59 / 255.0, 0.58).CGColor())     # slate, see-through
-            layer.setCornerRadius_(20.0)
-            layer.setMasksToBounds_(True)
-            layer.setBorderWidth_(1.0)
-            layer.setBorderColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(148 / 255.0, 163 / 255.0, 184 / 255.0, 0.30).CGColor())
+            ov_w.setLevel_(host_w.level())
+            ov_w.setHidesOnDeactivate_(False)
+            ov_w.setOpaque_(False)
+            ov_w.orderWindow_relativeTo_(NSWindowAbove, host_w.windowNumber())
         except Exception as exc:
-            _diag(f"[PREVIEW-OVERLAY] layer style failed: {exc}")
+            _diag(f"[PREVIEW-OVERLAY] ordering failed: {exc}")
 
     def _schedule_mpv_surface_refresh(self):
         try:
@@ -20544,6 +20554,55 @@ class ResizeNotifier(QObject):
             self._callback()
         except Exception:
             pass
+
+
+class WindowFollower(QObject):
+    """Calls `callback` (once, after the event loop turns) when the watched window moves, resizes, is shown, hidden, minimized or restored."""
+    _TYPES = (QEvent.Type.Move, QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.WindowStateChange, QEvent.Type.ActivationChange)
+
+    def __init__(self, window: QWidget, callback):
+        super().__init__(window)
+        self._callback = callback
+        self._pending = False
+        window.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() in self._TYPES and not self._pending:
+            self._pending = True
+            QTimer.singleShot(0, self._fire)
+        return False
+
+    def _fire(self):
+        self._pending = False
+        try:
+            self._callback()
+        except Exception:
+            pass
+
+
+class PreviewControlsWindow(QWidget):
+    """Show-tab redesign (experimental): the transport controls over the host preview video, in their own transparent frameless window.
+
+    A child widget of the main window cannot be see-through over a native video view (Qt composites an opaque black behind it), so this is a
+    separate window ordered just above the main window, the way the audience ticker is. It never takes focus."""
+
+    BAR = QColor(30, 41, 59, 184)          # slate, about 72% opaque: the video shows through a little
+    LINE = QColor(148, 163, 184, 77)
+    RADIUS = 20.0
+
+    def __init__(self, owner_window: QWidget):
+        super().__init__(owner_window, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(self.LINE, 1))
+        p.setBrush(self.BAR)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
 
 
 class SliderGlow(QWidget):
@@ -61469,16 +61528,13 @@ class KaraokeApp(QWidget):
             ov = getattr(pw, "overlay", None)
             if on:
                 if ov is None:
-                    ov = QFrame(pw)
-                    ov.setObjectName("previewOverlay")
-                    ov.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-                    ov.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)     # the layer paints the bar (translucent, rounded)
-                    ov.setAutoFillBackground(False)
+                    ov = PreviewControlsWindow(self)
                     lay = QHBoxLayout(ov)
                     lay.setContentsMargins(12, 6, 12, 6)
                     lay.setSpacing(8)
                     pw.overlay = ov
                     self._preview_overlay_layout = lay
+                    self._preview_overlay_follower = WindowFollower(self, pw.place_overlay)     # follow the main window
                 lay = self._preview_overlay_layout
                 if lay.indexOf(self.play_next) < 0:
                     for b in before:
@@ -61501,6 +61557,7 @@ class KaraokeApp(QWidget):
                 pw.set_native_round(14.0)
                 QTimer.singleShot(0, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))
                 QTimer.singleShot(250, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))
+                QTimer.singleShot(1000, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))       # late native surface changes
             else:
                 if ov is not None:
                     lay = self._preview_overlay_layout
