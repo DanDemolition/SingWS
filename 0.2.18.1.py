@@ -16677,6 +16677,12 @@ class LibraryCardDelegate(QStyledItemDelegate):
         duration = self.duration_from(right)
         hot = bool(option.state & QStyle.StateFlag.State_MouseOver)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if not selected and index.row() == 0:
+            try:
+                view = option.widget
+                selected = view is not None and not view.selectionModel().hasSelection()      # the mockup's first row is lit while nothing is picked
+            except Exception:
+                pass
         r = option.rect.adjusted(2, 2, -2, -2)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -25870,6 +25876,14 @@ class KaraokeApp(QWidget):
         if not self._ui_redesign_on():
             return
         self._bg_upnext_adapt()
+        try:
+            now = time.monotonic()
+            if now - float(getattr(self, "_song_count_at", 0.0)) > 60.0:       # one cheap COUNT a minute, so a finished scan shows up
+                self._song_count_at = now
+                n = song_index.song_count()
+                self.library_song_count.setText(f"{n:,} songs" if n else "")
+        except Exception:
+            pass
         try:
             if not self.hero_seek_slider.isSliderDown() and not getattr(self, "_karaoke_seek_dragging", False):
                 v = int(self.karaoke_seek_slider.value())
@@ -61416,6 +61430,12 @@ class KaraokeApp(QWidget):
             title = getattr(self, "_bg_main_title_raw", "") or ""
             artist = getattr(self, "_bg_main_artist_raw", "") or ""
             nxt = getattr(self, "_bg_main_next_raw", "") or ""
+            try:
+                last = str(getattr(self, "_last_sung_singer_display", "") or "").strip()
+                if artist and last and self._ui_redesign_on() and bool(getattr(self.bg_music, "is_playing", False)):
+                    artist = f"{artist} \u00b7 after {last}"       # the mockup's 'Avicii \u00b7 after Dana'
+            except Exception:
+                pass
             self.bg_main_title_label.setText(self._elide_for_label(self.bg_main_title_label, title))
             self.bg_main_artist_label.setText(self._elide_for_label(self.bg_main_artist_label, artist))
             self.bg_main_next_label.setText(self._elide_for_label(self.bg_main_next_label, nxt))

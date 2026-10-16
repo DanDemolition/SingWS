@@ -126,6 +126,21 @@ class LibraryRowTests(unittest.TestCase):
         self.assertEqual(len(box.actions()), 0)
         self.assertEqual(box.text(), "landslide")
 
+    def test_the_first_row_is_lit_only_while_nothing_is_selected(self):
+        lst, d, added = self.make()
+        lst.clearSelection()
+        lst.setCurrentRow(-1)
+        self.app.processEvents()
+        img = lst.viewport().grab().toImage()
+        first = lst.visualItemRect(lst.item(0)); second = lst.visualItemRect(lst.item(1))
+        lit = img.pixelColor(first.center().x() - 60, first.top() + 6).name()
+        plain = img.pixelColor(second.center().x() - 60, second.top() + 6).name()
+        self.assertNotEqual(lit, plain)                                   # first row has the highlight
+        lst.setCurrentRow(1)
+        self.app.processEvents()
+        img = lst.viewport().grab().toImage()
+        self.assertEqual(img.pixelColor(first.center().x() - 60, first.top() + 6).name(), plain)   # picking another row moves it
+
     def test_song_count_is_read_only_and_zero_without_an_index(self):
         import song_index
         self.assertEqual(song_index.song_count(Path(tempfile.mkdtemp()) / "missing.db"), 0)

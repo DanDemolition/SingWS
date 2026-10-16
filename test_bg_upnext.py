@@ -120,6 +120,12 @@ class BgUpNextTests(unittest.TestCase):
         self.assertIn("self.video_controls_splitter.setMinimumHeight(", src)
         self.assertIn("self.video_controls_splitter.setMinimumHeight(0)", src)
 
+    def test_the_music_subtitle_adds_after_the_last_singer_only_with_the_redesign_and_while_playing(self):
+        body = SRC[SRC.index("def _render_bg_main_text"):SRC.index("def _refresh_bg_main_panel")]
+        self.assertIn("self._ui_redesign_on()", body)
+        self.assertIn('getattr(self.bg_music, "is_playing", False)', body)
+        self.assertIn("after {last}", body)
+
 
 if __name__ == "__main__":
     unittest.main()
