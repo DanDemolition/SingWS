@@ -144,6 +144,25 @@ class HeroTextFitGuard(unittest.TestCase):
         self.assertIn("self.hero_chip_format.setVisible(need <= room)", sync)      # no room for all three: drop the format pill
 
 
+    def test_the_hero_time_left_always_has_its_minus_but_the_ticker_label_stays_unsigned(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()
+        ns = {}
+        body = src[src.index("    def _hero_remaining_text"):src.index("    def _fmt_karaoke_time")]
+        import textwrap
+        exec(textwrap.dedent(body), ns)
+
+        class Lbl:
+            def __init__(self, t): self._t = t
+            def text(self): return self._t
+
+        class Fake:
+            def __init__(self, t): self.karaoke_remaining_label = Lbl(t)
+        f = ns["_hero_remaining_text"]
+        self.assertEqual(f(Fake("02:52")), "-02:52")
+        self.assertEqual(f(Fake("-00:00")), "-00:00")
+        self.assertEqual(f(Fake("")), "")
+        self.assertNotIn("setText(self._hero_remaining_text())", src[src.index("def _update_karaoke_seek_ui"):src.index("def _on_karaoke_seek_pressed")])
+
 
 if __name__ == "__main__":
     unittest.main()

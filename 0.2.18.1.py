@@ -8588,7 +8588,7 @@ class VideoAreaWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 170))
+        painter.setBrush(QColor(8, 6, 20, 225))      # near-solid, so the card reads over busy artwork
         painter.drawRoundedRect(card_x, card_y, card_w, card_h, 16, 16)
 
         pad = 12
@@ -16956,7 +16956,9 @@ class QueueCardDelegate(QStyledItemDelegate):
             bfont.setPixelSize(14)         # the singer's name: 14px bold
             bfont.setBold(True)
             painter.setFont(bfont)
-            painter.setPen(QColor(230, 232, 240))
+            # a singer with no song in the rotation steps back to grey, so who is still in the running reads at a glance
+            no_song = status != "current" and self._kind_at(index, index.row() + 1) != "song"
+            painter.setPen(QColor(120, 126, 150) if no_song else QColor(230, 232, 240))
             fm = QFontMetrics(bfont)
             name_rect = QRect(x0, left_rect.top() + 4, max(0, left_rect.right() - x0), left_rect.height() - 4)
             painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -26763,7 +26765,7 @@ class KaraokeApp(QWidget):
                     self.hero_seek_slider.setValue(v)
                     self.hero_seek_slider.blockSignals(False)
                 self.hero_seek_elapsed.setText(self.karaoke_elapsed_label.text())
-                self.hero_seek_remaining.setText(self.karaoke_remaining_label.text())
+                self.hero_seek_remaining.setText(self._hero_remaining_text())
             try:
                 key = int(getattr(self, "_current_karaoke_semitones", 0) or 0)
             except Exception:
@@ -26811,7 +26813,7 @@ class KaraokeApp(QWidget):
             self.karaoke_seek_slider.blockSignals(False)
             self._on_karaoke_seek_value_changed(int(value))
             self.hero_seek_elapsed.setText(self.karaoke_elapsed_label.text())
-            self.hero_seek_remaining.setText(self.karaoke_remaining_label.text())
+            self.hero_seek_remaining.setText(self._hero_remaining_text())
         except Exception:
             pass
 
@@ -29465,6 +29467,9 @@ class KaraokeApp(QWidget):
     def _karaoke_seek_seconds(self, seconds: float) -> bool:
         """Seek karaoke playback to absolute seconds."""
         transport = getattr(self, "karaoke_transport", None)
+        if self._karafun_active_entry() is not None:
+            # KaraFun plays the song: seek by its Skip 10s menu items (lands within ~5 s)
+            return bool(self._karafun_seek_to(float(seconds)))
         if transport is None:
             return False
         try:
@@ -33472,6 +33477,13 @@ class KaraokeApp(QWidget):
         except Exception:
             position = 0.0
             duration = 0.0
+        try:
+            kf_times = self._karafun_display_times()
+        except Exception:
+            kf_times = None
+        if kf_times is not None:
+            # KaraFun plays outside SingWS: its clock is the app's own model of it
+            position, duration = kf_times
         position = round(float(position or 0.0), 3)
         duration = round(float(duration or 0.0), 3)
         bg = getattr(self, "bg_music", None)
@@ -33492,7 +33504,10 @@ class KaraokeApp(QWidget):
             play_title = str(rotation["current"]["title"] or "").strip()
             try:
                 current_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip()
-                if current_path:
+                if current_path.lower().startswith("karafun_streaming:"):
+                    play_artist = str(getattr(self, "_current_karaoke_artist", "") or "").strip()
+                    play_title = str(getattr(self, "_current_karaoke_title", "") or "").strip() or play_title
+                elif current_path:
                     display_name = self.lookup_display_name(current_path, artist_title_only=True)
                     if " • " in display_name:
                         play_artist = display_name.split(" • ", 1)[0].strip()
@@ -33593,6 +33608,9 @@ class KaraokeApp(QWidget):
             current_singer = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
             current_path = str(getattr(self, "_current_karaoke_song_path", "") or "").strip()
             current_title = self._host_song_title_from_path(current_path)
+            if current_path.lower().startswith("karafun_streaming:"):
+                # a KaraFun song is not in the library index: use its own title, never the streaming id
+                current_title = str(getattr(self, "_current_karaoke_title", "") or "").strip() or current_title
             current_item_id = "|".join(self._current_play_item_key()) if self._current_play_item_key() != ("", "") else ""
 
         next_slot = self._host_empty_rotation_slot()
@@ -33757,6 +33775,9 @@ class KaraokeApp(QWidget):
             dur_ns, pos_ns = self._gst_query_times()
             pos = (pos_ns or 0) / NS_PER_SECOND
             dur = (dur_ns or 0) / NS_PER_SECOND
+            kf_times = self._karafun_display_times() if self._karafun_active_entry() is not None else None
+            if kf_times is not None:
+                pos, dur = kf_times
             target = max(0.0, pos + float(delta_seconds))
             if dur > 0:
                 target = min(dur, target)
@@ -41284,6 +41305,11 @@ class KaraokeApp(QWidget):
 
             self._add_song_to_queue(singer_name, song_data)
             self.update_queue_display()
+
+    def _hero_remaining_text(self) -> str:
+        """The hero card's time-left, always with its minus sign (the ticker's own timer reads the unsigned label)."""
+        txt = str(self.karaoke_remaining_label.text() or "").strip()
+        return txt if (not txt or txt.startswith("-")) else "-" + txt
 
     def _fmt_karaoke_time(self, sec: float) -> str:
         try:

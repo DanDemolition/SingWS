@@ -90,6 +90,16 @@ class QueueCardTests(unittest.TestCase):
         self.assertEqual(len(set(rows)), 1, f"a line shows between the name row and the first song: {rows}")
         self.assertGreater(top.height(), 0)
 
+    def test_a_singer_with_no_song_has_a_dimmer_name(self):
+        view, model, d = self.build([0, 2])
+        img = view.viewport().grab().toImage()
+
+        def brightest(row):
+            r = view.visualRect(model.index(row, 0))
+            return max(img.pixelColor(x, y).red() for x in range(r.left() + 44, r.left() + 120) for y in range(r.top() + 4, r.bottom() - 2))
+        empty_name, full_name = brightest(0), brightest(1)
+        self.assertLess(empty_name, full_name - 40, f"empty singer {empty_name} vs singer with songs {full_name}")
+
     def test_selecting_a_song_selects_the_look_of_the_whole_card(self):
         view, model, d = self.build([3, 2])
         plain = view.viewport().grab().toImage().pixelColor(200, view.visualRect(model.index(0, 0)).top() + 6).name()
