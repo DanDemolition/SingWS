@@ -4062,6 +4062,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_chat_redesign": False,             # new Chat page look (experimental); off = the current look
     "ui_waitlist_redesign": False,         # new Waitlist look (experimental); off = the current look
     "ui_history_redesign": False,          # new Singer History look (experimental); off = the current look
     "ui_bgm_redesign": False,              # new BGM tab look (experimental); off = the current look
@@ -25883,6 +25884,38 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _apply_ui_chat_redesign(self):
+        """Chat page redesign (setting ui_chat_redesign, off by default): ghost / primary buttons, rounded inputs and views, pill tabs.
+        Styles only; handlers untouched; off restores exactly. (The message bubbles are generated HTML and keep their current look.)"""
+        try:
+            on = bool(self.settings.get("ui_chat_redesign", False))
+            if on == bool(getattr(self, "_chat_redesign", False)) or not hasattr(self, "chat_tab_bar"):
+                return
+            ghost = [self.chat_clear_button, self.chat_emoji_button, self.chat_gif_button, self.chat_photo_button, self.room_refresh_button,
+                     self.room_say_emoji_button, self.room_say_gif_button, self.room_say_photo_button]
+            danger = [self.room_clear_button]
+            primary = [self.chat_send_button, self.room_say_send_button]
+            inputs = [self.chat_message_input, self.room_say_input, self.room_search_input]
+            views = [self.chat_transcript, self.room_view]
+            allw = ghost + danger + primary + inputs + views + [self.chat_singer_list, self.chat_tab_bar]
+            if not hasattr(self, "_chat_css_off"):
+                self._chat_css_off = {id(w): w.styleSheet() for w in allw}
+            self._chat_redesign = on
+            off = self._chat_css_off
+            if not on:
+                for _w in allw:
+                    _set_css(_w, off.get(id(_w), ""))
+                return
+            th = SINGWS_THEME
+            css = th.chat_styles() if th is not None else {}
+            pairs = [(b, css.get("ghost", "")) for b in ghost] + [(b, css.get("danger", "")) for b in danger]
+            pairs += [(b, css.get("primary_btn", "")) for b in primary] + [(i, css.get("input", "")) for i in inputs]
+            pairs += [(v, css.get("viewbox", "")) for v in views] + [(self.chat_singer_list, css.get("chatlist", "")), (self.chat_tab_bar, css.get("tabbar", ""))]
+            for _w, _css in pairs:
+                _set_css(_w, _css)
+        except Exception as exc:
+            _diag(f"[CHAT-REDESIGN] apply failed: {exc}")
+
     def _apply_ui_waitlist_redesign(self):
         """Waitlist redesign (setting ui_waitlist_redesign, off by default): glass shell, card rows with avatar and status tag, restyled buttons.
         Styles and the row painter only; handlers untouched; off restores exactly."""
@@ -26577,6 +26610,8 @@ class KaraokeApp(QWidget):
                 QTimer.singleShot(0, self._apply_ui_history_redesign)
             if self.settings.get("ui_waitlist_redesign", False):
                 QTimer.singleShot(0, self._apply_ui_waitlist_redesign)
+            if self.settings.get("ui_chat_redesign", False):
+                QTimer.singleShot(0, self._apply_ui_chat_redesign)
             if self._ui_redesign_on():
                 QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
                 QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
@@ -31623,6 +31658,20 @@ class KaraokeApp(QWidget):
 
         waitlist_cb.toggled.connect(on_waitlist_redesign_toggled)
         _layout_card.addWidget(waitlist_cb)
+
+        chat_cb = QCheckBox("Use the new Chat look")
+        chat_cb.setChecked(bool(self.settings.get("ui_chat_redesign", False)))
+
+        def on_chat_redesign_toggled(checked: bool):
+            self.settings["ui_chat_redesign"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_ui_chat_redesign()
+
+        chat_cb.toggled.connect(on_chat_redesign_toggled)
+        _layout_card.addWidget(chat_cb)
 
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))

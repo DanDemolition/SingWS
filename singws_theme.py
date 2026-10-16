@@ -842,3 +842,20 @@ def history_styles() -> dict:
     s["muted"] = "color: rgba(154,160,189,1); font-size: 12px; font-weight: 600;"
     s["toggle"] = (s["ghost"].replace("QPushButton {", "QPushButton { text-align: left;", 1))
     return s
+
+
+def chat_styles() -> dict:
+    """Chat page redesign stylesheets by name (shares the ghost/primary/input looks of the other redesigned pages)."""
+    s = history_styles()
+    s["viewbox"] = ("QTextBrowser { background: rgba(0,0,0,0.20); border: 1px solid rgba(140,150,200,0.14); border-radius: 12px;"
+                    " padding: 10px; color: #e8eaf4; font-size: 13px; }")
+    s["chatlist"] = ("QListWidget { background: rgba(255,255,255,0.03); border: 1px solid rgba(140,150,200,0.12); border-radius: 12px; padding: 6px; outline: 0; }"
+                     " QListWidget::item { padding: 9px 10px; border-radius: 8px; color: #e8eaf4; }"
+                     " QListWidget::item:hover { background: rgba(255,255,255,0.055); }"
+                     " QListWidget::item:selected { background: rgba(124,61,255,0.34); color: white; }")
+    s["tabbar"] = ("QTabBar { background: transparent; qproperty-drawBase: 0; }"
+                   " QTabBar::tab { background: transparent; color: rgba(205,210,230,0.96); border: 1px solid rgba(140,150,200,0.28);"
+                   " border-radius: 14px; padding: 7px 20px; margin: 2px 8px 6px 0px; font-size: 13px; font-weight: 700; min-height: 18px; }"
+                   " QTabBar::tab:hover { background: rgba(124,61,255,0.16); }"
+                   " QTabBar::tab:selected { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8b4dff, stop:1 #6a2fe6); color: white; border-color: transparent; }")
+    return s
