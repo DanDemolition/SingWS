@@ -8886,6 +8886,12 @@ class _VinylRenderer:
     never rotates, so it stays readable. The record eases up to 33 1/3 rpm while a karaoke track plays and coasts to a stop;
     the ring keeps turning slowly and the halo pulses, like the original design.
     """
+    # Frame intervals. 30 fps while the record turns (it moves 6-7 degrees a frame), 12 fps for the idle ring. Measured on the dev Mac: 60 fps
+    # cost about 24 points of one core on top of the original layout while a song played; these halve that. Motion is time-based, so the speed
+    # does not depend on the rate.
+    SPIN_MS = 33
+    IDLE_MS = 83
+
     RPM_DEG_PER_SEC = 200.0          # 33 1/3 rpm
     RING_DEG_PER_SEC = 40.0          # one lap every 9 s
     PULSE_SECONDS = 2.6
@@ -8936,7 +8942,7 @@ class _VinylRenderer:
         want = self.animate and self.owner.isVisible()
         if want and not self.timer.isActive():
             self._last = time.monotonic()
-            self.timer.start(16)
+            self.timer.start(self.SPIN_MS)
         elif not want and self.timer.isActive():
             self.timer.stop()
 
@@ -8946,7 +8952,7 @@ class _VinylRenderer:
         self._last = now
         self.step(dt, self.playing())
         # faster frames while the record is actually turning, slow ones for the idle ring and halo
-        self.timer.setInterval(16 if (self.velocity > 0.0 or self.playing()) else 66)
+        self.timer.setInterval(self.SPIN_MS if (self.velocity > 0.0 or self.playing()) else self.IDLE_MS)
         self.owner.update()
 
     def step(self, dt: float, playing: bool):
@@ -15673,6 +15679,9 @@ class PreviewWindow(QWidget):
         ov = getattr(self, "overlay", None)
         if ov is None:
             return
+        if not getattr(self, "overlay_active", False):
+            ov.hide()                                   # switched off: never reappear (an empty bar) from a stray window event
+            return
         try:
             host = self.window()
             if not (self.isVisible() and host is not None and host.isVisible() and not host.isMinimized()):
@@ -15723,6 +15732,11 @@ class PreviewWindow(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._schedule_mpv_surface_refresh()
+        QTimer.singleShot(0, self.place_overlay)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        QTimer.singleShot(0, self.place_overlay)        # another tab: the floating controls go with the preview
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -20643,34 +20657,31 @@ class SliderGlow(QWidget):
             p.drawRoundedRect(QRectF(0, cy - h / 2.0, fill, h), h / 2.0, h / 2.0)
 
 
-class CanvasGlowOverlay(QWidget):
-    """Show-tab redesign: the page background glow (purple top-right, green bottom-left) painted behind every other widget."""
+class CanvasGlowOverlay:
+    """Show-tab redesign: the page background (deep blue-black with a purple glow top-right and a faint green one bottom-left), drawn once per
+    window size into a pixmap. The main window blits it from its paintEvent."""
 
-    def __init__(self, window: QWidget):
-        super().__init__(window)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        window.installEventFilter(self)
-        self.setGeometry(window.rect())
-        self.lower()
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Resize:
-            self.setGeometry(self.parentWidget().rect())
-            self.lower()
-        return False
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        w, h = float(self.width()), float(self.height())
-        p.fillRect(self.rect(), QColor(5, 6, 13))                  # the mockup's canvas: a deep blue-black
-        purple = QRadialGradient(QPointF(w * 0.70, -h * 0.10), max(w, h) * 0.55)
-        purple.setColorAt(0.0, QColor(139, 92, 246, 46))
-        purple.setColorAt(1.0, QColor(139, 92, 246, 0))
-        p.fillRect(self.rect(), purple)
-        green = QRadialGradient(QPointF(0.0, h), max(w, h) * 0.40)
-        green.setColorAt(0.0, QColor(52, 224, 138, 18))
-        green.setColorAt(1.0, QColor(52, 224, 138, 0))
-        p.fillRect(self.rect(), green)
+    @staticmethod
+    def _backdrop(window: QWidget, store: dict) -> QPixmap:
+        dpr = float(window.devicePixelRatioF())
+        key = (window.width(), window.height(), dpr)
+        if store.get("_canvas_key") != key:
+            pm = QPixmap(int(window.width() * dpr), int(window.height() * dpr))
+            pm.setDevicePixelRatio(dpr)
+            p = QPainter(pm)
+            w, h = float(window.width()), float(window.height())
+            p.fillRect(QRectF(0, 0, w, h), QColor(5, 6, 13))
+            purple = QRadialGradient(QPointF(w * 0.70, -h * 0.10), max(w, h) * 0.55)
+            purple.setColorAt(0.0, QColor(139, 92, 246, 46))
+            purple.setColorAt(1.0, QColor(139, 92, 246, 0))
+            p.fillRect(QRectF(0, 0, w, h), purple)
+            green = QRadialGradient(QPointF(0.0, h), max(w, h) * 0.40)
+            green.setColorAt(0.0, QColor(52, 224, 138, 18))
+            green.setColorAt(1.0, QColor(52, 224, 138, 0))
+            p.fillRect(QRectF(0, 0, w, h), green)
+            p.end()
+            store["_canvas_pm"], store["_canvas_key"] = pm, key
+        return store["_canvas_pm"]
 
 
 class HeroGlowOverlay(QWidget):
@@ -20690,16 +20701,29 @@ class HeroGlowOverlay(QWidget):
             self.lower()
         return False
 
+    def _pixmap(self):
+        dpr = float(self.devicePixelRatioF())
+        key = (self.width(), self.height(), dpr)
+        if getattr(self, "_cache_key", None) != key:
+            pm = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            g = QRadialGradient(QPointF(self.width() * 0.16, 0.0), max(240.0, self.width() * 0.6))
+            g.setColorAt(0.0, QColor(139, 92, 246, 66))
+            g.setColorAt(1.0, QColor(139, 92, 246, 0))
+            p.fillRect(QRectF(0, 0, self.width(), self.height()), g)
+            p.end()
+            self._cache, self._cache_key = pm, key
+        return self._cache
+
     def paintEvent(self, event):
         p = QPainter(self)
         clip = QPainterPath()
         clip.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 13, 13)     # the card's rounded corners
         p.setClipPath(clip)
-        g = QRadialGradient(QPointF(self.width() * 0.16, 0.0), max(240.0, self.width() * 0.6))
-        g.setColorAt(0.0, QColor(139, 92, 246, 66))
-        g.setColorAt(1.0, QColor(139, 92, 246, 0))
-        p.fillRect(self.rect(), g)
-
+        p.setClipRect(event.rect(), Qt.ClipOperation.IntersectClip)
+        p.drawPixmap(0, 0, self._pixmap())
 
 class DotWidget(QWidget):
     """A small glowing dot (the green dot before NOW SINGING)."""
@@ -25492,6 +25516,18 @@ class KaraokeApp(QWidget):
     # ------------------------------------------------------------------ Show tab redesign (hero stage)
     # Everything here is shown only with the `ui_show_redesign` setting; off (the default) leaves the current look untouched.
     # The new buttons and the seek bar call the SAME handlers as the existing transport controls, so there is one behaviour.
+
+    def paintEvent(self, event):
+        """With the redesign on the page gets its deep canvas and soft glow, drawn once and blitted here (a separate full-window widget
+        underneath cost about 9 points of CPU while a song played; this costs next to nothing)."""
+        super().paintEvent(event)
+        try:
+            if self.settings.get("ui_show_redesign", False):
+                p = QPainter(self)
+                p.setClipRect(event.rect())
+                p.drawPixmap(0, 0, CanvasGlowOverlay._backdrop(self, self.__dict__))
+        except Exception:
+            pass
 
     def _ui_redesign_on(self) -> bool:
         try:
@@ -61555,6 +61591,7 @@ class KaraokeApp(QWidget):
                     pw.overlay = ov
                     self._preview_overlay_layout = lay
                     self._preview_overlay_follower = WindowFollower(self, pw.place_overlay)     # follow the main window
+                pw.overlay_active = True
                 lay = self._preview_overlay_layout
                 if lay.indexOf(self.play_next) < 0:
                     for b in before:
@@ -61579,6 +61616,7 @@ class KaraokeApp(QWidget):
                 QTimer.singleShot(250, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))
                 QTimer.singleShot(1000, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))       # late native surface changes
             else:
+                pw.overlay_active = False
                 if ov is not None:
                     lay = self._preview_overlay_layout
                     if lay.indexOf(self.play_next) >= 0:
@@ -61674,10 +61712,7 @@ class KaraokeApp(QWidget):
                 if getattr(lw, "_css_off", None) is None:
                     lw._css_off = lw.styleSheet()
                 styled.append((lw, "QAbstractItemView { background: transparent; border: none; }" if on else lw._css_off))
-            if getattr(self, "canvas_glow", None) is None:
-                self.canvas_glow = CanvasGlowOverlay(self)
-            self.canvas_glow.setVisible(on)
-            self.canvas_glow.lower()
+            self.update()                      # the window paints the backdrop itself (see paintEvent)
             # small spaced-caps labels and a compact stepper look, as in the mockup
             cap = text_css("caption", "text_soft")
             styled += [

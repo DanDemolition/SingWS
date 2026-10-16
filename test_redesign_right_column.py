@@ -240,6 +240,7 @@ class RightColumnTests(unittest.TestCase):
         host.show()
         self.app.processEvents()
         pw.overlay = self.m.PreviewControlsWindow(host)
+        pw.overlay_active = True
         pw.place_overlay()
         g = pw.overlay.geometry()
         m = pw._main_layout.contentsMargins()
@@ -251,6 +252,10 @@ class RightColumnTests(unittest.TestCase):
         self.app.processEvents()
         pw.place_overlay()
         self.assertFalse(pw.overlay.isVisible())                                             # preview not showing: no floating controls
+        host.show()
+        pw.overlay_active = False
+        pw.place_overlay()
+        self.assertFalse(pw.overlay.isVisible())                                             # switched off: it never comes back by itself
         pw.overlay.close()
 
     def test_the_overlay_window_is_transparent_and_never_takes_focus(self):

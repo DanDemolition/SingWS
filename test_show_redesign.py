@@ -89,7 +89,7 @@ class ShowRedesignTests(unittest.TestCase):
         body = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
         self.assertIn("glass_card_css(name)", body)
         self.assertIn("card_css(name)", body)                    # today's card style is what comes back
-        self.assertIn("self.canvas_glow.setVisible(on)", body)
+        self.assertIn("self.update()", body)                       # the window repaints its own backdrop (no extra full-window widget)
         self.assertIn("lw._css_off", body)                       # the two lists get their own old style back
 
     def test_bottom_nav_is_a_glass_strip_with_dim_labels_and_goes_back_when_off(self):
@@ -118,6 +118,7 @@ class ShowRedesignTests(unittest.TestCase):
         live = SRC[SRC.index("def _rotation_hero_live_css(self"):SRC.index("def _rotation_hero_live_css_base")]
         self.assertIn("self._ui_redesign_on()", live)
         canvas = SRC[SRC.index("class CanvasGlowOverlay"):SRC.index("class HeroGlowOverlay")]
+        self.assertIn("def paintEvent(self, event):\n        \"\"\"With the redesign on the page gets its deep canvas", SRC)
         self.assertIn("QColor(5, 6, 13)", canvas)                # the mockup's deeper canvas
 
 

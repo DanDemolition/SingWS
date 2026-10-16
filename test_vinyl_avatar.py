@@ -128,6 +128,14 @@ class VinylAvatarTests(unittest.TestCase):
             self.assertFalse(a.grab().toImage().isNull())
             a.hide()
 
+    def test_frame_rates_are_the_cheaper_ones_measured_on_the_dev_mac(self):
+        # 60 fps cost about 24 points of one core during a song; 30 fps spinning and 12 fps for the idle ring halve that.
+        self.assertEqual((self.m._VinylRenderer.SPIN_MS, self.m._VinylRenderer.IDLE_MS), (33, 83))
+        a = self.make(playing=lambda: True)
+        a.show()
+        self.app.processEvents()
+        self.assertEqual(a._vinyl.timer.interval(), 33)
+
 
 class SliderGlowTests(unittest.TestCase):
     def tearDown(self):
