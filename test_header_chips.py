@@ -17,6 +17,8 @@ def _close_all_widgets():
     if app is None:
         return
     for w in list(app.topLevelWidgets()):
+        if type(w).__name__ == "KaraokeApp":
+            continue                      # a whole app window owned by another test: closing it runs the full shutdown and can block
         try:
             w.hide()
             w.close()
