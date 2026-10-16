@@ -176,6 +176,42 @@ class RightColumnTests(unittest.TestCase):
         self.assertNotEqual(inside.name(), outside.name())
         self.assertLess(inside.red() + inside.green() + inside.blue(), outside.red() + outside.green() + outside.blue())   # darker bar
 
+    def test_remembered_sizes_and_fonts_come_back_exactly_when_the_redesign_goes_off(self):
+        # Found by diffing every widget's geometry before/after turning the redesign on and off: buttons kept the redesign's size and font.
+        from types import SimpleNamespace
+        from PyQt6.QtGui import QFont
+        from PyQt6.QtWidgets import QPushButton, QSizePolicy
+        KA = self.m.KaraokeApp
+        btn = QPushButton("x")
+        f = QFont()
+        f.setPointSize(18)
+        f.setBold(True)
+        btn.setFont(f)
+        btn.setFixedSize(48, 38)
+        btn.setMinimumWidth(0)
+        btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        ns = SimpleNamespace(settings={"ui_show_redesign": True})
+        ns._ui_redesign_on = lambda: True
+        ns.__dict__.setdefault("_redesign_orig_sizes", {})
+        KA._redesign_remember(ns, btn)
+        btn.setFixedSize(34, 30)
+        f2 = btn.font()
+        f2.setPointSize(14)
+        btn.setFont(f2)
+        KA._redesign_restore(ns, btn)
+        self.assertEqual((btn.minimumWidth(), btn.maximumWidth(), btn.minimumHeight(), btn.maximumHeight()), (0, 48, 38, 38))
+        self.assertEqual((btn.font().pointSize(), btn.font().bold()), (18, True))
+
+    def test_nothing_is_remembered_while_the_redesign_is_off_so_an_early_half_built_state_is_never_the_original(self):
+        from types import SimpleNamespace
+        from PyQt6.QtWidgets import QPushButton
+        KA = self.m.KaraokeApp
+        btn = QPushButton("x")
+        ns = SimpleNamespace(settings={})
+        ns._ui_redesign_on = lambda: False
+        KA._redesign_remember(ns, btn)
+        self.assertEqual(ns.__dict__.get("_redesign_orig_sizes", {}), {})
+
 
 if __name__ == "__main__":
     unittest.main()

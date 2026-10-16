@@ -9298,7 +9298,7 @@ class BarLevelMeter(QWidget):
             return
         self._glow_style = on
         self._n_bars = 20 if on else 16
-        self._heights = self._rest_heights() if on and not self._active else [0.0] * self._n_bars
+        self._heights = self._rest_heights() if on and not self._active else [0.10] * self._n_bars     # 0.10 is how the meter starts
         self.update()
 
     def _rest_heights(self):
@@ -25438,7 +25438,11 @@ class KaraokeApp(QWidget):
                 # the mockup has no ROTATION title row: its facts live in the "UP NEXT" summary
                 for w in (self.rotation_title_label, self.queue_label, self._rotation_divider):
                     w.setVisible(not on)
-                self.search_input.setMinimumHeight(38 if on else max(int(self.search_input.sizeHint().height() * 1.45), 42))
+                self._redesign_remember(self.search_input)
+                if on:
+                    self.search_input.setMinimumHeight(38)
+                else:
+                    self._redesign_restore(self.search_input)
             except Exception:
                 pass
             try:
@@ -25521,7 +25525,7 @@ class KaraokeApp(QWidget):
                 _diag(f"[SHOW-REDESIGN] queue cards failed: {exc}")
             self.last_sung_label.setVisible(not on)          # its NEXT line repeated the on-deck singer
             for _w, _css in ((self.rotation_summary_title, text_css("display" if on else "hero", "text_bright")),
-                             (self.rotation_summary_kicker, text_css("label", "success" if on else "accent_bright"))):
+                             (self.rotation_summary_kicker, f"color:{_v('success' if on else 'accent_bright')}; font-size:12px; font-weight:850; letter-spacing:0px;")):
                 _w.setStyleSheet(_css)
             self.rotation_summary_card.setMinimumHeight(200 if on else 248)
             try:
@@ -25637,16 +25641,22 @@ class KaraokeApp(QWidget):
         try:
             for w in (self.karaoke_elapsed_label, self.karaoke_seek_slider, self.karaoke_remaining_label):
                 w.setVisible(not on)                 # the hero's progress bar is the seek control now
-            w_btn, h_btn = (34, 30) if on else (48, 38)
+            w_btn, h_btn = (34, 30)
             if getattr(self, "_transport_backdrop", None) is not None:
                 self._transport_backdrop.setVisible(on)
-            for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button, self.audio_output_button):
-                b.setFixedSize(w_btn, h_btn)
-                b.setMaximumWidth(w_btn)
-            for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button):
-                f = b.font()
-                f.setPointSize(14 if on else 18)
-                b.setFont(f)
+            _tbtns = (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button, self.audio_output_button)
+            self._redesign_remember(*_tbtns)
+            for b in _tbtns:
+                if on:
+                    b.setFixedSize(w_btn, h_btn)
+                    b.setMaximumWidth(w_btn)
+            if not on:
+                self._redesign_restore(*_tbtns)
+            if on:
+                for b in (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button):
+                    f = b.font()
+                    f.setPointSize(14)
+                    b.setFont(f)                     # off: _redesign_restore gives back the original (bold 18 pt) font
             for lab, text in ((self.karaoke_tempo_label, "TEMPO" if on else "Tempo"), (self.karaoke_key_label, "KEY" if on else "Key")):
                 lab.setText(text)
             # TEMPO / KEY: the label stays left, the steppers move to the right edge (Global ends the tempo row)
@@ -25683,6 +25693,8 @@ class KaraokeApp(QWidget):
             title = str(title or "").strip()
             artist = str(artist or "").strip()
             self.rotation_summary_subtitle.setText(" · ".join([p for p in (title, artist) if p]) or "Ready to sing")
+            if getattr(self, "_subtitle_css_off", None) is None:
+                self._subtitle_css_off = self.rotation_summary_subtitle.styleSheet()
             self.rotation_summary_subtitle.setStyleSheet(text_css("title", "text_muted"))
             self.rotation_summary_meta.setText(str(brand or "").strip())
             low = str(path or "").lower()
@@ -37421,15 +37433,11 @@ class KaraokeApp(QWidget):
                 self._now_singing_active_css = self._now_singing_active_css_for_pulse(pulse)
                 self.now_singing_label.setStyleSheet(self._now_singing_active_css)
             if getattr(self, "rotation_summary_kicker", None) is not None:
-                if active:
-                    color = _v("accent_bright")
-                    self.rotation_summary_kicker.setStyleSheet(
-                        f"color:{color}; font-size:12px; font-weight:850; letter-spacing:0px;"
-                    )
-                else:
-                    self.rotation_summary_kicker.setStyleSheet(
-                        f"color:{_v('accent_bright')}; font-size:12px; font-weight:850; letter-spacing:0px;"
-                    )
+                # the redesign's label is the mockup's green; off keeps the original violet (same 12 px / 850 either way)
+                color = _v("success") if self._ui_redesign_on() else _v("accent_bright")
+                self.rotation_summary_kicker.setStyleSheet(
+                    f"color:{color}; font-size:12px; font-weight:850; letter-spacing:0px;"
+                )
             if getattr(self, "performance_deck_status", None) is not None:
                 if active:
                     bg_alpha = 0.17 + (0.09 * pulse)
@@ -61298,6 +61306,25 @@ class KaraokeApp(QWidget):
         return (f"background:{_v('surface_alt')}; " + (f"color:{_v('text_soft')}; " if note else "")
                 + "border:1px solid rgba(115,144,180,0.14); border-radius:6px;")
 
+    def _redesign_remember(self, *widgets):
+        """Record each widget's size limits the first time the redesign touches it, so turning the setting off restores exactly what was there."""
+        if not self._ui_redesign_on():
+            return                    # only snapshot at the moment the redesign takes over; an early, still-being-built state is not "original"
+        store = self.__dict__.setdefault("_redesign_orig_sizes", {})
+        for w in widgets:
+            if w is not None and id(w) not in store:
+                store[id(w)] = (w.minimumWidth(), w.minimumHeight(), w.maximumWidth(), w.maximumHeight(), w.sizePolicy(), QFont(w.font()))
+
+    def _redesign_restore(self, *widgets):
+        store = self.__dict__.get("_redesign_orig_sizes", {})
+        for w in widgets:
+            o = store.get(id(w))
+            if o is not None:
+                w.setMinimumSize(o[0], o[1])
+                w.setMaximumSize(o[2], o[3])
+                w.setSizePolicy(o[4])
+                w.setFont(o[5])
+
     def _restyle_seek_sliders(self, on: bool):
         for name, groove in (("hero_seek_slider", 6), ("bg_main_seek_slider", 4)):
             w = getattr(self, name, None)
@@ -61345,8 +61372,12 @@ class KaraokeApp(QWidget):
             styled.append((_strip, "QWidget#soundboardStrip { background: transparent; border: none; }" if on else _strip._css_off))
             # one glass card around the whole right column, as in the mockup
             _vcs = self.video_controls_splitter
-            _vcs.setObjectName("videoControlsSplitter")
-            styled.append((_vcs, SINGWS_THEME.glass_card_css("videoControlsSplitter").replace("QFrame#", "QSplitter#") if (on and SINGWS_THEME is not None) else ""))
+            if _vcs.objectName() != "videoControlsSplitter":
+                _vcs._name_off = _vcs.objectName()
+                _vcs.setObjectName("videoControlsSplitter")
+            if getattr(_vcs, "_css_off", None) is None:
+                _vcs._css_off = _vcs.styleSheet()
+            styled.append((_vcs, SINGWS_THEME.glass_card_css("videoControlsSplitter").replace("QFrame#", "QSplitter#") if (on and SINGWS_THEME is not None) else _vcs._css_off))
             _vcs.setContentsMargins(*(12, 12, 12, 12) if on else (0, 0, 0, 0))
             # glass cards and the page glow
             for name, attr in (("libraryCard", "library_card"), ("rotationCard", "rotation_card")):
@@ -61442,6 +61473,10 @@ class KaraokeApp(QWidget):
             self.hero_lastnext_label.setVisible(on)
             if on:
                 self._update_last_sung_card()
+            else:
+                if getattr(self, "_subtitle_css_off", None) is not None:
+                    self.rotation_summary_subtitle.setStyleSheet(self._subtitle_css_off)
+                self._update_rotation_summary_card()      # the redesign rewrote the hero's text lines: put the original wording back
         except Exception as exc:
             _diag(f"[SHOW-REDESIGN] polish failed: {exc}")
 
@@ -61458,6 +61493,7 @@ class KaraokeApp(QWidget):
         try:
             btns = (self.bg_main_prev_button, self.bg_main_play_button, self.bg_main_next_button, self.bg_main_stop_button)
             row, top = self._bg_ctrl_row, self._bg_top_info_row
+            self._redesign_remember(*btns)
             self._restyle_bg_main_buttons(on)
             for w in (self.bg_main_elapsed_label, self.bg_main_remaining_label):
                 w.setVisible(not on)
@@ -61470,9 +61506,9 @@ class KaraokeApp(QWidget):
             elif (not on) and top.indexOf(self.bg_main_play_button) >= 0:
                 for b in btns:
                     top.removeWidget(b)
-                    b.setFixedSize(36, 30)
                 for i, b in enumerate(btns):
                     row.insertWidget(i, b)
+                self._redesign_restore(*btns)
             tc, sr, sl = self._bg_text_col, self._bg_seek_row, self.bg_main_seek_slider
             if on and tc.indexOf(sl) < 0:
                 sr.removeWidget(sl)
@@ -61489,7 +61525,7 @@ class KaraokeApp(QWidget):
     def _bg_ctrl_row_hide(self, on: bool):
         # the (now empty) button row keeps no height when the redesign is on
         row = self._bg_ctrl_row
-        row.setSpacing(0)
+        row.setSpacing(0 if on else 8)               # 8 is the spacing the row was built with
         row.setContentsMargins(0, 0, 0, 0)
 
     def _fit_right_column(self, on: bool):
