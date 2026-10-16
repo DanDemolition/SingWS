@@ -61625,7 +61625,7 @@ class KaraokeApp(QWidget):
             self.karaoke_tempo_value_label.setFixedSize(*(62, 28) if on else (62, 29))
             self.karaoke_key_value_label.setFixedSize(*(62, 28) if on else (42, 29))
             self.bg_main_art_label.setText("\u266a")
-            self._bg_hint_label.setVisible(on and self._bg_upnext_roomy())
+            self._bg_hint_label.setVisible(False)       # the instructions are not shown: drag and right-click still work
             self._bg_upnext_last_roomy = self._bg_upnext_roomy()
             for w, css in styled:
                 w.setStyleSheet(css)
@@ -61827,7 +61827,7 @@ class KaraokeApp(QWidget):
             return
         self._bg_upnext_last_roomy = roomy
         try:
-            self._bg_hint_label.setVisible(roomy)
+            self._bg_hint_label.setVisible(False)
             self._bg_upnext_sig = None
             self._refresh_bg_upnext()
             QTimer.singleShot(0, lambda: self._fit_right_column(True))
