@@ -26056,6 +26056,7 @@ class KaraokeApp(QWidget):
             if self._ui_redesign_on():
                 QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
                 QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
+                QTimer.singleShot(1200, self._preview_overlay_resettle)      # the preview's floating controls window only shows once the main window has settled
         # Run startup auto-placement only once; do not re-place on restore/maximize.
         if not getattr(self, "_initial_video_window_placement_done", False):
             self._initial_video_window_placement_done = True

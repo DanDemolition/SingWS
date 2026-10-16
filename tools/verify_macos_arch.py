@@ -16,7 +16,8 @@ RUNTIME_NATIVE_MODULES = (
     "PyQt6.QtCore",
     "numpy._core._multiarray_umath",
     "scipy._lib._ccallback_c",
-    "signalsmith_audio_native",
+    # signalsmith_audio_native is NOT checked: SingWS-arm64.spec excludes it (the app ships no such module; key/tempo run in the
+    # mpv `signalsmith` filter and the Rust engine), and a fresh build venv has no reason to carry it.
 )
 
 
