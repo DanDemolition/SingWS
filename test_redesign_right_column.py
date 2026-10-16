@@ -108,31 +108,20 @@ class RightColumnTests(unittest.TestCase):
         margins_off = pw._main_layout.contentsMargins()
         pw.set_card_style(True)
         m = pw._main_layout.contentsMargins()
-        self.assertEqual((m.left(), m.top(), m.right(), m.bottom()), (8, 8, 8, 0))     # only the margins around the video change
-        self.assertIn("border-top-left-radius: 14px", pw.styleSheet())
-        self.assertIn("border-bottom-left-radius: 0px", pw.styleSheet())             # square bottom: it joins the transport bar
+        self.assertEqual((m.left(), m.top(), m.right(), m.bottom()), (8, 8, 8, 8))     # only the margins around the video change
+        self.assertIn("border-radius: 14px", pw.styleSheet())                       # a full 14 px card around the inset video
         pw.set_card_style(False)
         self.assertEqual(pw.styleSheet(), off_css)
         m2 = pw._main_layout.contentsMargins()
         self.assertEqual((m2.left(), m2.top(), m2.right(), m2.bottom()), (margins_off.left(), margins_off.top(), margins_off.right(), margins_off.bottom()))
 
-    def test_the_transport_bar_squares_its_top_corners_only_with_the_redesign(self):
+    def test_the_transport_bar_has_no_card_of_its_own_with_the_redesign(self):
         from pathlib import Path
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
         body = src[src.index("def _transport_bar_live_css(self"):src.index("def _transport_bar_live_css_base")]
         self.assertIn("if self._ui_redesign_on():", body)
-        self.assertIn("border-top-left-radius: 0px", body)
-
-    def test_the_music_card_follows_the_controls_card_closely_and_the_old_spacer_comes_back(self):
-        from pathlib import Path
-        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
-        body = src[src.index("def _fit_right_column"):src.index("fit right column failed")]
-        self.assertIn("lay.takeAt(i)", body)                      # on: the spacer that pushed the card to the bottom is removed
-        self.assertIn("lay.insertStretch(1, 1)", body)            # off: and put back exactly where it was
-        self.assertIn("lay.setSpacing(12)", body)
-        self.assertIn("lay.setSpacing(10)", body)                 # the original spacing returns
-        self.assertIn("setMaximumHeight(bar.height() + gap + card_h)", body)
-        self.assertIn("setMaximumHeight(16777215)", body)
+        self.assertIn("background: transparent; border: none;", body)
+        self.assertIn("return self._transport_bar_live_css_base(active, pulse)", body)     # off: the playing glow is untouched
 
     def test_the_idle_preview_shows_a_gradient_and_label_only_when_nothing_else_is_showing(self):
         from PyQt6.QtGui import QPixmap

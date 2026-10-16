@@ -15610,14 +15610,13 @@ class PreviewWindow(QWidget):
         Off is exactly the old look. The video itself is untouched; only the margins around it change."""
         if on:
             css = ("QWidget#previewWindow { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(5,5,16,1), stop:1 rgba(18,10,42,1));"
-                   " border: 1px solid rgba(140,150,200,0.14); border-bottom: none; border-top-left-radius: 14px; border-top-right-radius: 14px;"
-                   " border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }")
+                   " border: 1px solid rgba(140,150,200,0.14); border-radius: 14px; }")
         else:
             css = ("QWidget#previewWindow { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #02040A, stop:1 #000000);"
                    " border: 1px solid rgba(124,61,255,0.36); border-radius: 8px; }")
         self.setStyleSheet(css)
         try:
-            self._main_layout.setContentsMargins(*(8, 8, 8, 0) if on else (0, 0, 0, 0))
+            self._main_layout.setContentsMargins(*(8, 8, 8, 8) if on else (0, 0, 0, 0))
         except Exception:
             pass
 
@@ -20596,7 +20595,7 @@ class StatusChip(QWidget):
         super().__init__(parent)
         self._text = str(text)
         self._dot = QColor(dot) if dot is not None else QColor(150, 156, 184)
-        self.setFixedHeight(28)
+        self.setFixedHeight(26)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._resize_to_text()
 
@@ -20614,12 +20613,12 @@ class StatusChip(QWidget):
 
     def _chip_font(self) -> QFont:
         f = QFont(self.font())
-        f.setPixelSize(12)
+        f.setPixelSize(11)
         f.setWeight(QFont.Weight.DemiBold)
         return f
 
     def _resize_to_text(self):
-        self.setFixedWidth(QFontMetrics(self._chip_font()).horizontalAdvance(self._text) + 40)
+        self.setFixedWidth(QFontMetrics(self._chip_font()).horizontalAdvance(self._text) + 36)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -23389,6 +23388,7 @@ class KaraokeApp(QWidget):
         title_label = QLabel(f'<span style="color:{_v("text_bright")};">Sing</span><span style="color:{_v("accent_bright")};">WS</span>')
         title_label.setTextFormat(Qt.TextFormat.RichText)
         title_label.setStyleSheet(f"font-size:24px; font-weight:900;")
+        self.header_logo_label = title_label
         header_layout.addWidget(title_label)
 
         header_layout.addStretch(1)
@@ -25658,6 +25658,9 @@ class KaraokeApp(QWidget):
             rc = self._row_controls
             rc.removeWidget(self._tempo_panel)
             rc.insertWidget(rc.indexOf(self.soundboard_caption) if on else rc.indexOf(self.soundboard_strip) + 1, self._tempo_panel)
+            # the controls sit directly on the right column's card: no extra inset, and the pad strip loses its own box
+            self._row_controls.setContentsMargins(*(0, 2, 0, 0) if on else (13, 13, 13, 13))
+            self.soundboard_strip.layout().setContentsMargins(*(0, 0, 0, 0) if on else (9, 9, 9, 9))
             self.soundboard_caption.setVisible(on)
             self.soundboard_strip.set_redesign(on)
         except Exception as exc:
@@ -37305,11 +37308,10 @@ class KaraokeApp(QWidget):
         return 0.5 - (0.5 * math.cos((t / period) * math.tau))
 
     def _transport_bar_live_css(self, active: bool, pulse: float) -> str:
-        css = self._transport_bar_live_css_base(active, pulse)
         if self._ui_redesign_on():
-            # joined to the preview above: square top corners, no top border, a rounder bottom
-            css = css.replace("border-radius: 8px;", "border-radius: 14px; border-top-left-radius: 0px; border-top-right-radius: 0px; border-top: none;")
-        return css
+            # the right column is one glass card now: the controls sit on it directly, with no card of their own
+            return "QFrame#transportBar { background: transparent; border: none; }"
+        return self._transport_bar_live_css_base(active, pulse)
 
     def _transport_bar_live_css_base(self, active: bool, pulse: float) -> str:
         if active:
@@ -61326,6 +61328,16 @@ class KaraokeApp(QWidget):
             if SINGWS_THEME is not None:
                 styled.append((self.rotation_hero_card, SINGWS_THEME.hero_card_css("rotationHeroCard") if on else SINGWS_THEME.performance_deck_css("rotationHeroCard")))
                 styled.append((self.bg_main_card, SINGWS_THEME.deck_css("bgMainCard", radius_px=14, accent=True) if on else SINGWS_THEME.deck_css("bgMainCard", accent=True)))
+            styled.append((self.header_logo_label, "font-size:24px; font-weight:800;" if on else "font-size:24px; font-weight:900;"))
+            _strip = self.soundboard_strip
+            if getattr(_strip, "_css_off", None) is None:
+                _strip._css_off = _strip.styleSheet()
+            styled.append((_strip, "QWidget#soundboardStrip { background: transparent; border: none; }" if on else _strip._css_off))
+            # one glass card around the whole right column, as in the mockup
+            _vcs = self.video_controls_splitter
+            _vcs.setObjectName("videoControlsSplitter")
+            styled.append((_vcs, SINGWS_THEME.glass_card_css("videoControlsSplitter").replace("QFrame#", "QSplitter#") if (on and SINGWS_THEME is not None) else ""))
+            _vcs.setContentsMargins(*(12, 12, 12, 12) if on else (0, 0, 0, 0))
             # glass cards and the page glow
             for name, attr in (("libraryCard", "library_card"), ("rotationCard", "rotation_card")):
                 off = SINGWS_THEME.card_css(name) if SINGWS_THEME is not None else content_card_css(name, radius=8)
