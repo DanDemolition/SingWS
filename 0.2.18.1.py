@@ -608,6 +608,16 @@ def deck_seek_slider_css() -> str:
         }}
     """
 
+def _song_memory_hook(app, phase: str):
+    """Call the app's per-song memory logger if it has one (a stripped-down stand-in app in tests does not); never raises."""
+    try:
+        fn = getattr(app, "_log_song_memory", None)
+        if callable(fn):
+            fn(phase)
+    except Exception:
+        pass
+
+
 _TICKER_GLASS = True              # ticker style B (glass pill); set from the setting ui_ticker_glass
 
 
@@ -27596,7 +27606,7 @@ class KaraokeApp(QWidget):
         # One authoritative playback path. A native-core failure is surfaced
         # by _start_mpv_karaoke_transport; silently changing clocks/renderers
         # in the middle of a live show is no longer permitted.
-        self._log_song_memory("start")      # per-song memory trail ([MEMORY-SONG])
+        _song_memory_hook(self, "start")      # per-song memory trail ([MEMORY-SONG])
         started = self._start_mpv_karaoke_transport(
             audio_path=audio_path,
             video_path=video_path,
@@ -29632,7 +29642,7 @@ class KaraokeApp(QWidget):
     @_perf_timed("ui_songend_cleanup")
     def _finish_media_end_cleanup(self, end_silence_triggered: bool, schedule_bg_resume: bool):
         """Finalize karaoke end: teardown/UI reset and optional delayed BG resume."""
-        self._log_song_memory("end")      # per-song memory trail ([MEMORY-SONG])
+        _song_memory_hook(self, "end")      # per-song memory trail ([MEMORY-SONG])
         try:
             _sh = self._transport_shadow()
             if _sh is not None and not isinstance(getattr(self, "_active_external_karafun", None), dict):
@@ -57790,7 +57800,7 @@ class KaraokeApp(QWidget):
             _diag(f"[KARAFUN] BGM fade failed: {e}")
 
     def _start_external_karafun_playback(self, *, singer: dict, entry: dict, song_info, key=0, tempo_percent=None, duet_display=None, marker_was_top: bool = False):
-        self._log_song_memory("start")      # per-song memory trail ([MEMORY-SONG])
+        _song_memory_hook(self, "start")      # per-song memory trail ([MEMORY-SONG])
         artist, title = self._karafun_entry_artist_title(entry)
         singer_display = duet_display or str((singer or {}).get("name", "") or "").strip()
         self._karafun_restore_token = None
@@ -58056,7 +58066,7 @@ class KaraokeApp(QWidget):
 
 
     def _finish_external_karafun_playback(self, action: str, *, expected_active=None):
-        self._log_song_memory("end")      # per-song memory trail ([MEMORY-SONG])
+        _song_memory_hook(self, "end")      # per-song memory trail ([MEMORY-SONG])
         active = self._active_external_karafun
         if expected_active is not None and active is not expected_active:
             _diag("[KARAFUN] ignored completion from an older playback session")

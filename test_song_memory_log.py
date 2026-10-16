@@ -39,8 +39,8 @@ class SongMemoryLogTests(unittest.TestCase):
             self.assertIn(key, lines[1])
 
     def test_it_is_hooked_into_native_and_karafun_song_start_and_end(self):
-        self.assertEqual(SRC.count('self._log_song_memory("start")'), 2)
-        self.assertEqual(SRC.count('self._log_song_memory("end")'), 2)
+        self.assertEqual(SRC.count('_song_memory_hook(self, "start")'), 2)
+        self.assertEqual(SRC.count('_song_memory_hook(self, "end")'), 2)
         body = SRC[SRC.index("    def _log_song_memory"):SRC.index("    def _log_memory_telemetry")]
         for expensive in ("gc.get_objects", "gc.collect", "tracemalloc"):
             self.assertNotIn(expensive, body)                       # nothing heavy runs at a song change
