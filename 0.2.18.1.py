@@ -20618,6 +20618,7 @@ class PreviewControlsWindow(QWidget):
                          | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)     # Qt hides Tool windows while the app is in the background otherwise
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def paintEvent(self, event):
@@ -61596,6 +61597,14 @@ class KaraokeApp(QWidget):
             if on:
                 if ov is None:
                     ov = PreviewControlsWindow(self)
+                    guard = QTimer(ov)                                   # a quiet guard: whatever hid or buried the bar (another app, the audience window opening), it comes back
+                    guard.setInterval(1500)
+                    guard.timeout.connect(self.preview_window.place_overlay)
+                    guard.start()
+                    try:
+                        QGuiApplication.instance().applicationStateChanged.connect(lambda *_: QTimer.singleShot(150, self._preview_overlay_resettle))
+                    except Exception:
+                        pass
                     lay = QHBoxLayout(ov)
                     lay.setContentsMargins(12, 6, 12, 6)
                     lay.setSpacing(8)

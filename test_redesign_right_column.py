@@ -258,6 +258,30 @@ class RightColumnTests(unittest.TestCase):
         self.assertFalse(pw.overlay.isVisible())                                             # switched off: it never comes back by itself
         pw.overlay.close()
 
+    def test_the_overlay_stays_visible_while_the_app_is_in_the_background_and_a_guard_brings_it_back(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QWidget, QVBoxLayout
+        host = QWidget()
+        ov = self.m.PreviewControlsWindow(host)
+        self.assertTrue(ov.testAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow))     # Qt hides Tool windows when the app is inactive without it
+        ov.close()
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()
+        self.assertIn("guard.timeout.connect(self.preview_window.place_overlay)", src)       # something hid it (another app, the show screen opening): it returns
+        host2 = QWidget()
+        lay = QVBoxLayout(host2)
+        pw = self.m.PreviewWindow()
+        lay.addWidget(pw)
+        host2.resize(500, 400)
+        host2.show()
+        self.app.processEvents()
+        pw.overlay = self.m.PreviewControlsWindow(host2)
+        pw.overlay_active = True
+        pw.place_overlay()
+        pw.overlay.hide()                                                                    # buried/hidden by something
+        pw.place_overlay()                                                                   # what the guard timer calls
+        self.assertTrue(pw.overlay.isVisible())
+        pw.overlay.close()
+
     def test_the_overlay_window_is_transparent_and_never_takes_focus(self):
         from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import QWidget
