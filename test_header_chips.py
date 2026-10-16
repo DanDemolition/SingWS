@@ -49,5 +49,60 @@ class HeaderChipTests(unittest.TestCase):
             self.assertIn(token, body)
 
 
+class SpacedCapsLabelTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        cls.m = load_main()
+
+    def render(self, label):
+        label.setFixedHeight(20)
+        label.resize(label.sizeHint().width() + 4, 20)
+        label.show()
+        self.app.processEvents()
+        return label.grab().toImage()
+
+    def test_spacing_zero_is_exactly_an_ordinary_label(self):
+        from PyQt6.QtWidgets import QLabel
+        css = "color: rgb(200,100,50); font-size: 11px; font-weight: 700;"
+        plain, spaced = QLabel("SONG LIBRARY"), self.m.SpacedCapsLabel("SONG LIBRARY")
+        plain.setStyleSheet(css)
+        spaced.setStyleSheet(css)
+        a, b = self.render(plain), self.render(spaced)
+        self.assertEqual(a.size(), b.size())
+        self.assertEqual(a, b)
+
+    def test_spacing_makes_the_label_wider_and_changes_how_it_draws(self):
+        lab = self.m.SpacedCapsLabel("SONG LIBRARY")
+        lab.setStyleSheet("color: rgb(200,100,50); font-size: 11px; font-weight: 700;")
+        w0 = lab.sizeHint().width()
+        img0 = self.render(lab)
+        lab.set_spacing(1.1)
+        self.assertGreater(lab.sizeHint().width(), w0)
+        self.assertNotEqual(self.render(lab), img0)
+
+    def test_the_spacing_survives_a_restyle_which_a_qfont_spacing_did_not(self):
+        lab = self.m.SpacedCapsLabel("TEMPO")
+        lab.setStyleSheet("color: rgb(127,132,150); font-size: 11px;")
+        lab.set_spacing(1.1)
+        before = lab.sizeHint().width()
+        lab.setStyleSheet("color: rgb(127,132,150); font-size: 11px; font-weight: 700;")   # what the redesign does when it restyles
+        self.app.processEvents()
+        self.assertGreater(lab.sizeHint().width(), QFontMetricsWidth(lab, "TEMPO"))
+        self.assertGreater(before, 0)
+
+    def test_the_labels_that_carry_it_are_the_spaced_kind_and_it_is_off_without_the_redesign(self):
+        src = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]
+        self.assertIn("w.set_spacing(px if on else 0.0)", src)
+        for name in ("library_title_label", "rotation_queue_section_label", "karaoke_tempo_label", "karaoke_key_label", "soundboard_caption", "bg_upnext_title", "rotation_summary_kicker"):
+            self.assertIn(f"self.{name} = SpacedCapsLabel(", SRC)
+
+
+def QFontMetricsWidth(label, text):
+    from PyQt6.QtGui import QFontMetrics
+    return QFontMetrics(label.font()).horizontalAdvance(text)
+
+
 if __name__ == "__main__":
     unittest.main()

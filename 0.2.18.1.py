@@ -20502,6 +20502,48 @@ class DotWidget(QWidget):
         p.drawEllipse(QPointF(7, 7), 3.5, 3.5)
 
 
+class SpacedCapsLabel(QLabel):
+    """A QLabel that can draw its text with extra space between the letters.
+
+    Qt stylesheets have no letter-spacing, and a QFont's spacing is lost whenever a stylesheet restyles the label, so the text is drawn here
+    from the font and colour the stylesheet resolved. With spacing 0 it is exactly an ordinary QLabel."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self._spacing = 0.0
+
+    def set_spacing(self, px: float):
+        px = float(px)
+        if px != self._spacing:
+            self._spacing = px
+            self.updateGeometry()
+            self.update()
+
+    def _spaced_font(self) -> QFont:
+        f = QFont(self.font())
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, self._spacing)
+        return f
+
+    def sizeHint(self):
+        sh = super().sizeHint()
+        if self._spacing > 0:
+            plain = QFontMetrics(self.font()).horizontalAdvance(self.text())
+            sh.setWidth(sh.width() - plain + QFontMetrics(self._spaced_font()).horizontalAdvance(self.text()))
+        return sh
+
+    def minimumSizeHint(self):
+        return self.sizeHint() if self._spacing > 0 else super().minimumSizeHint()
+
+    def paintEvent(self, event):
+        if self._spacing <= 0:
+            super().paintEvent(event)
+            return
+        p = QPainter(self)
+        p.setFont(self._spaced_font())
+        p.setPen(self.palette().color(QPalette.ColorRole.WindowText))
+        p.drawText(self.contentsRect(), int(self.alignment()), self.text())
+
+
 class StatusChip(QWidget):
     """Show-tab redesign: a header pill with a coloured dot and a short text, painted directly."""
 
@@ -22087,7 +22129,7 @@ class KaraokeApp(QWidget):
         self.soundboard_strip.changed.connect(self._on_soundboard_changed)
         self.soundboard_strip.became_inactive.connect(self._on_soundboard_inactive)
         self._row_controls = row_controls
-        self.soundboard_caption = QLabel("SOUNDBOARD")
+        self.soundboard_caption = SpacedCapsLabel("SOUNDBOARD")
         self.soundboard_caption.setStyleSheet(text_css("caption", "text_soft", "padding-top: 8px;"))
         self.soundboard_caption.setVisible(False)
         row_controls.addWidget(self.soundboard_caption)
@@ -22112,7 +22154,7 @@ class KaraokeApp(QWidget):
         self.tempo_row_cards = RowCardsOverlay(tempo_panel, tempo_controls_grid, 2)
         self.tempo_row_cards.setVisible(False)
 
-        self.karaoke_tempo_label = QLabel("Tempo")
+        self.karaoke_tempo_label = SpacedCapsLabel("Tempo")
         self.karaoke_tempo_down_button = QToolButton()
         self.karaoke_tempo_down_button.setText("－")
         self.karaoke_tempo_value_label = QLabel("100%")
@@ -22121,7 +22163,7 @@ class KaraokeApp(QWidget):
         self.karaoke_tempo_global_cb = QPushButton("Global")
         self.karaoke_tempo_global_cb.setCheckable(True)
         self.karaoke_tempo_global_cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.karaoke_key_label = QLabel("Key")
+        self.karaoke_key_label = SpacedCapsLabel("Key")
         self.karaoke_key_down_button = QToolButton()
         self.karaoke_key_down_button.setText("－")
         self.karaoke_key_value_label = QLabel("0")
@@ -22667,7 +22709,7 @@ class KaraokeApp(QWidget):
         library_header_row = QHBoxLayout()
         library_header_row.setContentsMargins(0, 0, 0, 0)
         library_header_row.setSpacing(8)
-        self.library_title_label = QLabel("SONG LIBRARY")
+        self.library_title_label = SpacedCapsLabel("SONG LIBRARY")
         self.library_title_label.setStyleSheet(text_css("title", "text_bright"))
         self.library_title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         library_header_row.addWidget(self.library_title_label)
@@ -22778,7 +22820,7 @@ class KaraokeApp(QWidget):
         rotation_summary_layout.setContentsMargins(0, 3, 0, 7)
         rotation_summary_layout.setSpacing(7)
 
-        self.rotation_summary_kicker = QLabel("ROTATION WAITING")
+        self.rotation_summary_kicker = SpacedCapsLabel("ROTATION WAITING")
         self.rotation_summary_kicker.setStyleSheet(text_css("label", "accent_bright"))
         rotation_summary_layout.addWidget(self.rotation_summary_kicker)
 
@@ -22884,7 +22926,7 @@ class KaraokeApp(QWidget):
         rotation_queue_layout = QVBoxLayout(self.rotation_queue_panel)
         rotation_queue_layout.setContentsMargins(0, 0, 0, 0)
         rotation_queue_layout.setSpacing(7)
-        self.rotation_queue_section_label = QLabel("UP NEXT")
+        self.rotation_queue_section_label = SpacedCapsLabel("UP NEXT")
         self.rotation_queue_section_label.setStyleSheet(text_css("section", "text_bright", extra="padding: 0px 2px;"))
         _q_head = QHBoxLayout()
         _q_head.setContentsMargins(0, 0, 0, 0)
@@ -23120,7 +23162,7 @@ class KaraokeApp(QWidget):
         _un.setSpacing(4)
         _un_head = QHBoxLayout()
         _un_head.setContentsMargins(0, 0, 0, 0)
-        self.bg_upnext_title = QLabel("UP NEXT IN BACKGROUND MUSIC")
+        self.bg_upnext_title = SpacedCapsLabel("UP NEXT IN BACKGROUND MUSIC")
         self.bg_upnext_count = QLabel("")
         self._bg_hint_label = QLabel("Drag to reorder \u00b7 right-click for Queue Next / Remove \u00b7 only upcoming tracks move")
         self._bg_hint_label.setWordWrap(True)
@@ -61257,11 +61299,9 @@ class KaraokeApp(QWidget):
                 (self.bg_main_title_label, text_css("body", "text_bright") if on else text_css("title", "text_bright")),
                 (self.bg_main_artist_label, text_css("label", "text_muted") if on else text_css("caption", "text_muted")),
             ]
-            for w in (self.library_title_label, self.rotation_queue_section_label, self.karaoke_tempo_label, self.karaoke_key_label,
-                      self.soundboard_caption, self.bg_upnext_title):
-                f = w.font()
-                f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2 if on else 0.0)
-                w.setFont(f)
+            for w, px in ((self.library_title_label, 1.1), (self.rotation_queue_section_label, 1.1), (self.karaoke_tempo_label, 1.1),
+                          (self.karaoke_key_label, 1.1), (self.soundboard_caption, 1.1), (self.bg_upnext_title, 1.0), (self.rotation_summary_kicker, 1.3)):
+                w.set_spacing(px if on else 0.0)
             for b in (self.karaoke_tempo_down_button, self.karaoke_tempo_up_button, self.karaoke_key_down_button, self.karaoke_key_up_button):
                 b.setFixedSize(*(28, 26) if on else (40, 29))
             self.karaoke_tempo_global_cb.setFixedSize(*(70, 26) if on else (82, 30))
