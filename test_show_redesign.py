@@ -1,6 +1,7 @@
 """Show tab redesign (hero stage): off by default, wired to the existing handlers, reversible. Source guards only: the layout
 itself is checked with screenshots (see HANDOFF)."""
 import re
+import os
 import unittest
 from pathlib import Path
 
@@ -120,6 +121,13 @@ class ShowRedesignTests(unittest.TestCase):
         canvas = SRC[SRC.index("class CanvasGlowOverlay"):SRC.index("class HeroGlowOverlay")]
         self.assertIn("def paintEvent(self, event):\n        \"\"\"With the redesign on the page gets its deep canvas", SRC)
         self.assertIn("QColor(5, 6, 13)", canvas)                # the mockup's deeper canvas
+
+
+class BlankHeroTitleGuard(unittest.TestCase):
+    def test_with_no_singer_the_redesigned_hero_title_is_blank(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()
+        self.assertIn('self.rotation_summary_title.setText("" if self._ui_redesign_on() else "No singer is active")', src)
+
 
 
 if __name__ == "__main__":

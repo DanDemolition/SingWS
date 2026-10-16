@@ -25516,7 +25516,7 @@ class KaraokeApp(QWidget):
                 return
 
             self.rotation_summary_kicker.setText("ROTATION WAITING")
-            self.rotation_summary_title.setText("No singer is active")
+            self.rotation_summary_title.setText("" if self._ui_redesign_on() else "No singer is active")      # the redesigned hero just stays blank (the long text was cut off)
             self.rotation_summary_subtitle.setText("Queue a song to start the rotation.")
             self.rotation_summary_meta.setText("")
             self.rotation_summary_art.set_mode("idle")
