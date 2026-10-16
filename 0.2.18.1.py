@@ -17471,6 +17471,13 @@ class SingerHistoryBrandChoicesWorker(QObject):
         )
 
 
+# Status tags update_queue_display puts in front of a queue song row's right text.
+_QUEUE_STATUS_TAGS_RE = (
+    r"^(?:(?:CUE|NOW|SKIP|SEARCHING KARAFUN|KARAFUN READY|MANUAL KARAFUN|LAUNCHING KARAFUN"
+    r"|PLAYING KARAFUN|KARAFUN PERMISSION|KARAFUN FAILED|KARAFUN DONE|KARAFUN)(?:  |$))+"
+)
+
+
 class QueueListModel(QAbstractListModel):
     """Model-backed rows for the live rotation queue."""
 
@@ -25825,6 +25832,13 @@ class KaraokeApp(QWidget):
                     entry = row.get("entry")
                     if isinstance(entry, dict):
                         visible, tooltip, left, right = self._build_queue_song_row_text(entry)
+                        # update_queue_display prefixes the right text with status tags
+                        # (CUE/NOW/SKIP, KaraFun status); a resize must not drop them.
+                        old_right = str((row.get("roles") or {}).get(int(Qt.ItemDataRole.UserRole) + 21) or "")
+                        tag = re.match(_QUEUE_STATUS_TAGS_RE, old_right)
+                        if tag:
+                            prefix = tag.group(0)
+                            right = prefix + (("" if prefix.endswith(" ") else "  ") + right if right else "")
                         model.setRowTextMeta(i, text=visible, tooltip=tooltip, left=left, right=right)
         except Exception:
             pass
