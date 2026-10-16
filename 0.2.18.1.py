@@ -4062,6 +4062,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_waitlist_redesign": False,         # new Waitlist look (experimental); off = the current look
     "ui_history_redesign": False,          # new Singer History look (experimental); off = the current look
     "ui_bgm_redesign": False,              # new BGM tab look (experimental); off = the current look
     "ui_show_redesign": False,             # new Show tab layout (experimental); off = the current look
@@ -17259,6 +17260,91 @@ class WaitlistRequestListModel(QAbstractListModel):
         return QModelIndex()
 
 
+class WaitlistRowDelegate(QStyledItemDelegate):
+    """Waitlist redesign: an avatar, the singer, 'Song · Artist', a status tag and the request details, as one rounded card.
+    Reads the row text the model already holds; it never changes the model."""
+    _FIELDS = re.compile(r"Singer:\s*(?P<singer>.*?)\s{2,}Status:\s*(?P<status>.*?)(?:\s{2,}Queue:\s*(?P<queue>#\d+))?\s*\n"
+                         r"Song:\s*(?P<title>.*?)\s{2,}Artist:\s*(?P<artist>.*?)\s*\n(?P<rest>.*)", re.S)
+
+    def sizeHint(self, option, index):
+        return QSize(0, 66)
+
+    def paint(self, painter, option, index):
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        selectable = bool(index.flags() & Qt.ItemFlag.ItemIsSelectable)
+        sel = bool(option.state & QStyle.StateFlag.State_Selected)
+        hot = bool(option.state & QStyle.StateFlag.State_MouseOver) and selectable
+        m = self._FIELDS.match(text)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = option.rect.adjusted(2, 2, -2, -2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        font = QFont(option.font)
+        if not m:                                           # a section header or message
+            f = QFont(font)
+            f.setPixelSize(11)
+            f.setBold(True)
+            painter.setFont(f)
+            painter.setPen(QColor(154, 160, 189))
+            painter.drawText(r.adjusted(8, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text.upper())
+            painter.restore()
+            return
+        painter.setBrush(QColor(124, 61, 255, 62) if sel else QColor(255, 255, 255, 20 if hot else 10))
+        painter.drawRoundedRect(r, 10, 10)
+        if sel:
+            painter.setBrush(QColor(167, 139, 250))
+            painter.drawRoundedRect(QRect(r.left() + 1, r.top() + 10, 3, r.height() - 20), 1.5, 1.5)
+        d = 38
+        av = QRect(r.left() + 12, r.center().y() - d // 2, d, d)
+        grad = QLinearGradient(av.topLeft().toPointF(), av.bottomRight().toPointF())
+        grad.setColorAt(0, QColor(106, 47, 230))
+        grad.setColorAt(1, QColor(34, 197, 94))
+        painter.setBrush(QBrush(grad))
+        painter.drawEllipse(av)
+        singer = m.group("singer").strip()
+        parts = [w for w in re.split(r"[\s&/-]+", singer) if w]
+        f = QFont(font)
+        f.setPixelSize(13)
+        f.setBold(True)
+        painter.setFont(f)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(av, Qt.AlignmentFlag.AlignCenter, ("".join(w[0] for w in parts[:2]) or "?").upper())
+        status = m.group("status").strip()
+        queue = m.group("queue") or ""
+        tag = f"{status}  {queue}".strip()
+        tf = QFont(font)
+        tf.setPixelSize(10)
+        tf.setBold(True)
+        tag_w = QFontMetrics(tf).horizontalAdvance(tag) + 18
+        x0 = av.right() + 12
+        w = max(0, r.right() - x0 - tag_w - 18)
+        painter.setFont(f)
+        painter.setPen(QColor(230, 232, 240))
+        painter.drawText(QRect(x0, r.top() + 6, w, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(f).elidedText(singer, Qt.TextElideMode.ElideRight, w))
+        sf = QFont(font)
+        sf.setPixelSize(12)
+        painter.setFont(sf)
+        painter.setPen(QColor(205, 210, 230))
+        line2 = "  \u00b7  ".join(p for p in (m.group("title").strip(), m.group("artist").strip()) if p)
+        painter.drawText(QRect(x0, r.top() + 25, w + tag_w, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(sf).elidedText(line2, Qt.TextElideMode.ElideRight, w + tag_w))
+        mf = QFont(font)
+        mf.setPixelSize(11)
+        painter.setFont(mf)
+        painter.setPen(QColor(150, 156, 184))
+        painter.drawText(QRect(x0, r.top() + 43, r.right() - x0 - 10, 16), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         QFontMetrics(mf).elidedText(" ".join(m.group("rest").split()), Qt.TextElideMode.ElideRight, r.right() - x0 - 10))
+        chip = QRect(r.right() - tag_w - 10, r.top() + 8, tag_w, 20)
+        painter.setPen(QPen(QColor(245, 200, 75, 130), 1))
+        painter.setBrush(QColor(245, 200, 75, 36))
+        painter.drawRoundedRect(chip, 10, 10)
+        painter.setFont(tf)
+        painter.setPen(QColor(250, 214, 110))
+        painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, tag)
+        painter.restore()
+
+
 class HistoryRowDelegate(QStyledItemDelegate):
     """Singer History redesign: a two-line row card (bold first line, muted second line), optionally with an initials avatar.
     Paints from the model's display text; the models and their rows are never touched."""
@@ -25797,6 +25883,44 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _apply_ui_waitlist_redesign(self):
+        """Waitlist redesign (setting ui_waitlist_redesign, off by default): glass shell, card rows with avatar and status tag, restyled buttons.
+        Styles and the row painter only; handlers untouched; off restores exactly."""
+        try:
+            on = bool(self.settings.get("ui_waitlist_redesign", False))
+            if on == bool(getattr(self, "_waitlist_redesign", False)) or not hasattr(self, "waiting_for_add_list"):
+                return
+            shell = self.findChild(QFrame, "waitingForAddShell")
+            widgets = {"shell": shell, "list": self.waiting_for_add_list, "detail": self.waiting_for_add_detail_label}
+            ghost_btns = [self.waiting_for_add_find_button, self.waiting_for_add_removed_toggle]
+            danger_btns = [self.waiting_for_add_clear_button, self.waiting_for_add_clear_all_button]
+            primary_btn = self.waiting_for_add_add_button
+            if not hasattr(self, "_waitlist_css_off"):
+                self._waitlist_css_off = {k: w.styleSheet() for k, w in widgets.items() if w is not None}
+                self._waitlist_css_off.update({id(b): b.styleSheet() for b in ghost_btns + danger_btns + [primary_btn]})
+                self._waitlist_delegate_off = self.waiting_for_add_list.itemDelegate()
+            self._waitlist_redesign = on
+            off = self._waitlist_css_off
+            if not on:
+                for _w, _css in ([(w, off.get(k, "")) for k, w in widgets.items() if w is not None]
+                                 + [(b, off.get(id(b), "")) for b in ghost_btns + danger_btns + [primary_btn]]):
+                    _set_css(_w, _css)
+                self.waiting_for_add_list.setItemDelegate(self._waitlist_delegate_off)
+                self.waiting_for_add_model.layoutChanged.emit()
+                return
+            th = SINGWS_THEME
+            css = th.history_styles() if th is not None else {}
+            pairs = [(widgets["shell"], css.get("shell", "").replace("singerHistoryShell", "waitingForAddShell")), (widgets["list"], css.get("view", "")),
+                     (widgets["detail"], css.get("muted", "")), (primary_btn, css.get("primary_btn", ""))]
+            pairs += [(b, css.get("ghost", "")) for b in ghost_btns] + [(b, css.get("danger", "")) for b in danger_btns]
+            for _w, _css in pairs:
+                if _w is not None:
+                    _set_css(_w, _css)
+            self.waiting_for_add_list.setItemDelegate(WaitlistRowDelegate(self.waiting_for_add_list))
+            self.waiting_for_add_model.layoutChanged.emit()
+        except Exception as exc:
+            _diag(f"[WAITLIST-REDESIGN] apply failed: {exc}")
+
     def _apply_ui_history_redesign(self):
         """Singer History redesign (setting ui_history_redesign, off by default): glass cards, avatar + two-line rows, folded admin tools.
         Styles and the row painter only; every button keeps its handler. Off puts back exactly what was there."""
@@ -26451,6 +26575,8 @@ class KaraokeApp(QWidget):
                 QTimer.singleShot(0, self._apply_ui_bgm_redesign)
             if self.settings.get("ui_history_redesign", False):
                 QTimer.singleShot(0, self._apply_ui_history_redesign)
+            if self.settings.get("ui_waitlist_redesign", False):
+                QTimer.singleShot(0, self._apply_ui_waitlist_redesign)
             if self._ui_redesign_on():
                 QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
                 QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
@@ -31483,6 +31609,20 @@ class KaraokeApp(QWidget):
 
         history_cb.toggled.connect(on_history_redesign_toggled)
         _layout_card.addWidget(history_cb)
+
+        waitlist_cb = QCheckBox("Use the new Waitlist look")
+        waitlist_cb.setChecked(bool(self.settings.get("ui_waitlist_redesign", False)))
+
+        def on_waitlist_redesign_toggled(checked: bool):
+            self.settings["ui_waitlist_redesign"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_ui_waitlist_redesign()
+
+        waitlist_cb.toggled.connect(on_waitlist_redesign_toggled)
+        _layout_card.addWidget(waitlist_cb)
 
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))

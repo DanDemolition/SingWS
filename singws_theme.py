@@ -838,5 +838,7 @@ def history_styles() -> dict:
     s["view"] = "QListView { background: transparent; border: none; outline: 0; } QListView::item { background: transparent; border: none; }"
     s["plain_card"] = "QFrame#{name} { background: rgba(255,255,255,0.03); border: 1px solid rgba(140,150,200,0.12); border-radius: 12px; }"
     s["shell"] = "QFrame#singerHistoryShell { background: transparent; border: none; }"
+    s["primary_btn"] = s["primary"].replace("border-radius: 8px;", "border-radius: 8px; padding: 6px 14px; font-size: 12px;", 1)
+    s["muted"] = "color: rgba(154,160,189,1); font-size: 12px; font-weight: 600;"
     s["toggle"] = (s["ghost"].replace("QPushButton {", "QPushButton { text-align: left;", 1))
     return s
