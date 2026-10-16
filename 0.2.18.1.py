@@ -25694,6 +25694,7 @@ class KaraokeApp(QWidget):
         """Mirror the transport state into the hero (every 250 ms while the redesign is on)."""
         if not self._ui_redesign_on():
             return
+        self._bg_upnext_adapt()
         try:
             if not self.hero_seek_slider.isSliderDown() and not getattr(self, "_karaoke_seek_dragging", False):
                 v = int(self.karaoke_seek_slider.value())
@@ -61394,7 +61395,8 @@ class KaraokeApp(QWidget):
             self.karaoke_tempo_value_label.setFixedSize(*(62, 28) if on else (62, 29))
             self.karaoke_key_value_label.setFixedSize(*(62, 28) if on else (42, 29))
             self.bg_main_art_label.setText("\u266a")
-            self._bg_hint_label.setVisible(on)
+            self._bg_hint_label.setVisible(on and self._bg_upnext_roomy())
+            self._bg_upnext_last_roomy = self._bg_upnext_roomy()
             for w, css in styled:
                 w.setStyleSheet(css)
             grid = self.karaoke_tempo_controls_grid
@@ -61511,8 +61513,11 @@ class KaraokeApp(QWidget):
                 self.right_controls_panel.setMinimumHeight(bar.height() + gap + card_h)
                 # exactly its content tall: the music card follows the controls card closely and any spare height goes to the video above
                 self.right_controls_panel.setMaximumHeight(bar.height() + gap + card_h)
+                # the splitter's own inset is not part of its children's minimums, so say it: without this the panel ran a few px into the nav at the smallest window
+                self.video_controls_splitter.setMinimumHeight(self.preview_window.minimumHeight() + self.video_controls_splitter.handleWidth() + bar.height() + gap + card_h + 24)
             else:
                 self.right_controls_panel.setMaximumHeight(16777215)
+                self.video_controls_splitter.setMinimumHeight(0)
                 lay = self.right_controls_panel.layout()
                 if not any(lay.itemAt(i).spacerItem() is not None for i in range(lay.count())):
                     lay.insertStretch(1, 1)         # back to how it was: the music card pinned to the bottom
@@ -61523,8 +61528,30 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             _diag(f"[SHOW-REDESIGN] fit right column failed: {exc}")
 
+    def _bg_upnext_roomy(self) -> bool:
+        """Three upcoming tracks and the hint line only when the window is tall; a shorter window gets two and no hint, so the redesign
+        never makes the smallest window taller than the old layout could be."""
+        try:
+            return int(self.height()) >= 960 and not getattr(self, "_compact_deck", False)
+        except Exception:
+            return False
+
     def _bg_upnext_rows_wanted(self) -> int:
-        return 3
+        return 3 if self._bg_upnext_roomy() else 2
+
+    def _bg_upnext_adapt(self):
+        """Called from the 250 ms hero sync: follow the window height (cheap: only does anything when the answer changes)."""
+        roomy = self._bg_upnext_roomy()
+        if roomy == getattr(self, "_bg_upnext_last_roomy", None):
+            return
+        self._bg_upnext_last_roomy = roomy
+        try:
+            self._bg_hint_label.setVisible(roomy)
+            self._bg_upnext_sig = None
+            self._refresh_bg_upnext()
+            QTimer.singleShot(0, lambda: self._fit_right_column(True))
+        except Exception:
+            pass
 
     def _refresh_bg_upnext(self):
         """Fill the redesign's Up Next list with the tracks after the current one (the same view the BGM tab shows)."""

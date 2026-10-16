@@ -102,6 +102,24 @@ class BgUpNextTests(unittest.TestCase):
         self.assertIn("if not self._ui_redesign_on():\n                return", SRC[SRC.index("def _refresh_bg_upnext"):SRC.index("def _bg_upnext_reordered")])
         self.assertRegex(SRC, r"self\.bg_upnext_box\.setVisible\(False\)\n\s+self\._bg_upnext_sig = None\n\s+if on:")
 
+    def test_a_short_window_gets_two_rows_and_no_hint_a_tall_one_three_and_the_hint(self):
+        from types import SimpleNamespace
+        KA = self.m.KaraokeApp
+        short = SimpleNamespace(height=lambda: 840, _compact_deck=False)
+        tall = SimpleNamespace(height=lambda: 1000, _compact_deck=False)
+        compact = SimpleNamespace(height=lambda: 1000, _compact_deck=True)
+        for obj in (short, tall, compact):
+            obj._bg_upnext_roomy = lambda o=obj: KA._bg_upnext_roomy(o)
+        self.assertEqual((KA._bg_upnext_rows_wanted(short), short._bg_upnext_roomy()), (2, False))
+        self.assertEqual((KA._bg_upnext_rows_wanted(tall), tall._bg_upnext_roomy()), (3, True))
+        self.assertEqual((KA._bg_upnext_rows_wanted(compact), compact._bg_upnext_roomy()), (2, False))   # a short screen never gets the tall layout
+
+    def test_the_redesign_does_not_make_the_smallest_window_taller_than_the_old_layout_needed(self):
+        # measured on screen: min height 828 (old) vs 841 (redesign) once the list drops to two rows; the splitter's own inset is accounted for
+        src = SRC[SRC.index("def _fit_right_column"):SRC.index("fit right column failed")]
+        self.assertIn("self.video_controls_splitter.setMinimumHeight(", src)
+        self.assertIn("self.video_controls_splitter.setMinimumHeight(0)", src)
+
 
 if __name__ == "__main__":
     unittest.main()
