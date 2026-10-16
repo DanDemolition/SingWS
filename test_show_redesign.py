@@ -81,8 +81,9 @@ class ShowRedesignTests(unittest.TestCase):
         body = SRC[SRC.index("def _apply_ui_show_redesign"):SRC.index("def _apply_redesign_hero_text")]
         self.assertIn("self.rotation_title_label, self.queue_label, self._rotation_divider", body)
         summary = SRC[SRC.index("def _refresh_queue_summary"):SRC.index("    def update_queue_display")]
-        for flag in ("CLASSIC", "ROTATION", "LOCKED", "LOOPING"):
+        for flag in ("LOCKED", "LOOPING"):                     # still shown when they apply
             self.assertIn(flag, summary)
+        self.assertNotIn('"CLASSIC"', summary)                 # the mode word is gone
 
     def test_glass_cards_and_the_page_glow_are_redesign_only_and_reversible(self):
         body = SRC[SRC.index("def _apply_redesign_polish"):SRC.index("def _restyle_bg_main_buttons")]

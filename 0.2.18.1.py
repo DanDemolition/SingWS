@@ -883,7 +883,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItemIterator, QProgressDialog,
     QTextEdit, QPlainTextEdit
 )
-from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath, QRadialGradient, QLinearGradient
+from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath, QRadialGradient, QLinearGradient, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop
 
@@ -15618,14 +15618,32 @@ class PreviewWindow(QWidget):
             css = ("QWidget#previewWindow { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #02040A, stop:1 #000000);"
                    " border: 1px solid rgba(124,61,255,0.36); border-radius: 8px; }")
         self.setStyleSheet(css)
+        self._card_on = bool(on)
+        self._apply_video_margins()
+
+    def _apply_video_margins(self):
+        """Card on: 8 px all round, plus dark bars on the sides or on top and bottom so the picture area is always 16:9 and as large as fits."""
         try:
-            self._main_layout.setContentsMargins(*(8, 8, 8, 8) if on else (0, 0, 0, 0))
+            if not getattr(self, "_card_on", False):
+                self._main_layout.setContentsMargins(0, 0, 0, 0)
+                return
+            inner_w, inner_h = self.width() - 16, self.height() - 16
+            side, vert = 8, 8
+            if inner_h > 0 and inner_w > 0:
+                want_w = int(inner_h * 16 / 9)
+                if want_w < inner_w:
+                    side = 8 + (inner_w - want_w) // 2
+            m = self._main_layout.contentsMargins()
+            if (m.left(), m.top(), m.right(), m.bottom()) != (side, vert, side, vert):
+                self._main_layout.setContentsMargins(side, vert, side, vert)
         except Exception:
             pass
 
     def set_native_round(self, radius: float):
         """Round the corners of the native mpv view inside this preview (macOS layers). 0 puts it back to square. Never raises."""
         try:
+            if QGuiApplication.platformName() != "cocoa":
+                return
             import objc
             from ctypes import c_void_p
             host = None
@@ -15652,8 +15670,33 @@ class PreviewWindow(QWidget):
     def place_overlay(self):
         ov = getattr(self, "overlay", None)
         if ov is not None and ov.isVisible():
-            ov.setGeometry(18, max(0, self.height() - 10 - 46 - 8), max(0, self.width() - 36), 46)
+            m = self._main_layout.contentsMargins()
+            ov.setGeometry(m.left() + 10, max(0, self.height() - m.bottom() - 10 - 46), max(0, self.width() - m.left() - m.right() - 20), 46)
             ov.raise_()
+            self._style_overlay_layer(ov)
+
+    @staticmethod
+    def _style_overlay_layer(ov):
+        """The mockup's bar: dark, about 70% opaque (the video shows through a little), rounded, with a fine border. Drawn by the view's own
+        layer, since a Qt stylesheet cannot make a native child translucent."""
+        try:
+            if QGuiApplication.platformName() != "cocoa":
+                return                      # the layer styling is for the real macOS windows only (headless test platforms have no NSView)
+            import objc
+            from ctypes import c_void_p
+            from AppKit import NSColor
+            view = objc.objc_object(c_void_p=c_void_p(int(ov.winId())))
+            view.setWantsLayer_(True)
+            layer = view.layer()
+            if layer is None:
+                return
+            layer.setBackgroundColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(5 / 255.0, 6 / 255.0, 13 / 255.0, 0.72).CGColor())
+            layer.setCornerRadius_(12.0)
+            layer.setMasksToBounds_(True)
+            layer.setBorderWidth_(1.0)
+            layer.setBorderColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(140 / 255.0, 150 / 255.0, 200 / 255.0, 0.22).CGColor())
+        except Exception as exc:
+            _diag(f"[PREVIEW-OVERLAY] layer style failed: {exc}")
 
     def _schedule_mpv_surface_refresh(self):
         try:
@@ -15673,6 +15716,7 @@ class PreviewWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._apply_video_margins()
         self._schedule_mpv_surface_refresh()
         self.place_overlay()
 
@@ -20479,6 +20523,29 @@ class BarBackdrop(QWidget):
         p.drawRoundedRect(QRectF(r).adjusted(-6, -5, 6, 5), 10, 10)
 
 
+class ResizeNotifier(QObject):
+    """Calls `callback` (once, after the event loop turns) whenever the watched widget changes size."""
+
+    def __init__(self, widget: QWidget, callback):
+        super().__init__(widget)
+        self._callback = callback
+        self._pending = False
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize and not self._pending:
+            self._pending = True
+            QTimer.singleShot(0, self._fire)
+        return False
+
+    def _fire(self):
+        self._pending = False
+        try:
+            self._callback()
+        except Exception:
+            pass
+
+
 class SliderGlow(QWidget):
     """Show-tab redesign: a soft purple glow around the filled part of a progress slider (a stylesheet cannot draw one)."""
 
@@ -23363,6 +23430,8 @@ class KaraokeApp(QWidget):
         self.video_controls_splitter.setStretchFactor(0, 5)
         self.video_controls_splitter.setStretchFactor(1, 4)
         right_panel.addWidget(self.video_controls_splitter, 1)
+        self._right_panel_layout = right_panel
+        self._right_resize_notifier = ResizeNotifier(self.video_controls_splitter, lambda: self._fit_right_column(self._ui_redesign_on()) if self._ui_redesign_on() else None)
 
         _right_buttons = [
             self.show_rotation_button,
@@ -51744,7 +51813,7 @@ class KaraokeApp(QWidget):
             count, _ends = getattr(self, "_header_summary", (0, ""))
             mins = int(getattr(self, "_queue_eta_minutes", 0) or 0)
             text = f"{count} singer{'s' if count != 1 else ''}" + (f" \u00b7 {mins} min" if mins > 0 else "")
-            flags = ["ROTATION" if self._is_rotation_mode() else "CLASSIC"]
+            flags = []                      # the mode word (ROTATION / CLASSIC) is not shown here: the mockup has just "5 singers . 27 min"
             if self._is_rotation_locked():
                 flags.append("LOCKED")
             if getattr(self, "_intro_loop_active", False):
@@ -61403,10 +61472,8 @@ class KaraokeApp(QWidget):
                     ov = QFrame(pw)
                     ov.setObjectName("previewOverlay")
                     ov.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-                    ov.setAutoFillBackground(True)
-                    _pal = ov.palette()
-                    _pal.setColor(QPalette.ColorRole.Window, QColor(12, 10, 26))
-                    ov.setPalette(_pal)
+                    ov.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)     # the layer paints the bar (translucent, rounded)
+                    ov.setAutoFillBackground(False)
                     lay = QHBoxLayout(ov)
                     lay.setContentsMargins(8, 6, 8, 6)
                     lay.setSpacing(8)
@@ -61423,6 +61490,12 @@ class KaraokeApp(QWidget):
                         lay.addWidget(b)
                 if getattr(self, "_transport_backdrop", None) is not None:
                     self._transport_backdrop.setVisible(False)
+                for b in before:                      # the mockup's overlay buttons: 30 px rounded squares with smaller glyphs
+                    b.setFixedSize(32, 28)
+                    f = b.font()
+                    f.setPointSize(12)
+                    b.setFont(f)
+                self.audio_output_button.setFixedSize(32, 28)
                 ov.show()
                 pw.place_overlay()
                 pw.set_native_round(14.0)
@@ -61443,6 +61516,8 @@ class KaraokeApp(QWidget):
                             row.addWidget(b)
                     ov.hide()
                 pw.set_native_round(0.0)
+                if self._ui_redesign_on():
+                    self._apply_redesign_right_column(True)       # the redesign's own button sizes come back
                 if self._ui_redesign_on() and getattr(self, "_transport_backdrop", None) is not None:
                     self._transport_backdrop.setVisible(True)
             QTimer.singleShot(0, lambda: self._fit_right_column(self._ui_redesign_on()))
@@ -61652,6 +61727,19 @@ class KaraokeApp(QWidget):
         row.setSpacing(0 if on else 8)               # 8 is the spacing the row was built with
         row.setContentsMargins(0, 0, 0, 0)
 
+    def _fit_preview_aspect(self):
+        """The preview is 16:9 of the column's width: it scales with the column and its picture fills the box. Width comes from the splitter
+        (the card's 12 px inset plus the preview's own 8 px margin each side), which is settled."""
+        try:
+            pw = self.preview_window
+            if self._ui_redesign_on():
+                video_w = max(0, self.video_controls_splitter.width() - 24 - 16)
+                pw.setMaximumHeight(max(pw.minimumHeight(), int(video_w * 9 / 16) + 16))
+            else:
+                pw.setMaximumHeight(16777215)
+        except Exception:
+            pass
+
     def _fit_right_column(self, on: bool):
         """The transport bar and the controls panel have fixed heights sized for today's layout; with the redesign they follow the content."""
         try:
@@ -61674,10 +61762,43 @@ class KaraokeApp(QWidget):
                 # exactly its content tall: the music card follows the controls card closely and any spare height goes to the video above
                 self.right_controls_panel.setMaximumHeight(bar.height() + gap + card_h)
                 # the splitter's own inset is not part of its children's minimums, so say it: without this the panel ran a few px into the nav at the smallest window
+                self._fit_preview_aspect()
                 self.video_controls_splitter.setMinimumHeight(self.preview_window.minimumHeight() + self.video_controls_splitter.handleWidth() + bar.height() + gap + card_h + 24)
+                # The glass card fills the column. The preview is 16:9 of the column's width (so it scales with the column and the picture fills
+                # its box exactly), the controls are exactly their content tall, and any spare height sits below them in a quiet spacer.
+                _vs = self.video_controls_splitter
+                spacer = getattr(self, "_right_spacer", None)
+                if spacer is None:
+                    spacer = QWidget()
+                    spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                    self._right_spacer = spacer
+                if _vs.indexOf(spacer) < 0:
+                    _vs.addWidget(spacer)
+                spacer.show()
+                _vs.setStretchFactor(0, 0)
+                _vs.setStretchFactor(1, 0)
+                _vs.setStretchFactor(2, 1)
+                _vs.setCollapsible(2, False)
+                for _h in (1, 2):
+                    try:
+                        _vs.handle(_h).setVisible(False)
+                    except Exception:
+                        pass
+                _vs.setMaximumHeight(16777215)
+                self._right_panel_layout.setAlignment(_vs, Qt.AlignmentFlag(0))
+                _ctl_h = bar.height() + gap + card_h
+                _pv_h = min(self.preview_window.maximumHeight(), max(self.preview_window.minimumHeight(), _vs.height() - _ctl_h - 2 * _vs.handleWidth() - 24))
+                _vs.setSizes([_pv_h, _ctl_h, max(0, _vs.height() - _pv_h - _ctl_h - 2 * _vs.handleWidth() - 24)])
             else:
                 self.right_controls_panel.setMaximumHeight(16777215)
+                self._fit_preview_aspect()
                 self.video_controls_splitter.setMinimumHeight(0)
+                self.video_controls_splitter.setMaximumHeight(16777215)
+                self._right_panel_layout.setAlignment(self.video_controls_splitter, Qt.AlignmentFlag(0))
+                _sp = getattr(self, "_right_spacer", None)
+                if _sp is not None and self.video_controls_splitter.indexOf(_sp) >= 0:
+                    _sp.hide()
+                    _sp.setParent(None)                  # back to exactly two children
                 lay = self.right_controls_panel.layout()
                 if not any(lay.itemAt(i).spacerItem() is not None for i in range(lay.count())):
                     lay.insertStretch(1, 1)         # back to how it was: the music card pinned to the bottom
