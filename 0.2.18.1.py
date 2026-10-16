@@ -15622,17 +15622,17 @@ class PreviewWindow(QWidget):
         self._apply_video_margins()
 
     def _apply_video_margins(self):
-        """Card on: 8 px all round, plus dark bars on the sides or on top and bottom so the picture area is always 16:9 and as large as fits."""
+        """Card on: 4 px all round (the picture runs nearly edge to edge), plus dark bars on the sides or on top and bottom so the picture area is always 16:9 and as large as fits."""
         try:
             if not getattr(self, "_card_on", False):
                 self._main_layout.setContentsMargins(0, 0, 0, 0)
                 return
-            inner_w, inner_h = self.width() - 16, self.height() - 16
-            side, vert = 8, 8
+            inner_w, inner_h = self.width() - 8, self.height() - 8
+            side, vert = 4, 4
             if inner_h > 0 and inner_w > 0:
                 want_w = int(inner_h * 16 / 9)
                 if want_w < inner_w:
-                    side = 8 + (inner_w - want_w) // 2
+                    side = 4 + (inner_w - want_w) // 2
             m = self._main_layout.contentsMargins()
             if (m.left(), m.top(), m.right(), m.bottom()) != (side, vert, side, vert):
                 self._main_layout.setContentsMargins(side, vert, side, vert)
@@ -15677,7 +15677,7 @@ class PreviewWindow(QWidget):
 
     @staticmethod
     def _style_overlay_layer(ov):
-        """The mockup's bar: dark, about 70% opaque (the video shows through a little), rounded, with a fine border. Drawn by the view's own
+        """The overlay bar: slate, about 58% opaque (the video shows through), well rounded, with a fine slate border. Drawn by the view's own
         layer, since a Qt stylesheet cannot make a native child translucent."""
         try:
             if QGuiApplication.platformName() != "cocoa":
@@ -15690,11 +15690,11 @@ class PreviewWindow(QWidget):
             layer = view.layer()
             if layer is None:
                 return
-            layer.setBackgroundColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(5 / 255.0, 6 / 255.0, 13 / 255.0, 0.72).CGColor())
-            layer.setCornerRadius_(12.0)
+            layer.setBackgroundColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(30 / 255.0, 41 / 255.0, 59 / 255.0, 0.58).CGColor())     # slate, see-through
+            layer.setCornerRadius_(20.0)
             layer.setMasksToBounds_(True)
             layer.setBorderWidth_(1.0)
-            layer.setBorderColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(140 / 255.0, 150 / 255.0, 200 / 255.0, 0.22).CGColor())
+            layer.setBorderColor_(NSColor.colorWithSRGBRed_green_blue_alpha_(148 / 255.0, 163 / 255.0, 184 / 255.0, 0.30).CGColor())
         except Exception as exc:
             _diag(f"[PREVIEW-OVERLAY] layer style failed: {exc}")
 
@@ -61475,7 +61475,7 @@ class KaraokeApp(QWidget):
                     ov.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)     # the layer paints the bar (translucent, rounded)
                     ov.setAutoFillBackground(False)
                     lay = QHBoxLayout(ov)
-                    lay.setContentsMargins(8, 6, 8, 6)
+                    lay.setContentsMargins(12, 6, 12, 6)
                     lay.setSpacing(8)
                     pw.overlay = ov
                     self._preview_overlay_layout = lay
@@ -61577,7 +61577,7 @@ class KaraokeApp(QWidget):
             if getattr(_vcs, "_css_off", None) is None:
                 _vcs._css_off = _vcs.styleSheet()
             styled.append((_vcs, SINGWS_THEME.glass_card_css("videoControlsSplitter").replace("QFrame#", "QSplitter#") if (on and SINGWS_THEME is not None) else _vcs._css_off))
-            _vcs.setContentsMargins(*(12, 12, 12, 12) if on else (0, 0, 0, 0))
+            _vcs.setContentsMargins(*(8, 8, 8, 8) if on else (0, 0, 0, 0))
             # glass cards and the page glow
             for name, attr in (("libraryCard", "library_card"), ("rotationCard", "rotation_card")):
                 off = SINGWS_THEME.card_css(name) if SINGWS_THEME is not None else content_card_css(name, radius=8)
@@ -61733,8 +61733,8 @@ class KaraokeApp(QWidget):
         try:
             pw = self.preview_window
             if self._ui_redesign_on():
-                video_w = max(0, self.video_controls_splitter.width() - 24 - 16)
-                pw.setMaximumHeight(max(pw.minimumHeight(), int(video_w * 9 / 16) + 16))
+                video_w = max(0, self.video_controls_splitter.width() - 16 - 8)
+                pw.setMaximumHeight(max(pw.minimumHeight(), int(video_w * 9 / 16) + 8))
             else:
                 pw.setMaximumHeight(16777215)
         except Exception:
@@ -61763,7 +61763,7 @@ class KaraokeApp(QWidget):
                 self.right_controls_panel.setMaximumHeight(bar.height() + gap + card_h)
                 # the splitter's own inset is not part of its children's minimums, so say it: without this the panel ran a few px into the nav at the smallest window
                 self._fit_preview_aspect()
-                self.video_controls_splitter.setMinimumHeight(self.preview_window.minimumHeight() + self.video_controls_splitter.handleWidth() + bar.height() + gap + card_h + 24)
+                self.video_controls_splitter.setMinimumHeight(self.preview_window.minimumHeight() + self.video_controls_splitter.handleWidth() + bar.height() + gap + card_h + 16)
                 # The glass card fills the column. The preview is 16:9 of the column's width (so it scales with the column and the picture fills
                 # its box exactly), the controls are exactly their content tall, and any spare height sits below them in a quiet spacer.
                 _vs = self.video_controls_splitter
@@ -61787,8 +61787,8 @@ class KaraokeApp(QWidget):
                 _vs.setMaximumHeight(16777215)
                 self._right_panel_layout.setAlignment(_vs, Qt.AlignmentFlag(0))
                 _ctl_h = bar.height() + gap + card_h
-                _pv_h = min(self.preview_window.maximumHeight(), max(self.preview_window.minimumHeight(), _vs.height() - _ctl_h - 2 * _vs.handleWidth() - 24))
-                _vs.setSizes([_pv_h, _ctl_h, max(0, _vs.height() - _pv_h - _ctl_h - 2 * _vs.handleWidth() - 24)])
+                _pv_h = min(self.preview_window.maximumHeight(), max(self.preview_window.minimumHeight(), _vs.height() - _ctl_h - 2 * _vs.handleWidth() - 16))
+                _vs.setSizes([_pv_h, _ctl_h, max(0, _vs.height() - _pv_h - _ctl_h - 2 * _vs.handleWidth() - 16)])
             else:
                 self.right_controls_panel.setMaximumHeight(16777215)
                 self._fit_preview_aspect()
