@@ -4062,6 +4062,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_history_redesign": False,          # new Singer History look (experimental); off = the current look
     "ui_bgm_redesign": False,              # new BGM tab look (experimental); off = the current look
     "ui_show_redesign": False,             # new Show tab layout (experimental); off = the current look
     "ui_hero_glow": "soft",                # redesign: strength of the record's glow: off | soft | medium | strong
@@ -17258,6 +17259,81 @@ class WaitlistRequestListModel(QAbstractListModel):
         return QModelIndex()
 
 
+class HistoryRowDelegate(QStyledItemDelegate):
+    """Singer History redesign: a two-line row card (bold first line, muted second line), optionally with an initials avatar.
+    Paints from the model's display text; the models and their rows are never touched."""
+
+    def __init__(self, view, avatar: bool, parent=None):
+        super().__init__(parent or view)
+        self._avatar = bool(avatar)
+
+    def sizeHint(self, option, index):
+        return QSize(0, 56 if self._avatar else 52)
+
+    @staticmethod
+    def _lines(text: str, avatar: bool):
+        first, _, rest = str(text or "").partition("\n")
+        if not avatar and " \u2022 " in first:
+            artist, _, title = first.partition(" \u2022 ")
+            return title.strip() or first, "  \u00b7  ".join(p for p in (artist.strip(), rest.strip()) if p)
+        return first.strip(), rest.strip().replace("\n", "  \u00b7  ")
+
+    def paint(self, painter, option, index):
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        selectable = bool(index.flags() & Qt.ItemFlag.ItemIsSelectable)
+        sel = bool(option.state & QStyle.StateFlag.State_Selected)
+        hot = bool(option.state & QStyle.StateFlag.State_MouseOver) and selectable
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = option.rect.adjusted(2, 2, -2, -2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if selectable:
+            painter.setBrush(QColor(124, 61, 255, 62) if sel else QColor(255, 255, 255, 20 if hot else 10))
+            painter.drawRoundedRect(r, 9, 9)
+            if sel:
+                painter.setBrush(QColor(167, 139, 250))
+                painter.drawRoundedRect(QRect(r.left() + 1, r.top() + 8, 3, r.height() - 16), 1.5, 1.5)
+        line1, line2 = self._lines(text, self._avatar)
+        font = QFont(option.font)
+        x0 = r.left() + 14
+        if self._avatar and selectable:
+            d = 34
+            av = QRect(r.left() + 12, r.center().y() - d // 2, d, d)
+            grad = QLinearGradient(av.topLeft().toPointF(), av.bottomRight().toPointF())
+            grad.setColorAt(0, QColor(106, 47, 230))
+            grad.setColorAt(1, QColor(34, 197, 94))
+            painter.setBrush(QBrush(grad))
+            painter.drawEllipse(av)
+            parts = [w for w in line1.replace("-", " ").split() if w]
+            initials = ("".join(w[0] for w in parts[:2]) or "?").upper()
+            f = QFont(font)
+            f.setPixelSize(13)
+            f.setBold(True)
+            painter.setFont(f)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(av, Qt.AlignmentFlag.AlignCenter, initials)
+            x0 = av.right() + 12
+        w = max(0, r.right() - x0 - 10)
+        tf = QFont(font)
+        tf.setPixelSize(13)
+        tf.setBold(True)
+        painter.setFont(tf)
+        painter.setPen(QColor(230, 232, 240) if selectable else QColor(150, 156, 184))
+        if line2:
+            painter.drawText(QRect(x0, r.top() + 6, w, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             QFontMetrics(tf).elidedText(line1, Qt.TextElideMode.ElideRight, w))
+            af = QFont(font)
+            af.setPixelSize(11)
+            painter.setFont(af)
+            painter.setPen(QColor(163, 168, 189))
+            painter.drawText(QRect(x0, r.top() + 26, w, 18), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             QFontMetrics(af).elidedText(line2, Qt.TextElideMode.ElideRight, w))
+        else:
+            painter.drawText(QRect(x0, r.top(), w, r.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             QFontMetrics(tf).elidedText(line1, Qt.TextElideMode.ElideRight, w))
+        painter.restore()
+
+
 class SingerHistorySongListModel(QAbstractListModel):
     """Model-backed song rows for the Singer History details view."""
 
@@ -25721,6 +25797,68 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _apply_ui_history_redesign(self):
+        """Singer History redesign (setting ui_history_redesign, off by default): glass cards, avatar + two-line rows, folded admin tools.
+        Styles and the row painter only; every button keeps its handler. Off puts back exactly what was there."""
+        try:
+            on = bool(self.settings.get("ui_history_redesign", False))
+            if on == bool(getattr(self, "_history_redesign", False)) or not hasattr(self, "singer_history_singer_list"):
+                return
+            fc = lambda n: self.findChild(QFrame, n)
+            frames = {"shell": "singerHistoryShell", "left": "singerHistoryLeftCard", "details": "singerHistoryDetailsCard",
+                      "cleanup": "singerHistoryCleanupCard", "summary": "singerHistorySummaryCard"}
+            widgets = {k: fc(n) for k, n in frames.items()}
+            widgets.update({"singers": self.singer_history_singer_list, "songs": self.singer_history_songs_list,
+                            "ssearch": self.singer_history_search, "psearch": self.singer_history_song_search,
+                            "name": self.singer_history_name_label, "admin": self.singer_history_admin_toggle})
+            ghost_btns = [self.singer_history_sync_button, self.singer_history_rename_button, self.singer_history_brand_button,
+                          self.singer_history_add_song_button, self.singer_history_edit_song_button]
+            danger_btns = [self.singer_history_delete_singer_button, self.singer_history_delete_song_button, self.history_clear_all_button,
+                           self.history_clear_small_button, self.history_clear_inactive_button]
+            if not hasattr(self, "_history_css_off"):
+                self._history_css_off = {k: w.styleSheet() for k, w in widgets.items() if w is not None}
+                self._history_css_off.update({id(b): b.styleSheet() for b in ghost_btns + danger_btns})
+                self._history_delegates_off = (self.singer_history_singer_list.itemDelegate(), self.singer_history_songs_list.itemDelegate())
+            self._history_redesign = on
+            off = self._history_css_off
+            toggle_visible = on
+            if not on:
+                for _w, _css in ([(w, off.get(k, "")) for k, w in widgets.items() if w is not None] + [(b, off.get(id(b), "")) for b in ghost_btns + danger_btns]):
+                    _set_css(_w, _css)
+                self.singer_history_singer_list.setItemDelegate(self._history_delegates_off[0])
+                self.singer_history_songs_list.setItemDelegate(self._history_delegates_off[1])
+                for b in (self.history_clear_all_button, self.history_clear_small_button, self.history_clear_inactive_button):
+                    b.setVisible(True)
+                self.singer_history_cleanup_meta_label.setVisible(True)
+                self.singer_history_admin_toggle.setVisible(False)
+                self.singer_history_singer_model.layoutChanged.emit()
+                self.singer_history_songs_model.layoutChanged.emit()
+                return
+            th = SINGWS_THEME
+            css = th.history_styles() if th is not None else {}
+            glass = {"left": "singerHistoryLeftCard", "details": "singerHistoryDetailsCard"}
+            pairs = [(widgets[k], th.glass_card_css(n)) for k, n in glass.items()] if th is not None else []
+            pairs += [(widgets["shell"], css.get("shell", "")), (widgets["cleanup"], css.get("plain_card", "").replace("{name}", "singerHistoryCleanupCard")),
+                      (widgets["summary"], css.get("plain_card", "").replace("{name}", "singerHistorySummaryCard")),
+                      (widgets["singers"], css.get("view", "")), (widgets["songs"], css.get("view", "")),
+                      (widgets["ssearch"], css.get("input", "")), (widgets["psearch"], css.get("input", "")),
+                      (widgets["name"], css.get("name", "")), (widgets["admin"], css.get("toggle", ""))]
+            pairs += [(b, css.get("ghost", "")) for b in ghost_btns] + [(b, css.get("danger", "")) for b in danger_btns]
+            for _w, _css in pairs:
+                if _w is not None:
+                    _set_css(_w, _css)
+            self.singer_history_singer_list.setItemDelegate(HistoryRowDelegate(self.singer_history_singer_list, True))
+            self.singer_history_songs_list.setItemDelegate(HistoryRowDelegate(self.singer_history_songs_list, False))
+            self.singer_history_cleanup_meta_label.setVisible(False)
+            self.singer_history_admin_toggle.setVisible(True)
+            self.singer_history_admin_toggle.setChecked(False)
+            for b in (self.history_clear_all_button, self.history_clear_small_button, self.history_clear_inactive_button):
+                b.setVisible(False)
+            self.singer_history_singer_model.layoutChanged.emit()
+            self.singer_history_songs_model.layoutChanged.emit()
+        except Exception as exc:
+            _diag(f"[HISTORY-REDESIGN] apply failed: {exc}")
+
     def _apply_ui_bgm_redesign(self):
         try:
             mgr = getattr(self, "bg_manager", None)
@@ -26311,6 +26449,8 @@ class KaraokeApp(QWidget):
             self._redesign_launch_applied = True
             if self.settings.get("ui_bgm_redesign", False):
                 QTimer.singleShot(0, self._apply_ui_bgm_redesign)
+            if self.settings.get("ui_history_redesign", False):
+                QTimer.singleShot(0, self._apply_ui_history_redesign)
             if self._ui_redesign_on():
                 QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
                 QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
@@ -31330,6 +31470,20 @@ class KaraokeApp(QWidget):
         bgm_cb.toggled.connect(on_bgm_redesign_toggled)
         _layout_card.addWidget(bgm_cb)
 
+        history_cb = QCheckBox("Use the new Singer History look")
+        history_cb.setChecked(bool(self.settings.get("ui_history_redesign", False)))
+
+        def on_history_redesign_toggled(checked: bool):
+            self.settings["ui_history_redesign"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_ui_history_redesign()
+
+        history_cb.toggled.connect(on_history_redesign_toggled)
+        _layout_card.addWidget(history_cb)
+
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))
         glow_combo = QComboBox()
@@ -35880,6 +36034,10 @@ class KaraokeApp(QWidget):
         self.singer_history_cleanup_meta_label.setStyleSheet(section_meta_css())
         bulk_header.addWidget(self.singer_history_cleanup_meta_label)
         bulk_shell_layout.addLayout(bulk_header)
+        self.singer_history_admin_toggle = QPushButton("Admin tools  \u25be")     # redesign only: folds the red buttons away
+        self.singer_history_admin_toggle.setCheckable(True)
+        self.singer_history_admin_toggle.setVisible(False)
+        bulk_shell_layout.addWidget(self.singer_history_admin_toggle)
 
         bulk_grid = QGridLayout()
         bulk_grid.setHorizontalSpacing(7)
@@ -35899,6 +36057,9 @@ class KaraokeApp(QWidget):
         bulk_grid.addWidget(self.history_clear_inactive_button, 2, 0)
         bulk_grid.setColumnStretch(0, 1)
         bulk_shell_layout.addLayout(bulk_grid)
+        self.singer_history_admin_toggle.toggled.connect(
+            lambda on: [b.setVisible(bool(on)) for b in (self.history_clear_all_button, self.history_clear_small_button, self.history_clear_inactive_button)]
+            if getattr(self, "_history_redesign", False) else None)
         left_col.addWidget(bulk_shell)
 
         right_col = QVBoxLayout()

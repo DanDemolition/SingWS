@@ -828,3 +828,15 @@ def bgm_styles() -> dict:
         "player": ("QFrame#bgPlayerFrame {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(124,61,255,0.30), stop:1 rgba(20,16,50,0.62));"
                    " border: 1px solid rgba(167,139,250,{edge:.2f}); border-radius: 14px; }}"),
     }
+
+
+def history_styles() -> dict:
+    """Singer History redesign stylesheets by name (the BGM ones are reused so both pages match)."""
+    s = bgm_styles()
+    s["name"] = "color: #ffffff; font-size: 24px; font-weight: 800;"
+    s["caps"] = "color: rgba(154,160,189,1); font-size: 11px; font-weight: 700; letter-spacing: 2px;"
+    s["view"] = "QListView { background: transparent; border: none; outline: 0; } QListView::item { background: transparent; border: none; }"
+    s["plain_card"] = "QFrame#{name} { background: rgba(255,255,255,0.03); border: 1px solid rgba(140,150,200,0.12); border-radius: 12px; }"
+    s["shell"] = "QFrame#singerHistoryShell { background: transparent; border: none; }"
+    s["toggle"] = (s["ghost"].replace("QPushButton {", "QPushButton { text-align: left;", 1))
+    return s
