@@ -16371,6 +16371,7 @@ class QueueCardDelegate(QStyledItemDelegate):
         path = self._card_path(card.adjusted(0, 0 if first else -3, 0, 0 if last else 3), first, last)
         bg = QColor(self.CARD_BG)
         line = QColor(self.CARD_LINE)
+        line.setAlpha(0)                      # the mockup's rows have no border until they are selected, next or current
         accent = None
         if status == "current":
             accent = QColor(34, 197, 94)
@@ -16437,7 +16438,10 @@ class QueueCardDelegate(QStyledItemDelegate):
             rfm = QFontMetrics(rfont)
             right_w = min(int(inner.width() * 0.45), rfm.horizontalAdvance(right) + 2)
             rcol = QColor(base_color)
-            rcol.setAlpha(190 if kind == "singer" else 150)
+            if rcol.red() > 200 and rcol.green() > 200 and rcol.blue() > 200:
+                rcol = QColor(111, 117, 144)                  # times: the mockup's soft grey
+            else:
+                rcol.setAlpha(190 if kind == "singer" else 150)
             painter.setPen(rcol)
             painter.drawText(
                 QRect(inner.right() - right_w, inner.top(), right_w, inner.height()),
@@ -16509,7 +16513,10 @@ class QueueCardDelegate(QStyledItemDelegate):
         else:
             text = re.sub(r"^\s*\u2022\s*", "", left).replace(" \u2022 ", " \u00b7 ")
             scol = QColor(base_color)
-            scol.setAlpha(200)
+            if scol.red() > 200 and scol.green() > 200 and scol.blue() > 200:
+                scol = QColor(163, 168, 189)                  # ordinary song lines are the mockup's muted grey
+            else:
+                scol.setAlpha(220)
             painter.setPen(scol)
             painter.setFont(font)
             fm = QFontMetrics(font)
@@ -61308,12 +61315,12 @@ class KaraokeApp(QWidget):
             self._restyle_seek_sliders(on)
             # queue buttons: ghost style and the mockup's short labels
             ghost = (
-                "QPushButton { background: transparent; color: rgba(230,232,240,0.85); border: 1px solid rgba(140,150,200,0.22);"
-                " border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 700; }"
+                "QPushButton { background: transparent; color: rgba(190,196,218,0.95); border: 1px solid rgba(140,150,200,0.22);"
+                " border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 600; }"
                 " QPushButton:hover { background: rgba(124,61,255,0.14); border-color: rgba(167,139,250,0.45); color: white; }"
                 " QPushButton:disabled { color: rgba(255,255,255,0.30); }"
             )
-            ghost_danger = ghost.replace("rgba(140,150,200,0.22)", "rgba(255,92,92,0.45)").replace("rgba(230,232,240,0.85)", "rgba(255,150,150,0.95)")
+            ghost_danger = ghost.replace("rgba(140,150,200,0.22)", "rgba(255,92,92,0.45)").replace("rgba(190,196,218,0.95)", "rgba(255,150,150,0.95)")
             labels_on = {"move_up_button": "\u2191 Up", "move_down_button": "\u2193 Down", "remove_button": "Remove", "clear_queue_button": "Clear queue\u2026"}
             labels_off = {"move_up_button": "\u2191\ufe0e  Move Up", "move_down_button": "\u2193\ufe0e  Move Down", "remove_button": "\u2715  Remove", "clear_queue_button": "Clear Queue"}
             off_css = {"move_up_button": self._reorder_btn_css, "move_down_button": self._reorder_btn_css,
