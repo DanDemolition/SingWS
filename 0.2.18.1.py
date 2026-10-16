@@ -9303,7 +9303,7 @@ class BarLevelMeter(QWidget):
 
     def _rest_heights(self):
         import math
-        return [0.22 + 0.2 * abs(math.sin(i * 0.9)) for i in range(self._n_bars)]
+        return [0.30 + 0.5 * abs(math.sin(i * 0.9)) for i in range(self._n_bars)]
 
     def set_active(self, active: bool):
         active = bool(active)
@@ -9407,9 +9407,11 @@ class BarLevelMeter(QWidget):
         gap, bar_w = 3, 6
         total = n * bar_w + (n - 1) * gap
         x = max(0, w - total)                       # right-aligned, like the mockup
+        base = int(h * 0.46)             # the bars' baseline: level with the bottom of the singer's name, as in the mockup
+        bar_max = 40
         for i, lvl in enumerate(self._heights):
-            bar_h = max(4, int(h * max(0.18, min(1.0, lvl))))
-            top = h - bar_h
+            bar_h = max(4, int(bar_max * max(0.18, min(1.0, lvl))))
+            top = base - bar_h
             amber = i >= n - 3
             c1 = QColor(245, 200, 75) if amber else QColor(168, 85, 247)
             c2 = QColor(168, 85, 247) if amber else QColor(139, 92, 246)
@@ -25555,7 +25557,7 @@ class KaraokeApp(QWidget):
                         text_col.removeWidget(meter)
                         tr.insertWidget(3, meter, 0, Qt.AlignmentFlag.AlignVCenter)
                     meter.set_glow_style(True)
-                    meter.setFixedSize(180, 64)    # 20 bars x 6px + 19 gaps x 3px = 177
+                    meter.setFixedSize(180, 100)   # 20 bars x 6px + 19 gaps x 3px = 177; 34 px of bars sit on a baseline in the upper half
                     kick = self.rotation_summary_kicker
                     if getattr(self, "_hero_kick_row", None) is None:
                         kr = QHBoxLayout()
