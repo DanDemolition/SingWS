@@ -66,10 +66,10 @@ input.s{width:100%;background:rgba(0,0,0,.28);border:1px solid var(--line);color
 /* audience */
 .tv{aspect-ratio:16/9;max-width:1100px;margin:0 auto;border-radius:12px;overflow:hidden;position:relative;border:1px solid var(--line2);background:#05050c}
 .tv.rot{background:radial-gradient(700px 400px at 70% 30%,rgba(124,61,255,.5),transparent 60%),radial-gradient(500px 400px at 100% 80%,rgba(34,197,94,.25),transparent 60%),#07060f}
-.ticker{position:absolute;left:0;right:0;bottom:0;height:11%;background:rgba(5,5,12,.92);border-top:2px solid #b6ff3d;display:flex;align-items:center;overflow:hidden;font-weight:800;font-size:clamp(14px,2.4vw,26px)}
-.ticker .tag{background:#b6ff3d;color:#0a0a14;height:100%;display:grid;place-items:center;padding:0 2%;font-size:.7em;letter-spacing:.08em}
-.ticker .txt{padding-left:3%;white-space:nowrap;color:#4dff6a}
-.ticker .clock{margin-left:auto;margin-right:2%;background:#7b2ff0;color:#fff;border-radius:10px;padding:2px 12px;font-variant-numeric:tabular-nums}
+.ticker{position:absolute;left:2%;right:2%;bottom:3%;height:9%;border:1px solid var(--line2);border-radius:999px;background:rgba(255,255,255,.07);backdrop-filter:blur(8px);display:flex;align-items:center;overflow:hidden;font-weight:800;font-size:clamp(14px,2.2vw,24px)}
+.ticker .tag{background:#b6ff3d;color:#0a0a14;border-radius:999px;margin:4px;height:calc(100% - 8px);display:grid;place-items:center;padding:0 2.2%;font-size:.62em;letter-spacing:.08em}
+.ticker .txt{padding-left:2.5%;white-space:nowrap;color:#fff}
+.ticker .clock{margin-left:auto;margin-right:6px;background:#7b2ff0;color:#fff;border-radius:999px;padding:2px 14px;font-variant-numeric:tabular-nums}
 .lyrics{position:absolute;top:10%;left:0;right:0;text-align:center;font:700 clamp(18px,3.4vw,38px)/1.45 ui-monospace,Menlo,monospace}
 .lyrics .d{color:#6f66ff}
 .big{font-size:clamp(26px,5.6vw,64px);font-weight:800}
@@ -85,14 +85,20 @@ input.s{width:100%;background:rgba(0,0,0,.28);border:1px solid var(--line);color
 .msg{max-width:70%;padding:9px 13px;border-radius:14px;background:var(--card2);margin:8px 0}
 .msg.me{margin-left:auto;background:rgba(124,61,255,.3)}.msg small{display:block;color:var(--mute);margin-bottom:2px}
 .g2{display:grid;grid-template-columns:300px 1fr;gap:14px}
+.modal{position:absolute;left:50%;transform:translateX(-50%);top:6%;bottom:8%;width:min(820px,92%);display:flex;flex-direction:column;border:1px solid var(--line2);border-radius:18px;background:linear-gradient(180deg,#171230,#0d0b1c);box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.modal .mh{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line);font-size:16px}
+.modal .mb{flex:1;overflow:auto;padding:14px 18px}.modal .mf{display:flex;gap:10px;align-items:center;padding:12px 18px;border-top:1px solid var(--line)}
+.frm{display:grid;grid-template-columns:150px 1fr;gap:8px 12px;align-items:center;margin-top:8px}.frm label{color:var(--soft);font-size:12px}
+input.i{padding-left:12px}
+.setnav div{padding:8px 12px;border-radius:9px;color:var(--soft);font-weight:600;margin-bottom:3px}.setnav .on{background:rgba(124,61,255,.25);color:#fff}
 @media(max-width:1100px){.body{grid-template-columns:1fr}.g2{grid-template-columns:1fr}.nav{grid-template-columns:repeat(5,1fr)}}
 </style>
 </head>
 <body>
 <div class="tabs" id="tabs">
-  <button data-p="bgm" class="on">BGM</button><button data-p="hist">Singer History</button><button data-p="wait">Waitlist</button><button data-p="chat">Chat</button><button data-p="eq">EQ</button>
+  <button data-p="bgm" class="on">BGM</button><button data-p="hist">Singer History</button><button data-p="wait">Waitlist</button><button data-p="chat">Chat</button><button data-p="eq">EQ</button><button data-p="net">Network</button><button data-p="set">Settings</button>
   <span class="sep"></span>
-  <button data-p="rot">Show Rotation (TV)</button><button data-p="kar">Show Karaoke + ticker (TV)</button><button data-p="tick">Ticker styles (TV)</button>
+  <button data-p="rot">Show Rotation (TV)</button><button data-p="kar">Show Karaoke + ticker (TV)</button>
 </div>
 <div class="note">Mockup only: same look as the new Show tab (glass cards, 14 px corners, purple/green accents). Nothing here is built yet. Tell me what to change on any page.</div>
 
@@ -194,16 +200,27 @@ input.s{width:100%;background:rgba(0,0,0,.28);border:1px solid var(--line);color
 <!-- Karaoke TV -->
 <section class="page" id="kar"><div class="tv"><div class="lyrics"><span class="d">In all the good times</span><br><span class="d">I find myself lon</span>ging<br>for change</div>
   <div style="position:absolute;left:3%;top:48%;width:94%;display:flex;justify-content:space-between;opacity:.85"><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div></div>
-  <div style="position:absolute;left:2%;bottom:15%;padding:8px 14px;border-radius:12px;background:rgba(15,12,40,.7);border:1px solid var(--line2);backdrop-filter:blur(6px)"><div class="cap" style="color:#6df0a0">Now singing</div><b style="font-size:clamp(14px,2.2vw,26px)">Diamond</b><span class="sub"> · Shallow</span></div>
+  <div style="position:absolute;left:3%;bottom:15%;padding:8px 14px;border-radius:12px;background:rgba(15,12,40,.7);border:1px solid var(--line2);backdrop-filter:blur(6px)"><div class="cap" style="color:#6df0a0">Now singing</div><b style="font-size:clamp(14px,2.2vw,26px)">Diamond</b><span class="sub"> · Shallow</span></div>
   <div class="ticker"><div class="tag">NEXT</div><div class="txt">Gaga &amp; Bradley Cooper) · Shallow | Next: April | Sign up se</div><div class="clock">02:52</div></div></div>
-  <ul class="legend"><li>Karaoke picture stays full screen and untouched; only the ticker and a small singer card get the new look.</li><li>The countdown pill becomes a rounded purple clock; &quot;Now singing&quot; card fades out after 8 seconds.</li></ul></section>
+  <ul class="legend"><li>Karaoke picture stays full screen and untouched; only the ticker and a small singer card get the new look.</li><li>Ticker style B (glass pill): lime tag, white text, rounded purple countdown. The &quot;Now singing&quot; card fades out after 8 seconds.</li></ul></section>
 
-<!-- Ticker styles -->
-<section class="page" id="tick"><div style="max-width:1100px;margin:0 auto;display:grid;gap:18px">
-  <div><div class="cap" style="margin-bottom:6px">A · Lime tag (today, polished)</div><div class="tv" style="aspect-ratio:12/1.3"><div class="ticker" style="height:100%"><div class="tag">SPECIALS</div><div class="txt">SPECIAL FOR KARAOKE NIGHTS! $5 Shots of Fireball</div><div class="clock">--:--</div></div></div></div>
-  <div><div class="cap" style="margin-bottom:6px">B · Glass pill</div><div class="tv" style="aspect-ratio:12/1.3;background:linear-gradient(90deg,#1a0f3f,#07060f)"><div class="ticker" style="height:70%;bottom:15%;left:2%;right:2%;border:1px solid var(--line2);border-radius:999px;background:rgba(255,255,255,.07);backdrop-filter:blur(8px)"><div class="tag" style="border-radius:999px;margin:4px;height:calc(100% - 8px)">NEXT</div><div class="txt" style="color:#fff">April · Of Monsters and Men, Little Talks | Justin S | Boo Boo Head</div><div class="clock">02:52</div></div></div></div>
-  <div><div class="cap" style="margin-bottom:6px">C · Purple bar, green text</div><div class="tv" style="aspect-ratio:12/1.3"><div class="ticker" style="height:100%;border-top-color:#a78bfa;background:linear-gradient(90deg,#2a1068,#12082b)"><div class="tag" style="background:#a78bfa">LIVE</div><div class="txt">Sign up at wskar.com · requests are open</div><div class="clock">02:52</div></div></div></div></div>
-  <ul class="legend"><li>Pick one (or tell me what to change). Scrolling speed, queue-change flash and the countdown stay as they are.</li></ul></section>
+
+<!-- Network -->
+<section class="page" id="net" data-nav="Network"><div class="app" style="position:relative"><div class="chrome-top"></div><div class="body" style="opacity:.35;filter:blur(1px)"><div class="card" style="height:520px"></div><div class="rcol"></div></div><div class="chrome-nav"></div>
+  <div class="modal"><div class="mh"><b>Network settings</b><span class="sp"></span><span class="chip g">&#9679; Connected to wskar.com</span><span class="btn sm">&times;</span></div>
+  <div class="mb"><div class="card"><h3>Connection</h3><div class="frm"><label>Venue ID</label><input class="s i" value="wsk"><label>Venue API key</label><input class="s i" value="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;"><label>Server</label><input class="s i" value="https://wskar.com"></div><div class="row" style="margin-top:10px"><span class="btn sm">Test connection</span><span class="mute">last sync 2 s ago</span></div></div>
+  <div class="card" style="margin-top:12px"><h3>Venue location</h3><div class="row" style="margin-top:8px"><span class="chip p">&#10003; Auto-detect this Mac's location</span><span class="btn sm">Detect now</span><span class="mute">35 m accuracy</span></div><div class="frm" style="margin-top:8px"><label>Latitude</label><input class="s i" value="37.5630"><label>Longitude</label><input class="s i" value="-122.3255"></div></div>
+  <div class="card" style="margin-top:12px"><h3>Request QR</h3><div class="row" style="margin-top:8px"><div style="width:84px;height:84px;background:#fff;border-radius:8px"></div><div class="sp"><input class="s i" style="padding-left:12px" placeholder="Custom QR link (blank = your venue page)"><div class="row" style="margin-top:8px"><span class="btn sm">Preview</span><span class="btn sm">Clear</span></div></div></div><div class="list" style="margin-top:8px"><div><span class="chip p">&#10003;</span> Show the QR on the show screen (next to the countdown)</div><div><span class="chip p">&#10003;</span> Show the QR on the rotation screen (with a call to action)</div></div></div></div>
+  <div class="mf"><span class="sp"></span><span class="btn">Cancel</span><span class="btn pr">OK</span></div></div></div></section>
+
+<!-- Settings -->
+<section class="page" id="set" data-nav="Settings"><div class="app" style="position:relative"><div class="chrome-top"></div><div class="body" style="opacity:.35;filter:blur(1px)"><div class="card" style="height:700px"></div><div class="rcol"></div></div><div class="chrome-nav"></div>
+  <div class="modal" style="top:8%;bottom:10%"><div class="mh"><b>Settings</b><span class="sp"></span><span class="sw" style="width:240px"><input class="s" placeholder="Search settings"></span><span class="btn sm">&times;</span></div>
+  <div class="mb" style="display:grid;grid-template-columns:150px 1fr;gap:16px;padding:0"><div style="padding:12px;border-right:1px solid var(--line)"><div class="setnav"><div>General</div><div class="on">Display</div><div>Audio</div><div>Search</div><div>Server</div><div>KaraFun</div><div>Advanced</div></div></div>
+  <div style="padding:14px 18px 14px 0"><div class="card"><h3>Show tab</h3><div class="list" style="margin-top:6px"><div><span class="chip p">&#10003;</span><div class="sp"><b>Use the new Show tab layout</b><div class="sub">Switch back any time, nothing is stored differently</div></div></div><div><span class="chip p">&#10003;</span><div class="sp"><b>Controls over the preview video</b><div class="sub">Experimental</div></div></div><div><span class="chip p">&#10003;</span><div class="sp"><b>Animate the record</b><div class="sub">Turn off to save about 17% of one CPU core</div></div></div></div></div>
+  <div class="card" style="margin-top:12px"><h3>Audience screens</h3><div class="frm" style="margin-top:8px"><label>Ticker style</label><span class="chip p">Glass pill</span><label>Ticker speed</label><div class="row"><div class="slider"><i style="width:55%"></i><b style="left:55%"></b></div></div><label>Rotation burn-in shift</label><span class="chip p">&#10003; On</span></div></div>
+  <div class="card" style="margin-top:12px"><h3>Window</h3><div class="frm" style="margin-top:8px"><label>Karaoke video window</label><span class="chip">Bottom right</span><label>Text size</label><span class="chip">Normal</span></div></div></div></div>
+  <div class="mf"><span class="mute">Changes apply as you make them</span><span class="sp"></span><span class="btn">Reset to defaults</span><span class="btn pr">Done</span></div></div></div></section>
 
 <script>
 const rc=document.getElementById('rc').innerHTML, top_=document.getElementById('chrome-top').innerHTML, nav=document.getElementById('chrome-nav').innerHTML;
