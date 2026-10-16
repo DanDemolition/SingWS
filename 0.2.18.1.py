@@ -25922,6 +25922,27 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _fit_hero_title(self):
+        """The singer's name steps down in size until it fits its column (never below 20 px), so 'Diamond' or a long
+        'Christopher Montgomery-Wellington' is not cut off at the edge by the level meter."""
+        lab = self.rotation_summary_title
+        text, w = lab.text(), lab.width()
+        if getattr(self, "_hero_title_key", None) == (text, w):
+            return
+        self._hero_title_key = (text, w)
+        base_css = text_css("display", "text_bright")
+        m = re.search(r"font-size:\s*(\d+)px", base_css)
+        base = int(m.group(1)) if m else 40
+        size = base
+        if text and w > 40:
+            f = QFont(lab.font())
+            f.setPixelSize(base)
+            f.setWeight(QFont.Weight.ExtraBold)
+            adv = QFontMetrics(f).horizontalAdvance(text)
+            if adv > w - 4:
+                size = max(20, int(base * (w - 4) / max(1, adv)))
+        lab.setStyleSheet(text_css("display", "text_bright", f"font-size:{size}px;") if size != base else base_css)
+
     def _elide_hero_subtitle(self):
         """One line, cut with an ellipsis: a long 'Song . Artist (feat. ...)' used to wrap onto three lines, clip at the bottom and push the
         brand line over the chips. The full text is kept so a wider window gets it back."""
@@ -25990,6 +26011,7 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
             self._elide_hero_subtitle()
+            self._fit_hero_title()
             self.hero_btn_pause.setText("Resume" if self._is_karaoke_paused() else "Pause")
             try:
                 def _mss(v):

@@ -138,6 +138,8 @@ class HeroTextFitGuard(unittest.TestCase):
         self.assertIn("self._hero_sub_full", body)                                 # the full text is kept for a wider window
         sync = src[src.index("def _hero_stage_sync"):src.index("def _hero_seek_pressed")]
         self.assertIn("self._elide_hero_subtitle()", sync)
+        self.assertIn("self._fit_hero_title()", sync)                              # the name steps down in size instead of being cut off
+        self.assertIn("max(20, int(base * (w - 4)", src[src.index("def _fit_hero_title"):src.index("def _elide_hero_subtitle")])
         self.assertIn("_chip.setMinimumWidth(_chip.sizeHint().width())", sync)     # a pill never shows half its text
         self.assertIn("self.hero_chip_format.setVisible(need <= room)", sync)      # no room for all three: drop the format pill
 
