@@ -7,7 +7,7 @@ SRC = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
 
 class WaitlistRedesignTests(unittest.TestCase):
     def test_off_by_default_with_a_checkbox_and_a_launch_hook(self):
-        self.assertIn('"ui_waitlist_redesign": False', SRC)
+        self.assertIn('"ui_waitlist_redesign": True', SRC)
         self.assertIn('QCheckBox("Use the new Waitlist look")', SRC)
         self.assertIn('if self.settings.get("ui_waitlist_redesign", False):', SRC)
 

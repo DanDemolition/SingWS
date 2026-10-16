@@ -22,7 +22,7 @@ class DialogsRedesignTests(unittest.TestCase):
         spec.loader.exec_module(cls.m)
 
     def test_off_by_default_and_wired(self):
-        self.assertIn('"ui_dialogs_redesign": False', SRC)
+        self.assertIn('"ui_dialogs_redesign": True', SRC)
         self.assertIn("_set_dialog_redesign(bool(self.settings.get(\"ui_dialogs_redesign\", False)))", SRC)
         self.assertFalse(self.m._DIALOG_REDESIGN)
 

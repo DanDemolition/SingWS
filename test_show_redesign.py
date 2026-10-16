@@ -10,7 +10,7 @@ SRC = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
 
 class ShowRedesignTests(unittest.TestCase):
     def test_the_redesign_is_off_by_default(self):
-        self.assertRegex(SRC, r'"ui_show_redesign":\s*False')
+        self.assertRegex(SRC, r'"ui_show_redesign":\s*True')
 
     def test_hero_buttons_reuse_the_existing_transport_handlers(self):
         for btn, handler in (("hero_btn_next", "_on_play_control_clicked"), ("hero_btn_pause", "toggle_karaoke_pause"),

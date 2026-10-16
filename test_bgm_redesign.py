@@ -46,7 +46,7 @@ class BgmRedesignTests(unittest.TestCase):
         return mgr
 
     def test_off_by_default(self):
-        self.assertRegex(SRC, r'"ui_bgm_redesign":\s*False')
+        self.assertRegex(SRC, r'"ui_bgm_redesign":\s*True')
         self.assertFalse(getattr(self.make(), "_bgm_redesign", False))
 
     def test_on_swaps_the_row_painter_and_off_puts_everything_back(self):

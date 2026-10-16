@@ -4077,14 +4077,14 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
-    "ui_dialogs_redesign": False,          # new look for Network / EQ / Settings and the other dialogs (experimental); applies the next time a dialog opens
-    "ui_chat_redesign": False,             # new Chat page look (experimental); off = the current look
-    "ui_waitlist_redesign": False,         # new Waitlist look (experimental); off = the current look
-    "ui_history_redesign": False,          # new Singer History look (experimental); off = the current look
-    "ui_bgm_redesign": False,              # new BGM tab look (experimental); off = the current look
-    "ui_show_redesign": False,             # new Show tab layout (experimental); off = the current look
+    "ui_dialogs_redesign": True,          # new look for Network / EQ / Settings and the other dialogs (experimental); applies the next time a dialog opens
+    "ui_chat_redesign": True,             # new Chat page look (experimental); off = the current look
+    "ui_waitlist_redesign": True,         # new Waitlist look (experimental); off = the current look
+    "ui_history_redesign": True,          # new Singer History look (experimental); off = the current look
+    "ui_bgm_redesign": True,              # new BGM tab look (experimental); off = the current look
+    "ui_show_redesign": True,             # new Show tab layout (ON by default since 2026-10-16); off = the old look
     "ui_hero_glow": "soft",                # redesign: strength of the record's glow: off | soft | medium | strong
-    "ui_preview_overlay": False,          # redesign (experimental): round the host preview video and put the transport controls over it
+    "ui_preview_overlay": True,          # redesign (experimental): round the host preview video and put the transport controls over it
     "ui_hero_record_animate": True,        # redesign: animate the record's ring/halo and spin it while a song plays
     "session_location_latitude": "",      # current SingWS session venue latitude
     "session_location_longitude": "",     # current SingWS session venue longitude
@@ -26131,7 +26131,7 @@ class KaraokeApp(QWidget):
 
         self._hero_format_text = ""
         self._hero_stage_timer = QTimer(self)
-        self._hero_stage_timer.setInterval(250)
+        self._hero_stage_timer.setInterval(1000)       # speeds up to 250 ms while a song plays (see _hero_stage_sync)
         self._hero_stage_timer.timeout.connect(self._hero_stage_sync)
 
     def _apply_ui_show_redesign(self, refit: bool = False):
@@ -26470,6 +26470,13 @@ class KaraokeApp(QWidget):
         if not self._ui_redesign_on():
             return
         self._bg_upnext_adapt()
+        try:
+            # quick (250 ms) while a song plays so the progress bar is smooth; a relaxed once-a-second pace when idle
+            want = 250 if bool(getattr(self, "karaoke_playing", False)) else 1000
+            if self._hero_stage_timer.interval() != want:
+                self._hero_stage_timer.setInterval(want)
+        except Exception:
+            pass
         try:
             now = time.monotonic()
             if now - float(getattr(self, "_song_count_at", 0.0)) > 60.0:       # one cheap COUNT a minute, so a finished scan shows up

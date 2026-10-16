@@ -8,7 +8,7 @@ SRC = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
 
 class HistoryRedesignTests(unittest.TestCase):
     def test_off_by_default_with_a_settings_checkbox_and_a_launch_hook(self):
-        self.assertRegex(SRC, r'"ui_history_redesign":\s*False')
+        self.assertRegex(SRC, r'"ui_history_redesign":\s*True')
         self.assertIn('QCheckBox("Use the new Singer History look")', SRC)
         self.assertIn('if self.settings.get("ui_history_redesign", False):', SRC)
 

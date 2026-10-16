@@ -218,7 +218,7 @@ class RightColumnTests(unittest.TestCase):
     def test_the_preview_overlay_is_opt_in_macos_only_and_puts_everything_back(self):
         from pathlib import Path
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertRegex(src, r'"ui_preview_overlay":\s*False')                       # off by default, and a separate switch from the redesign
+        self.assertRegex(src, r'"ui_preview_overlay":\s*True')                       # off by default, and a separate switch from the redesign
         wanted = src[src.index("def _preview_overlay_wanted"):src.index("def _preview_overlay_resettle")]
         self.assertIn("self._ui_redesign_on()", wanted)
         self.assertIn('sys.platform == "darwin"', wanted)
