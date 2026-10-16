@@ -19670,10 +19670,15 @@ class RotationAnnouncementTicker(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(0)
-        self.setStyleSheet("RotationAnnouncementTicker { background: #ADFF2F; }")
         self.specials_badge = QLabel("SPECIALS", self)
         self.specials_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.specials_badge.setStyleSheet("background: #ADFF2F; color: #09030E; font-size: 30px; font-weight: 900; padding: 0 22px;")
+        _lime, _ink = "#ADFF2F", "#09030E"
+        if _TICKER_GLASS:           # ticker style B: a rounded lime tag on a dark bar, next to the glass pill
+            _set_css(self, "RotationAnnouncementTicker { background: #07060f; }")
+            _set_css(self.specials_badge, f"background: {_lime}; color: {_ink}; font-size: 24px; font-weight: 900; padding: 0 22px; border-radius: 14px; margin: 8px 0px 8px 6px;")
+        else:
+            _set_css(self, f"RotationAnnouncementTicker {{ background: {_lime}; }}")
+            _set_css(self.specials_badge, f"background: {_lime}; color: {_ink}; font-size: 30px; font-weight: 900; padding: 0 22px;")
         layout.addWidget(self.specials_badge)
         layout.addWidget(self._backend, 1)
         self.setFixedHeight(self._backend.height() + 4)

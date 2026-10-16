@@ -20,6 +20,12 @@ class TickerGlassTests(unittest.TestCase):
         self.assertIn("radius: root.glass ? height / 2 : Math.min(13, height / 2)", qml)
         self.assertNotIn("WA_TranslucentBackground", SRC[SRC.index("class DetachedPainterTicker"):SRC.index("class DetachedPainterTicker") + 6000])
 
+    def test_the_rotation_specials_tag_is_a_rounded_pill_only_with_the_glass_look(self):
+        body = SRC[SRC.index("class RotationAnnouncementTicker"):SRC.index("class RotationAnimatedBackdrop")]
+        self.assertIn("if _TICKER_GLASS:", body)
+        self.assertIn("border-radius: 14px", body)
+        self.assertIn("font-size: 30px", body)                    # the classic tag is still there for the way back
+
 
 if __name__ == "__main__":
     unittest.main()
