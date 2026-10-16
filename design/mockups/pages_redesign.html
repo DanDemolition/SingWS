@@ -198,12 +198,17 @@ input.i{padding-left:12px}
   <ul class="legend"><li>Same glass cards and accents as the host app, rail with big numbers, QR column, ticker unchanged in behavior.</li><li>This screen sits on native video layers: I would check every change on the real TV before a show.</li></ul></section>
 
 <!-- Karaoke TV -->
-<section class="page" id="kar"><div class="tv"><div class="lyrics"><span class="d">In all the good times</span><br><span class="d">I find myself lon</span>ging<br>for change</div>
-  <div style="position:absolute;left:3%;top:48%;width:94%;display:flex;justify-content:space-between;opacity:.85"><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div></div>
-  <div style="position:absolute;left:3%;bottom:15%;padding:8px 14px;border-radius:12px;background:rgba(15,12,40,.7);border:1px solid var(--line2);backdrop-filter:blur(6px)"><div class="cap" style="color:#6df0a0">Now singing</div><b style="font-size:clamp(14px,2.2vw,26px)">Diamond</b><span class="sub"> · Shallow</span></div>
-  <div class="ticker"><div class="tag">NEXT</div><div class="txt">Gaga &amp; Bradley Cooper) · Shallow | Next: April | Sign up se</div><div class="clock">02:52</div></div></div>
-  <ul class="legend"><li>Karaoke picture stays full screen and untouched; only the ticker and a small singer card get the new look.</li><li>Ticker style B (glass pill): lime tag, white text, rounded purple countdown. The &quot;Now singing&quot; card fades out after 8 seconds.</li></ul></section>
-
+<section class="page" id="kar"><div style="max-width:1200px;margin:0 auto;display:grid;gap:22px">
+  <div><div class="cap" style="margin-bottom:8px">Without the singer card (how it is today, with the new ticker)</div>
+  <div class="tv"><div class="lyrics"><span class="d">In all the good times</span><br><span class="d">I find myself lon</span>ging<br>for change</div>
+    <div style="position:absolute;left:3%;top:48%;width:94%;display:flex;justify-content:space-between;opacity:.85"><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div></div>
+    <div class="ticker"><div class="tag">NEXT</div><div class="txt">Diamond · Shallow | Next: April | Justin S | Boo Boo Head</div><div class="clock">02:52</div></div></div></div>
+  <div><div class="cap" style="margin-bottom:8px">With the singer card (new: a small card, lower left, for the first 8 seconds of each song)</div>
+  <div class="tv"><div class="lyrics"><span class="d">In all the good times</span><br><span class="d">I find myself lon</span>ging<br>for change</div>
+    <div style="position:absolute;left:3%;top:48%;width:94%;display:flex;justify-content:space-between;opacity:.85"><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div><div style="width:26%;aspect-ratio:1.3;border-radius:50%;background:radial-gradient(circle at 50% 55%,#6b0f12,#150808 60%,transparent 62%)"></div></div>
+    <div style="position:absolute;left:3%;bottom:15%;padding:10px 16px;border-radius:14px;background:rgba(15,12,40,.72);border:1px solid var(--line2);backdrop-filter:blur(6px);display:flex;align-items:center;gap:12px"><div class="avatar" style="width:40px;height:40px">D</div><div><div class="cap" style="color:#6df0a0">Now singing</div><b style="font-size:clamp(14px,2.2vw,26px)">Diamond</b><div class="sub" style="font-size:clamp(11px,1.5vw,16px)">Shallow · Lady Gaga &amp; Bradley Cooper</div></div></div>
+    <div class="ticker"><div class="tag">NEXT</div><div class="txt">Diamond · Shallow | Next: April | Justin S | Boo Boo Head</div><div class="clock">02:52</div></div></div></div>
+  <ul class="legend" style="margin:0"><li>The card would be a new floating window over the video, like the ticker is. That is the part that needs care on a real TV: it must never cover the lyrics or end up behind the picture.</li><li>It fades out after 8 seconds so the lyrics stay clear. It is a nice-to-have, not something the screen needs.</li></ul></div></section>
 
 <!-- Network -->
 <section class="page" id="net" data-nav="Network"><div class="app" style="position:relative"><div class="chrome-top"></div><div class="body" style="opacity:.35;filter:blur(1px)"><div class="card" style="height:520px"></div><div class="rcol"></div></div><div class="chrome-nav"></div>
