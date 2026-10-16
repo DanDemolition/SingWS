@@ -212,6 +212,35 @@ class RightColumnTests(unittest.TestCase):
         KA._redesign_remember(ns, btn)
         self.assertEqual(ns.__dict__.get("_redesign_orig_sizes", {}), {})
 
+    def test_the_preview_overlay_is_opt_in_macos_only_and_puts_everything_back(self):
+        from pathlib import Path
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        self.assertRegex(src, r'"ui_preview_overlay":\s*False')                       # off by default, and a separate switch from the redesign
+        wanted = src[src.index("def _preview_overlay_wanted"):src.index("def _preview_overlay_resettle")]
+        self.assertIn("self._ui_redesign_on()", wanted)
+        self.assertIn('sys.platform == "darwin"', wanted)
+        body = src[src.index("def _apply_preview_overlay"):src.index("def _restyle_seek_sliders")]
+        self.assertIn("ov.hide()", body)                                                # off: the overlay goes away...
+        self.assertIn("row.insertWidget(i, b)", body)                                   # ...and the buttons return to their original row, in order
+        self.assertIn("pw.set_native_round(0.0)", body)                                 # ...and the video is square again
+        redesign = src[src.index("def _apply_ui_show_redesign"):src.index("def _apply_redesign_hero_text")]
+        self.assertIn("self._apply_preview_overlay()", redesign)                        # turning the whole redesign off also undoes it
+        refresh = src[src.index("def _refresh_mpv_video_views"):src.index("def _reveal_mpv_hosts_if_allowed")]
+        self.assertIn("self._preview_overlay_resettle()", refresh)                      # re-raised after every native surface change
+
+    def test_the_overlay_is_placed_at_the_bottom_of_the_preview_and_raised(self):
+        from PyQt6.QtWidgets import QFrame
+        pw = self.m.PreviewWindow()
+        pw.resize(400, 300)
+        pw.show()
+        self.app.processEvents()
+        pw.overlay = QFrame(pw)
+        pw.overlay.show()
+        pw.place_overlay()
+        g = pw.overlay.geometry()
+        self.assertEqual((g.x(), g.width(), g.height()), (18, 400 - 36, 46))
+        self.assertLessEqual(g.bottom(), 300 - 10)
+
 
 if __name__ == "__main__":
     unittest.main()

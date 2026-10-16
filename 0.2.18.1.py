@@ -4059,6 +4059,7 @@ DEFAULTS = {
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
     "ui_show_redesign": False,             # new Show tab layout (experimental); off = the current look
     "ui_hero_glow": "soft",                # redesign: strength of the record's glow: off | soft | medium | strong
+    "ui_preview_overlay": False,          # redesign (experimental): round the host preview video and put the transport controls over it
     "ui_hero_record_animate": True,        # redesign: animate the record's ring/halo and spin it while a song plays
     "session_location_latitude": "",      # current SingWS session venue latitude
     "session_location_longitude": "",     # current SingWS session venue longitude
@@ -15622,6 +15623,38 @@ class PreviewWindow(QWidget):
         except Exception:
             pass
 
+    def set_native_round(self, radius: float):
+        """Round the corners of the native mpv view inside this preview (macOS layers). 0 puts it back to square. Never raises."""
+        try:
+            import objc
+            from ctypes import c_void_p
+            host = None
+            owner = getattr(self, "_external_owner", None)
+            host = getattr(owner, "_mpv_preview_host", None) if owner is not None else None
+            if host is None:
+                return
+            view = objc.objc_object(c_void_p=c_void_p(int(host.winId())))
+            views = [view]
+            def walk(v):
+                for sub in v.subviews():
+                    views.append(sub)
+                    walk(sub)
+            walk(view)
+            for v in views:
+                v.setWantsLayer_(True)
+                layer = v.layer()
+                if layer is not None:
+                    layer.setCornerRadius_(float(radius))
+                    layer.setMasksToBounds_(bool(radius))
+        except Exception as exc:
+            _diag(f"[PREVIEW-ROUND] failed: {exc}")
+
+    def place_overlay(self):
+        ov = getattr(self, "overlay", None)
+        if ov is not None and ov.isVisible():
+            ov.setGeometry(18, max(0, self.height() - 10 - 46 - 8), max(0, self.width() - 36), 46)
+            ov.raise_()
+
     def _schedule_mpv_surface_refresh(self):
         try:
             self._mpv_surface_refresh_timer.start(180)
@@ -15641,6 +15674,7 @@ class PreviewWindow(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._schedule_mpv_surface_refresh()
+        self.place_overlay()
 
     def winId(self):
         return self.video_area.winId()
@@ -25430,6 +25464,7 @@ class KaraokeApp(QWidget):
             self._apply_redesign_bg_card(on)
             self._apply_redesign_polish(on)
             self._apply_search_icon(on)
+            self._apply_preview_overlay()
             try:
                 self._set_bottom_nav_active(getattr(self, "_bottom_nav_mode", "main"))
             except Exception:
@@ -26299,6 +26334,10 @@ class KaraokeApp(QWidget):
                 _diag(f"[MPV] video views refreshed reason={reason}")
             except Exception as exc:
                 _diag(f"[MPV] video views refresh failed reason={reason}: {exc}")
+            try:
+                self._preview_overlay_resettle()
+            except Exception:
+                pass
 
         # AppKit may reconnect native children just after Qt emits showEvent.
         # One immediate pass handles ordinary restores; one bounded retry
@@ -30854,6 +30893,21 @@ class KaraokeApp(QWidget):
 
         glow_combo.currentIndexChanged.connect(on_hero_look_changed)
         animate_cb.toggled.connect(on_hero_look_changed)
+
+        overlay_cb = QCheckBox("Round the host preview video and put the transport controls over it (experimental)")
+        overlay_cb.setChecked(bool(self.settings.get("ui_preview_overlay", False)))
+        overlay_cb.setToolTip("Host preview only; the audience window is not touched. Needs the new Show tab layout. Turn off if the preview ever looks wrong.")
+        _layout_card.addWidget(overlay_cb)
+
+        def on_preview_overlay_toggled(checked: bool):
+            self.settings["ui_preview_overlay"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_preview_overlay()
+
+        overlay_cb.toggled.connect(on_preview_overlay_toggled)
 
         _display_actions_card = _section_card(tab_display, "Display Tools")
         _display_actions = QHBoxLayout()
@@ -61324,6 +61378,76 @@ class KaraokeApp(QWidget):
                 w.setMaximumSize(o[2], o[3])
                 w.setSizePolicy(o[4])
                 w.setFont(o[5])
+
+    def _preview_overlay_wanted(self) -> bool:
+        return bool(self._ui_redesign_on() and self.settings.get("ui_preview_overlay", False) and sys.platform == "darwin")
+
+    def _preview_overlay_resettle(self):
+        """After any native surface change: keep the video's rounded corners and the controls above it."""
+        if not self._preview_overlay_wanted():
+            return
+        self.preview_window.set_native_round(14.0)
+        self.preview_window.place_overlay()
+
+    def _apply_preview_overlay(self):
+        """Experimental: round the host preview video and move the transport row onto it. Off puts everything back."""
+        try:
+            on = self._preview_overlay_wanted()
+            pw = self.preview_window
+            row = self.karaoke_transport_button_row
+            before = (self.play_next, self.karaoke_pause_button, self.restart_button, self.stop_button, self.add_file_icon_button)
+            after = (self.preview_time_label, self.audio_output_button)
+            ov = getattr(pw, "overlay", None)
+            if on:
+                if ov is None:
+                    ov = QFrame(pw)
+                    ov.setObjectName("previewOverlay")
+                    ov.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+                    ov.setAutoFillBackground(True)
+                    _pal = ov.palette()
+                    _pal.setColor(QPalette.ColorRole.Window, QColor(12, 10, 26))
+                    ov.setPalette(_pal)
+                    lay = QHBoxLayout(ov)
+                    lay.setContentsMargins(8, 6, 8, 6)
+                    lay.setSpacing(8)
+                    pw.overlay = ov
+                    self._preview_overlay_layout = lay
+                lay = self._preview_overlay_layout
+                if lay.indexOf(self.play_next) < 0:
+                    for b in before:
+                        row.removeWidget(b)
+                        lay.addWidget(b)
+                    lay.addStretch(1)
+                    for b in after:
+                        row.removeWidget(b)
+                        lay.addWidget(b)
+                if getattr(self, "_transport_backdrop", None) is not None:
+                    self._transport_backdrop.setVisible(False)
+                ov.show()
+                pw.place_overlay()
+                pw.set_native_round(14.0)
+                QTimer.singleShot(0, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))
+                QTimer.singleShot(250, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))
+            else:
+                if ov is not None:
+                    lay = self._preview_overlay_layout
+                    if lay.indexOf(self.play_next) >= 0:
+                        for b in (*before, *after):
+                            lay.removeWidget(b)
+                        for i in range(lay.count() - 1, -1, -1):
+                            if lay.itemAt(i).spacerItem() is not None:
+                                lay.takeAt(i)
+                        for i, b in enumerate(before):
+                            row.insertWidget(i, b)
+                        for b in after:
+                            row.addWidget(b)
+                    ov.hide()
+                pw.set_native_round(0.0)
+                if self._ui_redesign_on() and getattr(self, "_transport_backdrop", None) is not None:
+                    self._transport_backdrop.setVisible(True)
+            QTimer.singleShot(0, lambda: self._fit_right_column(self._ui_redesign_on()))
+        except Exception as exc:
+            _diag(f"[SHOW-REDESIGN] preview overlay failed: {exc}")
 
     def _restyle_seek_sliders(self, on: bool):
         for name, groove in (("hero_seek_slider", 6), ("bg_main_seek_slider", 4)):
