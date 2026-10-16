@@ -144,7 +144,7 @@ class QueueCardTests(unittest.TestCase):
         for y in range(rect.top(), rect.bottom() + 1):
             for x in range(rect.left() + 60, rect.left() + 200):
                 c = img.pixelColor(x, y)
-                if c.red() + c.green() + c.blue() > 560:           # the bright text pixels
+                if c.red() + c.green() + c.blue() > 480:           # the text pixels (songs are the muted grey)
                     text_rows.append(y)
                     break
         self.assertTrue(text_rows, "no text found")
