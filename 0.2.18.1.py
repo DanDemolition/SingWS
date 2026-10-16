@@ -4085,6 +4085,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_queue_pin_current": True,          # redesign: the current singer's card is pinned above the queue (display only)
     "ui_ticker_glass": True,               # audience ticker style B (glass pill); off = the classic bar
     "ui_dialogs_redesign": True,          # new look for Network / EQ / Settings and the other dialogs (experimental); applies the next time a dialog opens
     "ui_chat_redesign": True,             # new Chat page look (experimental); off = the current look
@@ -26071,6 +26072,84 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             _diag(f"[BGM-REDESIGN] host apply failed: {exc}")
 
+    def _ensure_pinned_current_view(self):
+        """The small list above the queue that shows the current singer's card (redesign only; built on first use)."""
+        view = getattr(self, "queue_pinned_view", None)
+        if view is not None:
+            return view
+        qd = self.queue_display
+        layout = qd.parentWidget().layout() if qd.parentWidget() is not None else None
+        idx = layout.indexOf(qd) if layout is not None else -1
+        if idx < 0:
+            return None
+        view = QListView()
+        view.setObjectName("queuePinnedCurrent")
+        self.queue_pinned_model = QueueListModel(self)
+        view.setModel(self.queue_pinned_model)
+        view.setItemDelegate(QueueCardDelegate(
+            self._row_left_role, self._row_right_role, self._queue_row_kind_role,
+            self._queue_presentation_role, duet_role=self._row_duet_role, parent=view))
+        view.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        view.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setSpacing(0)
+        _set_css(view, "QListView { background: transparent; border: none; }")
+        view.setVisible(False)
+        layout.insertWidget(idx, view)
+        self.queue_pinned_view = view
+        model = self.queue_display_model
+        for sig in (model.modelReset, model.dataChanged, model.rowsInserted, model.rowsRemoved, model.layoutChanged):
+            sig.connect(lambda *_: self._schedule_pinned_current_sync())
+        return view
+
+    def _schedule_pinned_current_sync(self):
+        if getattr(self, "_pinned_sync_queued", False):
+            return
+        self._pinned_sync_queued = True
+        QTimer.singleShot(0, self._sync_pinned_current)
+
+    def _sync_pinned_current(self):
+        """Redesign only, display only: the current singer's card (name + songs) is drawn once, pinned above the queue, and its rows are
+        hidden in the list below. The queue model, its row numbers and every handler are untouched (hidden rows keep their index)."""
+        self._pinned_sync_queued = False
+        try:
+            qd = self.queue_display
+            model = self.queue_display_model
+            for r in getattr(self, "_pinned_hidden_rows", []):
+                qd.setRowHidden(r, False)
+            self._pinned_hidden_rows = []
+            on = bool(self._ui_redesign_on() and self.settings.get("ui_queue_pin_current", True))
+            view = self._ensure_pinned_current_view() if on else getattr(self, "queue_pinned_view", None)
+            if view is None:
+                return
+            block = []
+            if on:
+                for i in range(model.rowCount()):
+                    ix = model.index(i, 0)
+                    if str(ix.data(self._queue_row_kind_role) or "") == "singer" and str(ix.data(self._queue_presentation_role) or "") == "current":
+                        block = [i]
+                        j = i + 1
+                        while j < model.rowCount() and str(model.index(j, 0).data(self._queue_row_kind_role) or "") == "song":
+                            block.append(j)
+                            j += 1
+                        break
+            if not block:
+                view.setVisible(False)
+                self.queue_pinned_model.setRows([])
+                return
+            self.queue_pinned_model.setRows([dict(model._rows[i]) for i in block])
+            for r in block:
+                qd.setRowHidden(r, True)
+            self._pinned_hidden_rows = list(block)
+            view.doItemsLayout()
+            view.setFixedHeight(sum(view.sizeHintForRow(r) for r in range(len(block))) + 6)
+            view.setVisible(True)
+        except Exception as exc:
+            _diag(f"[PINNED-CURRENT] sync failed: {exc}")
+
     def _ui_redesign_on(self) -> bool:
         try:
             return bool(self.settings.get("ui_show_redesign", False))
@@ -26268,6 +26347,7 @@ class KaraokeApp(QWidget):
                 qd.setSpacing(0 if on else 2)       # the cards draw their own gaps
                 qd.doItemsLayout()
                 qd.viewport().update()
+                self._schedule_pinned_current_sync()
             except Exception as exc:
                 _diag(f"[SHOW-REDESIGN] queue cards failed: {exc}")
             self.last_sung_label.setVisible(not on)          # its NEXT line repeated the on-deck singer
@@ -31756,6 +31836,20 @@ class KaraokeApp(QWidget):
 
         ticker_glass_cb.toggled.connect(on_ticker_glass_toggled)
         _layout_card.addWidget(ticker_glass_cb)
+
+        pin_cb = QCheckBox("Pin the current singer above the queue (new Show layout)")
+        pin_cb.setChecked(bool(self.settings.get("ui_queue_pin_current", True)))
+
+        def on_pin_toggled(checked: bool):
+            self.settings["ui_queue_pin_current"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._schedule_pinned_current_sync()
+
+        pin_cb.toggled.connect(on_pin_toggled)
+        _layout_card.addWidget(pin_cb)
 
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))
