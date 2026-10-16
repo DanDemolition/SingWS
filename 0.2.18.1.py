@@ -16245,9 +16245,9 @@ class QueueCardDelegate(QStyledItemDelegate):
     Paints from the same model roles as RightAlignedMetaDelegate, so selection, drag and the
     model itself are untouched; the setting just swaps which delegate paints."""
 
-    GAP = 8          # space above each singer card
-    NAME_H = 28
-    SONG_H = 24
+    GAP = 6          # space above each singer card
+    NAME_H = 26
+    SONG_H = 22
     LONG_SECS = 300      # a song this long or longer gets a 'Long' badge
     CARD_BG = QColor(255, 255, 255, 6)
     CARD_LINE = QColor(140, 150, 200, 40)
@@ -16389,7 +16389,7 @@ class QueueCardDelegate(QStyledItemDelegate):
         painter.drawPath(path)
         if own_selected and selected:
             # ...and the exact row you picked gets a clear band and an accent bar, so you can tell which song is meant
-            band = QRect(card.left() + 42, card.top() + 3, card.width() - 42 - 6, card.height() - 6)   # starts after the number chip, before the text
+            band = QRect(card.left() + 42, card.top() + 2, card.width() - 42 - 6, card.height() - 4)   # starts after the number chip, before the text
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(167, 139, 250, 78))
             painter.drawRoundedRect(band, 7, 7)
