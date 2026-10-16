@@ -608,7 +608,22 @@ def deck_seek_slider_css() -> str:
         }}
     """
 
+_DIALOG_REDESIGN = False          # set from the setting ui_dialogs_redesign (launch and the Settings checkbox); read when a dialog opens
+
+
+def _set_dialog_redesign(on: bool):
+    global _DIALOG_REDESIGN
+    _DIALOG_REDESIGN = bool(on)
+
+
 def dialog_stylesheet(win, base, txtc) -> str:
+    css = _dialog_stylesheet_base(win, base, txtc)
+    if _DIALOG_REDESIGN and SINGWS_THEME is not None and hasattr(SINGWS_THEME, "dialog_extra_css"):
+        css += SINGWS_THEME.dialog_extra_css()
+    return css
+
+
+def _dialog_stylesheet_base(win, base, txtc) -> str:
     try:
         return f"""
             QDialog {{
@@ -4062,6 +4077,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_dialogs_redesign": False,          # new look for Network / EQ / Settings and the other dialogs (experimental); applies the next time a dialog opens
     "ui_chat_redesign": False,             # new Chat page look (experimental); off = the current look
     "ui_waitlist_redesign": False,         # new Waitlist look (experimental); off = the current look
     "ui_history_redesign": False,          # new Singer History look (experimental); off = the current look
@@ -26612,6 +26628,7 @@ class KaraokeApp(QWidget):
                 QTimer.singleShot(0, self._apply_ui_waitlist_redesign)
             if self.settings.get("ui_chat_redesign", False):
                 QTimer.singleShot(0, self._apply_ui_chat_redesign)
+            _set_dialog_redesign(bool(self.settings.get("ui_dialogs_redesign", False)))
             if self._ui_redesign_on():
                 QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
                 QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
@@ -31672,6 +31689,20 @@ class KaraokeApp(QWidget):
 
         chat_cb.toggled.connect(on_chat_redesign_toggled)
         _layout_card.addWidget(chat_cb)
+
+        dialogs_cb = QCheckBox("Use the new look for Network, EQ and Settings windows (next time they open)")
+        dialogs_cb.setChecked(bool(self.settings.get("ui_dialogs_redesign", False)))
+
+        def on_dialogs_redesign_toggled(checked: bool):
+            self.settings["ui_dialogs_redesign"] = bool(checked)
+            _set_dialog_redesign(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+        dialogs_cb.toggled.connect(on_dialogs_redesign_toggled)
+        _layout_card.addWidget(dialogs_cb)
 
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))

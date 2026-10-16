@@ -859,3 +859,22 @@ def chat_styles() -> dict:
                    " QTabBar::tab:hover { background: rgba(124,61,255,0.16); }"
                    " QTabBar::tab:selected { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8b4dff, stop:1 #6a2fe6); color: white; border-color: transparent; }")
     return s
+
+
+def dialog_extra_css() -> str:
+    """Appended to the shared dialog stylesheet when the dialogs redesign is on (Network, EQ, Settings and the other dialogs).
+    Later rules win over the base ones: softer cards, ghost buttons, rounded inputs, pill tabs."""
+    return """
+        QDialog { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #151030, stop:1 #0a0a16); }
+        QPushButton { background: transparent; border: 1px solid rgba(140,150,200,0.28); border-radius: 9px; }
+        QPushButton:hover { background: rgba(124,61,255,0.16); border-color: rgba(167,139,250,0.5); }
+        QDialogButtonBox QPushButton:default { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8b4dff, stop:1 #6a2fe6); border: none; color: white; font-weight: 700; }
+        QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background-color: rgba(0,0,0,0.22); border: 1px solid rgba(140,150,200,0.16); border-radius: 10px; padding: 7px 10px; }
+        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid rgba(167,139,250,0.6); }
+        QListWidget, QListView, QTreeView, QTableView { background-color: rgba(255,255,255,0.03); border: 1px solid rgba(140,150,200,0.12); border-radius: 12px; }
+        QTabWidget::pane { border: none; }
+        QTabBar::tab { background: transparent; color: rgba(205,210,230,0.96); border: 1px solid rgba(140,150,200,0.22); border-radius: 12px; padding: 8px 14px; margin: 3px 4px; font-weight: 700; }
+        QTabBar::tab:hover { background: rgba(124,61,255,0.16); }
+        QTabBar::tab:selected { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #8b4dff, stop:1 #6a2fe6); color: white; border-color: transparent; }
+        QGroupBox { border: 1px solid rgba(140,150,200,0.16); border-radius: 12px; margin-top: 10px; padding-top: 8px; }
+    """
