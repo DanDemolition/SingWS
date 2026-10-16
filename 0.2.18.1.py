@@ -608,6 +608,16 @@ def deck_seek_slider_css() -> str:
         }}
     """
 
+def _singer_card_hook(app):
+    """Show the karaoke screen's singer card for the song that just started, if the app has one (stand-in apps in tests do not); never raises."""
+    try:
+        fn = getattr(app, "_show_singer_card", None)
+        if callable(fn):
+            fn()
+    except Exception:
+        pass
+
+
 def _song_memory_hook(app, phase: str):
     """Call the app's per-song memory logger if it has one (a stripped-down stand-in app in tests does not); never raises."""
     try:
@@ -921,6 +931,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItemIterator, QProgressDialog,
     QTextEdit, QPlainTextEdit
 )
+from PyQt6.QtCore import QPropertyAnimation
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath, QRadialGradient, QLinearGradient, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
 from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop
@@ -4096,6 +4107,7 @@ DEFAULTS = {
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
     "ui_queue_pin_current": True,          # redesign: the current singer's card is pinned above the queue (display only)
+    "ui_singer_card": True,                # karaoke screen: a small "now singing" card for the first 8 seconds of each song
     "ui_ticker_glass": True,               # audience ticker style B (glass pill); off = the classic bar
     "ui_dialogs_redesign": True,          # new look for Network / EQ / Settings and the other dialogs (experimental); applies the next time a dialog opens
     "ui_chat_redesign": True,             # new Chat page look (experimental); off = the current look
@@ -14028,6 +14040,73 @@ def parse_filename_stem(stem: str, fmt: str = DEFAULT_FILENAME_FORMAT) -> tuple[
     # Unknown / unrecognised format — best-effort default.
     return parts[0], " - ".join(parts[1:-1]) if n > 2 else (parts[1] if n > 1 else ""), parts[-1] if n > 2 else ""
 
+class SingerCardWindow(QWidget):
+    """Karaoke screen: a small glass card (lower left) that names the singer and song for the first seconds of a song.
+    Its own frameless, see-through, click-through window ordered just above the audience window, the way the ticker is; it never takes
+    focus and never touches the video's native views."""
+    W, H = 380, 84
+
+    def __init__(self, owner_window: QWidget):
+        super().__init__(owner_window, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowDoesNotAcceptFocus | Qt.WindowType.WindowTransparentForInput
+                         | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.singer = ""
+        self.song = ""
+        self.resize(self.W, self.H)
+
+    def set_text(self, singer: str, song: str):
+        self.singer, self.song = str(singer or ""), str(song or "")
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(QColor(148, 163, 184, 90), 1))
+        p.setBrush(QColor(15, 12, 40, 184))
+        p.drawRoundedRect(r, 16, 16)
+        d = 46.0
+        av = QRectF(14, (self.height() - d) / 2.0, d, d)
+        grad = QLinearGradient(av.topLeft(), av.bottomRight())
+        grad.setColorAt(0, QColor(106, 47, 230))
+        grad.setColorAt(1, QColor(34, 197, 94))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(grad))
+        p.drawEllipse(av)
+        words = [w for w in re.split(r"[\s&/-]+", self.singer) if w]
+        f = QFont(self.font())
+        f.setPixelSize(18)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(av, Qt.AlignmentFlag.AlignCenter, ("".join(w[0] for w in words[:2]) or "?").upper())
+        x0 = int(av.right()) + 14
+        w = self.width() - x0 - 14
+        kf = QFont(f)
+        kf.setPixelSize(11)
+        kf.setBold(True)
+        p.setFont(kf)
+        p.setPen(QColor(109, 240, 160))
+        p.drawText(QRect(x0, 10, w, 16), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "NOW SINGING")
+        nf = QFont(f)
+        nf.setPixelSize(22)
+        p.setFont(nf)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRect(x0, 26, w, 28), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   QFontMetrics(nf).elidedText(self.singer, Qt.TextElideMode.ElideRight, w))
+        sf = QFont(f)
+        sf.setPixelSize(13)
+        sf.setBold(False)
+        p.setFont(sf)
+        p.setPen(QColor(190, 196, 220))
+        p.drawText(QRect(x0, 54, w, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   QFontMetrics(sf).elidedText(self.song, Qt.TextElideMode.ElideRight, w))
+
+
 class VideoWindow(QWidget):
 
     def __init__(self, title='Karaoke Video Output', width=640, height=480,
@@ -14146,6 +14225,61 @@ class VideoWindow(QWidget):
         self._geometry_surface_reassert_timer.timeout.connect(
             self._reassert_surfaces_after_geometry_change
         )
+
+    def show_singer_card(self, singer: str, song: str, seconds: float = 8.0):
+        """Show the singer card for a few seconds (lower left, above the ticker), then fade it out. Display only."""
+        try:
+            if not singer or not self.isVisible():
+                return
+            card = getattr(self, "_singer_card", None)
+            if card is None:
+                card = SingerCardWindow(self)
+                self._singer_card = card
+                self._singer_card_follower = WindowFollower(self, self._place_singer_card)
+                self._singer_card_timer = QTimer(self)
+                self._singer_card_timer.setSingleShot(True)
+                self._singer_card_timer.timeout.connect(self._fade_singer_card)
+            card.set_text(singer, song)
+            card.setWindowOpacity(1.0)
+            self._singer_card_until = time.monotonic() + float(seconds)
+            self._place_singer_card()
+            self._singer_card_timer.start(int(float(seconds) * 1000))
+        except Exception as exc:
+            _diag(f"[SINGER-CARD] show failed: {exc}")
+
+    def _place_singer_card(self):
+        card = getattr(self, "_singer_card", None)
+        if card is None:
+            return
+        try:
+            if not (self.isVisible() and not self.isMinimized()) or time.monotonic() > getattr(self, "_singer_card_until", 0.0):
+                card.hide()
+                return
+            ticker_h = self.ticker.height() if getattr(self, "ticker", None) is not None else 0
+            tl = self.mapToGlobal(QPoint(0, 0))
+            x = tl.x() + max(12, int(self.width() * 0.03))
+            y = tl.y() + self.height() - ticker_h - card.height() - 34       # clear of the ticker's pill
+            card.move(x, y)
+            if not card.isVisible():
+                card.show()
+            PreviewWindow._order_overlay_above_host(card, self)
+        except Exception as exc:
+            _diag(f"[SINGER-CARD] place failed: {exc}")
+
+    def _fade_singer_card(self):
+        card = getattr(self, "_singer_card", None)
+        if card is None or not card.isVisible():
+            return
+        try:
+            anim = QPropertyAnimation(card, b"windowOpacity", card)
+            anim.setDuration(600)
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.0)
+            anim.finished.connect(card.hide)
+            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._singer_card_anim = anim
+        except Exception:
+            card.hide()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -26057,6 +26191,21 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             _diag(f"[HISTORY-REDESIGN] apply failed: {exc}")
 
+    def _show_singer_card(self):
+        try:
+            if not bool(self.settings.get("ui_singer_card", True)):
+                return
+            vw = getattr(self, "video_window", None)
+            if vw is None or not hasattr(vw, "show_singer_card"):
+                return
+            singer = str(getattr(self, "_current_karaoke_singer_display", "") or "").strip()
+            title = str(getattr(self, "_current_karaoke_title", "") or "").strip()
+            artist = str(getattr(self, "_current_karaoke_artist", "") or "").strip()
+            song = " \u00b7 ".join(p for p in (title, artist) if p)
+            vw.show_singer_card(singer, song, 8.0)
+        except Exception as exc:
+            _diag(f"[SINGER-CARD] host failed: {exc}")
+
     def _apply_ticker_glass(self):
         """Ticker style B on or off for the audience ticker that is already open (the next one reads the flag when it is built)."""
         try:
@@ -27607,6 +27756,7 @@ class KaraokeApp(QWidget):
         # by _start_mpv_karaoke_transport; silently changing clocks/renderers
         # in the middle of a live show is no longer permitted.
         _song_memory_hook(self, "start")      # per-song memory trail ([MEMORY-SONG])
+        QTimer.singleShot(900, lambda: _singer_card_hook(self))      # the karaoke screen's Now Singing card (after the singer/title are set)
         started = self._start_mpv_karaoke_transport(
             audio_path=audio_path,
             video_path=video_path,
@@ -31892,6 +32042,19 @@ class KaraokeApp(QWidget):
 
         pin_cb.toggled.connect(on_pin_toggled)
         _layout_card.addWidget(pin_cb)
+
+        card_cb = QCheckBox("Show a Now Singing card on the karaoke screen at the start of each song")
+        card_cb.setChecked(bool(self.settings.get("ui_singer_card", True)))
+
+        def on_card_toggled(checked: bool):
+            self.settings["ui_singer_card"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+        card_cb.toggled.connect(on_card_toggled)
+        _layout_card.addWidget(card_cb)
 
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))
@@ -57801,6 +57964,7 @@ class KaraokeApp(QWidget):
 
     def _start_external_karafun_playback(self, *, singer: dict, entry: dict, song_info, key=0, tempo_percent=None, duet_display=None, marker_was_top: bool = False):
         _song_memory_hook(self, "start")      # per-song memory trail ([MEMORY-SONG])
+        QTimer.singleShot(900, lambda: _singer_card_hook(self))      # the karaoke screen's Now Singing card (after the singer/title are set)
         artist, title = self._karafun_entry_artist_title(entry)
         singer_display = duet_display or str((singer or {}).get("name", "") or "").strip()
         self._karafun_restore_token = None
