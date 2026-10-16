@@ -11,6 +11,9 @@ saturate the Mac (load average >50) and cause video slowdowns while the capture 
 operator is testing playback. Menu bar hidden on the virtual test screen in full screen is BetterDisplay's max-level overlay, not
 SingWS; the operator decided full screen works as is.
 
+## SHOW TAB REDESIGN REHEARSAL - 2026-10-15 night: installed arm64 build `8b2f2bc4...` (DMG `5c1398d9...`, commit `a954a00`), operator: "works now"
+Operator rehearsed on the real profile with a real MP4 song: Settings switches, Lock (rotation mode only, left of Clear), queue/Up Next, record spin, preview + overlay bar all confirmed working. Two bugs found and fixed along the way: the overlay window did not appear when launched with the redesign saved ON (`_preview_overlay_resettle` now runs 1.2 s after launch), and the bar disappeared when the app went to the background / the show screen opened (WA_MacAlwaysShowToolWindow + a 1.5 s guard calling `place_overlay`). Pushed to main; NOT released; version stays 1.0.1.2; Intel not tested (CPU cost of the record animation unmeasured there).
+
 ## FUTURE (operator, 2026-10-15, NOT now): redesign the audience ticker, show screen and rotation screen like the Show tab
 Same approach as the Show tab: mockup first, off-by-default setting, off = original look verified. Not started. Other host screens (BGM, Singer History, Chat, Waitlist, Network, EQ, Settings) also still to do.
 
