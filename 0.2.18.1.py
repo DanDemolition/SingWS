@@ -15692,6 +15692,9 @@ class PreviewWindow(QWidget):
             ov.setGeometry(top_left.x(), top_left.y(), max(0, self.width() - m.left() - m.right() - 20), 46)
             if not ov.isVisible():
                 ov.show()
+                ov.repaint()                                  # a window first shown during launch was not painting until something nudged it
+                QTimer.singleShot(300, ov.update)
+                QTimer.singleShot(1200, ov.update)
             self._order_overlay_above_host(ov, host)
         except Exception as exc:
             _diag(f"[PREVIEW-OVERLAY] place failed: {exc}")
@@ -26046,6 +26049,13 @@ class KaraokeApp(QWidget):
         # Restore/return-from-tab must re-read authoritative playback IDs. This
         # updates presentation only and never selects a row or steals focus.
         QTimer.singleShot(0, lambda: self._reapply_rotation_presentation(scroll_current=False))
+        # With the new Show tab layout saved as ON, the first apply (during construction) can only reach the pieces built so far. Once the
+        # window is up every piece exists, so apply it once more, completely. (Turning it on from Settings later was always complete.)
+        if not getattr(self, "_redesign_launch_applied", False):
+            self._redesign_launch_applied = True
+            if self._ui_redesign_on():
+                QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
+                QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
         # Run startup auto-placement only once; do not re-place on restore/maximize.
         if not getattr(self, "_initial_video_window_placement_done", False):
             self._initial_video_window_placement_done = True
@@ -61663,7 +61673,7 @@ class KaraokeApp(QWidget):
                 " QPushButton:disabled { color: rgba(255,255,255,0.30); }"
             )
             ghost_danger = ghost.replace("rgba(140,150,200,0.22)", "rgba(255,92,92,0.45)").replace("rgba(190,196,218,0.95)", "rgba(255,150,150,0.95)")
-            labels_on = {"move_up_button": "\u2191 Up", "move_down_button": "\u2193 Down", "remove_button": "Remove", "clear_queue_button": "Clear queue\u2026"}
+            labels_on = {"move_up_button": "\u2191 Up", "move_down_button": "\u2193 Down", "remove_button": "Remove", "clear_queue_button": "Clear"}
             labels_off = {"move_up_button": "\u2191\ufe0e  Move Up", "move_down_button": "\u2193\ufe0e  Move Down", "remove_button": "\u2715  Remove", "clear_queue_button": "Clear Queue"}
             off_css = {"move_up_button": self._reorder_btn_css, "move_down_button": self._reorder_btn_css,
                        "remove_button": warning_button_css(padding="9px 12px", radius=8), "clear_queue_button": danger_button_css(padding="9px 12px", radius=8)}
@@ -61760,10 +61770,13 @@ class KaraokeApp(QWidget):
             row = self._btn_row1
             has_stretch = row.count() == 6
             if on:
-                for b, w in ((self.move_up_button, 76), (self.move_down_button, 92), (self.remove_button, 96), (self.clear_queue_button, 130)):
+                for b, w in ((self.move_up_button, 64), (self.move_down_button, 78), (self.remove_button, 84), (self.clear_queue_button, 66)):
                     b.setFixedWidth(w)
                 if not has_stretch:
                     row.insertStretch(3, 1)                    # Up / Down / Remove stay on the left, Clear queue goes right
+                row.removeWidget(self.rotation_lock_button)
+                row.insertWidget(row.indexOf(self.clear_queue_button), self.rotation_lock_button)   # Lock sits just left of Clear
+                self.rotation_lock_button.setFixedWidth(74)
                 for i in range(row.count()):
                     row.setStretch(i, 0)
                 row.setStretch(3, 1)
@@ -61773,6 +61786,10 @@ class KaraokeApp(QWidget):
                     b.setMaximumWidth(16777215)
                 if has_stretch:
                     row.takeAt(3)
+                row.removeWidget(self.rotation_lock_button)
+                row.addWidget(self.rotation_lock_button, 1)           # original order: Lock after Clear Queue
+                self.rotation_lock_button.setMinimumWidth(0)
+                self.rotation_lock_button.setMaximumWidth(16777215)
                 for i in range(row.count()):
                     row.setStretch(i, 1)
             # kicker dot
