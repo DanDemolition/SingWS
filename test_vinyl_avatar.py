@@ -8,6 +8,22 @@ os.environ.setdefault("SINGWS_HOME", tempfile.mkdtemp())
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+def _close_all_widgets():
+    """These tests show real widgets; leave nothing behind (a leftover focus widget made unrelated tests think the host was busy elsewhere)."""
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in list(app.topLevelWidgets()):
+        try:
+            w.hide()
+            w.close()
+            w.deleteLater()
+        except Exception:
+            pass
+    app.processEvents()
+
+
 def load_main():
     spec = importlib.util.spec_from_file_location("singws_main_vinyl", os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"))
     mod = importlib.util.module_from_spec(spec)
@@ -16,6 +32,9 @@ def load_main():
 
 
 class VinylAvatarTests(unittest.TestCase):
+    def tearDown(self):
+        _close_all_widgets()
+
     @classmethod
     def setUpClass(cls):
         from PyQt6.QtWidgets import QApplication
@@ -111,6 +130,9 @@ class VinylAvatarTests(unittest.TestCase):
 
 
 class SliderGlowTests(unittest.TestCase):
+    def tearDown(self):
+        _close_all_widgets()
+
     @classmethod
     def setUpClass(cls):
         from PyQt6.QtWidgets import QApplication
