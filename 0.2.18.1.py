@@ -608,6 +608,14 @@ def deck_seek_slider_css() -> str:
         }}
     """
 
+_TICKER_GLASS = True              # ticker style B (glass pill); set from the setting ui_ticker_glass
+
+
+def _set_ticker_glass(on: bool):
+    global _TICKER_GLASS
+    _TICKER_GLASS = bool(on)
+
+
 _DIALOG_REDESIGN = False          # set from the setting ui_dialogs_redesign (launch and the Settings checkbox); read when a dialog opens
 
 
@@ -4077,6 +4085,7 @@ DEFAULTS = {
     "bg_to_karaoke_gap_sec": 0.0,        # seconds: +silence, -overlap between BG fade and karaoke start
     "karaoke_tempo_percent": 100,          # karaoke tempo (percent)
     "karaoke_tempo_global": False,         # keep tempo across songs when enabled
+    "ui_ticker_glass": True,               # audience ticker style B (glass pill); off = the classic bar
     "ui_dialogs_redesign": True,          # new look for Network / EQ / Settings and the other dialogs (experimental); applies the next time a dialog opens
     "ui_chat_redesign": True,             # new Chat page look (experimental); off = the current look
     "ui_waitlist_redesign": True,         # new Waitlist look (experimental); off = the current look
@@ -26032,6 +26041,23 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             _diag(f"[HISTORY-REDESIGN] apply failed: {exc}")
 
+    def _apply_ticker_glass(self):
+        """Ticker style B on or off for the audience ticker that is already open (the next one reads the flag when it is built)."""
+        try:
+            on = bool(self.settings.get("ui_ticker_glass", True))
+            _set_ticker_glass(on)
+            tk = getattr(getattr(self, "video_window", None), "ticker", None)
+            root = getattr(tk, "_root", None)
+            if root is not None:
+                root.setProperty("glass", on)
+            view = getattr(tk, "_view", None)
+            if view is not None and hasattr(view, "update"):
+                view.update()
+            if tk is not None:
+                tk.update()
+        except Exception as exc:
+            _diag(f"[TICKER] glass apply failed: {exc}")
+
     def _apply_ui_bgm_redesign(self):
         try:
             mgr = getattr(self, "bg_manager", None)
@@ -26636,6 +26662,7 @@ class KaraokeApp(QWidget):
             if self.settings.get("ui_chat_redesign", False):
                 QTimer.singleShot(0, self._apply_ui_chat_redesign)
             _set_dialog_redesign(bool(self.settings.get("ui_dialogs_redesign", False)))
+            QTimer.singleShot(0, self._apply_ticker_glass)
             if self._ui_redesign_on():
                 QTimer.singleShot(0, lambda: self._apply_ui_show_redesign(refit=True))
                 QTimer.singleShot(600, lambda: self._apply_ui_show_redesign())
@@ -31710,6 +31737,20 @@ class KaraokeApp(QWidget):
 
         dialogs_cb.toggled.connect(on_dialogs_redesign_toggled)
         _layout_card.addWidget(dialogs_cb)
+
+        ticker_glass_cb = QCheckBox("Use the glass pill look for the audience ticker")
+        ticker_glass_cb.setChecked(bool(self.settings.get("ui_ticker_glass", True)))
+
+        def on_ticker_glass_toggled(checked: bool):
+            self.settings["ui_ticker_glass"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._apply_ticker_glass()
+
+        ticker_glass_cb.toggled.connect(on_ticker_glass_toggled)
+        _layout_card.addWidget(ticker_glass_cb)
 
         glow_row = QHBoxLayout()
         glow_row.addWidget(QLabel("Record glow:"))
@@ -63110,6 +63151,7 @@ Rectangle {
     property bool tickerBold: false
     property bool running: true
     property bool effectsEnabled: true
+    property bool glass: false          // ticker style B (glass pill): set from the app, off = the classic bar
     // Freeze-in-place during native window churn (sink detach/surface swap):
     // pausing the animator idles the render thread without hiding anything,
     // and the scroll resumes mid-pass when released.
@@ -63233,10 +63275,22 @@ Rectangle {
         }
     }
 
+    Rectangle {
+        id: glassPill
+        visible: root.glass
+        x: 6; y: 4
+        width: Math.max(0, root.width - 12)
+        height: Math.max(0, root.height - 8)
+        radius: height / 2
+        color: "#12ffffff"
+        border.width: 1
+        border.color: "#468c96c8"
+    }
+
     Item {
         id: leftClip
-        x: 0; y: 0
-        width: root.scrollAreaW
+        x: root.glass ? 22 : 0; y: 0
+        width: root.glass ? Math.max(0, root.scrollAreaW - 22) : root.scrollAreaW
         height: root.height
         clip: true
 
@@ -63270,7 +63324,7 @@ Rectangle {
         y: Math.max(3, (root.height - height) / 2)
         width: root.timerWidth
         height: Math.max(28, root.timerPx * 1.18)
-        radius: Math.min(13, height / 2)
+        radius: root.glass ? height / 2 : Math.min(13, height / 2)
         color: "#6d28d9"
         border.width: 1
         border.color: "#c4b5fd"
@@ -63460,6 +63514,7 @@ class RenderThreadTicker(QFrame):
             raise RuntimeError("QML ticker has no root object")
         try:
             self._root.setProperty("fontFamily", QApplication.font().family())
+            self._root.setProperty("glass", bool(_TICKER_GLASS))
         except Exception:
             pass
 
@@ -64221,6 +64276,13 @@ class Ticker(QFrame):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.fillRect(self.rect(), QColor("black"))
+        glass = bool(_TICKER_GLASS)
+        if glass:
+            # ticker style B: a rounded glass pill inside the bar (the bar itself stays opaque black, nothing about the window changes)
+            pr = QRectF(6.0, 4.0, max(0.0, self.width() - 12.0), max(0.0, self.height() - 8.0))
+            painter.setPen(QPen(QColor(140, 150, 200, 70), 1.0))
+            painter.setBrush(QBrush(QColor(255, 255, 255, 18)))
+            painter.drawRoundedRect(pr, pr.height() / 2.0, pr.height() / 2.0)
 
         now = time.monotonic()
         if self._effects_enabled:
@@ -64262,6 +64324,8 @@ class Ticker(QFrame):
         right_x = max(0, self.width() - self._right_width - self._right_margin)
         right_rect = QRect(right_x, 0, self._right_width, self.height())
         left_clip = QRect(0, 0, max(0, right_x - self._gap), self.height())
+        if glass:
+            left_clip = QRect(22, 0, max(0, right_x - self._gap - 22), self.height())
 
         if getattr(self, "_announcement_mode", False):
             left_clip = self.rect()
@@ -64279,7 +64343,8 @@ class Ticker(QFrame):
             )
             painter.setPen(QPen(QColor("#c4b5fd"), 1.0))
             painter.setBrush(QBrush(QColor("#6d28d9")))
-            painter.drawRoundedRect(pill, min(13.0, pill.height() / 2.0), min(13.0, pill.height() / 2.0))
+            _pr = pill.height() / 2.0 if glass else min(13.0, pill.height() / 2.0)
+            painter.drawRoundedRect(pill, _pr, _pr)
 
             pulse_x = max(3.0, right_x - 18.0)
             pulse_phase = (math.sin(now * math.tau / 2.7) + 1.0) / 2.0
@@ -64313,7 +64378,7 @@ class Ticker(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             "" if getattr(self, "_announcement_mode", False) else self._right_text,
         )
-        if self._effects_enabled:
+        if self._effects_enabled and not glass:
             edge = QLinearGradient(0, 0, self.width(), 0)
             edge.setColorAt(0.0, QColor(109, 40, 217, 0))
             edge.setColorAt(0.35, QColor(109, 40, 217, 136))
