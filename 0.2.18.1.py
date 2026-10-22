@@ -62707,8 +62707,8 @@ class KaraokeApp(QWidget):
                     guard.timeout.connect(self.preview_window.place_overlay)
                     guard.start()
                     pw._overlay_revealed = not bool(self.settings.get("preview_overlay_autohide", True))
-                    hover = QTimer(ov)                                   # is the pointer over the preview? (cheap: one cursor read every 120 ms)
-                    hover.setInterval(120)
+                    hover = QTimer(ov)                                   # is the pointer over the preview? (cheap: one cursor read every 300 ms; the idle-timer test allows nothing faster than 250 ms)
+                    hover.setInterval(300)
                     hover.timeout.connect(pw.poll_overlay_hover)
                     hover.start()
                     try:
