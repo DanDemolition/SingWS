@@ -22925,7 +22925,7 @@ class KaraokeApp(QWidget):
             b.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.audio_output_button.setIconSize(QSize(30, 30))
 
-        self.play_next.setToolTip("Play Next Singer")
+        self.play_next.setToolTip("Play Next Singer  \u2022  Shift-click: restart this song")
         self.karaoke_pause_button.setToolTip("Pause / Resume")
         self.restart_button.setToolTip("Restart Song")
         self.stop_button.setToolTip("Stop Playback")
@@ -58497,7 +58497,7 @@ class KaraokeApp(QWidget):
             # lock that prevents that signal from mutating the queue directly.
             button.setEnabled(True)
             button.setToolTip(
-                "Starting queued song…" if starting else "Play Next Singer"
+                "Starting queued song…" if starting else "Play Next Singer  \u2022  Shift-click: restart this song"
             )
         except Exception:
             pass
@@ -58594,7 +58594,7 @@ class KaraokeApp(QWidget):
         try:
             restore = "Starting queued song…" if bool(
                 getattr(self, "_play_control_starting", False)
-            ) else "Play Next Singer"
+            ) else "Play Next Singer  \u2022  Shift-click: restart this song"
             button.setToolTip("Current song kept — use Skip or Stop to end it")
             try:
                 from PyQt6.QtWidgets import QToolTip
@@ -58628,6 +58628,19 @@ class KaraokeApp(QWidget):
 
     def _on_play_control_clicked(self, _checked=False):
         """Single UI entry point for mouse, touch, keyboard, and accessibility."""
+        # Shift-click: start the song that is on from its beginning (a deliberate gesture, so no confirmation), and play it if it was paused.
+        try:
+            shift = bool(QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        except Exception:
+            shift = False
+        if shift and getattr(self, "karaoke_transport", None) is not None and not isinstance(getattr(self, "_active_external_karafun", None), dict):
+            self.restart_track(skip_confirmation=True)
+            try:
+                if self._is_karaoke_paused():
+                    self.toggle_karaoke_pause()
+            except Exception:
+                pass
+            return
         starting = bool(
             getattr(self, "_pending_play_start_token", None) is not None
             or getattr(self, "_next_in_progress", False)

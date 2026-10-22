@@ -56,6 +56,27 @@ class RecordClickTests(unittest.TestCase):
         self.assertIn("art.set_click_action(self._on_record_clicked)", src)
         self.assertIn("art.set_click_action(None)", src)
 
+    def test_shift_click_on_play_restarts_the_song_that_is_on(self):
+        from unittest import mock
+        from PyQt6.QtCore import Qt
+        calls = []
+        app = SimpleNamespace(
+            karaoke_transport=object(), _active_external_karafun=None,
+            restart_track=lambda skip_confirmation=False: calls.append(("restart", skip_confirmation)),
+            _is_karaoke_paused=lambda: True, toggle_karaoke_pause=lambda: calls.append(("resume",)),
+        )
+        with mock.patch.object(self.m.QGuiApplication, "keyboardModifiers", return_value=Qt.KeyboardModifier.ShiftModifier):
+            self.m.KaraokeApp._on_play_control_clicked(app)
+        self.assertEqual(calls, [("restart", True), ("resume",)])           # from the beginning, and playing again if it was paused
+
+    def test_shift_click_does_not_touch_a_karafun_song_or_an_idle_player(self):
+        from unittest import mock
+        from PyQt6.QtCore import Qt
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()
+        body = src[src.index("    def _on_play_control_clicked"):src.index("starting = bool(", src.index("    def _on_play_control_clicked"))]
+        self.assertIn("karaoke_transport", body)
+        self.assertIn("_active_external_karafun", body)                        # KaraFun plays outside SingWS: no restart there
+
 
 if __name__ == "__main__":
     unittest.main()
