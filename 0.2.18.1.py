@@ -9254,6 +9254,7 @@ class CircularAvatar(QWidget):
         self._name = ""
         self._mode = "idle"
         self._vinyl = None          # a _VinylRenderer while the Show tab redesign is on
+        self._on_click = None       # (shift_held) -> None while the record is a play/pause/stop failsafe
         self.setMinimumSize(80, 80)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -9268,6 +9269,22 @@ class CircularAvatar(QWidget):
             self._vinyl.timer.stop()
             self._vinyl = None
         self.update()
+
+    def set_click_action(self, handler):
+        """Make the record a failsafe button: handler(shift_held) runs on a click (None turns it off again)."""
+        self._on_click = handler
+        self.setCursor(Qt.CursorShape.PointingHandCursor if handler else Qt.CursorShape.ArrowCursor)
+        self.setToolTip("Click: play / pause  \u2022  Shift-click: stop" if handler else "")
+
+    def mousePressEvent(self, event):
+        if self._on_click is not None and event.button() == Qt.MouseButton.LeftButton:
+            try:
+                self._on_click(bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            except Exception as exc:
+                _diag(f"[RECORD-CLICK] failed: {exc}")
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -26472,6 +26489,16 @@ class KaraokeApp(QWidget):
         self._hero_stage_timer.setInterval(1000)       # speeds up to 250 ms while a song plays (see _hero_stage_sync)
         self._hero_stage_timer.timeout.connect(self._hero_stage_sync)
 
+    def _on_record_clicked(self, shift_held: bool):
+        """The spinning record as a failsafe: click = play / pause, Shift-click = stop. It presses the same buttons the transport row has, so
+        every existing guard (confirmations, the starting lock, KaraFun handling) applies exactly as for those buttons."""
+        if shift_held:
+            self.stop_button.click()
+        elif bool(getattr(self, "karaoke_playing", False)):
+            self.karaoke_pause_button.click()
+        else:
+            self.play_next.click()
+
     def _apply_ui_show_redesign(self, refit: bool = False):
         """Show or hide the redesigned hero pieces from the setting. Safe to call at any time."""
         try:
@@ -26594,8 +26621,10 @@ class KaraokeApp(QWidget):
                         # spins only while a karaoke track is actually playing (same test the level meter uses)
                         lambda: bool(getattr(self, "karaoke_playing", False)) and not self._is_karaoke_paused(),
                     )
+                    art.set_click_action(self._on_record_clicked)
                 else:
                     art.set_vinyl(False)
+                    art.set_click_action(None)
                     art.setFixedSize(96, 96)
                 self.rotation_summary_subtitle.setWordWrap(on)
             except Exception as exc:
