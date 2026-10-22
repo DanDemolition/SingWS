@@ -862,6 +862,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QMimeData, QDir
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QAction
+from PyQt6.QtGui import QCursor
 
 # Ensure QtSvg is discoverable in frozen builds (SVG icons)
 try:
@@ -923,7 +924,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QFont, QPainter, QFontMetrics, QPixmap, QIcon, QImage, QDesktopServices, QPen, QBrush, QShortcut, QKeySequence, QColor, QPalette, QTextCursor, QSurfaceFormat, QPainterPath, QRadialGradient, QLinearGradient, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer, QSize, QRect, QRectF, QByteArray, QMetaObject, pyqtSlot, QPoint, QPointF, QAbstractListModel, QModelIndex, QEvent, qInstallMessageHandler
-from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop
+from PyQt6.QtCore import QUrl, QItemSelectionModel, QUrlQuery, QEventLoop, QPropertyAnimation
 
 # WebSocket request relay (wskar.com). Optional: older PyQt6 installs may lack
 # QtWebSockets — the app then falls back to request polling.
@@ -15810,6 +15811,29 @@ class PreviewVideoAreaWidget(QWidget):
         super().paintEvent(event)
 
 
+SNAP_PX = 28            # a dragged preview bar this close (in pixels) to its default place snaps back into it
+
+
+def overlay_frac_from_pos(top_left, bounds, size):
+    """Where the bar sits as fractions (0..1) of the free space inside `bounds` (QRect), so a window resize keeps it in the same relative place."""
+    free_x = max(1, bounds.width() - size.width())
+    free_y = max(1, bounds.height() - size.height())
+    fx = (top_left.x() - bounds.left()) / float(free_x)
+    fy = (top_left.y() - bounds.top()) / float(free_y)
+    return (min(1.0, max(0.0, fx)), min(1.0, max(0.0, fy)))
+
+
+def overlay_pos_from_frac(frac, bounds, size):
+    free_x = max(0, bounds.width() - size.width())
+    free_y = max(0, bounds.height() - size.height())
+    return QPoint(int(round(bounds.left() + frac[0] * free_x)), int(round(bounds.top() + frac[1] * free_y)))
+
+
+def overlay_snap(top_left, default_top_left, snap_px=SNAP_PX):
+    """True when a dragged bar is close enough to its default place to jump back into it."""
+    return abs(top_left.x() - default_top_left.x()) + abs(top_left.y() - default_top_left.y()) <= int(snap_px)
+
+
 class PreviewWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -15925,17 +15949,96 @@ class PreviewWindow(QWidget):
             if not (self.isVisible() and host is not None and host.isVisible() and not host.isMinimized()):
                 ov.hide()
                 return
-            m = self._main_layout.contentsMargins()
-            top_left = self.mapToGlobal(QPoint(m.left() + 10, max(0, self.height() - m.bottom() - 10 - 46)))
-            ov.setGeometry(top_left.x(), top_left.y(), max(0, self.width() - m.left() - m.right() - 20), 46)
+            if not getattr(self, "_overlay_revealed", True) and not ov.isVisible():
+                return                                        # tucked away until the pointer comes into the preview
+            default_tl, size, bounds = self._overlay_geometry()
+            frac = getattr(self, "_overlay_frac", None)
+            if getattr(ov, "dragging", False):
+                pass                                          # the user is holding it: the drag moves it, nothing else may
+            else:
+                top_left = overlay_pos_from_frac(frac, bounds, size) if frac else default_tl
+                ov.setGeometry(top_left.x(), top_left.y(), size.width(), size.height())
             if not ov.isVisible():
+                ov.setWindowOpacity(0.0)
                 ov.show()
+                ov.fade_to(1.0)
                 ov.repaint()                                  # a window first shown during launch was not painting until something nudged it
                 QTimer.singleShot(300, ov.update)
                 QTimer.singleShot(1200, ov.update)
             self._order_overlay_above_host(ov, host)
         except Exception as exc:
             _diag(f"[PREVIEW-OVERLAY] place failed: {exc}")
+
+    def _overlay_geometry(self):
+        """(default top-left in global coordinates, the bar's size, the area it may be dragged within)."""
+        m = self._main_layout.contentsMargins()
+        size = QSize(max(0, self.width() - m.left() - m.right() - 20), 46)
+        default_tl = self.mapToGlobal(QPoint(m.left() + 10, max(0, self.height() - m.bottom() - 10 - 46)))
+        bounds_tl = self.mapToGlobal(QPoint(m.left(), m.top()))
+        bounds = QRect(bounds_tl, QSize(max(0, self.width() - m.left() - m.right()), max(0, self.height() - m.top() - m.bottom())))
+        return default_tl, size, bounds
+
+    def poll_overlay_hover(self):
+        """Show the bar while the pointer is over the preview (or the bar, or its menu, or it is being dragged); tuck it away otherwise, so it
+        never sits over the lyrics. Switched off by the bar's right-click menu."""
+        ov = getattr(self, "overlay", None)
+        if ov is None or not getattr(self, "overlay_active", False):
+            return
+        try:
+            host = self.window()
+            auto = bool(getattr(host, "settings", {}).get("preview_overlay_autohide", True))
+            if not auto:
+                want = True
+            else:
+                _d, _s, bounds = self._overlay_geometry()
+                near = bounds.adjusted(-10, -10, 10, 10)
+                want = bool(self.isVisible() and near.contains(QCursor.pos())) or bool(ov.dragging or ov.menu_open)
+            if want == bool(getattr(self, "_overlay_revealed", True)) and (want or not ov.isVisible()):
+                return
+            self._overlay_revealed = want
+            if want:
+                self.place_overlay()
+            elif ov.isVisible():
+                ov.fade_to(0.0)
+        except Exception as exc:
+            _diag(f"[PREVIEW-OVERLAY] hover check failed: {exc}")
+
+    def overlay_dragged_to(self, top_left):
+        """The bar is being dragged: keep it inside the preview, and let it jump back into its default place when it comes near."""
+        ov = getattr(self, "overlay", None)
+        if ov is None:
+            return
+        default_tl, size, bounds = self._overlay_geometry()
+        x = min(max(top_left.x(), bounds.left()), bounds.right() - size.width() + 1)
+        y = min(max(top_left.y(), bounds.top()), bounds.bottom() - size.height() + 1)
+        pos = QPoint(x, y)
+        if overlay_snap(pos, default_tl):
+            pos = default_tl
+            self._overlay_frac = None
+        else:
+            self._overlay_frac = overlay_frac_from_pos(pos, bounds, size)
+        ov.move(pos)
+
+    def overlay_drag_finished(self):
+        """Remember where the user left it (or that it is back in its default place)."""
+        host = self.window()
+        try:
+            settings = getattr(host, "settings", None)
+            if isinstance(settings, dict):
+                frac = getattr(self, "_overlay_frac", None)
+                if frac:
+                    settings["preview_overlay_frac"] = [round(frac[0], 4), round(frac[1], 4)]
+                else:
+                    settings.pop("preview_overlay_frac", None)
+                host.save_settings()
+        except Exception as exc:
+            _diag(f"[PREVIEW-OVERLAY] could not save its place: {exc}")
+
+    def overlay_reset_place(self):
+        """Snap the bar back to where it sits by default (double-click, or its right-click menu)."""
+        self._overlay_frac = None
+        self.place_overlay()
+        self.overlay_drag_finished()
 
     @staticmethod
     def _order_overlay_above_host(ov, host):
@@ -21025,8 +21128,8 @@ class PreviewControlsWindow(QWidget):
     A child widget of the main window cannot be see-through over a native video view (Qt composites an opaque black behind it), so this is a
     separate window ordered just above the main window, the way the audience ticker is. It never takes focus."""
 
-    BAR = QColor(30, 41, 59, 184)          # slate, about 72% opaque: the video shows through a little
-    LINE = QColor(148, 163, 184, 77)
+    BAR = QColor(30, 41, 59, 140)          # slate, about 55% opaque: the video shows through
+    LINE = QColor(148, 163, 184, 64)
     RADIUS = 20.0
 
     def __init__(self, owner_window: QWidget):
@@ -21036,6 +21139,97 @@ class PreviewControlsWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)     # Qt hides Tool windows while the app is in the background otherwise
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.dragging = False
+        self._press = None
+        self._fade = None
+        self.menu_open = False
+        self.setToolTip("Drag to move  \u2022  double-click (or right-click) to snap back")
+
+    def fade_to(self, target: float, ms: int = 140):
+        """Fade the whole bar in or out; fading out ends with the window hidden (so it never sits there invisible, catching clicks)."""
+        try:
+            if self._fade is not None:
+                self._fade.stop()
+            if target > 0.0:
+                self.setWindowOpacity(0.0 if not self.isVisible() else self.windowOpacity())
+            anim = QPropertyAnimation(self, b"windowOpacity", self)
+            anim.setDuration(int(ms))
+            anim.setStartValue(self.windowOpacity())
+            anim.setEndValue(float(target))
+            if target <= 0.0:
+                anim.finished.connect(self.hide)
+            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._fade = anim
+        except Exception:
+            if target <= 0.0:
+                self.hide()
+            else:
+                self.setWindowOpacity(1.0)
+
+    # Drag by the bar itself (a press on a button still belongs to the button); the preview window keeps it inside the picture.
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = (event.globalPosition().toPoint(), self.pos())
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            start, origin = self._press
+            delta = event.globalPosition().toPoint() - start
+            if not self.dragging and delta.manhattanLength() < 4:
+                return                                                # a click is not a drag
+            self.dragging = True
+            owner = self.parentWidget()
+            pw = getattr(owner, "preview_window", None)
+            if pw is not None:
+                pw.overlay_dragged_to(origin + delta)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        was_dragging = self.dragging
+        self.dragging = False
+        self._press = None
+        if was_dragging:
+            pw = getattr(self.parentWidget(), "preview_window", None)
+            if pw is not None:
+                pw.overlay_drag_finished()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        pw = getattr(self.parentWidget(), "preview_window", None)
+        if pw is not None:
+            pw.overlay_reset_place()
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        from PyQt6.QtWidgets import QMenu
+        pw = getattr(self.parentWidget(), "preview_window", None)
+        menu = QMenu(self)
+        act = menu.addAction("Snap back to the bottom of the preview")
+        act.setEnabled(pw is not None and getattr(pw, "_overlay_frac", None) is not None)
+        host = self.parentWidget()
+        auto = menu.addAction("Hide when the mouse is away from the preview")
+        auto.setCheckable(True)
+        auto.setChecked(bool(getattr(host, "settings", {}).get("preview_overlay_autohide", True)))
+        self.menu_open = True                      # the bar must not vanish under its own menu
+        try:
+            chosen = menu.exec(event.globalPos())
+        finally:
+            self.menu_open = False
+        if chosen is act and pw is not None:
+            pw.overlay_reset_place()
+        elif chosen is auto:
+            try:
+                host.settings["preview_overlay_autohide"] = bool(auto.isChecked())
+                host.save_settings()
+            except Exception:
+                pass
+            if pw is not None:
+                pw.poll_overlay_hover()
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -62512,6 +62706,11 @@ class KaraokeApp(QWidget):
                     guard.setInterval(1500)
                     guard.timeout.connect(self.preview_window.place_overlay)
                     guard.start()
+                    pw._overlay_revealed = not bool(self.settings.get("preview_overlay_autohide", True))
+                    hover = QTimer(ov)                                   # is the pointer over the preview? (cheap: one cursor read every 120 ms)
+                    hover.setInterval(120)
+                    hover.timeout.connect(pw.poll_overlay_hover)
+                    hover.start()
                     try:
                         QGuiApplication.instance().applicationStateChanged.connect(lambda *_: QTimer.singleShot(150, self._preview_overlay_resettle))
                     except Exception:
@@ -62520,6 +62719,12 @@ class KaraokeApp(QWidget):
                     lay.setContentsMargins(12, 6, 12, 6)
                     lay.setSpacing(8)
                     pw.overlay = ov
+                    try:
+                        saved = self.settings.get("preview_overlay_frac")
+                        if isinstance(saved, (list, tuple)) and len(saved) == 2:
+                            pw._overlay_frac = (min(1.0, max(0.0, float(saved[0]))), min(1.0, max(0.0, float(saved[1]))))
+                    except Exception:
+                        pw._overlay_frac = None
                     self._preview_overlay_layout = lay
                     self._preview_overlay_follower = WindowFollower(self, pw.place_overlay)     # follow the main window
                 pw.overlay_active = True
@@ -62540,7 +62745,8 @@ class KaraokeApp(QWidget):
                     f.setPointSize(12)
                     b.setFont(f)
                 self.audio_output_button.setFixedSize(32, 28)
-                ov.show()
+                if getattr(pw, "_overlay_revealed", True):      # with auto-hide on it stays tucked away until the pointer comes into the preview
+                    ov.show()
                 pw.place_overlay()
                 pw.set_native_round(14.0)
                 QTimer.singleShot(0, lambda: (pw.place_overlay(), pw.set_native_round(14.0)))
