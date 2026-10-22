@@ -160,6 +160,37 @@ class QueueCardTests(unittest.TestCase):
         self.assertEqual(px(3), sibling)
         self.assertNotEqual(px(2), sibling)              # the picked song has its own band
 
+    def test_the_selected_row_is_visible_in_the_current_and_next_cards_too(self):
+        from PyQt6.QtCore import Qt
+        m = self.m
+        L, R, K, P = [int(Qt.ItemDataRole.UserRole) + n for n in (20, 21, 30, 33)]
+        for status in ("current", "next"):
+            rows = [{"kind": "singer", "roles": {L: "1. Singer A", R: "", K: "singer", P: status}, "height": 34}]
+            for j in range(3):
+                rows.append({"kind": "song", "roles": {L: f"\u2022 Artist \u2022 Song {j}", R: "03:20", K: "song", P: ""}, "height": 31})
+            view = m.QueueListView()
+            model = m.QueueListModel(view)
+            model.setRows(rows)
+            view.setModel(model)
+            d = m.QueueCardDelegate(L, R, K, P, parent=view)
+            view.setItemDelegate(d)
+            d.attach(view)
+            view.setSpacing(0)
+            view.setStyleSheet("QListView { background: #0a1422; border: none; }")
+            view.resize(520, 400)
+            view.show()
+            self.app.processEvents()
+            view.setCurrentIndex(model.index(2, 0))      # the second song
+            self.app.processEvents()
+            img = view.viewport().grab().toImage()
+            x = 200
+            def px(row):
+                r = view.visualRect(model.index(row, 0))
+                return img.pixelColor(x, r.top() + r.height() // 2)
+            picked, sibling = px(2), px(1)
+            diff = sum(abs(a - b) for a, b in zip(picked.getRgb()[:3], sibling.getRgb()[:3]))
+            self.assertGreater(diff, 25, f"{status} card: the picked row looks the same as the others ({picked.name()} vs {sibling.name()})")
+
     def test_the_band_is_centred_on_the_text_of_the_selected_row(self):
         view, model, d = self.build([3])
         view.setCurrentIndex(model.index(2, 0))

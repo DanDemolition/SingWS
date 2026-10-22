@@ -16739,8 +16739,8 @@ class QueueCardDelegate(QStyledItemDelegate):
             line = QColor(167, 139, 250, 150)
         painter.setPen(QPen(line, 1))
         painter.drawPath(path)
-        if own_selected and selected:
-            # ...and the exact row you picked gets a clear band and an accent bar, so you can tell which song is meant
+        if own_selected:
+            # ...and the exact row you picked gets a clear band (also in the green/purple current and next cards, whose own tint replaces the soft card tint) and an accent bar, so you can tell which song is meant
             band = QRect(card.left() + 42, card.top() + 2, card.width() - 42 - 6, card.height() - 4)   # starts after the number chip, before the text
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(167, 139, 250, 78))
