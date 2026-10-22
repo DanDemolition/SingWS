@@ -1201,6 +1201,40 @@ class RecentRegressionTests(unittest.TestCase):
         )
         worker.assert_not_called()
 
+    def test_a_short_graphics_length_hint_does_not_pull_the_audio_end_earlier(self):
+        """A ZIP's duration hint comes from the CDG's size (graphics); a disc whose graphics stop a minute short of the music used to
+        put the 'last audible audio' a minute early, so the background music faded in over the end of the song."""
+        app = make_app(self.singws)
+        app._current_karaoke_song_path = "/library/CC-Mr-Crowley.zip"
+        app._karaoke_early_silence_trim_enabled = lambda: True
+        app._apply_audio_end_floor = mock.Mock()
+        record = SimpleNamespace(duration=298.0, audio_end=290.0)        # the audio: 298 s, last sound at 290 s
+        with mock.patch.object(self.singws, "transition_analysis_cached", return_value=record):
+            app._arm_audio_end_floor("/tmp/random_extracted.mp3", 238.0)   # the hint: the graphics' 238 s
+        app._apply_audio_end_floor.assert_called_once_with("/tmp/random_extracted.mp3", 298.0, 8.0, "library-cache")
+
+    def test_the_live_scan_measures_from_the_audio_files_own_length_not_the_hint(self):
+        app = make_app(self.singws)
+        app._current_karaoke_song_path = ""
+        app._karaoke_early_silence_trim_enabled = lambda: True
+        app._apply_audio_end_floor = mock.Mock()
+        app._run_on_ui_thread = lambda fn: fn()
+
+        class Inline:
+            def __init__(self, target=None, args=(), **kw):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+
+        with mock.patch.object(self.singws, "transition_analysis_cached", return_value=None), \
+                mock.patch.object(self.singws, "trailing_silence_cached", return_value=None), \
+                mock.patch.object(self.singws.phrase_detect, "probe_duration_seconds", return_value=298.0), \
+                mock.patch.object(self.singws, "detect_trailing_silence", return_value=8.0), \
+                mock.patch.object(self.singws.threading, "Thread", Inline):
+            app._arm_audio_end_floor("/tmp/random_extracted.mp3", 238.0)
+        app._apply_audio_end_floor.assert_called_once_with("/tmp/random_extracted.mp3", 298.0, 8.0, "scan")
+
     def test_server_off_background_follows_waitlist_state(self):
         app = make_app(self.singws)
         app._is_requests_accepting_cached = lambda: bool(app.settings["requests_accepting"])

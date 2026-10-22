@@ -41505,25 +41505,32 @@ class KaraokeApp(QWidget):
                 record_audio_end = getattr(record, "audio_end", None)
                 if record_audio_end is not None and record_duration > 0.0:
                     cached_tail = max(0.0, record_duration - float(record_audio_end))
-                    if cached_tail >= 0.3 and duration > 0.0:
+                    if cached_tail >= 0.3:
+                        # The record's duration is the AUDIO's. The hint (a ZIP's is worked out from the CDG's size, i.e. the
+                        # graphics) is not: on a disc whose graphics stop a minute early, hint - tail put the "last audible audio"
+                        # a minute early too, and the background music faded in over the last minute of the song.
                         self._apply_audio_end_floor(
-                            str(audio_path), duration, cached_tail, "library-cache"
+                            str(audio_path), record_duration, cached_tail, "library-cache"
                         )
                         return
             except Exception as exc:
                 _diag(f"[END-AUDIO] library transition cache unavailable: {exc}")
 
         cached = trailing_silence_cached(audio_path)
-        if cached is not None and duration > 0.0:
-            self._apply_audio_end_floor(audio_path, duration, float(cached), "cache")
+        true_dur = float(self.__dict__.get("_audio_true_duration", {}).get(str(audio_path), 0.0) or 0.0)
+        if cached is not None and true_dur > 0.0:
+            self._apply_audio_end_floor(audio_path, true_dur, float(cached), "cache")
             return
 
         def worker(scan_path: str, scan_duration: float):
-            if scan_duration <= 0.0:
-                try:
-                    scan_duration = float(phrase_detect.probe_duration_seconds(scan_path))
-                except Exception:
-                    scan_duration = 0.0
+            # The audio file's own length, not the hint: the hint can be the CDG's (graphics) length, and the trailing silence is
+            # measured back from the AUDIO's end, so the two must share a baseline.
+            try:
+                real_duration = float(phrase_detect.probe_duration_seconds(scan_path))
+            except Exception:
+                real_duration = 0.0
+            if real_duration > 0.0:
+                scan_duration = real_duration
             if scan_duration <= 0.0:
                 _diag(
                     "[END-AUDIO] duration unknown; end-of-song floor unavailable "
@@ -41546,6 +41553,7 @@ class KaraokeApp(QWidget):
             # posted its answer into a void -- which is why [END-AUDIO] still
             # logged nothing at all after the last fix.
             try:
+                self.__dict__.setdefault("_audio_true_duration", {})[str(scan_path)] = float(scan_duration)
                 self._run_on_ui_thread(
                     lambda: self._apply_audio_end_floor(
                         scan_path, scan_duration, trailing, "scan"
