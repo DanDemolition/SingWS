@@ -38,18 +38,53 @@ class RecordClickTests(unittest.TestCase):
         self.assertEqual(calls, [False, True])
         art.close()
 
-    def test_the_record_presses_the_right_transport_button(self):
+    def test_the_record_asks_first_and_then_presses_the_right_transport_button(self):
+        from unittest import mock
+        pressed, asked = [], []
+
+        def button(name):
+            return SimpleNamespace(click=lambda: pressed.append(name))
+
+        class Dlg:
+            answer = True
+            def __init__(self, parent=None, **kw):
+                asked.append((kw.get("title"), kw.get("confirm_text")))
+            def exec(self):
+                return self.m.QDialog.DialogCode.Accepted if Dlg.answer else self.m.QDialog.DialogCode.Rejected
+        Dlg.m = self.m
+        app = SimpleNamespace(stop_button=button("stop"), karaoke_pause_button=button("pause"), play_next=button("play"),
+                              karaoke_playing=False, settings={"ui_record_confirm": True}, _is_karaoke_paused=lambda: False)
+        handler = self.m.KaraokeApp._on_record_clicked
+        with mock.patch.object(self.m, "ConfirmInterruptDialog", Dlg):
+            handler(app, False)                    # idle: asks, then play
+            app.karaoke_playing = True
+            handler(app, False)                    # playing: asks, then pause
+            app._is_karaoke_paused = lambda: True
+            handler(app, False)                    # paused: asks, then resume (the same button)
+            handler(app, True)                     # shift: asks, then stop
+            Dlg.answer = False
+            handler(app, True)                     # Cancel: nothing is pressed
+        self.assertEqual(pressed, ["play", "pause", "pause", "stop"])
+        self.assertEqual([a[0] for a in asked], ["Play the next singer?", "Pause the song?", "Resume the song?", "Stop the song?", "Stop the song?"])
+
+    def test_with_the_warning_switched_off_a_click_acts_at_once(self):
+        from unittest import mock
         pressed = []
 
         def button(name):
             return SimpleNamespace(click=lambda: pressed.append(name))
-        app = SimpleNamespace(stop_button=button("stop"), karaoke_pause_button=button("pause"), play_next=button("play"), karaoke_playing=False)
-        handler = self.m.KaraokeApp._on_record_clicked
-        handler(app, False)                    # idle: play
-        app.karaoke_playing = True
-        handler(app, False)                    # playing: pause / resume
-        handler(app, True)                     # shift: stop
-        self.assertEqual(pressed, ["play", "pause", "stop"])
+        app = SimpleNamespace(stop_button=button("stop"), karaoke_pause_button=button("pause"), play_next=button("play"),
+                              karaoke_playing=True, settings={"ui_record_confirm": False}, _is_karaoke_paused=lambda: False)
+        with mock.patch.object(self.m, "ConfirmInterruptDialog", side_effect=AssertionError("must not ask")):
+            self.m.KaraokeApp._on_record_clicked(app, False)
+            self.m.KaraokeApp._on_record_clicked(app, True)
+        self.assertEqual(pressed, ["pause", "stop"])
+
+    def test_the_warning_is_a_setting_that_defaults_on(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()
+        self.assertIn('"ui_record_confirm": True', src)
+        self.assertIn('self.settings["ui_record_confirm"] = bool(checked)', src)
+        self.assertNotIn("PointingHandCursor", src)                  # the project's rule: the system arrow cursor everywhere
 
     def test_it_is_wired_only_with_the_redesigned_record(self):
         src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "0.2.18.1.py"), encoding="utf-8").read()

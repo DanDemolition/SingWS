@@ -4128,6 +4128,7 @@ DEFAULTS = {
     "ui_show_redesign": True,             # new Show tab layout (ON by default since 2026-10-16); off = the old look
     "ui_hero_glow": "soft",                # redesign: strength of the record's glow: off | soft | medium | strong
     "ui_preview_overlay": True,          # redesign (experimental): round the host preview video and put the transport controls over it
+    "ui_record_confirm": True,             # redesign: ask before a click on the spinning record plays / pauses / stops (it is only a failsafe)
     "ui_hero_record_animate": True,        # redesign: animate the record's ring/halo and spin it while a song plays
     "session_location_latitude": "",      # current SingWS session venue latitude
     "session_location_longitude": "",     # current SingWS session venue longitude
@@ -9273,7 +9274,6 @@ class CircularAvatar(QWidget):
     def set_click_action(self, handler):
         """Make the record a failsafe button: handler(shift_held) runs on a click (None turns it off again)."""
         self._on_click = handler
-        self.setCursor(Qt.CursorShape.PointingHandCursor if handler else Qt.CursorShape.ArrowCursor)
         self.setToolTip("Click: play / pause  \u2022  Shift-click: stop" if handler else "")
 
     def mousePressEvent(self, event):
@@ -26492,12 +26492,24 @@ class KaraokeApp(QWidget):
     def _on_record_clicked(self, shift_held: bool):
         """The spinning record as a failsafe: click = play / pause, Shift-click = stop. It presses the same buttons the transport row has, so
         every existing guard (confirmations, the starting lock, KaraFun handling) applies exactly as for those buttons."""
+        playing = bool(getattr(self, "karaoke_playing", False))
         if shift_held:
-            self.stop_button.click()
-        elif bool(getattr(self, "karaoke_playing", False)):
-            self.karaoke_pause_button.click()
+            action, button, title, message, verb = "stop", self.stop_button, "Stop the song?", "Stop the song that is playing?", "Stop"
+        elif playing:
+            try:
+                paused = bool(self._is_karaoke_paused())
+            except Exception:
+                paused = False
+            action, button = "pause", self.karaoke_pause_button
+            title, verb = ("Resume the song?", "Resume") if paused else ("Pause the song?", "Pause")
+            message = f"{verb} the song that is on?"
         else:
-            self.play_next.click()
+            action, button, title, message, verb = "play", self.play_next, "Play the next singer?", "Start the next singer's song?", "Play"
+        if bool(self.settings.get("ui_record_confirm", True)):
+            dlg = ConfirmInterruptDialog(self, title=title, message=message, confirm_text=verb, cancel_text="Cancel")
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+        button.click()
 
     def _apply_ui_show_redesign(self, refit: bool = False):
         """Show or hide the redesigned hero pieces from the setting. Safe to call at any time."""
@@ -32156,6 +32168,20 @@ class KaraokeApp(QWidget):
         animate_cb = QCheckBox("Animate the record (it spins only while a karaoke song plays)")
         animate_cb.setChecked(bool(self.settings.get("ui_hero_record_animate", True)))
         _layout_card.addWidget(animate_cb)
+
+        confirm_cb = QCheckBox("Ask before clicking the record plays, pauses or stops (it is only a failsafe)")
+        confirm_cb.setChecked(bool(self.settings.get("ui_record_confirm", True)))
+        confirm_cb.setToolTip("Click the spinning record: play / pause. Shift-click: stop. With this on, a small window asks first so a stray click cannot stop the show.")
+
+        def on_record_confirm_toggled(checked: bool):
+            self.settings["ui_record_confirm"] = bool(checked)
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+        confirm_cb.toggled.connect(on_record_confirm_toggled)
+        _layout_card.addWidget(confirm_cb)
 
         def on_hero_look_changed(*_):
             self.settings["ui_hero_glow"] = str(glow_combo.currentData() or "soft")
