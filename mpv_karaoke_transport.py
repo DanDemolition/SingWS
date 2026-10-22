@@ -76,6 +76,8 @@ class MpvKaraokeTransport(QObject):
         self._voice_norm = 1.0
         self._voice_phase = ""          # "" | "starting" | "voice_wait" | "seeking" | "running"
         self._voice_deadline = 0.0
+        self._voice_hard_deadline = 0.0     # give up for good (a picture that never loads), whatever the voice does
+        self._voice_loaded_at = 0.0         # when the picture was first seen loaded (the voice's wait is counted from here)
         self._voice_origin = 0.0
         self._user_paused = False
         self._timer = QTimer(self)
@@ -149,6 +151,8 @@ class MpvKaraokeTransport(QObject):
         if voice_on:
             self._voice_phase = "starting"
             self._voice_deadline = time.monotonic() + 4.0
+            self._voice_hard_deadline = time.monotonic() + 20.0
+            self._voice_loaded_at = 0.0
             self._vtimer.start()
         if float(start_seconds or 0.0) > 0.0:
             self.plugin.seekMedia(int(float(start_seconds) * 1000.0))
@@ -187,6 +191,7 @@ class MpvKaraokeTransport(QObject):
                 return
             self._voice_phase = "seeking"
             self._voice_deadline = time.monotonic() + 3.0
+            self._voice_hard_deadline = time.monotonic() + 10.0
             self._vtimer.start()
             return
         self.plugin.seekMedia(int(target * 1000.0))
@@ -307,14 +312,20 @@ class MpvKaraokeTransport(QObject):
                 return
             if self._voice_phase in ("starting", "seeking"):
                 loaded = int(self.plugin.durationMs()) > 0
+                if loaded and not self._voice_loaded_at:
+                    self._voice_loaded_at = now
                 if loaded and voice.is_ready():
                     self._voice_origin = voice.position_seconds()
                     voice.slave_to(self.position_seconds(), 0.0)
                     voice.play()
                     self._voice_phase = "voice_wait"
                     self._voice_deadline = now + 0.7
-                elif now > self._voice_deadline:
-                    self._drop_voice("the voice was not ready in time")
+                elif now > self._voice_deadline and (
+                    (loaded and now > self._voice_loaded_at + 3.0) or now > self._voice_hard_deadline
+                ):
+                    # A slow disk can keep the PICTURE from loading for several seconds (mpv's own sound waits for the same load,
+                    # so dropping the voice then gains nothing): the voice's 4 s only counts from the moment the picture is loaded.
+                    self._drop_voice("the voice was not ready in time" if loaded else "the picture did not load in time")
                     self.plugin.playMedia()
             elif self._voice_phase == "voice_wait":
                 if voice.position_seconds() > self._voice_origin + 0.002 or now > self._voice_deadline:

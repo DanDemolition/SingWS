@@ -3550,6 +3550,28 @@ def _perf_record(name: str, ms: float):
     except Exception:
         pass
 
+class _StepClock:
+    """Log-only step timer for a slow path: mark(name) after each step; report() logs one line when the total is slow."""
+    def __init__(self, label: str, threshold_ms: float = 500.0):
+        self.label, self.threshold_ms = label, float(threshold_ms)
+        self.t0 = self.last = time.perf_counter()
+        self.steps = []
+
+    def mark(self, name: str):
+        now = time.perf_counter()
+        self.steps.append((name, (now - self.last) * 1000.0))
+        self.last = now
+
+    def report(self, extra: str = ""):
+        try:
+            total = (time.perf_counter() - self.t0) * 1000.0
+            if total >= self.threshold_ms:
+                parts = " ".join(f"{n}={ms:.0f}" for n, ms in self.steps if ms >= 5.0)
+                _diag(f"[{self.label}] steps total={total:.0f}ms {parts} {extra}".rstrip())
+        except Exception:
+            pass
+
+
 def _perf_log_if_slow(name: str, ms: float):
     try:
         _perf_record(name, ms)
@@ -58413,6 +58435,7 @@ class KaraokeApp(QWidget):
 
     @_perf_timed("ui_songstart_play_next")
     def play_next_file(self, skip_confirmation=False, *, command_source="internal"):
+        _pn_clock = _StepClock("PLAYNEXT-STEPS")
         # Intro Loop release: if the next song is held in a looping intro, a
         # Play/Next press just lets it continue past the loop — no teardown, no
         # advance. (Not during the media-end auto-advance, which sets _pending.)
@@ -58423,7 +58446,9 @@ class KaraokeApp(QWidget):
             self._flush_deferred_remote_adds("before_play_next")
         except Exception:
             pass
+        _pn_clock.mark("flush_remote_adds")
         self._cancel_pending_media_end_cleanup("play_next")
+        _pn_clock.mark("cancel_cleanup")
         try:
             q_len = len(self.queue) if hasattr(self, "queue") and self.queue is not None else -1
             has_pipe = bool(getattr(self, "karaoke_transport", None))
@@ -58545,6 +58570,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        _pn_clock.mark("snapshot_rotation")
         singer = None
         attempts_remaining = max(0, len(self.queue))
         while attempts_remaining > 0:
@@ -58621,7 +58647,9 @@ class KaraokeApp(QWidget):
 
             # Handle both dict and tuple format
             if isinstance(entry, dict):
+                _pn_clock.mark("pick_song")
                 self._refresh_queue_entry_metadata(entry)
+                _pn_clock.mark("refresh_metadata")
                 song_info = entry.get("song_info")
                 key = entry.get("key", 0)
                 tempo_percent = entry.get("tempo_percent")
@@ -58650,7 +58678,9 @@ class KaraokeApp(QWidget):
                 self._next_in_progress = False
                 self._set_play_control_starting(False)
                 return
-            if primary_path and (not os.path.exists(primary_path)):
+            _pn_exists = bool(primary_path) and os.path.exists(primary_path)
+            _pn_clock.mark("file_exists")
+            if primary_path and (not _pn_exists):
                 _diag(f"[PLAYNEXT] start rejected: missing file kept in queue: {primary_path}")
                 _restore_play_transaction("missing_file")
                 try:
@@ -58678,8 +58708,10 @@ class KaraokeApp(QWidget):
         except Exception:
             current_song_dur = 0
 
+        _pn_clock.mark("duration")
         # Phrase-start has been retired; songs always begin at the file start.
         phrase_start = self._resolve_phrase_start(primary_path, entry, current_song_dur)
+        _pn_clock.report("(the rest of the start, load and transport setup, is in the ui_songstart_* lines)")
 
         # Retired phrase/intro-loop path.
         intro_loop_seconds = None

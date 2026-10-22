@@ -155,11 +155,27 @@ class TransportVoiceTests(unittest.TestCase):
         v = FakeVoice()
         t, p = make(v)
         t.start(0.0)
-        t._voice_deadline = 0.0           # the deadline has passed
+        t._voice_deadline = 0.0           # the deadline has passed...
+        t._voice_step()
+        self.assertTrue(t.voice_active(), "...but the picture was only just seen loaded: the voice gets 3 s from then")
+        t._voice_loaded_at = 0.001        # ...and the picture has been loaded for a while
         t._voice_step()
         self.assertFalse(t.voice_active())
         self.assertFalse(p.shadow)
         self.assertIn(("play",), p.calls, "mpv must start playing, with its own sound")
+
+    def test_a_slow_picture_load_does_not_cost_the_voice_its_wait(self):
+        v = FakeVoice()
+        t, p = make(v)
+        t.start(0.0)
+        p.dur_ms = 0                      # the picture has not loaded yet (a slow disk)
+        t._voice_deadline = 0.0           # the old 4 s would be over
+        t._voice_step()
+        self.assertTrue(t.voice_active(), "an unloaded picture must not get the voice dropped")
+        self.assertNotIn(("play",), p.calls)
+        t._voice_hard_deadline = 0.0      # a picture that never loads is still given up on, eventually
+        t._voice_step()
+        self.assertFalse(t.voice_active())
 
     def test_a_seek_moves_both_and_restarts_them_together(self):
         v = FakeVoice()
