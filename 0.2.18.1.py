@@ -63264,7 +63264,7 @@ class KaraokeApp(QWidget):
         # Never auto-start on a fresh launch; but once a karaoke song has played this session the music
         # comes back after it, as it already does after a native song (2026-10-16: the first KaraFun song
         # after a launch left the room silent until the operator pressed Play).
-        if not getattr(self, "_bgm_session_started", False) and not getattr(self, "_karaoke_played_this_session", False):
+        if not getattr(self, "_bgm_session_started", False) and not self.__dict__.get("_karaoke_played_this_session", False):
             _diag("[BG-HANDOFF] resume blocked: no BGM play pressed and no song played yet this session")
             return False
         
