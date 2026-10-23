@@ -67,6 +67,20 @@ server-sync lines and the PHP-side fixtures already used in the history/queue te
 This touches live queue and singer data, so every step is rehearsed on the scratch profile and reviewed with real traces
 before it is allowed near a show. Do not start until Stage A2 has run a clean show.
 
+**B0 replay harness (started 2026-10-23, `tools/queue_replay.py`, `test_queue_replay.py`).** Parses the real show logs
+(`[REMOTE-TOMBSTONE]`, `[REQUEST-LIFECYCLE]`, `[QUEUE-DEDUP]`, `[QUEUE-INSERT]`, `[HOST-REQUEST-SYNC]`) into a normalized event
+corpus (`--corpus out.jsonl`) and checks three invariants against what the Python app actually did: RESURRECTION (a
+host-removed/completed id never returns from the server), DEDUP_OLDEST (the kept duplicate has the smaller epoch-ms id), and
+ID_STABLE (a host request key never maps to two ids). First run over 151 logs: 0 violations. Findings that shape the rest of B:
+* ~89% of queue events in the live logs are unit-test noise (`request_id` < 1e12 written by tests into the real log). The
+  harness drops and counts them; the real corpus is only 169 request ids, 92 tombstones, 1,301 resurrection-guard hits.
+* DEDUP_OLDEST and the id-reuse path have NO real events yet, so their clean result proves nothing; the harness says so.
+* Host actions (reorder/replace/move between sections) are not in the corpus yet. Next harness steps: parse
+  `[QUEUE_SYNC_AUTHORITY]`, `[QUEUE-AUDIT]`, `[ROTATION-SLOT]`, `[QUEUE-STATE]` and `[SERVER-STATE]` snapshots, and add the
+  PHP-side fixtures already used by the queue tests. Only then write the pure `singws-queue` crate and replay the corpus
+  through it next to the Python result.
+* Separate bug worth fixing: unit tests write into the live `~/SingWS/logs`; they should use an isolated `SINGWS_HOME`.
+
 ## Stage C: background-music transition planning (small, pure)
 
 "When does the next track start fading, how long, from which offset" is already isolated in Python
