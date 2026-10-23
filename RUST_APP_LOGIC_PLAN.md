@@ -1,14 +1,15 @@
 # Moving the app's logic to Rust, gradually
 
-Status: PLAN ONLY (2026-10-15). Nothing here is built. Written at the operator's request after the engine layer
-(music, pads, karaoke audio, video bridge, analyzer) moved to Rust. This follows AGENTS.md: adapter-style, small
-reviewable steps, shadow before drive, a flag for every risky step, old code removed only after the replacement is proven.
+Status: ACTIVE (2026-10-23). Stage A0 is implemented, tested, and deployed on Apple Silicon; the Intel build and the
+three-show shadow acceptance run are next. This follows AGENTS.md: adapter-style, small reviewable steps, shadow before
+drive, a flag for every risky step, and old code removed only after the replacement is proven.
 
 ## What "the app" is today
 
 One Python file (`0.2.18.1.py`, ~61,000 lines) mixes four things:
 
-1. **UI** (PyQt widgets + QML surfaces). Stays in Python/PyQt (AGENTS rule 1). Not part of this plan.
+1. **UI** (PyQt widgets + QML surfaces). It stays in place while the application core moves, then migrates last to a
+   Rust-owned Qt Quick/QML shell so the packaged application no longer embeds Python.
 2. **Decision logic** with no UI in it: when a song has really ended, when to advance the rotation, how requests move
    between states, when the next background track starts fading. These are the rules the live-show bugs came from.
 3. **I/O glue**: server sync (HTTP/websocket), KaraFun control (AppleScript/Accessibility, macOS only), files, settings.
@@ -25,11 +26,12 @@ commands BeginPlayback, RetryResult, MarkPlaying, StartBgHandoff, CompleteSong, 
 Python feeds it through `transport_shadow.py`; it only logs (`[TRANSPORT-SHADOW]`, `MISMATCH`), and
 `tools/transport_shadow_report.py` gives the acceptance verdict (needs >= 3 shows, every one with 0 disagreements).
 
-**A0 (first, small): make the shadow actually collect data.** Finding 2026-10-15: the dev Mac profile has
+**A0 (complete in source and deployed on Apple Silicon): make the shadow actually collect data.** Finding 2026-10-15: the dev Mac profile has
 `"transport_shadow": false` saved from the earlier rehearsal instructions, which overrides the new default (on), so this
 Mac has recorded 0 songs (the report says "no shadow sessions"). The Intel Mac's profile is unknown (its show log is no
 longer available to check). Fix options: (a) operator deletes the key from settings.json on both Macs (shadow is log-only, safe);
-(b) a launch-time migration drops a saved `false` the same way `karaoke_engine` is forced. Then count shows with the report tool.
+(b) a launch-time migration enables a saved `false` once and records a migration marker. Option (b) shipped in commit
+`dd1f077`; later operator changes remain respected. Count shows with the report tool before Stage A1.
 
 **A1: fix what the shadow finds.** Every MISMATCH is either an app bug or a machine rule to fix. Exit: >= 3 shows,
 0 unexplained disagreements, covering native CDG/MP4 and KaraFun, including a seek-near-end and a manual Complete.
@@ -62,15 +64,20 @@ before it is allowed near a show. Do not start until Stage A2 has run a clean sh
 (`transition_analysis`, the scheduler maths). A pure Rust `plan_transition(metadata, now) -> plan` shadowed against Python on
 real playlists is a one-session job and the Rust BGM engine already consumes the result. Low risk, low urgency.
 
-## Stage D: stores and server client (only if a Windows port is scheduled)
+## Stage D: stores and server client
 
-History/stats/settings persistence and the HTTP/websocket client (`reqwest`/`tokio`). No benefit for the Mac app on its own.
+History/stats/settings persistence and the HTTP/websocket client (`reqwest`/`tokio`). This becomes necessary for the
+no-Python package, but remains behind the existing storage/network adapters until replay and compatibility tests pass.
 KaraFun control stays macOS-native (AppleScript/Accessibility) whatever the language; Windows would need a different mechanism.
 
-## Stage E: the UI
+## Stage E: Rust-owned UI and no-Python package
 
-Stays PyQt. The Tauri UI is on hold and is only reopened if a Windows port is scheduled or PyQt becomes a blocker.
-Rewriting 61,000 lines of UI to Rust is explicitly NOT part of this plan.
+Move the host UI to Qt Quick/QML with Rust exposing the application model and commands. Keep libmpv, the native macOS
+video bridge, Signalsmith C++, and platform APIs; "no Python" does not mean rewriting proven native libraries. Port one
+panel at a time behind a shell selector, beginning with read-only views and ending with live queue/transport controls.
+The PyQt shell remains the rollback path until the Rust shell completes the Intel and Apple Silicon rehearsal matrix.
+Exit: the signed application contains no Python interpreter, Python modules, PyQt, or PyInstaller bootloader, and passes
+the same show acceptance checklist on both architectures.
 
 ## What each stage buys, and what it does not
 
@@ -88,10 +95,12 @@ Rewriting 61,000 lines of UI to Rust is explicitly NOT part of this plan.
 | A3/A4 flip + delete | A2 | same | one clean show per decision |
 | B queue/rotation | A2 clean show, replay harness | `queue_drive` (off) | invariants + replay + shadow, then host actions first |
 | C transition planner | none | `bgm_plan_engine` | parity on real playlists |
-| D/E | a scheduled Windows port | n/a | n/a |
+| D stores/network | B/C state ownership proven | adapter selectors | persistence/network compatibility corpus passes |
+| E Rust UI/package | A-D APIs stable | shell selector during migration | no Python in bundle; full two-architecture show acceptance |
 
-## Immediate next step (needs operator input)
+## Immediate next step
 
-A0: remove `"transport_shadow": false` from settings.json on this Mac and on the Intel Mac (SingWS closed; I will not edit his
-profile without his go), or approve the launch-time migration. Then run the next shows and read
-`python3 tools/transport_shadow_report.py <last-show logs>`.
+Build/install commit `dd1f077` natively on the Intel Mac, then run three representative shows with native CDG/MP4 and
+KaraFun, including seek-near-end and manual Complete. Evaluate the three exported logs together with
+`python3 tools/transport_shadow_report.py <show-1.log> <show-2.log> <show-3.log>`. Do not enable any Rust driving decision
+until that command reports `ACCEPTANCE MET` and every mismatch has been explained.

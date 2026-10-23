@@ -1,7 +1,8 @@
 # SingWS Rust migration plan (Phases 2-4)
 
 Companion to `RUST_ARCHITECTURE_AUDIT.md` (read it first; its labels **[VERIFIED] / [REPORTED] / [SUSPECTED] / [OPEN]** are reused here).
-Status: **proposal for review. No implementation has started and none will start without approval.**
+Status: **historical engine-layer plan; implementation is active.** The current ordered application-core and no-Python
+roadmap is `RUST_APP_LOGIC_PLAN.md`. Where this document says the Python/PyQt shell is permanent, the newer roadmap wins.
 
 Guiding principle: migrate only where there is a measurable reliability or performance gain, or a dependency/maintainability reason that the project
 itself has stated. Do not translate Python into Rust for consistency.
