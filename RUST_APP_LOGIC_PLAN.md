@@ -129,7 +129,7 @@ and 4 of 4 deliberately broken Rust rules were caught by it. Honest limits:
   the 8 s crossfade cap.
 * The 4 junk `song.zip` records test runs left in the live `~/SingWS/transition-analysis.json` were removed on 2026-10-23 (the parity
   tool still skips temp-path records). The live loudness cache was also rewritten by pre-isolation test runs and now holds one real entry;
-  re-run library analysis to repopulate it.
+  re-run library analysis to repopulate it. OWNER ACTION (2026-10-23): the owner will re-run library analysis in the app; once it has finished, re-check `~/SingWS/loudness.json` has many real entries and re-run `tools/plan_parity.py` against the refreshed transition cache.
 Not done (needs real show evidence first): turning `plan_shadow` on by default, and any `bgm_plan_engine` drive step.
 
 ## Stage D: stores and server client
