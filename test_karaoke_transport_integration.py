@@ -19,7 +19,7 @@ from test_rust_video_bridge import FFMPEG, LIBMPV, ROOT, RUST_DYLIB
 SCENARIO = textwrap.dedent("""
     import json, os, sys, time, threading
     sys.path.insert(0, %r)
-    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ["SINGWS_HOME"] = %r
     os.environ["SINGWS_VIDEO_BRIDGE"] = "rust"
     os.environ["SINGWS_VIDEO_LIB"] = %r

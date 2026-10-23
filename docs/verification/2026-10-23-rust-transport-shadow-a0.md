@@ -53,3 +53,19 @@ python3 tools/transport_shadow_report.py show-1.log show-2.log show-3.log
 
 Do not enable `transport_drive` or remove the Python decision path until the report prints `ACCEPTANCE MET` and every
 reported disagreement has been investigated.
+
+## Operator-approved local substitute — 2026-10-23
+
+The operator explicitly chose a local acceptance rehearsal instead of waiting for three physical-Intel shows.
+
+- Real Sound Choice CDG+MP3 and generated MP4 passed `test_karaoke_transport_integration` through the real native video
+  bridge and Rust karaoke voice: start, key +2, tempo 125%, seek, pause/resume, and stop. CDG worst observed A/V clock
+  error was 72 ms; MP4 worst was 19 ms (limits: median <80 ms, worst <300 ms).
+- `tools/local_transport_acceptance.py` produced three isolated show-shaped logs and five lifecycle sessions covering
+  native CDG, native MP4, KaraFun automatic end, near-end seek, manual Complete, manual stop, and watchdog. Result:
+  three clean shows, zero disagreements, complete coverage, `ACCEPTANCE MET`.
+- The installed arm64 application and signed x86_64 DMG application both launched with isolated profiles and exited via
+  `SINGWS_SMOKE_EXIT_MS=9000` with exit code 0 and `[LAUNCH] clean shutdown`. Intel ran under Rosetta as x86_64.
+
+This satisfies the operator-approved A0/A1 local gate. It is functional/correctness evidence, not a physical-Intel
+performance measurement. A2 may begin behind `transport_drive: false`; the old Python decision must win every disagreement.

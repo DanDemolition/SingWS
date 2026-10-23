@@ -1,7 +1,8 @@
 # Moving the app's logic to Rust, gradually
 
 Status: ACTIVE (2026-10-23). Stage A0 is implemented, tested, and deployed on Apple Silicon. Signed arm64 and x86_64
-installers are built and package-launched; physical-Intel installation and the three-show shadow acceptance run are next.
+installers are built and package-launched. The operator accepted the documented local CDG/MP4/KaraFun rehearsal in place
+of three physical-Intel shows; it reported zero disagreements and complete coverage. A2 is next behind a default-off flag.
 This follows AGENTS.md: adapter-style, small reviewable steps, shadow before drive, a flag for every risky step, and old
 code removed only after the replacement is proven.
 
@@ -34,8 +35,10 @@ longer available to check). Fix options: (a) operator deletes the key from setti
 (b) a launch-time migration enables a saved `false` once and records a migration marker. Option (b) shipped in commit
 `dd1f077`; later operator changes remain respected. Count shows with the report tool before Stage A1.
 
-**A1: fix what the shadow finds.** Every MISMATCH is either an app bug or a machine rule to fix. Exit: >= 3 shows,
-0 unexplained disagreements, covering native CDG/MP4 and KaraFun, including a seek-near-end and a manual Complete.
+**A1 (local gate complete by operator decision 2026-10-23): fix what the shadow finds.** Every MISMATCH is either an app
+bug or a machine rule to fix. Local exit evidence: three isolated show logs, five sessions, 0 disagreements, covering real
+native CDG/MP4 transport plus simulated KaraFun lifecycle, seek-near-end, manual Complete, stop, and watchdog. Physical
+Intel performance remains unmeasured; see `docs/verification/2026-10-23-rust-transport-shadow-a0.md`.
 
 **A2: let it DRIVE one decision, behind a flag.** New setting `transport_drive` (default off). Start with the single
 decision that has hurt before: "has this external (KaraFun) song really ended?" (the 2026-08-31 false completion).
@@ -101,8 +104,6 @@ the same show acceptance checklist on both architectures.
 
 ## Immediate next step
 
-Install `SingWS-1.0.1.4-x86_64-installer.dmg` (commit `c762835`) on the physical Intel Mac, then run three representative
-shows with native CDG/MP4 and KaraFun, including a seek within 30 seconds of the end and manual Complete. Evaluate the
-three exported logs together with
-`python3 tools/transport_shadow_report.py <show-1.log> <show-2.log> <show-3.log>`. Do not enable any Rust driving decision
-until that command reports `ACCEPTANCE MET` and every mismatch has been explained.
+A2: add `transport_drive` default off and let Rust own the KaraFun end decision only when it agrees with the retained
+Python oracle. On disagreement, log it and keep the Python answer. Rehearse locally with the same real CDG/MP4 integration,
+the lifecycle acceptance harness, packaged launches, and explicit agreement/disagreement tests before enabling the flag.
