@@ -248,3 +248,22 @@ Rosetta). After the move: the integration test passes with no helper running and
   results over the real data are identical before and after.
 * Dev Mac install (2026-10-23): the Stage C plan-gate arm64 build (`184bc4cc...`) is installed in /Applications (key files hash-identical to the
   gate-tested DMG), `plan_shadow` is enabled in the live profile alongside the other shadow flags (backup `settings.json.bak-before-plan-shadow-*`).
+
+## Stage D0 store-format compatibility — 2026-10-23
+
+`rust/crates/singws-store` + `singws_store_roundtrip` (dsp-ffi) + `tools/store_roundtrip.py` (read-only) + `test_store_roundtrip.py`. Nothing in the app
+calls the Rust writer (a test asserts `singws_store` does not appear in `0.2.18.1.py`); the packaged dylibs were NOT rebuilt for this step because
+no packaged code path uses it.
+
+- `cargo test -p singws-store`: 7 tests (CPython float edge cases incl. exact ties, string escaping both modes, layouts, key order and unknown
+  fields, number kinds, unsupported values, bridge). Whole Rust workspace (minus `singws-video`) green; 255 Python tests green.
+- Live profile (app closed, read-only): 14 of 14 JSON files rewritten byte-identically by Rust. Layouts seen: `indent=2`+newline (settings,
+  singer_history, singer_preferences, queue, host_request_sync, deferred adds, waitlist), compact+newline (tracks), `indent=2` no newline
+  (bg_playlist, tombstones, pending_requests), default separators (loudness, silence_cache), compact (transition-analysis).
+- Seeded differential vs CPython: 1,500 random documents x 7 layouts identical; 1,900,000 floats identical (random bit patterns, tie-prone
+  dyadic rationals, app-like decimals, switch boundaries).
+- Bug found by the differential and fixed: exact decimal ties (900719925474099.25) printed with the odd digit by Rust's shortest printer; CPython
+  picks the even digit. Regression value pinned in the Rust tests.
+- Rescan check (owner re-ran library analysis): `loudness.json` 258 real entries (was 1), `transition-analysis.json` 443 records, no junk in either;
+  `tools/plan_parity.py` still 0 disagreements on the refreshed cache; the app re-saved both files in its native layout. Still no verified early-end
+  karaoke record in real data (185 CDG records report `blank_tail_too_short_or_ambiguous`, 258 `analysis_incomplete`, 1 `visual_end_unverified`).

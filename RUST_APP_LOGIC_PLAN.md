@@ -138,6 +138,21 @@ History/stats/settings persistence and the HTTP/websocket client (`reqwest`/`tok
 no-Python package, but remains behind the existing storage/network adapters until replay and compatibility tests pass.
 KaraFun control stays macOS-native (AppleScript/Accessibility) whatever the language; Windows would need a different mechanism.
 
+**D0 store-format compatibility (2026-10-23, DONE; proof only, the app does not use it):** `rust/crates/singws-store` writes JSON
+byte-identically to Python's `json.dumps` (key order and unknown fields preserved, `ensure_ascii` escaping incl. surrogate pairs and DEL,
+CPython float `repr` incl. its tie-to-even digit choice and the `1e-05` / `1e+16` exponent forms, `indent=2` and compact layouts,
+`sort_keys`, the trailing newline `_save_json_atomic` adds). Exported as `singws_store_roundtrip`. Evidence: `tools/store_roundtrip.py`
+(read-only) rewrote all 14 live profile JSON files byte-identically (singer_history.json 1 MB, the 775 KB transition cache,
+settings, tracks, tombstones, ...); a seeded differential over 1,500 random documents in 7 layouts matches Python's real `json.dumps`;
+1.9 million floats (1M random bit patterns, 400k tie-prone dyadic rationals, 400k app-like decimals, 100k at the fixed/exponent
+switch) match CPython's `repr`. The differential caught a real bug in the first formatter (exact ties such as 900719925474099.25 came
+out as ...99.3, Python writes ...99.2), fixed by taking only the digit COUNT from Rust's shortest printer and the digits from its
+exact-precision formatter. Values Rust cannot reproduce exactly (integers beyond 64 bits, NaN/Infinity, lone surrogates) are ERRORS,
+never silent changes. All live files match one of Python's layouts, so a Rust store can adopt a file without rewriting its layout.
+Not done, in order: D1 settings store behind the existing adapter (merge-with-defaults, atomic temp-file + rename, the write-digest
+skip), D2 history/stats, D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
+client. Each needs the same shadow-then-flag treatment and must never open a live profile for writing during tests.
+
 ## Stage E: Rust-owned UI and no-Python package
 
 Move the host UI to Qt Quick/QML with Rust exposing the application model and commands. Keep libmpv, the native macOS

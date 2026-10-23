@@ -1,0 +1,14 @@
+[package]
+name = "singws-store"
+version = "0.1.0"
+edition = "2024"
+description = "Byte-exact Python json.dumps compatible JSON writer for SingWS store files (key order, escaping, float repr, indentation). Foundation for moving settings/history/stats stores to Rust without changing their on-disk format."
+publish = false
+
+[lib]
+name = "singws_store"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
