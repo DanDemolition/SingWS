@@ -117,10 +117,13 @@ class TransportShadow:
             return 0
 
     def observe(self, session, kind, now=None, error=False, stop_in_progress=False):
-        """kind: 'playing' | 'idle' | 'end_clock' | 'watchdog' | 'media_end' (native end of stream; `error` for a decode failure)."""
+        """kind: 'playing' | 'idle' | 'end_clock' | 'watchdog' | 'media_end' (native end of stream; `error` for a decode failure).
+
+        Returns True/False for whether this event made the machine command CompleteSong, or None when the machine
+        could not answer (unavailable, stale session, error); callers must treat None as "use the Python answer"."""
         try:
             if not self.available or not session or session != self._session:
-                return
+                return None
             now = time.monotonic() if now is None else now
             self._check_overdue(now)
             name = {"playing": "PlayingObserved", "idle": "IdleObserved", "end_clock": "EndClockObserved",
@@ -134,9 +137,14 @@ class TransportShadow:
             if kind not in self._event_kinds:
                 self._event_kinds.add(kind)
                 self._say(f"event session={self._session} source={self._source} kind={kind}")
-            self._record(self._step({name: body}, stop_in_progress=stop_in_progress), now)
+            commands = self._step({name: body}, stop_in_progress=stop_in_progress)
+            self._record(commands, now)
+            return any(
+                (isinstance(c, dict) and "CompleteSong" in c) or c == "CompleteSong" for c in commands
+            )
         except Exception as exc:
             self._say(f"observe error: {exc!r}")
+            return None
 
     def note_seek(self, session, from_seconds, to_seconds, duration_seconds=None):
         """Record coverage for a real operator seek; it never changes machine state."""

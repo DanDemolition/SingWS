@@ -3969,6 +3969,9 @@ DEFAULTS = {
     # when it agrees with the retained Python oracle; Python wins every
     # disagreement. Set false for immediate rollback to Python-only decisions.
     "transport_drive": True,
+    # A2 for the native media-end decision. Same contract as transport_drive: Rust answers only when it agrees with the
+    # retained Python oracle; Python wins every disagreement. Default off until its own local and package gates pass.
+    "transport_drive_media_end": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -29762,18 +29765,40 @@ class KaraokeApp(QWidget):
     @_perf_timed("ui_songend_handler")
     def _handle_media_end_safe(self, trigger: str = "eos"):
         """Called when the current track finishes or on pipeline ERROR."""
+        rust_should_end = None
         try:
             _sh = self._transport_shadow()
             if _sh is not None and not isinstance(getattr(self, "_active_external_karafun", None), dict):
-                _sh.observe(getattr(self, "_shadow_native_id", 0), "media_end",
-                            error=(str(trigger or "").strip().lower() == "error"),
-                            stop_in_progress=bool(getattr(self, "_stop_in_progress", False)))
+                rust_should_end = _sh.observe(getattr(self, "_shadow_native_id", 0), "media_end",
+                                              error=(str(trigger or "").strip().lower() == "error"),
+                                              stop_in_progress=bool(getattr(self, "_stop_in_progress", False)))
         except Exception:
             pass
-        if getattr(self, "_stop_in_progress", False):
-            return
-        if bool(getattr(self, "_media_end_handoff_active", False)):
-            _diag("[END] duplicate media-end ignored: handoff already active")
+        stop_active = bool(getattr(self, "_stop_in_progress", False))
+        handoff_active = bool(getattr(self, "_media_end_handoff_active", False))
+        python_should_end = not (stop_active or handoff_active)
+        should_end = python_should_end
+        if bool(self.settings.get("transport_drive_media_end", False)) and rust_should_end is not None:
+            try:
+                import transport_shadow as _transport_logic
+                should_end, disagreed, owner = _transport_logic.select_drive_decision(
+                    python_should_end, rust_should_end, True
+                )
+                _diag(
+                    "[TRANSPORT-DRIVE] decision=media_end "
+                    f"python={int(python_should_end)} rust={int(bool(rust_should_end))} "
+                    f"selected={int(bool(should_end))} owner={owner} disagreement={int(disagreed)}"
+                )
+            except Exception as exc:
+                should_end = python_should_end
+                _diag_rate_limited(
+                    "transport_drive_media_end_error",
+                    f"[TRANSPORT-DRIVE] decision=media_end fallback=python error={exc!r}",
+                    60.0,
+                )
+        if not should_end:
+            if not stop_active and handoff_active:
+                _diag("[END] duplicate media-end ignored: handoff already active")
             return
         trigger = str(trigger or "eos").strip().lower()
         try:

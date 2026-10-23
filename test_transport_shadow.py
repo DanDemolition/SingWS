@@ -163,6 +163,25 @@ class NativeSongTests(unittest.TestCase):
         self.sh.observe(sid, "media_end", stop_in_progress=True)
         self.assertNotIn("CompleteSong", self.text())
 
+    def test_media_end_observation_reports_the_machine_answer(self):
+        sid = self.sh.start(False, 200.0)
+        self.assertIsNone(self.sh.observe(999, "media_end"))  # stale session: no answer, Python decides
+        self.assertFalse(self.sh.observe(sid, "playing"))
+        self.assertTrue(self.sh.observe(sid, "media_end"))
+        self.assertFalse(self.sh.observe(sid, "media_end"))  # duplicate: hand-off already active
+
+    def test_media_end_answer_is_false_during_stop_and_before_playing(self):
+        sid = self.sh.start(False, 200.0)
+        self.assertFalse(self.sh.observe(sid, "media_end"))  # still Starting: Python would complete -> disagreement
+        sid = self.sh.start(False, 200.0)
+        self.sh.observe(sid, "playing")
+        self.assertFalse(self.sh.observe(sid, "media_end", stop_in_progress=True))
+
+    def test_media_end_error_completes_even_for_external(self):
+        sid = self.sh.start(True, 200.0)
+        self.sh.observe(sid, "playing", now=1.0)
+        self.assertTrue(self.sh.observe(sid, "media_end", error=True))
+
     def test_the_machine_completing_a_native_song_the_app_never_finishes_is_a_mismatch(self):
         sid = self.sh.start(False, 200.0)
         self.sh.observe(sid, "playing")
@@ -226,6 +245,15 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn("select_drive_decision(", block)
         self.assertIn("should_complete = python_should_complete", block)
         self.assertIn("[TRANSPORT-DRIVE] decision=karafun_end", block)
+
+    def test_media_end_drive_is_its_own_flag_and_python_wins(self):
+        self.assertIn('"transport_drive_media_end": False', self.src)
+        start = self.src.index('if bool(self.settings.get("transport_drive_media_end", False))')
+        block = self.src[start:start + 1400]
+        self.assertIn("select_drive_decision(", block)
+        self.assertIn("should_end = python_should_end", block)
+        self.assertIn("[TRANSPORT-DRIVE] decision=media_end", block)
+        self.assertIn("python_should_end = not (stop_active or handoff_active)", self.src)
 
     def test_specs_bundle_the_module(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):

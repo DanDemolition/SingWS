@@ -109,6 +109,8 @@ the same show acceptance checklist on both architectures.
 
 ## Immediate next step
 
-Move the remaining transport decisions one at a time: native media end, watchdog, then stop/skip. Preserve comparison and
+Native media end now has its own A2 drive behind `transport_drive_media_end` (default OFF, uncommitted source change 2026-10-23): Rust answers only when it agrees with the retained Python oracle, Python wins every disagreement, and each call logs `[TRANSPORT-DRIVE] decision=media_end`. It still needs its clean-show/package gates before the default flips. Remaining: watchdog, then stop/skip.
+
+Move the remaining transport decisions one at a time: watchdog, then stop/skip. Preserve comparison and
 Python fallback until each decision has passed the same local and two-architecture gates. Only then start A4 removal of
 duplicated Python lifecycle decisions. See `docs/handoff/2026-10-23-rust-migration.md` for the continuation checklist.
