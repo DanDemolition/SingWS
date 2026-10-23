@@ -110,6 +110,27 @@ ID_STABLE (a host request key never maps to two ids). First run over 151 logs: 0
 (`transition_analysis`, the scheduler maths). A pure Rust `plan_transition(metadata, now) -> plan` shadowed against Python on
 real playlists is a one-session job and the Rust BGM engine already consumes the result. Low risk, low urgency.
 
+**C1 transition-planning shadow (2026-10-23, DONE for now):** pure `rust/crates/singws-plan` ports the five planning rules from
+`transition_analysis.py` operation-for-operation (audio boundaries from an envelope, fade-out estimate, record validity,
+`bgm_audio_window`, `select_bgm_crossfade_seconds`, `calculate_effective_karaoke_end`); `plan_shadow.py` + setting `plan_shadow`
+(default OFF) compare the two live BGM decisions (content window, crossfade length) with Rust and LOG `[PLAN-SHADOW]` lines only.
+Evidence: `tools/plan_parity.py` over the app's real analysis cache (443 usable records: 69 background-track envelopes, 2,215
+crossfade and 3,101 window probes, 443 effective-end and validity checks) shows 0 disagreements, bit-identical; a seeded
+randomized differential (3,000 records incl. invalid ones, 1,500 envelopes) against the app's own Python functions also shows 0,
+and 4 of 4 deliberately broken Rust rules were caught by it. Honest limits:
+* The real cache contains no verified karaoke early end (the cache only has `audio_end_unverified` / `visual_end_unverified`
+  outcomes), so the rule that authorises an early song end is proven only by the unit tests and the randomized differential,
+  not by real data. It is used offline in the analysis worker, so it has NO live shadow; the two hooked sites are the per-tick BGM
+  window and crossfade length, de-duplicated so a track costs one comparison.
+* Parity proves Rust equals Python, not that the transitions sound right. Nothing consumes the Rust plan yet.
+* Quirk preserved on purpose (a Python change, if wanted, comes first): `estimate_fade_out_from_envelope` searches the last 12 s
+  and counts flat loud audio as "not rising", so the earliest qualifying window wins; for a track whose last ~12 s lose 8 dB it
+  reports a fade start about 12 s before the audio end even when the audible fade is shorter, which pushes most such tracks to
+  the 8 s crossfade cap.
+* The live `~/SingWS/transition-analysis.json` holds 4 junk records for temp `song.zip` files written by test runs before
+  test isolation existed; harmless, and the parity tool skips them.
+Not done (needs real show evidence first): turning `plan_shadow` on by default, and any `bgm_plan_engine` drive step.
+
 ## Stage D: stores and server client
 
 History/stats/settings persistence and the HTTP/websocket client (`reqwest`/`tokio`). This becomes necessary for the

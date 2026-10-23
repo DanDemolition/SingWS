@@ -1899,6 +1899,24 @@ _LOUDNESS_FAILURE_CACHE_VERSION = 3
 _loudness_sem = threading.Semaphore(1)
 
 
+_PLAN_SHADOW = None
+
+
+def _plan_shadow_for(settings):
+    """The Stage C planning shadow, or None when the setting is off or the library is missing. Never raises."""
+    global _PLAN_SHADOW
+    try:
+        if not bool((settings or {}).get("plan_shadow", False)):
+            return None
+        if _PLAN_SHADOW is None:
+            import plan_shadow
+            _PLAN_SHADOW = plan_shadow.PlanShadow(_diag)
+            _diag(f"[PLAN-SHADOW] enabled available={int(_PLAN_SHADOW.available)}")
+        return _PLAN_SHADOW if _PLAN_SHADOW.available else None
+    except Exception:
+        return None
+
+
 def transition_analysis_cached(path: str):
     """Return validated transition metadata without doing live decode work."""
     global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
@@ -3979,6 +3997,11 @@ DEFAULTS = {
     # with the Rust queue rules and LOG disagreements only; the app's own answer is always used. Default off until its
     # two-architecture package gate passes. Read lazily; safe to flip in Settings JSON.
     "queue_shadow": False,
+    # Stage C shadow: compare the background-music window / crossfade-length decisions (transition_analysis) with the Rust
+    # singws-plan rules and LOG disagreements only; the app's own answer is always used. Default off until its two-architecture
+    # package gate passes. The karaoke effective-end rule runs only in the offline analysis worker and is covered by
+    # tools/plan_parity.py, not by this live shadow.
+    "plan_shadow": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -5447,9 +5470,15 @@ class BackgroundMusicPlayer(QObject):
         if not bool(settings.get("seamless_transitions_enabled", True)):
             return 0.0, float(duration or 0.0)
         record = transition_analysis_cached(path)
-        return transition_analysis.bgm_audio_window(
-            record, duration if duration is not None else getattr(record, "duration", 0.0),
-        )
+        window_duration = duration if duration is not None else getattr(record, "duration", 0.0)
+        result = transition_analysis.bgm_audio_window(record, window_duration)
+        try:
+            shadow = _plan_shadow_for(settings)
+            if shadow is not None:
+                shadow.check_window(record, window_duration, result)
+        except Exception:
+            pass
+        return result
 
     @staticmethod
     def _bg_track_signature(path):
@@ -5580,6 +5609,12 @@ class BackgroundMusicPlayer(QObject):
             seconds, reason = transition_analysis.select_bgm_crossfade_seconds(
                 record, default_seconds=configured / 1000.0,
             )
+            try:
+                shadow = _plan_shadow_for(settings)
+                if shadow is not None:
+                    shadow.check_crossfade(record, configured / 1000.0, (seconds, reason))
+            except Exception:
+                pass
             return int(round(seconds * 1000.0)), reason
         except Exception:
             return configured, "safe_fallback"

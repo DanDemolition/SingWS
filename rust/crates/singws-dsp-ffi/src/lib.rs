@@ -301,6 +301,35 @@ pub unsafe extern "C" fn singws_master_dsp_proc(_handle: u32, _channel: u32, buf
     let _ = catch_unwind(AssertUnwindSafe(|| m.run(slice)));
 }
 
+/// Stage C shadow hook: one transition-planning computation. `request` is a JSON object with an `"op"` field
+/// (`boundaries`, `fade`, `window`, `crossfade`, `effective_end`); the output is the JSON result. Returns the output length, or a
+/// negative code (-1 bad input, -2 output buffer too small, -3 panic). Never panics across the ABI.
+///
+/// # Safety
+/// `request` must be a NUL-terminated string; `out` must be writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_plan_json(request: *const std::os::raw::c_char, out: *mut u8, cap: usize) -> i64 {
+    if request.is_null() || out.is_null() {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let q = unsafe { std::ffi::CStr::from_ptr(request) }.to_str().map_err(|_| ())?;
+        singws_plan::plan_json(q).map_err(|_| ())
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}
+
 /// Stage B shadow hook: the poll-row admission decision. `facts` is a JSON `RowFacts`; the output is
 /// `{"admit":"<Admit>","accepts":bool}`. Returns the output length, or a negative code (-1 bad input, -2 output buffer too
 /// small, -3 panic). Never panics across the ABI.

@@ -1,0 +1,14 @@
+[package]
+name = "singws-plan"
+version = "0.1.0"
+edition = "2024"
+description = "Pure transition-planning rules for SingWS (no I/O, no clock): audio boundaries, fade estimate, BGM window and crossfade length, verified karaoke end. Shadow-mode reference for transition_analysis.py."
+publish = false
+
+[lib]
+name = "singws_plan"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }

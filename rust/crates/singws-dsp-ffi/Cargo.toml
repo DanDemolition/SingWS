@@ -13,3 +13,4 @@ crate-type = ["cdylib", "rlib"]
 singws-dsp = { path = "../singws-dsp" }
 singws-transport = { path = "../singws-transport" }
 singws-queue = { path = "../singws-queue" }
+singws-plan = { path = "../singws-plan" }

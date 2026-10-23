@@ -184,3 +184,48 @@ OFF) compare the app's four poll-row decisions (`id_reuse`, `tombstone`, `termin
 Show checklist before flipping any default: run a real show (or rehearsal with server requests, a host delete and a host
 reorder) and confirm `grep -c "QUEUE-SHADOW\] MISMATCH"` and `grep "TRANSPORT-DRIVE" ... disagreement=1` are zero while the
 `decision` lines show each branch was actually exercised.
+
+## Stage C transition-planning shadow local gate — 2026-10-23
+
+New pure crate `rust/crates/singws-plan` ports `transition_analysis.py`'s planning rules operation-for-operation (audio boundaries,
+fade-out estimate, record validity, `bgm_audio_window`, `select_bgm_crossfade_seconds`, `calculate_effective_karaoke_end`), exported
+as `singws_plan_json` from `libsingws_dsp_ffi`. `plan_shadow.py` + setting `plan_shadow` (default OFF) compare the two live BGM
+decisions (content window, crossfade length) with Rust and LOG `[PLAN-SHADOW]` lines; the app's answer is always used. Each track
+costs one comparison (inputs de-duplicated), and the record is copied field-by-field, never `asdict`, so the ~1,900-sample envelope
+is not copied per timer tick. Nothing consumes the Rust plan.
+
+- `cargo test -p singws-plan`: 10 tests. Mutation check: 14 deliberately broken rules (thresholds at their exact inclusive edges, margin,
+  max/min of the two ends, dead-tail edge, EOS-safe, validity, window tolerance) were all caught after boundary tests were added; the
+  randomized differential below additionally caught 4 more (fade ratio, run start, visual-order validity, window margin).
+- `tools/plan_parity.py` over the app's real analysis cache (443 usable records of 447): 69 BGM envelopes, 2,215 crossfade and
+  3,101 window probes, 443 effective-end and validity checks: 0 disagreements, bit-identical (needs serde_json `float_roundtrip`;
+  without it 309 window results were 1 ulp off). The 4 other records are temp `song.zip` junk written by tests before isolation.
+- Randomized differential against the app's own Python functions (seeded): 3,000 records incl. invalid ones and 1,500 envelopes,
+  0 disagreements; it reaches every crossfade reason and every effective-end outcome, including `verified_audio_and_visual` and
+  `normal_eos`, which the real cache never contains.
+- 248 Python tests, local transport acceptance, queue parity (still 0), and the real CDG/MP4 integration test passed (worst steady
+  clock error 57 ms CDG / 15 ms MP4); the live `~/SingWS` log did not grow.
+- Signed DMGs rebuilt (dylibs via `rust/build_dsp.sh`, 3 exports in each), launched from the mounted image with an isolated profile and
+  `queue_shadow`, `plan_shadow`, `transport_drive_media_end`, `transport_drive_watchdog` on: exit 0, 3 clean-shutdown lines, 0 tracebacks,
+  codesign/hdiutil OK, bundled dylib exports 3 of 3, both shadow modules bundled.
+  - arm64 `184bc4cc5826559fe53689ecc0fc8aa400d42f1e36b75fb3a85fdd99681f77aa`
+  - x86_64 `203252e8ab70487a4c08ae7abd9753e3c8546784850d5865148d75ffea13615e`
+  - Previous: `local-installs/queue-gate-1.0.1.4/` (DMGs), `local-installs/pre-plan-dsp-dylibs/` (dylibs).
+- The dev Mac's INSTALLED app is still the queue-gate build; the plan-gate DMGs have not been installed, and `plan_shadow` is off in
+  the live profile.
+- NOT proven: no real show has run with `plan_shadow`; the smoke launches play no background track. The karaoke effective-end rule has
+  no live shadow (it only runs in the offline analysis worker); it is covered by the real-cache parity, the unit tests and the fuzz.
+- Fade quirk (preserved, pinned by `FadeHeuristicPinTests`): the Python fade estimate returns the earliest qualifying window in its
+  12 s search range, so 50 of the 67 real tracks with a fade report exactly 12.0 s. Practical effect is small: of 69 BGM tracks, 51 take
+  the dead-tail path (fade ignored), 14 typical, 3 natural fade (all the 8 s cap), 1 hard ending. Left unchanged by decision.
+
+## iCloud hidden-flag fix for the build venvs — 2026-10-23
+
+Cause: the iCloud file provider re-applied the `hidden` flag to ~15,000 files in the dot-named venvs under `~/Documents` within seconds
+of `chflags -R nohidden` (678 files hidden after a 35 s test run). Qt's directory listing skips hidden files, so PyQt6 found no
+platform plugins and every GUI test and the integration test failed. Fix: `tools/move_venvs_off_icloud.sh` moves
+`.venv-build-arm64` and `.venv-build-intel-rosetta` to `~/.venvs/singws/` and leaves a symlink at the old path (absolute paths baked
+into the venvs stay valid; no build script or spec changed; `.venv` still resolves through `.venv-build-arm64`). The move is a
+copy+delete across the iCloud boundary (about 8 minutes for both); the script refuses to run while a build or test uses a venv, is
+idempotent, supports `--dry-run` and `--restore`, and verifies Python plus a Qt `QApplication` in each venv (the Intel one under
+Rosetta). After the move: the integration test passes with no helper running and 0 files are hidden afterwards.
