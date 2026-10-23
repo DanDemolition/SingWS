@@ -877,7 +877,16 @@ name = "singws-dsp-ffi"
 version = "0.1.0"
 dependencies = [
  "singws-dsp",
+ "singws-queue",
  "singws-transport",
+]
+
+[[package]]
+name = "singws-queue"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

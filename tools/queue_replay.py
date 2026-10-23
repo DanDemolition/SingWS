@@ -99,11 +99,17 @@ def parse_line(line, date="", seq=0):
     if tag == "REMOTE-TOMBSTONE":
         if body.startswith("created "):
             return {**base, "kind": "tombstone_created", "id": rid, "reason": kv.get("reason", ""),
-                    "singer": kv.get("singer", "")}
-        if body.startswith("poll old request ignored") or body.startswith("stale non-terminal row"):
-            return {**base, "kind": "tombstone_poll_ignored", "id": rid}
+                    "singer": kv.get("singer", ""), "title": kv.get("title", "")}
+        if body.startswith("poll old request ignored"):
+            return {**base, "kind": "tombstone_poll_ignored", "id": rid, "branch": "tombstone", "title": kv.get("title", "")}
+        if body.startswith("stale non-terminal row"):
+            return {**base, "kind": "tombstone_poll_ignored", "id": rid, "branch": "terminal_stale", "title": kv.get("title", "")}
         if body.startswith("reused request id accepted") or body.startswith("id reused with different song signature"):
-            return {**base, "kind": "tombstone_reuse", "id": rid}
+            return {**base, "kind": "tombstone_reuse", "id": rid, "branch": "tombstone",
+                    "old_title": kv.get("tombstone_title", ""), "new_title": kv.get("request_title", "")}
+        if body.startswith("terminal id reused by new request"):
+            return {**base, "kind": "tombstone_reuse", "id": rid, "branch": "terminal",
+                    "old_title": kv.get("old_title", ""), "new_title": kv.get("new_title", "")}
         return None
     if tag == "REQUEST-LIFECYCLE":
         if body.startswith("server confirmed terminal state"):

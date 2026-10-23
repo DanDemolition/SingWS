@@ -57,6 +57,7 @@ for helper in (
     "soundboard_channels.py",
     "rust_analysis.py",
     "transport_shadow.py",
+    "queue_shadow.py",
     "system_snapshot.py",
     "mac_keep_awake.py",
     "karafun_capture.py",
@@ -173,6 +174,7 @@ a = Analysis(
         'soundboard_channels',
         'rust_analysis',
         'transport_shadow',
+        'queue_shadow',
         'system_snapshot',
         # The Homebrew backend and the python-mpv module are added below only
         # for the homebrew stack: PyInstaller's ctypes hook resolves

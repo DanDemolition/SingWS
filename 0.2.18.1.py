@@ -3975,6 +3975,10 @@ DEFAULTS = {
     # A2 for the KaraFun duration-watchdog decision ("end unverified: tell the operator to press Complete"). Same
     # contract: Rust answers only when it agrees with the retained Python oracle; Python wins every disagreement.
     "transport_drive_watchdog": False,
+    # Stage B shadow: compare the poll-row admission decision (host tombstones / terminal ids must not resurrect a request)
+    # with the Rust queue rules and LOG disagreements only; the app's own answer is always used. Default off until its
+    # two-architecture package gate passes. Read lazily; safe to flip in Settings JSON.
+    "queue_shadow": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -57706,6 +57710,31 @@ class KaraokeApp(QWidget):
         except Exception:
             return None
 
+    def _queue_shadow(self):
+        """The Stage B queue-rules shadow, or None when the setting is off or the library is missing. Never raises."""
+        try:
+            if not bool(self.settings.get("queue_shadow", False)):
+                return None
+            sh = getattr(self, "_queue_shadow_obj", None)
+            if sh is None:
+                import queue_shadow
+                sh = queue_shadow.QueueShadow(_diag)
+                self._queue_shadow_obj = sh
+                _diag(f"[QUEUE-SHADOW] enabled available={int(sh.available)}")
+            return sh if sh.available else None
+        except Exception:
+            return None
+
+    def _queue_shadow_check(self, branch, request_id, req, *, tombstone_title=None, id_removed=False, terminal_title=None):
+        """Log-only comparison of one poll-row decision with the Rust queue rules. Never raises, never changes the decision."""
+        try:
+            sh = self._queue_shadow()
+            if sh is not None:
+                sh.check(branch, request_id, tombstone_title=tombstone_title, id_removed=id_removed,
+                         terminal_title=terminal_title, row_title=str((req or {}).get("title") or ""))
+        except Exception:
+            pass
+
     def _start_karafun_completion_monitor(self, entry: dict):
         """Complete the active external track once KaraFun reports end/idle state."""
         if not isinstance(entry, dict):
@@ -61349,6 +61378,8 @@ class KaraokeApp(QWidget):
             if tombstone is not None and self._tombstone_signature_conflicts(tombstone, req):
                 # Confirmed id reuse (clearly a different song): retire the
                 # old tombstone and treat this row as a brand-new request.
+                self._queue_shadow_check("id_reuse", request_id, req, tombstone_title=tombstone.get("title", ""),
+                                         id_removed=request_id in removed_ids)
                 self._drop_remote_request_tombstone(request_id, reason="id_reuse_confirmed")
                 try:
                     removed_ids.discard(request_id)
@@ -61366,6 +61397,8 @@ class KaraokeApp(QWidget):
                 # the host removal is authoritative — keep re-pushing the
                 # removal (the push helper is throttled and skips
                 # already-acknowledged tombstones), but log once per id.
+                self._queue_shadow_check("tombstone", request_id, req, tombstone_title=tombstone.get("title", ""),
+                                         id_removed=request_id in removed_ids)
                 if request_id not in logged_tombstone_repush:
                     logged_tombstone_repush.add(request_id)
                     _diag(
@@ -61395,6 +61428,7 @@ class KaraokeApp(QWidget):
                 except Exception:
                     terminal_title = ""
                 if terminal_title and self._tombstone_signature_conflicts({"title": terminal_title}, req):
+                    self._queue_shadow_check("terminal_reuse", request_id, req, id_removed=True, terminal_title=terminal_title)
                     try:
                         removed_ids.discard(request_id)
                         self._remote_removed_request_ids = removed_ids
@@ -61405,6 +61439,8 @@ class KaraokeApp(QWidget):
                         f"request_id={request_id} old_title={terminal_title!r} new_title={req.get('title', '')!r}"
                     )
                 else:
+                    self._queue_shadow_check("terminal_stale", request_id, req, id_removed=True,
+                                             terminal_title=terminal_title or None)
                     if request_id not in logged_tombstone_repush:
                         logged_tombstone_repush.add(request_id)
                         _diag(

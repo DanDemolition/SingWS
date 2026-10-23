@@ -67,6 +67,14 @@ server-sync lines and the PHP-side fixtures already used in the history/queue te
 This touches live queue and singer data, so every step is rehearsed on the scratch profile and reviewed with real traces
 before it is allowed near a show. Do not start until Stage A2 has run a clean show.
 
+**B1 queue-rules shadow (2026-10-23, DONE for now):** pure `rust/crates/singws-queue` (poll-row admission, title-conflict rule,
+oldest-wins, reorder permutation check, executable `Queue` invariants with property + mutation testing), `queue_shadow.py`, setting
+`queue_shadow` (default OFF; enabled in the dev Mac's live profile for the next show). Log-only: the app's answer is always used.
+Parity over the real logs: 0 disagreements. Evidence and the pre-flip show checklist are in
+`docs/verification/2026-10-23-rust-transport-shadow-a0.md`. Deliberately NOT done (needs real show evidence first): flipping
+`queue_shadow` on by default, driving host actions from Rust (`queue_drive`), the remaining decision sites (host delete/reorder/
+replace/move, server pulls) and the slot-lifecycle model. Slot expiry must follow the persistence decision below.
+
 **B0 replay harness (started 2026-10-23, `tools/queue_replay.py`, `test_queue_replay.py`).** Parses the real show logs
 (`[REMOTE-TOMBSTONE]`, `[REQUEST-LIFECYCLE]`, `[QUEUE-DEDUP]`, `[QUEUE-INSERT]`, `[HOST-REQUEST-SYNC]`) into a normalized event
 corpus (`--corpus out.jsonl`) and checks three invariants against what the Python app actually did: RESURRECTION (a
@@ -84,9 +92,10 @@ ID_STABLE (a host request key never maps to two ids). First run over 151 logs: 0
   repairs (all server-to-local) and 2,684 slot fills back their checks, but only 2 real reorder events exist (almost all
   QUEUE_SYNC_AUTHORITY data is test-origin), `same_item` is False in all 4,978 QUEUE-STATE lines so it supports no invariant,
   and dedup / id-reuse have no real events.
-* OPEN QUESTION (owner undecided 2026-10-23; do not model slot expiry in Rust until answered): preserved singer slots survive an app restart and were filled at startup (2026-07-14 23:58 preserve,
-  2026-07-15 00:07:52 restore) even though they carried `timeout_sec=180` and ~9 minutes had passed. Decide whether the
-  timeout must be honoured across a restart before the Rust queue models slot expiry.
+* DECIDED (owner, 2026-10-23): state persists across an app restart so a crash never loses data. Preserved singer slots are
+  restored at startup and are NOT expired by their `timeout_sec=180` just because the app was down (seen 2026-07-14 23:58 preserve,
+  2026-07-15 00:07:52 restore). The Rust queue must model restore as a no-op on persisted state (the `Restart` event already is),
+  and any slot expiry has to be driven by live elapsed time while the app is running, never by wall-clock time across a restart.
 * Still to do before the pure `singws-queue` crate: real host reorder/replace/move traces (a rehearsal session on the scratch
   profile would generate them), the PHP-side fixtures already used by the queue tests, and the test-log isolation fix (DONE 2026-10-23: `_test_profile.py` gives every test process a private, auto-deleted
   `SINGWS_HOME`; 59 test modules import it, and `test_test_isolation.py` fails any new test that loads the app without isolating).

@@ -301,6 +301,35 @@ pub unsafe extern "C" fn singws_master_dsp_proc(_handle: u32, _channel: u32, buf
     let _ = catch_unwind(AssertUnwindSafe(|| m.run(slice)));
 }
 
+/// Stage B shadow hook: the poll-row admission decision. `facts` is a JSON `RowFacts`; the output is
+/// `{"admit":"<Admit>","accepts":bool}`. Returns the output length, or a negative code (-1 bad input, -2 output buffer too
+/// small, -3 panic). Never panics across the ABI.
+///
+/// # Safety
+/// `facts` must be a NUL-terminated string; `out` must be writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_queue_admit_json(facts: *const std::os::raw::c_char, out: *mut u8, cap: usize) -> i64 {
+    if facts.is_null() || out.is_null() {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let f = unsafe { std::ffi::CStr::from_ptr(facts) }.to_str().map_err(|_| ())?;
+        singws_queue::admit_json(f).map_err(|_| ())
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}
+
 /// Stage 3 shadow hook: one JSON step of the song-lifecycle machine. Returns the output length, or a negative
 /// code (-1 bad input, -2 output buffer too small, -3 panic). Never panics across the ABI.
 ///

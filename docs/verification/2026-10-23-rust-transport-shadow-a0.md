@@ -149,3 +149,38 @@ gained an `expect` argument so a caller can ask for a specific command.
 Environment note: the `hidden` flag on the build venvs returned after the rebuilds (675 files in `.venv-build-arm64`),
 probably re-applied by iCloud's file provider in `~/Documents`. Run `chflags -R nohidden` on the venvs before
 `test_karaoke_transport_integration`, or move the build venvs outside `~/Documents`.
+
+## Stage B queue-rules shadow local gate — 2026-10-23
+
+New pure crate `rust/crates/singws-queue` (poll-row admission, title-conflict rule, oldest-wins, reorder-is-permutation, and a small
+`Queue` model), exported as `singws_queue_admit_json` from `libsingws_dsp_ffi`. `queue_shadow.py` + `queue_shadow` setting (default
+OFF) compare the app's four poll-row decisions (`id_reuse`, `tombstone`, `terminal_reuse`, `terminal_stale`) with Rust and LOG
+`[QUEUE-SHADOW]` lines; the app's own answer is always used. Stage B does not drive anything.
+
+- `cargo test -p singws-queue`: 12 tests incl. property tests (host removal never undone across restarts, ids never change,
+  terminal stays terminal, oldest wins). Mutation check: 6 deliberately broken rules were all caught (one equivalent mutant
+  needed an extra invariant assertion).
+- Real-log parity (`tools/queue_parity.py`, 151 logs): current rule, real ids: 0 disagreements over 32 tombstone decisions and
+  1,269 weak terminal-id decisions. Including unit-test traces: 0 disagreements over 635 tombstone and 672 id-reuse decisions.
+  Decisions before the rule change (commit 62e7452, 2026-07-10 11:46) are counted, not compared.
+- Differential: 4,000+ random title pairs (unicode, punctuation, empty) agree between Rust and the app's own
+  `_tombstone_signature_conflicts` (extracted from the source).
+- 232 Python tests (queue shadow/replay/isolation/transport/regressions), local transport acceptance, and the real CDG/MP4
+  integration test passed; the live `~/SingWS` log did not grow during the run.
+- Signed DMGs rebuilt with the queue-enabled dylibs (rebuilt with `rust/build_dsp.sh`, both architectures), each launched from the
+  mounted image with an isolated profile and `queue_shadow`, `transport_drive_media_end` and `transport_drive_watchdog` on: exit 0,
+  3 clean-shutdown lines, 0 tracebacks, codesign/hdiutil OK, bundled dylib exports both functions, `queue_shadow` module bundled.
+  - arm64 `65a4fb104dd2a93b21b8142d0f6188982d135d87f4aca223ab04f2e63f6466ea`
+  - x86_64 `d1d6d63b564881c35192e4f3e2df070cfae409a12a6de15de5d59b290a86f44d`
+  - Previous dylibs: `local-installs/pre-queue-dsp-dylibs/`; watchdog-gate DMGs: `local-installs/watchdog-gate-1.0.1.4/`.
+  - The app installed on the dev Mac is byte-identical to the arm64 DMG's app.
+- Live profile (2026-10-23): `queue_shadow`, `transport_drive_media_end`, `transport_drive_watchdog` set to true in
+  `~/SingWS/settings.json` (backup `settings.json.bak-before-queue-shadow-*`) so the next real show collects evidence.
+- Known and unrelated: `cargo test -p singws-bgm` fails `stream::tests::a_slow_reader_never_loses_or_repeats_audio` (crate not
+  touched here; not compared against a clean checkout because the vendored C++ does not build in a worktree).
+- NOT proven: no real show has run with these flags. The smoke launches play no song and poll no server rows, so no
+  `[QUEUE-SHADOW]` or `decision=media_end/watchdog` line has been produced by the packaged app yet.
+
+Show checklist before flipping any default: run a real show (or rehearsal with server requests, a host delete and a host
+reorder) and confirm `grep -c "QUEUE-SHADOW\] MISMATCH"` and `grep "TRANSPORT-DRIVE" ... disagreement=1` are zero while the
+`decision` lines show each branch was actually exercised.
