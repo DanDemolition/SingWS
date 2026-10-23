@@ -1,8 +1,9 @@
 # Moving the app's logic to Rust, gradually
 
-Status: ACTIVE (2026-10-23). Stage A0 is implemented, tested, and deployed on Apple Silicon; the Intel build and the
-three-show shadow acceptance run are next. This follows AGENTS.md: adapter-style, small reviewable steps, shadow before
-drive, a flag for every risky step, and old code removed only after the replacement is proven.
+Status: ACTIVE (2026-10-23). Stage A0 is implemented, tested, and deployed on Apple Silicon. Signed arm64 and x86_64
+installers are built and package-launched; physical-Intel installation and the three-show shadow acceptance run are next.
+This follows AGENTS.md: adapter-style, small reviewable steps, shadow before drive, a flag for every risky step, and old
+code removed only after the replacement is proven.
 
 ## What "the app" is today
 
@@ -26,7 +27,7 @@ commands BeginPlayback, RetryResult, MarkPlaying, StartBgHandoff, CompleteSong, 
 Python feeds it through `transport_shadow.py`; it only logs (`[TRANSPORT-SHADOW]`, `MISMATCH`), and
 `tools/transport_shadow_report.py` gives the acceptance verdict (needs >= 3 shows, every one with 0 disagreements).
 
-**A0 (complete in source and deployed on Apple Silicon): make the shadow actually collect data.** Finding 2026-10-15: the dev Mac profile has
+**A0 (complete in source and deployed on Apple Silicon; physical-Intel install pending): make the shadow actually collect data.** Finding 2026-10-15: the dev Mac profile has
 `"transport_shadow": false` saved from the earlier rehearsal instructions, which overrides the new default (on), so this
 Mac has recorded 0 songs (the report says "no shadow sessions"). The Intel Mac's profile is unknown (its show log is no
 longer available to check). Fix options: (a) operator deletes the key from settings.json on both Macs (shadow is log-only, safe);
@@ -100,7 +101,8 @@ the same show acceptance checklist on both architectures.
 
 ## Immediate next step
 
-Build/install commit `dd1f077` natively on the Intel Mac, then run three representative shows with native CDG/MP4 and
-KaraFun, including seek-near-end and manual Complete. Evaluate the three exported logs together with
+Install `SingWS-1.0.1.4-x86_64-installer.dmg` (commit `c762835`) on the physical Intel Mac, then run three representative
+shows with native CDG/MP4 and KaraFun, including a seek within 30 seconds of the end and manual Complete. Evaluate the
+three exported logs together with
 `python3 tools/transport_shadow_report.py <show-1.log> <show-2.log> <show-3.log>`. Do not enable any Rust driving decision
 until that command reports `ACCEPTANCE MET` and every mismatch has been explained.
