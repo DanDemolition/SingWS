@@ -69,3 +69,18 @@ The operator explicitly chose a local acceptance rehearsal instead of waiting fo
 
 This satisfies the operator-approved A0/A1 local gate. It is functional/correctness evidence, not a physical-Intel
 performance measurement. A2 may begin behind `transport_drive: false`; the old Python decision must win every disagreement.
+
+## A2 drive-one-decision local gate — 2026-10-23
+
+The KaraFun automatic-end decision is now wired through `transport_drive`, which remains default off. The Rust answer is
+selected only when it agrees with the retained Python oracle; either disagreement direction automatically uses Python and
+is logged as `[TRANSPORT-DRIVE]`.
+
+- All 152 recent regressions passed.
+- All 22 transport-shadow unit and wiring tests passed.
+- The local three-show/five-session lifecycle matrix again reported zero disagreements and complete required coverage.
+- The acceptance harness exercised the enabled drive selector against the real Rust lifecycle result, then explicitly
+  proved both disagreement directions return the Python answer.
+
+This satisfies the operator-approved A2 local gate. The rollback remains `transport_drive: false`; no Python oracle code
+has been removed.

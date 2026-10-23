@@ -17,6 +17,14 @@ def _lib():
 
 
 class NoLibraryTests(unittest.TestCase):
+    def test_drive_selector_uses_rust_only_on_agreement(self):
+        self.assertEqual(ts.select_drive_decision(False, False, True), (False, False, "rust"))
+        self.assertEqual(ts.select_drive_decision(True, True, True), (True, False, "rust"))
+        self.assertEqual(ts.select_drive_decision(True, False, True), (True, True, "python-fallback"))
+        self.assertEqual(ts.select_drive_decision(False, True, True), (False, True, "python-fallback"))
+        self.assertEqual(ts.select_drive_decision(True, False, False), (True, False, "python"))
+        self.assertEqual(ts.select_drive_decision(False, None, True), (False, False, "python"))
+
     def test_unavailable_machine_is_a_silent_no_op(self):
         lines = []
         sh = ts.TransportShadow(lines.append, lib=None)
@@ -210,6 +218,14 @@ class AppWiringGuardTests(unittest.TestCase):
                        '_sh.start(False, duration_seconds or None, source=f"native:{mode}")',
                        "_sh.note_seek(", '"media_end"', "_sh.app_stopped(", '"watchdog"'):
             self.assertIn(needle, self.src)
+
+    def test_drive_is_default_off_and_python_wins_disagreements(self):
+        self.assertIn('"transport_drive": False', self.src)
+        start = self.src.index('if bool(self.settings.get("transport_drive", False))')
+        block = self.src[start:start + 2200]
+        self.assertIn("select_drive_decision(", block)
+        self.assertIn("should_complete = python_should_complete", block)
+        self.assertIn("[TRANSPORT-DRIVE] decision=karafun_end", block)
 
     def test_specs_bundle_the_module(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):

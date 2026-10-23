@@ -3965,6 +3965,10 @@ DEFAULTS = {
     # Stage 3 shadow: feed playback events (KaraFun and native songs) to the Rust lifecycle machine and LOG disagreements only; it
     # never acts. DEFAULT ON since 2026-10-10 (log-only, every call is wrapped). Read at launch.
     "transport_shadow": True,
+    # A2 migration flag. When enabled, Rust owns the KaraFun end answer only
+    # when it agrees with the retained Python oracle; Python wins every
+    # disagreement. Default off until the A2 local rehearsal passes.
+    "transport_drive": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -58101,6 +58105,7 @@ class KaraokeApp(QWidget):
                 # Require end timing as corroboration, and never complete while
                 # playing or unknown. At a corroborated end, one idle reading
                 # suffices: waiting for a second full scrape adds dead air.
+                rust_should_complete = None
                 try:
                     _sh = self._transport_shadow()
                     if _sh is not None:
@@ -58111,15 +58116,41 @@ class KaraokeApp(QWidget):
                             _sh.observe(_sid, "end_clock")
                         if idle_reported and not playing_reported:
                             _sh.observe(_sid, "idle")
+                        rust_should_complete = _sh.would_complete(_sid)
                 except Exception:
                     pass
-                should_complete = (
+                python_should_complete = (
                     idle_reported and not playing_reported and seen_playback
                     and idle_stop_count >= 1 and age > 8.0
                     and (clock_near_end or expected_end_reached or (
                         ended_reported and bool(getattr(self, "_karafun_capture_session", False))
                     ))
                 )
+                should_complete = python_should_complete
+                if bool(self.settings.get("transport_drive", False)) and rust_should_complete is not None:
+                    try:
+                        import transport_shadow as _transport_logic
+                        should_complete, disagreed, owner = _transport_logic.select_drive_decision(
+                            python_should_complete, rust_should_complete, True
+                        )
+                        decision = (
+                            bool(python_should_complete), bool(rust_should_complete),
+                            bool(should_complete), str(owner), bool(disagreed),
+                        )
+                        if (should_complete or disagreed) and active_session.get("_transport_drive_last") != decision:
+                            active_session["_transport_drive_last"] = decision
+                            _diag(
+                                "[TRANSPORT-DRIVE] decision=karafun_end "
+                                f"python={int(bool(python_should_complete))} rust={int(bool(rust_should_complete))} "
+                                f"selected={int(bool(should_complete))} owner={owner} disagreement={int(disagreed)}"
+                            )
+                    except Exception as exc:
+                        should_complete = python_should_complete
+                        _diag_rate_limited(
+                            "transport_drive_karafun_error",
+                            f"[TRANSPORT-DRIVE] decision=karafun_end fallback=python error={exc!r}",
+                            60.0,
+                        )
                 if should_complete:
                     def _complete_near_end():
                         current_active = getattr(self, "_active_external_karafun", None)

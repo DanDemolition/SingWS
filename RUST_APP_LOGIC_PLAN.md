@@ -2,7 +2,8 @@
 
 Status: ACTIVE (2026-10-23). Stage A0 is implemented, tested, and deployed on Apple Silicon. Signed arm64 and x86_64
 installers are built and package-launched. The operator accepted the documented local CDG/MP4/KaraFun rehearsal in place
-of three physical-Intel shows; it reported zero disagreements and complete coverage. A2 is next behind a default-off flag.
+of three physical-Intel shows; it reported zero disagreements and complete coverage. A2 is implemented and has passed its
+local gate behind a default-off flag. A3 is next: enable only the proven KaraFun-end decision by default.
 This follows AGENTS.md: adapter-style, small reviewable steps, shadow before drive, a flag for every risky step, and old
 code removed only after the replacement is proven.
 
@@ -40,10 +41,12 @@ bug or a machine rule to fix. Local exit evidence: three isolated show logs, fiv
 native CDG/MP4 transport plus simulated KaraFun lifecycle, seek-near-end, manual Complete, stop, and watchdog. Physical
 Intel performance remains unmeasured; see `docs/verification/2026-10-23-rust-transport-shadow-a0.md`.
 
-**A2: let it DRIVE one decision, behind a flag.** New setting `transport_drive` (default off). Start with the single
+**A2 (local gate complete 2026-10-23): let it DRIVE one decision, behind a flag.** New setting `transport_drive` (default off). Start with the single
 decision that has hurt before: "has this external (KaraFun) song really ended?" (the 2026-08-31 false completion).
 The Python executor still performs the action; the old Python decision stays in place and is compared on every call
-(log any disagreement; on disagreement keep the OLD answer). Then the same for native media end, then watchdog, then stop/skip.
+(log any disagreement; on disagreement keep the OLD answer). The local harness explicitly proved agreement selects Rust
+and both disagreement directions select Python, while the three-show lifecycle matrix remained clean. Then the same for
+native media end, then watchdog, then stop/skip.
 
 **A3: flip the default, one decision at a time, each after a clean show. A4: delete the old Python decision code.**
 Rollback at every step: `transport_drive: false`.
@@ -104,6 +107,6 @@ the same show acceptance checklist on both architectures.
 
 ## Immediate next step
 
-A2: add `transport_drive` default off and let Rust own the KaraFun end decision only when it agrees with the retained
-Python oracle. On disagreement, log it and keep the Python answer. Rehearse locally with the same real CDG/MP4 integration,
-the lifecycle acceptance harness, packaged launches, and explicit agreement/disagreement tests before enabling the flag.
+A3: flip `transport_drive` on by default for the KaraFun-end decision while retaining the Python oracle and automatic
+Python fallback on every disagreement. Repeat the full regression, lifecycle acceptance, real CDG/MP4 integration, and
+signed-package launch matrix before removing any Python decision code.

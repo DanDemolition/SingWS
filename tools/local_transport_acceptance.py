@@ -24,7 +24,7 @@ if "SINGWS_DSP_LIB" not in os.environ:
         ROOT / "native" / "singws_dsp" / arch / "libsingws_dsp_ffi.dylib"
     )
 
-from transport_shadow import TransportShadow
+from transport_shadow import TransportShadow, select_drive_decision
 from tools import transport_shadow_report
 
 
@@ -40,6 +40,19 @@ def _show(run) -> Path:
     with handle:
         handle.write("\n".join(lines) + "\n")
     return Path(handle.name)
+
+
+def _assert_drive(python_answer: bool, rust_answer: bool, expected_owner: str) -> bool:
+    """Exercise the A2 enabled path and fail locally if its safety rule changes."""
+    selected, disagreed, owner = select_drive_decision(python_answer, rust_answer, True)
+    if selected != python_answer or owner != expected_owner:
+        raise AssertionError(
+            f"unsafe drive result python={python_answer} rust={rust_answer} "
+            f"selected={selected} owner={owner}"
+        )
+    if disagreed != (python_answer != rust_answer):
+        raise AssertionError("drive disagreement flag did not match the two answers")
+    return selected
 
 
 def _native_cdg(shadow: TransportShadow) -> None:
@@ -69,6 +82,14 @@ def _karafun(shadow: TransportShadow) -> None:
     shadow.observe(automatic, "playing", now=12.0)
     shadow.observe(automatic, "end_clock", now=111.0)
     shadow.observe(automatic, "idle", now=112.0)
+    rust_answer = shadow.would_complete(automatic)
+    if rust_answer is not True:
+        raise AssertionError(f"Rust did not recognize the rehearsed KaraFun end: {rust_answer!r}")
+    _assert_drive(True, rust_answer, "rust")
+    # Rehearse both possible disagreement directions. The retained Python
+    # oracle must remain authoritative while A2 is behind its rollout flag.
+    _assert_drive(True, False, "python-fallback")
+    _assert_drive(False, True, "python-fallback")
     shadow.app_auto_complete(automatic)
     shadow.app_finished(automatic, "complete")
 
@@ -88,6 +109,7 @@ def main() -> int:
     if not accepted:
         print(f"LOCAL ACCEPTANCE FAILED: watched={watched} clean={clean}")
         return 1
+    print("A2 DRIVE SAFETY PASSED: agreement uses Rust; disagreements use Python")
     print("LOCAL ACCEPTANCE PASSED")
     return 0
 

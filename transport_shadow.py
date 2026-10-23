@@ -19,6 +19,17 @@ COMPLETE_GRACE_S = 20.0
 _OUT_CAP = 8192
 
 
+def select_drive_decision(old_answer, rust_answer, enabled):
+    """Choose an A2 decision while retaining Python as the disagreement fallback."""
+    old_answer = bool(old_answer)
+    if not enabled or rust_answer is None:
+        return old_answer, False, "python"
+    rust_answer = bool(rust_answer)
+    if rust_answer != old_answer:
+        return old_answer, True, "python-fallback"
+    return rust_answer, False, "rust"
+
+
 class TransportShadow:
     def __init__(self, log, lib=None):
         self._log = log
@@ -143,6 +154,15 @@ class TransportShadow:
             )
         except Exception as exc:
             self._say(f"seek note error: {exc!r}")
+
+    def would_complete(self, session):
+        """Return Rust's current completion answer, or None when no valid session exists."""
+        try:
+            if not self.available or not session or session != self._session:
+                return None
+            return bool(self._completed_in_shadow())
+        except Exception:
+            return None
 
     def app_auto_complete(self, session):
         """The app's monitor decided the song ended on its own (called just before it finishes the song)."""
