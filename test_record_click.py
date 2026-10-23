@@ -1,4 +1,5 @@
 """The spinning record in the hero card as a failsafe: click = play/pause, Shift-click = stop, through the transport buttons' own handlers."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import unittest

@@ -1,5 +1,6 @@
 """Tests for the v2 DAW host-control-over-WebSocket path (HostControlRelayWorker
 wiring in 0.2.18.1.py). Pure logic — no live sockets."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import unittest
 

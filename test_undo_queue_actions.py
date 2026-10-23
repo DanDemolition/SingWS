@@ -1,5 +1,6 @@
 """Regression coverage for the session-only host queue undo stack."""
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import tempfile
 import unittest

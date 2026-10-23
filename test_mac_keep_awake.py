@@ -5,6 +5,7 @@ macOS (App Nap + idle sleep). Verifies the assertion is fail-safe everywhere,
 idempotent, releasable, and wired into the app defaults.
 """
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import sys

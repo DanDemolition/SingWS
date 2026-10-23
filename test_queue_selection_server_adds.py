@@ -9,6 +9,7 @@ what the host just added).
 Covers _mark_server_queue_mutation / _queue_top_actionable_row /
 _restore_queue_selection_after_rebuild in 0.2.18.1.py."""
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import unittest
 from types import SimpleNamespace

@@ -1,4 +1,5 @@
 """Round-trip real Python history through the PHP sync implementation in scratch SQLite."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import copy
 import importlib.util
 import json

@@ -4,6 +4,7 @@ duplicate — across the rotation menu, history rename, waitlist/pending
 server requests, and reconnect syncs. See _rename_rotation_singer /
 _merge_duplicate_rotation_singers in 0.2.18.1.py."""
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import unittest
 from types import SimpleNamespace

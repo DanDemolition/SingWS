@@ -1,5 +1,6 @@
 """KaraFun must be running and ready before the song-start automation searches or clicks (2026-10-01 show: the first,
 cold, run searched the moment KaraFun was launched and "did not report active playback")."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import ast
 import subprocess
 import sys

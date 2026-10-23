@@ -1,5 +1,6 @@
 """Focused coverage for the render-thread Singer Rotation presentation."""
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import json
 import os

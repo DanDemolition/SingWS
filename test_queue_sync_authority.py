@@ -9,6 +9,7 @@ host-added local song (local songs have no remote_request_id and no server
 row). See [QUEUE_SYNC_AUTHORITY] diag logging in _reconcile_remote_requests.
 """
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import sys
 import tempfile

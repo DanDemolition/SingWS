@@ -2,6 +2,7 @@
 
 Most tests use a fake helper script, so they need no Rust build; the last class runs the real binary when it exists
 (SINGWS_ANALYZE_BIN or the dev build in ~/.cache/singws-rust-target/release)."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import json
 import math

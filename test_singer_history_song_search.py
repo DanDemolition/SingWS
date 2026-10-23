@@ -1,5 +1,6 @@
 """Tests for the song search inside an individual singer's history view."""
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import sys

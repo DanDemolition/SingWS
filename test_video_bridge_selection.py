@@ -1,5 +1,6 @@
 """Which video bridge mpv_playback_iina loads (roadmap item 2, milestone V6): the Objective-C one by default, the Rust one only when asked, and
 ANY problem with the Rust one falls back to the Objective-C one with the reason. Selection runs in a subprocess per case (module singletons)."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import json
 import os
 import re

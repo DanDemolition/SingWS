@@ -1,5 +1,6 @@
 """Bug reports: every build sends the log of the LAST SHOW (one run of the app, even across midnight) to the developer through the
 SingWS server. The destination is fixed on the server and no mail credentials exist in the app."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import json
 import os

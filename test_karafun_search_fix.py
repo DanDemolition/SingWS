@@ -1,6 +1,7 @@
 """KaraFun result search: a label such as "Display:" must never be taken for a song length, and a queued title
 with a trailing "(live)" style qualifier must still find its row (2026-10-01 show: the search clicked a label and
 the song took 63 seconds to start)."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import ast
 import re
 import subprocess

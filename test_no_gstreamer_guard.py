@@ -8,6 +8,7 @@ bundling gstreamer plugins again.
 
 from __future__ import annotations
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME; the subprocess below inherits it)
 import math
 import os
 from pathlib import Path

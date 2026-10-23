@@ -1,5 +1,6 @@
 """Current/next rotation presentation must be independent from row selection."""
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import unittest
 from types import SimpleNamespace

@@ -5,6 +5,7 @@ The engine is constructed with ``create_sink=False`` and the tests pump
 without GStreamer.
 """
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import inspect
 import math

@@ -14,6 +14,7 @@ show_request_qr setting AND requests_accepting.
 Needs a QApplication; runs under the offscreen QPA platform.
 """
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import sys

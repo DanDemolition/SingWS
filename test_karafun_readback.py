@@ -1,6 +1,7 @@
 """karafun_confirmed_readback: a key/tempo read back from KaraFun may only overwrite SingWS's display when
 it repeats. Regression 2026-09-29: one early read (sliders not loaded, 0% = tempo 100) flipped the panel to
 100 while KaraFun stayed at 95, and the wrong value became the base of the next press."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import sys

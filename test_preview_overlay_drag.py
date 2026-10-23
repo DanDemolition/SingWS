@@ -1,4 +1,5 @@
 """The transport bar over the host preview: draggable inside the picture, snaps back to its default place, more see-through."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import unittest

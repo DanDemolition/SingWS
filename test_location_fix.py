@@ -4,6 +4,7 @@ Regression: on an Intel Mac (no GPS, Wi-Fi positioning) location detection faile
 how many times it was tried, because the first transient "location unknown" error ended the
 search, the first (often cached or coarse) fix was accepted, and 12 seconds was too short.
 """
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import sys

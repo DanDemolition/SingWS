@@ -1,4 +1,5 @@
 """The DAW / Live Player state for a KaraFun song: real artist/title, KaraFun's clock, key and tempo (never the streaming id)."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import time

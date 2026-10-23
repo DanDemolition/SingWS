@@ -8,6 +8,7 @@ These tests pin the new behavior: name-keyed ids, recovery by persisted name
 instead of silent unpinning, and the name recorded alongside the id.
 """
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import os
 import sys

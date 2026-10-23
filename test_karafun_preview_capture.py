@@ -1,4 +1,5 @@
 """Capturing the preview pane built into KaraFun's main window (opt-in), with the video window as the default and fallback."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import ast
 import subprocess
 import sys

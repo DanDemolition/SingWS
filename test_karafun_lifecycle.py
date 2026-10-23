@@ -1,4 +1,5 @@
 """KaraFun lifecycle regressions without controlling the real KaraFun app."""
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import types
 import unittest

@@ -84,11 +84,15 @@ ID_STABLE (a host request key never maps to two ids). First run over 151 logs: 0
   repairs (all server-to-local) and 2,684 slot fills back their checks, but only 2 real reorder events exist (almost all
   QUEUE_SYNC_AUTHORITY data is test-origin), `same_item` is False in all 4,978 QUEUE-STATE lines so it supports no invariant,
   and dedup / id-reuse have no real events.
-* Observed, not yet judged: preserved singer slots survive an app restart and were filled at startup (2026-07-14 23:58 preserve,
+* OPEN QUESTION (owner undecided 2026-10-23; do not model slot expiry in Rust until answered): preserved singer slots survive an app restart and were filled at startup (2026-07-14 23:58 preserve,
   2026-07-15 00:07:52 restore) even though they carried `timeout_sec=180` and ~9 minutes had passed. Decide whether the
   timeout must be honoured across a restart before the Rust queue models slot expiry.
 * Still to do before the pure `singws-queue` crate: real host reorder/replace/move traces (a rehearsal session on the scratch
-  profile would generate them), the PHP-side fixtures already used by the queue tests, and the test-log isolation fix.
+  profile would generate them), the PHP-side fixtures already used by the queue tests, and the test-log isolation fix (DONE 2026-10-23: `_test_profile.py` gives every test process a private, auto-deleted
+  `SINGWS_HOME`; 59 test modules import it, and `test_test_isolation.py` fails any new test that loads the app without isolating).
+  Before the fix ~52 test modules, when run directly with `python -m unittest`, wrote into the live `~/SingWS` profile: the show
+  log plus `host_request_sync.json`, `loudness.json`, `loudness.checkpoint.jsonl`, `transition-analysis.json` and
+  `waitlist_removed_tonight.json`. Existing live logs still contain that noise; the replay harness filters it by request id.
 * Separate bug worth fixing: unit tests write into the live `~/SingWS/logs`; they should use an isolated `SINGWS_HOME`.
 
 ## Stage C: background-music transition planning (small, pure)

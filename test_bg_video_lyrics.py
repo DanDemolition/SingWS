@@ -5,6 +5,7 @@ the app-level start/stop gating (enabled flag, opacity, folder contents,
 settings persistence keys). The native bridge is covered by source-contract
 tests here and exercised visually in an installed macOS build."""
 
+import _test_profile  # noqa: F401  (isolate SINGWS_HOME before the app is loaded)
 import importlib.util
 import inspect
 import os
