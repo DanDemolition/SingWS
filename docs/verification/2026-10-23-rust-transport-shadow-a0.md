@@ -106,3 +106,26 @@ The signed-package A3 gate also passed:
   `[LAUNCH] clean shutdown`. Observed startup was 956 ms arm64 and 1,372 ms on the successful Intel/Rosetta run.
 
 This completes the operator-approved A3 local gate.
+
+## A2 native media-end drive local gate — 2026-10-23
+
+`transport_drive_media_end` (default off) routes the native media-end decision through the Rust machine; Python is the
+retained oracle and wins every disagreement. `TransportShadow.observe()` now returns whether the machine commanded
+CompleteSong (`None` = no answer, so Python decides).
+
+- 30 transport-shadow/report tests, 152 recent regressions, and `tools/local_transport_acceptance.py` passed
+  (3 clean shows, 0 disagreements, full scenario coverage).
+- `test_karaoke_transport_integration` passed (CDG worst steady clock error 57 ms, MP4 20 ms).
+- Rebuilt signed DMGs, each launched from the mounted image with an isolated profile and `transport_drive_media_end: true`,
+  `SINGWS_SMOKE_EXIT_MS=9000`: exit 0 and `[LAUNCH] clean shutdown`. Signature authority `SingWS Local Code Signing`,
+  `codesign --verify --deep --strict` OK, `hdiutil verify` OK, arm64 minimum <= macOS 13.0 (gate 14.0), x86_64 (run
+  under Rosetta) minimum <= macOS 12.3.
+  - arm64 `a4188f49d3021a777ce03f05fed38dc95265c945d35a1ac1eb1fb136465c2309`
+  - x86_64 `97e58f9bf9c310a5d19e43703ed26632ae3e8864915f7cdc21308529626abe82`
+  - The A3 DMGs are kept in `local-installs/a3-checkpoint-1.0.1.4/`.
+- Not yet done: the default flip, which still needs a clean show with `[TRANSPORT-DRIVE] decision=media_end` logs.
+  The smoke launch plays no song, so it does not exercise the decision.
+
+Environment note: on this Mac (macOS 27.2) every file inside `.venv-build-arm64` and `.venv-build-intel-rosetta` had the
+`hidden` file flag, which made Qt's directory listing skip its plugins ("Could not find the Qt platform plugin").
+`chflags -R nohidden <venv>` fixes it; the cause of the flag is unknown.
