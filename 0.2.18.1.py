@@ -3965,6 +3965,9 @@ DEFAULTS = {
     # Stage 3 shadow: feed playback events (KaraFun and native songs) to the Rust lifecycle machine and LOG disagreements only; it
     # never acts. DEFAULT ON since 2026-10-10 (log-only, every call is wrapped). Read at launch.
     "transport_shadow": True,
+    # One-time upgrade for profiles that persisted the earlier off-by-default
+    # value. Shadow mode only observes and logs; it never controls playback.
+    "transport_shadow_default_on_migrated": False,
     # Draw the karaoke picture on a dedicated render thread instead of the GUI thread, so a frozen GUI (for example while
     # another app launches) cannot freeze the TV. DEFAULT ON since 2026-10-10 (operator's call, to rehearse it in the real
     # app before any release; proven so far only in tools/render_thread_probe.py on Apple Silicon). Set it to false in
@@ -12483,7 +12486,6 @@ class SimplePollWorker(QObject):
                 headers["X-API-Key"] = self.api_key
 
             if self.poll_requests and now >= next_request_poll:
-                next_request_poll = now + max(1, int(self.interval))
                 try:
                     params = {"user": self.user_id, "sync": "1"}
 
@@ -12545,9 +12547,15 @@ class SimplePollWorker(QObject):
                     elapsed = time_module.time() - start_time if 'start_time' in locals() else 0
                     print(f"[POLL] Poll failed after {elapsed:.2f}s: {e}")
                     self.consecutive_failures += 1
+                finally:
+                    # Measure the interval from completion, not request start.
+                    # A 6-second response must not trigger another request
+                    # immediately just because the old 2-second deadline
+                    # expired while the server was still answering.
+                    next_request_poll = time_module.time() + max(1, int(self.interval))
 
+            now = time_module.time()
             if self.api_key and now >= next_host_poll:
-                next_host_poll = now + self.host_interval
                 try:
                     resp = requests.get(
                         f"{self.base_url}/api/v1/host_commands.php",
@@ -12565,6 +12573,8 @@ class SimplePollWorker(QObject):
                         print(f"[HOST-CONTROLS] poll failed HTTP {resp.status_code}: {(resp.text or '')[:120]!r}")
                 except Exception as e:
                     print(f"[HOST-CONTROLS] poll failed: {e}")
+                finally:
+                    next_host_poll = time_module.time() + self.host_interval
             
             # Handle backoff after repeated failures
             if self.consecutive_failures >= self.max_failures_before_backoff:
@@ -20457,21 +20467,25 @@ class RotationView(QMainWindow):
             and not karaoke_active
             and not self._transition_overlay_active()
         )
-        # Timing only (no behaviour change): the 2026-10-01 show log has 21 GUI freezes of 0.4-0.8 s right when a
-        # song ends and these effects switch back on, but nothing says which surface costs the time.
-        _t0 = time.perf_counter()
-        if self.now_singing_surface is not None:
-            self.now_singing_surface.set_effects_enabled(enabled)
-        _perf_log_if_slow("rotation_effects_now_singing", (time.perf_counter() - _t0) * 1000.0)
-        _t1 = time.perf_counter()
-        if self.rotation_rail is not None:
-            self.rotation_rail.set_effects_enabled(enabled)
-            # Singer movement is functional information, not a decorative
-            # effect. Keep the rail scrolling through singer transitions and
-            # karaoke playback; only the lighting/backdrop effects yield GPU
-            # time to the lyric surface.
-            self.rotation_rail.set_running(True)
-        _perf_log_if_slow("rotation_effects_rail", (time.perf_counter() - _t1) * 1000.0)
+        applied_state = (
+            enabled,
+            id(self.now_singing_surface),
+            id(self.rotation_rail),
+        )
+        if applied_state != getattr(self, "_rotation_effects_applied_state", None):
+            self._rotation_effects_applied_state = applied_state
+            _t0 = time.perf_counter()
+            if self.now_singing_surface is not None:
+                self.now_singing_surface.set_effects_enabled(enabled)
+            _perf_log_if_slow("rotation_effects_now_singing", (time.perf_counter() - _t0) * 1000.0)
+            _t1 = time.perf_counter()
+            if self.rotation_rail is not None:
+                self.rotation_rail.set_effects_enabled(enabled)
+                # Singer movement is functional information, not a decorative
+                # effect. Keep the rail scrolling through singer transitions
+                # and karaoke playback; only decorative effects yield GPU time.
+                self.rotation_rail.set_running(True)
+            _perf_log_if_slow("rotation_effects_rail", (time.perf_counter() - _t1) * 1000.0)
 
         previous = getattr(self, "_show_priority_karaoke_active", None)
         if previous is None or bool(previous) != karaoke_active:
@@ -22549,6 +22563,15 @@ class KaraokeApp(QWidget):
             if obsolete_key in self.settings:
                 self.settings.pop(obsolete_key, None)
                 changed = True
+        if not bool(self.settings.get("transport_shadow_default_on_migrated", False)):
+            # Early rehearsals saved transport_shadow=false. That persisted
+            # value overrides the newer safe default and left the Intel show
+            # with no parity evidence. Force the log-only observer on once;
+            # later operator changes remain respected after this marker exists.
+            self.settings["transport_shadow"] = True
+            self.settings["transport_shadow_default_on_migrated"] = True
+            changed = True
+            _diag("[TRANSPORT-SHADOW] migrated saved profile to log-only observation")
         if not bool(self.settings.get("performance_debug_default_migrated", False)):
             # Runtime diagnostics used to default on and were often persisted
             # without the host making an explicit choice. Make them opt-in.
@@ -24572,6 +24595,8 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_post_count = 0
         self._daw_snapshot_stats_started = time.monotonic()
         self._daw_snapshot_viewer_recent_until = 0.0
+        self._daw_snapshot_viewer_check_after = 0.0
+        self._daw_snapshot_server_enabled = False
         self._daw_snapshot_timer = QTimer(self)
         self._daw_snapshot_timer.timeout.connect(self._schedule_daw_singer_screen_snapshot)
         self._retune_daw_snapshot_timer("startup")
@@ -29670,6 +29695,50 @@ class KaraokeApp(QWidget):
             except Exception as e:
                 print("VideoOverlay bind failed:", e)
                 
+    def _schedule_idle_full_gc(self):
+        """Run the infrequent full collection after the song handoff settles."""
+        try:
+            now = time.monotonic()
+            last_full = getattr(self, "_last_full_gc_ts", None)
+            if last_full is None:
+                self._last_full_gc_ts = now
+                return
+            if now - float(last_full) < 1800.0:
+                return
+            if bool(getattr(self, "_idle_full_gc_pending", False)):
+                return
+            self._idle_full_gc_pending = True
+            QTimer.singleShot(3000, self._run_idle_full_gc)
+        except Exception:
+            pass
+
+    def _run_idle_full_gc(self):
+        """Collect generation 2 only when no playback transition is active."""
+        self._idle_full_gc_pending = False
+        if bool(getattr(self, "_app_closing", False)):
+            return
+        busy = bool(
+            getattr(self, "karaoke_playing", False)
+            or getattr(self, "_stop_in_progress", False)
+            or getattr(self, "_playnext_pending", False)
+            or getattr(self, "_media_end_handoff_active", False)
+        )
+        if busy:
+            self._idle_full_gc_pending = True
+            QTimer.singleShot(10000, self._run_idle_full_gc)
+            return
+        try:
+            import gc as _gc
+            started = time.perf_counter()
+            _gc.collect()
+            self._last_full_gc_ts = time.monotonic()
+            _diag(
+                f"[PERF-DIAG] ui_idle_gc_full took "
+                f"{(time.perf_counter() - started) * 1000.0:.0f}ms"
+            )
+        except Exception:
+            pass
+
     @_perf_timed("ui_songend_handler")
     def _handle_media_end_safe(self, trigger: str = "eos"):
         """Called when the current track finishes or on pipeline ERROR."""
@@ -29700,28 +29769,18 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-        # Track end is a safe moment to flush deferred garbage.  We raised
-        # gc thresholds at startup to avoid pauses mid-song; the trade-off
-        # is that we should run a manual collection at points where a
-        # brief pause is inaudible — between songs is ideal.
-        # A full collection here cost the Intel show Mac a visible freeze at every song end (the song-end handler took ~356 ms
-        # with ~200 ms before cleanup, 2026-10-04 show). Young generations are cheap; a full pass runs at most every 30 minutes.
-        # The duration is always logged so the next show confirms the cost.
+        # Keep the cheap young-generation cleanup here, but never put a full
+        # collection in the handoff.  The Intel show log recorded 198-516 ms
+        # full-GC pauses at exactly the moment the next singer screen appeared.
         try:
             import gc as _gc
-            _gc_now = time.monotonic()
-            _gc_last_full = getattr(self, "_last_full_gc_ts", None)
-            if _gc_last_full is None:
-                self._last_full_gc_ts = _gc_now
-                _gc_last_full = _gc_now
-            _gc_full = (_gc_now - float(_gc_last_full)) >= 1800.0
             _gc_started = time.perf_counter()
-            if _gc_full:
-                self._last_full_gc_ts = _gc_now
-                _gc.collect()
-            else:
-                _gc.collect(1)
-            _diag(f"[PERF-DIAG] ui_songend_gc_{'full' if _gc_full else 'young'} took {(time.perf_counter() - _gc_started) * 1000.0:.0f}ms")
+            _gc.collect(1)
+            _diag(
+                f"[PERF-DIAG] ui_songend_gc_young took "
+                f"{(time.perf_counter() - _gc_started) * 1000.0:.0f}ms"
+            )
+            self._schedule_idle_full_gc()
         except Exception:
             pass
 
@@ -33175,6 +33234,7 @@ class KaraokeApp(QWidget):
         self._daw_snapshot_first_frame_pending = False
         self._daw_snapshot_pending_image = None
         self._daw_snapshot_pending_reason = ""
+        self._daw_snapshot_last_capture_ts = 0.0
         self._daw_preview_log(f"playback stopped reason={reason}")
         # Don't blank the DAW preview here: a forced capture publishes the idle
         # show screen / next-up overlay instead of flashing the browser back to
@@ -33182,8 +33242,6 @@ class KaraokeApp(QWidget):
         self._retune_daw_snapshot_timer("playback_stop")
         try:
             QTimer.singleShot(0, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped_immediate"))
-            QTimer.singleShot(450, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped"))
-            QTimer.singleShot(1000, lambda: self._schedule_daw_singer_screen_snapshot(force=True, reason="playback_stopped_retry"))
         except Exception as e:
             self._daw_preview_log(f"stop refresh scheduling failed reason={reason} error={e}")
 
@@ -33213,6 +33271,20 @@ class KaraokeApp(QWidget):
         base_url, tenant, api_key = self._daw_snapshot_config()
         if not base_url or not tenant or not api_key:
             self._daw_preview_log_transition("producer_state", f"producer skipped missing_config reason={reason}")
+            return
+
+        # A viewer remains valid for several seconds.  Reusing that result
+        # avoids a GET before every preview frame (once per second on the DAW
+        # page) while still refreshing presence often enough for open/close.
+        viewer_check_after = float(getattr(self, "_daw_snapshot_viewer_check_after", 0.0) or 0.0)
+        if now < viewer_check_after:
+            if bool(getattr(self, "_daw_snapshot_server_enabled", False)) and self._daw_snapshot_viewer_recent():
+                self._daw_snapshot_inflight = True
+                self._daw_preview_log_transition(
+                    "producer_state",
+                    f"preview producer cached_viewer reason={reason} playing={int(playing)}",
+                )
+                self._capture_daw_singer_screen_snapshot(reason=reason)
             return
 
         if not self._network_circuit_allows("daw_viewer_check"):
@@ -33250,6 +33322,8 @@ class KaraokeApp(QWidget):
                                 audience = "singer"
                     try:
                         self._daw_snapshot_viewer_recent_until = time.monotonic() + 16.0 if viewer_recent else 0.0
+                        self._daw_snapshot_viewer_check_after = time.monotonic() + 5.0
+                        self._daw_snapshot_server_enabled = enabled
                         self._daw_snapshot_audience = audience
                     except Exception:
                         pass
@@ -51901,7 +51975,7 @@ class KaraokeApp(QWidget):
         self._search_thread = SongSearchThread(
             job_id,
             query,
-            limit=500,
+            limit=200,
             fuzzy=True,
             karafun_search_url=(
                 _network_normalize_base_url(self.settings.get("base_url", "")) + "/karafun_search.php"
@@ -52163,7 +52237,12 @@ class KaraokeApp(QWidget):
         self.track_map = {}
 
         # Add items in SMALLER batches with proper yielding to avoid freezing the ticker
-        BATCH_SIZE = 25
+        # QListWidget eagerly creates and lays out every row.  On the Intel
+        # show Mac, rendering 500 hits in 25-row bursts kept waking the native
+        # paint/layout path for almost three seconds.  Keep enough results for
+        # practical searches, but make each UI slice small enough to stay
+        # below one ticker frame.
+        BATCH_SIZE = 10
         batch_idx = [0]  # Use list to avoid nonlocal issues
         dropped = [0]
         
@@ -52213,7 +52292,7 @@ class KaraokeApp(QWidget):
             
             # Schedule next batch if there are more items (increased delay for ticker smoothness)
             if end < len(rows):
-                QTimer.singleShot(20, add_next_batch)  # 20ms delay ensures ticker gets its 16ms frame
+                QTimer.singleShot(32, add_next_batch)
             else:
                 if dropped[0]:
                     _diag(f"[SEARCH] rendered {self.results_list.count()} of {len(rows)} rows; {dropped[0]} dropped")
@@ -52282,7 +52361,7 @@ class KaraokeApp(QWidget):
         self._pending_search_job_id = None
         try:
             self._search_thread = SongSearchThread(
-                int(pending_job_id), pending_query, limit=500,
+                int(pending_job_id), pending_query, limit=200,
                 karafun_search_url=(
                     _network_normalize_base_url(self.settings.get("base_url", "")) + "/karafun_search.php"
                     if bool(self.settings.get("karafun_include_online_search", False)) else ""

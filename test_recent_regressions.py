@@ -2019,6 +2019,15 @@ class SearchCoalescingTests(unittest.TestCase):
         self.assertIn("row render failed", source)
         self.assertNotIn("                    except Exception:\n                        continue", source)
 
+    def test_search_render_is_capped_and_split_into_small_ui_slices(self):
+        search = inspect.getsource(self.singws.KaraokeApp.search_tracks)
+        drain = inspect.getsource(self.singws.KaraokeApp._start_pending_search_if_needed)
+        apply_rows = inspect.getsource(self.singws.KaraokeApp._apply_db_search_results)
+        self.assertIn("limit=200", search)
+        self.assertIn("limit=200", drain)
+        self.assertIn("BATCH_SIZE = 10", apply_rows)
+        self.assertIn("QTimer.singleShot(32, add_next_batch)", apply_rows)
+
 
 class LoudnessFailureMemoryTests(unittest.TestCase):
     """Undecodable files were re-analysed on every pass.

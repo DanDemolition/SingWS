@@ -1,7 +1,7 @@
 """Stage 3 shadow hook: feeds real playback events to the Rust song-lifecycle machine and logs disagreements.
 
 SHADOW ONLY. The machine never drives anything; every method swallows its own errors, so a missing dylib, a bad
-event or a crash in here cannot affect a show. Off by default (setting ``transport_shadow``); read once at launch.
+event or a crash in here cannot affect a show. On by default (setting ``transport_shadow``); read once at launch.
 
 Log lines (grep ``TRANSPORT-SHADOW``):
   * ``cmd``      what the machine would do for an event (Ignore reasons are logged once per reason per session)

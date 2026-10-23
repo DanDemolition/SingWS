@@ -483,7 +483,8 @@ class PerformanceSafetyTests(unittest.TestCase):
 
         daw_stopped = function_source("_mark_daw_preview_playback_stopped")
         self.assertIn("playback_stopped_immediate", daw_stopped)
-        self.assertIn("playback_stopped_retry", daw_stopped)
+        self.assertNotIn("playback_stopped_retry", daw_stopped)
+        self.assertEqual(daw_stopped.count("QTimer.singleShot"), 1)
         self.assertNotIn("_post_daw_singer_screen_snapshot(None, active=False", daw_stopped)
 
         direct_message = function_source("_net_send_direct_message")
@@ -1057,6 +1058,19 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("_record_daw_preview_server_failure", uploader)
         self.assertIn("_record_daw_preview_server_success", uploader)
 
+    def test_slow_poll_responses_get_a_full_interval_before_retry(self):
+        start = MAIN_SOURCE.index("class SimplePollWorker(QObject):")
+        end = MAIN_SOURCE.index("class RelayRequestWorker(QObject):", start)
+        worker = MAIN_SOURCE[start:end]
+        self.assertIn(
+            "next_request_poll = time_module.time() + max(1, int(self.interval))",
+            worker,
+        )
+        self.assertIn(
+            "next_host_poll = time_module.time() + self.host_interval",
+            worker,
+        )
+
     def test_daw_preview_frame_callbacks_honor_viewer_and_server_backoff(self):
         frame_sender = function_source("_maybe_send_daw_snapshot_from_frame")
         self.assertIn("_daw_snapshot_viewer_recent()", frame_sender)
@@ -1068,6 +1082,15 @@ class PerformanceSafetyTests(unittest.TestCase):
         scheduler = function_source("_schedule_daw_singer_screen_snapshot")
         self.assertIn("should_capture = enabled and viewer_recent", scheduler)
         self.assertNotIn("viewer_recent or playing or bool(force)", scheduler)
+
+    def test_daw_preview_reuses_a_fresh_viewer_check(self):
+        scheduler = function_source("_schedule_daw_singer_screen_snapshot")
+        self.assertIn("_daw_snapshot_viewer_check_after", scheduler)
+        self.assertIn("_daw_snapshot_server_enabled", scheduler)
+        self.assertLess(
+            scheduler.index("now < viewer_check_after"),
+            scheduler.index('requests.get('),
+        )
 
     def test_daw_preview_timer_is_adaptive(self):
         init_source = MAIN_SOURCE[MAIN_SOURCE.index("self._daw_snapshot_timer = QTimer(self)"):]
@@ -1516,6 +1539,7 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_rotation_priority_keeps_singer_names_scrolling(self):
         apply_visibility = function_source("_apply_effects_visibility")
         self.assertIn("self.rotation_rail.set_running(True)", apply_visibility)
+        self.assertIn("_rotation_effects_applied_state", apply_visibility)
         self.assertNotIn("set_running(not karaoke_active)", apply_visibility)
         self.assertNotIn("self.scroll_timer.stop()", apply_visibility)
 

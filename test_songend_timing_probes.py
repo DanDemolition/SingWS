@@ -70,20 +70,32 @@ class SongEndCollectionTests(unittest.TestCase):
         start = SOURCE.index("    def _handle_media_end_safe(")
         return SOURCE[start:SOURCE.index("    def _auto_play_next_if_generation(")]
 
-    def test_a_song_end_collects_only_the_young_generations_and_a_full_pass_at_most_every_thirty_minutes(self):
+    def idle_gc(self):
+        start = SOURCE.index("    def _schedule_idle_full_gc(")
+        return SOURCE[start:SOURCE.index('    @_perf_timed("ui_songend_handler")', start)]
+
+    def test_a_song_end_collects_only_the_young_generations(self):
         h = self.handler()
         self.assertIn("_gc.collect(1)", h)
-        self.assertIn(">= 1800.0", h)
-        self.assertEqual(h.count("_gc.collect()"), 1)                       # the single full pass, behind the 30-minute rule
-        self.assertLess(h.index(">= 1800.0"), h.index("_gc.collect()"))
+        self.assertNotIn("_gc.collect()", h)
+        self.assertIn("self._schedule_idle_full_gc()", h)
 
-    def test_the_first_song_end_of_a_session_does_not_run_a_full_pass(self):
-        h = self.handler()
-        self.assertIn('_gc_last_full = getattr(self, "_last_full_gc_ts", None)', h)
-        self.assertIn("if _gc_last_full is None:\n                self._last_full_gc_ts = _gc_now", h)
+    def test_full_gc_waits_for_thirty_minutes_and_an_idle_handoff(self):
+        idle = self.idle_gc()
+        self.assertIn("< 1800.0", idle)
+        self.assertIn("QTimer.singleShot(3000, self._run_idle_full_gc)", idle)
+        self.assertIn('getattr(self, "karaoke_playing", False)', idle)
+        self.assertIn('getattr(self, "_media_end_handoff_active", False)', idle)
+        self.assertEqual(idle.count("_gc.collect()"), 1)
+
+    def test_the_first_song_end_of_a_session_only_starts_the_full_gc_clock(self):
+        idle = self.idle_gc()
+        self.assertIn('last_full = getattr(self, "_last_full_gc_ts", None)', idle)
+        self.assertIn("if last_full is None:\n                self._last_full_gc_ts = now\n                return", idle)
 
     def test_the_collection_time_is_always_logged(self):
         self.assertIn("[PERF-DIAG] ui_songend_gc_", self.handler())
+        self.assertIn("[PERF-DIAG] ui_idle_gc_full", self.idle_gc())
 
 
 if __name__ == "__main__":

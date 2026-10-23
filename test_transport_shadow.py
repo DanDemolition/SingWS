@@ -189,6 +189,16 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn('"transport_shadow": True', self.src)
         self.assertIn('self.settings.get("transport_shadow", True)', self.src)
 
+    def test_old_saved_false_is_migrated_once(self):
+        self.assertIn('"transport_shadow_default_on_migrated": False', self.src)
+        start = self.src.index(
+            'if not bool(self.settings.get("transport_shadow_default_on_migrated", False)):'
+        )
+        block = self.src[start:start + 900]
+        self.assertIn('self.settings["transport_shadow"] = True', block)
+        self.assertIn('self.settings["transport_shadow_default_on_migrated"] = True', block)
+        self.assertIn("log-only observation", block)
+
     def test_hooks_present(self):
         for needle in ('_sh.start(True, _dur or None)', '_sh.observe(_sid, "idle")', "_sh.app_auto_complete(", "_sh.app_finished(",
                        '_sh.start(False, duration_seconds or None)', '"media_end"', "_sh.app_stopped(", '"watchdog"'):
