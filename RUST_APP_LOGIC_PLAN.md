@@ -101,7 +101,7 @@ ID_STABLE (a host request key never maps to two ids). First run over 151 logs: 0
   `SINGWS_HOME`; 59 test modules import it, and `test_test_isolation.py` fails any new test that loads the app without isolating).
   Before the fix ~52 test modules, when run directly with `python -m unittest`, wrote into the live `~/SingWS` profile: the show
   log plus `host_request_sync.json`, `loudness.json`, `loudness.checkpoint.jsonl`, `transition-analysis.json` and
-  `waitlist_removed_tonight.json`. Existing live logs still contain that noise; the replay harness filters it by request id.
+  `waitlist_removed_tonight.json`. The noise with unambiguous test request ids was removed from the live logs on 2026-10-23 (archived first, `tools/clean_test_noise_from_logs.py`); name-only noise remains and the replay harness still filters by request id.
 * Separate bug worth fixing: unit tests write into the live `~/SingWS/logs`; they should use an isolated `SINGWS_HOME`.
 
 ## Stage C: background-music transition planning (small, pure)
@@ -127,8 +127,9 @@ and 4 of 4 deliberately broken Rust rules were caught by it. Honest limits:
   and counts flat loud audio as "not rising", so the earliest qualifying window wins; for a track whose last ~12 s lose 8 dB it
   reports a fade start about 12 s before the audio end even when the audible fade is shorter, which pushes most such tracks to
   the 8 s crossfade cap.
-* The live `~/SingWS/transition-analysis.json` holds 4 junk records for temp `song.zip` files written by test runs before
-  test isolation existed; harmless, and the parity tool skips them.
+* The 4 junk `song.zip` records test runs left in the live `~/SingWS/transition-analysis.json` were removed on 2026-10-23 (the parity
+  tool still skips temp-path records). The live loudness cache was also rewritten by pre-isolation test runs and now holds one real entry;
+  re-run library analysis to repopulate it.
 Not done (needs real show evidence first): turning `plan_shadow` on by default, and any `bgm_plan_engine` drive step.
 
 ## Stage D: stores and server client

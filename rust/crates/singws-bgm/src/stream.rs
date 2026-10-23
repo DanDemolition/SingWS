@@ -604,7 +604,18 @@ mod tests {
         // reader far slower than the worker: the 2 s ring fills and the worker waits
         let mut got = Vec::new();
         let mut buf = vec![0.0f32; 512 * 2];
+        let block_s = 512.0 / 48_000.0;
         loop {
+            // A genuinely slow reader never outruns the decoder: wait until a whole block is buffered (or the stream is done)
+            // before every read. Without this the test depended on build speed: in an unoptimized build the worker was slower than
+            // the free-running reader, read() correctly padded silence and counted underruns, and the output grew to ~5x the file.
+            let t0 = Instant::now();
+            while deck.buffered_seconds() < block_s
+                && deck.shared.done_gen.load(Ordering::Acquire) != deck.epoch
+                && t0.elapsed() < Duration::from_secs(10)
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             let n = deck.read(&mut buf);
             got.extend_from_slice(&buf[..n * 2]);
             if n < 512 {

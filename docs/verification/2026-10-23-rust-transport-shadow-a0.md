@@ -229,3 +229,22 @@ into the venvs stay valid; no build script or spec changed; `.venv` still resolv
 copy+delete across the iCloud boundary (about 8 minutes for both); the script refuses to run while a build or test uses a venv, is
 idempotent, supports `--dry-run` and `--restore`, and verifies Python plus a Qt `QApplication` in each venv (the Intel one under
 Rosetta). After the move: the integration test passes with no helper running and 0 files are hidden afterwards.
+
+## Cleanup of earlier loose ends — 2026-10-23
+
+* `singws-bgm` test `a_slow_reader_never_loses_or_repeats_audio`: NOT a player bug. It passed 3/3 in the optimized (shipped) build and
+  failed in the unoptimized test build because the "slow" reader slept only once per 20,480 frames, so with a slower debug worker the
+  reader outran the decoder, `read()` correctly padded silence (counted as underruns) and the output grew to ~5x the file. The test now
+  waits until a whole block is buffered before every read. Test-only change; whole Rust workspace (minus `singws-video`) green in debug.
+* Live `~/SingWS/transition-analysis.json`: removed the 4 temp-path `song.zip` records left by pre-isolation test runs (447 -> 443; backup
+  `transition-analysis.json.bak-before-junk-cleanup-*`). The app's own loader accepts the file and `tools/plan_parity.py` still passes.
+* Live `~/SingWS/loudness.json`: it held 5 entries, 4 of them test junk (removed; backup `loudness.json.bak-before-junk-cleanup-*`), leaving
+  ONE real track. Pre-isolation test runs rewrote this file (observed at 13:23 and 13:45 today, plus earlier ones), so an earlier, larger
+  cache was almost certainly overwritten. No older copy exists (no Time Machine snapshot, no backup, the log does not record its size).
+  It is a regenerable analysis cache, not user data; re-run library analysis to repopulate it. Never confirmed how many entries it had.
+* Live logs: `tools/clean_test_noise_from_logs.py --apply` removed 250,030 lines (those whose every request id is a unit-test id < 1e12)
+  from 32 of 99 logs after archiving them (`~/SingWS/log-archive/logs-before-test-noise-cleanup-*.tar.gz`, 4.4 MB); logs 165 MB -> 114 MB.
+  Name-only noise (ROTATION-SLOT, QUEUE-STATE, SURFACE, ...) cannot be attributed with certainty and was left. Queue replay and queue parity
+  results over the real data are identical before and after.
+* Dev Mac install (2026-10-23): the Stage C plan-gate arm64 build (`184bc4cc...`) is installed in /Applications (key files hash-identical to the
+  gate-tested DMG), `plan_shadow` is enabled in the live profile alongside the other shadow flags (backup `settings.json.bak-before-plan-shadow-*`).
