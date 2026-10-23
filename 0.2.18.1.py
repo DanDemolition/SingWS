@@ -27904,7 +27904,7 @@ class KaraokeApp(QWidget):
         try:
             _sh = self._transport_shadow()
             if _sh is not None and started:
-                self._shadow_native_id = _sh.start(False, duration_seconds or None)
+                self._shadow_native_id = _sh.start(False, duration_seconds or None, source=f"native:{mode}")
                 _sh.observe(self._shadow_native_id, "playing")
         except Exception:
             pass
@@ -29606,7 +29606,23 @@ class KaraokeApp(QWidget):
         if transport is None:
             return False
         try:
+            before_ns = duration_ns = None
+            try:
+                before_ns, duration_ns = self._gst_query_times()
+            except Exception:
+                pass
             transport.seek(seconds)
+            try:
+                _sh = self._transport_shadow()
+                if _sh is not None:
+                    _sh.note_seek(
+                        getattr(self, "_shadow_native_id", 0),
+                        (float(before_ns) / 1_000_000_000.0) if before_ns is not None else 0.0,
+                        float(seconds),
+                        (float(duration_ns) / 1_000_000_000.0) if duration_ns is not None else None,
+                    )
+            except Exception:
+                pass
             return True
         except Exception as e:
             _diag(f"[PY-KARAOKE] seek failed: {e}")
@@ -56173,6 +56189,13 @@ class KaraokeApp(QWidget):
                     # The end detection counts from the wall clock; tell it about the seek (see _karafun_fallback_remaining).
                     entry["karafun_seek_offset_s"] = float(entry.get("karafun_seek_offset_s") or 0.0) + moved
                     try:
+                        _sh = self._transport_shadow()
+                        active = getattr(self, "_active_external_karafun", None)
+                        if _sh is not None and isinstance(active, dict):
+                            _sh.note_seek(active.get("_shadow_id"), elapsed, target, duration)
+                    except Exception:
+                        pass
+                    try:
                         token, rearm = getattr(self, "_karafun_duration_rearm", (None, None))
                         if callable(rearm) and token == entry.get("karafun_completion_monitor"):
                             rearm()
@@ -58239,7 +58262,7 @@ class KaraokeApp(QWidget):
             _sh = self._transport_shadow()
             if _sh is not None and isinstance(self._active_external_karafun, dict):
                 _dur = 0 if bool(entry.get("duration_estimated", False)) else int(entry.get("duration") or 0)
-                self._active_external_karafun["_shadow_id"] = _sh.start(True, _dur or None)
+                self._active_external_karafun["_shadow_id"] = _sh.start(True, _dur or None, source="karafun")
         except Exception:
             pass
         QTimer.singleShot(0, lambda: self._reapply_rotation_presentation(scroll_current=True))

@@ -67,11 +67,16 @@ class ShadowAgainstRealMachineTests(unittest.TestCase):
         self.assertIn("MISMATCH", self.text())
 
     def test_manual_complete_is_not_a_mismatch(self):
-        sid = self.sh.start(True, 200.0)
+        sid = self.sh.start(True, 200.0, source="karafun")
         self.sh.observe(sid, "playing", now=1.0)
         self.sh.observe(sid, "playing", now=3.0)
+        self.sh.note_seek(sid, 160.0, 185.0, 200.0)
         self.sh.app_finished(sid, "complete")
         self.assertEqual(self.sh.mismatches, 0, self.text())
+        self.assertIn("session 1 started source=karafun", self.text())
+        self.assertIn("kind=playing", self.text())
+        self.assertIn("near_end=1", self.text())
+        self.assertIn("action=complete manual=1", self.text())
 
     def test_machine_completing_but_app_never_does_is_a_mismatch(self):
         sid = self.sh.start(True, 50.0)
@@ -178,7 +183,7 @@ class NativeSongTests(unittest.TestCase):
 
 
 class AppWiringGuardTests(unittest.TestCase):
-    """Source guards: the hooks exist, are wrapped, and the feature is off by default."""
+    """Source guards: the hooks exist, are wrapped, and the log-only feature is on by default."""
 
     @classmethod
     def setUpClass(cls):
@@ -200,8 +205,10 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn("log-only observation", block)
 
     def test_hooks_present(self):
-        for needle in ('_sh.start(True, _dur or None)', '_sh.observe(_sid, "idle")', "_sh.app_auto_complete(", "_sh.app_finished(",
-                       '_sh.start(False, duration_seconds or None)', '"media_end"', "_sh.app_stopped(", '"watchdog"'):
+        for needle in ('_sh.start(True, _dur or None, source="karafun")', '_sh.observe(_sid, "idle")',
+                       "_sh.app_auto_complete(", "_sh.app_finished(",
+                       '_sh.start(False, duration_seconds or None, source=f"native:{mode}")',
+                       "_sh.note_seek(", '"media_end"', "_sh.app_stopped(", '"watchdog"'):
             self.assertIn(needle, self.src)
 
     def test_specs_bundle_the_module(self):

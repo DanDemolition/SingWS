@@ -33,6 +33,8 @@ class TransportShadow:
         self._events = 0
         self.mismatches = 0
         self._auto_flag = False
+        self._source = "unknown"
+        self._event_kinds = set()
 
     # ---- helpers -------------------------------------------------------------------------------------------
     def _say(self, text):
@@ -78,7 +80,7 @@ class TransportShadow:
             self._say(f"cmd session={self._session} {json.dumps(c)}")
 
     # ---- events from the app (each returns quietly on any error) -------------------------------------------
-    def start(self, external, duration=None):
+    def start(self, external, duration=None, source=None):
         """Begin a new session; returns its id (store it with the app's own session object)."""
         try:
             self._flush_session()
@@ -89,8 +91,14 @@ class TransportShadow:
             self._app_finished = False
             self._ignored = set()
             self._events = 0
+            self._event_kinds = set()
+            self._source = str(source or ("karafun" if external else "native")).strip().lower().replace(" ", "_")
             ev = {"StartRequested": {"session": self._session, "external": bool(external),
                                      "duration": float(duration) if duration else None}}
+            self._say(
+                f"session {self._session} started source={self._source} external={int(bool(external))} "
+                f"duration={float(duration or 0.0):.1f}"
+            )
             self._record(self._step(ev), time.monotonic())
             return self._session
         except Exception as exc:
@@ -112,9 +120,29 @@ class TransportShadow:
                 body = {"session": int(session), "now": float(now), "error": bool(error)}
             else:
                 body = {"session": int(session), "now": float(now)}
+            if kind not in self._event_kinds:
+                self._event_kinds.add(kind)
+                self._say(f"event session={self._session} source={self._source} kind={kind}")
             self._record(self._step({name: body}, stop_in_progress=stop_in_progress), now)
         except Exception as exc:
             self._say(f"observe error: {exc!r}")
+
+    def note_seek(self, session, from_seconds, to_seconds, duration_seconds=None):
+        """Record coverage for a real operator seek; it never changes machine state."""
+        try:
+            if not self.available or not session or session != self._session:
+                return
+            start = max(0.0, float(from_seconds or 0.0))
+            target = max(0.0, float(to_seconds or 0.0))
+            duration = max(0.0, float(duration_seconds or 0.0))
+            remaining = max(0.0, duration - target) if duration > 0 else -1.0
+            near_end = duration > 0 and remaining <= 30.0
+            self._say(
+                f"seek session={self._session} source={self._source} from={start:.1f} to={target:.1f} "
+                f"duration={duration:.1f} remaining={remaining:.1f} near_end={int(near_end)}"
+            )
+        except Exception as exc:
+            self._say(f"seek note error: {exc!r}")
 
     def app_auto_complete(self, session):
         """The app's monitor decided the song ended on its own (called just before it finishes the song)."""
@@ -149,7 +177,12 @@ class TransportShadow:
                 return
             now = time.monotonic()
             self._app_finished = True
-            if not self._auto_flag:
+            manual = not self._auto_flag
+            self._say(
+                f"finish session={self._session} source={self._source} "
+                f"action={str(action or '').strip().lower() or 'unknown'} manual={int(manual)}"
+            )
+            if manual:
                 self._record(self._step({"ManualComplete": {"session": int(session)}}), now)
             self._auto_flag = False
             self._record(self._step({"CleanupDone": {"session": int(session)}}), now)
