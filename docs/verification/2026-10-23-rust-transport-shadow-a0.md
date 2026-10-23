@@ -84,3 +84,25 @@ is logged as `[TRANSPORT-DRIVE]`.
 
 This satisfies the operator-approved A2 local gate. The rollback remains `transport_drive: false`; no Python oracle code
 has been removed.
+
+## A3 default-on source gate — 2026-10-23
+
+`transport_drive` now defaults on for the single KaraFun automatic-end decision. The selector and Python oracle are
+unchanged: agreement uses Rust, and any disagreement or unavailable Rust answer uses Python. Setting the flag false returns
+immediately to Python-only decisions.
+
+- Python compilation checks passed.
+- All 26 transport-shadow/report tests passed.
+- All 152 recent regressions passed.
+- The three-show/five-session local lifecycle acceptance again reported zero disagreements and complete coverage.
+
+No Python decision code has been removed.
+
+The signed-package A3 gate also passed:
+
+- arm64 DMG SHA-256: `baec6d84e2436c46a8ddf0fc06e4317e54d2ebd410368afddd86ebaa60d0379d`
+- x86_64 DMG SHA-256: `e6526df8a3b00a7a1cb101ba020ec82f364ddf742bb8f794e7ad8a81bd8b440a`
+- Both exact DMG applications launched with isolated profiles and exited automatically with exit code 0 and
+  `[LAUNCH] clean shutdown`. Observed startup was 956 ms arm64 and 1,372 ms on the successful Intel/Rosetta run.
+
+This completes the operator-approved A3 local gate.

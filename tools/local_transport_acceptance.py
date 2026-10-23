@@ -109,7 +109,7 @@ def main() -> int:
     if not accepted:
         print(f"LOCAL ACCEPTANCE FAILED: watched={watched} clean={clean}")
         return 1
-    print("A2 DRIVE SAFETY PASSED: agreement uses Rust; disagreements use Python")
+    print("TRANSPORT DRIVE SAFETY PASSED: agreement uses Rust; disagreements use Python")
     print("LOCAL ACCEPTANCE PASSED")
     return 0
 

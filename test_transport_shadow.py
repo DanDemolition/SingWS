@@ -219,8 +219,8 @@ class AppWiringGuardTests(unittest.TestCase):
                        "_sh.note_seek(", '"media_end"', "_sh.app_stopped(", '"watchdog"'):
             self.assertIn(needle, self.src)
 
-    def test_drive_is_default_off_and_python_wins_disagreements(self):
-        self.assertIn('"transport_drive": False', self.src)
+    def test_drive_is_default_on_and_python_wins_disagreements(self):
+        self.assertIn('"transport_drive": True', self.src)
         start = self.src.index('if bool(self.settings.get("transport_drive", False))')
         block = self.src[start:start + 2200]
         self.assertIn("select_drive_decision(", block)

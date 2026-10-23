@@ -3965,10 +3965,10 @@ DEFAULTS = {
     # Stage 3 shadow: feed playback events (KaraFun and native songs) to the Rust lifecycle machine and LOG disagreements only; it
     # never acts. DEFAULT ON since 2026-10-10 (log-only, every call is wrapped). Read at launch.
     "transport_shadow": True,
-    # A2 migration flag. When enabled, Rust owns the KaraFun end answer only
+    # A3 migration flag. Rust owns the KaraFun end answer only
     # when it agrees with the retained Python oracle; Python wins every
-    # disagreement. Default off until the A2 local rehearsal passes.
-    "transport_drive": False,
+    # disagreement. Set false for immediate rollback to Python-only decisions.
+    "transport_drive": True,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,

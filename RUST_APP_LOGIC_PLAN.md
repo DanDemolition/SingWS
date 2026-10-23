@@ -2,8 +2,8 @@
 
 Status: ACTIVE (2026-10-23). Stage A0 is implemented, tested, and deployed on Apple Silicon. Signed arm64 and x86_64
 installers are built and package-launched. The operator accepted the documented local CDG/MP4/KaraFun rehearsal in place
-of three physical-Intel shows; it reported zero disagreements and complete coverage. A2 is implemented and has passed its
-local gate behind a default-off flag. A3 is next: enable only the proven KaraFun-end decision by default.
+of three physical-Intel shows; it reported zero disagreements and complete coverage. A2 is complete, and A3 enables the
+proven KaraFun-end decision by default with automatic Python fallback. Both signed package rehearsals passed.
 This follows AGENTS.md: adapter-style, small reviewable steps, shadow before drive, a flag for every risky step, and old
 code removed only after the replacement is proven.
 
@@ -48,7 +48,9 @@ The Python executor still performs the action; the old Python decision stays in 
 and both disagreement directions select Python, while the three-show lifecycle matrix remained clean. Then the same for
 native media end, then watchdog, then stop/skip.
 
-**A3: flip the default, one decision at a time, each after a clean show. A4: delete the old Python decision code.**
+**A3 (local and package gates complete 2026-10-23): flip the default, one decision at a time, each after a clean show. A4: delete the old Python decision code.**
+The default is now on only for KaraFun automatic-end detection; both answers are still computed, and Python remains the
+automatic disagreement fallback. Signed arm64 and x86_64 DMGs passed isolated-profile clean-launch/clean-exit smoke tests.
 Rollback at every step: `transport_drive: false`.
 
 ## Stage B: queue / rotation / request lifecycle (the biggest win, the biggest risk)
@@ -107,6 +109,6 @@ the same show acceptance checklist on both architectures.
 
 ## Immediate next step
 
-A3: flip `transport_drive` on by default for the KaraFun-end decision while retaining the Python oracle and automatic
-Python fallback on every disagreement. Repeat the full regression, lifecycle acceptance, real CDG/MP4 integration, and
-signed-package launch matrix before removing any Python decision code.
+Move the remaining transport decisions one at a time: native media end, watchdog, then stop/skip. Preserve comparison and
+Python fallback until each decision has passed the same local and two-architecture gates. Only then start A4 removal of
+duplicated Python lifecycle decisions. See `docs/handoff/2026-10-23-rust-migration.md` for the continuation checklist.
