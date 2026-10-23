@@ -75,10 +75,20 @@ ID_STABLE (a host request key never maps to two ids). First run over 151 logs: 0
 * ~89% of queue events in the live logs are unit-test noise (`request_id` < 1e12 written by tests into the real log). The
   harness drops and counts them; the real corpus is only 169 request ids, 92 tombstones, 1,301 resurrection-guard hits.
 * DEDUP_OLDEST and the id-reuse path have NO real events yet, so their clean result proves nothing; the harness says so.
-* Host actions (reorder/replace/move between sections) are not in the corpus yet. Next harness steps: parse
-  `[QUEUE_SYNC_AUTHORITY]`, `[QUEUE-AUDIT]`, `[ROTATION-SLOT]`, `[QUEUE-STATE]` and `[SERVER-STATE]` snapshots, and add the
-  PHP-side fixtures already used by the queue tests. Only then write the pure `singws-queue` crate and replay the corpus
-  through it next to the Python result.
+* B0b (2026-10-23): the harness now also parses `[QUEUE_SYNC_AUTHORITY]`, `[QUEUE-AUDIT]`, `[ROTATION-SLOT]`, `[QUEUE-STATE]` and
+  `[SERVER-STATE]` and checks host-action invariants: AUTH_PERMUTATION (a remote reorder never adds/drops ids), AUTH_HOST_ORDER
+  (an applied host order is honoured), AUTH_ECHO_NOOP, SLOT_FILL (a slot fill follows a preserve, never a host removal) and
+  ACCEPTING_HOST (accepting-requests mismatches always repair server-to-local). Violations carry an origin (real / test /
+  ambiguous / unverifiable); test and unverifiable ones are reported but do not fail the run. Result over 151 logs: 0 failing
+  violations; 1 unverifiable slot fill (the 2026-07-12 log that preserved the slot is missing). Coverage is uneven: 1,058 accepting
+  repairs (all server-to-local) and 2,684 slot fills back their checks, but only 2 real reorder events exist (almost all
+  QUEUE_SYNC_AUTHORITY data is test-origin), `same_item` is False in all 4,978 QUEUE-STATE lines so it supports no invariant,
+  and dedup / id-reuse have no real events.
+* Observed, not yet judged: preserved singer slots survive an app restart and were filled at startup (2026-07-14 23:58 preserve,
+  2026-07-15 00:07:52 restore) even though they carried `timeout_sec=180` and ~9 minutes had passed. Decide whether the
+  timeout must be honoured across a restart before the Rust queue models slot expiry.
+* Still to do before the pure `singws-queue` crate: real host reorder/replace/move traces (a rehearsal session on the scratch
+  profile would generate them), the PHP-side fixtures already used by the queue tests, and the test-log isolation fix.
 * Separate bug worth fixing: unit tests write into the live `~/SingWS/logs`; they should use an isolated `SINGWS_HOME`.
 
 ## Stage C: background-music transition planning (small, pure)
