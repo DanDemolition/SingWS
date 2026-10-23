@@ -129,3 +129,23 @@ CompleteSong (`None` = no answer, so Python decides).
 Environment note: on this Mac (macOS 27.2) every file inside `.venv-build-arm64` and `.venv-build-intel-rosetta` had the
 `hidden` file flag, which made Qt's directory listing skip its plugins ("Could not find the Qt platform plugin").
 `chflags -R nohidden <venv>` fixes it; the cause of the flag is unknown.
+
+## A2 KaraFun watchdog drive local gate — 2026-10-23
+
+`transport_drive_watchdog` (default off) routes the "end unverified, tell the operator to press Complete" decision through
+the Rust machine (`WarnOperator`); Python is the retained oracle and wins every disagreement. `TransportShadow.observe()`
+gained an `expect` argument so a caller can ask for a specific command.
+
+- 33 transport-shadow/report tests, 152 recent regressions, `tools/local_transport_acceptance.py` (3 clean shows, 0
+  disagreements) and `test_karaoke_transport_integration` (CDG worst steady clock error 60 ms, MP4 14 ms) passed.
+- Rebuilt signed DMGs, each launched from the mounted image with an isolated profile and both
+  `transport_drive_media_end` and `transport_drive_watchdog` on: exit 0, 3 `[LAUNCH] clean shutdown` lines, 0 tracebacks,
+  `codesign --verify --deep --strict` and `hdiutil verify` OK; x86_64 ran under Rosetta.
+  - arm64 `26216ad760f07c92b7bcb8fd211f30f30d40be141935bfafa248c72123a6e635`
+  - x86_64 `56a227e7337021ea89a8a120e454e39f57fe2592c1a1004c87759ab6126d7e99`
+  - The media-end-gate DMGs are kept in `local-installs/media-end-gate-1.0.1.4/`.
+- Not yet done: default flip (needs a real show with `decision=watchdog` logs; the smoke launch plays no song).
+
+Environment note: the `hidden` flag on the build venvs returned after the rebuilds (675 files in `.venv-build-arm64`),
+probably re-applied by iCloud's file provider in `~/Documents`. Run `chflags -R nohidden` on the venvs before
+`test_karaoke_transport_integration`, or move the build venvs outside `~/Documents`.

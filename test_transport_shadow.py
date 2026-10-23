@@ -200,6 +200,18 @@ class NativeSongTests(unittest.TestCase):
         self.sh.observe(sid, "media_end")
         self.assertEqual(len(self.lines), before, self.text())
 
+    def test_watchdog_answer_is_warn_operator_only_while_the_song_is_live(self):
+        sid = self.sh.start(True, 200.0)
+        self.sh.observe(sid, "playing", now=1.0)
+        self.assertTrue(self.sh.observe(sid, "watchdog", expect="WarnOperator"))
+        self.assertFalse(self.sh.observe(sid, "watchdog"))  # default expectation is CompleteSong: a watchdog never completes
+        self.sh.app_stopped(sid)
+        self.assertIsNone(self.sh.observe(sid, "watchdog", expect="WarnOperator"))  # session over: Python decides
+
+    def test_watchdog_before_playback_confirmed_also_warns(self):
+        sid = self.sh.start(True, 200.0)
+        self.assertTrue(self.sh.observe(sid, "watchdog", expect="WarnOperator"))
+
     def test_the_karafun_watchdog_only_warns(self):
         sid = self.sh.start(True, 200.0)
         self.sh.observe(sid, "playing", now=1.0)
@@ -254,6 +266,15 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn("should_end = python_should_end", block)
         self.assertIn("[TRANSPORT-DRIVE] decision=media_end", block)
         self.assertIn("python_should_end = not (stop_active or handoff_active)", self.src)
+
+    def test_watchdog_drive_is_its_own_flag_and_python_wins(self):
+        self.assertIn('"transport_drive_watchdog": False', self.src)
+        start = self.src.index('if bool(self.settings.get("transport_drive_watchdog", False))')
+        block = self.src[start:start + 1500]
+        self.assertIn("select_drive_decision(", block)
+        self.assertIn("should_warn = python_should_warn", block)
+        self.assertIn("[TRANSPORT-DRIVE] decision=watchdog", block)
+        self.assertIn('expect="WarnOperator"', self.src)
 
     def test_specs_bundle_the_module(self):
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):

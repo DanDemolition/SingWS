@@ -3972,6 +3972,9 @@ DEFAULTS = {
     # A2 for the native media-end decision. Same contract as transport_drive: Rust answers only when it agrees with the
     # retained Python oracle; Python wins every disagreement. Default off until its own local and package gates pass.
     "transport_drive_media_end": False,
+    # A2 for the KaraFun duration-watchdog decision ("end unverified: tell the operator to press Complete"). Same
+    # contract: Rust answers only when it agrees with the retained Python oracle; Python wins every disagreement.
+    "transport_drive_watchdog": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -57792,12 +57795,37 @@ class KaraokeApp(QWidget):
                         again.daemon = True
                         again.start()
                         return
+                    rust_should_warn = None
                     try:
                         _sh = self._transport_shadow()
                         if _sh is not None:
-                            _sh.observe(active_session.get("_shadow_id"), "watchdog")
+                            rust_should_warn = _sh.observe(
+                                active_session.get("_shadow_id"), "watchdog", expect="WarnOperator"
+                            )
                     except Exception:
                         pass
+                    python_should_warn = True  # every extension branch above has already returned
+                    should_warn = python_should_warn
+                    if bool(self.settings.get("transport_drive_watchdog", False)) and rust_should_warn is not None:
+                        try:
+                            import transport_shadow as _transport_logic
+                            should_warn, disagreed, owner = _transport_logic.select_drive_decision(
+                                python_should_warn, rust_should_warn, True
+                            )
+                            _diag(
+                                "[TRANSPORT-DRIVE] decision=watchdog "
+                                f"python={int(python_should_warn)} rust={int(bool(rust_should_warn))} "
+                                f"selected={int(bool(should_warn))} owner={owner} disagreement={int(disagreed)}"
+                            )
+                        except Exception as exc:
+                            should_warn = python_should_warn
+                            _diag_rate_limited(
+                                "transport_drive_watchdog_error",
+                                f"[TRANSPORT-DRIVE] decision=watchdog fallback=python error={exc!r}",
+                                60.0,
+                            )
+                    if not should_warn:
+                        return
                     _diag(
                         "[KARAFUN] end unverified reason=duration_watchdog "
                         f"last_playing={'never' if playing_age is None else f'{playing_age:.1f}s ago'}"

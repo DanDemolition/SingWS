@@ -116,10 +116,11 @@ class TransportShadow:
             self._say(f"start error: {exc!r}")
             return 0
 
-    def observe(self, session, kind, now=None, error=False, stop_in_progress=False):
+    def observe(self, session, kind, now=None, error=False, stop_in_progress=False, expect="CompleteSong"):
         """kind: 'playing' | 'idle' | 'end_clock' | 'watchdog' | 'media_end' (native end of stream; `error` for a decode failure).
 
-        Returns True/False for whether this event made the machine command CompleteSong, or None when the machine
+        Returns True/False for whether this event made the machine emit the `expect` command (CompleteSong by default;
+        WarnOperator for the watchdog decision), or None when the machine
         could not answer (unavailable, stale session, error); callers must treat None as "use the Python answer"."""
         try:
             if not self.available or not session or session != self._session:
@@ -139,9 +140,7 @@ class TransportShadow:
                 self._say(f"event session={self._session} source={self._source} kind={kind}")
             commands = self._step({name: body}, stop_in_progress=stop_in_progress)
             self._record(commands, now)
-            return any(
-                (isinstance(c, dict) and "CompleteSong" in c) or c == "CompleteSong" for c in commands
-            )
+            return any((isinstance(c, dict) and expect in c) or c == expect for c in commands)
         except Exception as exc:
             self._say(f"observe error: {exc!r}")
             return None
