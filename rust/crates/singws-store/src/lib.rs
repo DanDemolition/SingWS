@@ -19,6 +19,8 @@
 
 use serde_json::Value;
 
+pub mod settings;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Style {
     /// `None` = single line (`json.dumps(indent=None)`), `Some(n)` = n-space indentation.
@@ -243,7 +245,7 @@ pub fn dumps(value: &Value, style: &Style) -> Result<String, StoreError> {
 }
 
 /// Reject big integers before parsing: serde_json would quietly turn them into f64 and change their digits.
-fn reject_big_integers(text: &str) -> Result<(), StoreError> {
+pub(crate) fn reject_big_integers(text: &str) -> Result<(), StoreError> {
     let bytes = text.as_bytes();
     let mut i = 0;
     let mut in_str = false;

@@ -267,3 +267,32 @@ no packaged code path uses it.
 - Rescan check (owner re-ran library analysis): `loudness.json` 258 real entries (was 1), `transition-analysis.json` 443 records, no junk in either;
   `tools/plan_parity.py` still 0 disagreements on the refreshed cache; the app re-saved both files in its native layout. Still no verified early-end
   karaoke record in real data (185 CDG records report `blank_tail_too_short_or_ambiguous`, 258 `analysis_incomplete`, 1 `visual_end_unverified`).
+
+## Stage D1 settings-store shadow + power-loss durable writes — 2026-10-23
+
+D1 (shadow only): `singws-store::settings` (parse / fill_defaults / serialize / WriteGate / write_atomic), `settings_shadow.py`, setting
+`settings_shadow` (default off), `singws_settings_json` FFI (pure; no write is exported, a test inspects the Rust source to keep it so).
+Evidence: 22 Rust tests, 15 of 15 deliberately broken rules caught (8 settings-store, 7 durability-order); Python differentials run the
+app's REAL `_load_json_file` / `_save_json_atomic` / `_atomic_write_text` and methods extracted from the source in temp dirs; the live 225-key
+`settings.json` passes load / defaults / save read-only. A first package gate (settings shadow only) passed on both architectures with the
+shadow enabled in the packaged app's isolated profile: `[SETTINGS-SHADOW] enabled available=1`, decisions for load, defaults and save, 0
+MISMATCH, 0 errors (arm64 `abb702ab...`, x86_64 `a546c0f5...`, intermediate).
+
+Durable writes (owner decision): `_atomic_write_text` = temp file -> flush -> `F_FULLFSYNC` -> rename -> directory flush, used by
+`_save_json_atomic` (every JSON store), the tombstone store and the live BGM playlist (both were plain overwrites before). 13 + 4 tests
+run the real functions with instrumented os/fcntl and assert the ORDER, the failure modes (ENOTSUP/EINVAL fall back to fsync; EIO fails the
+save, keeps the old file, removes the temp file and forgets the digest; a directory-flush failure is ignored), the kill switch, byte-identical
+layouts, and no I/O for an unchanged payload; 11 deliberately broken variants of the writer were all caught. Cost measured on the dev Mac
+(APFS internal SSD): median 9.9 ms (max 13.9 ms) per real write for F_FULLFSYNC file+directory vs 0.2 ms today; plain fsync 0.2 ms but it does
+not survive a power cut on macOS. Saves are once per operation (the bulk tombstone paths run in the background sync worker).
+
+Final package gate for D1 + durable writes (both architectures, isolated profile, every shadow flag on, dylibs rebuilt with `rust/build_dsp.sh`, 5 exports
+each): exit 0, 3 clean-shutdown lines, 0 tracebacks, codesign/hdiutil OK, all four shadow modules bundled, `[SETTINGS-SHADOW]` decisions for load /
+defaults / save with 0 MISMATCH and 0 errors, and the settings file the packaged app wrote through the durable path is valid JSON, mode 600, with no
+leftover temp files (176 keys).
+  - arm64 `bf1350bf2512b63e15ef7d23f31310aa3e8119afafe349fcac62a0a441a89aaa`
+  - x86_64 `750de3e3a5df8fd29ecbd9e27f3a13a074b5038aa9712f885e8b56b8f0a933dd`
+  - Previous installed build (Stage C gate): `local-installs/plan-gate-1.0.1.4/`. The dev Mac's INSTALLED app is still that Stage C build, so it does
+    not yet have the durable writes; `settings_shadow` is not enabled in the live profile.
+Not proven: a real power cut (cannot be simulated safely); the tests prove the order of flush, rename and directory flush, which is the property that
+matters. Shadow mismatch counts from a real show are still pending for every shadow.

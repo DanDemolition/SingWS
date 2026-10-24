@@ -3459,6 +3459,24 @@ def probe_network_sync_status(
     _network_log(f"final UI state ok={result['ok']} partial={result['partial']} message={result['message']}")
     return result
 
+_SETTINGS_SHADOW = None
+
+
+def _settings_shadow_for(settings):
+    """The Stage D1 settings-store shadow, or None when the setting is off or the library is missing. Never raises."""
+    global _SETTINGS_SHADOW
+    try:
+        if not isinstance(settings, dict) or not bool(settings.get("settings_shadow", False)):
+            return None
+        if _SETTINGS_SHADOW is None:
+            import settings_shadow
+            _SETTINGS_SHADOW = settings_shadow.SettingsShadow(_diag)
+            _diag(f"[SETTINGS-SHADOW] enabled available={int(_SETTINGS_SHADOW.available)}")
+        return _SETTINGS_SHADOW if _SETTINGS_SHADOW.available else None
+    except Exception:
+        return None
+
+
 def _load_json_file(path: Path, default, *, expected_type=None, label: str = "JSON"):
     try:
         if not path.exists():
@@ -3480,6 +3498,73 @@ def _load_json_file(path: Path, default, *, expected_type=None, label: str = "JS
 # result. Serializing to compare costs ~14ms and is skipped entirely on a hit.
 _JSON_WRITE_DIGESTS: dict[str, str] = {}
 
+# Power-loss durability for every JSON store (settings, queue, singer history, preferences, tracks, ...). A rename that is
+# visible before the file's data reached the drive can leave an EMPTY or truncated store after a power cut (an app crash was
+# already safe: temp file + rename). The order that survives a power cut is: write the temp file, flush it to the drive, rename,
+# flush the directory. On macOS plain fsync() only hands the data to the drive, whose cache a power cut still loses, so
+# F_FULLFSYNC is used (about 10 ms per REAL write on the dev Mac; unchanged payloads are still skipped before any I/O).
+# SINGWS_DURABLE_JSON=0 turns the flushes off (rollback switch); a real I/O error from the flush fails the save.
+import errno as _errno
+try:
+    import fcntl as _fcntl
+except ImportError:  # not a POSIX platform
+    _fcntl = None
+_DURABLE_JSON_WRITES = os.environ.get("SINGWS_DURABLE_JSON", "1").strip() != "0"
+
+
+def _fsync_durable(fd: int) -> None:
+    """Flush `fd`'s data to the drive as far as the OS allows. Raises OSError on a real I/O failure."""
+    if not _DURABLE_JSON_WRITES:
+        return
+    full = getattr(_fcntl, "F_FULLFSYNC", None) if _fcntl is not None else None
+    if full is not None:
+        try:
+            _fcntl.fcntl(fd, full)
+            return
+        except OSError as exc:
+            # a filesystem without F_FULLFSYNC (network volume, some external disks): fall back to a plain fsync
+            if exc.errno not in (_errno.ENOTSUP, _errno.EINVAL, _errno.ENOTTY):
+                raise
+    os.fsync(fd)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush a directory entry so a completed rename survives a power cut. Best effort: the file's data is already safe."""
+    if not _DURABLE_JSON_WRITES:
+        return
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        _fsync_durable(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def _atomic_write_text(path: Path, payload: str) -> None:
+    """Write `payload` to `path` so that a crash OR a power cut leaves either the complete old file or the complete new one.
+
+    Temp file in the same directory -> flush data to the drive -> rename over the destination -> flush the directory. Raises on any
+    failure (including a real I/O error from the flush) with the destination untouched and the temp file removed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            _fsync_durable(f.fileno())
+        os.replace(tmp_name, path)
+        _fsync_directory(path.parent)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except Exception:
+            pass
+        raise
+
 
 def _save_json_atomic(path: Path, value) -> None:
     _perf_t0 = time.perf_counter()
@@ -3497,19 +3582,19 @@ def _save_json_atomic(path: Path, value) -> None:
     if _JSON_WRITE_DIGESTS.get(key) == digest and path.exists():
         _perf_record(f"json_write_skipped:{path.name}", (time.perf_counter() - _perf_t0) * 1000.0)
         return
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    if path == SETTINGS_PATH:
+        try:
+            shadow = _settings_shadow_for(value)
+            if shadow is not None:
+                shadow.check_save(value, payload)
+        except Exception:
+            pass
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(payload)
-        os.replace(tmp_name, path)
+        _atomic_write_text(path, payload)
         _JSON_WRITE_DIGESTS[key] = digest
         _perf_record(f"json_write:{path.name}", (time.perf_counter() - _perf_t0) * 1000.0)
     except Exception:
         _JSON_WRITE_DIGESTS.pop(key, None)
-        try:
-            os.unlink(tmp_name)
-        except Exception:
-            pass
         raise
 
 class PerfStats:
@@ -4002,6 +4087,10 @@ DEFAULTS = {
     # package gate passes. The karaoke effective-end rule runs only in the offline analysis worker and is covered by
     # tools/plan_parity.py, not by this live shadow.
     "plan_shadow": False,
+    # Stage D1 shadow: compare the settings store steps (load, DEFAULTS fill, serialize-before-save) with the Rust singws-store
+    # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
+    # two-architecture package gate passes. Read from the settings dict being processed.
+    "settings_shadow": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -11111,8 +11200,7 @@ class BackgroundMusicManager(QMainWindow):
     def save_current_playlist(self):
         """Save the current playlist"""
         try:
-            with open(self.playlist_path, 'w') as f:
-                json.dump(self.current_playlist, f, indent=2)
+            _atomic_write_text(Path(self.playlist_path), json.dumps(self.current_playlist, indent=2))
         except Exception as e:
             print(f"Failed to save playlist: {e}")
 
@@ -22768,10 +22856,16 @@ class KaraokeApp(QWidget):
             if retired_key in self.settings:
                 self.settings.pop(retired_key)
                 changed = True
+        _fill_before = dict(self.settings) if _settings_shadow_for(self.settings) is not None else None
         for k, v in DEFAULTS.items():
             if k not in self.settings:
                 self.settings[k] = v
                 changed = True
+        if _fill_before is not None:
+            try:
+                _settings_shadow_for(self.settings).check_defaults(_fill_before, DEFAULTS, self.settings)
+            except Exception:
+                pass
         if changed:
             try: self.save_settings()
             except Exception: pass
@@ -38674,7 +38768,14 @@ class KaraokeApp(QWidget):
         self.sync_session_location_async("venue_switch")
 
     def load_settings(self):
-        return _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
+        loaded = _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
+        try:
+            shadow = _settings_shadow_for(loaded)
+            if shadow is not None:
+                shadow.check_load(SETTINGS_PATH, loaded)
+        except Exception:
+            pass
+        return loaded
 
     def save_settings(self):
         _perf_t0 = time.perf_counter()
@@ -60080,8 +60181,9 @@ class KaraokeApp(QWidget):
             if not isinstance(data, dict):
                 data = {"requests": {}, "generated_at": int(time.time()), "version": 1}
             data["generated_at"] = int(time.time())
-            with open(REMOTE_REQUEST_TOMBSTONES_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, sort_keys=True)
+            # Atomic + durable (was a plain overwrite: a crash or power cut mid-write could leave this file empty, and an empty
+            # tombstone store lets host-deleted requests come back from the server). Same bytes as json.dump(indent=2, sort_keys=True).
+            _atomic_write_text(REMOTE_REQUEST_TOMBSTONES_PATH, json.dumps(data, indent=2, sort_keys=True))
         except Exception as e:
             _diag(f"[REMOTE-TOMBSTONE] save failed: {e}")
 

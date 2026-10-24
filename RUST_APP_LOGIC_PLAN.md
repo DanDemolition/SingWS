@@ -149,8 +149,30 @@ switch) match CPython's `repr`. The differential caught a real bug in the first 
 out as ...99.3, Python writes ...99.2), fixed by taking only the digit COUNT from Rust's shortest printer and the digits from its
 exact-precision formatter. Values Rust cannot reproduce exactly (integers beyond 64 bits, NaN/Infinity, lone surrogates) are ERRORS,
 never silent changes. All live files match one of Python's layouts, so a Rust store can adopt a file without rewriting its layout.
-Not done, in order: D1 settings store behind the existing adapter (merge-with-defaults, atomic temp-file + rename, the write-digest
-skip), D2 history/stats, D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
+**D1 settings-store shadow (2026-10-23, DONE for now; shadow only, Rust never writes):** `singws-store::settings` ports the mechanics of the
+Python settings adapter: `parse_settings` (`_load_json_file(..., expected_type=dict)` rules), `fill_defaults` (the startup `DEFAULTS` loop:
+existing keys keep value and position, missing keys append in `DEFAULTS` order, falsy saved values are kept), `serialize`
+(`json.dumps(indent=2)+"\n"`), `WriteGate` (the `_JSON_WRITE_DIGESTS` skip), and `write_atomic`/`save` (private temp file in the same
+directory, rename, mode 0600, temp cleaned on failure, digest forgotten on failure). The one-off `*_migrated` value migrations stay in
+Python: they run between parse and fill unchanged. `settings_shadow.py` + setting `settings_shadow` (default OFF) check three steps of the
+real pipeline and LOG `[SETTINGS-SHADOW]` lines: load (Rust parse equals what the app loaded, key order included), defaults (Rust fill equals
+the app's loop), save (Rust serialization equals the exact payload `_save_json_atomic` is about to write). Safety: the exported library has
+NO write function (`singws_settings_json` is pure and a test inspects the Rust source to keep it so); every Rust test uses a private temp
+directory; the Python tests run the app's REAL `_load_json_file` and `_save_json_atomic` (extracted from the source, not re-implemented) inside
+temp directories. Evidence: 18 Rust tests with 8 of 8 deliberately broken rules caught (the failed-save digest rule needed an extra test);
+Python differentials over random settings (load, fill, save) and the app's real 173-key `DEFAULTS`; the live 225-key `settings.json` passes all
+three checks read-only. Known, reported-not-hidden differences: Rust refuses integers beyond 64 bits, NaN/Infinity tokens and JSON nested
+deeper than serde_json's 128-level limit, all of which Python loads; the shadow logs a MISMATCH for them. DECIDED AND DONE (owner, 2026-10-23: "protected against power loss as well as crashes"): the app's atomic write
+now flushes the temp file to the drive BEFORE the rename and flushes the directory AFTER it, using `F_FULLFSYNC` on macOS (plain
+`fsync` leaves the data in the drive's cache; measured about 10 ms per real write on the dev Mac, unchanged payloads still skip all
+I/O). A real I/O error from the flush fails the save and leaves the old file; a directory-flush failure is ignored because the data is
+already safe; filesystems without `F_FULLFSYNC` fall back to `fsync`. Rollback switch: `SINGWS_DURABLE_JSON=0`. The Rust
+`write_atomic` has the same steps (injectable `Syncer`, so tests prove the order). Writing this up found two stores that were NOT even
+crash-safe, now fixed with the same shared `_atomic_write_text` and byte-identical layouts: `remote_request_tombstones.json` (a plain
+overwrite; an emptied file would have let host-deleted requests come back) and the live `bg_playlist.json`. Still not power-loss
+durable and deliberately left: the loudness cache (`loudness.json` snapshot, temp+rename without flush, and its append-only checkpoint
+only `flush()`es) and the SQLite databases (`singws.db` uses WAL + `synchronous=NORMAL`, `phrase_markers.db` the default without
+`fullfsync`); all are regenerable analysis data, so a power cut costs a re-scan and not user data. Next, in order: D2 history/stats, D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
 client. Each needs the same shadow-then-flag treatment and must never open a live profile for writing during tests.
 
 ## Stage E: Rust-owned UI and no-Python package

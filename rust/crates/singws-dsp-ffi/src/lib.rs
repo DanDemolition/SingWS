@@ -301,6 +301,35 @@ pub unsafe extern "C" fn singws_master_dsp_proc(_handle: u32, _channel: u32, buf
     let _ = catch_unwind(AssertUnwindSafe(|| m.run(slice)));
 }
 
+/// Stage D1 shadow hook: the pure settings-store operations (`parse`, `fill_defaults`, `serialize`) as JSON in, JSON out. The file
+/// WRITE is deliberately not exported, so nothing in the app can make Rust write a live profile file through this library. Returns the
+/// output length, or a negative code (-1 bad input, -2 output buffer too small, -3 panic). Never panics across the ABI.
+///
+/// # Safety
+/// `request` must be a NUL-terminated string; `out` must be writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_settings_json(request: *const std::os::raw::c_char, out: *mut u8, cap: usize) -> i64 {
+    if request.is_null() || out.is_null() {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let q = unsafe { std::ffi::CStr::from_ptr(request) }.to_str().map_err(|_| ())?;
+        singws_store::settings::settings_bridge(q).map_err(|_| ())
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}
+
 /// Stage D compatibility hook: parse `text` (JSON) and write it back in the Python-compatible `style` (a JSON `Style`), byte for
 /// byte as `json.dumps` would. The output is the rewritten document as plain UTF-8. Returns its length, or a negative code (-1 bad
 /// input, unsupported value or parse failure; -2 output buffer too small; -3 panic). Never panics across the ABI.
