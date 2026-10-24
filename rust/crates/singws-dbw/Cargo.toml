@@ -1,0 +1,19 @@
+[package]
+name = "singws-dbw"
+version = "0.1.0"
+edition = "2024"
+description = "SQLite WRITE paths of song_index.py and phrase_markers.py (schema, rebuild, incremental update, BPM cache, markers) reproduced for logical-equivalence proofs against Python-built databases. Temp databases only: the CLI refuses any path outside the system temp dir. Not linked into the app."
+publish = false
+
+[lib]
+name = "singws_dbw"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-dbw-cli"
+path = "src/bin/dbw_cli.rs"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled", "functions"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+singws-store = { path = "../singws-store" }

@@ -1134,6 +1134,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-dbw"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "singws-store",
+]
+
+[[package]]
 name = "singws-dsp"
 version = "0.1.0"
 

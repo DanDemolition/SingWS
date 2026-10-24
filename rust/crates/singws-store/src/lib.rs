@@ -245,7 +245,7 @@ pub fn dumps(value: &Value, style: &Style) -> Result<String, StoreError> {
 }
 
 /// Reject big integers before parsing: serde_json would quietly turn them into f64 and change their digits.
-pub(crate) fn reject_big_integers(text: &str) -> Result<(), StoreError> {
+pub fn reject_big_integers(text: &str) -> Result<(), StoreError> {
     let bytes = text.as_bytes();
     let mut i = 0;
     let mut in_str = false;

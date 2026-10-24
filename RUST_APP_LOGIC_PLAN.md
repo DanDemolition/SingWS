@@ -224,12 +224,22 @@ RFC 6455 server on 127.0.0.1, the real Qt workers (real `QWebSocket`, real event
 rejected handshake (Qt reports one disconnect then retries), nothing listening, host commands + compact ASCII JSON replies, host worker without disconnect status, awkward identities encoded alike, no
 connection after stop; the handshake carries exactly Qt's five headers. 17 of 18 deliberately broken variants caught (the survivor is equivalent: tungstenite turns a Close frame into a closed-connection
 error on the next read). Not covered: wss/TLS against a real server, the server-side protocol beyond the message types the Python workers handle, ping/pong timing, and any behaviour under a proxy.
+D3b SQLITE WRITE COMPATIBILITY (2026-10-23, DONE offline; nothing in the app uses it, NOT in the dylib, temp databases only): `rust/crates/singws-dbw` reproduces the write paths of
+`song_index.py` (connection pragmas incl. WAL + synchronous=NORMAL + foreign_keys=ON stated explicitly, `init_schema` with its column migrations and the `fuzzykey()` backfill, `rebuild_from_tracks_json`,
+`update_from_tracks_json`) and `phrase_markers.py` (schema + uuid backfill, marker upsert/default/clear/soft-delete, BPM and beat-grid cache). The writer is a separate crate so `singws-db` stays
+read-only by construction; its CLI only opens paths inside the system temp dir and never the live profile. `tools/dbw_parity.py` runs the app's REAL modules (time and uuid frozen) against it and compares
+schema text, header pragmas and every row of every table: all 1,112,064 code points through `normalize_text`/`fuzzy_match_key`, `int(float(x))` corpus, `errors="ignore"` decoding, fuzzed rebuilds
+and deltas (types, falsy values, key aliases, duplicates, real files for the stat fallbacks), legacy v1/v3/v4 upgrades, marker op sequences, odd top-level JSON shapes: IDENTICAL. Rust DECLINES (database untouched,
+app would keep Python) what it cannot reproduce: containers or 64-bit-overflowing numbers where a value is bound, non-ASCII numeric text, JSON Python accepts but serde rejects (lone surrogates), and letters in
+blocks where Unicode releases differ between Python's tables and Rust's (Latin Ext-D, Garay, Beria Erfe; the sweep found 28 such code points between Python 3.14.5/Unicode 16 and Rust 1.99/Unicode 17).
+Re-run the sweep against the Python that is packaged before any drive. Also found: rusqlite's bundled SQLite defaults foreign_keys ON, so the markers writer sets it OFF explicitly like Python. 28 Rust tests,
+49 mutants (`tools/mutate_dbw.py`): 47 killed, 2 equivalent (documented). Not ported: `apply_remote`/JSON import-export of markers, search/read paths (already proven by D3), any live shadow.
 OWNER DECISIONS NEEDED BEFORE D4b (a real Rust HTTP client): (1) HTTP stack: `reqwest`+`rustls` with bundled roots (self-contained, matches Python requests' certifi roots, adds a few MB and a
 large dependency tree to the app, also works for a Windows port) versus macOS `NSURLSession` (small, uses system proxy and keychain behaviour, macOS-only); (2) migration order: recommended is
 read-only polling first (`get_requests_v2.php`, `get_requests.php`), then the invariant-carrying mutations (`complete`/`delete`/`restore_remote_request`, `set_remote_request_order`, `upsert_host_request`)
 in a SHADOW that builds the request in Rust from the same inputs and compares it with what Python sent (no Rust traffic), then drive one endpoint behind a flag; (3) whether the Rust client
-should keep Python's per-call timeouts exactly (yes, recommended) and its "connect and each read" timeout semantics. Next, in order: D3b SQLite WRITE compatibility if it is ever wanted, D4b the
-Rust HTTP client (needs the decisions above), D4c the WebSocket relay, then Stage E.
+should keep Python's per-call timeouts exactly (yes, recommended) and its "connect and each read" timeout semantics. Next, in order: D4b the
+Rust HTTP client (needs the decisions above), then Stage E.
 Previously listed next steps: D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
 client. Each needs the same shadow-then-flag treatment and must never open a live profile for writing during tests.
 

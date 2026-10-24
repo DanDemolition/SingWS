@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/singws-analysis", "crates/singws-dsp", "crates/singws-dsp-ffi", "crates/singws-transport", "crates/singws-queue", "crates/singws-plan", "crates/singws-store", "crates/singws-db", "crates/singws-wire", "crates/singws-relay", "crates/singws-relay-ws", "crates/singws-bgm", "crates/singws-bgm-ffi", "crates/singws-video", "crates/singws-stretch"]
+members = ["crates/singws-analysis", "crates/singws-dsp", "crates/singws-dsp-ffi", "crates/singws-transport", "crates/singws-queue", "crates/singws-plan", "crates/singws-store", "crates/singws-db", "crates/singws-dbw", "crates/singws-wire", "crates/singws-relay", "crates/singws-relay-ws", "crates/singws-bgm", "crates/singws-bgm-ffi", "crates/singws-video", "crates/singws-stretch"]
 
 [profile.release]
 opt-level = 3
