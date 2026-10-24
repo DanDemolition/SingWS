@@ -5,93 +5,59 @@ import com.singws.shell
 
 ApplicationWindow {
     id: win
-    width: 520
+    width: 980
     height: 720
     visible: true
-    title: "SingWS (Rust shell, read-only library)"
+    title: "SingWS (Rust shell, read-only)"
     color: "#0b0a16"
 
-    LibraryPanel { id: panel }
-
-    property var rows: []
-    Connections {
-        target: panel
-        function onResultsJsonChanged() { win.rows = JSON.parse(panel.resultsJson) }
-    }
-
-    // Test hooks: `--query TEXT` fills the box, `--snapshot FILE.png` saves the window after the first results and quits.
+    // Test hooks: `--tab library|history`, per-page options (--query, --singer-search, --singer-key, --song-query) and
+    // `--snapshot FILE.png` (save the window after the first results, then quit).
     function arg(name) {
         var a = Qt.application.arguments
         for (var i = 0; i < a.length - 1; i++) if (a[i] === name) return a[i + 1]
         return ""
     }
-    Component.onCompleted: {
-        if (arg("--query") !== "") field.text = arg("--query")
-    }
-    Timer {
-        interval: 900
-        running: win.arg("--snapshot") !== ""
-        onTriggered: canvas.grabToImage(function(r) { r.saveToFile(win.arg("--snapshot")); Qt.quit() })
-    }
-
-    Timer { id: debounce; interval: 120; onTriggered: panel.search(field.text) }
 
     Rectangle {
-      id: canvas
-      anchors.fill: parent
-      color: "#0b0a16"
-    ColumnLayout {
+        id: canvas
         anchors.fill: parent
-        anchors.margins: 12
-        spacing: 10
+        color: "#0b0a16"
 
-        Label { text: "SONG LIBRARY"; color: "#e8e6f5"; font.pixelSize: 15; font.weight: Font.DemiBold }
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 12
+            spacing: 10
 
-        TextField {
-            id: field
-            Layout.fillWidth: true
-            placeholderText: "Search artist, title or disc id"
-            color: "#e8e6f5"
-            placeholderTextColor: "#7a77a0"
-            font.pixelSize: 14
-            selectByMouse: true
-            background: Rectangle { color: "#12102a"; radius: 8; border.color: field.activeFocus ? "#7c3aed" : "#2a2650"; border.width: 1 }
-            onTextChanged: debounce.restart()
-            Accessible.name: "Search songs"
-        }
-
-        Label { id: status; text: panel.status; color: "#9a97c0"; font.pixelSize: 12 }
-
-        ListView {
-            id: list
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            clip: true
-            model: win.rows
-            spacing: 2
-            ScrollBar.vertical: ScrollBar {}
-            delegate: Rectangle {
-                width: list.width
-                height: 48
-                radius: 6
-                color: ListView.isCurrentItem ? "#4b2bb0" : "#1a1838"
-                Accessible.role: Accessible.ListItem
-                Accessible.name: modelData.artist + ", " + modelData.title + ", " + modelData.duration
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 10
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
-                        Label { text: modelData.artist; color: "#ffffff"; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
-                        Label { text: modelData.title; color: "#c9c6e8"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+            TabBar {
+                id: tabs
+                Layout.fillWidth: true
+                background: Rectangle { color: "transparent" }
+                currentIndex: win.arg("--tab") === "history" ? 1 : 0
+                Repeater {
+                    model: ["Library", "Singer history"]
+                    TabButton {
+                        text: modelData
+                        font.pixelSize: 13
+                        contentItem: Label { text: parent.text; color: parent.checked ? "#ffffff" : "#9a97c0"; font: parent.font; horizontalAlignment: Text.AlignHCenter }
+                        background: Rectangle { color: parent.checked ? "#4b2bb0" : "#12102a"; radius: 6 }
                     }
-                    Label { text: modelData.kind.toUpperCase() + "  " + modelData.duration; color: "#9a97c0"; font.pixelSize: 11 }
                 }
-                MouseArea { anchors.fill: parent; onClicked: list.currentIndex = index }
+            }
+
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: tabs.currentIndex
+                LibraryPage {}
+                HistoryPage {}
             }
         }
     }
+
+    Timer {
+        interval: 1200
+        running: win.arg("--snapshot") !== ""
+        onTriggered: canvas.grabToImage(function(r) { r.saveToFile(win.arg("--snapshot")); Qt.quit() })
     }
 }

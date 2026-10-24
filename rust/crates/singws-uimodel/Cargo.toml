@@ -18,3 +18,9 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
 singws-db = { path = "../singws-db" }
 singws-dbw = { path = "../singws-dbw" }
+singws-store = { path = "../singws-store" }
+libc = "0.2"
+
+[[bin]]
+name = "singws-history-cli"
+path = "src/bin/history_cli.rs"

@@ -196,6 +196,14 @@ pub fn unicode_skew_risk(c: char) -> bool {
     UNICODE_SKEW_RANGES.iter().any(|(lo, hi)| (*lo..=*hi).contains(&(c as u32)))
 }
 
+/// `str.lower()`; text from Unicode blocks whose case data differs between Python releases is declined (see UNICODE_SKEW_RANGES).
+pub fn py_lower(s: &str) -> R<String> {
+    if let Some(c) = s.chars().find(|c| unicode_skew_risk(*c)) {
+        return decline(format!("Unicode table skew risk: U+{:04X}", c as u32));
+    }
+    Ok(s.to_lowercase())
+}
+
 /// `str.lower()` followed by the app's NBSP replacement.
 fn lower_nbsp(s: &str) -> R<String> {
     if let Some(c) = s.chars().find(|c| unicode_skew_risk(*c)) {

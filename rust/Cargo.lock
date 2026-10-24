@@ -2177,10 +2177,12 @@ dependencies = [
 name = "singws-uimodel"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rusqlite",
  "serde_json",
  "singws-db",
  "singws-dbw",
+ "singws-store",
 ]
 
 [[package]]
