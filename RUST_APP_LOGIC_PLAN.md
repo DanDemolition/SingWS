@@ -320,3 +320,6 @@ Native media end now has its own A2 drive behind `transport_drive_media_end` (de
 Next: continue Stage E panel by panel (next read-only candidates: singer history, then the rotation view), keeping Stage B/A real-show gates as they are. (Earlier text: Stage B, starting with the queue/rotation replay harness built from real logs (no Rust state machine until the harness exists). Preserve comparison and
 Python fallback until each decision has passed the same local and two-architecture gates. Only then start A4 removal of
 duplicated Python lifecycle decisions. See `docs/handoff/2026-10-23-rust-migration.md` for the continuation checklist.
+
+### Stage E: packaged shell (2026-10-24)
+`rust/package_shell.sh OUTDIR` builds the universal shell, bundles Qt with macdeployqt (needs the `qttools` archive in ~/Qt), drops the SQL drivers, and signs with the local identity. Result: a 168 MB self-contained `SingWS Shell.app` (arm64 + x86_64); snapshot smoke-run passed natively and under Rosetta. Not notarized and not installed anywhere.
