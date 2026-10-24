@@ -60,6 +60,11 @@ M = [
     ("view.rs", 'if code == "app_offline" {\n                    self.app_online = false;\n                }', '', None),
     ("view.rs", 'self.queue_sig = Some(q.queue_sig.clone());\n                self.singers = q.singers.clone();', 'self.singers = q.singers.clone();', None),
     ("view.rs", '"play_pause" | "stop" | "next" | "restart" | "key_up"', '"stop" | "next" | "restart" | "key_up"', None),
+    ("client.rs", 'if !any {\n                return Err("root bundle holds no certificates".into());\n            }', '', None),
+    ("client.rs", 'None => Ok(public_roots()),', 'None => Ok(rustls::RootCertStore::empty()),', None),
+    ("client.rs", 'roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());', '', None),
+    ("client.rs", 'config.connect_timeout, config.poll, config.root_pem.as_deref()) {', 'config.connect_timeout, config.poll, None) {', None),
+    ("client.rs", '.with_root_certificates(roots)', '.with_root_certificates(public_roots())', None),
 ]
 
 
@@ -83,7 +88,7 @@ def main():
                 continue
             path.write_text(text.replace(old, new, 1))
             try:
-                r = run(["cargo", "test", "-p", "singws-control", "--lib", "--quiet"], timeout=240)
+                r = run(["cargo", "test", "-p", "singws-control", "--features", "tls", "--lib", "--quiet"], timeout=240)
                 if r.returncode != 0:
                     kind = "build" if "could not compile" in r.stderr else "unit"
                     killed[kind] += 1
@@ -93,7 +98,7 @@ def main():
                 killed["unit"] += 1
                 print(f"[{n:02d}] killed by unit (hang)")
                 continue
-            run(["cargo", "build", "--release", "-p", "singws-control"])
+            run(["cargo", "build", "--release", "-p", "singws-control", "--features", "tls"])
             try:
                 p = subprocess.run([PY, str(ROOT / "tools/control_loopback.py")], cwd=ROOT, capture_output=True, text=True, timeout=600,
                                    env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
@@ -111,7 +116,7 @@ def main():
     finally:
         for fname, text in originals.items():
             (SRC / fname).write_text(text)
-        run(["cargo", "build", "--release", "-p", "singws-control"])
+        run(["cargo", "build", "--release", "-p", "singws-control", "--features", "tls"])
     print(f"killed: {killed}; survivors: {survivors}")
     return 1 if survivors else 0
 

@@ -37,6 +37,8 @@ pub struct Config {
     /// kept in memory only; never written anywhere
     pub pin: String,
     pub reconnect_ms: u64,
+    /// `wss://` only: trust exactly these PEM certificates instead of the built-in public roots (tests and private servers)
+    pub root_pem: Option<Vec<u8>>,
     pub ack_timeout: Duration,
     pub connect_timeout: Duration,
     pub poll: Duration,
@@ -49,6 +51,7 @@ impl Config {
             user: user.into(),
             pin: pin.into(),
             reconnect_ms: 5000,
+            root_pem: None,
             ack_timeout: Duration::from_secs(3),
             connect_timeout: Duration::from_secs(8),
             poll: Duration::from_millis(40),
@@ -135,7 +138,49 @@ fn host_port(url: &str) -> Result<(String, u16, bool), String> {
     Ok((host, port, secure))
 }
 
-fn open(url: &str, connect_timeout: Duration, poll: Duration) -> Result<Socket, String> {
+/// The public web roots, the same trust a browser has.
+#[cfg(feature = "tls")]
+fn public_roots() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
+/// The trusted roots for `wss://`: the supplied PEM certificates, or the public web roots.
+#[cfg(feature = "tls")]
+fn roots_for(root_pem: Option<&[u8]>) -> Result<rustls::RootCertStore, String> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    match root_pem {
+        Some(pem) => {
+            let mut roots = rustls::RootCertStore::empty();
+            let mut any = false;
+            for cert in CertificateDer::pem_slice_iter(pem) {
+                roots.add(cert.map_err(|e| format!("root bundle: {e}"))?).map_err(|e| format!("root bundle: {e}"))?;
+                any = true;
+            }
+            if !any {
+                return Err("root bundle holds no certificates".into());
+            }
+            Ok(roots)
+        }
+        None => Ok(public_roots()),
+    }
+}
+
+/// The TLS client settings for `wss://`: the supplied roots, or the public web roots (the same trust a browser or the app's `requests` has).
+#[cfg(feature = "tls")]
+fn tls_connector(root_pem: Option<&[u8]>) -> Result<tungstenite::Connector, String> {
+    let roots = roots_for(root_pem)?;
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(tungstenite::Connector::Rustls(Arc::new(config)))
+}
+
+fn open(url: &str, connect_timeout: Duration, poll: Duration, root_pem: Option<&[u8]>) -> Result<Socket, String> {
     let (host, port, secure) = host_port(url)?;
     if secure && !cfg!(feature = "tls") {
         return Err("wss:// needs the `tls` feature".into());
@@ -145,9 +190,12 @@ fn open(url: &str, connect_timeout: Duration, poll: Duration) -> Result<Socket, 
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(connect_timeout)).ok();
     #[cfg(feature = "tls")]
-    let (socket, _r) = tungstenite::client_tls(url, stream).map_err(|e| e.to_string())?;
+    let (socket, _r) = tungstenite::client_tls_with_config(url, stream, None, Some(tls_connector(root_pem)?)).map_err(|e| e.to_string())?;
     #[cfg(not(feature = "tls"))]
-    let (socket, _r) = tungstenite::client(url, MaybeTlsStream::Plain(stream)).map_err(|e| e.to_string())?;
+    let (socket, _r) = {
+        let _ = root_pem;
+        tungstenite::client(url, MaybeTlsStream::Plain(stream)).map_err(|e| e.to_string())?
+    };
     match socket.get_ref() {
         MaybeTlsStream::Plain(s) => {
             let _ = s.set_read_timeout(Some(poll));
@@ -237,7 +285,7 @@ fn run(config: Config, shared: Arc<Shared>, outbound: Receiver<String>, sink: im
             }
         };
         let url = browser_url(&info.ws_url, &info.tenant, &info.token);
-        let mut socket = match open(&url, config.connect_timeout, config.poll) {
+        let mut socket = match open(&url, config.connect_timeout, config.poll, config.root_pem.as_deref()) {
             Ok(s) => s,
             Err(e) => {
                 sink(Output::Log(format!("relay connect failed: {e}")));
@@ -362,5 +410,58 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(2), "stop is honoured promptly");
         let seen = seen.lock().unwrap();
         assert!(seen.iter().filter(|o| matches!(o, Output::Status(false, t) if t.starts_with("Cannot reach the server"))).count() >= 2, "it keeps retrying the network");
+    }
+}
+
+#[cfg(all(test, feature = "tls"))]
+mod tls_tests {
+    use super::*;
+
+    // a public certificate generated only for these tests (no private key is kept)
+    const TEST_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIC/DCCAeSgAwIBAgIUTcPSYFxmuE5URY297Znmz/4h8uMwDQYJKoZIhvcNAQEL
+BQAwHjEcMBoGA1UEAwwTU2luZ1dTIHVuaXQgdGVzdCBDQTAeFw0yNjEwMjQwODIz
+MjVaFw0zNjEwMjEwODIzMjVaMB4xHDAaBgNVBAMME1NpbmdXUyB1bml0IHRlc3Qg
+Q0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCvMJmycHusr4CNIBly
+aQYK/CoiFcxY/VTjnMZYjdxEYqk8UFXy5s19/K6BsVmTXkfaR0xOdFgBLpF0NloG
+sb1NeozPL+2oe0kNgcpGH+k06vxRsCxHZzP6K1oRDLWMZyc/bN5GjTR2EWSLZ81Z
+Wuxh0DdVotG9mIMcbKRafqUCjXVqOfMrqqz1+NxTygz/1eklZH0Y05alZGLHFWM9
+i61DRzj+AvBxvpENU9YEFsLVLmjZ0i3rQGOievIcTJgo4K4ossYnhT2VB5+GQN97
+FcdpzLntOA5GIY6cOakvHFsI/66WfL4smnfWLu6uULrmT3RgG9zh4Lyu8o4x75II
+UIL3AgMBAAGjMjAwMB0GA1UdDgQWBBT1H7N8xtvS433yeo0lgK6jEl7U9DAPBgNV
+HRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA48gInSezzppQfjS7F204t
+zGrhaBEfNblI25XD6GX3dpDkK/nUrqsLjdQzSwXX4gugXZz9Oj01eINfXesNOZjQ
+NrS4BPsBfM6hi0Njy4p0q7g9mgSFOn7sRkkGL90Ln+dx2YSYCNTCiEZuu/tzdi0U
+YX32S1oV1Wv9EfTzvqHPJ7d/sXI7kTA5FgHbAAsESQiNeObIgaipUoVoZ/IZ5OqW
+gnpaYPO1DUCupelDRS//27OhHFsIXKbj1DIUfKSwJyH1WDO9Gng7wBNHjZRSU51i
+dhGr5Jsfwm2Vjnl78lrccexSmFzL/APmfB6YBuNunLMy39qLXcaMEG2CTsYUQD/W
+-----END CERTIFICATE-----
+";
+
+    #[test]
+    fn the_default_trust_is_the_full_set_of_public_roots_not_an_empty_store() {
+        assert!(public_roots().len() > 100, "an empty store would refuse the real server");
+        assert!(roots_for(None).unwrap().len() > 100, "and that is what the connector uses when no bundle is given");
+        let own = roots_for(Some(TEST_CA.as_bytes())).unwrap();
+        assert_eq!(own.len(), 1, "a supplied bundle REPLACES the public roots, it does not add to them");
+    }
+
+    #[test]
+    fn the_connector_builds_from_public_roots_or_a_supplied_bundle() {
+        assert!(tls_connector(None).is_ok(), "the built-in public roots");
+        assert!(tls_connector(Some(TEST_CA.as_bytes())).is_ok());
+    }
+
+    #[test]
+    fn an_empty_or_garbled_bundle_is_refused_instead_of_trusting_nothing_silently() {
+        assert!(tls_connector(Some(b"")).err().expect("refused").contains("no certificates"));
+        assert!(tls_connector(Some(b"not a certificate")).err().expect("refused").contains("no certificates"));
+        assert!(tls_connector(Some(b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n")).is_err());
+    }
+
+    #[test]
+    fn wss_to_a_dead_port_fails_cleanly_with_tls_compiled_in() {
+        let r = open("wss://127.0.0.1:1/relay", Duration::from_millis(300), Duration::from_millis(40), None);
+        assert!(r.is_err());
     }
 }

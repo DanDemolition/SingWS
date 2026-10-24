@@ -15,10 +15,12 @@ path = "src/bin/control_cli.rs"
 
 [features]
 default = []
-tls = ["tungstenite/rustls-tls-webpki-roots"]
+tls = ["tungstenite/rustls-tls-webpki-roots", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 singws-http = { path = "../singws-http" }
 singws-relay = { path = "../singws-relay" }
 serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
 tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"], optional = true }
+webpki-roots = { version = "0.26", optional = true }

@@ -40,7 +40,7 @@ You can also let someone else watch the shell on a tablet's browser (the existin
 ## What this does NOT prove (so do not skip these later)
 
 * `apply` mode on a real queue (the edits are proven identical to the buttons on 1,200 random cases and end to end on loopback, but a real show has not seen one yet);
-* `wss://` from the shell to production with the `tls` build (the dry run can use the existing web-remote path only if you run the shell build that includes TLS; tell me which build you used);
+* the shell's `wss://` connection to the REAL server: the TLS code is proven against a private CA on loopback and the public-roots path is built in, but only step 3 above shows that wskar.com's certificate is accepted. The shell binary to use is the universal build from `rust/build_shell.sh` (it includes TLS);
 * the Intel build of the Qt shell on real Intel hardware (it has run under Rosetta only);
 * the button handlers still use their own code; only after a dry run and an `apply` show will they be moved onto the shared methods.
 

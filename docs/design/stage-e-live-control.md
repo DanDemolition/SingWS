@@ -139,3 +139,12 @@ Verification so far: 15 tests (differential plus every guard), 32 mutants on the
   a wrong PIN shows the refusal and enables nothing; with no app the controls stay disabled; the PIN appears in no file and no output. Screenshot: `docs/verification/2026-10-24-rust-shell-controls.png`.
 * 25 Rust unit tests in `singws-control`; 49 mutants in total on the crate, all killed.
 * Not done: a real run on the Intel show Mac, `wss://` to production (needs the `tls` feature), the pre-show check that production's relay forwards `queue.*` and `queue`, volume sliders and seek, the tablet page, moving the button handlers onto the shared methods, a dry-run show.
+
+## Encrypted relay (wss://) and dry-run preparation (2026-10-24)
+
+* The control client now speaks `wss://` (rustls, aws-lc-rs, the public web roots by default; `Config.root_pem` or `CONTROL_ROOTS_PEM` replaces them with exactly the given certificates for private servers and tests). The shell is built with it (`singws-control/tls`) for arm64 and Intel (`rust/build_shell.sh`).
+  Before this, the shell could only have talked to a plain `ws://` relay, which production is not.
+* Loopback proof (`tools/tls_proxy.py` terminates TLS in front of the reference relay, `tools/control_loopback.py` scenarios): with the private CA trusted the full command round trip works over `wss://`; without it the client never connects, keeps retrying, reports "Cannot reach the relay", and refuses to send. An https server can never hand out a plain `ws://` relay address.
+  NOT proven offline: that the public web roots accept the real wskar.com certificate. That is the first thing the show-Mac check (checklist step 3) establishes.
+* The app logs `[SHELL-CMD] ready mode=... queue_sig=... singers=N` after the queue loads whenever `shell_commands` is not off, and `tools/shadow_report.py` has a SHELL-COMMANDS row (optional for `--require-all`, ERROR on defects or on a command applied during a dry run). Both packaged builds were gated with `shell_commands: dry_run`; see `docs/verification/2026-10-23-rust-transport-shadow-a0.md`.
+* The dry-run show procedure is `docs/handoff/2026-10-24-dry-run-show-checklist.md`.

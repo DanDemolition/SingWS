@@ -2146,10 +2146,12 @@ dependencies = [
 name = "singws-control"
 version = "0.1.0"
 dependencies = [
+ "rustls",
  "serde_json",
  "singws-http",
  "singws-relay",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

@@ -124,8 +124,8 @@ class Stream:
 class Stack:
     """php + relay + the app stand-in, in a temp dir, torn down on exit."""
 
-    def __init__(self, mode="apply", mute=False, start_app=True):
-        self.mode, self.mute, self.start_app = mode, mute, start_app
+    def __init__(self, mode="apply", mute=False, start_app=True, tls=False):
+        self.mode, self.mute, self.start_app, self.tls = mode, mute, start_app, tls
         self.procs: list[Proc] = []
 
     def __enter__(self):
@@ -142,11 +142,19 @@ class Stack:
         sessions.mkdir()
         self.sessions = sessions
         prepend = self.tmp / "prepend.php"
-        prepend.write_text(f"<?php define('WS_RELAY_SECRET', '{SECRET}'); define('WS_PUBLIC_URL', 'ws://127.0.0.1:{self.relay_port}/relay');\n")
+        self.tls_port = free_port() if self.tls else None
+        public = f"wss://127.0.0.1:{self.tls_port}/relay" if self.tls else f"ws://127.0.0.1:{self.relay_port}/relay"
+        prepend.write_text(f"<?php define('WS_RELAY_SECRET', '{SECRET}'); define('WS_PUBLIC_URL', '{public}');\n")
         self.php = Proc([PHP, "-d", f"auto_prepend_file={prepend}", "-d", f"session.save_path={sessions}", "-S", f"127.0.0.1:{self.php_port}", "-t", str(srv)], cwd=str(srv))
         self.procs.append(self.php)
         assert wait_port(self.php_port), "php did not start"
         self.start_relay()
+        if self.tls:
+            self.ca = make_private_ca(self.tmp)
+            self.proxy = Proc([sys.executable, str(ROOT / "tools/tls_proxy.py"), "--listen", str(self.tls_port), "--target", str(self.relay_port),
+                               "--cert", str(self.tmp / "srv.pem"), "--key", str(self.tmp / "srv.key")])
+            self.procs.append(self.proxy)
+            assert wait_port(self.tls_port), "tls proxy did not start"
         if self.start_app:
             self.start_the_app()
         return self
@@ -169,9 +177,11 @@ class Stack:
         self.procs.append(self.app)
         self.app_events.wait_for(lambda e: e.get("event") == "connected", timeout=40)
 
-    def shell(self, pin=PIN, env=None):
+    def shell(self, pin=PIN, env=None, trust_ca=False):
         e = dict(os.environ)
         e.update({"CONTROL_RECONNECT_MS": "400", "CONTROL_ACK_TIMEOUT_MS": "1200"})
+        if trust_ca:
+            e["CONTROL_ROOTS_PEM"] = str(self.ca)
         e.update(env or {})
         p = Proc([CLI, f"http://127.0.0.1:{self.php_port}", TENANT, pin], env=e)
         self.procs.append(p)
@@ -183,12 +193,47 @@ class Stack:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+def make_private_ca(d: Path) -> Path:
+    """A throwaway CA and a 127.0.0.1 server certificate signed by it (srv.pem / srv.key in `d`); returns the CA file."""
+    run = lambda *a: subprocess.run(a, check=True, capture_output=True)  # noqa: E731
+    run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(d / "ca.key"), "-out", str(d / "ca.pem"), "-days", "2",
+        "-subj", "/CN=SingWS loopback CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+    run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", str(d / "srv.key"), "-out", str(d / "srv.csr"), "-subj", "/CN=localhost")
+    (d / "ext.cnf").write_text("subjectAltName=IP:127.0.0.1,DNS:localhost\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n"
+                               "authorityKeyIdentifier=keyid\nsubjectKeyIdentifier=hash\n")
+    run("openssl", "x509", "-req", "-in", str(d / "srv.csr"), "-CA", str(d / "ca.pem"), "-CAkey", str(d / "ca.key"), "-CAcreateserial", "-out", str(d / "srv.pem"),
+        "-days", "2", "-extfile", str(d / "ext.cnf"))
+    return d / "ca.pem"
+
+
 class unittest_skip(Exception):
     pass
 
 
 def is_msg(t):
     return lambda e: e.get("out") == "message" and e["msg"].get("type") == t
+
+
+def scenario_wss_works_when_the_servers_certificate_is_trusted():
+    with Stack("apply", tls=True) as st:
+        out, proc = connect(st, trust_ca=True)
+        q, _ = first_queue(out)
+        _, ack = command(out, proc, "queue.move_singer", {"singer_id": "s1", "direction": "down"}, sig=q["queue_sig"])
+        assert ack["msg"]["ok"] and ack["msg"]["message"] == "moved", ack
+        proc.send({"quit": True})
+
+
+def scenario_wss_refuses_a_certificate_it_does_not_trust():
+    with Stack("apply", tls=True) as st:
+        out, proc = st.shell()  # built-in public roots only: the private CA is not among them
+        out.wait_for(lambda e: e.get("out") == "logged_in", timeout=15)
+        fail1, _ = out.wait_for(lambda e: e.get("out") == "status" and not e.get("connected") and "relay" in e.get("text", ""), timeout=15)
+        time.sleep(1.5)
+        assert not any(e.get("out") == "status" and e.get("connected") for e in out.seen), "it must never connect to an untrusted server"
+        assert any("relay connect failed" in e.get("text", "") for e in out.seen if e.get("out") == "log"), out.seen[-5:]
+        proc.send({"send": "play_pause"})
+        e, _ = out.wait_for(lambda e: e.get("out") == "send_error", timeout=5)
+        assert "not connected" in e["error"]
 
 
 def connect(stack, **kw):
