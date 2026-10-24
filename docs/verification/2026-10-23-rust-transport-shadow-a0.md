@@ -408,3 +408,9 @@ settings.json valid, mode 600, no leftover temp files. Queue, plan and transport
 |---|---|
 | SingWS-1.0.1.4-arm64-installer.dmg | b693531060c5e4a19fdf20e3847e527da386331554eccd90b13036edb1835e41 |
 | SingWS-1.0.1.4-x86_64-installer.dmg | c8a4fb6b196d54d5077e5b8e897f509e554ce1eb417021b1c8a293c66335feac |
+
+Install (2026-10-23, dev Mac): the arm64 build `b693531060c5e4a19fdf20e3847e527da386331554eccd90b13036edb1835e41` (panels 1-3 era, RotationView fix, opt-in live stage state) is installed in /Applications/SingWS.app.
+Verified: every file of the installed app (2,105 files) hashes identically to the mounted DMG's app (manifest hash 75363c8291f78951...), `codesign --verify --deep --strict` passes, arm64, version 1.0.1.4;
+executable `1dd64a7e594d3613...`, dylib `267c380a8b24e801...`. The app was closed. The settings flag `publish_live_state` was already true (backup `~/SingWS/settings.json.bak-20261023-232802-publish-live-state`).
+Rollbacks: `/Applications/SingWS-1.0.1.4-pre-live-state-20261023.app` (the previous store-shadow build, exe `4e7277edb4cb5ce4...`, dylib `a886aba258e78a9d...`) and
+`local-installs/installed-before-live-state/SingWS-installed-store-shadow.zip` (ditto archive, SHA-256 e5d60a16ae823001550e3bf16a0f14dd17c70361fb935afc2ce581283bc9ee92, 8,291 entries).
