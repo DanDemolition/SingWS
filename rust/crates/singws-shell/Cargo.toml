@@ -1,0 +1,15 @@
+[package]
+name = "singws-shell"
+version = "0.1.0"
+edition = "2024"
+description = "Stage E: the Rust-owned Qt Quick shell. Panel 1 = read-only song library. Runs next to the PyQt app (it never writes) until the shell selector can replace it."
+publish = false
+
+[dependencies]
+cxx = "1"
+cxx-qt = "0.10"
+cxx-qt-lib = { version = "0.10", features = ["qt_full"] }
+singws-uimodel = { path = "../singws-uimodel" }
+
+[build-dependencies]
+cxx-qt-build = { version = "0.10", features = ["link_qt_object_files"] }

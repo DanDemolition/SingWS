@@ -1,0 +1,20 @@
+[package]
+name = "singws-uimodel"
+version = "0.1.0"
+edition = "2024"
+description = "Toolkit-free view models for the Rust-owned UI (Stage E). Panel 1: read-only song library search, equal to song_index.search_songs(fuzzy=False). No Qt, no writes."
+publish = false
+
+[lib]
+name = "singws_uimodel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-uimodel-cli"
+path = "src/bin/uimodel_cli.rs"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+singws-db = { path = "../singws-db" }
+singws-dbw = { path = "../singws-dbw" }

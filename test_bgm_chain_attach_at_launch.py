@@ -102,7 +102,8 @@ class AttachTests(unittest.TestCase):
 
     def test_host_schedules_the_repeat_after_loading_settings(self):
         src = (_ROOT / "0.2.18.1.py").read_text()
-        i = src.index("self.settings = self.load_settings()\n        # The background player was built above")
+        # the log-only wire shadow is installed on the line right after the settings load; the BGM re-attach comment follows it
+        i = src.index("self.settings = self.load_settings()\n        _install_wire_shadow(self.settings)\n        # The background player was built above")
         self.assertIn("QTimer.singleShot(0, self._attach_bgm_chain_after_init)", src[i:i + 700])
 
 

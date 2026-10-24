@@ -1,0 +1,21 @@
+[package]
+name = "singws-http"
+version = "0.1.0"
+edition = "2024"
+description = "Blocking HTTP sender for the SingWS server calls: requests are built by singws-wire (byte-exact with Python requests), sent with Python's per-call timeout semantics (connect timeout and per-read timeout) behind the same admission gate and in-flight accounting as network_lifecycle.ShutdownRequests. Not linked into the app yet."
+publish = false
+
+[lib]
+name = "singws_http"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-http-cli"
+path = "src/bin/http_cli.rs"
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "deflate", "stream"] }
+futures-util = { version = "0.3", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+singws-wire = { path = "../singws-wire" }

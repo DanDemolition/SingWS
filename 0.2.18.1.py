@@ -29958,7 +29958,7 @@ class KaraokeApp(QWidget):
         handoff_active = bool(getattr(self, "_media_end_handoff_active", False))
         python_should_end = not (stop_active or handoff_active)
         should_end = python_should_end
-        if bool(self.settings.get("transport_drive_media_end", False)) and rust_should_end is not None:
+        if bool((getattr(self, "settings", None) or {}).get("transport_drive_media_end", False)) and rust_should_end is not None:
             try:
                 import transport_shadow as _transport_logic
                 should_end, disagreed, owner = _transport_logic.select_drive_decision(
@@ -58019,7 +58019,7 @@ class KaraokeApp(QWidget):
                         pass
                     python_should_warn = True  # every extension branch above has already returned
                     should_warn = python_should_warn
-                    if bool(self.settings.get("transport_drive_watchdog", False)) and rust_should_warn is not None:
+                    if bool((getattr(self, "settings", None) or {}).get("transport_drive_watchdog", False)) and rust_should_warn is not None:
                         try:
                             import transport_shadow as _transport_logic
                             should_warn, disagreed, owner = _transport_logic.select_drive_decision(
@@ -58398,7 +58398,7 @@ class KaraokeApp(QWidget):
                     ))
                 )
                 should_complete = python_should_complete
-                if bool(self.settings.get("transport_drive", False)) and rust_should_complete is not None:
+                if bool((getattr(self, "settings", None) or {}).get("transport_drive", False)) and rust_should_complete is not None:
                     try:
                         import transport_shadow as _transport_logic
                         should_complete, disagreed, owner = _transport_logic.select_drive_decision(

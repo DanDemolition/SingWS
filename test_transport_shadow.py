@@ -289,7 +289,7 @@ class AppWiringGuardTests(unittest.TestCase):
 
     def test_drive_is_default_on_and_python_wins_disagreements(self):
         self.assertIn('"transport_drive": True', self.src)
-        start = self.src.index('if bool(self.settings.get("transport_drive", False))')
+        start = self.src.index('if bool((getattr(self, "settings", None) or {}).get("transport_drive", False))')
         block = self.src[start:start + 2200]
         self.assertIn("select_drive_decision(", block)
         self.assertIn("should_complete = python_should_complete", block)
@@ -297,7 +297,7 @@ class AppWiringGuardTests(unittest.TestCase):
 
     def test_media_end_drive_is_its_own_flag_and_python_wins(self):
         self.assertIn('"transport_drive_media_end": False', self.src)
-        start = self.src.index('if bool(self.settings.get("transport_drive_media_end", False))')
+        start = self.src.index('if bool((getattr(self, "settings", None) or {}).get("transport_drive_media_end", False))')
         block = self.src[start:start + 1400]
         self.assertIn("select_drive_decision(", block)
         self.assertIn("should_end = python_should_end", block)
@@ -306,7 +306,7 @@ class AppWiringGuardTests(unittest.TestCase):
 
     def test_watchdog_drive_is_its_own_flag_and_python_wins(self):
         self.assertIn('"transport_drive_watchdog": False', self.src)
-        start = self.src.index('if bool(self.settings.get("transport_drive_watchdog", False))')
+        start = self.src.index('if bool((getattr(self, "settings", None) or {}).get("transport_drive_watchdog", False))')
         block = self.src[start:start + 1500]
         self.assertIn("select_drive_decision(", block)
         self.assertIn("should_warn = python_should_warn", block)

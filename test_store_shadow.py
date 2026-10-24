@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import store_shadow as st
@@ -39,7 +40,9 @@ class Fake:
 class BehaviourTests(unittest.TestCase):
     def test_unavailable_library_is_a_silent_no_op(self):
         lines = []
-        sh = st.StoreShadow(lines.append, lib=None, start_worker=False)
+        # lib=None means "load the packaged library", which exists on this Mac, so force the unavailable case explicitly
+        with unittest.mock.patch.object(st, "_load_lib", return_value=None):
+            sh = st.StoreShadow(lines.append, lib=None, start_worker=False)
         self.assertFalse(sh.submit("queue.json", "[]\n"))
         self.assertIsNone(sh.check("queue.json", "[]\n"))
         self.assertEqual(lines, [])
