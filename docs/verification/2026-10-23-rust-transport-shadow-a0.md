@@ -395,3 +395,16 @@ check (`release.json` GET) and agreed with 0 mismatches and 0 errors, settings/s
 WebSocket relay (offline proof, not linked into the app): `singws-relay` (pure, 12 Rust tests), `singws-relay-ws` (tungstenite transport, 3 Rust tests, builds with and without the `tls` feature),
 `tools/relay_parity.py` (real worker classes + real Qt URLs: 27,000 URLs and 9,000 lifecycle sequences over three seeds identical), `tools/relay_ws_harness.py` (RFC 6455 test server on loopback + runners
 for real Qt and Rust), `test_relay_ws.py` (13 tests, about 30 s). 11 + 6 deliberately broken variants: all caught (one equivalent survivor documented in the plan).
+
+## Package gate after panels 1-3, HTTP sender, SQLite writer, RotationView fix and live stage state (2026-10-23, nothing installed)
+
+Both signed builds (commit e369fa0 plus the settings backup change, which is outside the repo) built, passed `codesign --verify --deep --strict`, launched from the mounted DMG with
+`SINGWS_HOME` isolated and every shadow flag plus `publish_live_state` on, and shut down cleanly (3 shutdown lines, 0 tracebacks) on arm64 and Intel (x86_64 under Rosetta):
+bundled `libsingws_dsp_ffi.dylib` exports 6 of 6; shadow modules bundled (queue, plan, settings, store, wire); SETTINGS-SHADOW CLEAN (defaults, load, save); STORE-SHADOW 5 stores checked, 0 mismatches;
+WIRE-SHADOW saw the app's own `release.json` GET, 0 mismatches, 0 errors; `live_state.json` written once (version 1, playing=False, integer pid, no stray temp file; mode 644);
+settings.json valid, mode 600, no leftover temp files. Queue, plan and transport shadows were NOT EXERCISED (no show in a smoke run).
+
+| DMG | SHA-256 |
+|---|---|
+| SingWS-1.0.1.4-arm64-installer.dmg | b693531060c5e4a19fdf20e3847e527da386331554eccd90b13036edb1835e41 |
+| SingWS-1.0.1.4-x86_64-installer.dmg | c8a4fb6b196d54d5077e5b8e897f509e554ce1eb417021b1c8a293c66335feac |
