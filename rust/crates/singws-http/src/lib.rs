@@ -112,6 +112,8 @@ pub struct Client {
     rt: tokio::runtime::Runtime,
     // Trust anchors. None = the operating system's verifier; Some = ONLY these (the PEM bundle Python's requests uses, certifi's cacert.pem).
     roots: Option<Vec<reqwest::Certificate>>,
+    // Session cookies (the host PIN login). None = no cookies are kept or sent. The jar lives in memory only and is shared by every per-timeout client.
+    jar: Option<Arc<reqwest::cookie::Jar>>,
 }
 
 impl Default for Client {
@@ -145,9 +147,25 @@ impl Client {
         Ok(Self::build(gate, Some(certs)))
     }
 
+    /// A client that keeps session cookies in memory (never on disk) and sends them back, like a browser tab.
+    pub fn with_cookies(gate: Arc<Gate>) -> Self {
+        let mut c = Self::build(gate, None);
+        c.jar = Some(Arc::new(reqwest::cookie::Jar::default()));
+        c
+    }
+
+    /// Forget every cookie (log out locally).
+    pub fn clear_cookies(&mut self) {
+        if self.jar.is_some() {
+            self.jar = Some(Arc::new(reqwest::cookie::Jar::default()));
+            self.clients.lock().unwrap().clear();
+        }
+    }
+
     fn build(gate: Arc<Gate>, roots: Option<Vec<reqwest::Certificate>>) -> Self {
         Client {
             roots,
+            jar: None,
             gate,
             clients: Default::default(),
             rt: tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().expect("runtime"),
@@ -171,6 +189,9 @@ impl Client {
         let mut builder = reqwest::Client::builder();
         if let Some(roots) = &self.roots {
             builder = builder.tls_certs_only(roots.iter().cloned());
+        }
+        if let Some(jar) = &self.jar {
+            builder = builder.cookie_provider(jar.clone());
         }
         let c = builder
             .connect_timeout(t)

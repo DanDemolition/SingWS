@@ -117,3 +117,14 @@ What exists in `0.2.18.1.py`, all inert while the setting `shell_commands` is `o
 * Not done: `queue.move_singer` to an arbitrary index, add, clear (needs the app's confirmation dialog), the shell side (`singws-control`, the Controls tab), the pre-show check that production's relay forwards the new message types.
 
 Verification so far: 15 tests (differential plus every guard), 32 mutants on the new code with 31 killed and 1 equivalent (a removed log line), and the full suite.
+
+## Step 2 as built (2026-10-24): `singws-control` (nothing installed, no UI yet)
+
+* `rust/crates/singws-control`: `protocol` (pure: command building and validation, request ids, parsing of `state` / `queue` / `ack` / `error` / `playback_tick` / `hello`, the browser URL), `session` (PIN login with an in-memory cookie jar, the 60-second websocket token, refusal of a plain `ws://` relay from an `https://` server),
+  `client` (a thread that logs in, fetches a token, joins the room as `role=browser`, delivers every message, sends validated commands, reports `NoAnswer` after 3 s, reconnects after the app's 5 s delay with a FRESH token, logs in again if the server forgot the session, and stops retrying when the PIN is refused).
+  The PIN lives in memory only and is hidden from Debug output; a command that fails validation never reaches the wire; nothing queued while disconnected is replayed after a reconnect. `singws-http` gained an in-memory cookie jar for this.
+* `tools/control_loopback.py` proves it end to end on 127.0.0.1 with no stand-ins for the parts that matter: the REAL PHP endpoints (a temp copy of SingWS-Server under `php -S`: `host_commands.php?action=login`, `v2/api/ws-token.php`), the repo's reference `relay.py` verifying the real HMAC token, and `tools/control_app.py`, which runs
+  the app's real `_on_host_relay_command`, `_execute_host_control_command`, queue commands, `_queue_signature` and `_publish_host_state_ws` on a bare app. 11 scenarios: login and first `state`/`queue` (same fingerprint); a queue edit, a song move, a removal and a skip applying and the new `queue` arriving; a stale edit refused with nothing changed;
+  dry run and off changing nothing (queue and transport); a repeated request id applied once; malformed commands never leaving the client; a wrong PIN stopping without any relay connection; no app means `app_offline`; a frozen app gives `NoAnswer`; the relay restarting (reconnect with a fresh token); the server session vanishing (automatic re-login).
+* 15 Rust unit tests; 35 mutants (35 killed: 32 by unit tests first, 3 more after adding tests); the loopback scenarios are the second line of defence.
+* Not done: the shell's Controls tab, `wss://` against production (needs the `tls` feature and the real server), the pre-show check that production's relay forwards `queue.*` and `queue` messages, the tablet web page.

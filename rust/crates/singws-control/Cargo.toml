@@ -1,0 +1,24 @@
+[package]
+name = "singws-control"
+version = "0.1.0"
+edition = "2024"
+description = "Remote control of a running SingWS from the Rust shell over the server's host-control relay: PIN login (in-memory cookie), 60 s websocket token, a role=browser relay client, command building and validation, state/queue/ack parsing. Sends intents only; the app stays the single writer. Tests talk to 127.0.0.1 (the real PHP endpoints, relay.py, and the app's real executor)."
+publish = false
+
+[lib]
+name = "singws_control"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-control-cli"
+path = "src/bin/control_cli.rs"
+
+[features]
+default = []
+tls = ["tungstenite/rustls-tls-webpki-roots"]
+
+[dependencies]
+singws-http = { path = "../singws-http" }
+singws-relay = { path = "../singws-relay" }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
