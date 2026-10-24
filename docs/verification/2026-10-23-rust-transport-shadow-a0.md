@@ -302,3 +302,30 @@ Info.plist hash-identical to the gate-tested DMG, 2,103 files, codesign OK (`Sin
 installed copy with an isolated profile exits cleanly with the settings shadow enabled and 0 mismatches. `settings_shadow` is now enabled in the live
 profile next to the queue, plan and transport shadows (backup `settings.json.bak-before-settings-shadow-*`). Rollback: reinstall the Stage C build from
 `local-installs/plan-gate-1.0.1.4/`, or set `SINGWS_DURABLE_JSON=0` to disable only the new flushes.
+
+## First real-show shadow readings, KaraFun explicit-end fix, post-show report tool — 2026-10-23
+
+Installed build (D1 + durable writes) run by the owner: BGM playing, a server request, a host reorder and a host delete (no KaraFun or native song).
+Report: SETTINGS-SHADOW CLEAN, PLAN-SHADOW CLEAN, QUEUE-SHADOW PARTIAL (`terminal_stale` seen and agreed, `tombstone` not reached), TRANSPORT-SHADOW and
+TRANSPORT-DRIVE not exercised. No MISMATCH in the session. (The owner confirmed the older 12:32 transport mismatch came from an earlier KaraFun test
+with a song not in this computer's library.)
+
+Transport finding and fix: that 12:32 mismatch (app completed on `karaFun_explicit_end`, machine `Ignore: uncorroborated idle`) was a rule gap in the
+Rust machine, not an app bug. Added `Event::ExplicitEndReported` (Rust), `observe(kind="explicit_end")` (transport_shadow.py) and the monitor feed under
+the Python rule's own condition. Evidence: 14 Rust transport tests (3 new, plus the random-order fuzz now generating the event), 37 transport-shadow
+tests (the real 12:32 sequence replayed: 0 mismatches with the event, 1 without it; a stale explicit end does not count), the local acceptance harness
+with a new streamed-song scenario (3 clean shows, 0 disagreements). The harness first failed because `native/singws_dsp` still held the pre-change
+dylib (it does not know the new event): packaged dylibs must be rebuilt with `rust/build_dsp.sh` after any Rust machine change (done; previous in
+`local-installs/pre-explicit-end-dsp-dylibs/`).
+
+`tools/shadow_report.py` + `test_shadow_report.py` (17 tests, 6 of 6 deliberately broken variants caught): per-shadow verdicts from the logs and
+settings.json, read-only. Building it found a real bug in the first version (a drive error line `decision=media_end fallback=python error=...` was counted
+as a successful decision) and a precedence bug (an error was hidden by "not exercised"); both fixed and pinned.
+
+Package gate for the explicit-end fix + report tool (both architectures, isolated profile, dylibs rebuilt, 5 exports each): exit 0, 3 clean-shutdown
+lines, 0 tracebacks, codesign/hdiutil OK, settings shadow load/defaults/save agreed with 0 mismatches, durable-write evidence as before (valid JSON,
+mode 600, no temp files), and `tools/shadow_report.py` run on each packaged app's smoke log reported SETTINGS-SHADOW CLEAN and the other four
+NOT EXERCISED (a smoke launch plays nothing), which is the correct reading.
+  - arm64 `93f87b70e8d209c67897f90cbcd10d2dadd67f406141f9ed3d7da41ca4383cfd`
+  - x86_64 `11fb369bae3dd4972a0090dcc8e79c743e6c25e857644c69be784cce9f618803`
+  - The dev Mac's INSTALLED app is still the D1 + durable-writes build (`bf1350bf...`); it does not have the KaraFun explicit-end handling.

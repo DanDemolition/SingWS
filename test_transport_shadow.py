@@ -118,6 +118,36 @@ class NativeSongTests(unittest.TestCase):
     def text(self):
         return "\n".join(self.lines)
 
+    def test_karafun_explicit_end_of_a_song_with_an_estimated_duration_is_not_a_mismatch(self):
+        # replays the real 2026-10-23 12:32 sequence (NOFX "Linoleum", 240 s fallback estimate, KaraFun reported ENDED at 138 s)
+        sid = self.sh.start(True, 240.0)
+        self.sh.observe(sid, "playing", now=10.0)
+        self.sh.observe(sid, "playing", now=12.0)
+        self.sh.observe(sid, "explicit_end", now=148.0)
+        self.sh.observe(sid, "idle", now=148.0)
+        self.assertTrue(self.sh.would_complete(sid))
+        self.sh.app_auto_complete(sid)
+        self.sh.app_finished(sid, "complete")
+        self.assertEqual(self.sh.mismatches, 0, self.text())
+
+    def test_without_the_explicit_end_the_same_sequence_is_still_reported_as_a_mismatch(self):
+        # the safety property is unchanged: an idle label alone never completes a song in the machine
+        sid = self.sh.start(True, 240.0)
+        self.sh.observe(sid, "playing", now=10.0)
+        self.sh.observe(sid, "playing", now=12.0)
+        self.sh.observe(sid, "idle", now=148.0)
+        self.assertFalse(self.sh.would_complete(sid))
+        self.sh.app_auto_complete(sid)
+        self.assertEqual(self.sh.mismatches, 1, self.text())
+
+    def test_a_stale_explicit_end_does_not_corroborate_a_later_idle(self):
+        sid = self.sh.start(True, 240.0)
+        self.sh.observe(sid, "playing", now=10.0)
+        self.sh.observe(sid, "playing", now=12.0)
+        self.sh.observe(sid, "explicit_end", now=50.0)
+        self.sh.observe(sid, "idle", now=100.0)
+        self.assertFalse(self.sh.would_complete(sid))
+
     def test_a_native_song_that_ends_normally_has_no_mismatch(self):
         sid = self.sh.start(False, 200.0)
         self.sh.observe(sid, "playing")
@@ -249,6 +279,13 @@ class AppWiringGuardTests(unittest.TestCase):
                        '_sh.start(False, duration_seconds or None, source=f"native:{mode}")',
                        "_sh.note_seek(", '"media_end"', "_sh.app_stopped(", '"watchdog"'):
             self.assertIn(needle, self.src)
+
+    def test_the_monitor_feeds_the_explicit_end_under_the_same_condition_as_the_python_rule(self):
+        rule = self.src.index("ended_reported and bool(getattr(self, \"_karafun_capture_session\", False))")
+        hook = self.src.index('_sh.observe(_sid, "explicit_end")')
+        self.assertIn('if ended_reported and bool(getattr(self, "_karafun_capture_session", False)):', self.src[hook - 200:hook])
+        self.assertLess(hook, self.src.index('_sh.observe(_sid, "idle")', hook - 400), "evidence is reported before the idle reading")
+        self.assertGreater(rule, 0)
 
     def test_drive_is_default_on_and_python_wins_disagreements(self):
         self.assertIn('"transport_drive": True', self.src)

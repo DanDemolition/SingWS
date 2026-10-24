@@ -58332,6 +58332,11 @@ class KaraokeApp(QWidget):
                             _sh.observe(_sid, "playing")
                         if clock_near_end:
                             _sh.observe(_sid, "end_clock")
+                        # KaraFun's own ENDED state: the Python rule below accepts it as end evidence only for a capture session, so the
+                        # machine is told about it under the same condition (otherwise a song with no verified duration, the usual case
+                        # for a streamed KaraFun song, is reported as "uncorroborated idle" while the app correctly completes it).
+                        if ended_reported and bool(getattr(self, "_karafun_capture_session", False)):
+                            _sh.observe(_sid, "explicit_end")
                         if idle_reported and not playing_reported:
                             _sh.observe(_sid, "idle")
                         rust_should_complete = _sh.would_complete(_sid)

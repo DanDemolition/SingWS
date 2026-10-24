@@ -190,6 +190,22 @@ the same show acceptance checklist on both architectures.
   decisions, and the bugs of 2026-08-31 (false completion) and 2026-08 (resurrected songs) become unit tests.
 * Does not buy: speed (decisions are microseconds already), a different look, or fewer lines overnight.
 
+**First real-show findings (2026-10-23) and the post-show procedure.** Two sessions with the installed shadow build (BGM playing, a server
+request, a reorder, a delete; no KaraFun song and no native song) produced: SETTINGS-SHADOW CLEAN (load, defaults, save all agreed), PLAN-SHADOW
+CLEAN (window and crossfade agreed), QUEUE-SHADOW PARTIAL (the `terminal_stale` branch agreed; `tombstone` never fired because the server stopped
+listing the deleted request, which is the normal case), TRANSPORT-SHADOW and TRANSPORT-DRIVE not exercised (no song). The earlier 12:32 KaraFun
+test in the same log carried the first real transport disagreement (A1 finding): the app completed NOFX "Linoleum" on KaraFun's own ENDED state while
+the machine, given only "idle" and a 240 s FALLBACK duration estimate (the song is not in this computer's library), answered "uncorroborated idle".
+Python was right. Streamed or non-local KaraFun songs never have a verified duration, so this would have recurred on every such song and blocked the
+clean-show requirement. Fix: a new Rust event `ExplicitEndReported` that corroborates an idle reading exactly like a fresh end clock (same freshness
+window, ignored for other sessions, never completes a song by itself, never before playback is confirmed), fed from the KaraFun monitor under the SAME
+condition the Python rule uses (`ended_reported` and a capture session). The real sequence is replayed in the Rust tests, the shadow tests and the
+local acceptance harness. `idle` alone still never completes a song in the machine (an idle label once cut a 263 s song after 34 s).
+Post-show procedure: `python3 tools/shadow_report.py` (reads the last app launch in the newest log and settings.json, read-only). Verdicts: CLEAN,
+PARTIAL (not every expected decision type happened; it prints what to do to exercise it), NOT EXERCISED, NOT ENABLED, UNAVAILABLE, DISAGREED, ERROR.
+Exit 1 on any DISAGREED/ERROR; `--require-all` exits 3 unless everything is CLEAN. A default may only be flipped after reports of real shows show
+CLEAN (not merely "no mismatches") for the decisions it covers.
+
 ## Order and gates
 
 | Stage | Needs first | Flag | Exit |

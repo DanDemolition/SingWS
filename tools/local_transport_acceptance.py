@@ -93,6 +93,20 @@ def _karafun(shadow: TransportShadow) -> None:
     shadow.app_auto_complete(automatic)
     shadow.app_finished(automatic, "complete")
 
+    # The 2026-10-23 12:32 show case: a streamed song whose duration is only an ESTIMATE (240 s), which KaraFun itself reports ENDED
+    # after 138 s. Python completes it on KaraFun's ENDED state; before ExplicitEndReported the machine said "uncorroborated idle".
+    streamed = shadow.start(True, 240.0, source="karafun")
+    shadow.observe(streamed, "playing", now=10.0)
+    shadow.observe(streamed, "playing", now=12.0)
+    shadow.observe(streamed, "explicit_end", now=148.0)
+    shadow.observe(streamed, "idle", now=148.0)
+    streamed_answer = shadow.would_complete(streamed)
+    if streamed_answer is not True:
+        raise AssertionError(f"Rust did not recognize KaraFun's explicit end of a song with an estimated duration: {streamed_answer!r}")
+    _assert_drive(True, streamed_answer, "rust")
+    shadow.app_auto_complete(streamed)
+    shadow.app_finished(streamed, "complete")
+
     manual = shadow.start(True, 240.0, source="karafun")
     shadow.observe(manual, "playing", now=1.0)
     shadow.observe(manual, "playing", now=3.0)

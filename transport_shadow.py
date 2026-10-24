@@ -117,7 +117,8 @@ class TransportShadow:
             return 0
 
     def observe(self, session, kind, now=None, error=False, stop_in_progress=False, expect="CompleteSong"):
-        """kind: 'playing' | 'idle' | 'end_clock' | 'watchdog' | 'media_end' (native end of stream; `error` for a decode failure).
+        """kind: 'playing' | 'idle' | 'end_clock' | 'explicit_end' (the external player itself reported ENDED) | 'watchdog' |
+        'media_end' (native end of stream; `error` for a decode failure).
 
         Returns True/False for whether this event made the machine emit the `expect` command (CompleteSong by default;
         WarnOperator for the watchdog decision), or None when the machine
@@ -128,7 +129,7 @@ class TransportShadow:
             now = time.monotonic() if now is None else now
             self._check_overdue(now)
             name = {"playing": "PlayingObserved", "idle": "IdleObserved", "end_clock": "EndClockObserved",
-                    "watchdog": "WatchdogExpired", "media_end": "MediaEnd"}[kind]
+                    "explicit_end": "ExplicitEndReported", "watchdog": "WatchdogExpired", "media_end": "MediaEnd"}[kind]
             if kind == "watchdog":
                 body = {"session": int(session)}
             elif kind == "media_end":

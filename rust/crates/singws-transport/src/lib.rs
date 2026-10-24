@@ -35,6 +35,9 @@ pub enum Event {
     IdleObserved { session: SessionId, now: f64 },
     /// KaraFun/engine reported the end clock reached the end.
     EndClockObserved { session: SessionId, now: f64 },
+    /// An external player (KaraFun) itself reported the song ENDED. Independent evidence like the end clock, and the usual one when the
+    /// song has no verified duration (a streamed or non-local song): it corroborates an idle reading for the same freshness window.
+    ExplicitEndReported { session: SessionId, now: f64 },
     MediaEnd { session: SessionId, now: f64, error: bool },
     StopRequested { session: SessionId },
     ManualComplete { session: SessionId },
@@ -115,7 +118,7 @@ pub fn step(state: &State, event: &Event, stop_in_progress: bool) -> (State, Vec
             }
             (State::Playing { session: *session, external: *external, duration: *duration, confirmed_at: confirmed, hints, end_clock_at: *end_clock_at }, cmds)
         }
-        (State::Playing { session, external, duration, confirmed_at, hints, .. }, Event::EndClockObserved { now, .. }) => (
+        (State::Playing { session, external, duration, confirmed_at, hints, .. }, Event::EndClockObserved { now, .. } | Event::ExplicitEndReported { now, .. }) => (
             State::Playing { session: *session, external: *external, duration: *duration, confirmed_at: *confirmed_at, hints: *hints, end_clock_at: Some(*now) },
             vec![],
         ),
@@ -158,7 +161,8 @@ pub fn step(state: &State, event: &Event, stop_in_progress: bool) -> (State, Vec
 fn event_session(e: &Event) -> Option<SessionId> {
     match e {
         Event::StartRequested { session, .. } | Event::PlayingObserved { session, .. } | Event::IdleObserved { session, .. }
-        | Event::EndClockObserved { session, .. } | Event::MediaEnd { session, .. } | Event::StopRequested { session }
+        | Event::EndClockObserved { session, .. } | Event::ExplicitEndReported { session, .. }
+        | Event::MediaEnd { session, .. } | Event::StopRequested { session }
         | Event::ManualComplete { session } | Event::WatchdogExpired { session } | Event::CleanupDone { session } => Some(*session),
     }
 }
@@ -230,6 +234,40 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_end_from_the_player_corroborates_idle_for_a_song_with_only_an_estimated_duration() {
+        // Real show 2026-10-23 12:32: NOFX "Linoleum" (about 2:10) was queued with a 240 s FALLBACK estimate because the song is not in the
+        // local library. KaraFun reported ENDED at 138 s. The app completed it; the machine, given only "idle", answered "uncorroborated".
+        let ended = |now| Event::ExplicitEndReported { session: 1, now };
+        let (s, c) = run(&[start(true, Some(240.0)), play(10.0), play(12.0), idle(148.0)]);
+        assert!(matches!(s, State::Playing { .. }), "idle alone is not enough (an idle label once cut a 263 s song after 34 s)");
+        assert!(matches!(c[3][0], Ignore(_)));
+        let (s, c) = run(&[start(true, Some(240.0)), play(10.0), play(12.0), ended(148.0), idle(148.0)]);
+        assert_eq!(s, State::Ending { session: 1 });
+        assert!(c[4].contains(&CompleteSong(1)));
+    }
+
+    #[test]
+    fn an_explicit_end_is_only_fresh_evidence_and_never_completes_on_its_own() {
+        let ended = |now| Event::ExplicitEndReported { session: 1, now };
+        // reported, then the idle reading arrives long after: stale, like a stale end clock
+        let (s, _) = run(&[start(true, None), play(10.0), play(12.0), ended(50.0), idle(80.0)]);
+        assert!(matches!(s, State::Playing { .. }));
+        // evidence alone changes nothing
+        let (s, c) = run(&[start(true, None), play(10.0), play(12.0), ended(50.0)]);
+        assert!(matches!(s, State::Playing { .. }));
+        assert!(c[3].is_empty());
+        // before playback is confirmed it can never complete a song
+        let (s, _) = run(&[start(true, None), ended(5.0), idle(5.0)]);
+        assert!(!matches!(s, State::Ending { .. }));
+    }
+
+    #[test]
+    fn an_explicit_end_for_another_session_is_ignored() {
+        let (s, _) = run(&[start(true, None), play(10.0), play(12.0), Event::ExplicitEndReported { session: 99, now: 20.0 }, idle(21.0)]);
+        assert!(matches!(s, State::Playing { .. }));
+    }
+
+    #[test]
     fn watchdog_warns_never_advances() {
         let (s, c) = run(&[start(true, Some(200.0)), play(1.0), play(2.0), Event::WatchdogExpired { session: 1 }]);
         assert!(matches!(s, State::Playing { .. }));
@@ -278,7 +316,7 @@ mod tests {
             for i in 0..40 {
                 let sess = 1 + rnd() % 2;
                 let now = i as f64 * 3.0;
-                let e = match rnd() % 9 {
+                let e = match rnd() % 10 {
                     0 => Event::StartRequested { session: sess, external: rnd() % 2 == 0, duration: Some(60.0) },
                     1 => Event::PlayingObserved { session: sess, now },
                     2 => Event::IdleObserved { session: sess, now },
@@ -287,6 +325,7 @@ mod tests {
                     5 => Event::StopRequested { session: sess },
                     6 => Event::ManualComplete { session: sess },
                     7 => Event::WatchdogExpired { session: sess },
+                    8 => Event::ExplicitEndReported { session: sess, now },
                     _ => Event::CleanupDone { session: sess },
                 };
                 let (n, c) = step(&s, &e, rnd() % 5 == 0);
