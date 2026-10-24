@@ -11,7 +11,7 @@
 //! * `data=` wins over `json=`; an empty `data`/`params` mapping means "no body"/"no query"; a body-less POST still carries `Content-Length: 0`;
 //! * `json=` is `json.dumps(value, allow_nan=False)` (default `", "`/`": "` separators, ASCII-escaped) encoded as UTF-8.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use singws_store::{dumps, py_float_repr, Style};
 
 const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-~";
@@ -208,8 +208,11 @@ pub fn handle(input: &Value) -> Value {
     }
 }
 
-#[allow(dead_code)]
-fn _unused(_: &Map<String, Value>) {}
+/// String bridge for the FFI export: one request object as JSON text in, the prepared wire form as JSON text out (an array in, an array out).
+pub fn handle_json(request_json: &str) -> Result<String, String> {
+    let v: Value = serde_json::from_str(request_json).map_err(|e| format!("request: {e}"))?;
+    serde_json::to_string(&handle(&v)).map_err(|e| e.to_string())
+}
 
 #[cfg(test)]
 mod tests {
@@ -296,6 +299,14 @@ mod tests {
                     "https://x.test/a\"b"] {
             assert!(prepare_url(bad, &Value::Null).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn string_bridge_round_trips_and_rejects_garbage() {
+        let out = handle_json(r#"{"method":"POST","url":"https://x.test/a.php","data":{"a":"b c"}}"#).unwrap();
+        assert!(out.contains("\"body\":\"a=b+c\"") && out.contains("\"content_length\":5"), "{out}");
+        assert!(handle_json("{").is_err());
+        assert!(handle_json("\"just a string\"").unwrap().contains("\"ok\":false") || handle_json("\"just a string\"").is_ok());
     }
 
     #[test]

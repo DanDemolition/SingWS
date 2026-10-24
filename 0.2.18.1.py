@@ -3459,6 +3459,20 @@ def probe_network_sync_status(
     _network_log(f"final UI state ok={result['ok']} partial={result['partial']} message={result['message']}")
     return result
 
+def _install_wire_shadow(settings):
+    """Attach the Stage D4 wire shadow to the app's request choke point (ShutdownRequests) when the setting is on. Never raises."""
+    try:
+        if not bool((settings or {}).get("wire_shadow", False)):
+            return
+        import wire_shadow
+        shadow = wire_shadow.WireShadow(_diag)
+        _diag(f"[WIRE-SHADOW] enabled available={int(shadow.available)}")
+        if shadow.available:
+            requests.set_observer(shadow.observe)
+    except Exception:
+        pass
+
+
 _STORE_SHADOW = None
 _STORE_SHADOW_ON = False
 
@@ -4116,6 +4130,10 @@ DEFAULTS = {
     # settings), a background worker asks the Rust JSON writer to reproduce those exact bytes and LOGS any difference. Rust never writes;
     # the check never runs on the GUI thread and never delays a save. Default off until its package gate passes. Read at launch.
     "store_shadow": False,
+    # Stage D4 shadow: compare what requests ACTUALLY sent (URL, body, Content-Type/Length) with what the Rust request builder would send, for every
+    # non-streaming get/post the app makes, and LOG differences. Rust sends nothing; only endpoint file names are logged, never hosts, values or keys.
+    # Observer runs after the real response exists, on the calling thread. Default off until its package gate passes. Read at launch.
+    "wire_shadow": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -22519,6 +22537,7 @@ class KaraokeApp(QWidget):
         # Make the flag visible to the BG player check via parent attribute
         # --- Settings for background image ---
         self.settings = self.load_settings()
+        _install_wire_shadow(self.settings)
         # The background player was built above, before these settings existed, so its EQ / master-chain / counter attach saw nothing.
         # Redo it once the window has finished initialising (the event loop's first turn), so the chain is live from launch.
         QTimer.singleShot(0, self._attach_bgm_chain_after_init)

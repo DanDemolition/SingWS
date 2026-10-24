@@ -24,6 +24,9 @@ FULL = [
     L("PLAN-SHADOW", "enabled available=1"),
     L("PLAN-SHADOW", "decision op=window kind=bounds agree=1"),
     L("PLAN-SHADOW", "decision op=crossfade kind=natural_fade agree=1"),
+    L("WIRE-SHADOW", "enabled available=1"),
+    L("WIRE-SHADOW", "decision endpoint=get_requests_v2.php kind=get agree=1"),
+    L("WIRE-SHADOW", "decision endpoint=delete_remote_request.php kind=form agree=1"),
     L("STORE-SHADOW", "enabled available=1"),
     L("STORE-SHADOW", "decision store=queue.json layout=indent2+newline agree=1"),
     L("STORE-SHADOW", "decision store=singer_history.json layout=indent2+newline agree=1"),
@@ -81,6 +84,18 @@ class VerdictTests(unittest.TestCase):
         worker = [LAUNCH] + FULL + [L("STORE-SHADOW", "worker error store=queue.json: ValueError('x')")]
         self.assertEqual(verdicts(worker)["STORE-SHADOW"], "ERROR")
 
+    def test_the_wire_shadow_needs_a_get_and_a_form_post_and_lists_endpoints_and_declined_calls(self):
+        lines = [LAUNCH, L("WIRE-SHADOW", "enabled available=1"), L("WIRE-SHADOW", "decision endpoint=get_requests_v2.php kind=get agree=1"),
+                 L("WIRE-SHADOW", "declined endpoint=upload_songbook.php reason=multipart")]
+        self.assertEqual(verdicts(lines)["WIRE-SHADOW"], "PARTIAL")
+        status, out = run(lines)
+        self.assertIn("not seen: form  (do something that POSTs to the server", out)
+        self.assertIn("1 endpoint(s): get_requests_v2.php", out)
+        self.assertIn("declined (not compared): upload_songbook.php:multipart", out)
+        self.assertEqual(verdicts([LAUNCH] + FULL)["WIRE-SHADOW"], "CLEAN")
+        bad = [LAUNCH] + FULL + [L("WIRE-SHADOW", "MISMATCH endpoint=delete_remote_request.php kind=form fields=body first_body_difference_at=4 sent_len=9 rust_len=8")]
+        self.assertEqual(verdicts(bad)["WIRE-SHADOW"], "DISAGREED")
+
     def test_rare_optional_decisions_do_not_make_a_shadow_partial(self):
         v = verdicts([LAUNCH] + FULL)
         self.assertEqual(v["QUEUE-SHADOW"], "CLEAN")  # id_reuse / terminal_reuse never happened and that is fine
@@ -92,7 +107,7 @@ class VerdictTests(unittest.TestCase):
 
     def test_a_shadow_that_never_logged_is_not_enabled(self):
         v = verdicts([LAUNCH])
-        self.assertEqual({v[k] for k in ("SETTINGS-SHADOW", "QUEUE-SHADOW", "PLAN-SHADOW", "STORE-SHADOW", "TRANSPORT-SHADOW")}, {"NOT ENABLED"})
+        self.assertEqual({v[k] for k in ("SETTINGS-SHADOW", "QUEUE-SHADOW", "PLAN-SHADOW", "STORE-SHADOW", "WIRE-SHADOW", "TRANSPORT-SHADOW")}, {"NOT ENABLED"})
         self.assertEqual(v["TRANSPORT-DRIVE"], "NOT EXERCISED")
 
     def test_settings_tell_a_switched_off_shadow_from_one_nothing_reached(self):
@@ -188,6 +203,7 @@ class RealFormatTests(unittest.TestCase):
             "plan_shadow.py": ["decision op={op} kind={kind} agree=1", "MISMATCH op={op}"],
             "transport_shadow.py": ["MISMATCH", "total_mismatches=", "started source="],
             "store_shadow.py": ["decision store={store} layout={layout} agree=1", "MISMATCH store={store}"],
+            "wire_shadow.py": ["decision endpoint={endpoint} kind={kind} agree=1", "MISMATCH endpoint={endpoint}", "declined endpoint={endpoint} reason={reason}"],
         }
         for fname, needles in expectations.items():
             text = (root / fname).read_text(encoding="utf-8")

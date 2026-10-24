@@ -130,13 +130,15 @@ def render(calls, markdown=False):
         out.append(f"- `{ep}`  {methods}  sites={len(sites)}  body={bodies}  kwargs={kw}" if markdown
                    else f"{ep:38s} {methods:9s} sites={len(sites):<2d} body={bodies:<10s} kwargs={kw}")
         for c in sites:
-            out.append(f"    {c['file']}:{c['line']} {c['function']}  timeout={c['timeout']}")
+            # the committed markdown contract carries no line numbers (they change with every unrelated edit); the console view keeps them
+            where = c["file"] if markdown else f"{c['file']}:{c['line']}"
+            out.append(f"    {where} {c['function']}  timeout={c['timeout']}")
     out.append("")
     out.append(h("Risk facts for a port"))
-    out.append(f"- calls with NO timeout: {len(f['no_timeout'])}" + "".join(f"\n    {c['file']}:{c['line']} {c['function']} {c['method']} {c['endpoint'] or c['url']}" for c in f["no_timeout"]))
-    out.append(f"- calls that disable TLS verification: {len(f['verify_disabled'])}" + "".join(f"\n    {c['file']}:{c['line']} {c['function']}" for c in f["verify_disabled"]))
+    out.append(f"- calls with NO timeout: {len(f['no_timeout'])}" + "".join(f"\n    {c['file']}{'' if markdown else ':' + str(c['line'])} {c['function']} {c['method']} {c['endpoint'] or c['url']}" for c in f["no_timeout"]))
+    out.append(f"- calls that disable TLS verification: {len(f['verify_disabled'])}" + "".join(f"\n    {c['file']}{'' if markdown else ':' + str(c['line'])} {c['function']}" for c in f["verify_disabled"]))
     out.append(f"- endpoints called from several places: {len(f['multi_site'])}: " + ", ".join(f"{k} x{len(v)}" for k, v in sorted(f["multi_site"].items())))
-    out.append(f"- calls whose URL is not a *.php API path: {len(f['non_api'])}" + "".join(f"\n    {c['file']}:{c['line']} {c['function']} {c['method']} {c['url']}" for c in f["non_api"]))
+    out.append(f"- calls whose URL is not a *.php API path: {len(f['non_api'])}" + "".join(f"\n    {c['file']}{'' if markdown else ':' + str(c['line'])} {c['function']} {c['method']} {c['url']}" for c in f["non_api"]))
     return "\n".join(out)
 
 

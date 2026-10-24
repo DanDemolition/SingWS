@@ -205,6 +205,25 @@ nested lists) identical; the differential found two real rules my first version 
 is the text "None"); 12 of 12 deliberately broken variants were caught. Rust DECLINES (never guesses) what `requests` rewrites or interprets oddly: URLs it would re-quote (spaces,
 non-ASCII, %-escapes), object-valued form fields (requests iterates the object's keys), non-http(s) schemes. Not covered yet: multipart `files=` bodies, the Qt WebSocket relay
 (wss://wskar.com/relay, 11 QWebSocket uses), headers/cookies/redirect/proxy/TLS-root behaviour, retries and the app's own ack/queue logic.
+D4 WIRE SHADOW (2026-10-23, DONE; log-only, the app's behaviour is unchanged): discovered that EVERY `requests.get/post` of the app goes through ONE object,
+`network_lifecycle.ShutdownRequests` (an admission gate that rejects new work during shutdown plus an in-flight counter drained before exit so OpenSSL is not torn down mid-request;
+any Rust client must reproduce both). `ShutdownRequests.set_observer` + `wire_shadow.py` (setting `wire_shadow`, default OFF, read at launch) compare, after each real non-streaming call, what
+`requests` ACTUALLY sent (first request when redirected: URL, body, Content-Type, Content-Length) with what the Rust request builder (`singws_wire_json`, pure) says it would send. Rust sends nothing.
+Only endpoint FILE NAMES are ever logged, never hosts, values, keys or query strings. Declined (counted, not mismatches): multipart `files=`, non-dict `data=`, non-JSON values, bodies over 256 KB,
+URLs `requests` rewrites; a header the caller set itself is not compared. 19 tests including real HTTP round trips to 127.0.0.1 THROUGH the real `ShutdownRequests` (responses, errors, accounting and
+streaming untouched by the observer); 13 of 13 deliberately broken variants caught after two test gaps were closed. Packaged apps (both architectures): 6 of 6 library exports, the shadow saw the app's
+real update check (`release.json` GET) and agreed, 0 mismatches, 0 errors. `tools/shadow_report.py` has a WIRE-SHADOW row (needs a GET poll and a form POST in a session; lists endpoints seen and
+calls declined). `docs/network_inventory.md` no longer carries line numbers, so only real changes (endpoints, kwargs, timeouts) invalidate it.
+D4c WEBSOCKET RELAY (2026-10-23, DONE offline; nothing in the app uses it): `rust/crates/singws-relay` is PURE (no sockets, threads or clocks; a test asserts it): the relay URL exactly as Qt's
+`QUrl`/`QUrlQuery` builds it (each value percent-encoded once, host lower-cased, explicit port kept, `ws` only for an `http` base, the `role=app&channel=host` variant), the classification of
+incoming frames for BOTH workers, and the connect / single-shot 5 s reconnect / stop state machine as commands to execute. `tools/relay_parity.py` compiles the app's REAL `RelayRequestWorker` and
+`HostControlRelayWorker` and compares: 3,000-9,000 random URLs per seed against real PyQt6 `QUrl.toEncoded()` (including the normalizer quirk that turns `https://` into `https://https:`), 340
+frames dispatched identically, and 1,000-3,000 random lifecycle sequences per seed through the real classes (fake Qt objects) giving identical command traces. `rust/crates/singws-relay-ws`
+executes that state machine over `tungstenite` (ws:// always; wss:// behind the opt-in `tls` feature = rustls + bundled roots, compiled but only exercised against loopback ws://). Against a scripted
+RFC 6455 server on 127.0.0.1, the real Qt workers (real `QWebSocket`, real event loop) and the Rust client are identical in 8 scenarios: normal session + server close + reconnect, abrupt drop,
+rejected handshake (Qt reports one disconnect then retries), nothing listening, host commands + compact ASCII JSON replies, host worker without disconnect status, awkward identities encoded alike, no
+connection after stop; the handshake carries exactly Qt's five headers. 17 of 18 deliberately broken variants caught (the survivor is equivalent: tungstenite turns a Close frame into a closed-connection
+error on the next read). Not covered: wss/TLS against a real server, the server-side protocol beyond the message types the Python workers handle, ping/pong timing, and any behaviour under a proxy.
 OWNER DECISIONS NEEDED BEFORE D4b (a real Rust HTTP client): (1) HTTP stack: `reqwest`+`rustls` with bundled roots (self-contained, matches Python requests' certifi roots, adds a few MB and a
 large dependency tree to the app, also works for a Windows port) versus macOS `NSURLSession` (small, uses system proxy and keychain behaviour, macOS-only); (2) migration order: recommended is
 read-only polling first (`get_requests_v2.php`, `get_requests.php`), then the invariant-carrying mutations (`complete`/`delete`/`restore_remote_request`, `set_remote_request_order`, `upsert_host_request`)

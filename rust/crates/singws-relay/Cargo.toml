@@ -1,0 +1,17 @@
+[package]
+name = "singws-relay"
+version = "0.1.0"
+edition = "2024"
+description = "Pure WebSocket relay logic for SingWS: the relay URL (as Qt builds it), incoming message classification, and the reconnect/lifecycle state machine of RelayRequestWorker and HostControlRelayWorker. No sockets, no timers, no networking dependency."
+publish = false
+
+[lib]
+name = "singws_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-relay-cli"
+path = "src/bin/relay_cli.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }

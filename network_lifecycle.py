@@ -17,6 +17,13 @@ class ShutdownRequests:
         self._condition = threading.Condition()
         self._closing = False
         self._active = 0
+        self._observer = None
+
+    def set_observer(self, observer):
+        """Install (or clear with None) a LOG-ONLY observer, called as ``observer(name, args, kwargs, response)`` after each completed
+        non-streaming call. It runs on the calling thread after the real response exists, cannot change the response, and any exception it raises
+        is swallowed. Used by the Rust wire shadow to compare what ``requests`` sent with what the Rust request builder would send."""
+        self._observer = observer
 
     def __getattr__(self, name):
         module = importlib.import_module(_requests.__name__)
@@ -34,6 +41,12 @@ class ShutdownRequests:
                 if kwargs.get("stream", False):
                     streaming = True
                     return _StreamingResponse(response, self._finished)
+                observer = self._observer
+                if observer is not None:
+                    try:
+                        observer(name, args, kwargs, response)
+                    except Exception:
+                        pass
                 return response
             finally:
                 if not streaming:

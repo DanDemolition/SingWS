@@ -17,6 +17,7 @@ Shadows and the log lines they write:
   QUEUE-SHADOW      decision branch=tombstone|terminal_stale|id_reuse|terminal_reuse   (server poll rows for removed requests)
   PLAN-SHADOW       decision op=window|crossfade kind=...        (background-music track changes)
   STORE-SHADOW      decision store=<file> layout=... agree=1     (every store file the app writes; Rust must reproduce the bytes)
+  WIRE-SHADOW       decision endpoint=<file> kind=get|form|json agree=1   (what requests sent vs what the Rust request builder would send)
   TRANSPORT-SHADOW  session N summary ... total_mismatches=M    (KaraFun and native song lifecycle)
   TRANSPORT-DRIVE   decision=karafun_end|media_end|watchdog ... disagreement=0|1   (Rust-vs-Python drive decisions)
 "Decision" lines are written once per decision type per app launch; MISMATCH lines every time.
@@ -48,19 +49,25 @@ SHADOWS = {
     "QUEUE-SHADOW": ({"tombstone", "terminal_stale"}, {"id_reuse", "terminal_reuse"}),
     "PLAN-SHADOW": ({"window", "crossfade"}, set()),
     # one decision line per store file per launch; queue.json changes whenever a request is added, the others only when their data changes
+    # kinds of request seen (first agreement per endpoint and kind); needs at least one GET poll and one form POST
+    "WIRE-SHADOW": ({"get", "form"}, {"json", "post_empty"}),
     "STORE-SHADOW": ({"queue.json"}, {"settings.json", "singer_history.json", "singer_preferences.json", "remote_request_tombstones.json",
                                        "bg_playlist.json", "tracks.json"}),
 }
 # the settings.json key that switches each shadow on (transport_shadow defaults to ON; the others default to off)
 SETTING_KEYS = {
     "SETTINGS-SHADOW": ("settings_shadow", False), "QUEUE-SHADOW": ("queue_shadow", False), "PLAN-SHADOW": ("plan_shadow", False),
-    "STORE-SHADOW": ("store_shadow", False),
+    "STORE-SHADOW": ("store_shadow", False), "WIRE-SHADOW": ("wire_shadow", False),
     "TRANSPORT-SHADOW": ("transport_shadow", True), "TRANSPORT-DRIVE": ("transport_drive", True),
 }
 DRIVE_REQUIRED = {"karafun_end", "media_end"}
 DRIVE_OPTIONAL = {"watchdog"}
 
 _HINTS = {
+    "get": "let the app poll the server (any network-connected session does)",
+    "form": "do something that POSTs to the server (add, delete, complete or reorder a request, toggle accepting)",
+    "json": "rare: a singer-history or other JSON sync",
+    "post_empty": "rare: a POST with no body",
     "queue.json": "add or change a request so the queue is saved",
     "singer_history.json": "finish a song so the singer history is saved",
     "singer_preferences.json": "change a singer preference",
@@ -141,7 +148,7 @@ def _analyse(rows):
 
     for name, (required, optional) in SHADOWS.items():
         r = Report(name)
-        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op", "STORE-SHADOW": "store"}[name]
+        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op", "STORE-SHADOW": "store", "WIRE-SHADOW": "kind"}[name]
         for t, msg in by_tag.get(name, []):
             kv = _kv(msg)
             if msg.startswith("enabled"):
@@ -157,6 +164,11 @@ def _analyse(rows):
                 r.errors.append(f"{t} {msg[:160]}")
         r.missing = required - r.seen
         r.optional_missing = optional - r.seen
+        if name == "WIRE-SHADOW":
+            endpoints = sorted({_kv(m).get("endpoint", "?") for _, m in by_tag.get(name, []) if m.startswith("decision")})
+            declined = sorted({f"{_kv(m).get('endpoint', '?')}:{_kv(m).get('reason', '?')}" for _, m in by_tag.get(name, []) if m.startswith("declined")})
+            r.detail = (f"{len(endpoints)} endpoint(s): {', '.join(endpoints)}" if endpoints else "") + (
+                f"; declined (not compared): {', '.join(declined)}" if declined else "")
         r.verdict = _verdict(r, required)
         reports.append(r)
 

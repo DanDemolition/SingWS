@@ -381,3 +381,17 @@ signature; extract with `ditto -x -k`); an older Stage C build is in `local-inst
   found only 4), 0 failed, 0 stale (every file exists), 0 junk. Nothing to repair.
 * SQLite `foreign_keys`: both readers set it explicitly OFF (the app's read connections leave it OFF; the bundled engine default is ON); it is part of the schema comparison again;
   new Rust test pins that the explicit setting is load-bearing. Live databases unchanged by every run; 1,212 + 3 requests still identical.
+
+## D4 wire shadow and D4c WebSocket relay — 2026-10-23
+
+Wire shadow: `network_lifecycle.ShutdownRequests.set_observer`, `wire_shadow.py`, setting `wire_shadow` (default off), `singws_wire_json` export (6 exports now), WIRE-SHADOW row in
+`tools/shadow_report.py`. 19 tests (real HTTP to 127.0.0.1 through the real ShutdownRequests), 13 of 13 mutants caught, full gates green.
+Package gate (both architectures, isolated profile, every shadow on, dylibs rebuilt, 6 exports): exit 0, 0 tracebacks, all five shadow modules bundled, WIRE-SHADOW saw the app's real update
+check (`release.json` GET) and agreed with 0 mismatches and 0 errors, settings/store shadows unchanged and clean, durable-write evidence as before (valid JSON, mode 600, no temp files).
+  - arm64 `ae7cc17a1f129954f438d78ca9b557abf6a0af4057540dd21ec47c4e41ef33c5`
+  - x86_64 `6e48480158fab3c8ccfa493316e660bf2005593e6cbdb5999b884e26e31a9398`
+  - Previous gate DMGs: `local-installs/store-gate-1.0.1.4/`. The dev Mac's INSTALLED app is the store-shadow build (`a0db38e2...`); it does not have the wire shadow.
+
+WebSocket relay (offline proof, not linked into the app): `singws-relay` (pure, 12 Rust tests), `singws-relay-ws` (tungstenite transport, 3 Rust tests, builds with and without the `tls` feature),
+`tools/relay_parity.py` (real worker classes + real Qt URLs: 27,000 URLs and 9,000 lifecycle sequences over three seeds identical), `tools/relay_ws_harness.py` (RFC 6455 test server on loopback + runners
+for real Qt and Rust), `test_relay_ws.py` (13 tests, about 30 s). 11 + 6 deliberately broken variants: all caught (one equivalent survivor documented in the plan).

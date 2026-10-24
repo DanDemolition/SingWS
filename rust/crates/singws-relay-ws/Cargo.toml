@@ -1,0 +1,24 @@
+[package]
+name = "singws-relay-ws"
+version = "0.1.0"
+edition = "2024"
+description = "WebSocket transport for the SingWS relay clients: executes the proven singws-relay state machine over a real socket and a real reconnect timer. ws:// always; wss:// with the `tls` feature (rustls + bundled roots). Tests only ever talk to 127.0.0.1."
+publish = false
+
+[lib]
+name = "singws_relay_ws"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-relay-ws-cli"
+path = "src/bin/relay_ws_cli.rs"
+
+[features]
+default = []
+tls = ["tungstenite/rustls-tls-webpki-roots"]
+
+[dependencies]
+singws-relay = { path = "../singws-relay" }
+singws-store = { path = "../singws-store" }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }

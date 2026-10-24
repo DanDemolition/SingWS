@@ -94,11 +94,15 @@ class SafetyTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_the_wire_crate_is_offline_only_and_not_part_of_the_app_or_its_library(self):
+    def test_the_wire_crate_never_networks_and_the_app_never_uses_its_cli(self):
         app = (ROOT / "0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertNotIn("singws-wire", app)
         self.assertNotIn("wire_cli", app)
-        self.assertNotIn("singws-wire", (ROOT / "rust/crates/singws-dsp-ffi/Cargo.toml").read_text())
+        self.assertNotIn("singws-wire-cli", app)
+        # the pure request builder IS exported from the library for the wire shadow (singws_wire_json); the crate it comes from cannot network
+        ffi = (ROOT / "rust/crates/singws-dsp-ffi/Cargo.toml").read_text()
+        self.assertIn("singws-wire", ffi)
+        for name in ("reqwest", "hyper", "ureq", "tokio", "rustls", "native-tls", "tungstenite"):
+            self.assertNotIn(name, ffi)
 
     def test_requests_version_matches_the_one_the_rules_were_derived_from(self):
         major, minor = (int(x) for x in requests.__version__.split(".")[:2])

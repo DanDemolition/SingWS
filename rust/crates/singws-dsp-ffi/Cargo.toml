@@ -15,3 +15,4 @@ singws-transport = { path = "../singws-transport" }
 singws-queue = { path = "../singws-queue" }
 singws-plan = { path = "../singws-plan" }
 singws-store = { path = "../singws-store" }
+singws-wire = { path = "../singws-wire" }
