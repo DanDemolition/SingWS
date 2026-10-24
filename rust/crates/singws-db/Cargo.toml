@@ -1,0 +1,18 @@
+[package]
+name = "singws-db"
+version = "0.1.0"
+edition = "2024"
+description = "Read-only SQLite access for SingWS compatibility proofs: schema, table dumps and guarded SELECTs, with values encoded exactly so Python and Rust results can be compared. Not linked into the app."
+publish = false
+
+[lib]
+name = "singws_db"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-db-cli"
+path = "src/bin/db_cli.rs"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }

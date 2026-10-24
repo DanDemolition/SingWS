@@ -347,3 +347,15 @@ five shadow modules bundled, `[STORE-SHADOW]` checked deferred_remote_adds.json,
 The dev Mac's installed app is still the D1 + durable-writes build; it has neither the KaraFun explicit-end handling nor the store shadow.
 Note: a first run of the combined Python suite showed 14 errors (NameError: `_store_shadow_submit`) in the older tests that compile the app's real writer into a
 private namespace; the app was fine, those namespaces simply lacked the new helper. Fixed by giving them a no-op stand-in.
+
+## Stage D3 SQLite read parity — 2026-10-23
+
+`rust/crates/singws-db` (+ `singws-db-cli`, offline only; not linked into the app or `libsingws_dsp_ffi`, so no package gate applies), `tools/db_parity.py`,
+`test_db_parity.py` (11 tests), 9 Rust tests. Read-only by construction: SQLite read-only open flag (never creates a file), `query_only`, a single-SELECT guard;
+the live databases' content and mtimes were identical before and after every run, and a test shows snapshotting a WAL database creates and changes nothing next to it.
+- Live `singws.db`: 1,212 of 1,212 requests identical; live `phrase_markers.db`: 3 of 3.
+- 20,000-song database built by the app's own indexer: all requests identical; hostile fixture (value kinds, invalid UTF-8, inf, 64-bit extremes, blobs, WAL, NOCASE index, WITHOUT ROWID): identical.
+- 12 deliberately broken variants of the Rust reader were tried: 9 caught by the parity/safety tests immediately; the 3 survivors (statement guard removed - SQLite
+  still refused writes; second-statement check removed; integers bound as text - invisible to comparisons because SQLite coerces) were killed by new direct Rust tests.
+- Tool bugs found by the hostile fixture and fixed: the query generator crashed on an undecodable text value.
+- Finding: `PRAGMA foreign_keys` default differs (rusqlite ON, Python OFF); excluded from the file comparison, recorded for any future writer.

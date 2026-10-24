@@ -181,7 +181,21 @@ separators); the log says which layout matched per store. Singer history is ~1 M
 1 MB store adds under 25 ms (bound; typically about the cost of a queue put) to the save. The report tool has a STORE-SHADOW row (required: queue.json;
 optional: settings, singer_history, singer_preferences, tombstones, bg_playlist, tracks). Nothing else about history/stats is ported: the per-singer
 counts and last-sang rules are application logic in Python, not store mechanics, and belong with Stage B/E when the queue/rotation model is owned.
-Next, in order: D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
+D3 SQLITE READ PARITY (2026-10-23, DONE for now; offline proof, NOT part of the app or its library): `rust/crates/singws-db` + the `singws-db-cli` binary open a
+database with SQLite's read-only flag (which refuses to create a missing file), `PRAGMA query_only=ON`, and accept only one SELECT; values are encoded exactly
+(INTEGER vs REAL vs TEXT vs BLOB vs NULL, non-finite floats and invalid UTF-8 as marker objects). `tools/db_parity.py` snapshots each database with SQLite's
+backup API from an IMMUTABLE read-only connection (it creates and changes nothing next to the live files) and has Python's `sqlite3` and the Rust reader (bundled
+SQLite 3.50.2 vs the system 3.50.4) answer the same requests: schema + header pragmas, every table dumped by rowid, and the app's real read shapes from
+`song_index.py` (the unescaped `%word%` LIKE search with `ORDER BY artist, title LIMIT`, the `LOWER()` artist/title lookup, the normalised-key lookup, the path lookup, the
+fuzzy full scan) with parameters drawn from the data plus hostile terms (`%`, `_`, accents, quotes, 400-char terms). Result on the live databases: `singws.db` 1,212 of
+1,212 requests identical (189 songs), `phrase_markers.db` 3 of 3 (19 markers, 186 song_meta); a 20,000-song database built by the app's OWN `rebuild_from_tracks_json`
+and a hostile WAL-mode fixture (every value kind, NULLs, 64-bit extremes, inf, blobs, invalid UTF-8, a NOCASE index, a WITHOUT ROWID table) are identical too. Findings:
+SQLite's LIKE ignores case for ASCII only (an upper-case accented query does not match stored lower-case text; the app lower-cases queries itself); the comparison first
+reported a difference in `PRAGMA foreign_keys`, a CONNECTION default (rusqlite's bundled SQLite turns it ON, Python's sqlite3 leaves it OFF and the app enables it
+explicitly on its write connections) that says nothing about the file and is excluded, but a future Rust WRITER must set it explicitly. Deliberately NOT done: any Rust
+write to a database (WAL, user_version migrations and the `fuzzykey()` Python SQL function used during migration need their own proof), and no live shadow (the search
+path is hot and the song index is rebuildable). Next, in order: D3b SQLite WRITE compatibility if it is ever wanted, D4 HTTP/websocket client, then Stage E.
+Previously listed next steps: D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
 client. Each needs the same shadow-then-flag treatment and must never open a live profile for writing during tests.
 
 ## Stage E: Rust-owned UI and no-Python package
