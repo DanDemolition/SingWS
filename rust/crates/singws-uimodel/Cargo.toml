@@ -24,3 +24,7 @@ libc = "0.2"
 [[bin]]
 name = "singws-history-cli"
 path = "src/bin/history_cli.rs"
+
+[[bin]]
+name = "singws-rotation-cli"
+path = "src/bin/rotation_cli.rs"

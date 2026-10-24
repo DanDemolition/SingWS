@@ -1,6 +1,7 @@
 //! singws-shell: the Rust-owned Qt Quick shell (Stage E). READ-ONLY panel 1: song library search.
 mod history_panel;
 mod library_panel;
+mod rotation_panel;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 

@@ -1,0 +1,7 @@
+[
+  {"name": "Dana", "singer_id": "s1", "rotation_marker": true, "songs": [{"song_info": "/demo/Friends.zip", "artist": "Garth Brooks", "title": "Friends In Low Places", "key": 0}]},
+  {"name": "Sam & Pat", "singer_id": "s2", "songs": [{"song_info": "/demo/Islands.zip", "artist": "Dolly Parton", "title": "Islands In The Stream", "duet_display": "Sam & Pat", "key": 0}]},
+  {"name": "Lee", "singer_id": "s3", "songs": [{"song_info": "/demo/q.zip", "display_name": "ABBA - Dancing Queen - KaraFun", "key": 0}, {"song_info": "/demo/z.zip", "artist": "Z", "title": "Later", "key": 0}]},
+  {"name": "Ro", "singer_id": "s4", "skipped": true, "songs": [{"song_info": "/demo/r.zip", "artist": "R", "title": "Skipped Singer", "key": 0}]},
+  {"name": "Moe", "singer_id": "s5", "songs": [{"song_info": "/demo/m.zip", "artist": "Queen", "title": "Bohemian Rhapsody", "key": 0, "skipped": true}, {"song_info": "/demo/m2.zip", "artist": "Journey", "title": "Don't Stop Believin'", "key": 2}]}
+]

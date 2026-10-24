@@ -33,9 +33,9 @@ ApplicationWindow {
                 id: tabs
                 Layout.fillWidth: true
                 background: Rectangle { color: "transparent" }
-                currentIndex: win.arg("--tab") === "history" ? 1 : 0
+                currentIndex: win.arg("--tab") === "history" ? 1 : (win.arg("--tab") === "rotation" ? 2 : 0)
                 Repeater {
-                    model: ["Library", "Singer history"]
+                    model: ["Library", "Singer history", "Rotation"]
                     TabButton {
                         text: modelData
                         font.pixelSize: 13
@@ -51,6 +51,7 @@ ApplicationWindow {
                 currentIndex: tabs.currentIndex
                 LibraryPage {}
                 HistoryPage {}
+                RotationPage {}
             }
         }
     }
