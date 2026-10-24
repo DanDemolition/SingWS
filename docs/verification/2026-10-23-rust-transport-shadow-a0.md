@@ -368,3 +368,9 @@ Offline only: the crate has no networking dependency or code (asserted), is not 
 - Differential vs `requests` 2.34.2 (`Request(...).prepare()`): 20,000 + 300,000 random calls and the app's own call shapes: identical URL, body bytes, Content-Type and Content-Length.
 - Found by the differential and fixed: all-None form body has no Content-Length; None one list level deeper becomes "None".
 - 12 of 12 deliberately broken variants of the crate caught. Declined (with the reason shown against requests): re-quoted URLs, object-valued form fields, non-http(s) schemes.
+
+Install (2026-10-23, dev Mac): the store-shadow + KaraFun explicit-end arm64 build (`a0db38e26628a20949041cc1e3739ca9b46d3d78abe2235c2df5615fd7e73319`) is installed in /Applications;
+executable (`4e7277ed...`), dylib (`a886aba2...`) and Info.plist hash-identical to the gate-tested DMG, 2,104 files, codesign OK, arm64, 5 of 5 library exports. A launch of the installed copy
+with an isolated profile exits cleanly. `store_shadow` is now enabled in the live profile with the queue, plan, settings and transport shadows (backup `settings.json.bak-before-store-shadow-*`).
+Rollback: `local-installs/installed-before-store-shadow/SingWS-installed-D1-durable.zip` is a ditto archive of the previously installed D1 + durable-writes app (2,103 files, restores to a valid
+signature; extract with `ditto -x -k`); an older Stage C build is in `local-installs/plan-gate-1.0.1.4/`.
