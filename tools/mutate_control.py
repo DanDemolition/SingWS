@@ -46,6 +46,20 @@ M = [
     ("client.rs", 'let lost: Vec<String> = shared.pending.lock().unwrap().drain(..).map(|(id, _)| id).collect();\n        for id in lost {\n            sink(Output::NoAnswer { request_id: id });\n        }', '', None),
     ("client.rs", 'if !self.is_connected() {\n            return Err(SendError::NotConnected);\n        }\n        let id = request_id.to_string();', 'let id = request_id.to_string();', None),
     ("client.rs", 'let url = browser_url(&info.ws_url, &info.tenant, &info.token);', 'let url = browser_url(&info.ws_url, &config.user, &info.token);', "the server's tenant and the configured user are the same string whenever login succeeded (the token endpoint rejects a mismatch), so the relay, which takes the tenant from the token, behaves identically"),
+    ("view.rs", 'self.connected && self.app_online', 'self.connected || self.app_online', None),
+    ("view.rs", 'if !connected {\n                    self.app_online = false;\n                }', '', None),
+    ("view.rs", 'if a.message.trim() == "stale_view" {\n                    self.refresh_requested = true;\n                }', '', None),
+    ("view.rs", 'let kind = if a.ok { kind } else if kind == "ok" { "error" } else { kind };', 'let kind = kind;', None),
+    ("view.rs", 'None if outcome.1 == "ok" => return,', 'None if false => return,', None),
+    ("view.rs", 'self.pending.retain(|(id, _)| id != request_id);', 'self.pending.clear();', None),
+    ("view.rs", 'return humanize(rest);', 'return (rest.to_string(), "ok");', None),
+    ("view.rs", '"stale_view" => ("The list changed before your edit arrived. It was refreshed; check it and try again".into(), "warn"),', '"stale_view" => ("The list changed".into(), "ok"),', None),
+    ("view.rs", '"shell_commands_off" => ("Remote control is switched off in the app (setting shell_commands)".into(), "error"),', '"shell_commands_off" => ("off".into(), "ok"),', None),
+    ("view.rs", 'self.login_error.clear();', '', None),
+    ("view.rs", 'self.seq += 1;\n        self.result = Some(CommandResult { seq: self.seq, text: text.to_string(), kind: "error" });', 'self.result = Some(CommandResult { seq: self.seq, text: text.to_string(), kind: "error" });', None),
+    ("view.rs", 'if code == "app_offline" {\n                    self.app_online = false;\n                }', '', None),
+    ("view.rs", 'self.queue_sig = Some(q.queue_sig.clone());\n                self.singers = q.singers.clone();', 'self.singers = q.singers.clone();', None),
+    ("view.rs", '"play_pause" | "stop" | "next" | "restart" | "key_up"', '"stop" | "next" | "restart" | "key_up"', None),
 ]
 
 

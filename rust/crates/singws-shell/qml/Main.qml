@@ -33,9 +33,9 @@ ApplicationWindow {
                 id: tabs
                 Layout.fillWidth: true
                 background: Rectangle { color: "transparent" }
-                currentIndex: win.arg("--tab") === "history" ? 1 : (win.arg("--tab") === "rotation" ? 2 : 0)
+                currentIndex: win.arg("--tab") === "history" ? 1 : (win.arg("--tab") === "rotation" ? 2 : (win.arg("--tab") === "controls" ? 3 : 0))
                 Repeater {
-                    model: ["Library", "Singer history", "Rotation"]
+                    model: ["Library", "Singer history", "Rotation", "Controls"]
                     TabButton {
                         text: modelData
                         font.pixelSize: 13
@@ -52,12 +52,13 @@ ApplicationWindow {
                 LibraryPage {}
                 HistoryPage {}
                 RotationPage {}
+                ControlsPage {}
             }
         }
     }
 
     Timer {
-        interval: 1200
+        interval: win.arg("--snapshot-after") !== "" ? parseInt(win.arg("--snapshot-after")) : 1200
         running: win.arg("--snapshot") !== ""
         onTriggered: canvas.grabToImage(function(r) { r.saveToFile(win.arg("--snapshot")); Qt.quit() })
     }

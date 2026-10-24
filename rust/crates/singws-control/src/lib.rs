@@ -5,7 +5,9 @@
 pub mod client;
 pub mod protocol;
 pub mod session;
+pub mod view;
 
 pub use client::{Config, Handle, Output, SendError, spawn};
 pub use protocol::{browser_url, Ack, Incoming, QueueMsg, SingerRow, SongRow, StateMsg, build_command, new_request_id, parse_incoming, validate_command};
 pub use session::{Session, SessionError, TokenInfo};
+pub use view::{ViewModel, humanize};

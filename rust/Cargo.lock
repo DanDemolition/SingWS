@@ -2238,6 +2238,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "serde_json",
+ "singws-control",
  "singws-uimodel",
 ]
 

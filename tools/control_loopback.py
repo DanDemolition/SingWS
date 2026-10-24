@@ -107,6 +107,19 @@ class Stream:
     def mark(self):
         return len(self.seen)
 
+    def drain(self):
+        """Pull in every line the process has printed so far."""
+        time.sleep(0.3)
+        while True:
+            try:
+                line = self.proc.lines.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                self.seen.append(json.loads(line))
+            except ValueError:
+                self.seen.append({self.key: "raw", "text": line})
+
 
 class Stack:
     """php + relay + the app stand-in, in a temp dir, torn down on exit."""

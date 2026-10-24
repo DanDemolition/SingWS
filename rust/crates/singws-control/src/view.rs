@@ -1,0 +1,455 @@
+//! The shell's picture of the remote app, as a pure reducer: feed it the client's [`Output`]s, read a JSON snapshot for the UI.
+//! No Qt here, so every rule (what is enabled, what a refusal means in plain words, when a stale edit asks for a refresh) is unit-tested.
+
+use crate::client::Output;
+use crate::protocol::{Incoming, SingerRow};
+use serde_json::{Value, json};
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Playback {
+    pub title: String,
+    pub artist: String,
+    pub playing: bool,
+    pub position: f64,
+    pub duration: f64,
+    pub key: i64,
+    pub tempo: f64,
+    pub bgm_volume: f64,
+    pub karaoke_volume: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandResult {
+    pub seq: u64,
+    pub text: String,
+    /// "ok" | "warn" | "error"
+    pub kind: &'static str,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ViewModel {
+    pub status: String,
+    pub connected: bool,
+    pub logged_in: bool,
+    pub login_error: String,
+    pub app_online: bool,
+    pub app_version: String,
+    pub playback: Playback,
+    pub rotation: Value,
+    pub queue_sig: Option<String>,
+    pub singers: Vec<SingerRow>,
+    pending: Vec<(String, Option<String>)>,
+    pub result: Option<CommandResult>,
+    seq: u64,
+    refresh_requested: bool,
+}
+
+/// What an acknowledgement means to an operator.
+pub fn humanize(message: &str) -> (String, &'static str) {
+    let m = message.trim();
+    if let Some(rest) = m.strip_prefix("duplicate: ") {
+        return humanize(rest);
+    }
+    if m.starts_with("dry_run") {
+        return ("Dry run: the app checked it and changed nothing".into(), "warn");
+    }
+    match m {
+        "stale_view" => ("The list changed before your edit arrived. It was refreshed; check it and try again".into(), "warn"),
+        "expired" => ("The command was too old when it arrived, so the app ignored it".into(), "warn"),
+        "clock_skew" => ("This computer's clock and the app's clock are too far apart".into(), "error"),
+        "unknown_singer" => ("That singer is no longer in the rotation".into(), "warn"),
+        "unknown_entry" => ("That song is no longer in the queue".into(), "warn"),
+        "shell_commands_off" => ("Remote control is switched off in the app (setting shell_commands)".into(), "error"),
+        "no_change" => ("Already there; nothing changed".into(), "ok"),
+        "bad_direction" | "bad_skipped" | "missing_request_id" | "missing_sent_at" => (format!("The app refused the command ({m})"), "error"),
+        "moved" => ("Moved".into(), "ok"),
+        "removed" => ("Removed".into(), "ok"),
+        "changed" => ("Done".into(), "ok"),
+        "noop" => ("Refreshed".into(), "ok"),
+        // the app names a finished transport command by its own id ("play_pause", "next", "key_up" ...)
+        "play_pause" | "stop" | "next" | "restart" | "key_up" | "key_down" | "tempo_up" | "tempo_down" | "bg_play_pause" => ("Done".into(), "ok"),
+        "" => ("Done".into(), "ok"),
+        other if other.starts_with("failed:") => (format!("The app could not do it: {}", other.trim_start_matches("failed:").trim()), "error"),
+        other => (other.to_string(), "ok"),
+    }
+}
+
+fn num(v: &Value, k: &str) -> f64 {
+    v.get(k).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+fn text(v: &Value, k: &str) -> String {
+    v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+impl ViewModel {
+    pub fn new() -> Self {
+        ViewModel { status: "Not connected".into(), rotation: Value::Null, ..Default::default() }
+    }
+
+    /// Remember that a command was sent (by id), with the words the result should use.
+    pub fn note_sent(&mut self, request_id: &str, label: &str) {
+        self.pending.push((request_id.to_string(), Some(label.to_string())));
+    }
+
+    /// A command the shell sends on its own (an automatic refresh): its acknowledgement is tracked but never shown as a result,
+    /// so it cannot cover the message that caused it.
+    pub fn note_sent_silently(&mut self, request_id: &str) {
+        self.pending.push((request_id.to_string(), None));
+    }
+
+    /// Take a command back out of the pending list (it could not be sent after all).
+    pub fn forget(&mut self, request_id: &str) {
+        self.pending.retain(|(id, _)| id != request_id);
+    }
+
+    /// Show a problem that happened before anything reached the network (an invalid command, no connection).
+    pub fn note_failure(&mut self, text: &str) {
+        self.seq += 1;
+        self.result = Some(CommandResult { seq: self.seq, text: text.to_string(), kind: "error" });
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// True once after a stale-view refusal: the owner should ask the app to publish the queue again.
+    pub fn take_refresh_request(&mut self) -> bool {
+        std::mem::take(&mut self.refresh_requested)
+    }
+
+    fn finish(&mut self, request_id: &str, outcome: (String, &'static str)) {
+        let label = match self.pending.iter().position(|(id, _)| id == request_id) {
+            Some(i) => match self.pending.remove(i).1 {
+                Some(label) => label,
+                None if outcome.1 == "ok" => return, // a silent command that worked says nothing
+                None => String::new(),               // one that failed is still reported
+            },
+            None => String::new(),
+        };
+        self.seq += 1;
+        let text = if label.is_empty() { outcome.0 } else { format!("{label}: {}", outcome.0) };
+        self.result = Some(CommandResult { seq: self.seq, text, kind: outcome.1 });
+    }
+
+    pub fn apply(&mut self, out: &Output) {
+        match out {
+            Output::Status(connected, text) => {
+                self.connected = *connected;
+                self.status = text.clone();
+                if !connected {
+                    self.app_online = false;
+                }
+            }
+            Output::LoggedIn => {
+                self.logged_in = true;
+                self.login_error.clear();
+            }
+            Output::LoginRefused(why) => {
+                self.logged_in = false;
+                self.connected = false;
+                self.app_online = false;
+                self.login_error = why.clone();
+            }
+            Output::NoAnswer { request_id } => {
+                self.finish(request_id, ("No answer from the app. It may or may not have received the command; check the queue before retrying".into(), "warn"));
+            }
+            Output::Log(_) => {}
+            Output::Message(m) => self.apply_message(m),
+        }
+    }
+
+    fn apply_message(&mut self, m: &Incoming) {
+        match m {
+            Incoming::Hello { .. } | Incoming::Other(_) | Incoming::NotJson => {}
+            Incoming::State(s) => {
+                self.app_online = s.connected;
+                self.app_version = s.app_version.clone();
+                if s.connected {
+                    let p = &s.playback;
+                    self.playback = Playback {
+                        title: text(p, "title"),
+                        artist: text(p, "artist"),
+                        playing: p.get("is_playing").and_then(Value::as_bool).unwrap_or(false),
+                        position: num(p, "position_seconds"),
+                        duration: num(p, "duration_seconds"),
+                        key: p.get("key").and_then(Value::as_i64).unwrap_or(0),
+                        tempo: num(p, "tempo"),
+                        bgm_volume: num(p, "bgm_volume"),
+                        karaoke_volume: num(p, "karaoke_volume"),
+                    };
+                    self.rotation = s.rotation.clone();
+                    if let Some(sig) = &s.queue_sig {
+                        self.queue_sig = Some(sig.clone());
+                    }
+                }
+            }
+            Incoming::Queue(q) => {
+                self.queue_sig = Some(q.queue_sig.clone());
+                self.singers = q.singers.clone();
+            }
+            Incoming::Tick { position, duration, remaining: _, playing } => {
+                self.playback.position = *position;
+                self.playback.duration = *duration;
+                self.playback.playing = *playing;
+            }
+            Incoming::Ack(a) => {
+                if a.message.trim() == "stale_view" {
+                    self.refresh_requested = true;
+                }
+                let (text, kind) = humanize(&a.message);
+                let kind = if a.ok { kind } else if kind == "ok" { "error" } else { kind };
+                self.finish(&a.request_id, (text, kind));
+            }
+            Incoming::Error { request_id, code, message } => {
+                let words = match code.as_str() {
+                    "app_offline" => "The app is not connected to the relay right now".to_string(),
+                    "bad_token" | "unauthorized" => "The relay refused this session".to_string(),
+                    other => format!("Relay error {other}: {message}"),
+                };
+                if code == "app_offline" {
+                    self.app_online = false;
+                }
+                match request_id {
+                    Some(id) if !id.is_empty() => self.finish(id, (words, "error")),
+                    _ => {
+                        self.seq += 1;
+                        self.result = Some(CommandResult { seq: self.seq, text: words, kind: "error" });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Commands can be sent only while the relay is up AND the app is on the other end.
+    pub fn controls_enabled(&self) -> bool {
+        self.connected && self.app_online
+    }
+
+    pub fn to_json(&self) -> Value {
+        let current = |k: &str| {
+            let r = self.rotation.get(k).cloned().unwrap_or(Value::Null);
+            json!({"singer": text(&r, "singer"), "title": text(&r, "title"), "artist": text(&r, "artist")})
+        };
+        json!({
+            "status": self.status,
+            "connected": self.connected,
+            "logged_in": self.logged_in,
+            "login_error": self.login_error,
+            "app_online": self.app_online,
+            "app_version": self.app_version,
+            "enabled": self.controls_enabled(),
+            "playback": {
+                "title": self.playback.title, "artist": self.playback.artist, "playing": self.playback.playing,
+                "position": self.playback.position, "duration": self.playback.duration, "key": self.playback.key,
+                "tempo": self.playback.tempo, "bgm_volume": self.playback.bgm_volume, "karaoke_volume": self.playback.karaoke_volume,
+            },
+            "rotation": {"last": current("last"), "current": current("current"), "next": current("next")},
+            "queue_sig": self.queue_sig,
+            "singers": self.singers.iter().map(|s| json!({
+                "singer_id": s.singer_id, "name": s.name, "skipped": s.skipped, "marker": s.marker,
+                "songs": s.songs.iter().map(|y| json!({"entry_id": y.entry_id, "artist": y.artist, "title": y.title, "skipped": y.skipped})).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "pending": self.pending.len(),
+            "result": self.result.as_ref().map(|r| json!({"seq": r.seq, "text": r.text, "kind": r.kind})),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Ack, QueueMsg, SongRow, StateMsg};
+
+    fn state(connected: bool) -> Output {
+        Output::Message(Incoming::State(StateMsg {
+            connected,
+            app_version: "1.0.1.4".into(),
+            queue_sig: Some("sig1".into()),
+            rotation: json!({"current": {"singer": "Dana", "title": "Halo", "artist": "Beyoncé"}, "next": {"singer": "Sam"}}),
+            playback: json!({"title": "Halo", "artist": "Beyoncé", "is_playing": true, "position_seconds": 12.5, "duration_seconds": 200.0, "key": 2, "tempo": 1.1, "bgm_volume": 0.4, "karaoke_volume": 0.9}),
+            updated_at: 1,
+        }))
+    }
+
+    fn queue() -> Output {
+        Output::Message(Incoming::Queue(QueueMsg {
+            queue_sig: "sig2".into(),
+            singers: vec![SingerRow { singer_id: "s1".into(), name: "Dana".into(), skipped: false, marker: true, songs: vec![SongRow { entry_id: "e1".into(), artist: "A".into(), title: "T".into(), skipped: false }] }],
+        }))
+    }
+
+    fn ack(id: &str, ok: bool, message: &str) -> Output {
+        Output::Message(Incoming::Ack(Ack { request_id: id.into(), ok, message: message.into() }))
+    }
+
+    #[test]
+    fn controls_need_both_the_relay_and_the_app() {
+        let mut v = ViewModel::new();
+        assert!(!v.controls_enabled());
+        v.apply(&Output::Status(true, "Connected to the relay".into()));
+        assert!(!v.controls_enabled(), "relay up but no app state yet");
+        v.apply(&state(true));
+        assert!(v.controls_enabled());
+        v.apply(&state(false));
+        assert!(!v.controls_enabled(), "the relay reports the app gone");
+        v.apply(&state(true));
+        v.apply(&Output::Status(false, "Disconnected".into()));
+        assert!(!v.controls_enabled() && !v.app_online, "a dropped relay also means the app cannot be reached");
+        assert_eq!(v.status, "Disconnected");
+    }
+
+    #[test]
+    fn state_queue_and_ticks_fill_the_picture() {
+        let mut v = ViewModel::new();
+        v.apply(&state(true));
+        v.apply(&queue());
+        let j = v.to_json();
+        assert_eq!(j["playback"]["title"], "Halo");
+        assert_eq!(j["playback"]["key"], 2);
+        assert_eq!(j["rotation"]["current"]["singer"], "Dana");
+        assert_eq!(j["rotation"]["last"]["singer"], "", "an empty slot is empty text, not null");
+        assert_eq!(j["queue_sig"], "sig2", "the queue message is the freshest word on the fingerprint");
+        assert_eq!(j["singers"][0]["songs"][0]["entry_id"], "e1");
+        v.apply(&Output::Message(Incoming::Tick { position: 20.0, duration: 200.0, remaining: 180.0, playing: false }));
+        assert_eq!(v.to_json()["playback"]["position"], 20.0);
+        assert_eq!(v.to_json()["playback"]["playing"], false);
+        // an offline state keeps the last known list but never overwrites the playback with empties
+        v.apply(&state(false));
+        assert_eq!(v.to_json()["playback"]["title"], "Halo");
+        assert_eq!(v.to_json()["singers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn acknowledgements_become_plain_words_with_the_commands_label() {
+        let mut v = ViewModel::new();
+        v.note_sent("r1", "Move Dana down");
+        assert_eq!(v.pending_count(), 1);
+        v.apply(&ack("r1", true, "moved"));
+        assert_eq!(v.pending_count(), 0);
+        let r = v.result.clone().unwrap();
+        assert_eq!((r.text.as_str(), r.kind), ("Move Dana down: Moved", "ok"));
+        v.note_sent("r2", "Remove song");
+        v.apply(&ack("r2", false, "unknown_entry"));
+        assert_eq!(v.result.clone().unwrap().text, "Remove song: That song is no longer in the queue");
+        assert_eq!(v.result.clone().unwrap().kind, "warn");
+        assert!(v.result.clone().unwrap().seq > r.seq, "every result gets a new sequence number so the UI can notice repeats");
+        v.apply(&ack("unknown-id", true, "removed"));
+        assert_eq!(v.result.clone().unwrap().text, "Removed", "an ack for something not tracked still shows");
+    }
+
+    #[test]
+    fn a_refusal_is_never_shown_as_success() {
+        let mut v = ViewModel::new();
+        v.note_sent("a", "Skip");
+        v.apply(&ack("a", false, "moved"));
+        assert_eq!(v.result.clone().unwrap().kind, "error", "ok=false overrides a success-looking text");
+        v.note_sent("b", "Skip");
+        v.apply(&ack("b", false, "shell_commands_off"));
+        assert!(v.result.clone().unwrap().text.contains("switched off"));
+        v.note_sent("c", "Skip");
+        v.apply(&ack("c", true, "dry_run: would queue.remove_singer"));
+        let r = v.result.clone().unwrap();
+        assert_eq!(r.kind, "warn");
+        assert!(r.text.contains("changed nothing"));
+    }
+
+    #[test]
+    fn a_stale_view_asks_for_exactly_one_refresh() {
+        let mut v = ViewModel::new();
+        v.note_sent("r", "Move up");
+        v.apply(&ack("r", false, "stale_view"));
+        assert!(v.result.clone().unwrap().text.contains("refreshed"));
+        assert!(v.take_refresh_request());
+        assert!(!v.take_refresh_request(), "taken once");
+        v.note_sent("r2", "x");
+        v.apply(&ack("r2", true, "moved"));
+        assert!(!v.take_refresh_request());
+    }
+
+    #[test]
+    fn duplicates_unknowns_and_failures_have_words() {
+        assert_eq!(humanize("duplicate: moved"), ("Moved".to_string(), "ok"));
+        assert_eq!(humanize("failed: boom").0, "The app could not do it: boom");
+        assert_eq!(humanize("failed: boom").1, "error");
+        assert_eq!(humanize("no_change").1, "ok");
+        assert_eq!(humanize("expired").1, "warn");
+        assert_eq!(humanize("clock_skew").1, "error");
+        assert_eq!(humanize("something new"), ("something new".to_string(), "ok"));
+        assert_eq!(humanize("  ").0, "Done");
+        for m in ["play_pause", "stop", "next", "restart", "key_up", "key_down", "tempo_up", "tempo_down", "bg_play_pause"] {
+            assert_eq!(humanize(m), ("Done".to_string(), "ok"), "{m}");
+        }
+        assert_eq!(humanize("set_key +2").0, "set_key +2", "messages with details pass through");
+    }
+
+    #[test]
+    fn no_answer_and_relay_errors_clear_the_pending_command() {
+        let mut v = ViewModel::new();
+        v.note_sent("n1", "Skip singer");
+        v.apply(&Output::NoAnswer { request_id: "n1".into() });
+        assert_eq!(v.pending_count(), 0);
+        assert!(v.result.clone().unwrap().text.starts_with("Skip singer: No answer from the app"));
+        assert_eq!(v.result.clone().unwrap().kind, "warn");
+        v.apply(&Output::Status(true, "up".into()));
+        v.apply(&state(true));
+        assert!(v.app_online);
+        v.note_sent("n2", "Play");
+        v.apply(&Output::Message(Incoming::Error { request_id: Some("n2".into()), code: "app_offline".into(), message: "no app".into() }));
+        assert_eq!(v.pending_count(), 0);
+        assert!(v.result.clone().unwrap().text.contains("not connected to the relay"));
+        assert!(!v.app_online);
+        v.apply(&Output::Message(Incoming::Error { request_id: None, code: "bad_token".into(), message: "x".into() }));
+        assert!(v.result.clone().unwrap().text.contains("refused this session"));
+        v.apply(&Output::Message(Incoming::Error { request_id: Some(String::new()), code: "weird".into(), message: "m".into() }));
+        assert_eq!(v.result.clone().unwrap().text, "Relay error weird: m");
+    }
+
+    #[test]
+    fn an_automatic_refresh_never_covers_the_message_that_caused_it() {
+        let mut v = ViewModel::new();
+        v.note_sent("a", "Move Lee to the top");
+        v.apply(&ack("a", false, "stale_view"));
+        let shown = v.result.clone().unwrap();
+        v.note_sent_silently("auto");
+        v.apply(&ack("auto", true, "noop"));
+        assert_eq!(v.result.clone().unwrap(), shown, "the successful silent acknowledgement changed nothing");
+        assert_eq!(v.pending_count(), 0, "but it is no longer pending");
+        v.note_sent_silently("auto2");
+        v.apply(&ack("auto2", false, "shell_commands_off"));
+        assert!(v.result.clone().unwrap().seq > shown.seq, "a silent command that FAILS is reported");
+        v.note_sent_silently("auto3");
+        v.apply(&Output::NoAnswer { request_id: "auto3".into() });
+        assert!(v.result.clone().unwrap().text.starts_with("No answer"));
+    }
+
+    #[test]
+    fn a_command_that_could_not_be_sent_leaves_no_ghost_and_says_why() {
+        let mut v = ViewModel::new();
+        v.note_sent("g1", "Skip");
+        v.note_sent("g2", "Next");
+        v.forget("g1");
+        assert_eq!(v.pending_count(), 1, "only that command was taken back");
+        v.forget("g2");
+        assert_eq!(v.pending_count(), 0);
+        v.forget("never-existed");
+        let before = v.result.clone();
+        v.note_failure("Not connected to the relay");
+        let r = v.result.clone().unwrap();
+        assert_eq!((r.text.as_str(), r.kind), ("Not connected to the relay", "error"));
+        assert!(before.is_none() && r.seq == 1);
+    }
+
+    #[test]
+    fn login_outcomes() {
+        let mut v = ViewModel::new();
+        v.apply(&Output::LoggedIn);
+        assert!(v.logged_in);
+        v.apply(&Output::LoginRefused("invalid PIN".into()));
+        assert!(!v.logged_in && !v.connected);
+        assert_eq!(v.to_json()["login_error"], "invalid PIN");
+        v.apply(&Output::LoggedIn);
+        assert_eq!(v.to_json()["login_error"], "", "a later success clears the old complaint");
+        v.apply(&Output::Log("x".into()));
+    }
+}
