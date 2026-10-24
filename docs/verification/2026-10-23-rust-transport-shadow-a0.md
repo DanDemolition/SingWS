@@ -296,3 +296,9 @@ leftover temp files (176 keys).
     not yet have the durable writes; `settings_shadow` is not enabled in the live profile.
 Not proven: a real power cut (cannot be simulated safely); the tests prove the order of flush, rename and directory flush, which is the property that
 matters. Shadow mismatch counts from a real show are still pending for every shadow.
+
+Install (2026-10-23, dev Mac): the final D1 + durable-writes arm64 build (`bf1350bf...`) is installed in /Applications; executable, dylib and
+Info.plist hash-identical to the gate-tested DMG, 2,103 files, codesign OK (`SingWS Local Code Signing`), arm64, 5 of 5 library exports. A launch of the
+installed copy with an isolated profile exits cleanly with the settings shadow enabled and 0 mismatches. `settings_shadow` is now enabled in the live
+profile next to the queue, plan and transport shadows (backup `settings.json.bak-before-settings-shadow-*`). Rollback: reinstall the Stage C build from
+`local-installs/plan-gate-1.0.1.4/`, or set `SINGWS_DURABLE_JSON=0` to disable only the new flushes.
