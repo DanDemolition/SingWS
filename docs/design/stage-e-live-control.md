@@ -1,6 +1,6 @@
 # Stage E: how the Rust shell sends live controls to the running app
 
-Status: DESIGN, owner answers recorded (2026-10-24). Nothing here is built. The three panels that exist (library, singer history, rotation) are read-only and write nothing.
+Status: owner answers recorded (2026-10-24). STEP 1 (the app side) is built and inert while `shell_commands` is `off` (see "Step 1 as built" at the end); the shell side is not built. The three panels that exist (library, singer history, rotation) are read-only and write nothing.
 
 ## Owner decisions (2026-10-24)
 
@@ -35,7 +35,7 @@ holds no API key, and never reaches the app by any other route.
 * Auth is the host PIN, exactly like the web DAW page: no API key on the shell machine. Tenant isolation and the 60 s token are the server's.
 * Messages stay the relay's JSON (`command` with `request_id`, `ack`, `state`, `playback_tick`, `error`), extended compatibly:
   * new command names (below); old ones unchanged, so the web page keeps working;
-  * the app adds `queue_version` to `state` and publishes a compact `queue` message whenever the version changes (singer ids, names, skipped flags, each singer's first-song entry id and title: enough to draw the rotation and address edits).
+  * the app adds `queue_sig` (see "Step 1 as built") to `state` and publishes a compact `queue` message whenever it changes (singer ids, names, skipped flags, each singer's first-song entry id and title: enough to draw the rotation and address edits).
 * No server change is needed if production matches the reference relay's pass-through behaviour (to be verified against production before the dry run).
 * The local file inbox I proposed earlier is dropped for now. It stays a possible same-machine fast path behind the same `CommandSink` interface in the shell.
 * Tablets: the web DAW page can gain the same queue controls later; the app-side contract is identical.
@@ -44,12 +44,12 @@ holds no API key, and never reaches the app by any other route.
 
 ```json
 {"type":"command","command":"queue.move_singer","request_id":"01JBX...","sent_at":1792830000,
- "args":{"singer_id":"ab12...","direction":"up","expect_queue_version":412}}
+ "args":{"singer_id":"ab12...","direction":"up","expect_queue_sig":"3fa91c07b2d4e615"}}
 ```
 
 * `request_id`: unique, sortable. The app applies each id once (it remembers recent ids), so a retry, a double click or two shells never doubles an edit.
 * `sent_at`: the app drops a command older than 10 s with `{ok:false, message:"expired"}` (clock skew tolerated; a command held up by a bad network never fires late).
-* `expect_queue_version`: the app bumps `queue_version` on every queue mutation; a command carrying an older number gets `{ok:false, message:"stale_view"}` and the shell refreshes (owner decision 3).
+* `expect_queue_sig`: a fingerprint of the rotation as the operator sees it; a command carrying a different one gets `{ok:false, message:"stale_view"}` and the shell refreshes (owner decision 3).
 * Identity is `singer_id` / entry id only.
 * v1 queue actions: `queue.move_singer {singer_id, direction|to_index}`, `queue.move_song {entry_id, direction}`, `queue.remove_song {entry_id}`, `queue.remove_singer {singer_id}`, `queue.skip_singer {singer_id}`.
   Transport actions pass through to the existing executor unchanged. NOT in v1: add song, clear queue (it has a confirmation dialog in the app), rename, anything that opens a dialog.
@@ -100,3 +100,20 @@ holds no API key, and never reaches the app by any other route.
 ## Path to Stage B
 
 The action names and ids are the `singws-queue` events. When the Rust core owns the queue, the same messages feed it and Python becomes a client; the shell does not change.
+
+## Step 1 as built (2026-10-24, app side only; nothing installed)
+
+What exists in `0.2.18.1.py`, all inert while the setting `shell_commands` is `off` (the default):
+
+* `_queue_signature()`: a 16-hex fingerprint of the rotation (singer ids, names, skip flags, rotation marker, each song's entry id and skip flag). DEVIATION from the design: a content fingerprint instead of a counter, because the queue is mutated in dozens of places (server adds, completions, renames,
+  merges) and a counter would silently miss one; a fingerprint cannot. Fields the operator cannot see (notes, durations) do not change it.
+* `shell_queue_move_singer`, `shell_queue_move_song`, `shell_queue_remove_singer`, `shell_queue_remove_song`, `shell_queue_set_singer_skipped`: id-based, with the same side effects as the buttons, in the same order (undo snapshot, display refresh, remote-order sync, remote-request deletion, empty-slot mark, the "playback detached"
+  flag, debounced save, ticker). DEVIATION from the design's "one implementation": the button handlers are NOT refactored yet. They stay exactly as they were so this step cannot regress the live UI; `test_shell_queue_commands.py` drives the real handlers (through a fake widget list) and the new methods on the same random queues
+  (1,200 cases: 4 singer moves, 4 song moves, remove singer, remove song, skip, unskip) and requires identical queues, recorded side effects, undo history and detach flag. Refactoring the handlers to call the new methods is left for after a dry-run show.
+* `_execute_shell_queue_command(action, args)`: the guards in order: mode (`off` refuses; `dry_run` validates and changes nothing; `apply`), known action, request id, `sent_at` (older than 10 s is `expired`, more than 60 s ahead is `clock_skew`), duplicate id (the first answer is repeated, never re-applied; the last 256 ids are remembered),
+  `expect_queue_sig` (`stale_view`), unknown singer or entry, bad direction or `skipped` value. Every outcome is logged `[SHELL-CMD] id= action= mode= ok= message=`.
+* Routing: `_execute_host_control_command` sends every `queue.*` action there, and treats a transport command carrying `"source":"shell"` by the same switch (refused when off, logged and not executed in dry run); transport commands from the web remote (no `source`) are unchanged. `_on_host_relay_command` and the HTTP poll path pass `request_id` and `sent_at` through.
+* Publishing: when the mode is not `off`, `state` carries `queue_sig` and a `queue` message with the compact rotation (`_shell_queue_summary`, at most 200 singers and 25 songs each) follows whenever the state changes.
+* Not done: `queue.move_singer` to an arbitrary index, add, clear (needs the app's confirmation dialog), the shell side (`singws-control`, the Controls tab), the pre-show check that production's relay forwards the new message types.
+
+Verification so far: 15 tests (differential plus every guard), 32 mutants on the new code with 31 killed and 1 equivalent (a removed log line), and the full suite.

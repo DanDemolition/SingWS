@@ -4110,6 +4110,7 @@ DEFAULTS = {
     "transport_drive": True,
     # A2 for the native media-end decision. Same contract as transport_drive: Rust answers only when it agrees with the
     # retained Python oracle; Python wins every disagreement. Default off until its own local and package gates pass.
+    "shell_commands": "off",  # queue.* commands from the Rust shell: "off" | "dry_run" (validate and log only) | "apply"
     "publish_live_state": False,  # write live_state.json (who is on stage) for the read-only Rust shell; best effort, never affects the show
     "transport_drive_media_end": False,
     # A2 for the KaraFun duration-watchdog decision ("end unverified: tell the operator to press Complete"). Same
@@ -28869,6 +28870,10 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
+        if action.startswith("queue.") or str(args.get("source") or "").strip().lower() == "shell":
+            args = dict(args)
+            args["_request_id"] = str(request_id or "")
+            args["_sent_at"] = data.get("sent_at")
         ok = False
         message = ""
         try:
@@ -28909,15 +28914,28 @@ class KaraokeApp(QWidget):
             "rotation": state.get("rotation", {}),
             "playback": playback,
         }
+        queue_sig = None
+        if self._shell_commands_mode() != "off":
+            try:
+                queue_sig = self._queue_signature()
+                full["queue_sig"] = queue_sig
+            except Exception:
+                queue_sig = None
         sig = json.dumps([full["rotation"], playback.get("key"), playback.get("tempo"),
                           playback.get("bgm_volume"), playback.get("karaoke_volume"),
-                          playback.get("title")], sort_keys=True)
+                          playback.get("title"), queue_sig], sort_keys=True)
         now = time.monotonic()
         if force or sig != getattr(self, "_host_relay_last_full_sig", "") or \
            (now - getattr(self, "_host_relay_last_full_at", 0.0)) > 3.0:
             self._host_relay_last_full_sig = sig
             self._host_relay_last_full_at = now
             worker.send_json(full)
+            if queue_sig is not None:
+                try:
+                    worker.send_json({"type": "queue", "user": full["user"], "queue_sig": queue_sig, "singers": self._shell_queue_summary(),
+                                      "updated_at": int(time.time())})
+                except Exception:
+                    pass
 
     def fetch_remote_requests_once(self, reason: str = "relay"):
         """Fetch active remote requests from get_requests_v2.php in a background thread.
@@ -33879,6 +33897,10 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
+            if action.startswith("queue."):
+                args = dict(args)
+                args["_request_id"] = f"http:{command_id}"
+                args["_sent_at"] = command.get("sent_at")
             ok = False
             message = ""
             try:
@@ -34174,6 +34196,16 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
+        if action.startswith("queue."):
+            return self._execute_shell_queue_command(action, args)
+        if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
+            # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
+            mode = self._shell_commands_mode()
+            if mode == "off":
+                return False, "shell_commands_off"
+            if mode == "dry_run":
+                _diag(f"[SHELL-CMD] id={args.get('_request_id') or '-'} action={action} mode=dry_run ok=True message=dry_run: would {action}")
+                return True, f"dry_run: would {action}"
         if action in ("play_pause", "toggle_playback", "pause"):
             if bool(getattr(self, "karaoke_playing", False)):
                 self.toggle_karaoke_pause()
@@ -49521,6 +49553,291 @@ class KaraokeApp(QWidget):
                 songs[song_idx]["skipped"] = not songs[song_idx].get("skipped", False)
                 self.update_queue_display()
                 self.save_data()
+
+    # ---- id-based queue edits for the Rust shell (setting `shell_commands`: off | dry_run | apply) ---------------------------------
+    # These mirror move_up / move_down / remove_selected / toggle_singer_skip, which work from the SELECTED ROW of the widget list.
+    # The handlers are deliberately left untouched; tests/test_shell_queue_commands.py drives both and requires identical effects.
+
+    def _queue_signature(self) -> str:
+        """Fingerprint of the rotation as an operator sees it (order, ids, names, skip and marker flags).
+
+        An edit carries the fingerprint it was made against; a different one now means the list changed underneath it (stale view).
+        Computed from content rather than counted, so no mutation path (server add, completion, rename ...) can be missed."""
+        parts = []
+        for singer in list(self.queue or []):
+            if not isinstance(singer, dict):
+                continue
+            songs = []
+            for entry in list(singer.get("songs", []) or []):
+                songs.append([
+                    str(KaraokeApp._ensure_queue_entry_id(entry)),
+                    bool(entry.get("skipped", False)) if isinstance(entry, dict) else False,
+                ])
+            parts.append([
+                str(KaraokeApp._ensure_singer_id(singer)),
+                str(singer.get("name", "") or ""),
+                bool(singer.get("skipped", False)),
+                bool(singer.get("rotation_marker", False)),
+                songs,
+            ])
+        return hashlib.sha1(json.dumps(parts, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+    def _queue_singer_index_by_id(self, singer_id: str) -> int:
+        wanted = str(singer_id or "").strip()
+        if not wanted:
+            return -1
+        for idx, singer in enumerate(self.queue or []):
+            if isinstance(singer, dict) and str(KaraokeApp._ensure_singer_id(singer)) == wanted:
+                return idx
+        return -1
+
+    def _queue_entry_position_by_id(self, entry_id: str) -> tuple[int, int]:
+        wanted = str(entry_id or "").strip()
+        if not wanted:
+            return -1, -1
+        for si, singer in enumerate(self.queue or []):
+            if not isinstance(singer, dict):
+                continue
+            for sj, entry in enumerate(singer.get("songs", []) or []):
+                if str(KaraokeApp._ensure_queue_entry_id(entry)) == wanted:
+                    return si, sj
+        return -1, -1
+
+    def shell_queue_move_singer(self, singer_id: str, where: str) -> str:
+        """Move a singer `up`/`down` one place or to the `top`/`bottom` (what Move Up/Down and Shift+Move do). Returns a short result text."""
+        i = self._queue_singer_index_by_id(singer_id)
+        if i < 0:
+            return "unknown_singer"
+        last = len(self.queue) - 1
+        if (where in ("up", "top") and i <= 0) or (where in ("down", "bottom") and i >= last):
+            return "no_change"
+        undo = KaraokeApp._begin_undoable_action(self, "Reorder")
+        if where == "top":
+            singer = self.queue.pop(i)
+            self.queue.insert(0, singer)
+        elif where == "bottom":
+            singer = self.queue.pop(i)
+            self.queue.append(singer)
+        elif where == "up":
+            self.queue[i - 1], self.queue[i] = self.queue[i], self.queue[i - 1]
+        else:
+            self.queue[i], self.queue[i + 1] = self.queue[i + 1], self.queue[i]
+        self.update_queue_display()
+        KaraokeApp._commit_undoable_action(self, undo, "Queue reordered")
+        return "moved"
+
+    def shell_queue_move_song(self, entry_id: str, where: str) -> str:
+        """Move a song within its singer (up/down one place, or top/bottom)."""
+        singer_idx, song_idx = self._queue_entry_position_by_id(entry_id)
+        if singer_idx < 0:
+            return "unknown_entry"
+        songs = self.queue[singer_idx]["songs"]
+        if (where in ("up", "top") and song_idx <= 0) or (where in ("down", "bottom") and song_idx >= len(songs) - 1):
+            return "no_change"
+        undo = KaraokeApp._begin_undoable_action(self, "Reorder")
+        if where in ("top", "bottom"):
+            song = songs.pop(song_idx)
+            if where == "top":
+                songs.insert(0, song)
+            else:
+                songs.append(song)
+            self.update_queue_display()
+            self._sync_remote_singer_order(singer_idx)
+        else:
+            other = song_idx - 1 if where == "up" else song_idx + 1
+            songs[other], songs[song_idx] = songs[song_idx], songs[other]
+            self.update_queue_display()
+            self._refresh_queue_song_row_identities(singer_idx)
+            self._update_queue_eta_label()
+            self._sync_remote_singer_order(singer_idx)
+        self.schedule_ticker_update()
+        KaraokeApp._commit_undoable_action(self, undo, "Queue reordered")
+        return "moved"
+
+    def shell_queue_remove_singer(self, singer_id: str) -> str:
+        singer_idx = self._queue_singer_index_by_id(singer_id)
+        if singer_idx < 0:
+            return "unknown_singer"
+        undo = KaraokeApp._begin_undoable_action(self, "Remove Singer")
+        try:
+            removed_singer_id = str(self.queue[singer_idx].get("singer_id") or "").strip()
+            current_singer_id = str(getattr(self, "_current_karaoke_singer_id", "") or "").strip()
+            if bool(getattr(self, "karaoke_playing", False)) and (removed_singer_id and removed_singer_id == current_singer_id):
+                self._current_playback_detached_from_rotation = True
+                _diag("[ROTATION] current playback detached by host singer removal; media continues normally")
+        except Exception:
+            pass
+        try:
+            singer = self.queue[singer_idx]
+            for entry in list(singer.get("songs", []) or []):
+                remote_request_id = self._queue_entry_remote_request_id(entry)
+                if remote_request_id is not None:
+                    self._delete_remote_request(remote_request_id, entry=entry, singer_name=str(singer.get("name", "") or ""), reason="host_remove_singer")
+        except Exception:
+            pass
+        self._delete_rotation_singer_row(singer_idx, reason="host_remove_singer")
+        self._finish_shell_queue_removal(undo, "Singer removed")
+        return "removed"
+
+    def shell_queue_remove_song(self, entry_id: str) -> str:
+        singer_idx, song_idx = self._queue_entry_position_by_id(entry_id)
+        if singer_idx < 0:
+            return "unknown_entry"
+        undo = KaraokeApp._begin_undoable_action(self, "Remove Song")
+        try:
+            removed_entry = self.queue[singer_idx]["songs"][song_idx]
+            removed_request_id = self._ensure_queue_entry_id(removed_entry)
+            current_request_id = str(getattr(self, "_current_karaoke_request_id", "") or "").strip()
+            if bool(getattr(self, "karaoke_playing", False)) and (removed_request_id and removed_request_id == current_request_id):
+                self._current_playback_detached_from_rotation = True
+                _diag("[ROTATION] current playback detached by host song removal; media continues normally")
+        except Exception:
+            pass
+        try:
+            entry = self.queue[singer_idx]["songs"][song_idx]
+            remote_request_id = self._queue_entry_remote_request_id(entry)
+            if remote_request_id is not None:
+                self._delete_remote_request(remote_request_id, entry=entry, singer_name=str(self.queue[singer_idx].get("name", "") or ""), reason="host_remove_song")
+        except Exception:
+            pass
+        del self.queue[singer_idx]["songs"][song_idx]
+        try:
+            if singer_idx < len(self.queue) and not self.queue[singer_idx].get("songs"):
+                self._mark_rotation_slot_temporarily_empty(self.queue[singer_idx], reason="host_remove_song")
+        except Exception:
+            pass
+        try:
+            if singer_idx < len(self.queue):
+                self._sync_remote_singer_order(singer_idx, reason="host_remove_song")
+        except Exception:
+            pass
+        self._finish_shell_queue_removal(undo, "Song removed")
+        return "removed"
+
+    def _finish_shell_queue_removal(self, undo, message: str) -> None:
+        self._request_queue_display_refresh()
+        try:
+            self._schedule_save_data(1000 if bool(getattr(self, "karaoke_playing", False)) else 0)
+        except Exception:
+            pass
+        KaraokeApp._commit_undoable_action(self, undo, message)
+
+    def shell_queue_set_singer_skipped(self, singer_id: str, skipped: bool) -> str:
+        idx = self._queue_singer_index_by_id(singer_id)
+        if idx < 0:
+            return "unknown_singer"
+        if bool(self.queue[idx].get("skipped", False)) == bool(skipped):
+            return "no_change"
+        self.toggle_singer_skip(idx)
+        return "changed"
+
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer")
+
+    def _shell_commands_mode(self) -> str:
+        mode = str((getattr(self, "settings", None) or {}).get("shell_commands", "off") or "off").strip().lower()
+        return mode if mode in ("dry_run", "apply") else "off"
+
+    def _execute_shell_queue_command(self, action: str, args: dict) -> tuple[bool, str]:
+        """Validate and run one `queue.*` command from the Rust shell. Every outcome is logged as [SHELL-CMD]."""
+        request_id = str(args.get("_request_id") or "").strip()
+        mode = self._shell_commands_mode()
+
+        def done(ok: bool, message: str):
+            try:
+                _diag(f"[SHELL-CMD] id={request_id or '-'} action={action} mode={mode} ok={ok} message={message}")
+            except Exception:
+                pass
+            return ok, message
+
+        if mode == "off":
+            return done(False, "shell_commands_off")
+        if action not in self._SHELL_QUEUE_ACTIONS:
+            return done(False, f"unknown command: {action}")
+        if not request_id:
+            return done(False, "missing_request_id")
+        state = object.__getattribute__(self, "__dict__")
+        seen = state.get("_shell_cmd_seen")
+        if not isinstance(seen, OrderedDict):
+            seen = OrderedDict()
+            self._shell_cmd_seen = seen
+        if request_id in seen:
+            ok, message = seen[request_id]
+            return done(ok, f"duplicate: {message}")
+        try:
+            sent_at = float(args.get("_sent_at"))
+        except (TypeError, ValueError):
+            return done(False, "missing_sent_at")
+        age = time.time() - sent_at
+        if age > 10.0:
+            return done(False, "expired")
+        if age < -60.0:
+            return done(False, "clock_skew")
+
+        def remember(ok: bool, message: str):
+            seen[request_id] = (ok, message)
+            while len(seen) > 256:
+                seen.popitem(last=False)
+            return done(ok, message)
+
+        expect = str(args.get("expect_queue_sig") or "").strip()
+        if expect and expect != self._queue_signature():
+            return remember(False, "stale_view")
+        if action == "queue.noop":
+            return remember(True, "noop")
+        where = str(args.get("direction") or args.get("where") or "").strip().lower()
+        singer_id = str(args.get("singer_id") or "").strip()
+        entry_id = str(args.get("entry_id") or "").strip()
+        if action in ("queue.move_singer", "queue.move_song") and where not in ("up", "down", "top", "bottom"):
+            return remember(False, "bad_direction")
+        if action in ("queue.move_singer", "queue.remove_singer", "queue.skip_singer") and self._queue_singer_index_by_id(singer_id) < 0:
+            return remember(False, "unknown_singer")
+        if action in ("queue.move_song", "queue.remove_song") and self._queue_entry_position_by_id(entry_id)[0] < 0:
+            return remember(False, "unknown_entry")
+        if action == "queue.skip_singer" and not isinstance(args.get("skipped"), bool):
+            return remember(False, "bad_skipped")
+        if mode == "dry_run":
+            return remember(True, f"dry_run: would {action}")
+        try:
+            if action == "queue.move_singer":
+                result = self.shell_queue_move_singer(singer_id, where)
+            elif action == "queue.move_song":
+                result = self.shell_queue_move_song(entry_id, where)
+            elif action == "queue.remove_singer":
+                result = self.shell_queue_remove_singer(singer_id)
+            elif action == "queue.remove_song":
+                result = self.shell_queue_remove_song(entry_id)
+            else:
+                result = self.shell_queue_set_singer_skipped(singer_id, bool(args.get("skipped")))
+        except Exception as exc:
+            return remember(False, f"failed: {exc}")
+        return remember(True, result)
+
+    def _shell_queue_summary(self) -> list:
+        """Compact queue for the shell's rotation list and edit targets (ids, names, titles, flags)."""
+        rows = []
+        for singer in list(self.queue or [])[:200]:
+            if not isinstance(singer, dict):
+                continue
+            songs = []
+            for entry in list(singer.get("songs", []) or [])[:25]:
+                try:
+                    artist, title = self._queue_entry_artist_title(entry)
+                except Exception:
+                    artist, title = "", ""
+                songs.append({
+                    "entry_id": str(KaraokeApp._ensure_queue_entry_id(entry)),
+                    "artist": artist,
+                    "title": title,
+                    "skipped": bool(entry.get("skipped", False)) if isinstance(entry, dict) else False,
+                })
+            rows.append({
+                "singer_id": str(KaraokeApp._ensure_singer_id(singer)),
+                "name": str(singer.get("name", "") or ""),
+                "skipped": bool(singer.get("skipped", False)),
+                "marker": bool(singer.get("rotation_marker", False)),
+                "songs": songs,
+            })
+        return rows
 
     def _queue_entry_song_info(self, entry):
         if isinstance(entry, dict):
