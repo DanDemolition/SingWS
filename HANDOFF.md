@@ -1,6 +1,18 @@
 # SingWS handoff
 
-Updated 2026-10-22.
+Updated 2026-10-24.
+
+## DEFERRED UNTIL THE CURRENT RUST BUILD IS FINISHED: 2026-10-24 SHOW-LOG MEMORY FOLLOW-UP
+
+The latest 1.0.1.4 show reached about 2.52 GB RSS with flat Python blocks,
+widgets, timers, threads, and file descriptors. The evidence points to native
+high-water allocations rather than a Python/UI-object leak, but the run differs
+from the lower-memory 1.0.1.3 comparison in Qt Quick surfaces and audio mode.
+Do not change playback or rendering during the current Rust work. Afterwards,
+add opt-in native-memory telemetry and run the documented Quick-surfaces A/B
+rehearsal before changing the mpv cache, Qt Quick lifetime, or ScreenCaptureKit
+cleanup. Full evidence and acceptance gates:
+`docs/handoff/2026-10-24-show-log-memory-followup.md`.
 
 ## VERSION POLICY (operator instruction, 2026-09-29)
 
