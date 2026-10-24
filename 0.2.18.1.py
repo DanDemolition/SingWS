@@ -3459,6 +3459,25 @@ def probe_network_sync_status(
     _network_log(f"final UI state ok={result['ok']} partial={result['partial']} message={result['message']}")
     return result
 
+_STORE_SHADOW = None
+_STORE_SHADOW_ON = False
+
+
+def _store_shadow_submit(name, payload):
+    """Hand the bytes just written for store `name` to the Stage D2 shadow (background worker). Never raises, never blocks."""
+    global _STORE_SHADOW
+    try:
+        if not _STORE_SHADOW_ON:
+            return
+        if _STORE_SHADOW is None:
+            import store_shadow
+            _STORE_SHADOW = store_shadow.StoreShadow(_diag)
+            _diag(f"[STORE-SHADOW] enabled available={int(_STORE_SHADOW.available)}")
+        _STORE_SHADOW.submit(name, payload)
+    except Exception:
+        pass
+
+
 _SETTINGS_SHADOW = None
 
 
@@ -3564,6 +3583,8 @@ def _atomic_write_text(path: Path, payload: str) -> None:
         except Exception:
             pass
         raise
+    else:
+        _store_shadow_submit(path.name, payload)  # after the durable write succeeded; background, log-only
 
 
 def _save_json_atomic(path: Path, value) -> None:
@@ -4091,6 +4112,10 @@ DEFAULTS = {
     # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
     # two-architecture package gate passes. Read from the settings dict being processed.
     "settings_shadow": False,
+    # Stage D2 shadow: after the app durably writes ANY store file (queue, singer history, preferences, tracks, tombstones, playlist,
+    # settings), a background worker asks the Rust JSON writer to reproduce those exact bytes and LOGS any difference. Rust never writes;
+    # the check never runs on the GUI thread and never delays a save. Default off until its package gate passes. Read at launch.
+    "store_shadow": False,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -38769,6 +38794,10 @@ class KaraokeApp(QWidget):
 
     def load_settings(self):
         loaded = _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
+        try:
+            globals()["_STORE_SHADOW_ON"] = bool(loaded.get("store_shadow", False))
+        except Exception:
+            pass
         try:
             shadow = _settings_shadow_for(loaded)
             if shadow is not None:

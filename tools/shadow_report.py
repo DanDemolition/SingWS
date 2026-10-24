@@ -16,6 +16,7 @@ Shadows and the log lines they write:
   SETTINGS-SHADOW   decision check=load|defaults|save           (startup + every settings save)
   QUEUE-SHADOW      decision branch=tombstone|terminal_stale|id_reuse|terminal_reuse   (server poll rows for removed requests)
   PLAN-SHADOW       decision op=window|crossfade kind=...        (background-music track changes)
+  STORE-SHADOW      decision store=<file> layout=... agree=1     (every store file the app writes; Rust must reproduce the bytes)
   TRANSPORT-SHADOW  session N summary ... total_mismatches=M    (KaraFun and native song lifecycle)
   TRANSPORT-DRIVE   decision=karafun_end|media_end|watchdog ... disagreement=0|1   (Rust-vs-Python drive decisions)
 "Decision" lines are written once per decision type per app launch; MISMATCH lines every time.
@@ -46,16 +47,27 @@ SHADOWS = {
     "SETTINGS-SHADOW": ({"load", "defaults", "save"}, set()),
     "QUEUE-SHADOW": ({"tombstone", "terminal_stale"}, {"id_reuse", "terminal_reuse"}),
     "PLAN-SHADOW": ({"window", "crossfade"}, set()),
+    # one decision line per store file per launch; queue.json changes whenever a request is added, the others only when their data changes
+    "STORE-SHADOW": ({"queue.json"}, {"settings.json", "singer_history.json", "singer_preferences.json", "remote_request_tombstones.json",
+                                       "bg_playlist.json", "tracks.json"}),
 }
 # the settings.json key that switches each shadow on (transport_shadow defaults to ON; the others default to off)
 SETTING_KEYS = {
     "SETTINGS-SHADOW": ("settings_shadow", False), "QUEUE-SHADOW": ("queue_shadow", False), "PLAN-SHADOW": ("plan_shadow", False),
+    "STORE-SHADOW": ("store_shadow", False),
     "TRANSPORT-SHADOW": ("transport_shadow", True), "TRANSPORT-DRIVE": ("transport_drive", True),
 }
 DRIVE_REQUIRED = {"karafun_end", "media_end"}
 DRIVE_OPTIONAL = {"watchdog"}
 
 _HINTS = {
+    "queue.json": "add or change a request so the queue is saved",
+    "singer_history.json": "finish a song so the singer history is saved",
+    "singer_preferences.json": "change a singer preference",
+    "remote_request_tombstones.json": "delete or complete a request",
+    "bg_playlist.json": "change the background-music playlist",
+    "tracks.json": "rescan the library",
+    "settings.json": "change a setting",
     "load": "start the app (settings are read at launch)",
     "defaults": "start the app on a profile that is missing at least one default",
     "save": "change any setting so the app saves settings.json",
@@ -129,7 +141,7 @@ def _analyse(rows):
 
     for name, (required, optional) in SHADOWS.items():
         r = Report(name)
-        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op"}[name]
+        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op", "STORE-SHADOW": "store"}[name]
         for t, msg in by_tag.get(name, []):
             kv = _kv(msg)
             if msg.startswith("enabled"):

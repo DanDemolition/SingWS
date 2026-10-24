@@ -210,7 +210,7 @@ class SaveDifferentialTests(unittest.TestCase):
             "SETTINGS_PATH": Path(td) / "settings.json", "TRACKS_PATH": Path(td) / "tracks.json",
             "_JSON_WRITE_DIGESTS": {}, "_perf_record": lambda *a, **k: None,
             "_settings_shadow_for": lambda value: shadow, "calls": calls,
-            "fcntl": fcntl, "_fcntl": fcntl, "_errno": errno, "_DURABLE_JSON_WRITES": True,
+            "fcntl": fcntl, "_fcntl": fcntl, "_errno": errno, "_DURABLE_JSON_WRITES": True, "_store_shadow_submit": lambda *a, **k: None,
         }
         app_function("_fsync_durable", ns)
         app_function("_fsync_directory", ns)

@@ -172,7 +172,16 @@ crash-safe, now fixed with the same shared `_atomic_write_text` and byte-identic
 overwrite; an emptied file would have let host-deleted requests come back) and the live `bg_playlist.json`. Still not power-loss
 durable and deliberately left: the loudness cache (`loudness.json` snapshot, temp+rename without flush, and its append-only checkpoint
 only `flush()`es) and the SQLite databases (`singws.db` uses WAL + `synchronous=NORMAL`, `phrase_markers.db` the default without
-`fullfsync`); all are regenerable analysis data, so a power cut costs a re-scan and not user data. Next, in order: D2 history/stats, D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
+`fullfsync`); all are regenerable analysis data, so a power cut costs a re-scan and not user data. D2 STORE SHADOW (2026-10-23, DONE for now; shadow only): the history, preferences, queue, tracks, tombstone and playlist stores use the same
+write path as settings, so D2 generalises D1's proof instead of adding rules. `store_shadow.py` + setting `store_shadow` (default OFF, read at launch):
+after the app has DURABLY written any store (the hook sits in the `else:` branch of `_atomic_write_text`, so it can never delay, fail or precede a
+save), the exact bytes it wrote go to ONE background worker (bounded queue of 4; when busy the newest check is dropped and counted, never queued
+without limit). Rust must parse those bytes and rewrite them identically under a known layout (indent=2 +/- newline, compact +/- newline, default
+separators); the log says which layout matched per store. Singer history is ~1 MB, so the check is never on the GUI thread; measured: submitting a
+1 MB store adds under 25 ms (bound; typically about the cost of a queue put) to the save. The report tool has a STORE-SHADOW row (required: queue.json;
+optional: settings, singer_history, singer_preferences, tombstones, bg_playlist, tracks). Nothing else about history/stats is ported: the per-singer
+counts and last-sang rules are application logic in Python, not store mechanics, and belong with Stage B/E when the queue/rotation model is owned.
+Next, in order: D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
 client. Each needs the same shadow-then-flag treatment and must never open a live profile for writing during tests.
 
 ## Stage E: Rust-owned UI and no-Python package

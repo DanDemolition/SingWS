@@ -24,6 +24,9 @@ FULL = [
     L("PLAN-SHADOW", "enabled available=1"),
     L("PLAN-SHADOW", "decision op=window kind=bounds agree=1"),
     L("PLAN-SHADOW", "decision op=crossfade kind=natural_fade agree=1"),
+    L("STORE-SHADOW", "enabled available=1"),
+    L("STORE-SHADOW", "decision store=queue.json layout=indent2+newline agree=1"),
+    L("STORE-SHADOW", "decision store=singer_history.json layout=indent2+newline agree=1"),
     L("TRANSPORT-SHADOW", "enabled available=1"),
     L("TRANSPORT-SHADOW", "session 1 started source=karafun external=1 duration=240.0"),
     L("TRANSPORT-SHADOW", "session 1 summary events=40 total_mismatches=0"),
@@ -67,6 +70,17 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("RESULT: nothing disagreed, but not every decision type was exercised", out)
         self.assertEqual(run(lines, "--require-all")[0], 3)
 
+    def test_the_store_shadow_needs_the_queue_store_and_reports_the_others_as_optional(self):
+        lines = [LAUNCH, L("STORE-SHADOW", "enabled available=1"), L("STORE-SHADOW", "decision store=settings.json layout=indent2+newline agree=1")]
+        self.assertEqual(verdicts(lines)["STORE-SHADOW"], "PARTIAL")
+        status, out = run(lines)
+        self.assertIn("not seen: queue.json  (add or change a request so the queue is saved)", out)
+        self.assertEqual(verdicts([LAUNCH] + FULL)["STORE-SHADOW"], "CLEAN")
+        bad = [LAUNCH] + FULL + [L("STORE-SHADOW", "MISMATCH store=singer_history.json no_layout_reproduces_the_bytes tried=indent2 bytes=9")]
+        self.assertEqual(verdicts(bad)["STORE-SHADOW"], "DISAGREED")
+        worker = [LAUNCH] + FULL + [L("STORE-SHADOW", "worker error store=queue.json: ValueError('x')")]
+        self.assertEqual(verdicts(worker)["STORE-SHADOW"], "ERROR")
+
     def test_rare_optional_decisions_do_not_make_a_shadow_partial(self):
         v = verdicts([LAUNCH] + FULL)
         self.assertEqual(v["QUEUE-SHADOW"], "CLEAN")  # id_reuse / terminal_reuse never happened and that is fine
@@ -78,7 +92,7 @@ class VerdictTests(unittest.TestCase):
 
     def test_a_shadow_that_never_logged_is_not_enabled(self):
         v = verdicts([LAUNCH])
-        self.assertEqual({v[k] for k in ("SETTINGS-SHADOW", "QUEUE-SHADOW", "PLAN-SHADOW", "TRANSPORT-SHADOW")}, {"NOT ENABLED"})
+        self.assertEqual({v[k] for k in ("SETTINGS-SHADOW", "QUEUE-SHADOW", "PLAN-SHADOW", "STORE-SHADOW", "TRANSPORT-SHADOW")}, {"NOT ENABLED"})
         self.assertEqual(v["TRANSPORT-DRIVE"], "NOT EXERCISED")
 
     def test_settings_tell_a_switched_off_shadow_from_one_nothing_reached(self):
@@ -173,6 +187,7 @@ class RealFormatTests(unittest.TestCase):
             "queue_shadow.py": ["decision branch={branch} answer={got} agree=1", "MISMATCH request_id="],
             "plan_shadow.py": ["decision op={op} kind={kind} agree=1", "MISMATCH op={op}"],
             "transport_shadow.py": ["MISMATCH", "total_mismatches=", "started source="],
+            "store_shadow.py": ["decision store={store} layout={layout} agree=1", "MISMATCH store={store}"],
         }
         for fname, needles in expectations.items():
             text = (root / fname).read_text(encoding="utf-8")

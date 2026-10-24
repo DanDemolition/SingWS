@@ -58,7 +58,7 @@ class Harness:
             "_fcntl": FcntlProxy(), "_errno": errno, "_DURABLE_JSON_WRITES": durable,
             "SETTINGS_PATH": self.td / "settings.json", "TRACKS_PATH": self.td / "tracks.json",
             "_JSON_WRITE_DIGESTS": {}, "_perf_record": lambda *a, **k: None,
-            "_settings_shadow_for": lambda value: None,
+            "_settings_shadow_for": lambda value: None, "_store_shadow_submit": lambda *a, **k: None,
         }
         app_function("_fsync_durable", self.ns)
         app_function("_fsync_directory", self.ns)
@@ -211,7 +211,7 @@ class RealRunTests(unittest.TestCase):
                 "json": json, "os": os, "tempfile": tempfile, "hashlib": hashlib, "time": time, "Path": Path, "_fcntl": fcntl,
                 "_errno": errno, "_DURABLE_JSON_WRITES": True, "SETTINGS_PATH": Path(td) / "settings.json",
                 "TRACKS_PATH": Path(td) / "tracks.json", "_JSON_WRITE_DIGESTS": {}, "_perf_record": lambda *a, **k: None,
-                "_settings_shadow_for": lambda v: None,
+                "_settings_shadow_for": lambda v: None, "_store_shadow_submit": lambda *a, **k: None,
             }
             app_function("_fsync_durable", ns)
             app_function("_fsync_directory", ns)
@@ -230,7 +230,7 @@ class RealRunTests(unittest.TestCase):
                 "json": json, "os": os, "tempfile": tempfile, "hashlib": hashlib, "time": time, "Path": Path, "_fcntl": fcntl,
                 "_errno": errno, "_DURABLE_JSON_WRITES": True, "SETTINGS_PATH": Path(td) / "settings.json",
                 "TRACKS_PATH": Path(td) / "tracks.json", "_JSON_WRITE_DIGESTS": {}, "_perf_record": lambda *a, **k: None,
-                "_settings_shadow_for": lambda v: None,
+                "_settings_shadow_for": lambda v: None, "_store_shadow_submit": lambda *a, **k: None,
             }
             app_function("_fsync_durable", ns)
             app_function("_fsync_directory", ns)

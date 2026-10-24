@@ -329,3 +329,21 @@ NOT EXERCISED (a smoke launch plays nothing), which is the correct reading.
   - arm64 `93f87b70e8d209c67897f90cbcd10d2dadd67f406141f9ed3d7da41ca4383cfd`
   - x86_64 `11fb369bae3dd4972a0090dcc8e79c743e6c25e857644c69be784cce9f618803`
   - The dev Mac's INSTALLED app is still the D1 + durable-writes build (`bf1350bf...`); it does not have the KaraFun explicit-end handling.
+
+## Stage D2 store shadow — 2026-10-23
+
+`store_shadow.py` + setting `store_shadow` (default off; read at launch) + the hook in the `else:` branch of the app's `_atomic_write_text`. After any store is
+durably written, a single background worker (bounded queue of 4, newest dropped and counted when busy) asks Rust to reproduce the exact bytes under a known
+layout. 20 tests (fake-library behaviour, the real library on every layout the app writes, the app's real `_atomic_write_text`/`_save_json_atomic` with the
+shadow attached for 7 stores, a 1 MB store adds under 25 ms to a save, hook ordering and wiring); 7 of 7 deliberately broken variants caught (one needed an extra
+test of the worker's own resilience). The report tool gained a STORE-SHADOW row (17 + 1 tests). Whole suite: 336 Python tests, Rust workspace green, all parity
+tools and the local acceptance unchanged; live log and live settings untouched by the runs.
+
+Package gate (both architectures, isolated profile, every shadow on, dylibs rebuilt): exit 0, 3 clean-shutdown lines, 0 tracebacks, 5 of 5 library exports, all
+five shadow modules bundled, `[STORE-SHADOW]` checked deferred_remote_adds.json, queue.json, settings.json, singer_history.json and singer_preferences.json with
+0 MISMATCH and 0 errors, settings shadow still load/defaults/save agreed, durable-write evidence as before.
+  - arm64 `a0db38e26628a20949041cc1e3739ca9b46d3d78abe2235c2df5615fd7e73319`
+  - x86_64 `d5362ab1cf37cda9fc294b2f6ce24dda9754c5851792b01df43151d49778638e`
+The dev Mac's installed app is still the D1 + durable-writes build; it has neither the KaraFun explicit-end handling nor the store shadow.
+Note: a first run of the combined Python suite showed 14 errors (NameError: `_store_shadow_submit`) in the older tests that compile the app's real writer into a
+private namespace; the app was fine, those namespaces simply lacked the new helper. Fixed by giving them a no-op stand-in.
