@@ -414,3 +414,14 @@ Verified: every file of the installed app (2,105 files) hashes identically to th
 executable `1dd64a7e594d3613...`, dylib `267c380a8b24e801...`. The app was closed. The settings flag `publish_live_state` was already true (backup `~/SingWS/settings.json.bak-20261023-232802-publish-live-state`).
 Rollbacks: `/Applications/SingWS-1.0.1.4-pre-live-state-20261023.app` (the previous store-shadow build, exe `4e7277edb4cb5ce4...`, dylib `a886aba258e78a9d...`) and
 `local-installs/installed-before-live-state/SingWS-installed-store-shadow.zip` (ditto archive, SHA-256 e5d60a16ae823001550e3bf16a0f14dd17c70361fb935afc2ce581283bc9ee92, 8,291 entries).
+
+## Package gate with live controls (2026-10-24, nothing installed)
+
+Both signed builds (the working tree after commit 3f2bb73 plus the `[SHELL-CMD] ready` launch line and the SHELL-COMMANDS report row) built, passed `codesign --verify --deep --strict`, launched from the mounted DMG with isolated `SINGWS_HOME`, every shadow flag,
+`publish_live_state` and `shell_commands: "dry_run"` on, and shut down cleanly (3 shutdown lines, 0 tracebacks) on arm64 and Intel (x86_64 under Rosetta). Dylib exports 6 of 6; shadow modules bundled; SETTINGS-SHADOW CLEAN; STORE-SHADOW 5 stores, 0 mismatches; WIRE-SHADOW saw `release.json`, 0 mismatches;
+`live_state.json` written once; **`[SHELL-CMD] ready mode=dry_run queue_sig=<16 hex> singers=0` is in both smoke logs** (the switch is read and the fingerprint is computed inside the packaged app), 0 commands (no relay in a smoke run), and the report's new SHELL-COMMANDS row says NOT EXERCISED, as it should.
+
+| DMG | SHA-256 |
+|---|---|
+| SingWS-1.0.1.4-arm64-installer.dmg | dc0845297456bcb5ba9748f1ae118bf94c4f3d2e1e491329711334e3762895c9 |
+| SingWS-1.0.1.4-x86_64-installer.dmg | 049ad3eef6a00115d235ff1b0ccf6a9c105dafb4f81077936813de3380048d76 |

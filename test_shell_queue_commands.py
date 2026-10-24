@@ -391,6 +391,37 @@ class GuardTests(unittest.TestCase):
         self.assertIn('args["_request_id"] = f"http:{command_id}"', src)
         self.assertIn('"queue_sig": queue_sig', src)
 
+    def test_a_launch_line_says_the_switch_is_on_and_is_silent_when_off(self):
+        import contextlib
+        import io
+        import logging
+
+        m = module()
+        for mode, expect in (("dry_run", True), ("apply", True), ("off", False), ("garbage", False)):
+            h = self.harness(mode)
+            records = []
+
+            class Grab(logging.Handler):
+                def emit(self, record):
+                    records.append(record.getMessage())
+
+            handler = Grab()
+            logging.getLogger().addHandler(handler)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    m.KaraokeApp._log_shell_commands_ready(h.app)
+            finally:
+                logging.getLogger().removeHandler(handler)
+            seen = [t for t in records + out.getvalue().splitlines() if "[SHELL-CMD] ready" in t]
+            self.assertEqual(bool(seen), expect, (mode, seen))
+            if expect:
+                self.assertIn(f"mode={mode}", seen[0])
+                self.assertIn(f"queue_sig={h.app._queue_signature()}", seen[0])
+                self.assertIn("singers=2", seen[0])
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        i = src.index('self._merge_duplicate_rotation_singers(reason="load_data")')
+        self.assertIn("self._log_shell_commands_ready()", src[i:i + 300], "the line is written right after the queue is loaded and merged")
+
     def test_the_old_button_handlers_are_untouched_by_this_step(self):
         # The design keeps the handlers as they were until the command path has run in a dry-run show.
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")

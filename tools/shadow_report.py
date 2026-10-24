@@ -20,6 +20,9 @@ Shadows and the log lines they write:
   WIRE-SHADOW       decision endpoint=<file> kind=get|form|json agree=1   (what requests sent vs what the Rust request builder would send)
   TRANSPORT-SHADOW  session N summary ... total_mismatches=M    (KaraFun and native song lifecycle)
   TRANSPORT-DRIVE   decision=karafun_end|media_end|watchdog ... disagreement=0|1   (Rust-vs-Python drive decisions)
+  SHELL-COMMANDS    [SHELL-CMD] ready mode=... then one line per command from the Rust shell (setting shell_commands: off | dry_run | apply).
+                    CLEAN = at least one command and no defect; ERROR = an app-side failure, clock skew, a malformed command, or a command APPLIED
+                    during a dry run. Refusals that are normal on a live show (stale_view, unknown_singer/entry, expired) are counted, not errors.
 "Decision" lines are written once per decision type per app launch; MISMATCH lines every time.
 
 By default only the LAST app launch in the newest log is read (the show you just ran); --all reads every launch in the given logs.
@@ -59,6 +62,7 @@ SETTING_KEYS = {
     "SETTINGS-SHADOW": ("settings_shadow", False), "QUEUE-SHADOW": ("queue_shadow", False), "PLAN-SHADOW": ("plan_shadow", False),
     "STORE-SHADOW": ("store_shadow", False), "WIRE-SHADOW": ("wire_shadow", False),
     "TRANSPORT-SHADOW": ("transport_shadow", True), "TRANSPORT-DRIVE": ("transport_drive", True),
+    "SHELL-COMMANDS": ("shell_commands", False),  # a string setting: "dry_run" or "apply" means on
 }
 DRIVE_REQUIRED = {"karafun_end", "media_end"}
 DRIVE_OPTIONAL = {"watchdog"}
@@ -102,6 +106,7 @@ class Report:
     disagreements: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     detail: str = ""
+    modes: Counter = field(default_factory=Counter)
 
 
 def read_lines(paths, last_launch_only):
@@ -131,6 +136,12 @@ def analyse(rows, settings=None):
         for r in reports:
             key, default = SETTING_KEYS[r.name]
             on = bool(settings.get(key, default))
+            if r.name == "SHELL-COMMANDS":
+                configured = str(settings.get(key, "off") or "off").strip().lower()
+                on = configured in ("dry_run", "apply")
+                if configured == "dry_run" and r.modes.get("apply"):
+                    r.errors.append(f"{r.modes['apply']} command(s) were APPLIED although shell_commands was dry_run in settings.json")
+                    r.verdict = "ERROR"
             if r.name == "TRANSPORT-DRIVE":  # the drive has one flag per decision
                 on = on or bool(settings.get("transport_drive_media_end", False)) or bool(settings.get("transport_drive_watchdog", False))
             if r.verdict in ("NOT ENABLED", "NOT EXERCISED") and not r.seen:
@@ -222,6 +233,33 @@ def _analyse(rows):
     if not r.enabled and not r.errors:
         r.verdict = "NOT EXERCISED"  # the drive flags live in settings; no decision line means no song reached those decisions
     reports.append(r)
+
+    # commands from the Rust shell (setting shell_commands)
+    r = Report("SHELL-COMMANDS")
+    modes, outcomes, actions = Counter(), Counter(), Counter()
+    for t, msg in by_tag.get("SHELL-CMD", []):
+        kv = _kv(msg)
+        if msg.startswith("ready"):
+            r.enabled = True
+            modes[kv.get("mode", "?")] += 0
+            continue
+        if "action" not in kv:
+            continue
+        r.enabled = True
+        mode, ok = kv.get("mode", "?"), kv.get("ok", "?")
+        message = msg.split("message=", 1)[1].strip() if "message=" in msg else ""
+        modes[mode] += 1
+        actions[kv["action"]] += 1
+        r.seen.add(kv["action"])
+        word = message.split(":")[0].split(" ")[0]
+        outcomes[(ok, word)] += 1
+        if message.startswith("failed:") or message in ("clock_skew",) or message.startswith(("missing_", "bad_")):
+            r.errors.append(f"{t} {msg[:160]}")
+    r.modes = +modes
+    r.detail = ("; ".join(f"{m}: {n} command(s)" for m, n in sorted(modes.items()) if n) or "no commands") + (
+        "; outcomes: " + ", ".join(f"{w}={n}" for (ok, w), n in sorted(outcomes.items(), key=lambda kv: -kv[1])) if outcomes else "")
+    r.verdict = _verdict(r, set())
+    reports.append(r)
     return reports
 
 
@@ -260,10 +298,18 @@ def render(reports):
     return "\n".join(out)
 
 
+# rows that only count when their switch is on: remote shell commands are a feature, not one of the Rust shadows every show must exercise
+OPTIONAL_ROWS = {"SHELL-COMMANDS"}
+
+
+def counted(reports):
+    return [r for r in reports if not (r.name in OPTIONAL_ROWS and r.verdict == "NOT ENABLED")]
+
+
 def exit_status(reports, require_all):
     if any(r.verdict in ("DISAGREED", "ERROR") for r in reports):
         return 1
-    if require_all and any(r.verdict != "CLEAN" for r in reports):
+    if require_all and any(r.verdict != "CLEAN" for r in counted(reports)):
         return 3
     return 0
 
@@ -294,7 +340,7 @@ def main(argv=None):
     worst = [r for r in reports if r.verdict in ("DISAGREED", "ERROR")]
     if worst:
         print(f"RESULT: {len(worst)} shadow(s) need attention: {', '.join(r.name for r in worst)}")
-    elif all(r.verdict == "CLEAN" for r in reports):
+    elif all(r.verdict == "CLEAN" for r in counted(reports)):
         print("RESULT: every shadow saw all its expected decisions and none disagreed")
     else:
         print("RESULT: nothing disagreed, but not every decision type was exercised (see 'not seen')")

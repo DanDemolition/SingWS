@@ -39,6 +39,8 @@ FULL = [
 
 
 def run(lines, *argv):
+    if "--settings" not in argv:
+        argv = (*argv, "--settings", "/nonexistent/settings.json")  # never read the machine's real settings.json from a test
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "singws_2026-10-23.log"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -55,9 +57,77 @@ def verdicts(lines, *argv):
         return {r.name: r.verdict for r in sr.analyse(sr.read_lines([str(path)], "--all" not in argv))}
 
 
+SHELL_READY = L("SHELL-CMD", "ready mode=dry_run queue_sig=0123456789abcdef singers=3")
+
+
+def shell(msg, t="10:06:00"):
+    return L("SHELL-CMD", msg, t)
+
+
+class ShellCommandRowTests(unittest.TestCase):
+    def verdict(self, lines, settings=None):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "x.log"
+            path.write_text("\n".join([LAUNCH] + lines) + "\n", encoding="utf-8")
+            rows = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True), settings)}
+        return rows["SHELL-COMMANDS"]
+
+    def test_off_by_default_and_it_does_not_hold_back_require_all(self):
+        self.assertEqual(self.verdict(FULL).verdict, "NOT ENABLED")
+        self.assertEqual(self.verdict(FULL, {"shell_commands": "off"}).verdict, "NOT ENABLED")
+        status, out = run([LAUNCH] + FULL, "--require-all")
+        self.assertEqual(status, 0, out)
+        self.assertIn("SHELL-COMMANDS", out)
+
+    def test_on_but_unused_is_not_exercised_and_then_require_all_notices(self):
+        self.assertEqual(self.verdict([SHELL_READY]).verdict, "NOT EXERCISED")
+        self.assertEqual(self.verdict(FULL, {"shell_commands": "dry_run"}).verdict, "NOT EXERCISED")
+        with tempfile.TemporaryDirectory() as td:
+            settings = Path(td) / "settings.json"
+            settings.write_text('{"shell_commands": "dry_run"}')
+            status, _ = run([LAUNCH] + FULL + [SHELL_READY], "--require-all", "--settings", str(settings))
+        self.assertEqual(status, 3)
+
+    def test_dry_run_commands_are_clean_and_counted(self):
+        lines = [SHELL_READY,
+                 shell("id=1 action=queue.move_singer mode=dry_run ok=True message=dry_run: would queue.move_singer"),
+                 shell("id=2 action=play_pause mode=dry_run ok=True message=dry_run: would play_pause"),
+                 shell("id=3 action=queue.move_singer mode=dry_run ok=False message=stale_view"),
+                 shell("id=4 action=queue.remove_song mode=dry_run ok=False message=unknown_entry"),
+                 shell("id=5 action=queue.noop mode=dry_run ok=True message=noop")]
+        r = self.verdict(lines, {"shell_commands": "dry_run"})
+        self.assertEqual(r.verdict, "CLEAN")
+        self.assertEqual(r.seen, {"queue.move_singer", "play_pause", "queue.remove_song", "queue.noop"})
+        self.assertIn("dry_run: 5 command(s)", r.detail)
+        self.assertIn("stale_view=1", r.detail, "normal refusals are counted, not errors")
+        self.assertEqual(r.errors, [])
+
+    def test_defects_are_errors(self):
+        for message in ("failed: boom", "clock_skew", "missing_sent_at", "bad_direction"):
+            r = self.verdict([SHELL_READY, shell(f"id=1 action=queue.move_singer mode=dry_run ok=False message={message}")], {"shell_commands": "dry_run"})
+            self.assertEqual(r.verdict, "ERROR", message)
+
+    def test_an_applied_command_during_a_dry_run_is_an_error(self):
+        lines = [SHELL_READY, shell("id=1 action=queue.move_singer mode=apply ok=True message=moved")]
+        r = self.verdict(lines, {"shell_commands": "dry_run"})
+        self.assertEqual(r.verdict, "ERROR")
+        self.assertIn("APPLIED", r.errors[0])
+        self.assertEqual(self.verdict(lines, {"shell_commands": "apply"}).verdict, "CLEAN", "in apply mode that is exactly what is expected")
+        status, _ = run([LAUNCH] + FULL + lines)
+        self.assertEqual(status, 0, "without settings the report cannot know it was a dry run")
+
+    def test_only_the_last_launch_counts(self):
+        lines = [shell("id=1 action=queue.noop mode=dry_run ok=True message=noop"), LAUNCH, SHELL_READY]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "x.log"
+            path.write_text("\n".join([LAUNCH] + lines) + "\n", encoding="utf-8")
+            rows = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True))}
+        self.assertEqual(rows["SHELL-COMMANDS"].verdict, "NOT EXERCISED")
+
+
 class VerdictTests(unittest.TestCase):
     def test_a_full_clean_session_is_clean_everywhere_and_exits_zero(self):
-        v = verdicts([LAUNCH] + FULL)
+        v = {k: x for k, x in verdicts([LAUNCH] + FULL).items() if k not in sr.OPTIONAL_ROWS}
         self.assertEqual(set(v.values()), {"CLEAN"}, v)
         status, out = run([LAUNCH] + FULL, "--require-all")
         self.assertEqual(status, 0, out)

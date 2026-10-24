@@ -49733,6 +49733,12 @@ class KaraokeApp(QWidget):
 
     _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer")
 
+    def _log_shell_commands_ready(self) -> None:
+        """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
+        mode = self._shell_commands_mode()
+        if mode != "off":
+            _diag(f"[SHELL-CMD] ready mode={mode} queue_sig={self._queue_signature()} singers={len(self.queue or [])}")
+
     def _shell_commands_mode(self) -> str:
         mode = str((getattr(self, "settings", None) or {}).get("shell_commands", "off") or "off").strip().lower()
         return mode if mode in ("dry_run", "apply") else "off"
@@ -50740,6 +50746,10 @@ class KaraokeApp(QWidget):
         # duplicates never survive a restart.
         try:
             self._merge_duplicate_rotation_singers(reason="load_data")
+        except Exception:
+            pass
+        try:
+            self._log_shell_commands_ready()
         except Exception:
             pass
 
