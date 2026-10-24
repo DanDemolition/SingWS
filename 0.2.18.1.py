@@ -1848,6 +1848,7 @@ APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / "SingWS"))
 APP_USER_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_PATH = APP_USER_DIR / "settings.json"
 QUEUE_PATH = APP_USER_DIR / "queue.json"
+LIVE_STATE_PATH = APP_USER_DIR / "live_state.json"  # who is on stage right now; written for the read-only Rust shell (setting publish_live_state)
 TRACKS_PATH = APP_USER_DIR / "tracks.json"
 SINGER_PREFS_PATH = APP_USER_DIR / "singer_preferences.json"
 SINGER_HISTORY_PATH = APP_USER_DIR / "singer_history.json"
@@ -4109,6 +4110,7 @@ DEFAULTS = {
     "transport_drive": True,
     # A2 for the native media-end decision. Same contract as transport_drive: Rust answers only when it agrees with the
     # retained Python oracle; Python wins every disagreement. Default off until its own local and package gates pass.
+    "publish_live_state": False,  # write live_state.json (who is on stage) for the read-only Rust shell; best effort, never affects the show
     "transport_drive_media_end": False,
     # A2 for the KaraFun duration-watchdog decision ("end unverified: tell the operator to press Complete"). Same
     # contract: Rust answers only when it agrees with the retained Python oracle; Python wins every disagreement.
@@ -21013,7 +21015,8 @@ class RotationView(QMainWindow):
             )
             now_strip = ""
             if now_row is not None:
-                song = str(now_row.get("song", "") or "")
+                # The bar names artist and title, so it uses the combined text (the table rows carry the split fields).
+                song = str(now_row.get("combined", "") or now_row.get("song", "") or "")
                 now_strip = f"{now_row.get('singer', '')} - {song}" if song else str(now_row.get("singer", ""))
             elif now_singing_text and now_singing_text != "Singer Rotation":
                 now_strip = str(now_singing_text)
@@ -21044,6 +21047,17 @@ class RotationView(QMainWindow):
             self.now_singing_subtitle.setText(
                 f"Live on the karaoke stage  •  {value}" if value else "Live on the karaoke stage"
             )
+
+    def _queue_entry_artist_title(self, entry):
+        """(artist, title) of a queue entry, from the main window's own splitter.
+
+        update_rotation() always called this, but only the main window defined it; the AttributeError was swallowed by a try/except, so
+        the rail rows never carried a separate artist and song."""
+        owner = self.parent()
+        split = getattr(owner, "_queue_entry_artist_title", None)
+        if callable(split):
+            return split(entry)
+        return "", ""
 
     def display_name_for_queue_entry(self, entry, song_path, tracks):
         """Prefer queue metadata, especially for synthetic streaming paths."""
@@ -34040,6 +34054,41 @@ class KaraokeApp(QWidget):
             "updated_at": int(time.time()),
         }
 
+    def _publish_live_state(self):
+        """Write live_state.json: who is on stage right now, for the read-only Rust shell (setting `publish_live_state`, default off).
+
+        Best effort: never raises, writes only when the content changed, and uses a plain temp-file rename (no fsync: it is a status
+        file, rebuilt at the next change). The pid lets a reader ignore the file once this process is gone."""
+        try:
+            if not bool(self.settings.get("publish_live_state", False)):
+                return
+            playing = bool(getattr(self, "karaoke_playing", False))
+            state = {
+                "version": 1,
+                "pid": os.getpid(),
+                "playing": playing,
+                "singer_id": str(getattr(self, "_current_karaoke_singer_id", "") or "") if playing else "",
+                "singer": str(getattr(self, "_current_karaoke_singer_display", "") or "").strip(),
+                "title": str(getattr(self, "_current_karaoke_title", "") or "").strip() if playing else "",
+            }
+            sig = json.dumps(state, sort_keys=True)
+            if sig == getattr(self, "_live_state_sig", None):
+                return
+            state["updated_at"] = int(time.time())
+            tmp = LIVE_STATE_PATH.with_name(f".{LIVE_STATE_PATH.name}.{os.getpid()}.tmp")
+            try:
+                tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+                os.replace(tmp, LIVE_STATE_PATH)
+            except Exception:
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+                raise
+            self._live_state_sig = sig
+        except Exception:
+            pass
+
     def _schedule_host_control_state_sync(self):
         try:
             app = QApplication.instance()
@@ -34057,6 +34106,10 @@ class KaraokeApp(QWidget):
             self._sync_host_control_state_now()
 
     def _sync_host_control_state_now(self):
+        try:
+            self._publish_live_state()
+        except Exception:
+            pass
         if bool(getattr(self, "_app_closing", False)) or bool(getattr(self, "_host_control_state_inflight", False)):
             return
         remaining = float(getattr(self, "_host_control_state_retry_at", 0.0) or 0.0) - time.monotonic()
@@ -42959,6 +43012,10 @@ class KaraokeApp(QWidget):
 
     def update_rotation_view(self):
         _perf_t0 = time.perf_counter()
+        try:
+            self._publish_live_state()
+        except Exception:
+            pass
         try:
             if self.rotation_view is None:
                 return

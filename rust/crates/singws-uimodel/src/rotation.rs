@@ -2,9 +2,10 @@
 //! Reproduces `RotationView.update_rotation` (rows, singer count, title with the rotation-start marker, up-next/on-deck lineup, now/next strips), the
 //! queue's load-time migration, and the two display-name lookups (`display_name_for_queue_entry`, the host's `lookup_display_name`).
 //!
-//! Two behaviours of the PyQt code are reproduced on purpose and are worth knowing:
-//!  * `RotationView` calls `self._queue_entry_artist_title`, a method only the main window has. The call sits inside `try/except`, so the rail's
-//!    artist column is ALWAYS empty and the song cell carries the combined "Artist • Title" text. The port does the same.
+//! Notes on the PyQt code this follows:
+//!  * `RotationView` used to call `self._queue_entry_artist_title`, a method only the main window had; the AttributeError was swallowed, so the table rows never
+//!    carried a separate artist. That was fixed in the app (RotationView now delegates to the main window's splitter) and this port follows the fixed code. The visible
+//!    NOW SINGING bar keeps using the combined "Artist • Title" text.
 //!  * a queue holding two singers whose names are equal ignoring case and spacing is merged by the app on load (`_merge_duplicate_rotation_singers`);
 //!    that merge is not ported, so such a queue is DECLINED rather than shown differently from the app.
 
@@ -192,6 +193,102 @@ fn display_name(entry: &Value, path_value: &Value, inp: &Inputs) -> R<String> {
     lookup_display_name(&text_of(path_value)?, inp)
 }
 
+/// What the host's `lookup_display_name(path, artist_title_only=False)` gives: the full display text, or "Python raised".
+enum Full {
+    Text(String),
+    Raised,
+}
+
+/// `str(value or "")` for the display column of a song-index row or a library entry
+fn display_text(v: &Value) -> R<String> {
+    py_str_or_empty(v)
+}
+
+fn lookup_full(path: &str, inp: &Inputs) -> R<Full> {
+    if let Some(db) = inp.db {
+        if db.exists() {
+            let con = singws_db::open_readonly(db)?;
+            let row = con
+                .query_row("SELECT display FROM songs WHERE path = ?", [path], |r| {
+                    r.get_ref(0).map(|v| match v {
+                        rusqlite::types::ValueRef::Null => Some(Value::Null),
+                        rusqlite::types::ValueRef::Text(t) => Some(Value::String(String::from_utf8_lossy(t).into_owned())),
+                        rusqlite::types::ValueRef::Integer(i) => Some(Value::from(i)),
+                        rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f).map(Value::Number),
+                        rusqlite::types::ValueRef::Blob(_) => None,
+                    })
+                })
+                .ok();
+            match row {
+                Some(Some(v)) => return Ok(Full::Text(display_text(&v)?)), // a row that exists answers, even with a NULL display
+                Some(None) => return decline("a song-index display of an unsupported type"),
+                None => {}
+            }
+        }
+    }
+    let lowered = py_lower(path)?;
+    for t in inp.tracks {
+        let Some(obj) = t.as_object() else { return Ok(Full::Raised) };
+        let tp = py_str_or_empty(obj.get("path").unwrap_or(&Value::Null))?;
+        if py_lower(&tp)? == lowered {
+            return Ok(Full::Text(match obj.get("display") {
+                None => basename(path).to_string(),
+                Some(v) => display_text(v)?,
+            }));
+        }
+    }
+    Ok(Full::Text(basename(path).to_string()))
+}
+
+/// `_split_display_artist_title_disc(display)` without the disc
+fn split_display(display: &str) -> (String, String) {
+    let dn = py_strip(display);
+    if dn.is_empty() {
+        return (String::new(), String::new());
+    }
+    let parts: Vec<&str> = dn.split(" - ").map(py_strip).collect();
+    if parts.len() >= 3 {
+        (parts[0].to_string(), py_strip(&parts[1..parts.len() - 1].join(" - ")).to_string())
+    } else if parts.len() == 2 {
+        (parts[0].to_string(), parts[1].to_string())
+    } else {
+        (String::new(), dn.to_string())
+    }
+}
+
+/// The main window's `_queue_entry_artist_title(entry)`
+fn artist_title(entry: &Value, inp: &Inputs) -> R<(String, String)> {
+    let mut artist = py_strip(&py_str_or_empty(get(entry, "artist"))?).to_string();
+    let mut title = py_strip(&py_str_or_empty(get(entry, "title"))?).to_string();
+    if !artist.is_empty() && !title.is_empty() {
+        return Ok((artist, title));
+    }
+    // `_queue_entry_primary_path`: the first element of a list, or the value itself, as text
+    let song_info = get(entry, "song_info");
+    let path = match song_info {
+        Value::Array(a) => match a.first() {
+            Some(p) => py_str_or_empty(p)?,
+            None => return Ok((artist, title)), // IndexError inside the try: swallowed
+        },
+        other => py_str_or_empty(other)?,
+    };
+    if !path.is_empty() {
+        match lookup_full(&path, inp)? {
+            Full::Text(disp) => {
+                let (a2, t2) = split_display(&disp);
+                if artist.is_empty() {
+                    artist = a2;
+                }
+                if title.is_empty() {
+                    title = t2;
+                }
+            }
+            Full::Raised => {}
+        }
+    }
+    Ok((py_strip(&artist).to_string(), py_strip(&title).to_string()))
+}
+
 pub fn view(queue: &[Value], inp: &Inputs) -> R<View> {
     let mut rows: Vec<Row> = Vec::new();
     let mut ready: Vec<String> = Vec::new();
@@ -226,11 +323,15 @@ pub fn view(queue: &[Value], inp: &Inputs) -> R<View> {
             name = format!("{name}  •  Rotation start");
         }
         let text = format!("{num}. {singer_display}  •  {name}");
+        let (row_artist, row_song) = match artist_title(first, inp)? {
+            (a, t) if !a.is_empty() && !t.is_empty() => (a, t),
+            _ => (String::new(), name.clone()),
+        };
         rows.push(Row {
             number: num.to_string(),
             singer: singer_display.clone(),
-            song: name.clone(), // the artist/title split raises AttributeError in the app and is skipped: see the module comment
-            artist: String::new(),
+            song: row_song,
+            artist: row_artist,
             duet: truthy(duet_display),
             combined: name,
             text,
@@ -272,7 +373,9 @@ pub fn view(queue: &[Value], inp: &Inputs) -> R<View> {
     }
     let mut now_strip = String::new();
     if let Some(r) = now_row {
-        now_strip = if r.song.is_empty() { r.singer.clone() } else { format!("{} - {}", r.singer, r.song) };
+        // the bar names artist and title, so it uses the combined text
+        let shown = if !r.combined.is_empty() { &r.combined } else { &r.song };
+        now_strip = if shown.is_empty() { r.singer.clone() } else { format!("{} - {}", r.singer, shown) };
     } else if !inp.now_singing.is_empty() && inp.now_singing != "Singer Rotation" {
         now_strip = inp.now_singing.to_string();
     }
@@ -295,6 +398,35 @@ pub fn view(queue: &[Value], inp: &Inputs) -> R<View> {
         now_strip,
         next_strip,
     })
+}
+
+/// What the app publishes in `live_state.json` (setting `publish_live_state`): who is on stage right now.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LiveState {
+    pub playing: bool,
+    pub singer_id: String,
+    pub singer: String,
+    pub title: String,
+}
+
+fn process_alive(pid: i64) -> bool {
+    if pid <= 0 || pid > i32::MAX as i64 {
+        return false;
+    }
+    // SAFETY: kill with signal 0 only checks whether the process exists (and may be signalled).
+    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// `None` when there is no file, it is unreadable, it is from another version, or the app that wrote it is no longer running.
+pub fn load_live_state(path: &Path) -> Option<LiveState> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    if v.get("version").and_then(Value::as_i64) != Some(1) || !process_alive(v.get("pid").and_then(Value::as_i64)?) {
+        return None;
+    }
+    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    Some(LiveState { playing: v.get("playing").and_then(Value::as_bool).unwrap_or(false), singer_id: s("singer_id"), singer: s("singer"), title: s("title") })
 }
 
 /// Read `queue.json` (read-only) and migrate it.
@@ -371,8 +503,10 @@ mod tests {
         assert_eq!(v.rows[0].text, "1. B  •  P • Q");
         assert_eq!(v.rows[1].text, "2. D  •  Only Title");
         assert_eq!(v.count_label, "2 SINGERS");
-        assert_eq!(v.rows[0].artist, "", "the app's artist/title split never runs for this view");
-        assert_eq!(v.rows[0].song, "P • Q");
+        assert_eq!(v.rows[0].artist, "P", "the table row carries the artist on its own");
+        assert_eq!(v.rows[0].song, "Q", "and the title alone");
+        assert_eq!(v.rows[0].combined, "P • Q");
+        assert_eq!((v.rows[1].artist.as_str(), v.rows[1].song.as_str()), ("", "Only Title"), "an entry without both parts keeps the combined text");
         assert_eq!(view(&queue[..1], &inputs(&[], "x")).unwrap().count_label, "0 SINGERS");
         assert_eq!(view(&queue[3..], &inputs(&[], "x")).unwrap().count_label, "1 SINGER");
     }
@@ -452,11 +586,11 @@ mod tests {
         let mut inp = inputs(&[], "al");
         let v = view(&queue, &inp).unwrap();
         assert_eq!(v.rows.len(), 4, "not playing: nobody is hidden");
-        assert_eq!(v.up_next, ("Bo".into(), "X • Two".into()), "the singer on stage (compared ignoring case) is not 'up next'");
+        assert_eq!(v.up_next, ("Bo".into(), "Two\nX".into()), "the singer on stage (compared ignoring case) is not 'up next'; the detail is title then artist");
         assert_eq!(v.on_deck.0, "Cy");
         assert_eq!(v.next_singer, "Bo");
-        assert_eq!(v.now_strip, "Al - X • One");
-        assert_eq!(v.next_strip, "Bo - X • Two");
+        assert_eq!(v.now_strip, "Al - X • One", "the visible bar names artist and title");
+        assert_eq!(v.next_strip, "Bo - Two", "the (hidden) next strip uses the title line only");
         inp.playing = true;
         inp.active_singer_id = "a";
         inp.live_title = "  Live  ";
@@ -475,6 +609,57 @@ mod tests {
         assert_eq!(view(&queue, &inputs(&[], "Singer Rotation")).unwrap().now_strip, "");
         let blank = view(&queue, &inputs(&[], "")).unwrap();
         assert_eq!((blank.up_next.0.as_str(), blank.now_strip.as_str()), ("Al", ""), "with no one on stage the first two rows are up next and on deck");
+    }
+
+    #[test]
+    fn the_artist_title_split_uses_the_entry_then_the_librarys_display_text() {
+        let tracks = vec![
+            json!({"path": "/lib/a.zip", "display": "Band - Tune - KV9"}),
+            json!({"path": "/lib/b.zip", "display": "Band - Long - Name - Disc"}),
+            json!({"path": "/lib/c.zip", "display": "Just Two - Parts"}),
+            json!({"path": "/lib/d.zip", "display": "No dashes"}),
+            json!({"path": "/lib/e.zip"}),
+            json!({"path": "/lib/f.zip", "display": null}),
+        ];
+        let inp = inputs(&tracks, "");
+        let at = |entry: Value| artist_title(&entry, &inp).unwrap();
+        assert_eq!(at(json!({"artist": " A ", "title": " T ", "song_info": "/lib/a.zip"})), ("A".into(), "T".into()));
+        assert_eq!(at(json!({"song_info": "/lib/a.zip"})), ("Band".into(), "Tune".into()), "three parts: artist, title, disc");
+        assert_eq!(at(json!({"song_info": ["/lib/b.zip", "/lib/b.mp3"]})), ("Band".into(), "Long - Name".into()), "the middle parts rejoin");
+        assert_eq!(at(json!({"song_info": "/lib/c.zip"})), ("Just Two".into(), "Parts".into()));
+        assert_eq!(at(json!({"song_info": "/lib/d.zip"})), ("".into(), "No dashes".into()));
+        assert_eq!(at(json!({"song_info": "/lib/e.zip"})), ("".into(), "e.zip".into()), "no display means the file name");
+        assert_eq!(at(json!({"song_info": "/lib/f.zip"})), ("".into(), "".into()), "a null display is empty text, not an error");
+        assert_eq!(at(json!({"artist": "Given", "song_info": "/lib/a.zip"})), ("Given".into(), "Tune".into()), "a missing half is filled from the library");
+        assert_eq!(at(json!({"title": "Given", "song_info": "/lib/a.zip"})), ("Band".into(), "Given".into()));
+        assert_eq!(at(json!({"song_info": ""})), ("".into(), "".into()));
+        assert_eq!(at(json!({"song_info": []})), ("".into(), "".into()), "an IndexError inside the app's try is swallowed");
+        let bad = vec![json!(5)];
+        assert_eq!(artist_title(&json!({"song_info": "/x"}), &inputs(&bad, "")).unwrap(), ("".into(), "".into()), "a damaged library entry makes the lookup raise inside the try");
+    }
+
+    #[test]
+    fn live_state_is_ignored_unless_its_app_is_still_running() {
+        let dir = std::env::temp_dir().join(format!("singws_live_state_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("live_state.json");
+        let write = |pid: i64, version: i64| {
+            std::fs::write(&p, json!({"version": version, "pid": pid, "playing": true, "singer_id": "s1", "singer": "Dana", "title": "Song"}).to_string()).unwrap()
+        };
+        write(std::process::id() as i64, 1);
+        assert_eq!(load_live_state(&p), Some(LiveState { playing: true, singer_id: "s1".into(), singer: "Dana".into(), title: "Song".into() }));
+        write(std::process::id() as i64, 2);
+        assert_eq!(load_live_state(&p), None, "an unknown version is ignored");
+        write(2_000_000_000, 1);
+        assert_eq!(load_live_state(&p), None, "the writer is gone (a crash must not leave a singer on stage)");
+        write(0, 1);
+        assert_eq!(load_live_state(&p), None);
+        std::fs::write(&p, "{").unwrap();
+        assert_eq!(load_live_state(&p), None);
+        std::fs::write(&p, r#"{"version": 1}"#).unwrap();
+        assert_eq!(load_live_state(&p), None, "no pid");
+        assert_eq!(load_live_state(&dir.join("absent.json")), None);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

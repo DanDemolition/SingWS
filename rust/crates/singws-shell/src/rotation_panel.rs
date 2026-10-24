@@ -62,6 +62,10 @@ impl Default for RotationPanelRust {
     }
 }
 
+fn py_strip_empty(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
     o.push('"');
@@ -102,16 +106,27 @@ impl qobject::RotationPanel {
             self.as_mut().rust_mut().tracks = Some(tracks);
         }
         let db = std::path::PathBuf::from(format!("{dir}/singws.db"));
-        let now = now_singing.to_string();
+        // who is on stage: the app's own live_state.json (setting publish_live_state) unless a test passes --now-singing
+        let live = rotation::load_live_state(std::path::Path::new(&format!("{dir}/live_state.json")));
+        let mut now = now_singing.to_string();
+        let (playing, active_id, live_title) = match &live {
+            Some(l) => {
+                if now.is_empty() {
+                    now = l.singer.clone();
+                }
+                (l.playing, l.singer_id.clone(), l.title.clone())
+            }
+            None => (false, String::new(), String::new()),
+        };
         let view = {
             let rust = self.rust();
             let inp = Inputs {
                 db: Some(db.as_path()),
                 tracks: rust.tracks.as_deref().unwrap_or(&[]),
-                now_singing: if now.is_empty() { "Singer Rotation" } else { &now },
-                playing: false,
-                active_singer_id: "",
-                live_title: "",
+                now_singing: if py_strip_empty(&now) { "Singer Rotation" } else { &now },
+                playing,
+                active_singer_id: &active_id,
+                live_title: &live_title,
             };
             rotation::view(rust.queue.as_deref().unwrap_or(&[]), &inp)
         };
@@ -120,14 +135,15 @@ impl qobject::RotationPanel {
                 let items: Vec<String> = v
                     .rows
                     .iter()
-                    .map(|r| format!("{{\"number\":{},\"singer\":{},\"song\":{},\"duet\":{}}}", esc(&r.number), esc(&r.singer), esc(&r.song), r.duet))
+                    .map(|r| format!("{{\"number\":{},\"singer\":{},\"song\":{},\"artist\":{},\"combined\":{},\"duet\":{}}}", esc(&r.number), esc(&r.singer), esc(&r.song), esc(&r.artist), esc(&r.combined), r.duet))
                     .collect();
                 self.as_mut().set_rows_json(QString::from(format!("[{}]", items.join(",")).as_str()));
                 self.as_mut().set_count_label(QString::from(v.count_label.as_str()));
                 self.as_mut().set_title_label(QString::from(v.title_label.as_str()));
                 self.as_mut().set_now_strip(QString::from(v.now_strip.as_str()));
                 self.as_mut().set_next_strip(QString::from(v.next_strip.as_str()));
-                self.as_mut().set_status(QString::from(if v.rows.is_empty() { "Nobody is waiting (as of the last save)" } else { "As of the app's last save" }));
+                let live_note = if live.is_some() { "Live from the app" } else { "As of the app's last save (live stage state off)" };
+                self.as_mut().set_status(QString::from(if v.rows.is_empty() { format!("Nobody is waiting. {live_note}") } else { live_note.to_string() }.as_str()));
             }
             Err(e) => {
                 self.as_mut().set_rows_json(QString::from("[]"));

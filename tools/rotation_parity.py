@@ -7,7 +7,7 @@ Oracle = the app module: ``RotationView.update_rotation``, ``display_name_for_qu
 (that code lives inside a method that also reads the user's files); the Rust migration is compared with it, and that copy mirrors lines of 0.2.18.1.py
 marked "DATA MIGRATION".
 
-Compared for fuzzed queues (legacy tuple/list/string entries, dicts without song_info, skipped singers and songs, duets, rotation-start markers, odd
+Compared for fuzzed queues (the artist/title split through the main window's own splitter, legacy tuple/list/string entries, dicts without song_info, skipped singers and songs, duets, rotation-start markers, odd
 types, KaraFun and "unknown" display names, library hits in the index, library hits only in memory, misses): every row's number/singer/song/artist/duet/
 combined/text, the count label, the title label, the next singer, the up-next and on-deck lineup, and the now/next strips, for several "now singing"
 texts, a playing singer (skipped from the list) and a live title. Where Python raises, Rust must decline.
@@ -120,7 +120,9 @@ def py_view(queue, tracks, now_singing, playing, active_id, live_title, home):
     app.song_index._clear_read_caches()
     host = types.SimpleNamespace(karaoke_playing=playing, _current_karaoke_singer_id=active_id, _current_karaoke_title=live_title,
                                  _display_name_cache={}, tracks=tracks)
-    host.lookup_display_name = types.MethodType(app.KaraokeApp.lookup_display_name, host)
+    for name in ("lookup_display_name", "_queue_entry_artist_title", "_queue_entry_primary_path", "_queue_entry_song_info",
+                 "_split_display_artist_title_disc"):
+        setattr(host, name, types.MethodType(getattr(app.KaraokeApp, name), host))
     out = {}
     rv = types.SimpleNamespace(rotation_rail=None, now_singing_surface=None, queue_items=[], now_singing_label=Label(), queue_count_label=Label(),
                                queue_title_label=Label())
@@ -128,7 +130,7 @@ def py_view(queue, tracks, now_singing, playing, active_id, live_title, home):
     rv.parent = lambda: host
     rv.set_side_lineup = lambda a, b: out.__setitem__("lineup", (a, b))
     rv.set_now_playing_strip = lambda n, x: out.__setitem__("strips", (n, x))
-    for name in ("display_name_for_queue_entry", "lookup_display_name"):
+    for name in ("display_name_for_queue_entry", "lookup_display_name", "_queue_entry_artist_title"):
         setattr(rv, name, types.MethodType(getattr(app.RotationView, name), rv))
     app.RotationView.update_rotation(rv, queue, tracks, now_singing)
     return {"rows": [{"number": r["number"], "singer": r["singer"], "song": r["song"], "artist": r["artist"], "duet": r["duet"], "combined": r["combined"],

@@ -60,7 +60,7 @@ Item {
                 radius: 6
                 color: "#1a1838"
                 Accessible.role: Accessible.ListItem
-                Accessible.name: modelData.number + ", " + modelData.singer + ", " + modelData.song
+                Accessible.name: modelData.number + ", " + modelData.singer + ", " + modelData.combined
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 10
@@ -71,7 +71,7 @@ Item {
                         Layout.fillWidth: true
                         spacing: 0
                         Label { text: modelData.singer; color: "#ffffff"; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
-                        Label { text: modelData.song; color: "#c9c6e8"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                        Label { text: modelData.combined; color: "#c9c6e8"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                     }
                     Label { visible: modelData.duet; text: "DUET"; color: "#9a97c0"; font.pixelSize: 11 }
                 }
