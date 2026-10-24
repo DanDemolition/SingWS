@@ -1,90 +1,102 @@
 # Stage E: how the Rust shell sends live controls to the running app
 
-Status: DESIGN for review (2026-10-24). Nothing here is built. The three panels that exist (library, singer history, rotation) are read-only and write nothing.
+Status: DESIGN, owner answers recorded (2026-10-24). Nothing here is built. The three panels that exist (library, singer history, rotation) are read-only and write nothing.
 
-## What the code does today (checked in 0.2.18.1.py)
+## Owner decisions (2026-10-24)
 
-* The running Python app owns the queue in memory and is the only writer of `queue.json` (debounced saves, plus `save_data()` after edits).
-* There is already ONE command executor for remote control: `_execute_host_control_command(action, args) -> (ok, message)`. Two sources feed it: the WebSocket relay (`_on_host_relay_command`)
-  and the HTTP poll (`handle_host_commands_from_thread`). It covers transport and levels only: play_pause, stop, next/skip, restart, seek, key/tempo, karaoke and background volume, bg play/pause.
-* Queue edits are NOT commands. Move up/down, remove and clear (`move_up`, `move_down`, `remove_selected`, `clear_queue_with_confirmation`) work from the SELECTED ROW of a widget list,
-  and each carries side effects: an undo snapshot, `_sync_remote_singer_order`, remote-request tombstones (`_delete_remote_request`), rotation-marker repair, the "playback detached from rotation" rule, ticker refresh.
-* The app already treats identity by ids, not names or rows: `singer_id` and `_ensure_queue_entry_id` (`remote:<id>` or `local:<uid>`).
+1. First controls: transport AND queue reorder/remove/skip.
+2. The shell runs on a DIFFERENT Mac or a tablet than the app, so a same-machine file inbox is not enough. The transport is the server relay.
+3. A stale edit (the list changed since the operator looked) is REJECTED and the shell refreshes.
+4. The first show with live controls is a DRY RUN (commands validated and logged, nothing changed).
 
-So the shell cannot "call move_up". It needs id-based entry points in the app, and a safe way to deliver intents to them.
+## What the code does today (checked in 0.2.18.1.py and SingWS-Server/v2)
+
+* The running Python app owns the queue in memory and is the only writer of `queue.json`.
+* A remote-control channel already exists. The app's `HostControlRelayWorker` joins the server's WebSocket relay (`wss://.../relay?role=app&channel=host`) with the tenant API key. A browser (the v2 DAW page, usable from a tablet) logs in with the host PIN
+  (`/api/v1/host_commands.php?action=login`, a session cookie), asks `/v2/api/ws-token.php` for a 60-second HMAC token, and joins the same room as `role=browser`. The reference relay (`v2/dev/relay-server/relay.py`) is a plain forwarder: every browser message goes to the room's apps, every app message to the browsers,
+  with `user` stamped by the relay and `{error: app_offline}` when no app is connected. It does not filter message types.
+* The app receives `command` messages in `_on_host_relay_command`, runs ONE executor, `_execute_host_control_command(action, args) -> (ok, message)`, replies `{type: ack, request_id, ok, message}`, and pushes a fresh `state`.
+  That executor covers transport and levels only: play_pause, stop, next/skip, restart, seek, key/tempo, karaoke and background volume, bg play/pause. The HTTP poll path (`handle_host_commands_from_thread`) uses the same executor.
+* Queue edits are NOT commands. `move_up`, `move_down`, `remove_selected`, `clear_queue_with_confirmation` work from the SELECTED ROW of a widget list and carry side effects: an undo snapshot, `_sync_remote_singer_order`, remote-request tombstones (`_delete_remote_request`),
+  rotation-marker repair, the "playback detached from rotation" rule, ticker refresh.
+* Identity in the app is by id (`singer_id`, `_ensure_queue_entry_id`: `remote:<id>` or `local:<uid>`), never by name or row.
 
 ## Principle
 
-Until the Rust core owns the queue (Stage B drive, not started), **the Python app stays the single writer and the single executor**. The shell sends INTENTS; the app validates and executes them through the
-same internal code the buttons use, then publishes the result. The shell never writes `queue.json` and never mutates app state by any other route.
+Until the Rust core owns the queue (Stage B drive, not started), **the Python app stays the single writer and single executor.** The shell sends INTENTS through the relay; the app validates and runs them through the same internal code the buttons use, then reports. The shell never writes `queue.json`,
+holds no API key, and never reaches the app by any other route.
 
-## Delivery: a command inbox (recommended), compared with the alternatives
+## Transport: the existing relay, with the shell as a second "browser"
 
-| Option | Verdict |
-|---|---|
-| A. Inbox directory `~/SingWS/commands/` (one JSON file per command, atomic rename), results next to it | **Recommended.** No new open port, survives a restart without replaying, easy to log and to dry-run, same-user file permissions, trivially testable. Latency about the poll tick (250 ms). Same machine only. |
-| B. Unix-domain socket owned by the app | Faster and gives request/response, but needs a server thread inside the Python app and a handshake; more code on the live path. A good later swap behind the same interface. |
-| C. Send through the existing server relay (`host_commands`) | Works across machines, zero new app code for transport commands, but needs internet and credentials in the shell, and queue edits are not in that vocabulary anyway. Right choice only if the shell runs on a different machine from the show. |
-| D. Shell writes `queue.json` directly | **Rejected.** Two writers, no undo, no tombstones, no server order sync. |
-
-Keep a `CommandSink` interface in the shell so A can become B (or the Rust core) without changing any panel.
-
-## Command format (version 1)
-
-```json
-{"v": 1, "id": "01JBX...", "session": "<app session nonce>", "issued_at": 1792830000, "expires_at": 1792830010,
- "expect": {"queue_version": 412},
- "action": "queue.move_singer", "args": {"singer_id": "ab12...", "direction": "up"}}
+```
+ Rust shell (other Mac) --PIN login--> server (session cookie) --ws-token--> wss relay (role=browser) <==> relay <==> app (role=app)
 ```
 
-* `id`: sortable unique id; the app applies commands in id order and remembers processed ids, so a duplicate (double click, retry, two shells) is applied once.
-* `session`: a nonce the app puts in `live_state.json` at launch; a command aimed at an earlier app instance is rejected, so nothing written while the app was down can fire after a restart.
-* `expires_at`: 10 s. An expired command is dropped with result `expired` (a frozen app never replays old clicks later).
-* `expect.queue_version`: the app bumps a counter on every queue mutation and publishes it. An edit made against an older view is rejected as `stale_view` (the operator sees the fresh list and retries) unless the policy below is changed.
-* Identity is ALWAYS `singer_id` / entry id, never a row index or a name.
+* Auth is the host PIN, exactly like the web DAW page: no API key on the shell machine. Tenant isolation and the 60 s token are the server's.
+* Messages stay the relay's JSON (`command` with `request_id`, `ack`, `state`, `playback_tick`, `error`), extended compatibly:
+  * new command names (below); old ones unchanged, so the web page keeps working;
+  * the app adds `queue_version` to `state` and publishes a compact `queue` message whenever the version changes (singer ids, names, skipped flags, each singer's first-song entry id and title: enough to draw the rotation and address edits).
+* No server change is needed if production matches the reference relay's pass-through behaviour (to be verified against production before the dry run).
+* The local file inbox I proposed earlier is dropped for now. It stays a possible same-machine fast path behind the same `CommandSink` interface in the shell.
+* Tablets: the web DAW page can gain the same queue controls later; the app-side contract is identical.
 
-First actions (v1): `queue.move_singer {singer_id, direction|to_index}`, `queue.move_song {entry_id, direction}`, `queue.remove_song {entry_id}`, `queue.remove_singer {singer_id}`, `queue.skip_singer {singer_id}`,
-and the existing transport actions passed through to `_execute_host_control_command` unchanged. NOT in v1: add song, clear queue, rename, anything that opens a dialog.
+## Command format (extends the relay's `command`)
+
+```json
+{"type":"command","command":"queue.move_singer","request_id":"01JBX...","sent_at":1792830000,
+ "args":{"singer_id":"ab12...","direction":"up","expect_queue_version":412}}
+```
+
+* `request_id`: unique, sortable. The app applies each id once (it remembers recent ids), so a retry, a double click or two shells never doubles an edit.
+* `sent_at`: the app drops a command older than 10 s with `{ok:false, message:"expired"}` (clock skew tolerated; a command held up by a bad network never fires late).
+* `expect_queue_version`: the app bumps `queue_version` on every queue mutation; a command carrying an older number gets `{ok:false, message:"stale_view"}` and the shell refreshes (owner decision 3).
+* Identity is `singer_id` / entry id only.
+* v1 queue actions: `queue.move_singer {singer_id, direction|to_index}`, `queue.move_song {entry_id, direction}`, `queue.remove_song {entry_id}`, `queue.remove_singer {singer_id}`, `queue.skip_singer {singer_id}`.
+  Transport actions pass through to the existing executor unchanged. NOT in v1: add song, clear queue (it has a confirmation dialog in the app), rename, anything that opens a dialog.
 
 ## Execution in the app
 
-1. A `QTimer` on the GUI thread (250 ms) scans the inbox. Running on the GUI thread means commands can never interleave with a click: the event loop serialises them.
-2. Per command: check setting, session, expiry, version, then run the id-based method inside `_begin_undoable_action` / `_commit_undoable_action` so the operator can undo from the app as usual.
-3. Each id-based method is a thin wrapper over the logic the button handlers use (the handlers get refactored to resolve the selected row to an id and call the same wrapper), so there is one implementation, not two.
-4. After the mutation the app flushes `queue.json` (not debounced), bumps `queue_version`, rewrites `live_state.json`, then writes `commands/<id>.result.json` with `{ok, message, queue_version}`.
-5. Rules that already exist stay in force: removing the current singer detaches playback instead of stopping it; edits that the host UI blocks while a song plays stay blocked; remote requests get their tombstones.
-6. Setting `shell_commands`: `off` (default) | `dry_run` | `apply`. `dry_run` validates, logs `[SHELL-CMD] would apply ...` and writes a result with `dry_run: true`, changing nothing. Every command, in every mode, is logged
-   (`[SHELL-CMD] id= action= ok= message=`) so `shadow_report.py` can audit it.
+1. `_on_host_relay_command` hands `queue.*` actions to new id-based methods; everything else goes to the existing executor. It already runs on the GUI thread, so a remote command can never interleave with a click.
+2. Each id-based method is a thin wrapper over logic extracted from the button handlers; the handlers are refactored to resolve the selected row to an id and call the same wrapper, so there is ONE implementation. The wrapper runs inside `_begin_undoable_action` / `_commit_undoable_action`, so the operator can undo it in the app.
+3. Existing rules stay: removing the current singer detaches playback instead of stopping it; edits the host UI blocks stay blocked; remote requests get their tombstones; server order sync runs.
+4. After a mutation the app flushes `queue.json` (not debounced), bumps `queue_version`, publishes the `queue` message and `state`, then sends the `ack` (with the new version).
+5. Setting `shell_commands`: `off` (default) | `dry_run` | `apply`. In `dry_run` the app validates (version, ids, guards), logs `[SHELL-CMD] would apply ...`, acks `{ok:true, message:"dry_run: ...", dry_run:true}` and changes NOTHING. In every mode each command is logged (`[SHELL-CMD] id= action= ok= message=`), so `shadow_report.py` can audit it.
+   Transport commands in `dry_run` are logged and acked but not executed, so a dry-run show cannot change playback.
 
 ## The shell side
 
-* A control is disabled unless `live_state.json` is fresh and its pid is alive (already implemented for the stage view).
-* No optimistic updates: a click shows "sending", the list changes only when the app's new state arrives; no result within the timeout shows "no answer from the app" and offers retry with a NEW id.
-* Destructive actions (remove singer with songs) ask for confirmation in the shell. The app does not trust that: its own whitelist and the same guards apply.
+* A small Rust crate (`singws-control`): PIN login with a cookie jar (the HTTP sender gains cookies), token fetch, a relay client with `role=browser` (the existing relay crate's state machine and Qt-parity tests are reused), a command builder/validator, a parser for `state` and `queue`.
+* Controls are enabled only while a fresh `state` shows `connected:true`. No optimistic updates: a click shows "sending", the list changes only when the app's new `queue` arrives; no ack within 3 s shows "no answer from the app" and offers retry with a NEW id.
+* The PIN is typed into the shell and kept in memory only; the session cookie is not written to disk.
+* Destructive actions (remove singer with songs) ask for confirmation in the shell; the app does not rely on it.
 
 ## Failure modes
 
 | Situation | Behaviour |
 |---|---|
-| App closed or crashed | Controls disabled (pid check). Any file left behind has a dead session or is expired: inert. |
-| App frozen | Command expires; shell shows "no answer". Nothing replays later. |
-| Double click, two shells | Same id applies once; different ids apply in id order. |
-| Queue changed under the operator (server add, host click) | `stale_view`; shell refreshes. |
-| Power loss mid-command | The inbox file is unlinked only after the result is written; an unfinished command is either expired or has a dead session on restart. |
-| Server also reorders (`_sync_remote_singer_order`) | Unchanged: the app's existing path runs inside the command. |
+| App offline or relay down | Relay answers `app_offline` or the socket drops; shell disables controls. Nothing is queued anywhere, so nothing replays later. |
+| App frozen | No ack within 3 s; the command expires after 10 s and is dropped. |
+| Double click, two shells, a browser plus the shell | Same `request_id` applies once; different ids apply in arrival order on the GUI thread. |
+| Queue changed under the operator | `stale_view`; shell refreshes from the new `queue` message. |
+| Venue network drops | Relay reconnect (the proven 5 s single-shot state machine); the shell re-logs in only if the 60 s token path fails. |
+| Wrong or revoked PIN | Server refuses the login or token; shell shows it; no command can be sent. |
+| Production relay filters unknown message types | Found in the pre-show check below; the fallback is to ship the new names through the v1 `host_commands` queue, which already passes `command`/`args` to the same executor. |
 
-## Verification plan (how this would be proven before it is trusted)
+## Verification plan
 
-1. Unit tests with a fake app for every guard (session, expiry, stale view, duplicate id, off/dry_run/apply, bad JSON, huge files, wrong permissions, symlinks in the inbox).
-2. The queue replay harness's host-action invariants run against command-driven sequences and must equal the same sequences driven through the button handlers (differential on the resulting queue and the server-sync calls).
-3. Mutation tests on the executor and on the Rust command writer.
-4. One real show in `dry_run` (commands logged, nothing applied), compared by `shadow_report`, then `apply` behind the setting.
-5. Package gate on both architectures with the setting on.
+1. App side: unit tests with a fake app for every guard (expiry, stale version, duplicate id, off/dry_run/apply, unknown singer, current singer, bad args) and a DIFFERENTIAL against the button handlers: the same edit through `move_up` and through `queue.move_singer` must leave identical queue, server-sync calls, undo entry and tombstones.
+   The queue replay harness's host-action invariants run over command-driven sequences.
+2. Rust side: loopback tests against the repo's own `relay.py` and `sim_app.py` (real sockets, real protocol), the PIN/token flow against a stub, mutation tests on the command builder and parser.
+3. Pre-show: confirm production's relay forwards the new message types (a harmless `queue.noop` in `dry_run`).
+4. Package gate on both architectures with `shell_commands` on, then one real show in `dry_run`, compared by `shadow_report`, then `apply` behind the setting.
+
+## Build order
+
+1. App: `queue_version`, extracted id-based queue methods, button handlers delegating to them, `queue.*` actions, the `queue` message, `shell_commands` setting and logging (all inert while the setting is `off`). Proven by the differential before anything else is built.
+2. `singws-control` crate and loopback tests.
+3. Shell "Controls" tab (transport first, then queue).
+4. Package gate, dry-run show, then apply.
 
 ## Path to Stage B
 
-The action names and ids are the `singws-queue` events. When the Rust core owns the queue, the same inbox (or a socket) feeds it and Python becomes a client; the shell does not change.
-
-## Open questions for the owner
-
-See the end of the design discussion: first controls, whether the shell runs on the show machine, stale-view policy, and whether to start with a dry-run show.
+The action names and ids are the `singws-queue` events. When the Rust core owns the queue, the same messages feed it and Python becomes a client; the shell does not change.
