@@ -194,7 +194,23 @@ SQLite's LIKE ignores case for ASCII only (an upper-case accented query does not
 reported a difference in `PRAGMA foreign_keys`, a CONNECTION default (rusqlite's bundled SQLite turns it ON, Python's sqlite3 leaves it OFF and the app enables it
 explicitly on its write connections) that says nothing about the file and is excluded, but a future Rust WRITER must set it explicitly. Deliberately NOT done: any Rust
 write to a database (WAL, user_version migrations and the `fuzzykey()` Python SQL function used during migration need their own proof), and no live shadow (the search
-path is hot and the song index is rebuildable). Next, in order: D3b SQLite WRITE compatibility if it is ever wanted, D4 HTTP/websocket client, then Stage E.
+path is hot and the song index is rebuildable). D4a NETWORK CONTRACT + BYTE-EXACT REQUEST BUILDING (2026-10-23, DONE for now; nothing in the app changes and NOTHING touches the network):
+`tools/network_inventory.py` (AST, sends nothing) found the app makes 56 direct `requests` calls (17 GET, 39 POST) to 31 API endpoints plus 8 non-API URLs (KaraFun search,
+release manifest/asset download, accepting/waitlist reads, GIFs), with no single choke point; every call has a timeout (3-12 s typical, 30 s logs, 180 s songbook upload), none
+disables TLS verification, 9 endpoints are called from several places (host_chat_moderation x6, delete_remote_request x3, ...), most POSTs are form-encoded (`data=`), 3 use `json=`, 6 use
+multipart `files=`. The committed contract is `docs/network_inventory.md` (a test fails when it goes stale or the call count changes). `rust/crates/singws-wire` +
+`singws-wire-cli` reproduce what `requests` 2.34 puts on the wire (URL + query string, form body, JSON body, Content-Type/Length) with no sockets and no networking dependency (a test
+inspects the crate for them). Differential against `requests.Request(...).prepare()`: 320,000 random calls (unicode, reserved characters, ints to 2^64, random-bit floats, bools, None,
+nested lists) identical; the differential found two real rules my first version missed (an all-None form body is sent with a Content-Type but NO Content-Length; a None one list level deeper
+is the text "None"); 12 of 12 deliberately broken variants were caught. Rust DECLINES (never guesses) what `requests` rewrites or interprets oddly: URLs it would re-quote (spaces,
+non-ASCII, %-escapes), object-valued form fields (requests iterates the object's keys), non-http(s) schemes. Not covered yet: multipart `files=` bodies, the Qt WebSocket relay
+(wss://wskar.com/relay, 11 QWebSocket uses), headers/cookies/redirect/proxy/TLS-root behaviour, retries and the app's own ack/queue logic.
+OWNER DECISIONS NEEDED BEFORE D4b (a real Rust HTTP client): (1) HTTP stack: `reqwest`+`rustls` with bundled roots (self-contained, matches Python requests' certifi roots, adds a few MB and a
+large dependency tree to the app, also works for a Windows port) versus macOS `NSURLSession` (small, uses system proxy and keychain behaviour, macOS-only); (2) migration order: recommended is
+read-only polling first (`get_requests_v2.php`, `get_requests.php`), then the invariant-carrying mutations (`complete`/`delete`/`restore_remote_request`, `set_remote_request_order`, `upsert_host_request`)
+in a SHADOW that builds the request in Rust from the same inputs and compares it with what Python sent (no Rust traffic), then drive one endpoint behind a flag; (3) whether the Rust client
+should keep Python's per-call timeouts exactly (yes, recommended) and its "connect and each read" timeout semantics. Next, in order: D3b SQLite WRITE compatibility if it is ever wanted, D4b the
+Rust HTTP client (needs the decisions above), D4c the WebSocket relay, then Stage E.
 Previously listed next steps: D3 SQLite (`singws.db`, `phrase_markers.db`) compatibility via the existing schema, D4 HTTP/websocket
 client. Each needs the same shadow-then-flag treatment and must never open a live profile for writing during tests.
 

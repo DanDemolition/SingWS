@@ -1,0 +1,18 @@
+[package]
+name = "singws-wire"
+version = "0.1.0"
+edition = "2024"
+description = "Byte-exact reproduction of what Python requests puts on the wire for the app's calls (query string, form body, JSON body, Content-Type/Length), with no network access at all. Foundation for a Rust server client."
+publish = false
+
+[lib]
+name = "singws_wire"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-wire-cli"
+path = "src/bin/wire_cli.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+singws-store = { path = "../singws-store" }

@@ -359,3 +359,12 @@ the live databases' content and mtimes were identical before and after every run
   still refused writes; second-statement check removed; integers bound as text - invisible to comparisons because SQLite coerces) were killed by new direct Rust tests.
 - Tool bugs found by the hostile fixture and fixed: the query generator crashed on an undecodable text value.
 - Finding: `PRAGMA foreign_keys` default differs (rusqlite ON, Python OFF); excluded from the file comparison, recorded for any future writer.
+
+## Stage D4a network contract and byte-exact request building — 2026-10-23
+
+`tools/network_inventory.py` + `docs/network_inventory.md` + `rust/crates/singws-wire` (+ `singws-wire-cli`) + `tools/wire_parity.py` + `test_wire_parity.py` (14 tests) + 9 Rust tests.
+Offline only: the crate has no networking dependency or code (asserted), is not linked into the app or `libsingws_dsp_ffi`, so no package gate applies. Nothing was sent to any server.
+- Inventory: 56 calls (17 GET, 39 POST), 31 API endpoints, 0 without a timeout, 0 disabling TLS verification; the facts are pinned by tests and the markdown contract is checked for staleness.
+- Differential vs `requests` 2.34.2 (`Request(...).prepare()`): 20,000 + 300,000 random calls and the app's own call shapes: identical URL, body bytes, Content-Type and Content-Length.
+- Found by the differential and fixed: all-None form body has no Content-Length; None one list level deeper becomes "None".
+- 12 of 12 deliberately broken variants of the crate caught. Declined (with the reason shown against requests): re-quoted URLs, object-valued form fields, non-http(s) schemes.
