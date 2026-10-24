@@ -129,7 +129,7 @@ and 4 of 4 deliberately broken Rust rules were caught by it. Honest limits:
   the 8 s crossfade cap.
 * The 4 junk `song.zip` records test runs left in the live `~/SingWS/transition-analysis.json` were removed on 2026-10-23 (the parity
   tool still skips temp-path records). The live loudness cache was also rewritten by pre-isolation test runs and now holds one real entry;
-  re-run library analysis to repopulate it. OWNER ACTION (2026-10-23): the owner will re-run library analysis in the app; once it has finished, re-check `~/SingWS/loudness.json` has many real entries and re-run `tools/plan_parity.py` against the refreshed transition cache.
+  re-run library analysis to repopulate it. DONE 2026-10-23: the owner re-ran library analysis. `loudness.json` now has 258 real entries (all 69 background tracks plus all 189 library songs, each CDG keyed by its paired .mp3), none failed, none stale, no junk; `tools/plan_parity.py` re-run against the refreshed transition cache is clean.
 Not done (needs real show evidence first): turning `plan_shadow` on by default, and any `bgm_plan_engine` drive step.
 
 ## Stage D: stores and server client
@@ -192,7 +192,7 @@ fuzzy full scan) with parameters drawn from the data plus hostile terms (`%`, `_
 and a hostile WAL-mode fixture (every value kind, NULLs, 64-bit extremes, inf, blobs, invalid UTF-8, a NOCASE index, a WITHOUT ROWID table) are identical too. Findings:
 SQLite's LIKE ignores case for ASCII only (an upper-case accented query does not match stored lower-case text; the app lower-cases queries itself); the comparison first
 reported a difference in `PRAGMA foreign_keys`, a CONNECTION default (rusqlite's bundled SQLite turns it ON, Python's sqlite3 leaves it OFF and the app enables it
-explicitly on its write connections) that says nothing about the file and is excluded, but a future Rust WRITER must set it explicitly. Deliberately NOT done: any Rust
+explicitly on its write connections). RESOLVED 2026-10-23: both readers now set `PRAGMA foreign_keys=OFF` explicitly (exactly like the app's read connections), the value is compared in the schema parity, and a Rust test proves the explicit setting is what makes it OFF (the bundled engine default is ON). A future Rust WRITER must set it ON explicitly, as `song_index._connect` does. Deliberately NOT done: any Rust
 write to a database (WAL, user_version migrations and the `fuzzykey()` Python SQL function used during migration need their own proof), and no live shadow (the search
 path is hot and the song index is rebuildable). D4a NETWORK CONTRACT + BYTE-EXACT REQUEST BUILDING (2026-10-23, DONE for now; nothing in the app changes and NOTHING touches the network):
 `tools/network_inventory.py` (AST, sends nothing) found the app makes 56 direct `requests` calls (17 GET, 39 POST) to 31 API endpoints plus 8 non-API URLs (KaraFun search,

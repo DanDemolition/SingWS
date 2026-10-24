@@ -63,6 +63,7 @@ def py_connect(path):
     con.text_factory = _text
     con.execute("PRAGMA query_only=ON")
     con.execute("PRAGMA temp_store=MEMORY")
+    con.execute("PRAGMA foreign_keys=OFF")  # explicit, exactly like the Rust reader and like song_index._connect(read_only=True)
     return con
 
 
@@ -74,7 +75,8 @@ def py_query(con, sql, params=()):
 
 def py_schema(con):
     pragmas = {}
-    for name in ("user_version", "application_id", "journal_mode", "page_size", "encoding", "auto_vacuum"):  # database-level only (see the Rust crate)
+    # database-level facts plus the connection's foreign_keys (both readers set it explicitly OFF, like the app's read connections)
+    for name in ("user_version", "application_id", "journal_mode", "page_size", "encoding", "auto_vacuum", "foreign_keys"):
         pragmas[name] = enc(con.execute(f"PRAGMA {name}").fetchone()[0])
     master = py_query(con, "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
     tables = {}

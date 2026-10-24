@@ -374,3 +374,10 @@ executable (`4e7277ed...`), dylib (`a886aba2...`) and Info.plist hash-identical 
 with an isolated profile exits cleanly. `store_shadow` is now enabled in the live profile with the queue, plan, settings and transport shadows (backup `settings.json.bak-before-store-shadow-*`).
 Rollback: `local-installs/installed-before-store-shadow/SingWS-installed-D1-durable.zip` is a ditto archive of the previously installed D1 + durable-writes app (2,103 files, restores to a valid
 signature; extract with `ditto -x -k`); an older Stage C build is in `local-installs/plan-gate-1.0.1.4/`.
+
+## Loose ends closed — 2026-10-23
+
+* Loudness cache after the owner's rescan: 258 entries = 69 background tracks + 189 library songs (a CDG song is keyed by its paired .mp3, which is why an exact-path match
+  found only 4), 0 failed, 0 stale (every file exists), 0 junk. Nothing to repair.
+* SQLite `foreign_keys`: both readers set it explicitly OFF (the app's read connections leave it OFF; the bundled engine default is ON); it is part of the schema comparison again;
+  new Rust test pins that the explicit setting is load-bearing. Live databases unchanged by every run; 1,212 + 3 requests still identical.

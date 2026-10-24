@@ -19,7 +19,10 @@ pub fn open_readonly(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .map_err(|e| format!("open: {e}"))?;
     conn.busy_timeout(Duration::from_millis(5000)).map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA query_only=ON; PRAGMA temp_store=MEMORY;").map_err(|e| e.to_string())?;
+    // `foreign_keys` is a per-CONNECTION setting whose default depends on how SQLite was compiled: rusqlite's bundled build turns it ON, Python's
+    // sqlite3 leaves it OFF. The app only enables it on its WRITE connections (`song_index._connect(read_only=False)`), so a read connection must
+    // have it OFF. Set it explicitly instead of inheriting an engine default. A future Rust WRITER must do the opposite explicitly (ON), as the app does.
+    conn.execute_batch("PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=OFF;").map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -112,10 +115,9 @@ fn table_names(conn: &Connection) -> Result<Vec<String>, String> {
 /// Schema and header facts: every sqlite_master entry, the pragmas that identify a database, and per-table column and index info.
 pub fn schema(conn: &Connection) -> Result<Value, String> {
     let mut pragmas = Map::new();
-    // Database-level facts only. `foreign_keys` is deliberately NOT here: it is a per-connection setting whose default differs between
-    // engines (rusqlite's bundled SQLite turns it ON, Python's sqlite3 leaves it OFF and the app enables it explicitly on its write
-    // connections), so comparing it says nothing about the file. A future Rust WRITER must set it explicitly to match the app.
-    for name in ["user_version", "application_id", "journal_mode", "page_size", "encoding", "auto_vacuum"] {
+    // Database-level facts, plus `foreign_keys` as a check on the CONNECTION: it is not stored in the file, but both readers now set it
+    // explicitly (see `open_readonly`), so a regression to an engine default shows up as a difference here.
+    for name in ["user_version", "application_id", "journal_mode", "page_size", "encoding", "auto_vacuum", "foreign_keys"] {
         let v = conn.query_row(&format!("PRAGMA {name}"), [], |r| Ok(encode(r.get_ref_unwrap(0)))).map_err(|e| e.to_string())?;
         pragmas.insert(name.to_string(), v);
     }
@@ -234,6 +236,18 @@ mod tests {
         assert_eq!(r["rows"], json!([]));
         let r = query(&conn, "SELECT id FROM songs WHERE searchstring LIKE ?", &[json!("%élan%")]).unwrap();
         assert_eq!(r["rows"], json!([[2]]));
+    }
+
+    #[test]
+    fn foreign_keys_is_set_explicitly_off_on_read_connections_not_inherited_from_the_engine() {
+        let f = Fixture::new();
+        // the bundled SQLite's own default is ON: prove the explicit setting is what makes it OFF
+        let raw = Connection::open_with_flags(f.db(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let engine_default: i64 = raw.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        let ours: i64 = open_readonly(&f.db()).unwrap().query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(ours, 0, "read connections match the app's read connections (OFF)");
+        assert_eq!(engine_default, 1, "if this ever changes the explicit setting is no longer load-bearing; revisit the comment in open_readonly");
+        assert_eq!(schema(&open_readonly(&f.db()).unwrap()).unwrap()["pragmas"]["foreign_keys"], json!(0));
     }
 
     #[test]
