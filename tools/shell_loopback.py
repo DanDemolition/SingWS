@@ -94,6 +94,23 @@ def scenario_dry_run_shows_a_dry_run_and_changes_nothing():
         assert final["order"] == ["s1", "s2", "s3"] and final["played"] == []
 
 
+def scenario_the_volume_and_seek_commands_reach_the_app_with_their_values():
+    """The Controls tab's sliders call act() with these exact commands; they must arrive validated, tagged `shell`, with no list fingerprint."""
+    with cl.Stack("apply") as st:
+        script = [
+            {"label": "Karaoke volume 50%", "command": "set_karaoke_volume", "args": {"value": 0.5}},
+            {"label": "Music volume 30%", "command": "set_bg_volume", "args": {"value": 0.3}},
+            {"label": "Seek to 0:12", "command": "seek_to", "args": {"seconds": 12.0}},
+        ]
+        view, p, _ = run_shell(st, script)
+        assert view is not None, p.stderr[-800:]
+        cmds = commands_seen(st)
+        assert [c["command"] for c in cmds[:3]] == ["set_karaoke_volume", "set_bg_volume", "seek_to"], [c["command"] for c in cmds]
+        assert cmds[0]["args"]["value"] == 0.5 and cmds[1]["args"]["value"] == 0.3 and cmds[2]["args"]["seconds"] == 12.0, cmds[:3]
+        for c in cmds[:3]:
+            assert c["args"]["source"] == "shell" and "expect_queue_sig" not in c["args"], c
+
+
 def scenario_a_wrong_pin_shows_the_refusal_and_enables_nothing():
     with cl.Stack("apply") as st:
         view, p, _ = run_shell(st, [], pin="9999", snapshot_after=6000)

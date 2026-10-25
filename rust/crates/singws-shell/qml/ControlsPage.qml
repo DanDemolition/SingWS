@@ -34,6 +34,30 @@ Item {
         background: Rectangle { radius: 6; color: !b.enabled ? "#15132b" : (b.down ? Qt.darker(b.tone, 1.3) : b.tone) }
     }
 
+    // A slider that follows the app's value until the user grabs it; it sends ONE command when released (or on a keyboard change), so dragging never floods the relay.
+    component Dial: RowLayout {
+        id: d
+        property string caption: ""
+        property real shown: 0
+        property real maximum: 1
+        property string valueText: ""
+        signal commit(real value)
+        spacing: 8
+        Label { text: d.caption; color: "#9a97c0"; font.pixelSize: 12; Layout.preferredWidth: 92 }
+        Slider {
+            id: sl
+            Layout.fillWidth: true
+            from: 0
+            to: d.maximum
+            enabled: page.view.enabled && d.maximum > 0
+            Accessible.name: d.caption
+            Binding { target: sl; property: "value"; value: Math.min(d.shown, d.maximum); when: !sl.pressed }
+            onPressedChanged: if (!pressed) d.commit(value)
+            onMoved: if (!pressed) d.commit(value)
+        }
+        Label { text: d.valueText; color: "#c9c6e8"; font.pixelSize: 12; Layout.preferredWidth: 84; horizontalAlignment: Text.AlignRight }
+    }
+
     Component.onCompleted: {
         urlField.text = arg("--control-url") !== "" ? arg("--control-url") : panel.savedUrl
         userField.text = arg("--control-user") !== "" ? arg("--control-user") : panel.savedUser
@@ -190,6 +214,28 @@ Item {
                     Btn { text: "Key +"; onClicked: page.act("Key up", "key_up") }
                     Btn { text: "Tempo −"; onClicked: page.act("Tempo down", "tempo_down") }
                     Btn { text: "Tempo +"; onClicked: page.act("Tempo up", "tempo_up") }
+                }
+                Dial {
+                    Layout.fillWidth: true
+                    caption: "Position"
+                    shown: page.view.playback.position
+                    maximum: page.view.playback.duration
+                    valueText: Math.floor(page.view.playback.position / 60) + ":" + ("0" + Math.floor(page.view.playback.position % 60)).slice(-2)
+                    onCommit: function (v) { page.act("Seek to " + Math.floor(v / 60) + ":" + ("0" + Math.floor(v % 60)).slice(-2), "seek_to", {seconds: Math.round(v * 10) / 10}) }
+                }
+                Dial {
+                    Layout.fillWidth: true
+                    caption: "Karaoke volume"
+                    shown: page.view.playback.karaoke_volume
+                    valueText: Math.round(page.view.playback.karaoke_volume * 100) + "%"
+                    onCommit: function (v) { page.act("Karaoke volume " + Math.round(v * 100) + "%", "set_karaoke_volume", {value: Math.round(v * 100) / 100}) }
+                }
+                Dial {
+                    Layout.fillWidth: true
+                    caption: "Music volume"
+                    shown: page.view.playback.bgm_volume
+                    valueText: Math.round(page.view.playback.bgm_volume * 100) + "%"
+                    onCommit: function (v) { page.act("Music volume " + Math.round(v * 100) + "%", "set_bg_volume", {value: Math.round(v * 100) / 100}) }
                 }
             }
         }
