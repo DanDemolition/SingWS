@@ -247,7 +247,7 @@ class ThroughTheRealChokePointTests(unittest.TestCase):
 
 class WiringTests(unittest.TestCase):
     def test_off_by_default_installed_after_settings_load_and_uses_the_choke_point(self):
-        self.assertIn('"wire_shadow": False', _SRC)
+        self.assertIn('"wire_shadow": True', _SRC)
         self.assertLess(_SRC.index("self.settings = self.load_settings()\n        _install_wire_shadow(self.settings)"),
                         _SRC.index("# The background player was built above"))
         block = _SRC[_SRC.index("def _install_wire_shadow"):][:700]

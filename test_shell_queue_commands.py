@@ -246,8 +246,8 @@ class GuardTests(unittest.TestCase):
             a["_sent_at"] = time.time() + env.get("offset", 0) if env.get("sent_at", "now") == "now" else env["sent_at"]
         return module().KaraokeApp._execute_shell_queue_command(h.app, action, a)
 
-    def test_off_is_the_default_and_refuses_everything_without_touching_the_queue(self):
-        self.assertEqual(module().DEFAULTS["shell_commands"], "off")
+    def test_off_refuses_everything_without_touching_the_queue_and_dry_run_is_the_default(self):
+        self.assertEqual(module().DEFAULTS["shell_commands"], "dry_run")
         for mode in ("off", "", "nonsense", None):
             h = self.harness(mode)
             before = copy.deepcopy(h.app.queue)

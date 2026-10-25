@@ -259,7 +259,7 @@ class RealWriterTests(unittest.TestCase):
 
 class WiringTests(unittest.TestCase):
     def test_off_by_default_read_from_the_loaded_settings_and_never_synchronous(self):
-        self.assertIn('"store_shadow": False', _SRC)
+        self.assertIn('"store_shadow": True', _SRC)
         self.assertIn('globals()["_STORE_SHADOW_ON"] = bool(loaded.get("store_shadow", False))', _SRC)
         helper = _SRC[_SRC.index("def _store_shadow_submit"):][:800]
         self.assertIn(".submit(name, payload)", helper)

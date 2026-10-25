@@ -23,7 +23,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen, renderer_raise_script
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.1.5"
+APP_VERSION = "1.0.1.6"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -4060,6 +4060,23 @@ MPV_CDG_BASE_OFFSET_MS = -50
 # MP4 audio/video is aligned without an automatic lead.
 MPV_MP4_BASE_OFFSET_MS = 0
 
+_RUST_EVIDENCE_FLAGS = ("queue_shadow", "plan_shadow", "settings_shadow", "store_shadow", "wire_shadow", "publish_live_state",
+                        "transport_drive_media_end", "transport_drive_watchdog")
+
+
+def _migrate_rust_evidence_defaults(settings) -> bool:
+    """One time per profile: switch the Rust evidence collectors on (they used to default off, and saved profiles persist the old values).
+    shell_commands moves from "off" to "dry_run" but "apply" (or "dry_run") is never touched. Returns True when it changed anything."""
+    if bool(settings.get("rust_evidence_defaults_migrated", False)):
+        return False
+    for key in _RUST_EVIDENCE_FLAGS:
+        settings[key] = True
+    if str(settings.get("shell_commands", "off") or "off").strip().lower() == "off":
+        settings["shell_commands"] = "dry_run"
+    settings["rust_evidence_defaults_migrated"] = True
+    return True
+
+
 DEFAULTS = {
     "bg_enabled": True,              # master kill-switch
     "bg_autoplay_on_idle": True,     # start BG when karaoke stops
@@ -4110,36 +4127,40 @@ DEFAULTS = {
     "transport_drive": True,
     # A2 for the native media-end decision. Same contract as transport_drive: Rust answers only when it agrees with the
     # retained Python oracle; Python wins every disagreement. Default off until its own local and package gates pass.
-    "shell_commands": "off",  # queue.* commands from the Rust shell: "off" | "dry_run" (validate and log only) | "apply"
-    "publish_live_state": False,  # write live_state.json (who is on stage) for the read-only Rust shell; best effort, never affects the show
-    "transport_drive_media_end": False,
+    "shell_commands": "dry_run",  # queue.* commands from the Rust shell: "off" | "dry_run" (validate and log only) | "apply"
+    "publish_live_state": True,  # write live_state.json (who is on stage) for the read-only Rust shell; best effort, never affects the show
+    "transport_drive_media_end": True,
     # A2 for the KaraFun duration-watchdog decision ("end unverified: tell the operator to press Complete"). Same
     # contract: Rust answers only when it agrees with the retained Python oracle; Python wins every disagreement.
-    "transport_drive_watchdog": False,
+    "transport_drive_watchdog": True,
     # Stage B shadow: compare the poll-row admission decision (host tombstones / terminal ids must not resurrect a request)
     # with the Rust queue rules and LOG disagreements only; the app's own answer is always used. Default off until its
     # two-architecture package gate passes. Read lazily; safe to flip in Settings JSON.
-    "queue_shadow": False,
+    "queue_shadow": True,
     # Stage C shadow: compare the background-music window / crossfade-length decisions (transition_analysis) with the Rust
     # singws-plan rules and LOG disagreements only; the app's own answer is always used. Default off until its two-architecture
     # package gate passes. The karaoke effective-end rule runs only in the offline analysis worker and is covered by
     # tools/plan_parity.py, not by this live shadow.
-    "plan_shadow": False,
+    "plan_shadow": True,
     # Stage D1 shadow: compare the settings store steps (load, DEFAULTS fill, serialize-before-save) with the Rust singws-store
     # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
     # two-architecture package gate passes. Read from the settings dict being processed.
-    "settings_shadow": False,
+    "settings_shadow": True,
     # Stage D2 shadow: after the app durably writes ANY store file (queue, singer history, preferences, tracks, tombstones, playlist,
     # settings), a background worker asks the Rust JSON writer to reproduce those exact bytes and LOGS any difference. Rust never writes;
     # the check never runs on the GUI thread and never delays a save. Default off until its package gate passes. Read at launch.
-    "store_shadow": False,
+    "store_shadow": True,
     # Stage D4 shadow: compare what requests ACTUALLY sent (URL, body, Content-Type/Length) with what the Rust request builder would send, for every
     # non-streaming get/post the app makes, and LOG differences. Rust sends nothing; only endpoint file names are logged, never hosts, values or keys.
     # Observer runs after the real response exists, on the calling thread. Default off until its package gate passes. Read at launch.
-    "wire_shadow": False,
+    "wire_shadow": True,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
+    # One-time upgrade (2026-10-25, operator's call for the Intel show rehearsals): the Rust evidence collectors (all shadows, live-state
+    # publishing, the shell command dry run and the two A2 drives that Python always overrides) are ON by default. Profiles that persisted
+    # the old off values get them switched on once; later operator changes are respected once this marker exists. "apply" is never touched.
+    "rust_evidence_defaults_migrated": False,
     # Draw the karaoke picture on a dedicated render thread instead of the GUI thread, so a frozen GUI (for example while
     # another app launches) cannot freeze the TV. DEFAULT ON since 2026-10-10 (operator's call, to rehearse it in the real
     # app before any release; proven so far only in tools/render_thread_probe.py on Apple Silicon). Set it to false in
@@ -22768,6 +22789,9 @@ class KaraokeApp(QWidget):
             self.settings["transport_shadow_default_on_migrated"] = True
             changed = True
             _diag("[TRANSPORT-SHADOW] migrated saved profile to log-only observation")
+        if _migrate_rust_evidence_defaults(self.settings) or getattr(self, "_rust_defaults_just_migrated", False):
+            changed = True
+            _diag("[RUST-DEFAULTS] migrated saved profile: shadows, live state, shell dry-run and A2 drives on")
         if not bool(self.settings.get("performance_debug_default_migrated", False)):
             # Runtime diagnostics used to default on and were often persisted
             # without the host making an explicit choice. Make them opt-in.
@@ -38899,13 +38923,20 @@ class KaraokeApp(QWidget):
     def load_settings(self):
         loaded = _load_json_file(SETTINGS_PATH, {}, expected_type=dict, label="Settings")
         try:
-            globals()["_STORE_SHADOW_ON"] = bool(loaded.get("store_shadow", False))
-        except Exception:
-            pass
-        try:
             shadow = _settings_shadow_for(loaded)
             if shadow is not None:
                 shadow.check_load(SETTINGS_PATH, loaded)
+        except Exception:
+            pass
+        # Migrate BEFORE anything reads these flags at launch (store / wire shadows are read once, at startup), so the very first launch
+        # after the upgrade already has them on. The shadow check above compared the file as it is on disk.
+        try:
+            if isinstance(loaded, dict) and _migrate_rust_evidence_defaults(loaded):
+                self._rust_defaults_just_migrated = True
+        except Exception:
+            pass
+        try:
+            globals()["_STORE_SHADOW_ON"] = bool(loaded.get("store_shadow", False))
         except Exception:
             pass
         return loaded

@@ -43,8 +43,8 @@ class LiveStateTests(unittest.TestCase):
     def publish(self, h):
         self.mod.KaraokeApp._publish_live_state(h)
 
-    def test_the_setting_is_off_by_default_and_nothing_is_written_then(self):
-        self.assertFalse(self.mod.DEFAULTS["publish_live_state"])
+    def test_the_setting_is_on_by_default_but_a_profile_without_it_writes_nothing(self):
+        self.assertTrue(self.mod.DEFAULTS["publish_live_state"])
         h = self.host(settings={}, karaoke_playing=True, _current_karaoke_singer_display="Dana")
         self.publish(h)
         self.assertFalse(self.path.exists())

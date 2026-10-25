@@ -255,7 +255,7 @@ class SaveDifferentialTests(unittest.TestCase):
 
 class WiringTests(unittest.TestCase):
     def test_off_by_default_and_log_only(self):
-        self.assertIn('"settings_shadow": False', _SRC)
+        self.assertIn('"settings_shadow": True', _SRC)
         block = _SRC[_SRC.index("def _settings_shadow_for"):][:700]
         self.assertIn("except Exception:", block)
         self.assertNotIn("singws_settings", _SRC.replace("singws_settings_json", ""), "no other settings export is used by the app")

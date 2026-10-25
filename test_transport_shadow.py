@@ -296,7 +296,7 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn("[TRANSPORT-DRIVE] decision=karafun_end", block)
 
     def test_media_end_drive_is_its_own_flag_and_python_wins(self):
-        self.assertIn('"transport_drive_media_end": False', self.src)
+        self.assertIn('"transport_drive_media_end": True', self.src)  # on by default since 2026-10-25 (Python still wins every disagreement)
         start = self.src.index('if bool((getattr(self, "settings", None) or {}).get("transport_drive_media_end", False))')
         block = self.src[start:start + 1400]
         self.assertIn("select_drive_decision(", block)
@@ -305,7 +305,7 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn("python_should_end = not (stop_active or handoff_active)", self.src)
 
     def test_watchdog_drive_is_its_own_flag_and_python_wins(self):
-        self.assertIn('"transport_drive_watchdog": False', self.src)
+        self.assertIn('"transport_drive_watchdog": True', self.src)  # on by default since 2026-10-25 (Python still wins every disagreement)
         start = self.src.index('if bool((getattr(self, "settings", None) or {}).get("transport_drive_watchdog", False))')
         block = self.src[start:start + 1500]
         self.assertIn("select_drive_decision(", block)

@@ -186,7 +186,7 @@ class WiringTests(unittest.TestCase):
         cls.src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
 
     def test_off_by_default_and_log_only(self):
-        self.assertIn('"queue_shadow": False', self.src)
+        self.assertIn('"queue_shadow": True', self.src)
         start = self.src.index("def _queue_shadow_check")
         block = self.src[start:start + 700]
         self.assertIn("except Exception:", block)
