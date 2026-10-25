@@ -200,11 +200,15 @@ pub fn parse_incoming(text: &str) -> Incoming {
     }
 }
 
-/// `ws_url` + the query the web DAW page uses: `role=browser&channel=host&user=&token=`.
+/// The production relay answers `426 Upgrade Required` to any connection without `app_version` >= 0.3.0.1 (found 2026-10-25: 0.1.0 and
+/// non-numeric values are refused, 0.3.0.1 and 1.0.1.5 pass), so the shell sends the app release line whose relay protocol it speaks.
+pub const RELAY_APP_VERSION: &str = "1.0.1.5";
+
+/// `ws_url` + the query the web DAW page uses: `role=browser&channel=host&user=&token=`, plus `app_version` for the production relay's gate.
 pub fn browser_url(ws_url: &str, user: &str, token: &str) -> String {
     let sep = if ws_url.contains('?') { '&' } else { '?' };
     format!(
-        "{ws_url}{sep}role=browser&channel=host&user={}&token={}",
+        "{ws_url}{sep}role=browser&channel=host&user={}&token={}&app_version={RELAY_APP_VERSION}",
         singws_relay::percent_encode(user),
         singws_relay::percent_encode(token)
     )
@@ -339,7 +343,7 @@ mod tests {
 
     #[test]
     fn the_browser_url_encodes_the_user_and_token() {
-        assert_eq!(browser_url("ws://h:1/relay", "dan", "a.b-c"), "ws://h:1/relay?role=browser&channel=host&user=dan&token=a.b-c");
-        assert_eq!(browser_url("wss://h/relay?x=1", "d an", "t/+="), "wss://h/relay?x=1&role=browser&channel=host&user=d%20an&token=t%2F%2B%3D");
+        assert_eq!(browser_url("ws://h:1/relay", "dan", "a.b-c"), "ws://h:1/relay?role=browser&channel=host&user=dan&token=a.b-c&app_version=1.0.1.5");
+        assert_eq!(browser_url("wss://h/relay?x=1", "d an", "t/+="), "wss://h/relay?x=1&role=browser&channel=host&user=d%20an&token=t%2F%2B%3D&app_version=1.0.1.5");
     }
 }
