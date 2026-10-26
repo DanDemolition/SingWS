@@ -78,6 +78,9 @@ async def main():
             outbox.put_nowait(obj)
 
     app.host_relay_worker = Worker()
+    # the real _run_on_ui_thread posts to the Qt GUI thread, which this bare stand-in does not have: post to its own event loop instead
+    _loop = asyncio.get_running_loop()
+    app._run_on_ui_thread = lambda fn: _loop.call_soon_threadsafe(fn)
     # the app's own state publisher, bound to the bare app
     app._publish_host_state_ws = types.MethodType(m.KaraokeApp._publish_host_state_ws, app)
     app._on_host_relay_command = types.MethodType(m.KaraokeApp._on_host_relay_command, app)

@@ -11,11 +11,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control_loopback as cl  # noqa: E402
 
-mode = sys.argv[1] if len(sys.argv) > 1 else "apply"
+mode = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "apply"
+library = "--library" in sys.argv   # a throwaway song library the app can search and add from
 stop = False
 signal.signal(signal.SIGTERM, lambda *a: globals().__setitem__("stop", True))
 signal.signal(signal.SIGINT, lambda *a: globals().__setitem__("stop", True))
-with cl.Stack(mode) as st:
-    print(f"READY http://127.0.0.1:{st.php_port}/v2/daw-controls.php?user={cl.TENANT}  tenant={cl.TENANT} pin={cl.PIN} mode={mode}", flush=True)
+with cl.Stack(mode, library=library) as st:
+    print(f"READY http://127.0.0.1:{st.php_port}/v2/daw-controls.php?user={cl.TENANT}  tenant={cl.TENANT} pin={cl.PIN} mode={mode} library={library}", flush=True)
     while not stop:
         time.sleep(0.5)
