@@ -153,7 +153,7 @@ def main() -> int:
 
     host = Host()
     player = app_mod.BackgroundMusicPlayer(host)
-    engine = player._bass_engine
+    engine = player._bgm_engine
     print(f"[REHEARSAL] engine={getattr(engine, 'backend_name', None)} mode={args.mode} tracks={len(files)}")
     if getattr(engine, "backend_name", "") != "Rust":
         print("FAIL: the player did not choose the Rust engine")

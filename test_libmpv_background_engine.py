@@ -284,7 +284,7 @@ class HostRecoverySelectionTests(unittest.TestCase):
             raise RuntimeError("simulated Rust engine start-up failure")
 
         player = module.BackgroundMusicPlayer.__new__(module.BackgroundMusicPlayer)
-        player._bass_engine = None
+        player._bgm_engine = None
         player._attach_host_audio_chain = lambda: None
         import rust_bgm_engine
         original_rust = rust_bgm_engine.RustBackgroundEngine
@@ -292,13 +292,13 @@ class HostRecoverySelectionTests(unittest.TestCase):
         rust_bgm_engine.RustBackgroundEngine = _rust_raises
         module.LibmpvBackgroundEngine = _StubLibmpvEngine
         try:
-            ok = module.BackgroundMusicPlayer._init_bass_engine(player)
+            ok = module.BackgroundMusicPlayer._init_bgm_engine(player)
         finally:
             rust_bgm_engine.RustBackgroundEngine = original_rust
             module.LibmpvBackgroundEngine = original_libmpv
         self.assertTrue(ok)
-        self.assertIsInstance(player._bass_engine, _StubLibmpvEngine)
-        self.assertTrue(player._bass_ready())
+        self.assertIsInstance(player._bgm_engine, _StubLibmpvEngine)
+        self.assertTrue(player._bgm_ready())
 
     def test_both_engines_failing_reports_false(self):
         module = self.singws
@@ -310,7 +310,7 @@ class HostRecoverySelectionTests(unittest.TestCase):
             raise RuntimeError("simulated libmpv engine failure")
 
         player = module.BackgroundMusicPlayer.__new__(module.BackgroundMusicPlayer)
-        player._bass_engine = None
+        player._bgm_engine = None
         player._attach_host_audio_chain = lambda: None
         import rust_bgm_engine
         original_rust = rust_bgm_engine.RustBackgroundEngine
@@ -318,12 +318,12 @@ class HostRecoverySelectionTests(unittest.TestCase):
         rust_bgm_engine.RustBackgroundEngine = _rust_raises
         module.LibmpvBackgroundEngine = _libmpv_raises
         try:
-            ok = module.BackgroundMusicPlayer._init_bass_engine(player)
+            ok = module.BackgroundMusicPlayer._init_bgm_engine(player)
         finally:
             rust_bgm_engine.RustBackgroundEngine = original_rust
             module.LibmpvBackgroundEngine = original_libmpv
         self.assertFalse(ok)
-        self.assertIsNone(player._bass_engine)
+        self.assertIsNone(player._bgm_engine)
 
 
 if __name__ == "__main__":

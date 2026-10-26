@@ -16,7 +16,7 @@ import test_shell_queue_commands as base
 class FakePlayer:
     def __init__(self, playlist, index=0, playing=False):
         self.playlist, self.current_index, self.is_playing, self.calls = playlist, index, playing, []
-        self._bass_engine = types.SimpleNamespace(set_eq=lambda eq: self.calls.append(("set_eq", eq)))
+        self._bgm_engine = types.SimpleNamespace(set_eq=lambda eq: self.calls.append(("set_eq", eq)))
 
     def next_track(self):
         self.calls.append("next_track")

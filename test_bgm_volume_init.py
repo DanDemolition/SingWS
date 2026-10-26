@@ -60,7 +60,7 @@ class BgmVolumeInitTests(unittest.TestCase):
         player = self.singws.BackgroundMusicPlayer.__new__(self.singws.BackgroundMusicPlayer)
         player.volume = 0.8
         player.is_playing = False
-        player._bass_engine = FakeBassEngine()
+        player._bgm_engine = FakeBassEngine()
         player._bg_last_volume_source = ""
         player._bg_norm_gen = {}
         player.parent = lambda: FakeHost(settings)
@@ -76,8 +76,8 @@ class BgmVolumeInitTests(unittest.TestCase):
         player.initialize_startup_volume()
 
         self.assertAlmostEqual(player.volume, 0.37)
-        self.assertAlmostEqual(player._bass_engine.master_volume, 0.37)
-        self.assertIn(0.37, player._bass_engine.calls)
+        self.assertAlmostEqual(player._bgm_engine.master_volume, 0.37)
+        self.assertIn(0.37, player._bgm_engine.calls)
 
     def test_unknown_normalized_track_uses_unity_playback_while_analysis_runs(self):
         player = self.make_player({
@@ -112,7 +112,7 @@ class BgmVolumeInitTests(unittest.TestCase):
             self.assertEqual(calls, [])
             self.assertIsNone(info)
             self.assertAlmostEqual(factor, 1.0)
-            self.assertAlmostEqual(player._bass_engine.primary_norm, 1.0)
+            self.assertAlmostEqual(player._bgm_engine.primary_norm, 1.0)
         finally:
             self.singws.loudness_info_cached = orig_info
             self.singws.analyze_loudness_async = orig_analyze

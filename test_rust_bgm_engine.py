@@ -298,7 +298,7 @@ def _load_app():
 
 
 class AppSelectionTests(unittest.TestCase):
-    """`_init_bass_engine` picks the engine from the `bgm_engine` setting (default rust) and always falls back to BASS."""
+    """`_init_bgm_engine` picks the engine from the `bgm_engine` setting (default rust) and always falls back to BASS."""
 
     @classmethod
     def setUpClass(cls):
@@ -332,8 +332,8 @@ class AppSelectionTests(unittest.TestCase):
             fake.backend_name = "Rust"
             fake.fell_back_to_default = False
             with mock.patch.dict(sys.modules, {"rust_bgm_engine": mock.Mock(RustBackgroundEngine=mock.Mock(return_value=fake))}):
-                self.assertTrue(p._init_bass_engine("Some Device"))
-            self.assertIs(p._bass_engine, fake)
+                self.assertTrue(p._init_bgm_engine("Some Device"))
+            self.assertIs(p._bgm_engine, fake)
 
     def test_any_rust_failure_falls_back_to_libmpv(self):
         p = self._player("rust")
@@ -342,9 +342,9 @@ class AppSelectionTests(unittest.TestCase):
         broken = mock.Mock(RustBackgroundEngine=mock.Mock(side_effect=RuntimeError("no device")))
         with mock.patch.dict(sys.modules, {"rust_bgm_engine": broken}):
             with mock.patch.object(self.app, "LibmpvBackgroundEngine", return_value=libmpv) as ctor:
-                self.assertTrue(p._init_bass_engine("Some Device"))
+                self.assertTrue(p._init_bgm_engine("Some Device"))
         ctor.assert_called_once()
-        self.assertIs(p._bass_engine, libmpv)
+        self.assertIs(p._bgm_engine, libmpv)
 
     def test_no_bass_module_is_left_in_the_app(self):
         self.assertFalse(hasattr(self.app, "BassBackgroundEngine"))

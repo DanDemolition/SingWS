@@ -67,38 +67,38 @@ class AttachTests(unittest.TestCase):
     def _player(self, host):
         P = self.mod.BackgroundMusicPlayer
         p = P.__new__(P)
-        p._bass_engine = FakeEngine()
+        p._bgm_engine = FakeEngine()
         p.parent = lambda: host
-        p._start_audio_diag_counters = lambda parent: setattr(p._bass_engine, "diag", True)
+        p._start_audio_diag_counters = lambda parent: setattr(p._bgm_engine, "diag", True)
         return p
 
     def test_no_settings_yet_attaches_nothing(self):
         p = self._player(FakeHost(settings=None))
         p._attach_host_audio_chain()
-        self.assertEqual(p._bass_engine.master, "unset")
+        self.assertEqual(p._bgm_engine.master, "unset")
 
     def test_repeat_after_settings_exist_attaches_master_chain(self):
         host = FakeHost(settings=None)
         p = self._player(host)
         p._attach_host_audio_chain()
-        self.assertEqual(p._bass_engine.master, "unset")
+        self.assertEqual(p._bgm_engine.master, "unset")
         host.settings = {"simple_audio_mode": True}
         p._attach_host_audio_chain()
-        self.assertIs(p._bass_engine.master, host.proc)
-        self.assertTrue(p._bass_engine.diag)
-        self.assertIsNone(p._bass_engine.eq)  # simple audio mode: EQ left out
+        self.assertIs(p._bgm_engine.master, host.proc)
+        self.assertTrue(p._bgm_engine.diag)
+        self.assertIsNone(p._bgm_engine.eq)  # simple audio mode: EQ left out
 
     def test_advanced_mode_attaches_the_graphic_eq(self):
         host = FakeHost(settings={"simple_audio_mode": False})
         p = self._player(host)
         p._attach_host_audio_chain()
-        self.assertIs(p._bass_engine.eq, host.bgm_eq)
+        self.assertIs(p._bgm_engine.eq, host.bgm_eq)
 
     def test_master_off_detaches(self):
         host = FakeHost(settings={"simple_audio_mode": True}, master_on=False)
         p = self._player(host)
         p._attach_host_audio_chain()
-        self.assertIsNone(p._bass_engine.master)
+        self.assertIsNone(p._bgm_engine.master)
 
     def test_host_schedules_the_repeat_after_loading_settings(self):
         src = (_ROOT / "0.2.18.1.py").read_text()

@@ -72,7 +72,7 @@ async def main():
     player.next_track = lambda: (_bg_select(min(player.current_index + 1, len(tracks) - 1)), setattr(player, "current_index", bg["index"]), played.append("bg_next"))
     player.stop = lambda: played.append("bg_stop")
     player.play = lambda: (_bg_select(player.current_index), played.append(f"bg_play:{player.current_index}"))
-    player._bass_engine = types.SimpleNamespace(set_eq=lambda eq: played.append("bass_set_eq"))
+    player._bgm_engine = types.SimpleNamespace(set_eq=lambda eq: played.append("bass_set_eq"))
     app.bg_music = player
     app.update_bg_button_state = lambda: None
     app.update_bg_track_display = lambda: None

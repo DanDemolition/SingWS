@@ -80,7 +80,7 @@ class PadWidgetOnRustTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.host = Host()
         self.player = app.BackgroundMusicPlayer(self.host)
-        self.engine = self.player._bass_engine
+        self.engine = self.player._bgm_engine
         self.assertEqual(self.engine.backend_name, "Rust")
 
         player = self.player
@@ -176,8 +176,8 @@ class PadWidgetOnRustTests(unittest.TestCase):
     def test_the_slider_value_survives_an_engine_rebuild(self):
         self.player.set_soundboard_volume(0.4)
         self.host.settings["soundboard_volume"] = 0.4
-        self.player._init_bass_engine()               # what an output-device change does
-        self.assertAlmostEqual(self.player._bass_engine.soundboard_volume, 0.4, places=3)
+        self.player._init_bgm_engine()               # what an output-device change does
+        self.assertAlmostEqual(self.player._bgm_engine.soundboard_volume, 0.4, places=3)
 
     def test_the_bgm_section_has_the_soundboard_slider_wired_to_the_host(self):
         src = (_ROOT / "0.2.18.1.py").read_text()

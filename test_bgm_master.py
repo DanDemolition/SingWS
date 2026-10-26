@@ -32,7 +32,7 @@ class HostBgmGatingTests(unittest.TestCase):
         app.settings = base
         app.bgm_master = None
         bg = type("Bg", (), {})()
-        bg._bass_engine = FakeEngine()
+        bg._bgm_engine = FakeEngine()
         app.bg_music = bg
         return app
 
@@ -54,14 +54,14 @@ class HostBgmGatingTests(unittest.TestCase):
     def test_apply_attaches_processor_when_active(self):
         app = self.make_app(master_audio_enabled=True)
         app._apply_bgm_master_processing()
-        attached = app.bg_music._bass_engine.calls[-1]
+        attached = app.bg_music._bgm_engine.calls[-1]
         self.assertIsNotNone(attached)
         self.assertTrue(attached.enabled())
 
     def test_apply_detaches_when_disabled(self):
         app = self.make_app(master_audio_enabled=False)
         app._apply_bgm_master_processing()
-        self.assertIsNone(app.bg_music._bass_engine.calls[-1])
+        self.assertIsNone(app.bg_music._bgm_engine.calls[-1])
 
 class NormalizeRetryTests(unittest.TestCase):
     @classmethod
@@ -150,8 +150,8 @@ class BackgroundTrackCrossfadeTests(unittest.TestCase):
         player.playlist = ["/audible.mp3", "/next.mp3"]
         player.current_index = 0
         player.crossfade_active = False
-        player._bass_ready = lambda: True
-        player._bass_engine = SimpleNamespace(
+        player._bgm_ready = lambda: True
+        player._bgm_engine = SimpleNamespace(
             primary=SimpleNamespace(path="/audible.mp3"),
             secondary=SimpleNamespace(path="/next.mp3"),
         )
@@ -163,8 +163,8 @@ class BackgroundTrackCrossfadeTests(unittest.TestCase):
         player.playlist = ["/outgoing.mp3", "/incoming.mp3"]
         player.current_index = 0
         player.crossfade_active = True
-        player._bass_ready = lambda: True
-        player._bass_engine = SimpleNamespace(
+        player._bgm_ready = lambda: True
+        player._bgm_engine = SimpleNamespace(
             primary=SimpleNamespace(path="/outgoing.mp3"),
             secondary=SimpleNamespace(path="/incoming.mp3"),
         )

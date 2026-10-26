@@ -96,7 +96,7 @@ class StopFadeTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.host = Host()
         self.player = app.BackgroundMusicPlayer(self.host)
-        self.engine = self.player._bass_engine
+        self.engine = self.player._bgm_engine
         self.assertEqual(self.engine.backend_name, "Rust")
         self.player.playlist = [tone(self.tmp.name, "a.wav"), tone(self.tmp.name, "b.wav", hz=880)]
         self.player.current_index = 0

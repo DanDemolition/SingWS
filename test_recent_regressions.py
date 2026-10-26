@@ -386,7 +386,7 @@ class RecentRegressionTests(unittest.TestCase):
             },
             karaoke_eq=karaoke_eq,
             bgm_eq=bgm_eq,
-            bg_music=SimpleNamespace(_bass_engine=bass),
+            bg_music=SimpleNamespace(_bgm_engine=bass),
             _simple_audio_mode=lambda: False,
             _push_mpv_audio_processing=lambda reason: pushed.append(("mpv", reason)),
             _log_bgm_eq_route=lambda reason: pushed.append(("bgm_route", reason)),
@@ -432,7 +432,7 @@ class RecentRegressionTests(unittest.TestCase):
             karaoke_eq=None,
             bgm_eq=bgm_eq,
             bg_music=SimpleNamespace(
-                _bass_engine=SimpleNamespace(set_eq=lambda eq: pushed.append(eq))
+                _bgm_engine=SimpleNamespace(set_eq=lambda eq: pushed.append(eq))
             ),
             _simple_audio_mode=lambda: True,
             _log_bgm_eq_route=lambda reason: None,

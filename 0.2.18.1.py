@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from karafun_fullscreen import ensure_renderer_fullscreen, renderer_raise_script
 
-# The BASS master/EQ processors run as Python DSP callbacks on the audio
+# The reference ("python") master/EQ processors run as Python DSP callbacks on the audio
 # thread, so producing sound needs the GIL -- unlike the old GStreamer pipeline,
 # which was pure C and could not be blocked by anything the UI did. At Python's
 # default 5ms switch interval a burst of GUI work (opening Settings, the EQ, the
@@ -4103,13 +4103,13 @@ DEFAULTS = {
     # performance_debug_enabled precisely so stall stacks stay usable without
     # paying this. Turn on only to identify a specific stall, then turn back off.
     "stall_event_attribution": False,
-    # Once-a-minute "[AUDIO-DIAG]" log line with the timing of the Python master-processor callback that runs on BASS's
-    # audio thread (blocks, mean/p99/max time, blocks over half their own duration, gaps between callbacks, BASS CPU,
+    # Once-a-minute "[AUDIO-DIAG]" log line with the timing of the Python master-processor callback that runs on the
+    # audio thread (blocks, mean/p99/max time, blocks over half their own duration, gaps between callbacks, engine CPU,
     # stalled-mixer polls). Cost: two clock reads and a few additions per audio block. Set False to switch off.
     "audio_diag_counters": True,
     # Which implementation runs the BGM master chain (gate, tilt EQ, exciter, compressor, limiter): "rust" (DEFAULT since
-    # 2026-10-09: libsingws_dsp_ffi.dylib, called by BASS directly, no Python on the audio thread; a full Intel show ran it
-    # with zero over-budget blocks and zero gaps) or "python" (the reference, runs inside a BASS audio-thread callback).
+    # 2026-10-09: libsingws_dsp_ffi.dylib, called by the Rust engine directly, no Python on the audio thread; a full Intel show ran it
+    # with zero over-budget blocks and zero gaps) or "python" (the reference, runs inside an audio-thread callback).
     # Falls back to Python if the library is missing. Takes effect at the next launch.
     "master_dsp_engine": "rust",
     "bgm_engine": "rust",   # Always the Rust engine now (BASS removed in S5); a saved "bass" is ignored with a log line. A Rust start-up failure falls back to libmpv.
@@ -4851,9 +4851,9 @@ class BackgroundMusicPlayer(QObject):
         # Probe fields used to detect stale 'is_playing=True' state.
         self._play_probe_pos = None
         self._play_probe_ts = None
-        self._bass_engine = None
-        self._bass_fade_generation = 0
-        self._bass_crossfade_generation = 0
+        self._bgm_engine = None
+        self._bgm_fade_generation = 0
+        self._bgm_crossfade_generation = 0
         self._bg_first_play_logged = False
         self._bg_volume_probe_generation = 0
         self._bg_last_volume_source = "default"
@@ -4862,12 +4862,12 @@ class BackgroundMusicPlayer(QObject):
         self._startup_preload_resume_request = None
         self._next_preload_in_progress = False
         self._next_preload_attempt = None
-        # Files that BASS cannot open are bypassed for automatic transitions.
+        # Files the background engine cannot open are bypassed for automatic transitions.
         # The signature makes an edited/replaced file eligible again without
         # requiring an application restart.
         self._bg_unplayable_signatures = {}
         self.soundboard_volume = 1.0
-        self._init_bass_engine()
+        self._init_bgm_engine()
 
     def _platform_audio_label(self) -> str:
         try:
@@ -4889,7 +4889,7 @@ class BackgroundMusicPlayer(QObject):
 
     def _bg_volume_diag(self, stage: str, path: str | None = None, extra: str = ""):
         try:
-            engine = getattr(self, "_bass_engine", None)
+            engine = getattr(self, "_bgm_engine", None)
             backend = getattr(engine, "backend_name", "BASS") if engine is not None else "none"
             master = ""
             if engine is not None:
@@ -4917,7 +4917,7 @@ class BackgroundMusicPlayer(QObject):
             target = 0.8
         self.volume = target
         self._bg_last_volume_source = reason
-        engine = getattr(self, "_bass_engine", None)
+        engine = getattr(self, "_bgm_engine", None)
         if engine is not None:
             try:
                 engine.set_master_volume(target)
@@ -4954,7 +4954,7 @@ class BackgroundMusicPlayer(QObject):
 
     def initialize_startup_volume(self):
         target = self._sync_volume_from_ui_or_settings("app-launch")
-        engine = getattr(self, "_bass_engine", None)
+        engine = getattr(self, "_bgm_engine", None)
         if engine is not None:
             try:
                 engine.set_master_volume(target)
@@ -4973,17 +4973,17 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             return False
 
-    def _init_bass_engine(self, output_name: str | None = None) -> bool:
+    def _init_bgm_engine(self, output_name: str | None = None) -> bool:
         try:
             # Close old engine first to free BASS resources
-            old_engine = getattr(self, "_bass_engine", None)
+            old_engine = getattr(self, "_bgm_engine", None)
             if old_engine is not None:
                 try:
                     old_engine.close()
                 except Exception:
                     pass
-                self._bass_engine = None
-            self._bass_engine = None    # also on the very first call, when no engine (and no attribute) exists yet
+                self._bgm_engine = None
+            self._bgm_engine = None    # also on the very first call, when no engine (and no attribute) exists yet
 
             if self._legacy_bass_setting() and not getattr(self, "_legacy_bass_logged", False):
                 self._legacy_bass_logged = True
@@ -4992,19 +4992,19 @@ class BackgroundMusicPlayer(QObject):
             # so the show never loses its music.
             try:
                 from rust_bgm_engine import RustBackgroundEngine
-                self._bass_engine = RustBackgroundEngine(output_name=output_name)
-                if getattr(self._bass_engine, "fell_back_to_default", False):
-                    _diag(f"[BG-RUST] saved output '{output_name}' not found; using the system default ({self._bass_engine.device_name})")
+                self._bgm_engine = RustBackgroundEngine(output_name=output_name)
+                if getattr(self._bgm_engine, "fell_back_to_default", False):
+                    _diag(f"[BG-RUST] saved output '{output_name}' not found; using the system default ({self._bgm_engine.device_name})")
             except Exception as rust_err:
                 _diag(f"[BG-RUST] Rust background engine unavailable ({rust_err}); trying libmpv/Qt background engine")
-                self._bass_engine = LibmpvBackgroundEngine(output_name=output_name)
-            backend = getattr(self._bass_engine, "backend_name", "Rust")
-            _diag(f"[BG-BASS] {backend} background engine ready platform={self._platform_audio_label()}")
+                self._bgm_engine = LibmpvBackgroundEngine(output_name=output_name)
+            backend = getattr(self._bgm_engine, "backend_name", "Rust")
+            _diag(f"[BG-ENGINE] {backend} background engine ready platform={self._platform_audio_label()}")
             self._attach_host_audio_chain()
             return True
         except Exception as e:
-            self._bass_engine = None
-            _diag(f"[BG-BASS] no Rust/libmpv background engine available ({e})")
+            self._bgm_engine = None
+            _diag(f"[BG-ENGINE] no Rust/libmpv background engine available ({e})")
             return False
 
     def set_soundboard_volume(self, volume) -> None:
@@ -5015,7 +5015,7 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             v = 1.0
         self.soundboard_volume = v
-        engine = getattr(self, "_bass_engine", None)
+        engine = getattr(self, "_bgm_engine", None)
         try:
             if engine is not None and hasattr(engine, "set_soundboard_volume"):
                 engine.set_soundboard_volume(v)
@@ -5025,14 +5025,14 @@ class BackgroundMusicPlayer(QObject):
     def soundboard_runtime(self):
         """The engine the soundboard pads play through: only the Rust engine has pads (layering, the same EQ/master chain, own volume).
         None on the libmpv fallback, where pads report that they cannot play."""
-        engine = getattr(self, "_bass_engine", None)
+        engine = getattr(self, "_bgm_engine", None)
         return engine if engine is not None and hasattr(engine, "pad_play") else None
 
     def _attach_host_audio_chain(self) -> None:
         """Attach the BGM graphic EQ, the master chain and the audio counters to the current engine, from the host's settings.
         Runs when the engine is created AND again once the host has finished loading its settings: the player is built before
         `self.settings` exists, so the first run sees no settings and (by design of the guards) attaches nothing."""
-        if getattr(self, "_bass_engine", None) is None:
+        if getattr(self, "_bgm_engine", None) is None:
             return
         parent = self.parent()
         # Attach the BGM 10-band graphic EQ ONLY in advanced mode. Simple
@@ -5044,21 +5044,21 @@ class BackgroundMusicPlayer(QObject):
                 parent._ensure_eq_engines()
             bgm_eq = getattr(parent, "bgm_eq", None) if parent is not None else None
             if bgm_eq is not None and not simple:
-                self._bass_engine.set_eq(bgm_eq)
-            elif hasattr(self._bass_engine, "set_eq"):
-                self._bass_engine.set_eq(None)
-            _diag(f"[BG-BASS] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
+                self._bgm_engine.set_eq(bgm_eq)
+            elif hasattr(self._bgm_engine, "set_eq"):
+                self._bgm_engine.set_eq(None)
+            _diag(f"[BG-ENGINE] init simple_audio={int(simple)} eq_attached={int(bool(bgm_eq is not None and not simple))}")
         except Exception:
             pass
         # Full master chain (gate/tilt EQ/exciter/compressor/limiter) so
         # BGM is processed in tandem with karaoke songs when enabled.
         try:
             if (parent is not None and hasattr(parent, "_bgm_master_active")
-                    and hasattr(self._bass_engine, "set_master_processor")):
+                    and hasattr(self._bgm_engine, "set_master_processor")):
                 if parent._bgm_master_active():
-                    self._bass_engine.set_master_processor(parent._ensure_bgm_master_processor())
+                    self._bgm_engine.set_master_processor(parent._ensure_bgm_master_processor())
                 else:
-                    self._bass_engine.set_master_processor(None)
+                    self._bgm_engine.set_master_processor(None)
         except Exception:
             pass
         try:
@@ -5072,12 +5072,12 @@ class BackgroundMusicPlayer(QObject):
         except Exception:
             pass
 
-    def _bass_ready(self) -> bool:
-        return getattr(self, "_bass_engine", None) is not None
+    def _bgm_ready(self) -> bool:
+        return getattr(self, "_bgm_engine", None) is not None
 
     def _start_audio_diag_counters(self, parent) -> None:
         """Enable the master-DSP timing counters and the once-a-minute log line (setting `audio_diag_counters`)."""
-        engine = getattr(self, "_bass_engine", None)
+        engine = getattr(self, "_bgm_engine", None)
         if engine is None or not hasattr(engine, "set_audio_diagnostics"):
             return
         enabled = bool(parent.settings.get("audio_diag_counters", True)) if (parent is not None and hasattr(parent, "settings")) else False
@@ -5095,7 +5095,7 @@ class BackgroundMusicPlayer(QObject):
             timer.stop()
 
     def _log_audio_diag(self) -> None:
-        engine = getattr(self, "_bass_engine", None)
+        engine = getattr(self, "_bgm_engine", None)
         snapshot_fn = getattr(engine, "audio_diagnostics_snapshot", None)
         if not callable(snapshot_fn):
             return
@@ -5103,7 +5103,7 @@ class BackgroundMusicPlayer(QObject):
         if line:
             _diag(line)
 
-    def _bass_selected_output_name(self) -> str | None:
+    def _bgm_selected_output_name(self) -> str | None:
         try:
             parent = self.parent()
             return parent._safe_local_audio_output_name()
@@ -5111,8 +5111,8 @@ class BackgroundMusicPlayer(QObject):
             pass
         return None
 
-    def _bass_update_meter(self):
-        engine = getattr(self, "_bass_engine", None)
+    def _bgm_update_meter(self):
+        engine = getattr(self, "_bgm_engine", None)
         if engine is None:
             return
         try:
@@ -5126,36 +5126,36 @@ class BackgroundMusicPlayer(QObject):
         """The user's Stop: fade the music out, THEN stop (position is dropped, like stop()). Pause is not affected and stays instant, and
         internal callers of stop() (track changes) keep their instant stop. Pressing Play/Pause/another Stop during the fade takes over."""
         try:
-            engine = getattr(self, "_bass_engine", None)
+            engine = getattr(self, "_bgm_engine", None)
             if engine is None or engine.primary is None or not self.is_playing or int(duration_ms) <= 0:
                 self.stop()
                 return
-            self._bass_fade_generation += 1
-            self._bass_crossfade_generation += 1
+            self._bgm_fade_generation += 1
+            self._bgm_crossfade_generation += 1
             self.crossfade_active = False
             self.crossfade_progress = 0.0
             self._crossfade_target_index = None
             engine.cancel_crossfade()
             self._next_preload_attempt = None
-            generation = int(self._bass_fade_generation)
+            generation = int(self._bgm_fade_generation)
             engine.slide_master_volume(0.0, int(duration_ms))
             QTimer.singleShot(int(duration_ms) + 30, lambda g=generation: self._stop_after_stop_fade(g))
         except Exception:
             self.stop()
 
     def _stop_after_stop_fade(self, generation: int):
-        if generation != int(getattr(self, "_bass_fade_generation", 0) or 0):
+        if generation != int(getattr(self, "_bgm_fade_generation", 0) or 0):
             return      # something else (Play, Pause, another fade) took over while fading
         self.stop()
         try:
             self.volume = self._target_volume_from_ui()
-            if self._bass_ready():
-                self._bass_engine.set_master_volume(self.volume)    # the next Play must not start at the faded-out 0
+            if self._bgm_ready():
+                self._bgm_engine.set_master_volume(self.volume)    # the next Play must not start at the faded-out 0
         except Exception:
             pass
 
-    def _bass_stop_after_fade(self, generation: int):
-        if generation != int(getattr(self, "_bass_fade_generation", 0) or 0):
+    def _bgm_stop_after_fade(self, generation: int):
+        if generation != int(getattr(self, "_bgm_fade_generation", 0) or 0):
             return
         self.pause()
         try:
@@ -5295,16 +5295,16 @@ class BackgroundMusicPlayer(QObject):
 
     def get_active_track_path(self) -> str:
         """Best-effort path for the track currently sounding from the live engine."""
-        if self._bass_ready():
+        if self._bgm_ready():
             try:
                 # A secondary deck can be preloaded and attached at zero gain
                 # well before a crossfade starts.  It is not the audible track
                 # until the crossfade is active; reporting it here makes
                 # playlist edits/shuffles preserve the wrong row.
                 deck = (
-                    self._bass_engine.secondary
-                    if self.crossfade_active and self._bass_engine.secondary is not None
-                    else self._bass_engine.primary
+                    self._bgm_engine.secondary
+                    if self.crossfade_active and self._bgm_engine.secondary is not None
+                    else self._bgm_engine.primary
                 )
                 if deck is not None:
                     return str(deck.path)
@@ -5381,7 +5381,7 @@ class BackgroundMusicPlayer(QObject):
         eq_chain = "off"
         if eq_on:
             try:
-                engine = getattr(self, "_bass_engine", None)
+                engine = getattr(self, "_bgm_engine", None)
                 if engine is not None and getattr(engine, "_eq_fx_handles", None):
                     eq_chain = "native-bass"
                 elif engine is not None and getattr(engine, "_eq_dsp_handle", 0):
@@ -5488,7 +5488,7 @@ class BackgroundMusicPlayer(QObject):
         track plays at a consistent level. The gain is per source deck; the
         user's volume/fades remain the single mixer-master stage."""
         try:
-            engine = getattr(self, "_bass_engine", None)
+            engine = getattr(self, "_bgm_engine", None)
             if engine is None:
                 return None
             # Bump this deck's generation token so any pending re-apply retry
@@ -5577,15 +5577,15 @@ class BackgroundMusicPlayer(QObject):
 
     def _check_track_position(self):
         """Check current track position and start crossfade near the end"""
-        if self._bass_ready():
-            self._bass_update_meter()
-            engine = self._bass_engine
+        if self._bgm_ready():
+            self._bgm_update_meter()
+            engine = self._bgm_engine
             if not self.is_playing or engine.primary is None:
                 return
             if self.crossfade_active:
                 finished = getattr(engine, "crossfade_finished", None)
                 if callable(finished) and finished():
-                    self._complete_crossfade(self._bass_crossfade_generation)
+                    self._complete_crossfade(self._bgm_crossfade_generation)
                 return
             if not self.crossfade_active and engine.source_ended():
                 if bool(getattr(self, "stop_after_current", False)):
@@ -5667,7 +5667,7 @@ class BackgroundMusicPlayer(QObject):
         if signatures.get(signature[0]) != signature:
             signatures[signature[0]] = signature
             _diag(
-                f"[BG-BASS] bypassing unopenable track until file changes "
+                f"[BG-ENGINE] bypassing unopenable track until file changes "
                 f"track={Path(path).name!r} error={str(error)[:160]!r}"
             )
         return True
@@ -5682,7 +5682,7 @@ class BackgroundMusicPlayer(QObject):
             return False
         if saved != signature:
             signatures.pop(signature[0], None)
-            _diag(f"[BG-BASS] changed file eligible again track={Path(path).name!r}")
+            _diag(f"[BG-ENGINE] changed file eligible again track={Path(path).name!r}")
             return False
         return True
 
@@ -5698,7 +5698,7 @@ class BackgroundMusicPlayer(QObject):
 
     def _prepare_next_background_track(self):
         """Prescan one next BASS source off the UI thread; attach only if still next."""
-        engine = self._bass_engine
+        engine = self._bgm_engine
         host = self.parent()
         if (not self.playlist or self.crossfade_active
                 or not hasattr(engine, "install_prepared_secondary")
@@ -5730,7 +5730,7 @@ class BackgroundMusicPlayer(QObject):
             def _finish():
                 self._next_preload_in_progress = False
                 still_next = (
-                    engine is self._bass_engine and primary is engine.primary
+                    engine is self._bgm_engine and primary is engine.primary
                     and not self.crossfade_active and bool(self.playlist)
                     and next_index == self._next_playable_bg_index()
                     and path == str(self.playlist[next_index])
@@ -5739,7 +5739,7 @@ class BackgroundMusicPlayer(QObject):
                     if prepared is not None:
                         engine.discard_prepared_primary(prepared)
                     if error:
-                        _diag(f"[BG-BASS] next preload unavailable track={Path(path).name!r} error={error[:160]!r}")
+                        _diag(f"[BG-ENGINE] next preload unavailable track={Path(path).name!r} error={error[:160]!r}")
                         if self._mark_bg_track_unplayable(path, error):
                             self._next_preload_attempt = None
                             QTimer.singleShot(0, self._prepare_next_background_track)
@@ -5747,7 +5747,7 @@ class BackgroundMusicPlayer(QObject):
                 try:
                     engine.install_prepared_secondary(prepared)
                 except Exception as exc:
-                    _diag(f"[BG-BASS] next preload attach failed: {exc}")
+                    _diag(f"[BG-ENGINE] next preload attach failed: {exc}")
 
             host._run_on_ui_thread(_finish)
 
@@ -5780,18 +5780,18 @@ class BackgroundMusicPlayer(QObject):
 
     def get_playback_times(self) -> tuple[float, float]:
         """Return (position_seconds, duration_seconds) for current BG track."""
-        if self._bass_ready():
+        if self._bgm_ready():
             try:
-                return self._bass_engine.get_times()
+                return self._bgm_engine.get_times()
             except Exception:
                 return 0.0, 0.0
         return 0.0, 0.0
 
     def is_effectively_playing(self) -> bool:
         """True only when BG is really running (not stale PLAYING/muted state)."""
-        if self._bass_ready():
+        if self._bgm_ready():
             try:
-                engine = self._bass_engine
+                engine = self._bgm_engine
                 return bool(
                     self.is_playing
                     and engine.primary is not None
@@ -5804,11 +5804,11 @@ class BackgroundMusicPlayer(QObject):
 
     def seek_seconds(self, seconds: float) -> bool:
         """Seek current BG track to absolute seconds."""
-        if self._bass_ready():
+        if self._bgm_ready():
             try:
-                return bool(self._bass_engine.seek(seconds))
+                return bool(self._bgm_engine.seek(seconds))
             except Exception as e:
-                _diag(f"[BG-BASS] seek failed: {e}")
+                _diag(f"[BG-ENGINE] seek failed: {e}")
                 return False
         return False
     
@@ -5817,7 +5817,7 @@ class BackgroundMusicPlayer(QObject):
         # Reset trailing-silence detector for the upcoming track.
         self._bg_silence_accum_s = 0.0
         self._bg_silence_last_ts = 0.0
-        if self._bass_ready():
+        if self._bgm_ready():
             if self.crossfade_active or not self.playlist:
                 return False
             self._sync_volume_from_ui_or_settings("crossfade-start")
@@ -5827,23 +5827,23 @@ class BackgroundMusicPlayer(QObject):
                 else self._next_playable_bg_index()
             )
             if next_index is None:
-                _diag("[BG-BASS] no playable background track available for crossfade")
+                _diag("[BG-ENGINE] no playable background track available for crossfade")
                 return False
             next_file = self.playlist[next_index]
             selected_duration_ms = max(100, min(8000, int(
                 self.crossfade_duration_ms if duration_ms is None else duration_ms
             )))
             try:
-                position, duration = self._bass_engine.get_times()
+                position, duration = self._bgm_engine.get_times()
                 if duration > 0.0:
                     _start, end = self._bgm_content_window(self.playlist[self.current_index], duration)
-                    lead = getattr(self._bass_engine, "crossfade_lead_seconds", lambda: 0.0)()
+                    lead = getattr(self._bgm_engine, "crossfade_lead_seconds", lambda: 0.0)()
                     selected_duration_ms = min(selected_duration_ms, max(100, int((end - position - lead) * 1000)))
                 norm_gain, info = self._bg_norm_factor_for_path(next_file)
                 content_start, content_end = self._bgm_content_window(next_file)
                 if content_end > content_start:
                     selected_duration_ms = min(selected_duration_ms, max(100, int((content_end - content_start) * 1000)))
-                if not self._bass_engine.start_crossfade(
+                if not self._bgm_engine.start_crossfade(
                     next_file, selected_duration_ms, norm_gain=norm_gain, start_seconds=content_start,
                 ):
                     return False
@@ -5852,9 +5852,9 @@ class BackgroundMusicPlayer(QObject):
                 self.crossfade_active = True
                 self.crossfade_progress = 0.0
                 self._crossfade_target_index = next_index
-                self._bass_crossfade_generation += 1
-                generation = int(self._bass_crossfade_generation)
-                if not callable(getattr(self._bass_engine, "crossfade_finished", None)):
+                self._bgm_crossfade_generation += 1
+                generation = int(self._bgm_crossfade_generation)
+                if not callable(getattr(self._bgm_engine, "crossfade_finished", None)):
                     QTimer.singleShot(
                         max(1, selected_duration_ms),
                         lambda g=generation: self._complete_crossfade(g),
@@ -5875,18 +5875,18 @@ class BackgroundMusicPlayer(QObject):
             math.sin(progress * math.pi * 0.5),
         )
     
-    def _complete_crossfade(self, bass_generation=None):
+    def _complete_crossfade(self, bgm_generation=None):
         """Complete the crossfade and switch to the new track"""
-        if self._bass_ready():
-            if bass_generation is not None and bass_generation != int(getattr(self, "_bass_crossfade_generation", 0) or 0):
+        if self._bgm_ready():
+            if bgm_generation is not None and bgm_generation != int(getattr(self, "_bgm_crossfade_generation", 0) or 0):
                 return
             if not self.crossfade_active:
                 return
             try:
-                if not self._bass_engine.complete_crossfade():
+                if not self._bgm_engine.complete_crossfade():
                     return
             except Exception as e:
-                _diag(f"[BG-BASS] crossfade completion failed: {e}")
+                _diag(f"[BG-ENGINE] crossfade completion failed: {e}")
                 return
             target_index = getattr(self, "_crossfade_target_index", None)
             self.current_index = (
@@ -5905,26 +5905,26 @@ class BackgroundMusicPlayer(QObject):
 
     def preload_current_track_paused(self) -> bool:
         """Build current track pipeline and leave it PAUSED (silent preroll)."""
-        if self._bass_ready():
+        if self._bgm_ready():
             if not self.playlist:
                 return False
-            if self._bass_engine.primary is not None:
+            if self._bgm_engine.primary is not None:
                 self._sync_volume_from_ui_or_settings("preload-existing")
                 return True
             try:
                 current_file = self.playlist[self.current_index]
                 self._bg_volume_diag("preload-before-media-load", current_file)
                 target = self._sync_volume_from_ui_or_settings("preload")
-                self._bass_engine.set_master_volume(0.0)
-                self._bass_engine.load(current_file, paused=True, volume=self.volume)
-                self._bass_engine.set_master_volume(target)
+                self._bgm_engine.set_master_volume(0.0)
+                self._bgm_engine.load(current_file, paused=True, volume=self.volume)
+                self._bgm_engine.set_master_volume(target)
                 self._refresh_bg_normalize(current_file, deck="primary")
                 self.is_playing = False
                 self._bg_volume_diag("preload-after-media-load", current_file, extra=f"target={target:.3f}")
-                print(f"[BG-BASS] Preloaded track (paused): {Path(current_file).name}")
+                print(f"[BG-ENGINE] Preloaded track (paused): {Path(current_file).name}")
                 return True
             except Exception as e:
-                print(f"[BG-BASS] Preload exception: {e}")
+                print(f"[BG-ENGINE] Preload exception: {e}")
                 return False
         return False
 
@@ -5958,9 +5958,9 @@ class BackgroundMusicPlayer(QObject):
 
     def preload_current_track_paused_async(self) -> bool:
         """Prescan the startup BGM source off the GUI thread, then attach it."""
-        if not self._bass_ready() or not self.playlist:
+        if not self._bgm_ready() or not self.playlist:
             return False
-        engine = self._bass_engine
+        engine = self._bgm_engine
         if engine.primary is not None:
             return True
         # Only the native BASS backend exposes a safe split between slow file
@@ -5971,7 +5971,7 @@ class BackgroundMusicPlayer(QObject):
             and hasattr(engine, "install_prepared_primary")
             and hasattr(engine, "discard_prepared_primary")
         ):
-            _diag("[BG-BASS] startup preload skipped; backend has no worker-safe prepare path")
+            _diag("[BG-ENGINE] startup preload skipped; backend has no worker-safe prepare path")
             return False
         if bool(getattr(self, "_startup_preload_in_progress", False)):
             return True
@@ -5982,7 +5982,7 @@ class BackgroundMusicPlayer(QObject):
         self._startup_preload_generation += 1
         generation = int(self._startup_preload_generation)
         self._startup_preload_in_progress = True
-        _diag(f"[BG-BASS] startup preload queued track={Path(current_file).name!r}")
+        _diag(f"[BG-ENGINE] startup preload queued track={Path(current_file).name!r}")
 
         def _worker():
             prepared = None
@@ -5997,7 +5997,7 @@ class BackgroundMusicPlayer(QObject):
                 resume_request = getattr(self, "_startup_preload_resume_request", None)
                 stale = (
                     generation != int(getattr(self, "_startup_preload_generation", 0) or 0)
-                    or engine is not getattr(self, "_bass_engine", None)
+                    or engine is not getattr(self, "_bgm_engine", None)
                     or not self.playlist
                     or str(self.playlist[self.current_index]) != current_file
                 )
@@ -6008,7 +6008,7 @@ class BackgroundMusicPlayer(QObject):
                         self._startup_preload_in_progress = False
                         self._startup_preload_resume_request = None
                     _diag(
-                        f"[BG-BASS] startup preload discarded stale={int(stale)} "
+                        f"[BG-ENGINE] startup preload discarded stale={int(stale)} "
                         f"error={error[:160]!r}"
                     )
                     return
@@ -6022,7 +6022,7 @@ class BackgroundMusicPlayer(QObject):
                 self._startup_preload_in_progress = False
                 self._startup_preload_resume_request = None
                 if not installed:
-                    _diag(f"[BG-BASS] startup preload attach failed error={error_text[:160]!r}")
+                    _diag(f"[BG-ENGINE] startup preload attach failed error={error_text[:160]!r}")
                     if resume_request:
                         if resume_request[0] == "fade":
                             self.fade_in(*resume_request[1:])
@@ -6035,11 +6035,11 @@ class BackgroundMusicPlayer(QObject):
                     extra=f"elapsed_ms={(time.monotonic() - started) * 1000.0:.0f} target={target:.3f}",
                 )
                 _diag(
-                    f"[BG-BASS] startup preload ready track={Path(current_file).name!r} "
+                    f"[BG-ENGINE] startup preload ready track={Path(current_file).name!r} "
                     f"chain={self._bg_dsp_chain_label(current_file, info)}"
                 )
                 if resume_request:
-                    _diag(f"[BG-BASS] honoring queued startup action={resume_request[0]}")
+                    _diag(f"[BG-ENGINE] honoring queued startup action={resume_request[0]}")
                     if resume_request[0] == "fade":
                         self.fade_in(*resume_request[1:])
                     else:
@@ -6072,45 +6072,45 @@ class BackgroundMusicPlayer(QObject):
 
         if bool(getattr(self, "_startup_preload_in_progress", False)):
             self._startup_preload_resume_request = ("play",)
-            _diag("[BG-BASS] play queued behind startup preload")
+            _diag("[BG-ENGINE] play queued behind startup preload")
             return
 
-        if self._bass_ready():
-            if self._pipeline_realign_needed and self._bass_engine.primary is not None and not self.is_playing:
-                self._bass_engine.stop()
+        if self._bgm_ready():
+            if self._pipeline_realign_needed and self._bgm_engine.primary is not None and not self.is_playing:
+                self._bgm_engine.stop()
             self._pipeline_realign_needed = False
             target_volume = self._sync_volume_from_ui_or_settings("play")
             if self.volume <= 0.001:
                 self.volume = target_volume
-                print(f"[BG-BASS] Play sanity: using desired volume {self.volume}")
+                print(f"[BG-ENGINE] Play sanity: using desired volume {self.volume}")
             try:
                 current_file = self.playlist[self.current_index]
                 if not self._bg_first_play_logged:
                     self._bg_first_play_logged = True
                     _diag(f"[BG-VOLUME] first BGM file selected={Path(current_file).name!r}")
-                if self._bass_engine.primary is None and not self.preload_current_track_paused():
+                if self._bgm_engine.primary is None and not self.preload_current_track_paused():
                     return
                 self._refresh_bg_normalize()
                 self._bg_volume_diag("play-before-BASS_ChannelPlay", current_file)
-                self._bass_engine.set_master_volume(target_volume)
-                if not self._bass_engine.play():
-                    print("[BG-BASS] Failed to start background mixer")
+                self._bgm_engine.set_master_volume(target_volume)
+                if not self._bgm_engine.play():
+                    print("[BG-ENGINE] Failed to start background mixer")
                     return
-                self._bass_engine.set_master_volume(target_volume)
+                self._bgm_engine.set_master_volume(target_volume)
                 self.is_playing = True
                 self._bg_volume_diag("play-after-BASS_ChannelPlay", current_file)
                 self._schedule_volume_state_probe("bass-play")
                 print(f"Playing BASSmix background music: {Path(self.playlist[self.current_index]).name}")
             except Exception as e:
-                print(f"[BG-BASS] play failed: {e}")
+                print(f"[BG-ENGINE] play failed: {e}")
             return
         print("[BG] no background audio engine available")
         
     def pause(self):
         """Pause background music"""
-        if self._bass_ready():
-            self._bass_fade_generation += 1
-            self._bass_engine.pause()
+        if self._bgm_ready():
+            self._bgm_fade_generation += 1
+            self._bgm_engine.pause()
             self.is_playing = False
             self._meter_level = 0.0
             self._play_probe_pos = None
@@ -6129,10 +6129,10 @@ class BackgroundMusicPlayer(QObject):
         ) + 1
         self._startup_preload_in_progress = False
         self._startup_preload_resume_request = None
-        if self._bass_ready():
-            self._bass_fade_generation += 1
-            self._bass_crossfade_generation += 1
-            self._bass_engine.stop()
+        if self._bgm_ready():
+            self._bgm_fade_generation += 1
+            self._bgm_crossfade_generation += 1
+            self._bgm_engine.stop()
             self.crossfade_active = False
             self.crossfade_progress = 0.0
             self._crossfade_target_index = None
@@ -6156,15 +6156,15 @@ class BackgroundMusicPlayer(QObject):
 
     def apply_audio_output_change(self):
         """Apply selected output device to BG immediately (karaoke applies next track)."""
-        if self._bass_ready():
-            had_deck = self._bass_engine.primary is not None
-            was_playing = bool(self.is_playing and self._bass_engine.is_playing())
+        if self._bgm_ready():
+            had_deck = self._bgm_engine.primary is not None
+            was_playing = bool(self.is_playing and self._bgm_engine.is_playing())
             pos_sec, _dur_sec = self.get_playback_times()
             try:
-                self._bass_engine.close()
+                self._bgm_engine.close()
             except Exception:
                 pass
-            if not self._init_bass_engine(self._bass_selected_output_name()):
+            if not self._init_bgm_engine(self._bgm_selected_output_name()):
                 return
             if had_deck and self.playlist:
                 if self.preload_current_track_paused() and pos_sec > 0.0:
@@ -6194,7 +6194,7 @@ class BackgroundMusicPlayer(QObject):
         # IMMEDIATE UI UPDATE - Update index and display BEFORE audio processing
         target_index = self._next_playable_bg_index()
         if target_index is None:
-            _diag("[BG-BASS] next requested but no playable background track is available")
+            _diag("[BG-ENGINE] next requested but no playable background track is available")
             self.stop()
             return
         self.current_index = target_index
@@ -6270,25 +6270,25 @@ class BackgroundMusicPlayer(QObject):
         """Set background music volume (0.0 to 1.0)"""
         ui_value = volume
         self.volume = max(0.0, min(1.0, volume))
-        if self._bass_ready():
-            self._bass_engine.set_master_volume(self.volume)
+        if self._bgm_ready():
+            self._bgm_engine.set_master_volume(self.volume)
             try:
-                eff = float(self._bass_engine._effective_master())
+                eff = float(self._bgm_engine._effective_master())
             except Exception:
                 eff = self.volume
-            _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend={getattr(self._bass_engine, 'backend_name', 'BASS')} master_gain={eff:.3f}")
+            _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend={getattr(self._bgm_engine, 'backend_name', 'BASS')} master_gain={eff:.3f}")
             return
         _diag(f"[BG-VOL] ui={float(ui_value):.3f} applied={self.volume:.3f} backend=none")
 
     def cancel_pending_fades(self, restore_to_target: bool = True):
         """Cancel any in-flight BG fade/crossfade so stale timers cannot mute playback later."""
-        if self._bass_ready():
-            self._bass_fade_generation += 1
-            self._bass_crossfade_generation += 1
+        if self._bgm_ready():
+            self._bgm_fade_generation += 1
+            self._bgm_crossfade_generation += 1
             self.crossfade_active = False
             self.crossfade_progress = 0.0
             self._crossfade_target_index = None
-            self._bass_engine.cancel_crossfade()
+            self._bgm_engine.cancel_crossfade()
             self._next_preload_attempt = None
             if not restore_to_target:
                 return
@@ -6297,7 +6297,7 @@ class BackgroundMusicPlayer(QObject):
             except Exception:
                 target = max(0.0, min(1.0, float(self.volume or 0.8)))
             self.volume = target
-            self._bass_engine.set_master_volume(target)
+            self._bgm_engine.set_master_volume(target)
             return
         self.crossfade_active = False
         self.crossfade_progress = 0.0
@@ -6308,11 +6308,11 @@ class BackgroundMusicPlayer(QObject):
     def ensure_audible(self, reason: str = ""):
         """Recover the 'flag says playing but silent' state: a karaoke-start
         fade can leave the engine paused or at master volume 0 while
-        self.is_playing stays True (a stale _bass_stop_after_fade generation
+        self.is_playing stays True (a stale _bgm_stop_after_fade generation
         skips the pause), so resume paths that trust the flag leave silence."""
-        if not self._bass_ready() or not self.is_playing:
+        if not self._bgm_ready() or not self.is_playing:
             return
-        eng = self._bass_engine
+        eng = self._bgm_engine
         try:
             paused = bool(eng.is_paused())
             master = float(getattr(eng, "master_volume", 1.0) or 0.0)
@@ -6327,7 +6327,7 @@ class BackgroundMusicPlayer(QObject):
             target = float(getattr(self, "volume", 0.65) or 0.65)
         print(f"[BG-RECOVER] flag playing but paused={int(paused)} playing={int(really_playing)} master={master:.2f} reason={reason}; restoring vol={target:.2f}")
         try:
-            self._bass_fade_generation += 1  # cancel any pending stop-after-fade
+            self._bgm_fade_generation += 1  # cancel any pending stop-after-fade
             if paused or not really_playing:
                 eng.set_master_volume(0.0)
                 eng.play()
@@ -6337,25 +6337,25 @@ class BackgroundMusicPlayer(QObject):
 
     def fade_out(self, duration_ms=1000):
         """Fade out background music"""
-        if self._bass_ready():
-            if self._bass_engine.primary is None or not self.is_playing:
+        if self._bgm_ready():
+            if self._bgm_engine.primary is None or not self.is_playing:
                 return
-            self._bass_fade_generation += 1
-            self._bass_crossfade_generation += 1
+            self._bgm_fade_generation += 1
+            self._bgm_crossfade_generation += 1
             self.crossfade_active = False
             self.crossfade_progress = 0.0
             self._crossfade_target_index = None
-            self._bass_engine.cancel_crossfade()
+            self._bgm_engine.cancel_crossfade()
             self._next_preload_attempt = None
-            generation = int(self._bass_fade_generation)
-            self._bass_engine.slide_master_volume(0.0, duration_ms)
+            generation = int(self._bgm_fade_generation)
+            self._bgm_engine.slide_master_volume(0.0, duration_ms)
             try:
-                settle_ms = max(0, int(self._bass_engine.fade_settle_delay_ms()))
+                settle_ms = max(0, int(self._bgm_engine.fade_settle_delay_ms()))
             except Exception:
                 settle_ms = 0
             QTimer.singleShot(
                 max(1, int(duration_ms) + settle_ms),
-                lambda g=generation: self._bass_stop_after_fade(g),
+                lambda g=generation: self._bgm_stop_after_fade(g),
             )
             if settle_ms:
                 _diag(
@@ -6384,10 +6384,10 @@ class BackgroundMusicPlayer(QObject):
             self._startup_preload_resume_request = (
                 "fade", target_volume, duration_ms, allow_during_karaoke,
             )
-            _diag("[BG-BASS] fade-in queued behind startup preload")
+            _diag("[BG-ENGINE] fade-in queued behind startup preload")
             return
 
-        if self._bass_ready():
+        if self._bgm_ready():
             try:
                 target_volume = max(0.0, min(1.0, float(target_volume)))
                 self.volume = target_volume
@@ -6396,22 +6396,22 @@ class BackgroundMusicPlayer(QObject):
                     self._bg_first_play_logged = True
                     _diag(f"[BG-VOLUME] first BGM file selected={Path(current_file).name!r}")
                 self._bg_volume_diag("fade-in-before-preload", current_file, extra=f"target={target_volume:.3f}")
-                if self._bass_engine.primary is None and not self.preload_current_track_paused():
+                if self._bgm_engine.primary is None and not self.preload_current_track_paused():
                     return
-                self._bass_fade_generation += 1
+                self._bgm_fade_generation += 1
                 self._refresh_bg_normalize(deck="primary")
-                self._bass_engine.set_master_volume(0.0)
+                self._bgm_engine.set_master_volume(0.0)
                 self._bg_volume_diag("fade-in-before-BASS_ChannelPlay", current_file, extra=f"target={target_volume:.3f}")
-                if not self._bass_engine.play():
-                    print("[BG-BASS] fade_in start failed")
+                if not self._bgm_engine.play():
+                    print("[BG-ENGINE] fade_in start failed")
                     return
                 self.is_playing = True
-                self._bass_engine.slide_master_volume(target_volume, duration_ms)
+                self._bgm_engine.slide_master_volume(target_volume, duration_ms)
                 self._bg_volume_diag("fade-in-after-BASS_ChannelPlay", current_file, extra=f"target={target_volume:.3f} duration_ms={int(duration_ms)}")
                 self._schedule_volume_state_probe("bass-fade-in")
                 print(f"Starting BASSmix fade in to volume {target_volume}")
             except Exception as e:
-                print(f"[BG-BASS] fade in failed: {e}")
+                print(f"[BG-ENGINE] fade in failed: {e}")
             return
         print("[BG] fade in unavailable: no background audio engine")
 
@@ -21990,7 +21990,7 @@ class SoundboardPad(QPushButton):
         bg_music = getattr(owner, "bg_music", None) if owner is not None else None
         if bg_music is not None and hasattr(bg_music, "soundboard_runtime"):
             return bg_music.soundboard_runtime()
-        return getattr(bg_music, "_bass_engine", None)
+        return getattr(bg_music, "_bgm_engine", None)
 
     def _stop_channel(self, release: bool = False):
         was_playing = bool(getattr(self, "_playing", False))
@@ -24952,7 +24952,7 @@ class KaraokeApp(QWidget):
             return
         try:
             bg = getattr(self, "bg_music", None)
-            bass = getattr(bg, "_bass_engine", None) if bg is not None else None
+            bass = getattr(bg, "_bgm_engine", None) if bg is not None else None
             if bass is not None and hasattr(bass, "set_eq"):
                 # Detaches the BASS DSP entirely when BGM EQ is off or
                 # flat, so disabled EQ has zero audio-callback cost.
@@ -24996,7 +24996,7 @@ class KaraokeApp(QWidget):
 
             try:
                 bg = getattr(self, "bg_music", None)
-                bass = getattr(bg, "_bass_engine", None) if bg is not None else None
+                bass = getattr(bg, "_bgm_engine", None) if bg is not None else None
                 if bass is not None and hasattr(bass, "set_eq"):
                     bass.set_eq(self.bgm_eq)
             except Exception:
@@ -25288,7 +25288,7 @@ class KaraokeApp(QWidget):
             if bg is not None and hasattr(bg, "_attach_host_audio_chain"):
                 bg._attach_host_audio_chain()
                 self._apply_soundboard_volume(self.settings.get("soundboard_volume", 1.0), save=False)
-                eng = getattr(bg, "_bass_engine", None)
+                eng = getattr(bg, "_bgm_engine", None)
                 _diag(f"[MASTER-AUDIO] BGM chain attached at launch master={int(bool(self._bgm_master_active()))} "
                       f"proc={int(bool(getattr(eng, 'master_attached', getattr(eng, '_master_proc', None) is not None)))}")
         except Exception as exc:
@@ -25299,7 +25299,7 @@ class KaraokeApp(QWidget):
         chain in tandem with the karaoke chain."""
         try:
             bg = getattr(self, "bg_music", None)
-            engine = getattr(bg, "_bass_engine", None) if bg is not None else None
+            engine = getattr(bg, "_bgm_engine", None) if bg is not None else None
             if engine is None or not hasattr(engine, "set_master_processor"):
                 return
             if self._bgm_master_active():
@@ -33179,7 +33179,7 @@ class KaraokeApp(QWidget):
                 self.set_cdg_timing_offset_ms(int(self.settings.get(self._cdg_timing_offset_key(), 0) or 0))
                 if hasattr(self, "bg_music") and self.bg_music is not None:
                     self.bg_music._refresh_bg_normalize()
-                    eng = getattr(self.bg_music, "_bass_engine", None)
+                    eng = getattr(self.bg_music, "_bgm_engine", None)
                     if eng is not None and hasattr(eng, "set_eq"):
                         if not self._simple_audio_mode():
                             self._ensure_eq_engines()
@@ -38864,7 +38864,7 @@ class KaraokeApp(QWidget):
             bgm_eq.set_enabled(bool(self.settings.get("eq_bgm_enabled", False)))
             try:
                 bg = getattr(self, "bg_music", None)
-                bass = getattr(bg, "_bass_engine", None) if bg is not None else None
+                bass = getattr(bg, "_bgm_engine", None) if bg is not None else None
                 if bass is not None and hasattr(bass, "set_eq"):
                     # Same rule as the EQ dialog: Simple Audio Mode keeps the
                     # BGM EQ out of the chain entirely.
@@ -52422,7 +52422,7 @@ class KaraokeApp(QWidget):
         # Background music engine (BASS): attach/detach the BGM EQ.
         try:
             bg = getattr(self, "bg_music", None)
-            eng = getattr(bg, "_bass_engine", None) if bg is not None else None
+            eng = getattr(bg, "_bgm_engine", None) if bg is not None else None
             if eng is not None and hasattr(eng, "set_eq"):
                 eng.set_eq(None if simple else getattr(self, "bgm_eq", None))
                 self._log_bgm_eq_route("simple_audio_toggle")
@@ -52450,7 +52450,7 @@ class KaraokeApp(QWidget):
     def _log_bgm_eq_route(self, reason: str) -> None:
         try:
             bg = getattr(self, "bg_music", None)
-            eng = getattr(bg, "_bass_engine", None) if bg is not None else None
+            eng = getattr(bg, "_bgm_engine", None) if bg is not None else None
             if eng is None:
                 _diag(f"[EQ-ROUTE] path=bgm routed=0 chain=gstreamer_fallback reason={reason}")
                 return
