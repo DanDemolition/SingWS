@@ -82,6 +82,26 @@ def scenario_a_stale_edit_is_refused_then_the_shell_refreshes_itself():
         assert names[:2] == ["queue.move_singer", "queue.noop"], names  # the refusal triggered exactly one refresh request
 
 
+def scenario_the_shell_adds_a_library_song_through_the_relay_and_a_second_add_is_refused():
+    """The real Qt shell's act() -> real relay -> the app's REAL add routine (quiet mode) over a throwaway song library."""
+    with cl.Stack("apply", library=True) as st:
+        ids = st.song_ids
+        add = {"singer": "bob new", "song_id": ids["a.mp4"], "key": 2}
+        script = [{"label": "Add song", "command": "queue.add_song", "args": add, "nosig": True}, {"label": "Add it again", "command": "queue.add_song", "args": add, "nosig": True}]
+        view, p, _ = run_shell(st, script, snapshot_after=8000)
+        assert view is not None, p.stderr[-800:]
+        cmds = commands_seen(st)
+        assert [c["command"] for c in cmds[:2]] == ["queue.add_song", "queue.add_song"], [c["command"] for c in cmds]
+        assert cmds[0]["args"] == {"singer": "bob new", "song_id": ids["a.mp4"], "key": 2, "source": "shell"}, cmds[0]["args"]
+        first, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[0]["request_id"], timeout=5)
+        second, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[1]["request_id"], timeout=5)
+        assert len(first["order"]) == 4 and sum(len(v) for v in first["songs"].values()) == 6, first  # the 3 sample singers (5 songs) plus Bob and his one song
+        assert second["songs"] == first["songs"], "the second add changed nothing"
+        assert view["result"]["kind"] == "warn" and "already has this song" in view["result"]["text"], view["result"]
+        bob = [s for s in view["singers"] if s["name"] == "Bob New"]
+        assert len(bob) == 1 and len(bob[0]["songs"]) == 1, view["singers"]
+
+
 def scenario_dry_run_shows_a_dry_run_and_changes_nothing():
     with cl.Stack("dry_run") as st:
         script = [{"label": "Remove Dana", "command": "queue.remove_singer", "args": {"singer_id": "s1"}},

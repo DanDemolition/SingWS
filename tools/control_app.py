@@ -37,6 +37,7 @@ async def main():
     ap.add_argument("--key", default="devkey")
     ap.add_argument("--mode", default="apply")
     ap.add_argument("--mute", action="store_true", help="receive commands but never answer (a frozen app)")
+    ap.add_argument("--library", default=None, help="write the ids of a throwaway song library to this file and let the app add those songs (queue.add_song)")
     args = ap.parse_args()
     m = module()
     queue = [
@@ -44,7 +45,15 @@ async def main():
         {"singer_id": "s2", "name": "Sam", "songs": [entry(3)], "skipped": False},
         {"singer_id": "s3", "name": "Lee", "songs": [entry(4), entry(5)], "skipped": False},
     ]
-    h = Harness(queue)
+    if args.library:
+        import test_shell_add_song as ta  # the same throwaway library and recorded widgets the add-song tests use
+
+        lib = ta.env()
+        Path(args.library).write_text(json.dumps({"ids": lib["ids"]}))
+        h = ta.AddHarness(queue)
+        h.app._is_rotation_mode = lambda: True
+    else:
+        h = Harness(queue)
     app = h.app
     app.settings.update({"shell_commands": args.mode, "user": args.tenant})
     played = []
@@ -82,7 +91,7 @@ async def main():
     app.update_queue_display = lambda: None
 
     def snapshot():
-        return {"order": [s["singer_id"] for s in app.queue], "songs": {s["singer_id"]: [e["request_uid"] for e in s["songs"]] for s in app.queue},
+        return {"order": [s["singer_id"] for s in app.queue], "songs": {s["singer_id"]: [e.get("request_uid") or e.get("display_name") or "?" for e in s["songs"]] for s in app.queue},
                 "skipped": {s["singer_id"]: bool(s.get("skipped")) for s in app.queue}, "sig": app._queue_signature(), "played": list(played)}
 
     async def pump():

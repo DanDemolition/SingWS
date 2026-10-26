@@ -11,7 +11,7 @@ Item {
         return ""
     }
 
-    ControlPanel { id: panel }
+    property var panel: null   // the one shared ControlPanel (Main.qml)
     property var view: JSON.parse(panel.viewJson)
     property string confirmSinger: ""
     property bool scriptDone: false
@@ -82,6 +82,7 @@ Item {
             }
             var s = page.script[page.step++]
             if (s.command && s.sig) panel.sendWithSig(s.label || s.command, s.command, JSON.stringify(s.args || {}), s.sig)
+            else if (s.command && s.nosig) panel.send(s.label || s.command, s.command, JSON.stringify(s.args || {}), false)   // how the Library tab's Add sends: no list fingerprint
             else if (s.command) page.act(s.label || s.command, s.command, s.args)
         }
     }

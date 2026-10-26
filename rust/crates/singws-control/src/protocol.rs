@@ -49,6 +49,12 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
         }
         "queue.remove_singer" => need(text(args, "singer_id").is_some(), "singer_id is required"),
         "queue.remove_song" => need(text(args, "entry_id").is_some(), "entry_id is required"),
+        "queue.add_song" => {
+            let singer = args.get("singer").and_then(Value::as_str).map(str::trim).unwrap_or("");
+            need(!singer.is_empty() && singer.chars().count() <= 60 && !singer.chars().any(char::is_control), "singer must be a name of 1-60 characters with no control characters")?;
+            need(args.get("song_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "song_id must be a whole number from the library search")?;
+            need(args.get("key").is_none_or(|k| k.as_i64().is_some_and(|v| (-4..=4).contains(&v))), "key must be a whole number from -4 to 4")
+        }
         "queue.skip_singer" => {
             need(text(args, "singer_id").is_some(), "singer_id is required")?;
             need(args.get("skipped").is_some_and(Value::is_boolean), "skipped must be true or false")
@@ -272,6 +278,19 @@ mod tests {
             ("set_karaoke_volume", json!({})),
             ("seek_to", json!({"seconds": -1})),
             ("seek_to", json!({"seconds": "10"})),
+            ("queue.add_song", json!({"song_id": 5})),
+            ("queue.add_song", json!({"singer": "Dana"})),
+            ("queue.add_song", json!({"singer": "  ", "song_id": 5})),
+            ("queue.add_song", json!({"singer": "x".repeat(61), "song_id": 5})),
+            ("queue.add_song", json!({"singer": "Da\nna", "song_id": 5})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": 0})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": -3})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": 5.5})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": "5"})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": 5})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": -5})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": 1.5})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": "1"})),
             ("queue.explode", json!({})),
             ("rm -rf", json!({})),
             ("play_pause", json!([1, 2])),
@@ -288,6 +307,10 @@ mod tests {
             ("set_karaoke_volume", json!({"value": 1})),
             ("seek_to", json!({"seconds": 0})),
             ("queue.skip_singer", json!({"singer_id": "a", "skipped": false})),
+            ("queue.add_song", json!({"singer": "Dana", "song_id": 1})),
+            ("queue.add_song", json!({"singer": " Amber & Delores ", "song_id": 133158, "key": -4})),
+            ("queue.add_song", json!({"singer": "Mom \u{200d}\u{1F469}", "song_id": 7, "key": 4})),
+            ("queue.add_song", json!({"singer": "x".repeat(60), "song_id": 9, "key": 0})),
             ("queue.move_song", json!({"entry_id": "local:x", "direction": "bottom"})),
         ] {
             assert!(validate_command(c, &a).is_ok(), "{c} {a} must be accepted");

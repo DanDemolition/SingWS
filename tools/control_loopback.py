@@ -125,8 +125,8 @@ class Stream:
 class Stack:
     """php + relay + the app stand-in, in a temp dir, torn down on exit."""
 
-    def __init__(self, mode="apply", mute=False, start_app=True, tls=False):
-        self.mode, self.mute, self.start_app, self.tls = mode, mute, start_app, tls
+    def __init__(self, mode="apply", mute=False, start_app=True, tls=False, library=False):
+        self.mode, self.mute, self.start_app, self.tls, self.library = mode, mute, start_app, tls, library
         self.procs: list[Proc] = []
 
     def __enter__(self):
@@ -186,10 +186,15 @@ class Stack:
         cmd = [sys.executable, str(ROOT / "tools/control_app.py"), "--url", f"ws://127.0.0.1:{self.relay_port}/relay", "--tenant", TENANT, "--mode", self.mode]
         if self.mute:
             cmd.append("--mute")
+        if self.library:
+            self.ids_file = self.tmp / "library_ids.json"
+            cmd += ["--library", str(self.ids_file)]
         self.app = Proc(cmd, env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
         self.app_events = Stream(self.app, "event")
         self.procs.append(self.app)
         self.app_events.wait_for(lambda e: e.get("event") == "connected", timeout=40)
+        if self.library:
+            self.song_ids = json.loads(self.ids_file.read_text())["ids"]
 
     def shell(self, pin=PIN, env=None, trust_ca=False):
         e = dict(os.environ)

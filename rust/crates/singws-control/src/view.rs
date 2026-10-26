@@ -62,6 +62,16 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "shell_commands_off" => ("Remote control is switched off in the app (setting shell_commands)".into(), "error"),
         "no_change" => ("Already there; nothing changed".into(), "ok"),
         "bad_direction" | "bad_skipped" | "missing_request_id" | "missing_sent_at" => (format!("The app refused the command ({m})"), "error"),
+        "added" => ("Song added".into(), "ok"),
+        "unknown_song" => ("That song is not in the library (the song index may have changed); search again".into(), "warn"),
+        "file_missing" => ("The song file is not on disk. Is the library drive connected?".into(), "warn"),
+        "missing_mp3" => ("This CDG has no matching MP3 file next to it".into(), "warn"),
+        "bad_song" | "bad_zip" => ("The app cannot play that file".into(), "warn"),
+        "rotation_locked" => ("The rotation is locked. Unlock it in the app to add songs".into(), "warn"),
+        "duplicate" => ("That singer already has this song queued".into(), "warn"),
+        "limit" => ("That singer is at the song limit".into(), "warn"),
+        "bad_singer" => ("That singer name is not valid".into(), "warn"),
+        "bad_song_id" | "bad_key" => (format!("The app refused the command ({m})"), "error"),
         "moved" => ("Moved".into(), "ok"),
         "removed" => ("Removed".into(), "ok"),
         "changed" => ("Done".into(), "ok"),
@@ -438,6 +448,18 @@ mod tests {
         let r = v.result.clone().unwrap();
         assert_eq!((r.text.as_str(), r.kind), ("Not connected to the relay", "error"));
         assert!(before.is_none() && r.seq == 1);
+    }
+
+    #[test]
+    fn add_song_answers_are_plain_words_and_refusals_are_warnings() {
+        assert_eq!(humanize("added"), ("Song added".to_string(), "ok"));
+        for code in ["unknown_song", "file_missing", "missing_mp3", "rotation_locked", "duplicate", "limit", "bad_singer"] {
+            assert_eq!(humanize(code).1, "warn", "{code} is a refusal the operator can act on, not an error");
+            assert_ne!(humanize(code).0, code, "{code} has words");
+        }
+        assert_eq!(humanize("duplicate: added"), ("Song added".to_string(), "ok"), "a replayed request id still answers with its first result");
+        assert_eq!(humanize("duplicate").0, "That singer already has this song queued", "the bare code is the song duplicate");
+        assert_eq!(humanize("bad_song_id").1, "error");
     }
 
     #[test]

@@ -19,6 +19,9 @@ ApplicationWindow {
         return ""
     }
 
+    // ONE connection to the app, shared by the Controls tab and the Library tab's Add buttons
+    ControlPanel { id: control }
+
     Rectangle {
         id: canvas
         anchors.fill: parent
@@ -49,10 +52,10 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 currentIndex: tabs.currentIndex
-                LibraryPage {}
+                LibraryPage { control: control }
                 HistoryPage {}
                 RotationPage {}
-                ControlsPage {}
+                ControlsPage { panel: control }
                 MusicPage {}
                 SettingsPage {}
             }
