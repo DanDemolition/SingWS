@@ -58795,6 +58795,11 @@ class KaraokeApp(QWidget):
                             _sh.observe(_sid, "playing")
                         if clock_near_end:
                             _sh.observe(_sid, "end_clock")
+                        # Python also completes on its own expected-end timer (verified OR estimated duration). Show of 2026-10-25: 4 of 6
+                        # KaraFun songs ended that way with the machine knowing only the start-time estimate (none, or a later-corrected
+                        # one), so it said "uncorroborated idle" and the Rust drive disagreed. Same condition as the Python rule below.
+                        if expected_end_reached:
+                            _sh.observe(_sid, "expected_end")
                         # KaraFun's own ENDED state: the Python rule below accepts it as end evidence only for a capture session, so the
                         # machine is told about it under the same condition (otherwise a song with no verified duration, the usual case
                         # for a streamed KaraFun song, is reported as "uncorroborated idle" while the app correctly completes it).

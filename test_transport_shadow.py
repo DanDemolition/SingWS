@@ -140,6 +140,37 @@ class NativeSongTests(unittest.TestCase):
         self.sh.app_auto_complete(sid)
         self.assertEqual(self.sh.mismatches, 1, self.text())
 
+    def test_expected_end_timer_of_an_estimated_duration_is_not_a_mismatch(self):
+        # replays the real 2026-10-25 show: sessions 29, 32 and 43 (and 15 before midnight) were KaraFun songs started with a duration estimate
+        # (none known to the machine; "duration corrected from 240s to 145s"), ended by Python's expected-end timer at the idle reading
+        for idle_at in (143.0, 299.0, 322.0):
+            sh = ts.TransportShadow(self.lines.append, lib=_lib())
+            sid = sh.start(True, None)
+            sh.observe(sid, "playing", now=10.0)
+            sh.observe(sid, "playing", now=12.0)
+            sh.observe(sid, "expected_end", now=idle_at)
+            sh.observe(sid, "idle", now=idle_at)
+            self.assertTrue(sh.would_complete(sid), idle_at)
+            sh.app_auto_complete(sid)
+            sh.app_finished(sid, "complete")
+            self.assertEqual(sh.mismatches, 0, "\n".join(self.lines))
+
+    def test_without_the_expected_end_an_early_idle_is_still_not_completed(self):
+        # session 43: a 2 s idle blip right after the start; neither rule completes it
+        sid = self.sh.start(True, None)
+        self.sh.observe(sid, "playing", now=10.0)
+        self.sh.observe(sid, "playing", now=12.0)
+        self.sh.observe(sid, "idle", now=14.0)
+        self.assertFalse(self.sh.would_complete(sid))
+
+    def test_a_stale_expected_end_does_not_corroborate_a_later_idle(self):
+        sid = self.sh.start(True, None)
+        self.sh.observe(sid, "playing", now=10.0)
+        self.sh.observe(sid, "playing", now=12.0)
+        self.sh.observe(sid, "expected_end", now=50.0)
+        self.sh.observe(sid, "idle", now=100.0)
+        self.assertFalse(self.sh.would_complete(sid))
+
     def test_a_stale_explicit_end_does_not_corroborate_a_later_idle(self):
         sid = self.sh.start(True, 240.0)
         self.sh.observe(sid, "playing", now=10.0)
@@ -272,6 +303,13 @@ class AppWiringGuardTests(unittest.TestCase):
         self.assertIn('self.settings["transport_shadow"] = True', block)
         self.assertIn('self.settings["transport_shadow_default_on_migrated"] = True', block)
         self.assertIn("log-only observation", block)
+
+    def test_the_monitor_feeds_the_expected_end_under_the_same_condition_as_the_python_rule(self):
+        feed = self.src.index('_sh.observe(_sid, "expected_end")')
+        guard = self.src.rindex("if expected_end_reached:", 0, feed)
+        self.assertLess(feed - guard, 80)
+        self.assertLess(feed, self.src.index('_sh.observe(_sid, "idle")', feed))  # evidence first, then the idle reading
+        self.assertIn("(clock_near_end or expected_end_reached or (", self.src)  # the Python rule it mirrors
 
     def test_hooks_present(self):
         for needle in ('_sh.start(True, _dur or None, source="karafun")', '_sh.observe(_sid, "idle")',
