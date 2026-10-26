@@ -1,8 +1,26 @@
 # SingWS handoff
 
-Updated 2026-10-24.
+Updated 2026-10-26.
 
-## DEFERRED UNTIL THE CURRENT RUST BUILD IS FINISHED: 2026-10-24 SHOW-LOG MEMORY FOLLOW-UP
+## STATE AS OF 2026-10-26 (read this first)
+
+**Versions.** Published and latest: **1.0.1.6**. Installed on the dev Mac (Apple Silicon): **1.0.1.7** (built, never published). **1.0.1.8 is a DRAFT** GitHub release (tag `v1.0.1.8` pushed, both DMGs uploaded and size-verified, `main` NOT pushed, manifest not live): publish with `gh release edit v1.0.1.8 --draft=false --latest`, then `git push origin main` (and `git -C SingWS-Server push origin main`). The operator said "not yet" on 2026-10-26. `local-installs/intel-1.0.1.8/` holds the Intel folder (install_on_intel.sh, check_launch.sh, after_show.sh, DMG + sha256). Code newer than the 1.0.1.8 build (committed, in no installer): the relay's background-music fields (`bg_playing/bg_volume/bg_index/bg_track`) and the live Music tab, EQ tab, music/settings panels' later changes: they need the next build (1.0.1.9).
+
+**What 1.0.1.7/.8 contain.** Rust evidence collectors ON by default through a one-time settings migration (`rust_evidence_defaults_migrated`: all shadows, `publish_live_state`, `shell_commands: dry_run`, the two A2 drives; Python still wins every disagreement); the KaraFun-end shadow fix (the monitor now feeds the machine Python's expected-end timer as `expected_end`); the native-memory probe (`native_memory.py`, `[MEMORY-NATIVE]` lines: macOS `footprint` categories at launch, every 5 min and each song start/end); 1.0.1.8 adds `queue.add_song` (library song by id, quiet add, refuses limit / locked rotation / duplicate / missing file) and `library.search` (read-only, rows only, never paths).
+
+**Show evidence (Intel Mac, 2026-10-25, 1.0.1.6, 4.5 h, 43 songs).** media-end drive 37/37 agreed; KaraFun-end 4 of 6 disagreed (cause found and fixed in 1.0.1.7, needs a real show to confirm); queue/plan/wire/store shadows CLEAN; settings shadow clean; watchdog never exercised; shell commands not used. Memory: 887 MB at launch, 1,577 MB before any karaoke song (BGM only), +342 MB on the first song, flattening near 3.0-3.2 GB, Python blocks flat: native growth; the probe will name the category.
+
+**Analyse a show:** `python3 tools/show_report.py <zip from after_show.sh>` (joins the pre-midnight rotated log `singws_YYYY-MM-DD.log.YYYY-MM-DD`, prints shadows, drive agreement, every KaraFun-end disagreement with its explaining lines, the memory trail and native-memory growth). The plan for the next show and what flips each switch: `docs/handoff/2026-10-26-next-show-checklist.md`.
+
+**Server (production, deployed by the operator):** relay `/var/www/wskar-relay` (Node, `wskar-relay.service`) extended on 2026-10-25 with host-control rooms and the HMAC browser token (`server-deployments/relay-host-controls/`, undo: `/root/singws-chat-deploy/relay-host-controls-20261025T203200Z/rollback.sh`); web remote rotation editor deployed 2026-10-26 (`server-deployments/web-remote-queue/`, undo `.../web-remote-queue-20261026T152657Z/rollback.sh`). **Written, NOT deployed:** `server-deployments/web-remote-add-song/deploy.sh` (the ADD A SONG section; SingWS-Server commit `cdead23`, local only). The relay refuses connections without `app_version` >= 0.3.0.1 for apps; browsers (the shell, the phone page) are exempt. `server-deployments/` is git-ignored like the other deploy scripts.
+
+**Rust shell** (`rust/crates/singws-shell`, Qt Quick, installed at `/Applications/SingWS Shell.app`, built by `rust/package_shell.sh OUT`, universal, local signature, not notarized): tabs Library (typo-tolerant search; Add button per result), Singer history, Rotation, Controls (live: PIN login, transport, rotation edits, seek/volume), Music, EQ, Settings (never shows keys/PINs/tokens). The installed shell predates Music-live, EQ and Add: rebuild with `rust/package_shell.sh` and ask before installing. Every read-only panel is parity-tested against the app's real code (tools/*_parity.py) and mutation-tested.
+
+**Test hygiene learned the hard way.** (1) A full suite run (about 13 min, 2049 tests) must use its own process id when waiting (an old 36-hour-old unittest process once made a wait loop look busy). (2) An unhandled exception in a Qt slot used to open a modal dialog and hang the run forever; `_test_profile.py` now turns every QMessageBox static into a non-blocking no-op. (3) `test_bgm_master` leaves `QTimer.singleShot` replaced by a recorder and some later tests only pass because real timers never fire: do NOT "fix" that leak without fixing them (conftest.py documents it); `test_bgm_stop_fade` takes the real timer captured at import time. (4) `test_shell_add_song` patches `song_index.db_path` and restores it in `tearDownModule`.
+
+**Still open.** Real-show evidence for KaraFun-end, watchdog and shell/phone dry-run; then `apply` mode (steps in the checklist); the rest of Stage E (queue editing beyond live controls, music/EQ controls, TV and karaoke windows with video, dialogs, notarization); moving the remaining logic to Rust; the Python-free package; a real-Intel run of the Rust shell. Do not remove any Python rule before clean real-show reports.
+
+## 2026-10-24 SHOW-LOG MEMORY FOLLOW-UP (the telemetry half is DONE: see the probe above; the A/B rehearsal and any cache/buffer change still wait for the probe's evidence)
 
 The latest 1.0.1.4 show reached about 2.52 GB RSS with flat Python blocks,
 widgets, timers, threads, and file descriptors. The evidence points to native
