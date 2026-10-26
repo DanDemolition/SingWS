@@ -50,6 +50,20 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
         for leak in ("sk-SECRET-VALUE", "9876"):
             self.assertNotIn(leak, p.stdout + p.stderr)
 
+    def test_the_eq_tab_draws_and_copes_with_unreadable_settings(self):
+        d = self.make_home()
+        (Path(d) / "settings.json").write_text(json.dumps({"eq_bgm": [5, 4, 3, 1, -1, -1, 1, 3, 4, 5], "eq_karaoke": [0] * 10, "eq_karaoke_enabled": False, "api_key": "sk-SECRET-VALUE"}))
+        p, shot = self.run_tab("eq", d)
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+        self.assertGreater(shot.stat().st_size, 5000)
+        self.assertNotIn("sk-SECRET-VALUE", p.stdout + p.stderr)
+        (Path(d) / "settings.json").write_text(json.dumps({"eq_bgm": [1, None, 3]}))  # the app gives up on both equalisers; the tab says so instead of drawing garbage
+        p, shot = self.run_tab("eq", d)
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+        (Path(d) / "settings.json").unlink()
+        p, shot = self.run_tab("eq", d)
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+
     def test_the_numeric_tab_arguments_still_work(self):
         d = self.make_home()
         p, shot = self.run_tab("4", d)
