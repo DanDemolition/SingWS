@@ -60,8 +60,12 @@ async def main():
     app.toggle_karaoke_pause = lambda: played.append("pause")
     app.play_next_file = lambda skip_confirmation=False: played.append("next")
     app.stop_and_clear_now_singing = lambda skip_confirmation=False: played.append("stop")
+    bg = {"playing": True, "volume": 0.4, "index": 1, "track": "Track B.mp3"}
+    app._bg_main_toggle_playback = lambda: (bg.update(playing=not bg["playing"]), played.append("bg_toggle"))
+    app.bg_music = types.SimpleNamespace(set_volume=lambda v: bg.update(volume=v))
     app._host_control_state = lambda: {"rotation": {"last": {}, "current": {}, "next": {}},
-                                       "playback": {"is_playing": False, "position_seconds": 0.0, "duration_seconds": 0.0, "remaining_seconds": 0.0}}
+                                       "playback": {"is_playing": False, "position_seconds": 0.0, "duration_seconds": 0.0, "remaining_seconds": 0.0},
+                                       "bg_playing": bg["playing"], "bg_volume": bg["volume"], "bg_index": bg["index"], "bg_track": bg["track"]}
     app._queue_entry_artist_title = lambda e: (e.get("artist", ""), e.get("title", ""))
     app._update_undo_action = lambda: None
     u = urlparse(args.url)

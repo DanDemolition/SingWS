@@ -65,5 +65,36 @@ class HostStateKarafunTests(unittest.TestCase):
         self.assertAlmostEqual(s.seeks[0], 40.0, delta=1.5)
 
 
+class HostStateBackgroundMusicTests(HostStateKarafunTests):
+    """`bg_index` / `bg_track`: which background-music track the player is on, for the shell's Music tab (same clamp as the app's own playlist list)."""
+
+    def with_bg(self, playlist, index, playing=False):
+        import types
+        s = self.stub()
+        s.bg_music = types.SimpleNamespace(playlist=playlist, current_index=index, is_playing=playing, volume=0.5)
+        return s
+
+    def test_the_track_and_its_row_are_published(self):
+        st = self.with_bg(["/music/a/One.mp3", "/music/a/Two.flac", "/music/b/Three.m4a"], 1, playing=True)._host_control_state()
+        self.assertEqual((st["bg_index"], st["bg_track"], st["bg_playing"], st["bg_volume"]), (1, "Two.flac", True, 0.5))
+
+    def test_the_index_is_clamped_like_the_apps_own_list_and_no_playlist_means_minus_one(self):
+        for raw, want in ((99, 2), (-5, 0), (2, 2), (0, 0)):
+            st = self.with_bg(["/m/a.mp3", "/m/b.mp3", "/m/c.mp3"], raw)._host_control_state()
+            self.assertEqual(st["bg_index"], want, raw)
+        st = self.with_bg([], 3)._host_control_state()
+        self.assertEqual((st["bg_index"], st["bg_track"]), (-1, ""))
+        s = self.stub()
+        self.assertEqual((s._host_control_state()["bg_index"], s._host_control_state()["bg_track"]), (-1, ""), "no background player at all")
+
+    def test_dict_entries_and_garbage_never_break_the_state(self):
+        st = self.with_bg([{"path": "/m/Dict Song.mp3", "filename": "Dict Song.mp3"}], 0)._host_control_state()
+        self.assertEqual(st["bg_track"], "Dict Song.mp3")
+        st = self.with_bg([None, 5], 0)._host_control_state()
+        self.assertEqual((st["bg_index"], st["bg_track"]), (0, ""))
+        st = self.with_bg(["/m/a.mp3"], "not a number")._host_control_state()
+        self.assertEqual((st["bg_index"], st["bg_track"]), (-1, ""), "an unreadable index falls back, it does not raise")
+
+
 if __name__ == "__main__":
     unittest.main()

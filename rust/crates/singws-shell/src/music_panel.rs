@@ -18,7 +18,12 @@ pub mod qobject {
         type MusicPanel = super::MusicPanelRust;
 
         #[qinvokable]
-        fn refresh(self: Pin<&mut MusicPanel>, query: &QString);
+        fn refresh(self: Pin<&mut MusicPanel>, query: &QString, cutoff: i32);
+
+        /// test hook (`--dump-music FILE`): write the rows the tab is showing
+        #[qinvokable]
+        #[cxx_name = "dumpRows"]
+        fn dump_rows(self: &MusicPanel, path: &QString);
     }
 }
 
@@ -66,7 +71,11 @@ fn info_line(dir: &str) -> String {
 }
 
 impl qobject::MusicPanel {
-    fn refresh(mut self: Pin<&mut Self>, query: &QString) {
+    fn dump_rows(&self, path: &QString) {
+        let _ = std::fs::write(path.to_string(), self.rows_json().to_string());
+    }
+
+    fn refresh(mut self: Pin<&mut Self>, query: &QString, cutoff: i32) {
         let dir = self.rust().dir.clone();
         let info = info_line(&dir);
         self.as_mut().set_info(QString::from(info.as_str()));
@@ -77,7 +86,7 @@ impl qobject::MusicPanel {
             self.as_mut().set_status(QString::from("No background-music playlist saved yet"));
             return;
         }
-        let result = read_json(&path).and_then(|raw| music::parse_playlist(&raw)).and_then(|rows| music::view(&rows, &query.to_string()));
+        let result = read_json(&path).and_then(|raw| music::parse_playlist(&raw)).and_then(|rows| music::view_from(&rows, &query.to_string(), i64::from(cutoff)));
         match result {
             Ok(v) => {
                 let rows: Vec<Value> = v.rows.iter().map(|r| json!({"filename": r.filename, "path": r.path})).collect();

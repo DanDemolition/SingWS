@@ -28955,6 +28955,11 @@ class KaraokeApp(QWidget):
             "updated_at": int(time.time()),
             "rotation": state.get("rotation", {}),
             "playback": playback,
+            # background music: playing, volume, and which track of the saved playlist the player is on (the shell's Music tab hides what has played)
+            "bg_playing": bool(state.get("bg_playing", False)),
+            "bg_volume": state.get("bg_volume", 0.0),
+            "bg_index": state.get("bg_index", -1),
+            "bg_track": state.get("bg_track", ""),
         }
         queue_sig = None
         if self._shell_commands_mode() != "off":
@@ -28965,7 +28970,7 @@ class KaraokeApp(QWidget):
                 queue_sig = None
         sig = json.dumps([full["rotation"], playback.get("key"), playback.get("tempo"),
                           playback.get("bgm_volume"), playback.get("karaoke_volume"),
-                          playback.get("title"), queue_sig], sort_keys=True)
+                          playback.get("title"), queue_sig, full["bg_playing"], full["bg_index"], full["bg_volume"]], sort_keys=True)
         now = time.monotonic()
         if force or sig != getattr(self, "_host_relay_last_full_sig", "") or \
            (now - getattr(self, "_host_relay_last_full_at", 0.0)) > 3.0:
@@ -33983,6 +33988,15 @@ class KaraokeApp(QWidget):
             0.0,
             min(1.0, float(self.__dict__.get("_host_karaoke_live_volume", 1.0) or 0.0)),
         )
+        bg_index, bg_track = -1, ""
+        try:
+            bg_list = list(getattr(bg, "playlist", None) or []) if bg is not None else []
+            if bg_list:
+                bg_index = max(0, min(int(getattr(bg, "current_index", 0) or 0), len(bg_list) - 1))  # the same clamp as _playlist_current_row()
+                entry = bg_list[bg_index]
+                bg_track = os.path.basename(str(entry.get("path") if isinstance(entry, dict) else entry or ""))
+        except Exception:
+            bg_index, bg_track = -1, ""
         # Title/artist of the song that is actually playing right now.
         play_title = ""
         play_artist = ""
@@ -34013,6 +34027,9 @@ class KaraokeApp(QWidget):
             "tempo_percent": tempo_percent,
             "bg_playing": bool(getattr(bg, "is_playing", False)) if bg is not None else False,
             "bg_volume": bg_volume,
+            # which background-music track the player is on (its row in the saved playlist) and that track's file name; -1 / "" when there is no playlist
+            "bg_index": bg_index,
+            "bg_track": bg_track,
             # Structured block consumed by the DAW / Live Player web remote.
             "playback": {
                 "title": play_title,

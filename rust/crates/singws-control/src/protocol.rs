@@ -88,6 +88,8 @@ pub struct StateMsg {
     pub queue_sig: Option<String>,
     pub rotation: Value,
     pub playback: Value,
+    /// the background-music block, from the state's top-level `bg_*` fields: {playing, volume, index, track}
+    pub bg: Value,
     pub updated_at: i64,
 }
 
@@ -160,6 +162,7 @@ pub fn parse_incoming(text: &str) -> Incoming {
             queue_sig: v.get("queue_sig").and_then(Value::as_str).map(str::to_string),
             rotation: v.get("rotation").cloned().unwrap_or(Value::Null),
             playback: v.get("playback").cloned().unwrap_or(Value::Null),
+            bg: json!({"playing": v.get("bg_playing"), "volume": v.get("bg_volume"), "index": v.get("bg_index"), "track": v.get("bg_track")}),
             updated_at: v.get("updated_at").and_then(Value::as_i64).unwrap_or(0),
         }),
         "queue" => {

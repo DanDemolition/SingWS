@@ -56,7 +56,7 @@ ApplicationWindow {
                 HistoryPage {}
                 RotationPage {}
                 ControlsPage { panel: control }
-                MusicPage {}
+                MusicPage { control: control }
                 SettingsPage {}
             }
         }

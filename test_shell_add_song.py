@@ -47,12 +47,20 @@ def env():
     tp.write_text(json.dumps(tracks))
     db = d / "s.db"
     song_index.rebuild_from_tracks_json(tp, db, verbose=False)
+    _ENV["real_db_path"] = song_index.db_path
     song_index.db_path = lambda: db  # the app module calls song_index.find_by_id() with no database argument
     con = song_index._connect(db, read_only=True)
     ids = {Path(r["path"]).name: r["id"] for r in con.execute("SELECT id, path FROM songs")}
     con.close()
     _ENV.update(dir=d, db=db, ids=ids)
     return _ENV
+
+
+def tearDownModule():
+    """Put the real song-index location back: a later test module in the same process must not search this throwaway library."""
+    if "real_db_path" in _ENV:
+        song_index.db_path = _ENV.pop("real_db_path")
+        _ENV.clear()
 
 
 class AddHarness(base.Harness):

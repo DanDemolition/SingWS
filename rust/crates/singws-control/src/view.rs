@@ -18,6 +18,21 @@ pub struct Playback {
     pub karaoke_volume: f64,
 }
 
+/// Background music as the app reports it: which track the player is on (its row in the saved playlist, -1 when there is no playlist).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bg {
+    pub playing: bool,
+    pub volume: f64,
+    pub index: i64,
+    pub track: String,
+}
+
+impl Default for Bg {
+    fn default() -> Self {
+        Bg { playing: false, volume: 0.0, index: -1, track: String::new() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandResult {
     pub seq: u64,
@@ -35,6 +50,7 @@ pub struct ViewModel {
     pub app_online: bool,
     pub app_version: String,
     pub playback: Playback,
+    pub bg: Bg,
     pub rotation: Value,
     pub queue_sig: Option<String>,
     pub singers: Vec<SingerRow>,
@@ -189,6 +205,12 @@ impl ViewModel {
                         karaoke_volume: num(p, "karaoke_volume"),
                     };
                     self.rotation = s.rotation.clone();
+                    self.bg = Bg {
+                        playing: s.bg.get("playing").and_then(Value::as_bool).unwrap_or(false),
+                        volume: s.bg.get("volume").and_then(Value::as_f64).unwrap_or(0.0),
+                        index: s.bg.get("index").and_then(Value::as_i64).unwrap_or(-1),
+                        track: s.bg.get("track").and_then(Value::as_str).unwrap_or("").to_string(),
+                    };
                     if let Some(sig) = &s.queue_sig {
                         self.queue_sig = Some(sig.clone());
                     }
@@ -254,6 +276,7 @@ impl ViewModel {
                 "position": self.playback.position, "duration": self.playback.duration, "key": self.playback.key,
                 "tempo": self.playback.tempo, "bgm_volume": self.playback.bgm_volume, "karaoke_volume": self.playback.karaoke_volume,
             },
+            "bg": {"playing": self.bg.playing, "volume": self.bg.volume, "index": self.bg.index, "track": self.bg.track},
             "rotation": {"last": current("last"), "current": current("current"), "next": current("next")},
             "queue_sig": self.queue_sig,
             "singers": self.singers.iter().map(|s| json!({
@@ -277,6 +300,7 @@ mod tests {
             app_version: "1.0.1.4".into(),
             queue_sig: Some("sig1".into()),
             rotation: json!({"current": {"singer": "Dana", "title": "Halo", "artist": "Beyoncé"}, "next": {"singer": "Sam"}}),
+            bg: json!({"playing": true, "volume": 0.4, "index": 3, "track": "Song.mp3"}),
             playback: json!({"title": "Halo", "artist": "Beyoncé", "is_playing": true, "position_seconds": 12.5, "duration_seconds": 200.0, "key": 2, "tempo": 1.1, "bgm_volume": 0.4, "karaoke_volume": 0.9}),
             updated_at: 1,
         }))
@@ -448,6 +472,22 @@ mod tests {
         let r = v.result.clone().unwrap();
         assert_eq!((r.text.as_str(), r.kind), ("Not connected to the relay", "error"));
         assert!(before.is_none() && r.seq == 1);
+    }
+
+    #[test]
+    fn the_background_music_block_follows_the_state_message_and_defaults_to_no_playlist() {
+        let mut v = ViewModel::new();
+        assert_eq!(v.to_json()["bg"], json!({"playing": false, "volume": 0.0, "index": -1, "track": ""}));
+        v.apply(&state(true));
+        assert_eq!(v.to_json()["bg"], json!({"playing": true, "volume": 0.4, "index": 3, "track": "Song.mp3"}));
+        // an older app that does not publish the fields leaves the defaults, never garbage
+        let old = crate::protocol::parse_incoming(r#"{"type":"state","connected":true,"app_version":"1.0.1.4","rotation":{},"playback":{}}"#);
+        let mut v2 = ViewModel::new();
+        v2.apply(&Output::Message(old));
+        assert_eq!(v2.to_json()["bg"], json!({"playing": false, "volume": 0.0, "index": -1, "track": ""}));
+        let live = crate::protocol::parse_incoming(r#"{"type":"state","connected":true,"bg_playing":true,"bg_volume":0.65,"bg_index":0,"bg_track":"A.mp3","rotation":{},"playback":{}}"#);
+        v2.apply(&Output::Message(live));
+        assert_eq!(v2.to_json()["bg"], json!({"playing": true, "volume": 0.65, "index": 0, "track": "A.mp3"}));
     }
 
     #[test]

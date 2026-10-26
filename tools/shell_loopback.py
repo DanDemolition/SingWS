@@ -20,10 +20,10 @@ import control_loopback as cl  # noqa: E402
 SHELL = os.environ.get("SINGWS_SHELL_BIN") or os.path.expanduser("~/.cache/singws-rust-target/debug/singws-shell")
 
 
-def run_shell(stack, script, pin=cl.PIN, snapshot=None, snapshot_after=9000, extra_env=None):
+def run_shell(stack, script, pin=cl.PIN, snapshot=None, snapshot_after=9000, extra_env=None, tab="controls", extra_args=()):
     tmp = Path(tempfile.mkdtemp(prefix="shell_run_"))
     dump = tmp / "view.json"
-    args = [SHELL, "--tab", "controls", "--control-url", f"http://127.0.0.1:{stack.php_port}", "--control-user", cl.TENANT, "--control-pin", pin,
+    args = [SHELL, "--tab", tab, *extra_args, "--control-url", f"http://127.0.0.1:{stack.php_port}", "--control-user", cl.TENANT, "--control-pin", pin,
             "--do", json.dumps(script), "--dump-view", str(dump), "--snapshot", str(snapshot or tmp / "shot.png"), "--snapshot-after", str(snapshot_after)]
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", SINGWS_SHELL_CONFIG_DIR=str(tmp / "cfg"))
     env.update(extra_env or {})
@@ -100,6 +100,27 @@ def scenario_the_shell_adds_a_library_song_through_the_relay_and_a_second_add_is
         assert view["result"]["kind"] == "warn" and "already has this song" in view["result"]["text"], view["result"]
         bob = [s for s in view["singers"] if s["name"] == "Bob New"]
         assert len(bob) == 1 and len(bob[0]["songs"]) == 1, view["singers"]
+
+
+def scenario_the_music_tab_follows_the_players_position_and_drives_the_background_music():
+    """The real shell's Music tab over the real relay: the app says it is on track 2 of 4, so the played tracks hide; play/pause and volume reach the app."""
+    import tempfile
+    home = Path(tempfile.mkdtemp(prefix="music_home_"))
+    (home / "bg_playlist.json").write_text(json.dumps([{"path": f"/m/{n}.mp3", "filename": f"Track {n}.mp3", "title": n} for n in "ABCD"]))
+    (home / "settings.json").write_text(json.dumps({"bg_enabled": True, "bg_volume": 0.4}))
+    with cl.Stack("apply") as st:
+        dump = home / "rows.json"
+        script = [{"label": "Background music", "command": "bg_play_pause"}, {"label": "Music volume 70%", "command": "set_bg_volume", "args": {"value": 0.7}}]
+        view, p, _ = run_shell(st, script, tab="music", extra_args=("--dump-music", str(dump)), extra_env={"SINGWS_HOME": str(home)}, snapshot_after=9000)
+        assert view is not None, p.stderr[-800:]
+        assert view["bg"] == {"playing": False, "volume": 0.7, "index": 1, "track": "Track B.mp3"}, view["bg"]
+        rows = json.loads(dump.read_text())
+        assert [r["filename"] for r in rows] == ["Track C.mp3", "Track D.mp3"], rows  # A and B are at or above the current track (index 1)
+        cmds = commands_seen(st)
+        assert [c["command"] for c in cmds[:2]] == ["bg_play_pause", "set_bg_volume"], [c["command"] for c in cmds]
+        assert cmds[1]["args"]["value"] == 0.7 and cmds[1]["args"]["source"] == "shell"
+        final, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[1]["request_id"], timeout=5)
+        assert final["played"] == ["bg_toggle"], final
 
 
 def scenario_dry_run_shows_a_dry_run_and_changes_nothing():

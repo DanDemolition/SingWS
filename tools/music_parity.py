@@ -4,7 +4,7 @@
 Oracle = the app module: ``BackgroundMusicManager._make_playlist_item`` builds every row exactly as ``load_data`` does (``track['filename']`` / ``track['path']``, so a
 missing key or a non-text filename raises, as it does at launch), then ``_apply_playlist_filter`` / ``update_playlist_count`` / ``_playlist_filter_terms`` run
 on a bare app whose list widget is a real ``QListWidget`` (offscreen), whose search box answers the typed text and whose counter records ``setText``.
-With no player playlist the app hides no played rows (``_playlist_current_row`` is -1), which is the shell's view too.
+The player position is fuzzed too: with a player playlist and a current track the app hides every row at or above it, and the Rust view is given the app's own ``_playlist_current_row`` answer as its cutoff.
 
 Compared for fuzzed playlists (ASCII, accents, Turkish dotted I, German sharp s, Greek sigma, CJK, emoji, duplicate names, empty lists, malformed entries) and
 queries (words taken from the names, partial words, garbage, Python-only whitespace such as U+001C and U+3000): the visible filenames in order and the counter
@@ -60,7 +60,7 @@ def skewed(s):
     return any(lo <= ord(c) <= hi for c in s for lo, hi in SKEW)
 
 
-def python_view(playlist, query):
+def python_view(playlist, query, current_index=None):
     """What the app shows. Returns (filenames, counter text) or raises exactly where load_data / the filter would."""
     from PyQt6.QtWidgets import QApplication, QListWidget
 
@@ -75,7 +75,8 @@ def python_view(playlist, query):
     shown = {"text": ""}
     f.playlist_count = types.SimpleNamespace(setText=lambda t: shown.__setitem__("text", t))
     f.playlist_search = types.SimpleNamespace(text=lambda: query)
-    f.bg_music = types.SimpleNamespace(playlist=[], current_index=0)
+    # with a player playlist and a current track the app hides every row at or above it; with none it hides nothing
+    f.bg_music = types.SimpleNamespace(playlist=(["p"] if current_index is not None else []), current_index=(current_index or 0))
     f._refresh_workspace_meta = lambda: None
     f._playlist_filter_terms = lambda: ka._playlist_filter_terms(f)
     f._playlist_current_row = lambda: ka._playlist_current_row(f)
@@ -84,7 +85,7 @@ def python_view(playlist, query):
         f.playlist_list.addItem(ka._make_playlist_item(f, track["filename"], track["path"]))
     ka._apply_playlist_filter(f)
     names = [f.playlist_list.item(i).text() for i in range(f.playlist_list.count()) if not f.playlist_list.item(i).isHidden()]
-    return names, shown["text"]
+    return names, shown["text"], ka._playlist_current_row(f)
 
 
 NAMES = ["Adele - Hello.mp3", "ADELE - Skyfall.MP3", "Zara Larsson - Lush Life.flac", "İstanbul Nights.mp3", "Straße der Liebe.mp3", "ΟΔΟΣ - Σίσυφος.mp3",
@@ -143,12 +144,13 @@ def run_case(rng):
     query = rand_query(rng, playlist)
     text = json.dumps(playlist, ensure_ascii=rng.random() < 0.5)
     skew = skewed(text) or skewed(query)
+    current = rng.choice([None, None, 0, 1, 2, 5, 40, -3, 10**6])
     try:
-        py = python_view(playlist, query)
+        py = python_view(playlist, query, current)
         py_err = None
     except Exception as exc:  # noqa: BLE001
         py, py_err = None, repr(exc)
-    r = rust({"playlist_text": text, "query": query})
+    r = rust({"playlist_text": text, "query": query, "cutoff": py[2] if py is not None else -1})
     if "error" in r:
         if skew and "skew" in r["error"]:
             tally("declined_skew")
@@ -161,12 +163,13 @@ def run_case(rng):
     if py_err is not None:
         fail(f"Python raised ({py_err}) but Rust showed a list: q={query!r} playlist={text[:200]}")
         return
-    names, counter = py
+    names, counter, _cutoff = py
     if r["filenames"] != names or r["count_label"] != counter:
         fail(f"q={query!r}\n python={names!r} {counter!r}\n rust  ={r['filenames']!r} {r['count_label']!r}")
     else:
         tally("same")
         tally("filtered" if query.split() else "unfiltered")
+        tally("with_a_current_track" if current is not None else "no_player")
 
 
 def main(argv=None):
