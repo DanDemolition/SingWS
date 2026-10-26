@@ -28912,7 +28912,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith("queue.") or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -33939,7 +33939,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith("queue."):
+            if action.startswith(("queue.", "library.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34238,7 +34238,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith("queue."):
+        if action.startswith(("queue.", "library.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -49775,6 +49775,34 @@ class KaraokeApp(QWidget):
         self._finish_shell_queue_removal(undo, "Song removed")
         return "removed"
 
+    def _shell_library_search_async(self, request_id: str, query: str) -> None:
+        """Search the song index on a worker thread (strict first, then the typo-tolerant fallback when nothing matches) and send the rows back as ONE
+        `library` message from the GUI thread (the relay worker is not thread-safe). At most 25 rows; a failure sends an empty list with a short error."""
+        def work():
+            try:
+                rows = song_index.search_songs(query, limit=25, fuzzy=False)
+                fuzzy = False
+                if not rows:
+                    rows = song_index.search_songs(query, limit=25, fuzzy=True)
+                    fuzzy = bool(rows)
+                out = []
+                for r in rows[:25]:
+                    secs = r.get("duration_secs")
+                    out.append({"id": int(r["id"]), "artist": str(r.get("artist") or ""), "title": str(r.get("title") or ""), "kind": str(r.get("song_type") or ""),
+                                "duration_secs": int(secs) if isinstance(secs, (int, float)) and not isinstance(secs, bool) else None})
+                msg = {"type": "library", "request_id": request_id, "query": query, "fuzzy": fuzzy, "rows": out}
+            except Exception as exc:
+                msg = {"type": "library", "request_id": request_id, "query": query, "fuzzy": False, "rows": [], "error": str(exc)[:80]}
+
+            def deliver():
+                worker = getattr(self, "host_relay_worker", None)
+                if worker is not None and worker.is_connected():
+                    worker.send_json(msg)
+
+            self._run_on_ui_thread(deliver)
+
+        threading.Thread(target=work, daemon=True, name="shell-library-search").start()
+
     def shell_queue_add_song(self, singer_name, song_id, key=0, *, dry_run: bool = False) -> tuple[bool, str]:
         """Add a LIBRARY song (by its song-index id, never by a path from the wire) to a singer for the Rust shell / phone. Returns (ok, code).
 
@@ -49842,7 +49870,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -49901,6 +49929,16 @@ class KaraokeApp(QWidget):
             return remember(False, "stale_view")
         if action == "queue.noop":
             return remember(True, "noop")
+        if action == "library.search":
+            # READ-ONLY: look songs up in the app's own song index for the phone / shell and answer with a `library` message (ids, names, kind, length; never paths).
+            query = args.get("query")
+            if not isinstance(query, str) or not query.strip() or len(query.strip()) > 80:
+                return remember(False, "bad_query")
+            worker = getattr(self, "host_relay_worker", None)
+            if worker is None or not worker.is_connected():
+                return remember(False, "needs_relay")
+            self._shell_library_search_async(request_id, query.strip())
+            return remember(True, "searching")
         where = str(args.get("direction") or args.get("where") or "").strip().lower()
         singer_id = str(args.get("singer_id") or "").strip()
         entry_id = str(args.get("entry_id") or "").strip()

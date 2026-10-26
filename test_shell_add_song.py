@@ -41,6 +41,8 @@ def env():
     names = ["a.mp4", "b.cdg", "c.cdg", "plain.kfn", "good.zip", "bad.zip", "gone.mp4"]
     tracks = [{"path": str(d / n), "artist": f"Artist {i}", "title": f"Title {i}", "discid": f"D{i}", "display": f"Artist {i} - Title {i}", "duration_secs": 100 + i,
                "type": Path(n).suffix[1:]} for i, n in enumerate(names)]
+    tracks += [{"path": str(d / f"bulk{i:02d}.kfn"), "artist": "Bulk Artist", "title": f"Bulk Song {i:02d}", "discid": f"B{i}", "display": f"Bulk Artist - Bulk Song {i:02d}",
+                "duration_secs": 200 + i, "type": "kfn"} for i in range(40)]
     tp = d / "tracks.json"
     tp.write_text(json.dumps(tracks))
     db = d / "s.db"
@@ -275,6 +277,124 @@ class AddSongTests(unittest.TestCase):
         h = self.harness(base.random_queue(random.Random(3)))
         ok, message = self.command(h, {"singer": "Dana", "song_id": e["ids"]["a.mp4"]}, rid="s1", extra={"expect_queue_sig": "0000000000000000"})
         self.assertEqual((ok, message), (False, "stale_view"))
+
+
+class LibrarySearchTests(unittest.TestCase):
+    """`library.search`: read-only song lookup for the phone / shell; the answer is one `library` message, never a path."""
+
+    @classmethod
+    def setUpClass(cls):
+        env()
+
+    def make(self, mode="apply", connected=True):
+        import threading as th
+        h = AddHarness([])
+        a = h.app
+        a.settings["shell_commands"] = mode
+        h.sent, h.ui_calls_count, h.arrived = [], [0], th.Event()
+
+        class Worker:
+            def is_connected(self_inner):
+                return connected
+
+            def send_json(self_inner, obj):
+                h.sent.append(obj)
+                h.arrived.set()
+
+        a.host_relay_worker = Worker()
+
+        def on_ui(fn):
+            h.ui_calls_count[0] += 1
+            fn()
+
+        a._run_on_ui_thread = on_ui
+        return h
+
+    def search(self, h, query, rid="q1", mode=None):
+        h.arrived.clear()
+        args = {"query": query, "_request_id": rid, "_sent_at": time.time()}
+        return h.app._execute_shell_queue_command("library.search", args)
+
+    def test_rows_come_back_as_one_library_message_without_paths(self):
+        h = self.make()
+        self.assertEqual(self.search(h, "title 3"), (True, "searching"))
+        self.assertTrue(h.arrived.wait(5))
+        self.assertEqual(len(h.sent), 1)
+        msg = h.sent[0]
+        self.assertEqual((msg["type"], msg["request_id"], msg["query"], msg["fuzzy"]), ("library", "q1", "title 3", False))
+        expect = song_index.search_songs("title 3", limit=25, fuzzy=False)
+        self.assertEqual([r["id"] for r in msg["rows"]], [r["id"] for r in expect])
+        self.assertEqual(msg["rows"][0], {"id": expect[0]["id"], "artist": "Artist 3", "title": "Title 3", "kind": expect[0]["song_type"], "duration_secs": 103})
+        self.assertNotIn("path", json.dumps(msg).lower().replace("duration", ""), "no file path ever leaves the app")
+        self.assertEqual(h.ui_calls_count[0], 1, "the reply is posted through the GUI thread, never sent from the worker thread")
+
+    def test_a_misspelling_is_rescued_and_flagged_and_nothing_found_is_an_empty_list(self):
+        h = self.make()
+        self.search(h, "artst 3", rid="q2")
+        self.assertTrue(h.arrived.wait(5))
+        self.assertTrue(h.sent[-1]["fuzzy"])
+        self.assertIn("Artist 3", [r["artist"] for r in h.sent[-1]["rows"]])
+        self.search(h, "zzzzzzzzzz", rid="q3")
+        self.assertTrue(h.arrived.wait(5))
+        self.assertEqual((h.sent[-1]["rows"], h.sent[-1]["fuzzy"]), ([], False))
+
+    def test_at_most_25_rows(self):
+        h = self.make()
+        self.search(h, "bulk")
+        self.assertTrue(h.arrived.wait(5))
+        self.assertEqual(len(h.sent[0]["rows"]), 25)
+        self.assertEqual(h.sent[0]["rows"][0]["title"], "Bulk Song 00", "strict results keep the app's artist/title order")
+
+    def test_bad_queries_and_a_missing_relay_are_refused_before_any_search(self):
+        h = self.make()
+        for bad in ("", "   ", "x" * 81, 5, None, ["a"]):
+            self.assertEqual(self.search(h, bad, rid=f"b{id(bad)}"), (False, "bad_query"), repr(bad))
+        self.assertEqual(h.sent, [])
+        self.assertEqual(self.search(self.make(connected=False), "title"), (False, "needs_relay"))
+
+    def test_off_refuses_dry_run_still_answers_because_a_search_changes_nothing(self):
+        self.assertEqual(self.search(self.make("off"), "title"), (False, "shell_commands_off"))
+        h = self.make("dry_run")
+        self.assertEqual(self.search(h, "title 3"), (True, "searching"))
+        self.assertTrue(h.arrived.wait(5))
+
+    def test_it_arrives_through_the_relay_command_entry_point_with_an_ack_then_the_rows(self):
+        h = self.make()
+        h.app._publish_host_state_ws = lambda force=False: None
+        h.arrived.clear()
+        h.app._on_host_relay_command({"type": "command", "command": "library.search", "args": {"query": "title 3"}, "request_id": "r9", "sent_at": int(time.time())})
+        self.assertTrue(h.arrived.wait(5))
+        types_ = [m["type"] for m in h.sent]
+        self.assertEqual(h.sent[0], {"type": "ack", "request_id": "r9", "ok": True, "message": "searching"})
+        deadline = time.time() + 5
+        while len(h.sent) < 2 and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual([m["type"] for m in h.sent], ["ack", "library"], types_)
+        self.assertEqual(h.sent[1]["request_id"], "r9")
+        # the same entry point refuses it cleanly when remote control is off
+        off = self.make("off")
+        off.app._publish_host_state_ws = lambda force=False: None
+        off.app._on_host_relay_command({"type": "command", "command": "library.search", "args": {"query": "x"}, "request_id": "r10", "sent_at": int(time.time())})
+        self.assertEqual(off.sent[0], {"type": "ack", "request_id": "r10", "ok": False, "message": "shell_commands_off"})
+
+    def test_the_same_request_id_searches_once(self):
+        h = self.make()
+        self.assertEqual(self.search(h, "title 3", rid="same"), (True, "searching"))
+        self.assertTrue(h.arrived.wait(5))
+        self.assertEqual(self.search(h, "title 3", rid="same"), (True, "duplicate: searching"))
+        time.sleep(0.2)
+        self.assertEqual(len(h.sent), 1)
+
+    def test_a_failing_search_still_answers_with_an_empty_list_and_a_short_error(self):
+        h = self.make()
+        real = song_index.search_songs
+        song_index.search_songs = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk gone"))
+        try:
+            self.assertEqual(self.search(h, "title"), (True, "searching"))
+            self.assertTrue(h.arrived.wait(5))
+        finally:
+            song_index.search_songs = real
+        self.assertEqual((h.sent[0]["rows"], h.sent[0]["error"]), ([], "disk gone"))
 
 
 if __name__ == "__main__":
