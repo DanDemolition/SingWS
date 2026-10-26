@@ -24941,6 +24941,28 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _eq_refresh_live_attachment(self, settings_key: str, eq, reason: str = "eq_dialog_change") -> None:
+        """Point the running audio at an equaliser change: shared by the EQ dialog and the Rust shell's `eq.set` so the two can never drift apart."""
+        if settings_key == "eq_karaoke":
+            # mpv's engine has no Python EQ object to re-point; its
+            # bands live in the `af` chain, so rebuild it live.
+            self._push_mpv_audio_processing(reason)
+            return
+        if settings_key != "eq_bgm":
+            return
+        try:
+            bg = getattr(self, "bg_music", None)
+            bass = getattr(bg, "_bass_engine", None) if bg is not None else None
+            if bass is not None and hasattr(bass, "set_eq"):
+                # Detaches the BASS DSP entirely when BGM EQ is off or
+                # flat, so disabled EQ has zero audio-callback cost.
+                # Simple Audio Mode keeps BGM EQ out of the chain even
+                # while the dialog is open (same rule as karaoke).
+                bass.set_eq(None if self._simple_audio_mode() else eq)
+            self._log_bgm_eq_route(reason)
+        except Exception:
+            pass
+
     def _ensure_eq_engines(self) -> bool:
         """Create EQ engines only when advanced audio needs them.
 
@@ -25431,25 +25453,7 @@ class KaraokeApp(QWidget):
 
             # --- wiring ---
             def refresh_live_eq_attachment():
-                if settings_key == "eq_karaoke":
-                    # mpv's engine has no Python EQ object to re-point; its
-                    # bands live in the `af` chain, so rebuild it live.
-                    self._push_mpv_audio_processing("eq_dialog_change")
-                    return
-                if settings_key != "eq_bgm":
-                    return
-                try:
-                    bg = getattr(self, "bg_music", None)
-                    bass = getattr(bg, "_bass_engine", None) if bg is not None else None
-                    if bass is not None and hasattr(bass, "set_eq"):
-                        # Detaches the BASS DSP entirely when BGM EQ is off or
-                        # flat, so disabled EQ has zero audio-callback cost.
-                        # Simple Audio Mode keeps BGM EQ out of the chain even
-                        # while the dialog is open (same rule as karaoke).
-                        bass.set_eq(None if self._simple_audio_mode() else eq)
-                    self._log_bgm_eq_route("eq_dialog_change")
-                except Exception:
-                    pass
+                self._eq_refresh_live_attachment(settings_key, eq, "eq_dialog_change")
 
             def push_all_to_eq():
                 gains = [s.value() / 10.0 for s in sliders]
@@ -28912,7 +28916,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith(("queue.", "library.")) or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.", "bg.", "eq.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -33944,7 +33948,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith(("queue.", "library.")):
+            if action.startswith(("queue.", "library.", "bg.", "eq.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34255,7 +34259,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith(("queue.", "library.")):
+        if action.startswith(("queue.", "library.", "bg.", "eq.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -49792,6 +49796,72 @@ class KaraokeApp(QWidget):
         self._finish_shell_queue_removal(undo, "Song removed")
         return "removed"
 
+    def shell_bg_next(self, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Skip to the next background-music track (the app's own `_bg_main_next`), refused while a karaoke song is playing and when there is no playlist."""
+        if getattr(self, "karaoke_playing", False):
+            return False, "karaoke_playing"
+        bg = getattr(self, "bg_music", None)
+        if bg is None or not getattr(bg, "playlist", None):
+            return False, "no_playlist"
+        if dry_run:
+            return True, "dry_run: would skip to the next track"
+        self._bg_main_next()
+        return True, "skipped"
+
+    def shell_bg_play_track(self, index: int, track: str, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Play the playlist row `index` now (what a double-click in the playlist does). `track` must be that row's file name, so an out-of-date list cannot start
+        the wrong song (`stale_playlist`). Refused while a karaoke song is playing."""
+        if getattr(self, "karaoke_playing", False):
+            return False, "karaoke_playing"
+        bg = getattr(self, "bg_music", None)
+        playlist = list(getattr(bg, "playlist", None) or []) if bg is not None else []
+        if not playlist:
+            return False, "no_playlist"
+        if not 0 <= index < len(playlist):
+            return False, "unknown_track"
+        entry = playlist[index]
+        name = os.path.basename(str(entry.get("path") if isinstance(entry, dict) else entry or ""))
+        if name != track.strip():
+            return False, "stale_playlist"
+        if dry_run:
+            return True, "dry_run: would play the track"
+        self._bgm_session_started = True  # operator-initiated play, as the play button does
+        bg.current_index = index
+        bg.stop()
+        bg.play()
+        try:
+            self.highlight_current_track()
+        except Exception:
+            pass
+        try:
+            self.update_bg_button_state()
+            self.update_bg_track_display()
+        except Exception:
+            pass
+        return True, "playing"
+
+    def shell_eq_set(self, target: str, gains, enabled: bool, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Set one equaliser's ten gains (dB, -12..12 in 0.1 steps like the EQ dialog's sliders) and its on/off state, then re-point the live audio, exactly in the
+        dialog's order: gains -> settings -> enable -> live attachment -> save. Refused in Simple Audio Mode (the dialog refuses to open there too)."""
+        if self._simple_audio_mode():
+            return False, "simple_audio"
+        if not self._ensure_eq_engines():
+            return False, "eq_unavailable"
+        key, enabled_key, eq = ("eq_bgm", "eq_bgm_enabled", self.bgm_eq) if target == "bgm" else ("eq_karaoke", "eq_karaoke_enabled", self.karaoke_eq)
+        values = [round(float(g), 1) for g in gains]
+        if dry_run:
+            return True, "dry_run: would set the equaliser"
+        eq.set_all_gains_db(values)
+        self.settings[key] = values
+        eq.set_enabled(bool(enabled))
+        self.settings[enabled_key] = bool(enabled)
+        self._eq_refresh_live_attachment(key, eq, "shell_eq")
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        return True, "changed"
+
     def _shell_library_search_async(self, request_id: str, query: str) -> None:
         """Search the song index on a worker thread (strict first, then the typo-tolerant fallback when nothing matches) and send the rows back as ONE
         `library` message from the GUI thread (the relay worker is not thread-safe). At most 25 rows; a failure sends an empty list with a short error."""
@@ -49887,7 +49957,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -49956,6 +50026,31 @@ class KaraokeApp(QWidget):
                 return remember(False, "needs_relay")
             self._shell_library_search_async(request_id, query.strip())
             return remember(True, "searching")
+        if action == "bg.next":
+            ok, code = self.shell_bg_next(dry_run=(mode == "dry_run"))
+            return remember(ok, code)
+        if action == "bg.play_track":
+            index, track = args.get("index"), args.get("track")
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                return remember(False, "bad_index")
+            if not isinstance(track, str) or not track.strip():
+                return remember(False, "bad_track")
+            ok, code = self.shell_bg_play_track(index, track, dry_run=(mode == "dry_run"))
+            return remember(ok, code)
+        if action == "eq.set":
+            target, gains, enabled = args.get("target"), args.get("gains"), args.get("enabled")
+            if target not in ("bgm", "karaoke"):
+                return remember(False, "bad_target")
+            if (not isinstance(gains, list) or len(gains) != 10
+                    or any(isinstance(g, bool) or not isinstance(g, (int, float)) or g != g or abs(g) > 12.0 for g in gains)):
+                return remember(False, "bad_gains")
+            if not isinstance(enabled, bool):
+                return remember(False, "bad_enabled")
+            try:
+                ok, code = self.shell_eq_set(target, gains, enabled, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
         where = str(args.get("direction") or args.get("where") or "").strip().lower()
         singer_id = str(args.get("singer_id") or "").strip()
         entry_id = str(args.get("entry_id") or "").strip()
