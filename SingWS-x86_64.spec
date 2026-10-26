@@ -62,6 +62,7 @@ for helper in (
     "settings_shadow.py",
     "store_shadow.py",
     "wire_shadow.py",
+    "native_memory.py",
     "system_snapshot.py",
     "mac_keep_awake.py",
     "karafun_capture.py",
@@ -183,6 +184,7 @@ a = Analysis(
         'settings_shadow',
         'store_shadow',
         'wire_shadow',
+        'native_memory',
         'system_snapshot',
         # The Homebrew backend and the python-mpv module are added below only
         # for the homebrew stack: PyInstaller's ctypes hook resolves

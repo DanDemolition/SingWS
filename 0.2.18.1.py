@@ -4154,6 +4154,9 @@ DEFAULTS = {
     # non-streaming get/post the app makes, and LOG differences. Rust sends nothing; only endpoint file names are logged, never hosts, values or keys.
     # Observer runs after the real response exists, on the calling thread. Default off until its package gate passes. Read at launch.
     "wire_shadow": True,
+    # Log-only: where the process's native memory sits (macOS `footprint` categories) every 5 minutes and at each song start/end, from a
+    # background thread ([MEMORY-NATIVE]). The shows of 2026-10-23/25 grew to ~3 GB with Python flat; this says which native owner it is.
+    "native_memory_probe": True,
     # One-time upgrade for profiles that persisted the earlier off-by-default
     # value. Shadow mode only observes and logs; it never controls playback.
     "transport_shadow_default_on_migrated": False,
@@ -28496,8 +28499,20 @@ class KaraokeApp(QWidget):
         except Exception as e:
             print(f"[PERF-SUMMARY] failed: {e}")
 
+    def _start_native_memory_probe(self):
+        try:
+            if sys.platform != "darwin" or not bool((getattr(self, "settings", None) or {}).get("native_memory_probe", False)):
+                return
+            if getattr(self, "_native_memory_probe", None) is None:
+                import native_memory
+                self._native_memory_probe = native_memory.NativeMemoryProbe(_diag)
+                self._native_memory_probe.start()
+        except Exception as exc:
+            _diag_rate_limited("native_memory_probe_failure", f"[MEMORY-NATIVE] unavailable error={exc}", 1800.0)
+
     def _start_memory_telemetry(self):
         """Sample bounded cache/process growth without adding UI work."""
+        self._start_native_memory_probe()
         if not PSUTIL_AVAILABLE:
             return
         try:
@@ -28532,6 +28547,9 @@ class KaraokeApp(QWidget):
             self._song_mem_prev = now
             n = int(getattr(self, "_song_mem_count", 0)) + (1 if phase == "start" else 0)
             self._song_mem_count = n
+            probe = getattr(self, "_native_memory_probe", None)
+            if probe is not None:
+                probe.request(f"song_{phase}_{n}")
             _diag(
                 f"[MEMORY-SONG] phase={phase} n={n} rss_mb={rss:.0f} d_rss={rss - prev.get('rss', rss):+.0f} "
                 f"py_blocks_k={blocks // 1000} d_blocks_k={(blocks - prev.get('blocks', blocks)) // 1000:+d} "
