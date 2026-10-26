@@ -15,3 +15,18 @@ if not os.environ.get("SINGWS_HOME"):
     _HOME = tempfile.mkdtemp(prefix="singws-test-home-")
     os.environ["SINGWS_HOME"] = _HOME
     atexit.register(shutil.rmtree, _HOME, ignore_errors=True)
+
+
+# A blocking modal dialog can never be answered in a headless test run: an unhandled exception in a Qt slot makes the app's own error handler call
+# QMessageBox.critical() and the whole run then waits forever (seen 2026-10-26, 30 minutes of nothing). Tests that CHECK a dialog patch it themselves
+# (mock.patch replaces these); everything else gets a non-blocking answer instead of a hang.
+try:
+    from PyQt6.QtWidgets import QMessageBox as _QMessageBox
+
+    def _no_modal(*_args, **_kwargs):
+        return _QMessageBox.StandardButton.Ok
+
+    for _name in ("critical", "warning", "information", "question", "about", "aboutQt"):
+        setattr(_QMessageBox, _name, staticmethod(_no_modal))
+except Exception:  # PyQt is not needed by every test module
+    pass

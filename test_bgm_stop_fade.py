@@ -56,10 +56,14 @@ class StopFadeTests(unittest.TestCase):
         from PyQt6.QtCore import QObject, QTimer
         app = self.app
         # Older tests in this suite leave QTimer.singleShot replaced by a recorder; this test needs real timers, for its own duration only.
-        try:
-            from conftest import REAL_SINGLE_SHOT as real_single_shot
-        except Exception:
-            real_single_shot = _IMPORT_TIME_SINGLE_SHOT or QTimer.singleShot
+        # Prefer the timer captured when THIS file was imported (all test files are imported before any test runs). conftest.py records the same thing, but under plain
+        # unittest its first import can happen here, after test_bgm_master has already replaced the timer, and it would then record the replacement.
+        real_single_shot = _IMPORT_TIME_SINGLE_SHOT
+        if real_single_shot is None:
+            try:
+                from conftest import REAL_SINGLE_SHOT as real_single_shot
+            except Exception:
+                real_single_shot = QTimer.singleShot
         leaked = QTimer.singleShot
         QTimer.singleShot = staticmethod(real_single_shot)
         self.addCleanup(setattr, QTimer, "singleShot", staticmethod(leaked) if leaked is not real_single_shot else staticmethod(real_single_shot))
