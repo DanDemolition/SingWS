@@ -4,7 +4,7 @@ HOME_DIR="${SINGWS_HOME:-$HOME/SingWS}"; L=$(ls -t "$HOME_DIR"/logs/singws_*.log
 [[ -n "$L" ]] || { echo "No log found in $HOME_DIR/logs. Open SingWS first."; exit 1; }
 echo "log: $L"; echo
 ok() { n=$(grep -c "$2" "$L" || true); printf '%-30s %s\n' "$1" "$([[ "$n" -gt 0 ]] && echo "OK ($n)" || echo "MISSING")"; }
-grep -m1 '\[LAUNCH\]' "$L" | sed -E 's/.*"version":"([^"]*)".*/version \1/'; echo
+grep '\[LAUNCH\] {' "$L" | tail -1 | sed -E 's/.*"startup_utc":"([^"]*)".*"version":"([^"]*)".*/LAST launch: version \2 started \1/'; echo
 ok "settings migrated" 'RUST-DEFAULTS\] migrated\|rust_evidence'
 ok "store shadow" 'STORE-SHADOW\] enabled available=1'
 ok "wire shadow" 'WIRE-SHADOW\] enabled available=1'
