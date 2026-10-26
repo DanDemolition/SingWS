@@ -57,7 +57,7 @@ async def main():
     app._update_undo_action = lambda: None
     u = urlparse(args.url)
     reader, writer = await asyncio.open_connection(u.hostname, u.port or 80)
-    path = f"{u.path}?role=app&channel=host&user={args.tenant}&token={args.key}&app_version=test"
+    path = f"{u.path}?role=app&channel=host&user={args.tenant}&token={args.key}&app_version=1.0.1.6"
     await wsutil.client_handshake(reader, writer, f"{u.hostname}:{u.port or 80}", path)
     outbox: asyncio.Queue = asyncio.Queue()
 

@@ -31,6 +31,7 @@ PHP = shutil.which("php")
 SECRET = "loopback-secret-0123456789abcdef0123456789abcdef0123456789abcdef"
 PIN = "4321"
 TENANT = "dan"
+APP_KEY = "devkey"  # the key tools/control_app.py presents as role=app
 
 
 def free_port():
@@ -160,6 +161,19 @@ class Stack:
         return self
 
     def start_relay(self):
+        node_dir = os.environ.get("SINGWS_NODE_RELAY_DIR")  # a folder with the PRODUCTION relay's server.js and node_modules (ws, dotenv)
+        if node_dir:
+            import hashlib
+
+            db = self.tmp / "users.db"
+            subprocess.run(["sqlite3", str(db), "CREATE TABLE IF NOT EXISTS api_keys(user_id TEXT, key_hash TEXT, is_active INT);"
+                            f"INSERT INTO api_keys VALUES('{TENANT}', '{hashlib.sha256(APP_KEY.encode()).hexdigest()}', 1);"], check=True)
+            env = dict(os.environ, PORT=str(self.relay_port), HOST="127.0.0.1", USERS_DB=str(db), WS_RELAY_SECRET=SECRET, ALLOWED_TENANTS=TENANT,
+                       NOTIFY_SECRET="x", MIN_APP_VERSION="0.3.0.1")
+            self.relay = Proc(["node", "server.js"], env=env, cwd=node_dir)
+            self.procs.append(self.relay)
+            assert wait_port(self.relay_port), "node relay did not start"
+            return
         self.relay = Proc([sys.executable, str(SERVER / "v2/dev/relay-server/relay.py"), "--host", "127.0.0.1", "--port", str(self.relay_port), "--secret", SECRET])
         self.procs.append(self.relay)
         assert wait_port(self.relay_port), "relay did not start"
@@ -378,7 +392,7 @@ def scenario_wrong_pin_stops_without_connecting():
         assert "PIN" in refused["text"]
         time.sleep(1.2)  # longer than the reconnect delay: it must NOT retry
         assert not any(e.get("out") == "logged_in" for e in out.seen)
-        assert not any("browser" in line for line in st.relay.log), st.relay.log
+        assert not any(line.startswith("[relay] + browser") for line in st.relay.log), st.relay.log  # the reference relay logs every join; the production one logs none
         _, ack = None, None
         proc.send({"send": "play_pause"})
         e, _ = out.wait_for(lambda e: e.get("out") == "send_error", timeout=5)
