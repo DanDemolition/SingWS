@@ -4,6 +4,7 @@ Skipped when the Rust library is missing (`cd rust && cargo build --release -p s
 end to end through the C interface: a tempo change must never move the key."""
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -44,20 +45,23 @@ class KaraokeVoiceTests(unittest.TestCase):
     def tearDown(self):
         self.engine.close()
 
+    def _render_until_ready(self, seconds=8.0):
+        """The source is fed by a decoder thread; wait on the clock (not on a loop count) so a loaded machine that schedules that thread late still passes."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            self.engine.render(480)
+            if self.k.is_ready():
+                return
+            time.sleep(0.005)
+
     def test_ready_flag_follows_loading_and_seeking(self):
         self.assertFalse(self.k.is_ready())
         self.k.load(self.song, paused=True)
-        for _ in range(200):
-            self.engine.render(480)
-            if self.k.is_ready():
-                break
+        self._render_until_ready()
         self.assertTrue(self.k.is_ready(), "a loaded song's source must become ready (even while paused)")
         self.k.seek_seconds(30.0)
         self.engine.render(480)
-        for _ in range(300):
-            self.engine.render(480)
-            if self.k.is_ready():
-                break
+        self._render_until_ready()
         self.assertTrue(self.k.is_ready(), "ready again after the seek, still paused")
         self.assertTrue(self.k.is_paused())
 

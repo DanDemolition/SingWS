@@ -20,6 +20,11 @@ import rust_bgm_engine as rbe
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _ROOT = Path(__file__).resolve().parent
 RATE = 48000
+try:  # test modules are all imported before any test runs, so this is the genuine timer even when an earlier test leaks a recorder
+    from PyQt6.QtCore import QTimer as _QTimer
+    _IMPORT_TIME_SINGLE_SHOT = _QTimer.singleShot
+except Exception:
+    _IMPORT_TIME_SINGLE_SHOT = None
 
 
 def tone(directory, name, hz=440, amp=0.4, seconds=30.0):
@@ -54,7 +59,7 @@ class StopFadeTests(unittest.TestCase):
         try:
             from conftest import REAL_SINGLE_SHOT as real_single_shot
         except Exception:
-            real_single_shot = QTimer.singleShot
+            real_single_shot = _IMPORT_TIME_SINGLE_SHOT or QTimer.singleShot
         leaked = QTimer.singleShot
         QTimer.singleShot = staticmethod(real_single_shot)
         self.addCleanup(setattr, QTimer, "singleShot", staticmethod(leaked) if leaked is not real_single_shot else staticmethod(real_single_shot))

@@ -79,10 +79,16 @@ class NormalizeRetryTests(unittest.TestCase):
         bgp._refresh_bg_normalize = lambda p, d: bgp._refresh_calls.append((p, d))
         return bgp
 
+    def capture_single_shot(self, captured):
+        """Record QTimer.singleShot callbacks for this test only; the real timer comes back afterwards (a leaked recorder silently stops every later test's timers)."""
+        original = self.singws.QTimer.singleShot
+        self.addCleanup(setattr, self.singws.QTimer, "singleShot", staticmethod(original))
+        self.singws.QTimer.singleShot = staticmethod(lambda ms, cb: captured.append(cb))
+
     def test_retry_fires_when_token_matches(self):
         bgp = self.make_player()
         captured = []
-        self.singws.QTimer.singleShot = staticmethod(lambda ms, cb: captured.append(cb))
+        self.capture_single_shot(captured)
         bgp._schedule_bg_normalize_retry("/a.mp3", "primary")
         self.assertEqual(len(captured), 1)
         captured[0]()  # token (5) still current -> re-applies
@@ -91,7 +97,7 @@ class NormalizeRetryTests(unittest.TestCase):
     def test_retry_cancels_on_track_change(self):
         bgp = self.make_player()
         captured = []
-        self.singws.QTimer.singleShot = staticmethod(lambda ms, cb: captured.append(cb))
+        self.capture_single_shot(captured)
         bgp._schedule_bg_normalize_retry("/a.mp3", "primary")
         # A new track bumped the generation token -> stale retry must bail.
         bgp._bg_norm_gen = {"primary": 6}
@@ -101,7 +107,7 @@ class NormalizeRetryTests(unittest.TestCase):
     def test_retry_is_bounded(self):
         bgp = self.make_player()
         captured = []
-        self.singws.QTimer.singleShot = staticmethod(lambda ms, cb: captured.append(cb))
+        self.capture_single_shot(captured)
         for _ in range(20):
             bgp._schedule_bg_normalize_retry("/a.mp3", "primary")
         # Capped at 12 scheduled retries for the same (deck, path).
