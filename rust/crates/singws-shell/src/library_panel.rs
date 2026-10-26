@@ -44,13 +44,15 @@ impl qobject::LibraryPanel {
     fn search(mut self: Pin<&mut Self>, query: &QString) {
         let q = query.to_string();
         let db = self.db_path().to_string();
-        match singws_uimodel::search(std::path::Path::new(&db), &q, 500) {
+        match singws_uimodel::search_with_fuzzy(std::path::Path::new(&db), &q, 500, Some(std::time::Duration::from_millis(1500))) {
             Ok(res) => {
                 let rows: Vec<serde_like::Row> = res.rows.iter().map(serde_like::Row::from).collect();
                 let status = if q.trim().is_empty() {
                     "Type to search your library".to_string()
                 } else if res.rows.is_empty() {
                     "No songs match".to_string()
+                } else if res.fuzzy_used {
+                    format!("{} song{} (closest matches to what you typed)", res.rows.len(), if res.rows.len() == 1 { "" } else { "s" })
                 } else {
                     format!("{} song{}", res.rows.len(), if res.rows.len() == 1 { "" } else { "s" })
                 };

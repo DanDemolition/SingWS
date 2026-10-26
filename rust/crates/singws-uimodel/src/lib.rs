@@ -3,6 +3,7 @@
 //! of the search string, ordered by artist/title, then ranked exact < prefix < word-prefix < contains). The typo-tolerant fallback that Python runs when the strict
 //! search finds nothing is NOT ported yet; `SearchResult::fuzzy_fallback_needed` says when Python would have used it.
 
+pub mod fuzzy;
 pub mod history;
 pub mod music;
 pub mod rotation;
@@ -30,6 +31,8 @@ pub struct SearchResult {
     pub rows: Vec<SongRow>,
     /// the strict search found nothing, so `song_index` would now run its typo-tolerant scan (not ported)
     pub fuzzy_fallback_needed: bool,
+    /// the typo-tolerant scan produced these rows (the strict search found nothing)
+    pub fuzzy_used: bool,
 }
 
 /// `mm:ss` (or `h:mm:ss` from one hour), `--:--` when unknown.
@@ -63,7 +66,7 @@ fn rank_key(row: &SongRow, q: &str) -> Result<(u8, String, String), String> {
 pub fn search(db: &Path, query: &str, limit: i64) -> Result<SearchResult, String> {
     let q = normalize_text(query)?;
     if q.is_empty() || !db.exists() {
-        return Ok(SearchResult { rows: Vec::new(), fuzzy_fallback_needed: false });
+        return Ok(SearchResult { rows: Vec::new(), fuzzy_fallback_needed: false, fuzzy_used: false });
     }
     let words: Vec<&str> = q.split(' ').filter(|w| !w.is_empty()).collect();
     let con = singws_db::open_readonly(db)?;
@@ -106,7 +109,68 @@ pub fn search(db: &Path, query: &str, limit: i64) -> Result<SearchResult, String
     keyed.sort_by(|a, b| a.0.cmp(&b.0)); // stable, like Python's list.sort
     let rows: Vec<SongRow> = keyed.into_iter().map(|(_, r)| r).collect();
     let fuzzy_fallback_needed = rows.is_empty();
-    Ok(SearchResult { rows, fuzzy_fallback_needed })
+    Ok(SearchResult { rows, fuzzy_fallback_needed, fuzzy_used: false })
+}
+
+/// Strict search first; when it finds nothing the app's typo-tolerant scan (see `fuzzy`). `budget` bounds the scan's wall time (None = no bound).
+pub fn search_with_fuzzy(db: &Path, query: &str, limit: i64, budget: Option<std::time::Duration>) -> Result<SearchResult, String> {
+    let strict = search(db, query, limit)?;
+    if !strict.rows.is_empty() || !strict.fuzzy_fallback_needed {
+        return Ok(strict);
+    }
+    let q = normalize_text(query)?;
+    let words: Vec<&str> = q.split(' ').filter(|w| !w.is_empty()).collect();
+    if words.is_empty() {
+        return Ok(strict);
+    }
+    let terms = fuzzy::terms(&words)?;
+    let con = singws_db::open_readonly(db)?;
+    let mut stmt = con
+        .prepare(&format!("SELECT id, path, artist, title, discid, duration_secs, song_type, display, searchstring FROM songs LIMIT {}", fuzzy::SCAN_CAP))
+        .map_err(|e| e.to_string())?;
+    let text = |r: &rusqlite::Row, i: usize| -> rusqlite::Result<String> {
+        Ok(match r.get_ref(i)? {
+            rusqlite::types::ValueRef::Null => String::new(),
+            rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+            rusqlite::types::ValueRef::Integer(v) => v.to_string(),
+            rusqlite::types::ValueRef::Real(v) => v.to_string(),
+            rusqlite::types::ValueRef::Blob(_) => String::new(),
+        })
+    };
+    let mut cursor = stmt.query([]).map_err(|e| e.to_string())?;
+    let started = std::time::Instant::now();
+    let mut extra: Vec<SongRow> = Vec::new();
+    let mut scanned = 0u64;
+    while let Some(r) = cursor.next().map_err(|e| e.to_string())? {
+        scanned += 1;
+        if scanned & 2047 == 0 && budget.is_some_and(|b| started.elapsed() > b) {
+            break;
+        }
+        let ss = text(r, 8).map_err(|e| e.to_string())?;
+        if !fuzzy::row_matches(&ss, &terms)? {
+            continue;
+        }
+        extra.push(SongRow {
+            id: r.get(0).map_err(|e| e.to_string())?,
+            path: text(r, 1).map_err(|e| e.to_string())?,
+            artist: text(r, 2).map_err(|e| e.to_string())?,
+            title: text(r, 3).map_err(|e| e.to_string())?,
+            discid: text(r, 4).map_err(|e| e.to_string())?,
+            duration_secs: r.get::<_, Option<i64>>(5).unwrap_or(None),
+            song_type: text(r, 6).map_err(|e| e.to_string())?,
+            display: text(r, 7).map_err(|e| e.to_string())?,
+        });
+        if extra.len() as i64 >= limit {
+            break;
+        }
+    }
+    let mut keyed = Vec::with_capacity(extra.len());
+    for r in extra {
+        let k = rank_key(&r, &q)?;
+        keyed.push((k, r));
+    }
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(SearchResult { rows: keyed.into_iter().map(|(_, r)| r).collect(), fuzzy_fallback_needed: false, fuzzy_used: true })
 }
 
 pub fn row_json(r: &SongRow) -> Value {
