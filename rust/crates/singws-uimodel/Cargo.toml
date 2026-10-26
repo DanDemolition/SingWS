@@ -28,3 +28,7 @@ path = "src/bin/history_cli.rs"
 [[bin]]
 name = "singws-rotation-cli"
 path = "src/bin/rotation_cli.rs"
+
+[[bin]]
+name = "singws-music-cli"
+path = "src/bin/music_cli.rs"

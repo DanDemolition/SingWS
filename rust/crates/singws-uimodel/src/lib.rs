@@ -4,6 +4,7 @@
 //! search finds nothing is NOT ported yet; `SearchResult::fuzzy_fallback_needed` says when Python would have used it.
 
 pub mod history;
+pub mod music;
 pub mod rotation;
 mod casefold_table;
 
