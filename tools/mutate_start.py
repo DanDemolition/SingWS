@@ -56,7 +56,8 @@ M = [
     ('Some((singers.len() - 1, first_playable(last)))', 'Some((0, first_playable(last)))', None),
     ('Some((singers.len() - 1, first_playable(last)))', 'Some((singers.len() - 1, None))', None),
     ('"song": p.and_then(|x| x.1)}', '"song": p.map(|_| 0)}', None),
-    ("!matches!(c, 'd' | 's' | 't')", "!matches!(c, 'd' | 's')", None),
+    ("singers.iter().any(|s| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't')))", "singers.iter().any(|s| s.songs.chars().any(|c| !matches!(c, 'd' | 's')))", None),
+    ("let bad = |s: &RotSinger| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'));", "let bad = |s: &RotSinger| s.songs.chars().any(|c| !matches!(c, 'd' | 's'));", None),
     ('    let last = singers.last()?;', '    let last = singers.first()?;', None),
     # ---- display payload
     ('    let shown: String = if !a.is_empty() && !t.is_empty() {', '    let shown: String = if !a.is_empty() || !t.is_empty() {', None),
@@ -71,6 +72,20 @@ M = [
     ("('\\u{1c}'..='\\u{1f}')", "('\\u{1c}'..='\\u{1e}')", None),
     ('fallback?.to_string() };', 'fallback.unwrap_or("").to_string() };', None),
     ('        return Ok(serde_json::json!({"artist": artist, "title": title}).to_string());', '        return Ok(serde_json::json!({"artist": title, "title": artist}).to_string());', None),
+    # ---- rotation after a start
+    ('    me.has_sung = true;', '    me.has_sung = false;', None),
+    ('        me.round_sung = Some(true);', '        me.round_sung = Some(false);', None),
+    ('    if !rotation_mode {\n        return q;\n    }', '    if false {\n        return q;\n    }', None),
+    ('        if let Some(last) = q.last_mut() {\n            last.marker = true;\n        }', '        if let Some(first) = q.first_mut() {\n            first.marker = true;\n        }', None),
+    ('    if marked.len() != 1 {', '    if marked.len() > 1 {', None),
+    ('    if marked.len() != 1 {', '    if marked.len() < 1 {', None),
+    ('    let keep = marked.first().copied().unwrap_or(0);'.replace('    let','        let'), '        let keep = marked.last().copied().unwrap_or(0);', None),
+    ('            if s.round_sung.is_none() {\n                s.round_sung = Some(false);', '            if s.round_sung.is_none() {\n                s.round_sung = Some(true);', None),
+    ('    if q.iter().any(RotSinger::active) {', '    if true {', None),
+    ('.all(|s| s.round_sung == Some(true)) {', '.any(|s| s.round_sung == Some(true)) {', None),
+    ('            for s in q.iter_mut().filter(|s| s.active()) {\n                s.round_sung = Some(false);', '            for s in q.iter_mut() {\n                s.round_sung = Some(false);', None),
+    ('        !self.skipped && self.songs.chars().any(|c| c != \'s\')', '        !self.skipped || self.songs.chars().any(|c| c != \'s\')', None),
+    ('        let after = after_start(&queue, &singer, flag("rotation_mode"), flag("marker_was_top"));', '        let after = after_start(&queue, &singer, flag("marker_was_top"), flag("rotation_mode"));', None),
 ]
 
 

@@ -44,6 +44,15 @@ The text the TV, the singer cards and the server announce: the entry's own artis
 (looked up by the app, passed in), split on the FIRST " • " into artist and title, both stripped (no separator: all artist, empty title). Stripping is Python's (it also strips
 U+001C..U+001F, which Rust's `trim` does not). Tested against the REAL method with 600 random names (`DisplayWiring`) and mutation-tested.
 
+## Step 5 (built): the rotation after a started song is committed (`after_start`, `"op":"after_start"`)
+When the transport reports the song really started, `_commit_pending_start` marks the singer as having sung, appends them to the bottom and, in rotation mode, moves the
+marker when it was on the top singer, repairs a missing or doubled marker (first wins, none = first singer), fills missing `round_sung` keys and restarts a round in which every
+active singer has sung. The app compares the three flags per singer (marker, round_sung, has_sung) with Rust over the queue it had just before the commit. A locked rotation (tail
+reweave) is not compared. Tested against the REAL method and its commit callback over 500 random rotations (`RotationWiring`).
+**Finding (2026-10-26, bigger than the "all singers skipped" note above, NOT changed):** in that case the pick loop has already appended the retained singer to the bottom, so the
+commit appends the SAME singer record again: the queue then holds that singer twice (one record, two rows; `test_the_all_skipped_quirk_puts_the_same_singer_in_the_queue_twice`).
+The shadow logs `NOTE singer_already_in_queue` and skips the comparison for that start.
+
 ## Next steps (not built)
 3. Transport arguments: key, tempo, start offset, loop and duration the transport receives (`_start_karaoke_transport`).
 4. Confirmed-start bookkeeping (what is published to the screen and the server once the transport accepts).

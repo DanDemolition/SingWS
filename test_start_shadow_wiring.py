@@ -190,6 +190,19 @@ class PickWiring(unittest.TestCase):
         self.assertEqual([x for x in lines if "MISMATCH" in x], [])
         self.assertTrue(any("decision route=pick agree=1" in x for x in lines))
 
+    def test_the_all_skipped_quirk_puts_the_same_singer_in_the_queue_twice(self):
+        """The bigger half of the finding: the loop has already moved the skipped singers to the bottom, so the commit of the started song appends the picked one AGAIN."""
+        rot = RotationWiring("test_the_marker_moves_with_the_singer_when_it_was_on_top")
+        RotationWiring.setUpClass()
+        q = [{"name": "A", "singer_id": "a", "skipped": True, "songs": [{"request_uid": "x", "song_info": "/lib/a.mp3", "skipped": False}]},
+             {"name": "B", "singer_id": "b", "skipped": True, "songs": [{"request_uid": "y", "song_info": "/lib/b.mp3", "skipped": False},
+                                                                          {"request_uid": "z", "song_info": "/lib/b2.mp3", "skipped": False}]}]
+        app, lines = rot.run_commit(q, rotation_mode=False)
+        self.assertEqual([s["name"] for s in app.queue], ["A", "B", "B"], "the same singer (one record) is now in the queue twice")
+        self.assertIs(app.queue[1], app.queue[2])
+        self.assertEqual([x for x in lines if "MISMATCH" in x], [])
+        self.assertTrue(any("NOTE singer_already_in_queue" in x for x in lines), lines)
+
     def test_a_locked_rotation_is_not_compared_and_off_logs_nothing(self):
         q = lambda: [{"name": "A", "singer_id": "a", "skipped": True, "songs": [{"request_uid": "x", "song_info": "/lib/a.mp3", "skipped": False}]},
                      {"name": "B", "singer_id": "b", "skipped": False, "songs": [{"request_uid": "y", "song_info": "/lib/b.mp3", "skipped": False}]}]
@@ -207,6 +220,88 @@ class PickWiring(unittest.TestCase):
         self.assertIsNone(start_shadow.pick_facts([{"songs": "abc"}]))
         self.assertEqual(start_shadow.pick_facts([{"songs": None}]), [{"skipped": False, "songs": ""}])
         self.assertEqual(start_shadow.pick_facts([{"skipped": 1, "songs": [{"skipped": True}, {"skipped": 0}, ("x", 1), {}]}]), [{"skipped": True, "songs": "sdtd"}])
+
+
+class RotationWiring(unittest.TestCase):
+    """What the app does to the rotation when a started song is committed (the transport's started signal), from the REAL `play_next_file` and its commit callback:
+    random queues with random skipped singers / songs, markers (none, one, several), round flags (missing, true, false) and both queue modes. Rust must produce the same
+    marker / round / has-sung flags for every singer."""
+    bare_app = base.ShowCriticalRegressionTests.bare_app
+    playback_app = base.ShowCriticalRegressionTests.playback_app
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = base.load_main_module()
+        if not start_shadow.StartShadow(lambda s: None).available:
+            raise unittest.SkipTest("libsingws_dsp_ffi.dylib with the start shadow is not built")
+
+    def run_commit(self, queue, *, rotation_mode, locked=False, enabled=True):
+        app = self.playback_app(queue)
+        app.settings = {"start_shadow": enabled, "queue_mode": "rotation" if rotation_mode else "classic"}
+        app._is_rotation_mode = lambda: rotation_mode
+        app._is_rotation_locked = lambda: locked
+        app._rotation_reweave_locked_tail = lambda: None
+        app._ensure_queue_entry_id = lambda entry: (entry.setdefault("request_uid", f"rid-{entry.get('song_info')}") if isinstance(entry, dict) else f"rid-{entry[0]}")
+        lines = []
+        self.singws._START_SHADOW = start_shadow.StartShadow(lambda text: lines.append(str(text)))
+        with mock.patch.object(self.singws, "_diag", lambda *a, **k: None), mock.patch.object(self.singws.os.path, "exists", lambda p: True):
+            app.play_next_file()
+            if app.created_transports:
+                app.created_transports[-1].started.emit()
+        return app, lines
+
+    @staticmethod
+    def random_queue(rng):
+        queue = []
+        for i in range(rng.randint(1, 7)):
+            songs = []
+            for j in range(rng.randint(0, 3)):
+                r = rng.random()
+                path = f"/lib/s{i}_{j}.mp3"
+                if r < 0.25:
+                    songs.append({"request_uid": f"r{i}{j}", "song_info": path, "skipped": True})
+                elif r < 0.32:
+                    songs.append((path, 0))
+                else:
+                    songs.append({"request_uid": f"r{i}{j}", "song_info": path, "skipped": False})
+            singer = {"name": f"S{i}", "singer_id": f"sid{i}", "skipped": rng.random() < 0.2, "songs": songs}
+            if rng.random() < 0.8:
+                singer["round_sung"] = rng.random() < 0.5
+            if rng.random() < 0.3:
+                singer["rotation_marker"] = True
+            if rng.random() < 0.5:
+                singer["has_sung"] = rng.random() < 0.5
+            queue.append(singer)
+        return queue
+
+    def test_random_rotations_end_up_with_the_flags_rust_computes(self):
+        import random
+        rng = random.Random(20261026)
+        compared = 0
+        for case in range(500):
+            queue = self.random_queue(rng)
+            app, lines = self.run_commit(queue, rotation_mode=rng.random() < 0.7)
+            self.assertEqual([x for x in lines if "MISMATCH" in x], [], (case, [x for x in lines if "MISMATCH" in x]))
+            if app.created_transports:
+                twice = any("NOTE singer_already_in_queue" in x for x in lines)
+                self.assertTrue(twice or any("decision route=rotation agree=1" in x for x in lines), (case, "a committed start must be compared (or noted as the all-skipped duplicate)", lines))
+                compared += 0 if twice else 1
+        self.assertGreater(compared, 150)
+
+    def test_the_marker_moves_with_the_singer_when_it_was_on_top(self):
+        q = [{"name": "A", "singer_id": "a", "skipped": False, "rotation_marker": True, "songs": [{"request_uid": "x", "song_info": "/lib/a.mp3", "skipped": False}]},
+             {"name": "B", "singer_id": "b", "skipped": False, "songs": [{"request_uid": "y", "song_info": "/lib/b.mp3", "skipped": False}]}]
+        app, lines = self.run_commit(q, rotation_mode=True)
+        self.assertEqual([x["name"] for x in app.queue], ["B", "A"])
+        self.assertEqual([bool(x.get("rotation_marker")) for x in app.queue], [False, True])
+        self.assertEqual([x for x in lines if "MISMATCH" in x], [])
+
+    def test_a_locked_rotation_and_the_setting_off_are_not_compared(self):
+        q = lambda: [{"name": "A", "singer_id": "a", "skipped": False, "songs": [{"request_uid": "x", "song_info": "/lib/a.mp3", "skipped": False}]}]
+        app, lines = self.run_commit(q(), rotation_mode=True, locked=True)
+        self.assertFalse(any("route=rotation" in x or "MISMATCH" in x for x in lines), lines)
+        app, lines = self.run_commit(q(), rotation_mode=True, enabled=False)
+        self.assertEqual(lines, [])
 
 
 class DisplayWiring(unittest.TestCase):

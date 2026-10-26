@@ -60572,6 +60572,17 @@ class KaraokeApp(QWidget):
                 generation=start_generation,
             )
 
+            _rot_shadow, _rot_facts = None, None
+            try:
+                _rot_shadow = _start_shadow_for(self.settings)
+                if _rot_shadow is not None and not self._is_rotation_locked():
+                    if any(_q is singer for _q in self.queue):
+                        # the all-singers-skipped quirk: the pick loop already put this singer back at the bottom, so the commit below adds them a second time
+                        _rot_shadow.note("singer_already_in_queue", f"singer={singer.get('name', '')!r} queue_len={len(self.queue)} (the commit appends the same singer again)")
+                    else:
+                        _rot_facts = _rot_shadow.rotation_facts(self.queue, singer, self._is_rotation_mode(), marker_was_top)
+            except Exception:
+                _rot_facts = None
             singer["has_sung"] = True
             singer["last_sung_at"] = time.time()
             try:
@@ -60591,6 +60602,11 @@ class KaraokeApp(QWidget):
                 self._rotation_repair_marker()
                 self._rotation_recompute_round_state(force_reset=False)
             self.queue = self.queue.copy()
+            if _rot_facts is not None:
+                try:
+                    _rot_shadow.check_rotation(_rot_facts, self.queue)
+                except Exception:
+                    pass
 
             # Do NOT mark the song sung here. Starting a song used to complete
             # the remote request and record the performance immediately, which

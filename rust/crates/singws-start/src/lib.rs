@@ -238,6 +238,74 @@ pub fn pick(singers: &[PickSinger]) -> Option<(usize, Option<usize>)> {
     if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }
 }
 
+/// One singer's rotation state as `_commit_pending_start` sees it: the same `skipped` / `songs` facts as [`PickSinger`] (a singer is ACTIVE when not skipped and holding a
+/// song that is not skipped), plus the flags the commit changes. `round_sung` may be absent (the key is missing until the app first normalizes the queue).
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+pub struct RotSinger {
+    #[serde(default)]
+    pub skipped: bool,
+    pub songs: String,
+    #[serde(default)]
+    pub round_sung: Option<bool>,
+    #[serde(default)]
+    pub marker: bool,
+    #[serde(default)]
+    pub has_sung: bool,
+}
+
+impl RotSinger {
+    fn active(&self) -> bool {
+        !self.skipped && self.songs.chars().any(|c| c != 's')
+    }
+}
+
+/// The queue after a song has started and the app commits it: the singer is marked as having sung (and, in rotation mode, as having sung this round), goes to the
+/// bottom; in rotation mode the marker follows when it was on the top singer, a missing or doubled marker is repaired (the first one wins; none: the first singer), the
+/// missing `round_sung` keys are filled with false, and a round in which every active singer has sung starts over. `queue` is the queue WITHOUT the singer.
+/// (A locked rotation also reweaves its tail; that is not modeled and the app does not compare it.)
+pub fn after_start(queue: &[RotSinger], singer: &RotSinger, rotation_mode: bool, marker_was_top: bool) -> Vec<RotSinger> {
+    let mut me = singer.clone();
+    me.has_sung = true;
+    if rotation_mode {
+        me.round_sung = Some(true);
+    }
+    let mut q: Vec<RotSinger> = queue.to_vec();
+    q.push(me);
+    if !rotation_mode {
+        return q;
+    }
+    if marker_was_top {
+        for s in q.iter_mut() {
+            s.marker = false;
+        }
+        if let Some(last) = q.last_mut() {
+            last.marker = true;
+        }
+    }
+    // repair: exactly one marker; several: keep the first; none: the first singer
+    let marked: Vec<usize> = q.iter().enumerate().filter(|(_, s)| s.marker).map(|(i, _)| i).collect();
+    if marked.len() != 1 {
+        let keep = marked.first().copied().unwrap_or(0);
+        for (i, s) in q.iter_mut().enumerate() {
+            s.marker = i == keep;
+        }
+    }
+    // round state
+    if q.iter().any(RotSinger::active) {
+        for s in q.iter_mut() {
+            if s.round_sung.is_none() {
+                s.round_sung = Some(false);
+            }
+        }
+        if q.iter().filter(|s| s.active()).all(|s| s.round_sung == Some(true)) {
+            for s in q.iter_mut().filter(|s| s.active()) {
+                s.round_sung = Some(false);
+            }
+        }
+    }
+    q
+}
+
 /// Python's `str.strip()` whitespace: Unicode White_Space plus U+001C..U+001F (which Python also counts as whitespace and Rust does not).
 fn is_py_space(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
@@ -274,6 +342,17 @@ pub fn start_json(request: &str) -> Result<String, String> {
         let fallback = text("fallback");
         let (artist, title) = display_payload(&a, &t, fallback.as_deref()).ok_or("the display name is needed but was not given")?;
         return Ok(serde_json::json!({"artist": artist, "title": title}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("after_start") {
+        let queue: Vec<RotSinger> = serde_json::from_value(v.get("queue").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        let singer: RotSinger = serde_json::from_value(v.get("singer").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        let bad = |s: &RotSinger| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'));
+        if queue.iter().any(bad) || bad(&singer) {
+            return Err("songs may only contain d, s and t".into());
+        }
+        let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let after = after_start(&queue, &singer, flag("rotation_mode"), flag("marker_was_top"));
+        return Ok(serde_json::json!({"queue": after.iter().map(|s| serde_json::json!({"marker": s.marker, "round_sung": s.round_sung, "has_sung": s.has_sung})).collect::<Vec<_>>()}).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("pick") {
         let singers: Vec<PickSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
@@ -485,6 +564,64 @@ mod tests {
         assert_eq!(start_json(r#"{"op":"display","artist":"","title":"B","fallback":"X • Y"}"#).unwrap(), r#"{"artist":"X","title":"Y"}"#);
         assert!(start_json(r#"{"op":"display","artist":"","title":""}"#).is_err());
         assert!(start_json(r#"{"op":"display","title":"B"}"#).is_err());
+    }
+
+    fn rs(songs: &str, skipped: bool, round: Option<bool>, marker: bool, has_sung: bool) -> RotSinger {
+        RotSinger { skipped, songs: songs.into(), round_sung: round, marker, has_sung }
+    }
+    fn flags(q: &[RotSinger]) -> Vec<(bool, Option<bool>, bool)> {
+        q.iter().map(|s| (s.marker, s.round_sung, s.has_sung)).collect()
+    }
+
+    #[test]
+    fn a_started_singer_goes_to_the_bottom_marked_as_sung() {
+        let q = [rs("d", false, Some(false), true, false), rs("d", false, Some(false), false, false)];
+        let me = rs("d", false, Some(false), false, false);
+        let out = after_start(&q, &me, false, false);
+        assert_eq!(flags(&out), vec![(true, Some(false), false), (false, Some(false), false), (false, Some(false), true)], "classic mode: only has_sung and the place change");
+        let out = after_start(&q, &me, true, false);
+        assert_eq!(flags(&out), vec![(true, Some(false), false), (false, Some(false), false), (false, Some(true), true)], "rotation mode: sung this round");
+    }
+
+    #[test]
+    fn the_marker_follows_the_singer_when_it_was_on_the_top_and_is_repaired_otherwise() {
+        let q = [rs("d", false, Some(false), false, false), rs("d", false, Some(false), false, false)];
+        let me = rs("d", false, None, true, false);
+        assert_eq!(flags(&after_start(&q, &me, true, true)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![false, false, true], "moved to the singer");
+        let two = [rs("d", false, Some(false), true, false), rs("d", false, Some(false), true, false)];
+        assert_eq!(flags(&after_start(&two, &me, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false, false], "the first of several wins");
+        let none = [rs("d", false, Some(false), false, false)];
+        let plain = rs("d", false, None, false, false);
+        assert_eq!(flags(&after_start(&none, &plain, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false], "no marker: the first singer");
+        let one = [rs("d", false, Some(false), true, false), rs("d", false, Some(false), false, false)];
+        assert_eq!(flags(&after_start(&one, &plain, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false, false], "one marker stays where it is");
+        assert_eq!(flags(&after_start(&[], &plain, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true], "alone: marked");
+    }
+
+    #[test]
+    fn a_finished_round_starts_over_and_missing_flags_are_filled() {
+        let q = [rs("d", false, Some(true), true, true), rs("s", false, Some(true), false, true), rs("d", true, Some(true), false, true)];
+        let me = rs("d", false, None, false, false);
+        let out = after_start(&q, &me, true, false);
+        // active singers: 0 and the new one (1 has only skipped songs, 2 is skipped): everyone active has sung, so the round restarts for them
+        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(true), Some(true), Some(false)], "inactive singers keep their flag");
+        let open = [rs("d", false, Some(false), true, false)];
+        let out = after_start(&open, &me, true, false);
+        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(true)], "someone has not sung: no reset");
+        let missing = [rs("d", false, None, true, false), rs("s", false, None, false, false)];
+        let out = after_start(&missing, &rs("s", false, None, false, false), true, false);
+        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(false), Some(true)], "nobody active holds a song? the first singer is active, so keys are filled");
+        let nobody = [rs("s", false, None, true, false)];
+        let out = after_start(&nobody, &rs("", false, None, false, false), true, false);
+        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![None, Some(true)], "no active singer: nothing is normalized (the started singer keeps what it was given)");
+    }
+
+    #[test]
+    fn the_after_start_op_is_routed_by_the_json_glue() {
+        let r = start_json(r#"{"op":"after_start","rotation_mode":true,"marker_was_top":true,"queue":[{"songs":"d","round_sung":false,"marker":false}],"singer":{"songs":"d","marker":true}}"#).unwrap();
+        assert_eq!(r, r#"{"queue":[{"has_sung":false,"marker":false,"round_sung":false},{"has_sung":true,"marker":true,"round_sung":true}]}"#);
+        assert!(start_json(r#"{"op":"after_start","queue":[{"songs":"x"}],"singer":{"songs":"d"}}"#).is_err());
+        assert!(start_json(r#"{"op":"after_start","queue":[]}"#).is_err());
     }
 
     #[test]

@@ -135,6 +135,45 @@ class StartShadow:
             self._say(f"check_display error: {exc!r}")
             return None
 
+    def note(self, kind, text=""):
+        """A one-time `NOTE` line for something the shadow cannot compare but a report reader should know happened. Never raises."""
+        try:
+            key = f"note:{kind}"
+            if key not in self._seen:
+                self._seen.add(key)
+                self._say(f"NOTE {kind} {text}".rstrip())
+        except Exception:
+            pass
+
+    def check_rotation(self, facts, queue_after):
+        """Compare the singers' marker / round / has-sung flags after the app committed a started song with Rust. Never raises; None when skipped."""
+        try:
+            if not self.available or facts is None:
+                return None
+            payload = json.dumps(facts, allow_nan=False)
+            size = _OUT_CAP + 120 * (len(facts["queue"]) + 1)
+            buf = ctypes.create_string_buffer(size)
+            n = self._lib.singws_start_json(payload.encode(), buf, size)
+            if n < 0:
+                self._say(f"rotation call failed code={n}")
+                return None
+            got = json.loads(buf.raw[:n].decode())["queue"]
+            want = rotation_after(queue_after)
+            self.checks += 1
+            agree = got == want
+            if not agree:
+                self.mismatches += 1
+                self._say(f"MISMATCH rotation app={json.dumps(want)[:240]} rust={json.dumps(got)[:240]} before={json.dumps(facts)[:240]}")
+            elif "rotation" not in self._seen:
+                self._seen.add("rotation")
+                self._say("decision route=rotation agree=1")
+            if self.checks % SUMMARY_EVERY == 0:
+                self._say(f"summary checks={self.checks} mismatches={self.mismatches}")
+            return agree
+        except Exception as exc:
+            self._say(f"check_rotation error: {exc!r}")
+            return None
+
     def check_pick(self, facts, singer, song):
         """Compare who the app picked to sing next (`singer` = index in the queue as it was before the pick, `song` = index in that singer's songs; both None when
         nobody could sing) with Rust. `facts` is :func:`pick_facts` of the queue taken before the loop ran. Never raises; returns agree, or None when skipped."""
@@ -222,6 +261,49 @@ def pick_facts(queue):
 
 
 StartShadow.pick_facts = staticmethod(pick_facts)  # the app calls it on the instance it already holds
+
+def _kinds(songs):
+    if songs is None:
+        songs = []
+    if not isinstance(songs, (list, tuple)):
+        return None
+    return "".join(("s" if x.get("skipped", False) else "d") if isinstance(x, dict) else "t" for x in songs)
+
+
+def _rot_singer(singer):
+    if not isinstance(singer, dict):
+        return None
+    kinds = _kinds(singer.get("songs", []))
+    if kinds is None:
+        return None
+    return {"skipped": bool(singer.get("skipped", False)), "songs": kinds, "round_sung": (bool(singer["round_sung"]) if "round_sung" in singer else None),
+            "marker": bool(singer.get("rotation_marker", False)), "has_sung": bool(singer.get("has_sung", False))}
+
+
+def rotation_facts(queue, singer, rotation_mode, marker_was_top):
+    """The rotation state right before a started song is committed: the queue WITHOUT the singer, the singer, and the two mode flags. None for anything odd."""
+    rows = []
+    for other in queue:
+        r = _rot_singer(other)
+        if r is None:
+            return None
+        rows.append(r)
+    me = _rot_singer(singer)
+    if me is None:
+        return None
+    return {"op": "after_start", "queue": rows, "singer": me, "rotation_mode": bool(rotation_mode), "marker_was_top": bool(marker_was_top)}
+
+
+def rotation_after(queue):
+    """The three flags the commit changes, per singer, in queue order."""
+    out = []
+    for s in queue:
+        out.append({"marker": bool(s.get("rotation_marker", False)), "round_sung": (bool(s["round_sung"]) if "round_sung" in s else None), "has_sung": bool(s.get("has_sung", False))})
+    return out
+
+
+StartShadow.rotation_facts = staticmethod(rotation_facts)
+
 
 def _load_lib():
     try:
