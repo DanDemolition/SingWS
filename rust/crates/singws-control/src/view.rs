@@ -95,6 +95,12 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "duplicate" => ("That singer already has this song queued".into(), "warn"),
         "limit" => ("That singer is at the song limit".into(), "warn"),
         "bad_singer" => ("That singer name is not valid".into(), "warn"),
+        "bad_tempo" => ("The app refused the speed (70 to 130 percent only)".into(), "error"),
+        "pitch_unsupported" => ("Key changes are not available on this setup".into(), "warn"),
+        "name_taken" => ("Another singer already has that name".into(), "warn"),
+        "bad_name" => ("That name is not valid".into(), "warn"),
+        "renamed" => ("Singer renamed".into(), "ok"),
+        "not_renamed" => ("The app could not rename that singer".into(), "warn"),
         "bad_song_id" | "bad_key" => (format!("The app refused the command ({m})"), "error"),
         "moved" => ("Moved".into(), "ok"),
         "removed" => ("Removed".into(), "ok"),
@@ -522,6 +528,17 @@ mod tests {
         assert_eq!(humanize("duplicate: added"), ("Song added".to_string(), "ok"), "a replayed request id still answers with its first result");
         assert_eq!(humanize("duplicate").0, "That singer already has this song queued", "the bare code is the song duplicate");
         assert_eq!(humanize("bad_song_id").1, "error");
+    }
+
+    #[test]
+    fn dialog_answers_are_plain_words() {
+        assert_eq!(humanize("renamed"), ("Singer renamed".to_string(), "ok"));
+        for code in ["pitch_unsupported", "name_taken", "bad_name", "not_renamed"] {
+            assert_eq!(humanize(code).1, "warn", "{code}");
+            assert_ne!(humanize(code).0, code, "{code} has words");
+        }
+        assert_eq!(humanize("bad_tempo").1, "error");
+        assert_eq!(humanize("bad_key").1, "error");
     }
 
     #[test]

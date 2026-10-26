@@ -120,15 +120,28 @@ async def main():
     app._execute_host_control_command = types.MethodType(m.KaraokeApp._execute_host_control_command, app)
     for name in ("_shell_commands_mode", "_queue_signature", "_shell_queue_summary", "_execute_shell_queue_command", "_queue_singer_index_by_id",
                  "_queue_entry_position_by_id", "shell_queue_move_singer", "shell_queue_move_song", "shell_queue_remove_singer", "shell_queue_remove_song",
-                 "shell_queue_set_singer_skipped", "_finish_shell_queue_removal", "toggle_singer_skip", "_step_karaoke_key", "_step_karaoke_tempo"):
+                 "shell_queue_set_singer_skipped", "_finish_shell_queue_removal", "toggle_singer_skip", "_step_karaoke_key", "_step_karaoke_tempo",
+                 "shell_queue_set_song_modifier", "shell_queue_rename_singer", "_queue_song_entry"):
         if hasattr(m.KaraokeApp, name):
             setattr(app, name, types.MethodType(getattr(m.KaraokeApp, name), app))
     app._SHELL_QUEUE_ACTIONS = m.KaraokeApp._SHELL_QUEUE_ACTIONS
+    # the dialogs' own plumbing is stubbed (server push, persistence, the real rename has its own tests); the new key / speed / name stay in the queue so the loopback can read them
+    app._queue_limit_name_key = m.KaraokeApp._queue_limit_name_key  # a static method: not bound
+    app._karaoke_pitch_supported = True
+    app._push_remote_request_modifiers = lambda entry: None
+    app._persist_song_modifier_change = lambda message="": None
+
+    def _rename(idx, name, source="host", merge_prefs_history=True):
+        app.queue[idx]["name"] = name
+        return True
+
+    app._rename_rotation_singer = _rename
     app.update_queue_display = lambda: None
 
     def snapshot():
         return {"order": [s["singer_id"] for s in app.queue], "songs": {s["singer_id"]: [e.get("request_uid") or e.get("display_name") or "?" for e in s["songs"]] for s in app.queue},
-                "skipped": {s["singer_id"]: bool(s.get("skipped")) for s in app.queue}, "sig": app._queue_signature(), "played": list(played)}
+                "skipped": {s["singer_id"]: bool(s.get("skipped")) for s in app.queue},
+                "names": {s["singer_id"]: s["name"] for s in app.queue}, "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played)}
 
     async def pump():
         while True:

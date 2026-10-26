@@ -102,6 +102,26 @@ def scenario_the_shell_adds_a_library_song_through_the_relay_and_a_second_add_is
         assert len(bob) == 1 and len(bob[0]["songs"]) == 1, view["singers"]
 
 
+def scenario_the_shell_changes_a_songs_key_and_speed_and_renames_a_singer_through_the_relay():
+    """The Key / Speed / Rename buttons' commands, through the real Qt shell and relay, into the app's REAL dialog routines; a taken name is refused."""
+    with cl.Stack("apply") as st:
+        view0, p0, _ = run_shell(st, [], snapshot_after=4000)
+        assert view0 is not None, p0.stderr[-800:]
+        entry = view0["singers"][0]["songs"][0]["entry_id"]
+        script = [{"label": "Key", "command": "queue.set_song_key", "args": {"entry_id": entry, "key": -2}},
+                  {"label": "Speed", "command": "queue.set_song_tempo", "args": {"entry_id": entry, "tempo_percent": 85}},
+                  {"label": "Rename", "command": "queue.rename_singer", "args": {"singer_id": "s1", "name": "Dana Lee"}},
+                  {"label": "Rename taken", "command": "queue.rename_singer", "args": {"singer_id": "s2", "name": "dana lee"}}]
+        view, p, _ = run_shell(st, script, snapshot_after=9000)
+        assert view is not None, p.stderr[-800:]
+        names = [c["command"] for c in commands_seen(st)]
+        assert names[-4:] == ["queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.rename_singer"], names
+        last, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == commands_seen(st)[-1]["request_id"], timeout=5)
+        assert last["names"]["s1"] == "Dana Lee" and last["names"]["s2"] == "Sam", last["names"]
+        assert last["mods"]["s1"][0] == [-2, 85], last["mods"]
+        assert view["result"]["kind"] == "warn" and "Another singer" in view["result"]["text"], view["result"]
+
+
 def scenario_the_music_tab_follows_the_players_position_and_drives_the_background_music():
     """The real shell's Music tab over the real relay: the app says it is on track 2 of 4, so the played tracks hide; play/pause and volume reach the app."""
     import tempfile

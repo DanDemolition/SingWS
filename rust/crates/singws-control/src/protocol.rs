@@ -55,6 +55,19 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
             need(args.get("song_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "song_id must be a whole number from the library search")?;
             need(args.get("key").is_none_or(|k| k.as_i64().is_some_and(|v| (-4..=4).contains(&v))), "key must be a whole number from -4 to 4")
         }
+        "queue.set_song_key" => {
+            need(text(args, "entry_id").is_some(), "entry_id is required")?;
+            need(args.get("key").and_then(Value::as_i64).is_some_and(|v| (-5..=5).contains(&v)), "key must be a whole number from -5 to 5")
+        }
+        "queue.set_song_tempo" => {
+            need(text(args, "entry_id").is_some(), "entry_id is required")?;
+            need(args.get("tempo_percent").and_then(Value::as_i64).is_some_and(|v| (70..=130).contains(&v)), "tempo_percent must be a whole number from 70 to 130")
+        }
+        "queue.rename_singer" => {
+            need(text(args, "singer_id").is_some(), "singer_id is required")?;
+            let name = args.get("name").and_then(Value::as_str).map(str::trim).unwrap_or("");
+            need(!name.is_empty() && name.chars().count() <= 60 && !name.chars().any(char::is_control), "name must be a name of 1-60 characters with no control characters")
+        }
         "bg.next" => Ok(()),
         "bg.play_track" => {
             need(args.get("index").and_then(Value::as_u64).is_some(), "index must be a whole number, 0 or more")?;
@@ -305,6 +318,23 @@ mod tests {
             ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": -5})),
             ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": 1.5})),
             ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": "1"})),
+            ("queue.set_song_key", json!({"key": 1})),
+            ("queue.set_song_key", json!({"entry_id": "e1"})),
+            ("queue.set_song_key", json!({"entry_id": "e1", "key": 6})),
+            ("queue.set_song_key", json!({"entry_id": "e1", "key": -6})),
+            ("queue.set_song_key", json!({"entry_id": "e1", "key": 1.5})),
+            ("queue.set_song_key", json!({"entry_id": "e1", "key": "1"})),
+            ("queue.set_song_tempo", json!({"tempo_percent": 100})),
+            ("queue.set_song_tempo", json!({"entry_id": "e1", "tempo_percent": 69})),
+            ("queue.set_song_tempo", json!({"entry_id": "e1", "tempo_percent": 131})),
+            ("queue.set_song_tempo", json!({"entry_id": "e1", "tempo_percent": 99.5})),
+            ("queue.set_song_tempo", json!({"entry_id": "e1", "tempo_percent": "100"})),
+            ("queue.rename_singer", json!({"name": "Dana"})),
+            ("queue.rename_singer", json!({"singer_id": "s1"})),
+            ("queue.rename_singer", json!({"singer_id": "s1", "name": "  "})),
+            ("queue.rename_singer", json!({"singer_id": "s1", "name": "x".repeat(61)})),
+            ("queue.rename_singer", json!({"singer_id": "s1", "name": "Da\nna"})),
+            ("queue.rename_singer", json!({"singer_id": "s1", "name": 5})),
             ("bg.play_track", json!({"track": "A.mp3"})),
             ("bg.play_track", json!({"index": -1, "track": "A.mp3"})),
             ("bg.play_track", json!({"index": 1.5, "track": "A.mp3"})),
@@ -338,6 +368,13 @@ mod tests {
             ("seek_to", json!({"seconds": 0})),
             ("queue.skip_singer", json!({"singer_id": "a", "skipped": false})),
             ("bg.next", json!({})),
+            ("queue.set_song_key", json!({"entry_id": "e1", "key": -5})),
+            ("queue.set_song_key", json!({"entry_id": "e1", "key": 5})),
+            ("queue.set_song_key", json!({"entry_id": "e1", "key": 0})),
+            ("queue.set_song_tempo", json!({"entry_id": "e1", "tempo_percent": 70})),
+            ("queue.set_song_tempo", json!({"entry_id": "e1", "tempo_percent": 130})),
+            ("queue.rename_singer", json!({"singer_id": "s1", "name": "Dana"})),
+            ("queue.rename_singer", json!({"singer_id": "s1", "name": "x".repeat(60)})),
             ("bg.play_track", json!({"index": 0, "track": "A.mp3"})),
             ("bg.play_track", json!({"index": 68, "track": "Zara Larsson - Lush Life.flac"})),
             ("eq.set", json!({"target": "bgm", "gains": [5, 4, 3, 1, -1, -1, 1, 3, 4, 5], "enabled": true})),

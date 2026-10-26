@@ -24,6 +24,53 @@ Item {
         panel.send(label, command, JSON.stringify(args || {}), command.indexOf("queue.") === 0)
     }
 
+    // One small dialog for the three edits: a song's key, a song's speed, a singer's name. OK sends the command; Cancel sends nothing.
+    Popup {
+        id: editor
+        property string kind: ""          // "key" | "tempo" | "name"
+        property string targetId: ""
+        property string targetName: ""
+        modal: true
+        focus: true
+        anchors.centerIn: Overlay.overlay
+        width: 320
+        padding: 14
+        background: Rectangle { color: "#1a1838"; radius: 10; border.color: "#4b2bb0" }
+        function openFor(kind, id, name) { editor.kind = kind; editor.targetId = id; editor.targetName = name; nameInput.text = kind === "name" ? name : ""; keyBox.value = 0; speedBox.value = 100; editor.open(); if (kind === "name") nameInput.forceActiveFocus() }
+        function accept() {
+            if (kind === "key") page.act("Key " + keyBox.value + " for " + targetName, "queue.set_song_key", {entry_id: targetId, key: keyBox.value})
+            else if (kind === "tempo") page.act("Speed " + speedBox.value + "% for " + targetName, "queue.set_song_tempo", {entry_id: targetId, tempo_percent: speedBox.value})
+            else if (nameInput.text.trim() !== "") page.act("Rename " + targetName, "queue.rename_singer", {singer_id: targetId, name: nameInput.text.trim()})
+            else return
+            editor.close()
+        }
+        contentItem: ColumnLayout {
+            spacing: 10
+            Label { text: editor.kind === "key" ? "Change key" : (editor.kind === "tempo" ? "Change speed" : "Rename singer"); color: "#ffffff"; font.pixelSize: 15; font.weight: Font.DemiBold }
+            Label { text: editor.targetName; color: "#9a97c0"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+            SpinBox { id: keyBox; visible: editor.kind === "key"; from: -5; to: 5; editable: true; Layout.fillWidth: true; Accessible.name: "Key in semitones"; textFromValue: function (v) { return (v > 0 ? "+" : "") + v + " semitones" } }
+            SpinBox { id: speedBox; visible: editor.kind === "tempo"; from: 70; to: 130; stepSize: 5; editable: true; Layout.fillWidth: true; Accessible.name: "Speed in percent"; textFromValue: function (v) { return v + "%" } }
+            TextField {
+                id: nameInput
+                visible: editor.kind === "name"
+                Layout.fillWidth: true
+                maximumLength: 60
+                color: "#e8e6f5"
+                selectByMouse: true
+                Accessible.name: "New singer name"
+                background: Rectangle { color: "#12102a"; radius: 8; border.color: nameInput.activeFocus ? "#7c3aed" : "#2a2650" }
+                onAccepted: editor.accept()
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Item { Layout.fillWidth: true }
+                Button { text: "Cancel"; onClicked: editor.close() }
+                Button { text: "OK"; highlighted: true; onClicked: editor.accept() }
+            }
+        }
+    }
+
     component Btn: Button {
         id: b
         property color tone: "#2a2650"
@@ -275,6 +322,7 @@ Item {
                         Label { visible: card.singer.skipped; text: "SKIPPED"; color: "#f0b44c"; font.pixelSize: 11 }
                         Btn { text: "▲"; implicitWidth: 34; onClicked: page.act("Move " + card.singer.name + " up", "queue.move_singer", {singer_id: card.singer.singer_id, direction: "up"}) }
                         Btn { text: "▼"; implicitWidth: 34; onClicked: page.act("Move " + card.singer.name + " down", "queue.move_singer", {singer_id: card.singer.singer_id, direction: "down"}) }
+                        Btn { text: "Rename"; onClicked: editor.openFor("name", card.singer.singer_id, card.singer.name) }
                         Btn { text: card.singer.skipped ? "Unskip" : "Skip"; onClicked: page.act((card.singer.skipped ? "Unskip " : "Skip ") + card.singer.name, "queue.skip_singer", {singer_id: card.singer.singer_id, skipped: !card.singer.skipped}) }
                         Btn {
                             text: page.confirmSinger === card.singer.singer_id ? "Confirm remove" : "Remove"
@@ -293,6 +341,8 @@ Item {
                             Layout.leftMargin: 28
                             spacing: 6
                             Label { text: (song.artist !== "" ? song.artist + " • " : "") + song.title; color: song.skipped ? "#8a87aa" : "#c9c6e8"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                            Btn { text: "Key"; implicitWidth: 40; implicitHeight: 26; onClicked: editor.openFor("key", song.entry_id, song.title) }
+                            Btn { text: "Speed"; implicitWidth: 50; implicitHeight: 26; onClicked: editor.openFor("tempo", song.entry_id, song.title) }
                             Btn { text: "▲"; implicitWidth: 28; implicitHeight: 26; onClicked: page.act("Move song up", "queue.move_song", {entry_id: song.entry_id, direction: "up"}) }
                             Btn { text: "▼"; implicitWidth: 28; implicitHeight: 26; onClicked: page.act("Move song down", "queue.move_song", {entry_id: song.entry_id, direction: "down"}) }
                             Btn { text: "✕"; implicitWidth: 28; implicitHeight: 26; tone: "#5a1f2a"; onClicked: page.act("Remove song", "queue.remove_song", {entry_id: song.entry_id}) }

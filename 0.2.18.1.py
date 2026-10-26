@@ -49796,6 +49796,48 @@ class KaraokeApp(QWidget):
         self._finish_shell_queue_removal(undo, "Song removed")
         return "removed"
 
+    def shell_queue_set_song_modifier(self, entry_id: str, field: str, value: int, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Set one song's own key (semitones, -5..5) or speed (70..130 percent): what the Change Key / Change Speed dialogs do after OK, in the same order
+        (value on the entry, push it to the server's request, then save and refresh). It applies when that song is next played."""
+        singer_idx, song_idx = self._queue_entry_position_by_id(entry_id)
+        entry = self._queue_song_entry(singer_idx, song_idx)
+        if entry is None:
+            return False, "unknown_entry"
+        if field == "key" and not bool(getattr(self, "_karaoke_pitch_supported", True)):
+            return False, "pitch_unsupported"
+        if dry_run:
+            return True, f"dry_run: would set the song's {'key' if field == 'key' else 'speed'}"
+        name = str(entry.get("display_name") or "this song")
+        entry[field] = int(value)
+        self._push_remote_request_modifiers(entry)
+        if field == "key":
+            self._persist_song_modifier_change(f"Key {int(value):+d} set for {name}" if value else f"Key reset for {name}")
+        else:
+            self._persist_song_modifier_change(f"Speed {int(value)}% set for {name}" if int(value) != 100 else f"Speed reset for {name}")
+        return True, "changed"
+
+    def shell_queue_rename_singer(self, singer_id: str, new_name: str, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Rename a singer by id (the rotation menu's Rename). Refuses when the new name already belongs to ANOTHER singer: the app asks the host to confirm that merge,
+        and a merge should never be one tap on a phone."""
+        import unicodedata
+        idx = self._queue_singer_index_by_id(singer_id)
+        if idx < 0:
+            return False, "unknown_singer"
+        name = str(new_name or "").strip()
+        if not name or len(name) > 60 or any(unicodedata.category(c) == "Cc" for c in name):
+            return False, "bad_name"
+        old = str(self.queue[idx].get("name", "") or "").strip()
+        if name == old:
+            return True, "no_change"
+        key = self._queue_limit_name_key(name)
+        if any(i != idx and isinstance(o, dict) and self._queue_limit_name_key(o.get("name", "")) == key for i, o in enumerate(self.queue or [])):
+            return False, "name_taken"
+        if dry_run:
+            return True, "dry_run: would rename the singer"
+        if not self._rename_rotation_singer(idx, name, source="shell"):
+            return False, "not_renamed"
+        return True, "renamed"
+
     def shell_bg_next(self, *, dry_run: bool = False) -> tuple[bool, str]:
         """Skip to the next background-music track (the app's own `_bg_main_next`), refused while a karaoke song is playing and when there is no playlist."""
         if getattr(self, "karaoke_playing", False):
@@ -49957,7 +49999,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50056,12 +50098,32 @@ class KaraokeApp(QWidget):
         entry_id = str(args.get("entry_id") or "").strip()
         if action in ("queue.move_singer", "queue.move_song") and where not in ("up", "down", "top", "bottom"):
             return remember(False, "bad_direction")
-        if action in ("queue.move_singer", "queue.remove_singer", "queue.skip_singer") and self._queue_singer_index_by_id(singer_id) < 0:
+        if action in ("queue.move_singer", "queue.remove_singer", "queue.skip_singer", "queue.rename_singer") and self._queue_singer_index_by_id(singer_id) < 0:
             return remember(False, "unknown_singer")
-        if action in ("queue.move_song", "queue.remove_song") and self._queue_entry_position_by_id(entry_id)[0] < 0:
+        if action in ("queue.move_song", "queue.remove_song", "queue.set_song_key", "queue.set_song_tempo") and self._queue_entry_position_by_id(entry_id)[0] < 0:
             return remember(False, "unknown_entry")
         if action == "queue.skip_singer" and not isinstance(args.get("skipped"), bool):
             return remember(False, "bad_skipped")
+        if action in ("queue.set_song_key", "queue.set_song_tempo"):
+            field = "key" if action == "queue.set_song_key" else "tempo_percent"
+            lo, hi = (-5, 5) if field == "key" else (70, 130)
+            value = args.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
+                return remember(False, "bad_key" if field == "key" else "bad_tempo")
+            try:
+                ok, code = self.shell_queue_set_song_modifier(entry_id, field, value, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action == "queue.rename_singer":
+            new_name = args.get("name")
+            if not isinstance(new_name, str):
+                return remember(False, "bad_name")
+            try:
+                ok, code = self.shell_queue_rename_singer(singer_id, new_name, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
         if action == "queue.add_song":
             song_id = args.get("song_id")
             key = args.get("key", 0)
