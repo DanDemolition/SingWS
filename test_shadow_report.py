@@ -24,6 +24,8 @@ FULL = [
     L("PLAN-SHADOW", "enabled available=1"),
     L("PLAN-SHADOW", "decision op=window kind=bounds agree=1"),
     L("PLAN-SHADOW", "decision op=crossfade kind=natural_fade agree=1"),
+    L("START-SHADOW", "enabled available=1"),
+    L("START-SHADOW", "decision route=mp4 agree=1"),
     L("WIRE-SHADOW", "enabled available=1"),
     L("WIRE-SHADOW", "decision endpoint=get_requests_v2.php kind=get agree=1"),
     L("WIRE-SHADOW", "decision endpoint=delete_remote_request.php kind=form agree=1"),
@@ -143,6 +145,14 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("RESULT: nothing disagreed, but not every decision type was exercised", out)
         self.assertEqual(run(lines, "--require-all")[0], 3)
 
+    def test_the_start_shadow_is_clean_with_one_compared_start_not_exercised_without_one_and_disagreement_is_reported(self):
+        self.assertEqual(verdicts([LAUNCH] + FULL)["START-SHADOW"], "CLEAN")
+        self.assertEqual(verdicts([LAUNCH, L("START-SHADOW", "enabled available=1")])["START-SHADOW"], "NOT EXERCISED")
+        self.assertEqual(verdicts([LAUNCH, L("START-SHADOW", "enabled available=0")])["START-SHADOW"], "UNAVAILABLE")
+        bad = [LAUNCH] + FULL + [L("START-SHADOW", "MISMATCH app=mp3 rust=mp4 info='/a.mp4' facts={}")]
+        self.assertEqual(verdicts(bad)["START-SHADOW"], "DISAGREED")
+        self.assertEqual(run(bad)[0], 1)
+
     def test_the_store_shadow_needs_the_queue_store_and_reports_the_others_as_optional(self):
         lines = [LAUNCH, L("STORE-SHADOW", "enabled available=1"), L("STORE-SHADOW", "decision store=settings.json layout=indent2+newline agree=1")]
         self.assertEqual(verdicts(lines)["STORE-SHADOW"], "PARTIAL")
@@ -177,7 +187,7 @@ class VerdictTests(unittest.TestCase):
 
     def test_a_shadow_that_never_logged_is_not_enabled(self):
         v = verdicts([LAUNCH])
-        self.assertEqual({v[k] for k in ("SETTINGS-SHADOW", "QUEUE-SHADOW", "PLAN-SHADOW", "STORE-SHADOW", "WIRE-SHADOW", "TRANSPORT-SHADOW")}, {"NOT ENABLED"})
+        self.assertEqual({v[k] for k in ("SETTINGS-SHADOW", "QUEUE-SHADOW", "PLAN-SHADOW", "START-SHADOW", "STORE-SHADOW", "WIRE-SHADOW", "TRANSPORT-SHADOW")}, {"NOT ENABLED"})
         self.assertEqual(v["TRANSPORT-DRIVE"], "NOT EXERCISED")
 
     def test_settings_tell_a_switched_off_shadow_from_one_nothing_reached(self):

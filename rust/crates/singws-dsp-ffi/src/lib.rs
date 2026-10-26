@@ -424,6 +424,34 @@ pub unsafe extern "C" fn singws_plan_json(request: *const std::os::raw::c_char, 
     }
 }
 
+/// Stage A5 shadow hook: the song-start routing decision of `play_next_file`. `request` is a JSON `singws_start::Input`; the output is `{"route":"<name>"}`.
+/// Returns the output length, or a negative code (-1 bad input, -2 output buffer too small, -3 panic). Never panics across the ABI.
+///
+/// # Safety
+/// `request` must be a NUL-terminated string; `out` must be writable for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_start_json(request: *const std::os::raw::c_char, out: *mut u8, cap: usize) -> i64 {
+    if request.is_null() || out.is_null() {
+        return -1;
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let q = unsafe { std::ffi::CStr::from_ptr(request) }.to_str().map_err(|_| ())?;
+        singws_start::start_json(q).map_err(|_| ())
+    }));
+    match r {
+        Err(_) => -3,
+        Ok(Err(())) => -1,
+        Ok(Ok(json)) => {
+            let b = json.as_bytes();
+            if b.len() > cap {
+                return -2;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), out, b.len()) };
+            b.len() as i64
+        }
+    }
+}
+
 /// Stage B shadow hook: the poll-row admission decision. `facts` is a JSON `RowFacts`; the output is
 /// `{"admit":"<Admit>","accepts":bool}`. Returns the output length, or a negative code (-1 bad input, -2 output buffer too
 /// small, -3 panic). Never panics across the ABI.

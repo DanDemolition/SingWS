@@ -2182,6 +2182,7 @@ dependencies = [
  "singws-dsp",
  "singws-plan",
  "singws-queue",
+ "singws-start",
  "singws-store",
  "singws-transport",
  "singws-wire",
@@ -2242,6 +2243,14 @@ dependencies = [
  "serde_json",
  "singws-control",
  "singws-uimodel",
+]
+
+[[package]]
+name = "singws-start"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

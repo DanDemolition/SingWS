@@ -1918,6 +1918,24 @@ def _plan_shadow_for(settings):
         return None
 
 
+_START_SHADOW = None
+
+
+def _start_shadow_for(settings):
+    """The Stage A5 song-start routing shadow, or None when the setting is off or the library is missing. Never raises."""
+    global _START_SHADOW
+    try:
+        if not bool((settings or {}).get("start_shadow", False)):
+            return None
+        if _START_SHADOW is None:
+            import start_shadow
+            _START_SHADOW = start_shadow.StartShadow(_diag)
+            _diag(f"[START-SHADOW] enabled available={int(_START_SHADOW.available)}")
+        return _START_SHADOW if _START_SHADOW.available else None
+    except Exception:
+        return None
+
+
 def transition_analysis_cached(path: str):
     """Return validated transition metadata without doing live decode work."""
     global _transition_analysis_cache_loaded, _transition_analysis_cache_loading
@@ -4061,7 +4079,7 @@ MPV_CDG_BASE_OFFSET_MS = -50
 MPV_MP4_BASE_OFFSET_MS = 0
 
 _RUST_EVIDENCE_FLAGS = ("queue_shadow", "plan_shadow", "settings_shadow", "store_shadow", "wire_shadow", "publish_live_state",
-                        "transport_drive_media_end", "transport_drive_watchdog")
+                        "transport_drive_media_end", "transport_drive_watchdog", "start_shadow")
 
 
 def _migrate_rust_evidence_defaults(settings) -> bool:
@@ -4142,6 +4160,9 @@ DEFAULTS = {
     # package gate passes. The karaoke effective-end rule runs only in the offline analysis worker and is covered by
     # tools/plan_parity.py, not by this live shadow.
     "plan_shadow": True,
+    # Stage A5 shadow: at each point where play_next_file commits to a start route (external KaraFun, refusal, ZIP preparation, mp4, mp3, MP3+G, CDG+MP3) compare it with
+    # the Rust singws-start rules and LOG disagreements only; the app's own route is always used and nothing extra is read from disk.
+    "start_shadow": True,
     # Stage D1 shadow: compare the settings store steps (load, DEFAULTS fill, serialize-before-save) with the Rust singws-store
     # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
     # two-architecture package gate passes. Read from the settings dict being processed.
@@ -27970,6 +27991,7 @@ class KaraokeApp(QWidget):
         voice = None
         reason = ""
         supports = False
+        _est, _verr, _code = "none", False, ""   # facts for the Stage A5 shadow (who plays the sound): engine state, voice build failed, why not
         try:
             supports = bool(plugin.supportsShadowAudio())
         except Exception:
@@ -27978,6 +28000,7 @@ class KaraokeApp(QWidget):
             try:
                 if not supports:
                     reason = "this video bridge cannot run shadow audio (the Objective-C bridge)"
+                    _code = "bridge_unsupported"
                 else:
                     engine = None
                     try:
@@ -27986,7 +28009,9 @@ class KaraokeApp(QWidget):
                         engine = None
                     if engine is None or getattr(engine, "_headless", False):
                         reason = "the Rust audio engine is not running"
+                        _est, _code = ("none" if engine is None else "headless"), "engine_not_running"
                     else:
+                        _est = "running"
                         from rust_karaoke_voice import RustKaraokeVoice
                         cached = getattr(self, "_rust_karaoke_voice", None)
                         if cached is None or getattr(cached, "_e", None) is not engine:
@@ -28000,9 +28025,16 @@ class KaraokeApp(QWidget):
             except Exception as exc:
                 reason = str(exc)
                 voice = None
+                _verr, _code = True, "error"
         try:
             if supports:
                 plugin.setShadowAudio(voice is not None)
+        except Exception:
+            pass
+        try:
+            _sh = _start_shadow_for(self.settings)
+            if _sh is not None:
+                _sh.check_engine({"voice": voice is not None, "reason": _code, "set_shadow_audio": (voice is not None) if supports else None}, want, supports, _est, _verr)
         except Exception:
             pass
         if want and voice is None:
@@ -59983,6 +60015,15 @@ class KaraokeApp(QWidget):
         )
         self._flash_play_control_kept_current()
 
+    def _start_route_taken(self, route, song_info, **facts):
+        """Shadow hook (Stage A5): the start route play_next_file is about to take, with the facts it has computed so far. Never raises, never changes the start."""
+        try:
+            shadow = _start_shadow_for(self.settings)
+            if shadow is not None:
+                shadow.check(route, song_info, **facts)
+        except Exception:
+            pass
+
     @_perf_timed("ui_songstart_play_next")
     def play_next_file(self, skip_confirmation=False, *, command_source="internal"):
         _pn_clock = _StepClock("PLAYNEXT-STEPS")
@@ -60216,6 +60257,7 @@ class KaraokeApp(QWidget):
 
             primary_path = self._song_info_primary_path(song_info)
             if self._is_external_karafun_entry(entry):
+                self._start_route_taken("external_karafun", song_info, external=True)
                 self._start_external_karafun_playback(
                     singer=singer,
                     entry=entry,
@@ -60230,7 +60272,9 @@ class KaraokeApp(QWidget):
                 return
             _pn_exists = bool(primary_path) and os.path.exists(primary_path)
             _pn_clock.mark("file_exists")
+            _pn_facts = {"has_primary": bool(primary_path), "primary_exists": bool(_pn_exists)}
             if primary_path and (not _pn_exists):
+                self._start_route_taken("reject_missing_file", song_info, **_pn_facts)
                 _diag(f"[PLAYNEXT] start rejected: missing file kept in queue: {primary_path}")
                 _restore_play_transaction("missing_file")
                 try:
@@ -60285,9 +60329,12 @@ class KaraokeApp(QWidget):
         # start. Restore the queue before starting the worker, keep Play gated,
         # and re-enter this method from the extraction callback. This prevents
         # extraction errors or repeated clicks from consuming a request.
+        _zip_cached = None
         if isinstance(song_info, str) and song_info.lower().endswith(".zip"):
             cached_cdg, cached_mp3 = self.zip_cache.cached_paths_if_ready(song_info)
+            _zip_cached = bool(cached_cdg and cached_mp3)
             if not cached_cdg or not cached_mp3:
+                self._start_route_taken("zip_prepare", song_info, zip_cached=False, **_pn_facts)
                 _restore_play_transaction("zip_prepare_pending", clear_gate=False)
                 self._mp3g_prepare_then_play_next = str(song_info)
                 if not self.play_mp3g_zip(
@@ -60325,20 +60372,25 @@ class KaraokeApp(QWidget):
             if isinstance(song_info[0], str) and song_info[0].endswith(".cdg"):
                 cdg_path, mp3_path = song_info
                 song_path_display = cdg_path
+                self._start_route_taken("cdg_mp3_dual", song_info, zip_cached=_zip_cached, **_pn_facts)
                 start_ok = bool(self.play_cdg_mp3_dual(cdg_path, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds, duration_seconds=current_song_dur))
             elif isinstance(song_info[0], str) and song_info[0].endswith(".mp4"):
                 # Old tuple (original, processed) — play original with realtime key change
                 orig_mp4 = song_info[0]
                 song_path_display = orig_mp4
+                self._start_route_taken("mp4", song_info, zip_cached=_zip_cached, **_pn_facts)
                 start_ok = bool(self.play_mp4(orig_mp4, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
             else:
                 # Fallback to first element
                 song_path_display = str(song_info[0])
                 if song_path_display.endswith(".mp4"):
+                    self._start_route_taken("mp4", song_info, zip_cached=_zip_cached, **_pn_facts)
                     start_ok = bool(self.play_mp4(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
                 elif song_path_display.endswith(".mp3"):
+                    self._start_route_taken("mp3", song_info, zip_cached=_zip_cached, **_pn_facts)
                     start_ok = bool(self.play_mp3(song_path_display, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
                 else:
+                    self._start_route_taken("reject_unsupported_tuple", song_info, zip_cached=_zip_cached, **_pn_facts)
                     print("Unsupported tuple format:", song_info)
                     _restore_play_transaction("unsupported_tuple")
                     return
@@ -60346,12 +60398,16 @@ class KaraokeApp(QWidget):
             # Plain string path
             song_path_display = song_info
             if song_info.endswith(".mp4"):
+                self._start_route_taken("mp4", song_info, zip_cached=_zip_cached, **_pn_facts)
                 start_ok = bool(self.play_mp4(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
             elif song_info.endswith(".mp3"):
+                self._start_route_taken("mp3", song_info, zip_cached=_zip_cached, **_pn_facts)
                 start_ok = bool(self.play_mp3(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds))
             elif song_info.endswith(".zip"):
                 # NEW: Handle MP3G zip files
-                if self.is_mp3g_zip(song_info):
+                _is_mp3g = bool(self.is_mp3g_zip(song_info))
+                self._start_route_taken("mp3g_zip" if _is_mp3g else "reject_invalid_zip", song_info, zip_cached=_zip_cached, mp3g=_is_mp3g, **_pn_facts)
+                if _is_mp3g:
                     start_ok = bool(self.play_mp3g_zip(song_info, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds, duration_seconds=current_song_dur))
                 else:
                     print("Invalid zip format:", song_info)
@@ -60360,7 +60416,9 @@ class KaraokeApp(QWidget):
             elif song_info.endswith(".cdg"):
                 base, _ = os.path.splitext(song_info)
                 mp3_path = base + ".mp3"
-                if os.path.exists(mp3_path):
+                _pair = bool(os.path.exists(mp3_path))
+                self._start_route_taken("cdg_mp3_dual" if _pair else "reject_missing_cdg_audio_pair", song_info, zip_cached=_zip_cached, pair=_pair, **_pn_facts)
+                if _pair:
                     start_ok = bool(self.play_cdg_mp3_dual(song_info, mp3_path, semitones=key, start_seconds=phrase_start, loop_seconds=intro_loop_seconds, duration_seconds=current_song_dur))
                 else:
                     _diag(f"[PLAYNEXT] failed: missing MP3 pair for CDG {song_info}")
@@ -60368,6 +60426,7 @@ class KaraokeApp(QWidget):
                     _restore_play_transaction("missing_cdg_audio_pair")
                     return
             else:
+                self._start_route_taken("reject_unsupported_format", song_info, zip_cached=_zip_cached, **_pn_facts)
                 _diag(f"[PLAYNEXT] failed: unsupported format {song_info}")
                 print("Unsupported format:", song_info)
                 _restore_play_transaction("unsupported_format")

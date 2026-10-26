@@ -1,0 +1,14 @@
+[package]
+name = "singws-start"
+version = "0.1.0"
+edition = "2024"
+description = "Pure song-start routing rules for SingWS (no I/O): which playback route a queued song takes in play_next_file, or why the start is refused. Shadow-mode reference for the app's dispatch."
+publish = false
+
+[lib]
+name = "singws_start"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }

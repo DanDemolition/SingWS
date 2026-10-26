@@ -16,6 +16,7 @@ Shadows and the log lines they write:
   SETTINGS-SHADOW   decision check=load|defaults|save           (startup + every settings save)
   QUEUE-SHADOW      decision branch=tombstone|terminal_stale|id_reuse|terminal_reuse   (server poll rows for removed requests)
   PLAN-SHADOW       decision op=window|crossfade kind=...        (background-music track changes)
+  START-SHADOW      decision route=mp4|mp3|cdg_mp3_dual|mp3g_zip|zip_prepare|reject_*|external_karafun agree=1   (the route play_next_file takes for each started song)
   STORE-SHADOW      decision store=<file> layout=... agree=1     (every store file the app writes; Rust must reproduce the bytes)
   WIRE-SHADOW       decision endpoint=<file> kind=get|form|json agree=1   (what requests sent vs what the Rust request builder would send)
   TRANSPORT-SHADOW  session N summary ... total_mismatches=M    (KaraFun and native song lifecycle)
@@ -51,6 +52,8 @@ SHADOWS = {
     "SETTINGS-SHADOW": ({"load", "defaults", "save"}, set()),
     "QUEUE-SHADOW": ({"tombstone", "terminal_stale"}, {"id_reuse", "terminal_reuse"}),
     "PLAN-SHADOW": ({"window", "crossfade"}, set()),
+    # one decision line per route taken per launch; CLEAN as soon as one song start was compared and nothing disagreed (the routes seen are listed)
+    "START-SHADOW": (set(), set()),
     # one decision line per store file per launch; queue.json changes whenever a request is added, the others only when their data changes
     # kinds of request seen (first agreement per endpoint and kind); needs at least one GET poll and one form POST
     "WIRE-SHADOW": ({"get", "form"}, {"json", "post_empty"}),
@@ -59,7 +62,7 @@ SHADOWS = {
 }
 # the settings.json key that switches each shadow on (transport_shadow defaults to ON; the others default to off)
 SETTING_KEYS = {
-    "SETTINGS-SHADOW": ("settings_shadow", False), "QUEUE-SHADOW": ("queue_shadow", False), "PLAN-SHADOW": ("plan_shadow", False),
+    "SETTINGS-SHADOW": ("settings_shadow", False), "QUEUE-SHADOW": ("queue_shadow", False), "PLAN-SHADOW": ("plan_shadow", False), "START-SHADOW": ("start_shadow", False),
     "STORE-SHADOW": ("store_shadow", False), "WIRE-SHADOW": ("wire_shadow", False),
     "TRANSPORT-SHADOW": ("transport_shadow", True), "TRANSPORT-DRIVE": ("transport_drive", True),
     "SHELL-COMMANDS": ("shell_commands", False),  # a string setting: "dry_run" or "apply" means on
@@ -159,7 +162,7 @@ def _analyse(rows):
 
     for name, (required, optional) in SHADOWS.items():
         r = Report(name)
-        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op", "STORE-SHADOW": "store", "WIRE-SHADOW": "kind"}[name]
+        key = {"SETTINGS-SHADOW": "check", "QUEUE-SHADOW": "branch", "PLAN-SHADOW": "op", "START-SHADOW": "route", "STORE-SHADOW": "store", "WIRE-SHADOW": "kind"}[name]
         for t, msg in by_tag.get(name, []):
             kv = _kv(msg)
             if msg.startswith("enabled"):
