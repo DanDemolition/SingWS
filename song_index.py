@@ -831,6 +831,24 @@ def find_by_path(path: str, *, dbfile: Optional[Path]=None) -> Optional[Dict[str
     _cache_set(_LOOKUP_CACHE, cache_key, dict(result) if result else None, _LOOKUP_CACHE_MAX)
     return result
 
+def find_by_id(song_id: int, *, dbfile: Optional[Path]=None) -> Optional[Dict[str,Any]]:
+    """One song by its row id (the id the library search returns), read-only; None when there is no such song or no database."""
+    dbfile = dbfile or db_path()
+    if not dbfile.exists():
+        return None
+    try:
+        sid = int(song_id)
+    except (TypeError, ValueError):
+        return None
+    con = _connect(dbfile, read_only=True)
+    try:
+        row = con.execute("SELECT * FROM songs WHERE id = ?", (sid,)).fetchone()
+    except Exception:
+        row = None
+    finally:
+        con.close()
+    return dict(row) if row else None
+
 def main(argv: Optional[Sequence[str]]=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="song_index.py")

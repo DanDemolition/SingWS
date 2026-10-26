@@ -44883,7 +44883,12 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _add_song_to_queue(self, singer_name, song_data, track=None, remote_meta=None):
+    def _add_song_to_queue(self, singer_name, song_data, track=None, remote_meta=None, quiet=False):
+        """`quiet=True` is the Rust shell / phone add: the same queue logic as the operator's Add, but it never touches the operator's screen (does not clear what
+        they are typing, reset the key selector or move the selection), never bypasses the song limit (it refuses, and says so in `_quiet_add_outcome`), and reports
+        a duplicate instead of silently swallowing it."""
+        if quiet:
+            self._quiet_add_outcome = {"code": "added", "message": ""}
         try:
             self._prune_expired_empty_rotation_slots()
         except Exception:
@@ -45048,7 +45053,9 @@ class KaraokeApp(QWidget):
                 self._request_queue_display_refresh()
             except Exception:
                 pass
-            if not is_remote:
+            if quiet:
+                self._quiet_add_outcome = {"code": "duplicate", "message": "already queued"}
+            if not is_remote and not quiet:
                 self._select_queue_singer_for_host(dup_singer_idx)
             return True
 
@@ -45076,6 +45083,10 @@ class KaraokeApp(QWidget):
             # to exceed the cap — log the bypass so it stays auditable in diagnostics.
             if is_remote:
                 self._show_queue_limit_rejected(limit_message, remote=is_remote)
+                return False
+            if quiet:
+                self._quiet_add_outcome = {"code": "limit", "message": str(limit_message or "")}
+                _diag(f"[QUEUE-LIMIT] shell add refused: {limit_message}")
                 return False
             try:
                 _diag(f"[QUEUE-LIMIT] host bypass — operator added over limit: {limit_message}")
@@ -45145,7 +45156,7 @@ class KaraokeApp(QWidget):
                 except Exception:
                     pass
             self._request_queue_display_refresh()
-            if not is_remote:
+            if not is_remote and not quiet:
                 self._select_queue_singer_for_host(singer_idx)
                 self.singer_input.clear()
                 self.key_selector.setCurrentIndex(self.key_selector.findText("Key: 0"))
@@ -45201,11 +45212,12 @@ class KaraokeApp(QWidget):
             singer_idx=ins,
         )
         if not is_remote:
-            self.singer_input.clear()
+            if not quiet:
+                self.singer_input.clear()
         else:
             self._mark_server_queue_mutation(reason=f"{insert_source}_new_singer")
         self._request_queue_display_refresh()
-        if not is_remote:
+        if not is_remote and not quiet:
             self._select_queue_singer_for_host(ins)
             self.key_selector.setCurrentIndex(self.key_selector.findText("Key: 0"))
         return True
@@ -49763,6 +49775,56 @@ class KaraokeApp(QWidget):
         self._finish_shell_queue_removal(undo, "Song removed")
         return "removed"
 
+    def shell_queue_add_song(self, singer_name, song_id, key=0, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Add a LIBRARY song (by its song-index id, never by a path from the wire) to a singer for the Rust shell / phone. Returns (ok, code).
+
+        It runs the operator's own add routine in `quiet` mode, so the queue rules are the same, and it REFUSES (never overrides): an unknown song, a file that is not
+        on disk (an unplugged drive), a CDG without its MP3 or a bad MP3+G zip (the Add button would show a dialog), a locked rotation, a singer already holding this
+        song, and a singer at the song limit. A new name creates a new singer, as the Add box does. With `dry_run` every check runs and nothing is added."""
+        name = str(singer_name or "").strip()
+        import unicodedata
+        if not name or len(name) > 60 or any(unicodedata.category(c) == "Cc" for c in name):  # control characters only: emoji joiners and no-break spaces are fine in a name
+            return False, "bad_singer"
+        track = song_index.find_by_id(song_id)
+        if not track:
+            return False, "unknown_song"
+        path = str(track.get("path") or "").strip()
+        if not path or not os.path.exists(path):
+            return False, "file_missing"
+        try:
+            song_data = self._waiting_for_add_song_data_from_track({"key": int(key or 0)}, track)
+        except FileNotFoundError:
+            return False, "missing_mp3"
+        except ValueError:
+            return False, "bad_zip" if path.lower().endswith(".zip") else "bad_song"
+        if self._is_rotation_locked():
+            return False, "rotation_locked"
+        primary, duet_display = self._parse_duet_singer(self._capitalize_singer_name(name))
+        if not primary:
+            return False, "bad_singer"
+        keys = {self._queue_limit_name_key(n) for n in self._duet_participants_from_display(primary, duet_display)}
+        for singer in self.queue or []:
+            if not isinstance(singer, dict) or self._queue_limit_name_key(singer.get("name", "")) not in keys:
+                continue
+            for entry in singer.get("songs", []) or []:
+                if isinstance(entry, dict) and not entry.get("skipped") and self._song_info_primary_path(entry.get("song_info")) == path:
+                    return False, "duplicate"
+        if dry_run:
+            ok, message = self._check_queue_song_limit(self._duet_participants_from_display(primary, duet_display), counts=self._live_song_counts_by_singer())
+            return (True, "dry_run: would add") if ok else (False, "limit")
+        undo = KaraokeApp._begin_undoable_action(self, "Add Song")
+        self._quiet_add_outcome = {"code": "added", "message": ""}
+        added = bool(self._add_song_to_queue(name, song_data, track=track, quiet=True))
+        outcome = dict(getattr(self, "_quiet_add_outcome", None) or {})
+        if not added or outcome.get("code") != "added":
+            return False, str(outcome.get("code") or "not_added")
+        try:
+            self._schedule_save_data(1000 if bool(getattr(self, "karaoke_playing", False)) else 0)
+        except Exception:
+            pass
+        KaraokeApp._commit_undoable_action(self, undo, "Song added")
+        return True, "added"
+
     def _finish_shell_queue_removal(self, undo, message: str) -> None:
         self._request_queue_display_refresh()
         try:
@@ -49780,7 +49842,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -49850,6 +49912,20 @@ class KaraokeApp(QWidget):
             return remember(False, "unknown_entry")
         if action == "queue.skip_singer" and not isinstance(args.get("skipped"), bool):
             return remember(False, "bad_skipped")
+        if action == "queue.add_song":
+            song_id = args.get("song_id")
+            key = args.get("key", 0)
+            if not isinstance(song_id, int) or isinstance(song_id, bool) or song_id <= 0:
+                return remember(False, "bad_song_id")
+            if not isinstance(key, int) or isinstance(key, bool) or not -4 <= key <= 4:
+                return remember(False, "bad_key")
+            if not isinstance(args.get("singer"), str):
+                return remember(False, "bad_singer")
+            try:
+                ok, code = self.shell_queue_add_song(args.get("singer"), song_id, key, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
         if mode == "dry_run":
             return remember(True, f"dry_run: would {action}")
         try:
