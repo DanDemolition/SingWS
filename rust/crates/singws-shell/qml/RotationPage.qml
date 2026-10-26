@@ -12,6 +12,7 @@ Item {
     }
 
     RotationPanel { id: panel }
+    property var tv: null   // the TV window (Main.qml)
     property var rows: []
     Connections {
         target: panel
@@ -28,6 +29,15 @@ Item {
             Layout.fillWidth: true
             Label { text: panel.titleLabel; color: "#e8e6f5"; font.pixelSize: 15; font.weight: Font.DemiBold; Layout.fillWidth: true; elide: Text.ElideRight }
             Label { text: panel.countLabel; color: "#a78bfa"; font.pixelSize: 13; font.weight: Font.DemiBold }
+            Button {
+                text: "TV window"
+                implicitHeight: 28
+                font.pixelSize: 12
+                contentItem: Label { text: parent.text; color: "#ffffff"; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                background: Rectangle { radius: 5; color: parent.down ? "#3a2290" : "#4b2bb0" }
+                onClicked: { if (page.tv) { page.tv.show(); page.tv.raise() } }
+                Accessible.name: "Open the audience rotation screen in its own window"
+            }
         }
         Label { text: panel.status; color: "#9a97c0"; font.pixelSize: 12 }
         Rectangle {

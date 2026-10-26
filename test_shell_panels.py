@@ -64,6 +64,26 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
         p, shot = self.run_tab("eq", d)
         self.assertEqual(p.returncode, 0, p.stderr[-400:])
 
+    def test_the_tv_window_renders_the_rotation_and_survives_an_empty_or_broken_queue(self):
+        d = self.make_home()
+        songs = [{"song_info": f"/lib/{i}.mp4", "artist": f"Artist {i}", "title": f"Title {i}", "display_name": f"Artist {i} \u2022 Title {i}", "key": 0, "skipped": False, "request_uid": f"u{i}"} for i in range(12)]
+        queue = [{"singer_id": f"s{i}", "name": f"Singer {i}", "songs": [songs[i]], "skipped": False, "has_sung": False, "round_sung": False, "rotation_marker": i == 0, "created_at": float(i)} for i in range(12)]
+        (Path(d) / "queue.json").write_text(json.dumps(queue))
+        tv = Path(d) / "tv.png"
+        p, shot = self.run_tab("rotation", d, ("--tv", "1", "--now-singing", "Singer 0", "--tv-snapshot", str(tv)))
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+        self.assertGreater(tv.stat().st_size, 20000, "the TV window drew its rows")
+        self.assertGreater(shot.stat().st_size, 5000)
+        (Path(d) / "queue.json").write_text("[]")
+        tv2 = Path(d) / "tv2.png"
+        p, shot = self.run_tab("rotation", d, ("--tv", "1", "--tv-snapshot", str(tv2)))
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+        self.assertGreater(tv2.stat().st_size, 2000)
+        self.assertLess(tv2.stat().st_size, tv.stat().st_size, "an empty queue draws far less than a full one")
+        (Path(d) / "queue.json").write_text("not json")
+        p, shot = self.run_tab("rotation", d, ("--tv", "1", "--tv-snapshot", str(Path(d) / "tv3.png")))
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+
     def test_the_numeric_tab_arguments_still_work(self):
         d = self.make_home()
         p, shot = self.run_tab("4", d)

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import com.singws.shell
 
 ApplicationWindow {
@@ -21,6 +22,12 @@ ApplicationWindow {
 
     // ONE connection to the app, shared by the Controls tab and the Library tab's Add buttons
     ControlPanel { id: control }
+
+    // the audience's rotation screen in a window of its own (opened from the Rotation tab, or with --tv)
+    TvWindow { id: tv }
+    Component.onCompleted: {
+        if (win.arg("--tv") !== "") { tv.show(); if (win.arg("--tv") === "fullscreen") tv.visibility = Window.FullScreen }
+    }
 
     Rectangle {
         id: canvas
@@ -54,7 +61,7 @@ ApplicationWindow {
                 currentIndex: tabs.currentIndex
                 LibraryPage { control: control }
                 HistoryPage {}
-                RotationPage {}
+                RotationPage { tv: tv }
                 ControlsPage { panel: control }
                 MusicPage { control: control }
                 EqPage { control: control }
@@ -66,6 +73,9 @@ ApplicationWindow {
     Timer {
         interval: win.arg("--snapshot-after") !== "" ? parseInt(win.arg("--snapshot-after")) : 1200
         running: win.arg("--snapshot") !== ""
-        onTriggered: canvas.grabToImage(function(r) { r.saveToFile(win.arg("--snapshot")); Qt.quit() })
+        onTriggered: {
+            if (win.arg("--tv-snapshot") !== "") tv.contentItem.grabToImage(function(t) { t.saveToFile(win.arg("--tv-snapshot")); canvas.grabToImage(function(r) { r.saveToFile(win.arg("--snapshot")); Qt.quit() }) })
+            else canvas.grabToImage(function(r) { r.saveToFile(win.arg("--snapshot")); Qt.quit() })
+        }
     }
 }
