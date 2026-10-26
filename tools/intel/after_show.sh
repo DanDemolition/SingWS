@@ -3,7 +3,7 @@
 # The zip holds the newest log and a REDUCED settings file (only the flag values the report needs: no keys, PINs, URLs or names).
 set -euo pipefail
 HOME_DIR="${SINGWS_HOME:-$HOME/SingWS}"; OUT_DIR="${OUT_DIR:-$HOME/Desktop}"
-LOGS=$(find "$HOME_DIR/logs" -name "singws_*.log" -mtime -3 2>/dev/null | sort | tail -3); [[ -n "$LOGS" ]] || { echo "No log found."; exit 1; }
+LOGS=$(find "$HOME_DIR/logs" -name "singws_*.log*" -mtime -3 2>/dev/null | sort | tail -4); [[ -n "$LOGS" ]] || { echo "No log found."; exit 1; }
 T=$(mktemp -d); D="$T/singws-show-$(date +%Y%m%d-%H%M)"; mkdir -p "$D"
 for f in $LOGS; do cp "$f" "$D/"; done
 { echo "{"; grep -E '^  "(transport_shadow|transport_drive|transport_drive_media_end|transport_drive_watchdog|queue_shadow|plan_shadow|settings_shadow|store_shadow|wire_shadow|publish_live_state|shell_commands|rust_evidence_defaults_migrated|transport_shadow_default_on_migrated)":' "$HOME_DIR/settings.json" | sed -E 's/,[[:space:]]*$//' | paste -sd, - | sed 's/^/ /'; echo "}"; } > "$D/settings.json"
