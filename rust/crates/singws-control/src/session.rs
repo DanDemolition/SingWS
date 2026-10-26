@@ -82,6 +82,22 @@ impl Session {
         &self.base
     }
 
+    pub(crate) fn user(&self) -> &str {
+        &self.user
+    }
+
+    /// GET a JSON endpoint with the session cookie.
+    pub(crate) fn get_json(&self, path: &str, params: Value) -> Result<(u16, Value), SessionError> {
+        self.json_call("GET", path, params, Value::Null)
+    }
+
+    /// GET raw bytes (an image) with the session cookie.
+    pub(crate) fn get_bytes(&self, path: &str, params: Value) -> Result<(u16, Vec<u8>), SessionError> {
+        let req = Request { method: "GET".into(), url: format!("{}{}", self.base, path), params, data: Value::Null, json: Value::Null, timeout: 4.0 };
+        let resp = self.http.send(&req).map_err(map_http)?;
+        Ok((resp.status, resp.body))
+    }
+
     fn json_call(&self, method: &str, path: &str, params: Value, data: Value) -> Result<(u16, Value), SessionError> {
         let req = Request { method: method.into(), url: format!("{}{}", self.base, path), params, data, json: Value::Null, timeout: 6.0 };
         let resp = self.http.send(&req).map_err(map_http)?;
@@ -221,6 +237,25 @@ mod tests {
             let (base, _) = stub(vec![(200, Box::leak(body.to_string().into_boxed_str()), "")]);
             assert!(matches!(Session::new(&base, "dan").unwrap().token(), Err(SessionError::Protocol(_))), "{body}");
         }
+    }
+
+    #[test]
+    fn the_preview_calls_use_the_session_and_map_their_answers() {
+        let (base, seen) = stub(vec![
+            (200, r#"{"ok":true,"enabled":true,"active":true,"updated_at_ms":9,"playback_state":"playing","image_url":"/api/show-screen/snapshot.php?user=dan&image=1&v=77"}"#, ""),
+            (401, r#"{"ok":false,"error":"unauthenticated"}"#, ""),
+            (200, "<html>not a picture</html>", ""),
+            (404, "gone", ""),
+        ]);
+        let s = Session::new(&base, "dan").unwrap();
+        let m = s.snapshot_meta().unwrap();
+        assert!(m.active && m.playing() && m.image_version.as_deref() == Some("77"));
+        assert_eq!(s.snapshot_meta(), Err(SessionError::Unauthenticated));
+        assert!(matches!(s.snapshot_image("77"), Err(SessionError::Protocol(_))), "an answer that is not a JPEG is refused");
+        assert!(matches!(s.snapshot_image("77"), Err(SessionError::Protocol(m)) if m.contains("404")));
+        let reqs = seen.lock().unwrap().clone();
+        assert!(reqs[0].starts_with("GET /api/show-screen/snapshot.php?user=dan HTTP/1.1"), "{}", reqs[0]);
+        assert!(reqs[2].starts_with("GET /api/show-screen/snapshot.php?") && reqs[2].contains("image=1") && reqs[2].contains("v=77"), "{}", reqs[2]);
     }
 
     #[test]

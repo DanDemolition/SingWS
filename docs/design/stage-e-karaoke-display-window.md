@@ -21,3 +21,8 @@ To show the real video the shell would have to PLAY it (decode, render, stay in 
 
 ## What can be built before that (small, optional)
 A read-only OUTPUT PREVIEW in the shell, the same picture the phone page shows (`/api/show-screen/snapshot.php`, JPEG frames the app uploads while the preview setting is on; needs the host session cookie the shell already obtains at login). It is a monitor, not a display: roughly a second of delay and compressed frames. Not built yet; ask if it is wanted.
+
+
+## Output preview: BUILT (2026-10-26)
+The optional read-only OUTPUT PREVIEW now exists in the shell's Controls tab ("Show karaoke output preview", off by default). `singws-control::preview` polls `/api/show-screen/snapshot.php` with its own host login (a second in-memory session cookie), every 0.4 s while a song plays, 1 s when paused, 1.5 s when idle, and stores the JPEG the app uploaded under `~/Library/Application Support/SingWS-Shell/preview/`. It is a monitor, not the display: about a second behind, no sound, and every poll counts as a viewer, so the app spends a little CPU capturing frames only while the box is ticked. Tests: 7 Rust unit tests (frame rules, cadence, JPEG check, status words, session calls against a stub) and two shell loopback scenarios against the real PHP endpoints (a frame is shown byte for byte, a watcher is registered only when switched on, an idle screen says so). The loopback writes the producer's files directly because the loopback PHP has no API-key database; the app's real upload is exercised only in a show.
+Screenshot: docs/verification/2026-10-26-rust-shell-output-preview.png.

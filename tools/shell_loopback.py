@@ -122,6 +122,55 @@ def scenario_the_shell_changes_a_songs_key_and_speed_and_renames_a_singer_throug
         assert view["result"]["kind"] == "warn" and "Another singer" in view["result"]["text"], view["result"]
 
 
+def upload_frame(stack, active=True, colour=(200, 30, 120), state="playing"):
+    """Leave on the loopback server exactly what the app's snapshot producer leaves there (the loopback PHP has no API-key database, so the POST itself is not used):
+    snapshot.jpg and snapshot.json in the tenant's show_screen_preview folder, which the real GET endpoints then serve."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (320, 180), colour).save(buf, "JPEG")
+    jpeg = buf.getvalue()
+    d = stack.tmp / "server" / "tenants" / cl.TENANT / "show_screen_preview"
+    d.mkdir(parents=True, exist_ok=True)
+    now_ms = int(time.time() * 1000)
+    meta = {"active": bool(active), "updated_at": now_ms // 1000, "updated_at_ms": now_ms, "song_id": "t1", "request_id": "r1", "playback_state": state, "warning": ""}
+    if active:
+        (d / "snapshot.jpg").write_bytes(jpeg)
+        meta.update({"image_updated_at": now_ms // 1000, "image_updated_at_ms": now_ms})
+    (d / "snapshot.json").write_text(json.dumps(meta))
+    return jpeg
+
+
+def scenario_the_output_preview_shows_the_frame_the_app_uploaded_and_stays_off_until_asked():
+    """The real shell polls the real snapshot endpoint with its own login and stores the very bytes the app uploaded; with the switch off it does not ask at all."""
+    with cl.Stack("apply") as st:
+        jpeg = upload_frame(st)
+        view, p, _ = run_shell(st, [], snapshot_after=9000, extra_args=("--preview",))
+        assert view is not None, p.stderr[-800:]
+        pv = view["preview"]
+        assert pv["on"] is True and pv["url"].startswith("file://") and pv["url"].endswith(".jpg"), pv
+        data = Path(pv["url"][len("file://"):]).read_bytes()
+        assert data == jpeg, "the shell kept exactly the uploaded picture"
+        assert pv["bytes"] == len(jpeg) and pv["status"] == "", pv
+        meta = json.loads((st.tmp / "server" / "tenants" / cl.TENANT / "show_screen_preview" / "snapshot.json").read_text())
+        assert meta.get("daw_viewer_seen_at", 0) > 0, "a watcher was registered, so the app would keep capturing"
+        (st.tmp / "server" / "tenants" / cl.TENANT / "show_screen_preview" / "snapshot.json").write_text(json.dumps({k: v for k, v in meta.items() if "viewer" not in k}))
+        # switched off (the default): no poll, so no picture and no watcher
+        view2, p2, _ = run_shell(st, [], snapshot_after=5000)
+        assert view2["preview"]["on"] is False and view2["preview"]["url"] == "" and view2["preview"]["bytes"] == 0, view2["preview"]
+        meta2 = json.loads((st.tmp / "server" / "tenants" / cl.TENANT / "show_screen_preview" / "snapshot.json").read_text())
+        assert not any("viewer" in k for k in meta2), "with the switch off the shell never asked, so no watcher was registered"
+
+
+def scenario_the_output_preview_says_so_when_nothing_is_on_the_singer_screen():
+    with cl.Stack("apply") as st:
+        upload_frame(st, active=False, state="idle")
+        view, p, _ = run_shell(st, [], snapshot_after=8000, extra_args=("--preview",))
+        assert view is not None, p.stderr[-800:]
+        pv = view["preview"]
+        assert pv["url"] == "" and pv["status"] == "No active singer screen preview", pv
+
+
 def scenario_the_music_tab_follows_the_players_position_and_drives_the_background_music():
     """The real shell's Music tab over the real relay: the app says it is on track 2 of 4, so the played tracks hide; play/pause and volume reach the app."""
     import tempfile

@@ -15,6 +15,9 @@ pub mod qobject {
         #[qproperty(QString, view_json, cxx_name = "viewJson")]
         #[qproperty(QString, saved_url, cxx_name = "savedUrl")]
         #[qproperty(QString, saved_user, cxx_name = "savedUser")]
+        #[qproperty(QString, preview_url, cxx_name = "previewUrl")]
+        #[qproperty(QString, preview_status, cxx_name = "previewStatus")]
+        #[qproperty(bool, preview_on, cxx_name = "previewOn")]
         type ControlPanel = super::ControlPanelRust;
 
         #[qinvokable]
@@ -33,6 +36,11 @@ pub mod qobject {
         #[cxx_name = "sendWithSig"]
         fn send_with_sig(self: Pin<&mut ControlPanel>, label: &QString, command: &QString, args_json: &QString, sig: &QString);
 
+        /// Switch the karaoke output preview on or off. Off means the server is no longer polled, so the app stops capturing frames for it.
+        #[qinvokable]
+        #[cxx_name = "setPreview"]
+        fn set_preview(self: Pin<&mut ControlPanel>, on: bool);
+
         #[qinvokable]
         #[cxx_name = "dumpView"]
         fn dump_view(self: &ControlPanel, path: &QString);
@@ -45,13 +53,21 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 use serde_json::Value;
-use singws_control::{Config, Handle, ViewModel, new_request_id, spawn};
+use singws_control::{Config, Handle, PreviewEvent, PreviewHandle, ViewModel, new_request_id, spawn, spawn_preview};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub struct ControlPanelRust {
     view_json: QString,
     saved_url: QString,
     saved_user: QString,
+    preview_url: QString,
+    preview_status: QString,
+    preview_on: bool,
+    /// the preview poller runs beside the relay client; it only asks the server while `preview_wanted` is set
+    preview: Option<PreviewHandle>,
+    preview_wanted: Arc<AtomicBool>,
+    preview_bytes: Arc<AtomicU64>,
     handle: Option<Handle>,
     vm: Arc<Mutex<ViewModel>>,
 }
@@ -61,6 +77,10 @@ fn config_path() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/SingWS-Shell"));
     dir.join("connection.json")
+}
+
+fn preview_dir() -> std::path::PathBuf {
+    config_path().parent().map(|p| p.join("preview")).unwrap_or_else(|| std::path::PathBuf::from("preview"))
 }
 
 /// the server address and tenant from the last run (never the PIN)
@@ -86,6 +106,12 @@ impl Default for ControlPanelRust {
             view_json: QString::from(vm.to_json().to_string().as_str()),
             saved_url: QString::from(url.as_str()),
             saved_user: QString::from(user.as_str()),
+            preview_url: QString::default(),
+            preview_status: QString::default(),
+            preview_on: false,
+            preview: None,
+            preview_wanted: Arc::new(AtomicBool::new(false)),
+            preview_bytes: Arc::new(AtomicU64::new(0)),
             handle: None,
             vm: Arc::new(Mutex::new(vm)),
         }
@@ -109,7 +135,9 @@ impl qobject::ControlPanel {
         self.as_mut().set_saved_url(QString::from(url.as_str()));
         self.as_mut().set_saved_user(QString::from(user.as_str()));
         let qt = self.qt_thread();
-        let handle = spawn(Config::new(url, user, pin.to_string()), move |out| {
+        let config = Config::new(url, user, pin.to_string());
+        self.as_mut().start_preview(config.clone());
+        let handle = spawn(config, move |out| {
             let (json, refresh) = {
                 let mut v = vm.lock().unwrap();
                 v.apply(&out);
@@ -126,7 +154,66 @@ impl qobject::ControlPanel {
         self.as_mut().rust_mut().handle = Some(handle);
     }
 
+    /// The poller is created with the connection and stays idle until the operator switches the preview on.
+    fn start_preview(mut self: Pin<&mut Self>, config: Config) {
+        let wanted = self.rust().preview_wanted.clone();
+        wanted.store(*self.as_ref().preview_on(), Ordering::SeqCst);
+        let bytes = self.rust().preview_bytes.clone();
+        let counter = Arc::new(AtomicU64::new(0));
+        let qt = self.qt_thread();
+        let dir = preview_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let handle = spawn_preview(config, wanted, move |event| {
+            let update = match event {
+                PreviewEvent::Frame { jpeg, .. } => {
+                    // a new file name per frame, so the image item never shows a cached older picture
+                    let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let file = dir.join(format!("frame-{n}.jpg"));
+                    let tmp = dir.join("frame.tmp");
+                    if std::fs::write(&tmp, &jpeg).is_err() || std::fs::rename(&tmp, &file).is_err() {
+                        (None, "Preview: could not store the picture".to_string())
+                    } else {
+                        if n > 2 {
+                            let _ = std::fs::remove_file(dir.join(format!("frame-{}.jpg", n - 2)));
+                        }
+                        bytes.store(jpeg.len() as u64, Ordering::SeqCst);
+                        (Some(format!("file://{}", file.display())), String::new())
+                    }
+                }
+                PreviewEvent::Waiting(text) => (Some(String::new()), text),
+                PreviewEvent::Failed(text) => (None, text),
+            };
+            let _ = qt.queue(move |mut obj: Pin<&mut qobject::ControlPanel>| {
+                if !*obj.as_ref().preview_on() {
+                    return;
+                }
+                if let Some(url) = update.0 {
+                    obj.as_mut().set_preview_url(QString::from(url.as_str()));
+                }
+                obj.as_mut().set_preview_status(QString::from(update.1.as_str()));
+            });
+        });
+        self.as_mut().rust_mut().preview = Some(handle);
+    }
+
+    fn set_preview(mut self: Pin<&mut Self>, on: bool) {
+        self.as_mut().set_preview_on(on);
+        self.rust().preview_wanted.store(on, Ordering::SeqCst);
+        if !on {
+            self.as_mut().set_preview_url(QString::default());
+            self.as_mut().set_preview_status(QString::default());
+        } else {
+            self.as_mut().set_preview_status(QString::from("Waiting for the first picture…"));
+        }
+    }
+
     fn end_session(mut self: Pin<&mut Self>) {
+        if let Some(p) = self.as_mut().rust_mut().preview.take() {
+            p.stop();
+        }
+        self.as_mut().set_preview_url(QString::default());
+        self.as_mut().set_preview_status(QString::default());
         if let Some(h) = self.as_mut().rust_mut().handle.take() {
             h.stop();
         }
@@ -172,7 +259,9 @@ impl qobject::ControlPanel {
     }
 
     fn dump_view(&self, path: &QString) {
-        let json = self.rust().vm.lock().unwrap().to_json().to_string();
-        let _ = std::fs::write(path.to_string(), json);
+        let mut view = self.rust().vm.lock().unwrap().to_json();
+        // the preview is a shell concern (not the relay's view model); the snapshot test reads it from here
+        view["preview"] = serde_json::json!({"on": self.preview_on, "url": self.preview_url.to_string(), "status": self.preview_status.to_string(), "bytes": self.rust().preview_bytes.load(Ordering::SeqCst)});
+        let _ = std::fs::write(path.to_string(), view.to_string());
     }
 }

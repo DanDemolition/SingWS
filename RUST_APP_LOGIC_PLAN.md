@@ -357,3 +357,6 @@ Intel show 2026-10-25 (1.0.1.6): RSS 887 MB at launch, 1,577 MB before any karao
 * Tests: `test_shell_dialogs.py` (11), `tools/mutate_dialogs.py` (27 mutants, 26 killed, 1 documented equivalent), Rust validation + plain-words messages in singws-control, loopback scenario in `tools/shell_loopback.py` (real shell, relay and app routines).
 * Shell: Controls tab has Rename per singer and Key / Speed per song, opening one small dialog (spin box or name field, OK / Cancel). The rows do not carry the song's current key or speed, so the dialog starts at 0 / 100%.
 * Not built: phone page for these, phrase start, brand override, direct message, replace track, library locations dialogs, the karaoke output preview.
+
+### Stage E: karaoke output preview in the shell (2026-10-26)
+* Controls tab checkbox (default off) shows the same picture as the phone page; design and test notes in docs/design/stage-e-karaoke-display-window.md. Not the display window: that stays Python until the transport drives are proven in a show.

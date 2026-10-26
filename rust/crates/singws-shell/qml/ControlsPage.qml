@@ -110,6 +110,7 @@ Item {
         userField.text = arg("--control-user") !== "" ? arg("--control-user") : panel.savedUser
         if (arg("--control-pin") !== "" && urlField.text !== "" && userField.text !== "")
             panel.connectTo(urlField.text, userField.text, arg("--control-pin"))
+        if (Qt.application.arguments.indexOf("--preview") >= 0) panel.setPreview(true)   // test hook: start with the preview on
     }
 
     // Test hook: `--do '[{"label":..,"command":..,"args":{..}}, {"wait":ms}]'` runs once the app is reachable, one step per tick;
@@ -286,6 +287,43 @@ Item {
                     onCommit: function (v) { page.act("Music volume " + Math.round(v * 100) + "%", "set_bg_volume", {value: Math.round(v * 100) / 100}) }
                 }
             }
+        }
+
+        // ---- karaoke output preview (a monitor, not the display: about a second behind, off until switched on; each poll tells the app somebody is watching)
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            CheckBox {
+                id: previewBox
+                text: "Show karaoke output preview"
+                checked: panel.previewOn
+                enabled: page.view.connected || page.view.logged_in
+                Accessible.name: "Show karaoke output preview"
+                contentItem: Label { text: previewBox.text; color: "#c9c6e8"; font.pixelSize: 13; leftPadding: previewBox.indicator.width + 6; verticalAlignment: Text.AlignVCenter }
+                onToggled: panel.setPreview(checked)
+            }
+            Label { visible: panel.previewOn; Layout.fillWidth: true; text: panel.previewStatus; color: "#9a97c0"; font.pixelSize: 12; elide: Text.ElideRight }
+        }
+        Rectangle {
+            visible: panel.previewOn
+            Layout.fillWidth: true
+            Layout.preferredHeight: 200
+            radius: 8
+            color: "#000000"
+            border.color: "#2a2650"
+            Image {
+                id: previewImage
+                anchors.fill: parent
+                anchors.margins: 2
+                fillMode: Image.PreserveAspectFit
+                cache: false
+                asynchronous: true
+                source: panel.previewUrl
+                visible: panel.previewUrl !== ""
+                Accessible.role: Accessible.Graphic
+                Accessible.name: "Karaoke output preview"
+            }
+            Label { anchors.centerIn: parent; visible: panel.previewUrl === ""; text: "No picture yet"; color: "#6a678f"; font.pixelSize: 13 }
         }
 
         // ---- rotation
