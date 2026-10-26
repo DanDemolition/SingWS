@@ -125,8 +125,9 @@ class Stream:
 class Stack:
     """php + relay + the app stand-in, in a temp dir, torn down on exit."""
 
-    def __init__(self, mode="apply", mute=False, start_app=True, tls=False, library=False):
+    def __init__(self, mode="apply", mute=False, start_app=True, tls=False, library=False, settings_file=None):
         self.mode, self.mute, self.start_app, self.tls, self.library = mode, mute, start_app, tls, library
+        self.settings_file = settings_file
         self.procs: list[Proc] = []
 
     def __enter__(self):
@@ -186,6 +187,8 @@ class Stack:
         cmd = [sys.executable, str(ROOT / "tools/control_app.py"), "--url", f"ws://127.0.0.1:{self.relay_port}/relay", "--tenant", TENANT, "--mode", self.mode]
         if self.mute:
             cmd.append("--mute")
+        if getattr(self, "settings_file", None):
+            cmd += ["--settings-file", str(self.settings_file)]
         if self.library:
             self.ids_file = self.tmp / "library_ids.json"
             cmd += ["--library", str(self.ids_file)]

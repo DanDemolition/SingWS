@@ -57,7 +57,7 @@ ApplicationWindow {
                 RotationPage {}
                 ControlsPage { panel: control }
                 MusicPage { control: control }
-                EqPage {}
+                EqPage { control: control }
                 SettingsPage {}
             }
         }

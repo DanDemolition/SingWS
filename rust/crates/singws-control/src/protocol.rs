@@ -55,6 +55,17 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
             need(args.get("song_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "song_id must be a whole number from the library search")?;
             need(args.get("key").is_none_or(|k| k.as_i64().is_some_and(|v| (-4..=4).contains(&v))), "key must be a whole number from -4 to 4")
         }
+        "bg.next" => Ok(()),
+        "bg.play_track" => {
+            need(args.get("index").and_then(Value::as_u64).is_some(), "index must be a whole number, 0 or more")?;
+            need(text(args, "track").is_some(), "track (the playlist row's file name) is required")
+        }
+        "eq.set" => {
+            need(args.get("target").and_then(Value::as_str).is_some_and(|t| t == "bgm" || t == "karaoke"), "target must be bgm or karaoke")?;
+            let ok = args.get("gains").and_then(Value::as_array).is_some_and(|g| g.len() == 10 && g.iter().all(|x| x.is_number() && x.as_f64().is_some_and(|v| v.is_finite() && v.abs() <= 12.0)));
+            need(ok, "gains must be ten numbers from -12 to 12")?;
+            need(args.get("enabled").is_some_and(Value::is_boolean), "enabled must be true or false")
+        }
         "queue.skip_singer" => {
             need(text(args, "singer_id").is_some(), "singer_id is required")?;
             need(args.get("skipped").is_some_and(Value::is_boolean), "skipped must be true or false")
@@ -294,6 +305,22 @@ mod tests {
             ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": -5})),
             ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": 1.5})),
             ("queue.add_song", json!({"singer": "Dana", "song_id": 5, "key": "1"})),
+            ("bg.play_track", json!({"track": "A.mp3"})),
+            ("bg.play_track", json!({"index": -1, "track": "A.mp3"})),
+            ("bg.play_track", json!({"index": 1.5, "track": "A.mp3"})),
+            ("bg.play_track", json!({"index": "1", "track": "A.mp3"})),
+            ("bg.play_track", json!({"index": 0})),
+            ("bg.play_track", json!({"index": 0, "track": "  "})),
+            ("eq.set", json!({"target": "bgm", "gains": vec![0; 9], "enabled": true})),
+            ("eq.set", json!({"target": "bgm", "gains": vec![0; 11], "enabled": true})),
+            ("eq.set", json!({"target": "master", "gains": vec![0; 10], "enabled": true})),
+            ("eq.set", json!({"gains": vec![0; 10], "enabled": true})),
+            ("eq.set", json!({"target": "bgm", "gains": [13, 0, 0, 0, 0, 0, 0, 0, 0, 0], "enabled": true})),
+            ("eq.set", json!({"target": "bgm", "gains": [-12.5, 0, 0, 0, 0, 0, 0, 0, 0, 0], "enabled": true})),
+            ("eq.set", json!({"target": "bgm", "gains": [true, 0, 0, 0, 0, 0, 0, 0, 0, 0], "enabled": true})),
+            ("eq.set", json!({"target": "bgm", "gains": ["1", 0, 0, 0, 0, 0, 0, 0, 0, 0], "enabled": true})),
+            ("eq.set", json!({"target": "bgm", "gains": vec![0; 10]})),
+            ("eq.set", json!({"target": "bgm", "gains": vec![0; 10], "enabled": 1})),
             ("queue.explode", json!({})),
             ("rm -rf", json!({})),
             ("play_pause", json!([1, 2])),
@@ -310,6 +337,11 @@ mod tests {
             ("set_karaoke_volume", json!({"value": 1})),
             ("seek_to", json!({"seconds": 0})),
             ("queue.skip_singer", json!({"singer_id": "a", "skipped": false})),
+            ("bg.next", json!({})),
+            ("bg.play_track", json!({"index": 0, "track": "A.mp3"})),
+            ("bg.play_track", json!({"index": 68, "track": "Zara Larsson - Lush Life.flac"})),
+            ("eq.set", json!({"target": "bgm", "gains": [5, 4, 3, 1, -1, -1, 1, 3, 4, 5], "enabled": true})),
+            ("eq.set", json!({"target": "karaoke", "gains": [12, -12, 0.1, -0.1, 0, 0, 0, 0, 0, 0], "enabled": false})),
             ("queue.add_song", json!({"singer": "Dana", "song_id": 1})),
             ("queue.add_song", json!({"singer": " Amber & Delores ", "song_id": 133158, "key": -4})),
             ("queue.add_song", json!({"singer": "Mom \u{200d}\u{1F469}", "song_id": 7, "key": 4})),

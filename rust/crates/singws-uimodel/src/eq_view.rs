@@ -9,6 +9,17 @@ use singws_dbw::pyval::truthy;
 
 pub const BANDS_HZ: [f64; 10] = [31.5, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
 
+/// The app's equaliser presets (`singws_eq.PRESETS`), in its order; tools/eq_parity.py compares this table with the Python one.
+pub const PRESETS: [(&str, [f64; 10]); 7] = [
+    ("Flat", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("Vocal Boost", [-2.0, -2.0, -1.0, 0.0, 2.0, 4.0, 5.0, 4.0, 2.0, 0.0]),
+    ("Rock", [5.0, 4.0, 3.0, 1.0, -1.0, -1.0, 1.0, 3.0, 4.0, 5.0]),
+    ("Bass Boost", [7.0, 6.0, 5.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("Treble Boost", [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0, 7.0]),
+    ("Loudness", [5.0, 4.0, 1.0, 0.0, -1.0, 0.0, 0.0, 2.0, 4.0, 6.0]),
+    ("Karaoke Vocal", [-3.0, -3.0, -2.0, -1.0, 1.0, 3.0, 4.0, 3.0, 2.0, 0.0]),
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Eq {
     pub gains: [f64; 10],
@@ -109,6 +120,15 @@ mod tests {
         assert!(read(&json!({"eq_bgm": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null]})).is_ok(), "an unreadable entry beyond the tenth is never looked at");
         assert!(read(&json!({"eq_bgm": [1000.0]})).is_ok());
         assert!(read(&json!({"eq_bgm": [1000.5]})).is_err() && read(&json!({"eq_bgm": [-1e30]})).is_err(), "absurd gains are declined");
+    }
+
+    #[test]
+    fn every_preset_is_ten_gains_inside_the_dialogs_range_and_flat_is_flat() {
+        for (name, g) in PRESETS {
+            assert_eq!(g.len(), 10, "{name}");
+            assert!(g.iter().all(|x| x.abs() <= 12.0), "{name}");
+        }
+        assert!(PRESETS[0].1.iter().all(|x| *x == 0.0) && PRESETS[0].0 == "Flat");
     }
 
     #[test]

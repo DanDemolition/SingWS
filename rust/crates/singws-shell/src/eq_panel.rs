@@ -17,6 +17,11 @@ pub mod qobject {
 
         #[qinvokable]
         fn refresh(self: Pin<&mut EqPanel>);
+
+        /// test hook (`--dump-eq FILE`): write what the tab is showing
+        #[qinvokable]
+        #[cxx_name = "dumpEq"]
+        fn dump_eq(self: &EqPanel, path: &QString);
     }
 }
 
@@ -44,6 +49,10 @@ fn one(e: &Eq) -> Value {
 }
 
 impl qobject::EqPanel {
+    fn dump_eq(&self, path: &QString) {
+        let _ = std::fs::write(path.to_string(), self.eq_json().to_string());
+    }
+
     fn refresh(mut self: Pin<&mut Self>) {
         let path = format!("{}/settings.json", self.rust().dir);
         let result = std::fs::read_to_string(&path)
@@ -52,7 +61,8 @@ impl qobject::EqPanel {
             .and_then(|v| eq_view::read(&v));
         match result {
             Ok((bgm, karaoke)) => {
-                let doc = json!({"bands": eq_view::BANDS_HZ.to_vec(), "bgm": one(&bgm), "karaoke": one(&karaoke)});
+                let presets: Vec<Value> = eq_view::PRESETS.iter().map(|(n, g)| json!({"name": n, "gains": g.to_vec()})).collect();
+                let doc = json!({"bands": eq_view::BANDS_HZ.to_vec(), "presets": presets, "bgm": one(&bgm), "karaoke": one(&karaoke)});
                 self.as_mut().set_eq_json(QString::from(doc.to_string().as_str()));
                 self.as_mut().set_status(QString::from(""));
             }

@@ -8,6 +8,8 @@ use singws_dbw::pyval::py_lower;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
+    /// the row's position in the saved playlist (what the app's `bg_index` counts), kept when earlier rows are hidden
+    pub index: usize,
     pub filename: String,
     /// the entry's `path` when it is a string (shown as a tooltip), otherwise empty
     pub path: String,
@@ -42,7 +44,7 @@ pub fn parse_playlist(v: &Value) -> Result<Vec<Row>, String> {
         let fv = o.get("filename").ok_or("a playlist entry has no filename")?;
         let filename = if fv.is_null() { "" } else { fv.as_str().ok_or("a playlist filename is not text")? };
         let path = o.get("path").ok_or("a playlist entry has no path")?;
-        rows.push(Row { filename: filename.to_string(), path: path.as_str().unwrap_or("").to_string() });
+        rows.push(Row { index: rows.len(), filename: filename.to_string(), path: path.as_str().unwrap_or("").to_string() });
     }
     Ok(rows)
 }
@@ -82,7 +84,7 @@ mod tests {
     use serde_json::json;
 
     fn rows(names: &[&str]) -> Vec<Row> {
-        names.iter().map(|n| Row { filename: n.to_string(), path: format!("/m/{n}") }).collect()
+        names.iter().enumerate().map(|(i, n)| Row { index: i, filename: n.to_string(), path: format!("/m/{n}") }).collect()
     }
 
     #[test]
@@ -95,6 +97,14 @@ mod tests {
         assert_eq!(view(&r, "").unwrap().rows.len(), 3, "with no player position every saved track is shown, the first one included");
         assert_eq!(view(&r, "   ").unwrap().count_label, "3 tracks", "a query of only spaces is no filter");
         assert_eq!(view(&r, "nothing").unwrap().count_label, "0 of 3 tracks");
+    }
+
+    #[test]
+    fn every_row_keeps_its_position_in_the_saved_playlist_even_when_others_are_hidden_or_filtered() {
+        let all = parse_playlist(&json!([{"filename": "a one", "path": "/a"}, {"filename": "b two", "path": "/b"}, {"filename": "c three", "path": "/c"}, {"filename": "d two", "path": "/d"}])).unwrap();
+        assert_eq!(all.iter().map(|r| r.index).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        let v = view_from(&all, "two", 0).unwrap();
+        assert_eq!(v.rows.iter().map(|r| (r.index, r.filename.as_str())).collect::<Vec<_>>(), [(1, "b two"), (3, "d two")], "the index is the playlist row, not the position in the list on screen");
     }
 
     #[test]

@@ -158,6 +158,15 @@ def main(argv=None):
     if not os.path.exists(CLI):
         print(f"missing {CLI}; build with: cd rust && cargo build --release -p singws-uimodel", file=sys.stderr)
         return 2
+    # the preset table the shell offers must be the app's own, in order
+    import singws_eq
+    out = subprocess.run([CLI], input=json.dumps({"presets": True}), capture_output=True, text=True, timeout=60)
+    got = [(p["name"], p["gains"]) for p in json.loads(out.stdout)["presets"]]
+    want = [(n, [float(g) for g in v]) for n, v in singws_eq.PRESETS.items()]
+    if got != want:
+        fail(f"preset table differs:\n python={want}\n rust  ={got}")
+    else:
+        tally("presets_identical", len(want))
     rng = random.Random(args.seed)
     for _ in range(args.cases):
         run_case(rng)

@@ -79,6 +79,14 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "no_change" => ("Already there; nothing changed".into(), "ok"),
         "bad_direction" | "bad_skipped" | "missing_request_id" | "missing_sent_at" => (format!("The app refused the command ({m})"), "error"),
         "added" => ("Song added".into(), "ok"),
+        "skipped" => ("Skipped to the next track".into(), "ok"),
+        "playing" => ("Playing that track".into(), "ok"),
+        "karaoke_playing" => ("A karaoke song is playing, so the background music is off for now".into(), "warn"),
+        "no_playlist" => ("There is no background-music playlist".into(), "warn"),
+        "stale_playlist" | "unknown_track" => ("The playlist changed; look at the Music tab again and pick the track again".into(), "warn"),
+        "simple_audio" => ("Simple Audio Mode is on in the app, so the equalisers are bypassed. Turn it off in the app first".into(), "warn"),
+        "eq_unavailable" => ("The app could not start its equalisers".into(), "warn"),
+        "bad_index" | "bad_track" | "bad_target" | "bad_gains" | "bad_enabled" => (format!("The app refused the command ({m})"), "error"),
         "unknown_song" => ("That song is not in the library (the song index may have changed); search again".into(), "warn"),
         "file_missing" => ("The song file is not on disk. Is the library drive connected?".into(), "warn"),
         "missing_mp3" => ("This CDG has no matching MP3 file next to it".into(), "warn"),
@@ -488,6 +496,20 @@ mod tests {
         let live = crate::protocol::parse_incoming(r#"{"type":"state","connected":true,"bg_playing":true,"bg_volume":0.65,"bg_index":0,"bg_track":"A.mp3","rotation":{},"playback":{}}"#);
         v2.apply(&Output::Message(live));
         assert_eq!(v2.to_json()["bg"], json!({"playing": true, "volume": 0.65, "index": 0, "track": "A.mp3"}));
+    }
+
+    #[test]
+    fn music_and_eq_answers_are_plain_words() {
+        assert_eq!(humanize("skipped").1, "ok");
+        assert_eq!(humanize("playing").1, "ok");
+        for code in ["karaoke_playing", "no_playlist", "stale_playlist", "unknown_track", "simple_audio", "eq_unavailable"] {
+            assert_eq!(humanize(code).1, "warn", "{code}");
+            assert_ne!(humanize(code).0, code, "{code} has words");
+        }
+        for code in ["bad_index", "bad_track", "bad_target", "bad_gains", "bad_enabled"] {
+            assert_eq!(humanize(code).1, "error", "{code}");
+        }
+        assert_eq!(humanize("changed"), ("Done".to_string(), "ok"));
     }
 
     #[test]

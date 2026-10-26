@@ -37,6 +37,7 @@ async def main():
     ap.add_argument("--key", default="devkey")
     ap.add_argument("--mode", default="apply")
     ap.add_argument("--mute", action="store_true", help="receive commands but never answer (a frozen app)")
+    ap.add_argument("--settings-file", default=None, help="write the app's settings here whenever it saves them (the shell's EQ and Music tabs read this file)")
     ap.add_argument("--library", default=None, help="write the ids of a throwaway song library to this file and let the app add those songs (queue.add_song)")
     args = ap.parse_args()
     m = module()
@@ -61,8 +62,36 @@ async def main():
     app.play_next_file = lambda skip_confirmation=False: played.append("next")
     app.stop_and_clear_now_singing = lambda skip_confirmation=False: played.append("stop")
     bg = {"playing": True, "volume": 0.4, "index": 1, "track": "Track B.mp3"}
+    tracks = ["/m/Track A.mp3", "/m/Track B.mp3", "/m/Track C.mp3", "/m/Track D.mp3"]
     app._bg_main_toggle_playback = lambda: (bg.update(playing=not bg["playing"]), played.append("bg_toggle"))
-    app.bg_music = types.SimpleNamespace(set_volume=lambda v: bg.update(volume=v))
+
+    def _bg_select(i):
+        bg.update(index=i, track=tracks[i].rsplit("/", 1)[1])
+
+    player = types.SimpleNamespace(set_volume=lambda v: bg.update(volume=v), playlist=tracks, current_index=1, is_playing=True)
+    player.next_track = lambda: (_bg_select(min(player.current_index + 1, len(tracks) - 1)), setattr(player, "current_index", bg["index"]), played.append("bg_next"))
+    player.stop = lambda: played.append("bg_stop")
+    player.play = lambda: (_bg_select(player.current_index), played.append(f"bg_play:{player.current_index}"))
+    player._bass_engine = types.SimpleNamespace(set_eq=lambda eq: played.append("bass_set_eq"))
+    app.bg_music = player
+    app.update_bg_button_state = lambda: None
+    app.update_bg_track_display = lambda: None
+    app.highlight_current_track = lambda: None
+    # the equalisers are the app's REAL GraphicEQ objects; saving settings writes the file the shell's tabs read
+    app.settings.update({"simple_audio_mode": False, "eq_bgm": [5.0, 4.0, 3.0, 1.0, -1.0, -1.0, 1.0, 3.0, 4.0, 5.0], "eq_bgm_enabled": True, "eq_karaoke": [], "eq_karaoke_enabled": False})
+    app.karaoke_eq = None
+    app.bgm_eq = None
+    app._push_mpv_audio_processing = lambda reason="update", audio_path="": played.append(f"mpv_push:{reason}")
+    app._log_bgm_eq_route = lambda reason: None
+    app._ensure_eq_engines()
+    played.clear()
+    if args.settings_file:
+        def _save():
+            Path(args.settings_file).write_text(json.dumps(app.settings))
+        app.save_settings = _save
+        _save()
+    else:
+        app.save_settings = lambda: None
     app._host_control_state = lambda: {"rotation": {"last": {}, "current": {}, "next": {}},
                                        "playback": {"is_playing": False, "position_seconds": 0.0, "duration_seconds": 0.0, "remaining_seconds": 0.0},
                                        "bg_playing": bg["playing"], "bg_volume": bg["volume"], "bg_index": bg["index"], "bg_track": bg["track"]}

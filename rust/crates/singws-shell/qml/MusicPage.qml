@@ -68,6 +68,15 @@ Item {
                         Accessible.name: text
                     }
                     Button {
+                        text: "Next"
+                        implicitHeight: 32
+                        font.pixelSize: 13
+                        contentItem: Label { text: parent.text; color: "#ffffff"; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        background: Rectangle { radius: 6; color: parent.down ? "#2a2650" : "#1f1c45" }
+                        onClicked: page.act("Next track", "bg.next")
+                        Accessible.name: "Skip to the next background music track"
+                    }
+                    Button {
                         text: page.cview.bg && page.cview.bg.playing ? "Pause" : "Play"
                         implicitHeight: 32
                         font.pixelSize: 13
@@ -126,7 +135,24 @@ Item {
                 color: "#1a1838"
                 Accessible.role: Accessible.ListItem
                 Accessible.name: modelData.filename
-                Label { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; verticalAlignment: Text.AlignVCenter; text: modelData.filename; color: "#ffffff"; font.pixelSize: 13; elide: Text.ElideRight }
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 6
+                    Label { Layout.fillWidth: true; text: modelData.filename; color: "#ffffff"; font.pixelSize: 13; elide: Text.ElideRight }
+                    Button {
+                        text: "Play"
+                        visible: page.live
+                        implicitHeight: 26
+                        implicitWidth: 56
+                        font.pixelSize: 12
+                        contentItem: Label { text: parent.text; color: "#ffffff"; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        background: Rectangle { radius: 5; color: parent.down ? "#3a2290" : "#4b2bb0" }
+                        // the row's own file name rides along, so a playlist that changed since this list was drawn cannot start the wrong song
+                        onClicked: page.act("Play " + modelData.filename, "bg.play_track", {index: modelData.index, track: modelData.filename})
+                        Accessible.name: "Play " + modelData.filename + " now"
+                    }
+                }
                 ToolTip.visible: hover.hovered && modelData.path !== ""
                 ToolTip.text: modelData.path
                 HoverHandler { id: hover }

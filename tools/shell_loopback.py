@@ -123,6 +123,40 @@ def scenario_the_music_tab_follows_the_players_position_and_drives_the_backgroun
         assert final["played"] == ["bg_toggle"], final
 
 
+def scenario_the_shell_changes_the_equaliser_and_the_playing_track_through_the_relay():
+    """Real Qt shell -> real relay -> the app's REAL `eq.set` (GraphicEQ, shared live re-attach, settings saved) and `bg.play_track` / `bg.next`; the EQ tab then shows what the
+    app saved, read from the settings file exactly as the app wrote it."""
+    import tempfile
+    home = Path(tempfile.mkdtemp(prefix="eq_home_"))
+    settings_file = home / "settings.json"
+    (home / "bg_playlist.json").write_text(json.dumps([{"path": f"/m/Track {n}.mp3", "filename": f"Track {n}.mp3", "title": n} for n in "ABCD"]))
+    with cl.Stack("apply", settings_file=settings_file) as st:
+        dump = home / "eq.json"
+        flat_gains = [0.0] * 10
+        script = [
+            {"label": "Next track", "command": "bg.next", "nosig": True},
+            {"label": "Play C", "command": "bg.play_track", "args": {"index": 2, "track": "Track C.mp3"}, "nosig": True},
+            {"label": "Play with the wrong name", "command": "bg.play_track", "args": {"index": 3, "track": "Track A.mp3"}, "nosig": True},
+            {"label": "Karaoke EQ", "command": "eq.set", "args": {"target": "karaoke", "gains": [-3, -3, -2, -1, 1, 3, 4, 3, 2, 0.04], "enabled": True}, "nosig": True},
+            {"label": "Music EQ flat and off", "command": "eq.set", "args": {"target": "bgm", "gains": flat_gains, "enabled": False}, "nosig": True},
+        ]
+        view, p, _ = run_shell(st, script, tab="eq", extra_args=("--dump-eq", str(dump)), extra_env={"SINGWS_HOME": str(home)}, snapshot_after=11000)
+        assert view is not None, p.stderr[-800:]
+        cmds = commands_seen(st)
+        assert [c["command"] for c in cmds[:5]] == ["bg.next", "bg.play_track", "bg.play_track", "eq.set", "eq.set"], [c["command"] for c in cmds]
+        final, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[4]["request_id"], timeout=5)
+        assert final["played"][:3] == ["bg_next", "bg_stop", "bg_play:2"], final["played"]  # the wrong-name play was refused: nothing after bg_play:2 until the EQ pushes
+        assert "mpv_push:shell_eq" in final["played"] and "bass_set_eq" in final["played"], final["played"]
+        saved = json.loads(settings_file.read_text())
+        assert saved["eq_karaoke"] == [-3.0, -3.0, -2.0, -1.0, 1.0, 3.0, 4.0, 3.0, 2.0, 0.0] and saved["eq_karaoke_enabled"] is True, saved
+        assert saved["eq_bgm"] == flat_gains and saved["eq_bgm_enabled"] is False, saved
+        shown = json.loads(dump.read_text())
+        assert shown["karaoke"]["enabled"] and shown["karaoke"]["gains"][0] == -3.0, shown["karaoke"]
+        assert shown["bgm"]["flat"] and not shown["bgm"]["enabled"], shown["bgm"]
+        assert view["bg"]["index"] == 2 and view["bg"]["track"] == "Track C.mp3", view["bg"]
+        assert view["result"]["kind"] == "ok", view["result"]  # the last command (EQ) succeeded
+
+
 def scenario_dry_run_shows_a_dry_run_and_changes_nothing():
     with cl.Stack("dry_run") as st:
         script = [{"label": "Remove Dana", "command": "queue.remove_singer", "args": {"singer_id": "s1"}},

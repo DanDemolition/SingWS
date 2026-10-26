@@ -89,7 +89,7 @@ impl qobject::MusicPanel {
         let result = read_json(&path).and_then(|raw| music::parse_playlist(&raw)).and_then(|rows| music::view_from(&rows, &query.to_string(), i64::from(cutoff)));
         match result {
             Ok(v) => {
-                let rows: Vec<Value> = v.rows.iter().map(|r| json!({"filename": r.filename, "path": r.path})).collect();
+                let rows: Vec<Value> = v.rows.iter().map(|r| json!({"index": r.index, "filename": r.filename, "path": r.path})).collect();
                 self.as_mut().set_rows_json(QString::from(Value::Array(rows).to_string().as_str()));
                 self.as_mut().set_count_label(QString::from(v.count_label.as_str()));
                 self.as_mut().set_status(QString::from(if v.total == 0 { "The playlist is empty" } else if v.shown == 0 { "No tracks match" } else { "" }));
