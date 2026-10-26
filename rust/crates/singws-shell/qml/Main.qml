@@ -33,9 +33,9 @@ ApplicationWindow {
                 id: tabs
                 Layout.fillWidth: true
                 background: Rectangle { color: "transparent" }
-                currentIndex: win.arg("--tab") === "history" ? 1 : (win.arg("--tab") === "rotation" ? 2 : (win.arg("--tab") === "controls" ? 3 : 0))
+                currentIndex: ({"history": 1, "rotation": 2, "controls": 3, "music": 4, "settings": 5})[win.arg("--tab")] || (parseInt(win.arg("--tab")) || 0)
                 Repeater {
-                    model: ["Library", "Singer history", "Rotation", "Controls"]
+                    model: ["Library", "Singer history", "Rotation", "Controls", "Music", "Settings"]
                     TabButton {
                         text: modelData
                         font.pixelSize: 13
@@ -53,6 +53,8 @@ ApplicationWindow {
                 HistoryPage {}
                 RotationPage {}
                 ControlsPage {}
+                MusicPage {}
+                SettingsPage {}
             }
         }
     }

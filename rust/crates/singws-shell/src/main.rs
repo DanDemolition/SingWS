@@ -2,7 +2,9 @@
 mod control_panel;
 mod history_panel;
 mod library_panel;
+mod music_panel;
 mod rotation_panel;
+mod settings_panel;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 

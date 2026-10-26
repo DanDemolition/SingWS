@@ -6,6 +6,7 @@
 pub mod history;
 pub mod music;
 pub mod rotation;
+pub mod settings_view;
 mod casefold_table;
 
 use serde_json::{Value, json};
