@@ -39,6 +39,11 @@ compared yet.
 `continue`s without clearing `singer`, that SKIPPED singer's next song starts. (A last singer who is not skipped but has nothing playable is forgotten, so nothing starts.)
 `test_the_all_skipped_quirk_is_what_the_app_really_does` pins it; the Rust rule models it; changing the app is the operator's call.
 
+## Step 4 (built): the artist and title published for the song that started (`display_payload`, `"op":"display"`)
+The text the TV, the singer cards and the server announce: the entry's own artist and title when both are non-empty after stripping, otherwise the library's display name
+(looked up by the app, passed in), split on the FIRST " • " into artist and title, both stripped (no separator: all artist, empty title). Stripping is Python's (it also strips
+U+001C..U+001F, which Rust's `trim` does not). Tested against the REAL method with 600 random names (`DisplayWiring`) and mutation-tested.
+
 ## Next steps (not built)
 3. Transport arguments: key, tempo, start offset, loop and duration the transport receives (`_start_karaoke_transport`).
 4. Confirmed-start bookkeeping (what is published to the screen and the server once the transport accepts).

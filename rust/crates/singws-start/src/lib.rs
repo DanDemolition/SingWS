@@ -238,6 +238,27 @@ pub fn pick(singers: &[PickSinger]) -> Option<(usize, Option<usize>)> {
     if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }
 }
 
+/// Python's `str.strip()` whitespace: Unicode White_Space plus U+001C..U+001F (which Python also counts as whitespace and Rust does not).
+fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+fn py_strip(s: &str) -> &str {
+    s.trim_matches(is_py_space)
+}
+
+/// The artist and title published when a song starts (`play_next_file`, "immutable display payload"): the entry's own artist and title when BOTH are non-empty after
+/// stripping, otherwise the library's display name (`fallback`, which the app looks up); then the text is split on the FIRST " • " into artist and title, both stripped; a
+/// text without that separator is all artist and the title stays empty.
+pub fn display_payload(entry_artist: &str, entry_title: &str, fallback: Option<&str>) -> Option<(String, String)> {
+    let (a, t) = (py_strip(entry_artist), py_strip(entry_title));
+    let shown: String = if !a.is_empty() && !t.is_empty() { format!("{a} • {t}") } else { fallback?.to_string() };
+    Some(match shown.split_once(" • ") {
+        Some((x, y)) => (py_strip(x).to_string(), py_strip(y).to_string()),
+        None => (py_strip(&shown).to_string(), String::new()),
+    })
+}
+
 /// JSON in, JSON out. `{"op":"engine", ...}` is an [`EngineInput`] and answers `{"voice":..,"reason":"..","set_shadow_audio":null|bool}`; anything else is an
 /// [`Input`] (the start route) and answers `{"route":"<name>"}`.
 pub fn start_json(request: &str) -> Result<String, String> {
@@ -246,6 +267,13 @@ pub fn start_json(request: &str) -> Result<String, String> {
         let input: EngineInput = serde_json::from_value(v).map_err(|e| e.to_string())?;
         let a = engine_route(&input);
         return Ok(serde_json::json!({"voice": a.voice, "reason": a.reason, "set_shadow_audio": a.set_shadow_audio}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("display") {
+        let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+        let (a, t) = (text("artist").ok_or("artist is required")?, text("title").ok_or("title is required")?);
+        let fallback = text("fallback");
+        let (artist, title) = display_payload(&a, &t, fallback.as_deref()).ok_or("the display name is needed but was not given")?;
+        return Ok(serde_json::json!({"artist": artist, "title": title}).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("pick") {
         let singers: Vec<PickSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
@@ -433,6 +461,30 @@ mod tests {
         assert!(start_json(r#"{"op":"pick","singers":[{"songs":"dx"}]}"#).is_err());
         assert!(start_json(r#"{"op":"pick"}"#).is_err());
         assert!(start_json(r#"{"op":"pick","singers":[{"skipped":true}]}"#).is_err());
+    }
+
+    #[test]
+    fn the_published_artist_and_title_follow_the_entry_then_the_library_name() {
+        let d = |a: &str, t: &str, f: Option<&str>| display_payload(a, t, f);
+        assert_eq!(d("Abba", "Waterloo", Some("ignored")), Some(("Abba".into(), "Waterloo".into())));
+        assert_eq!(d("  Abba ", "\tWaterloo\n", None), Some(("Abba".into(), "Waterloo".into())), "stripped, and the fallback is not needed");
+        assert_eq!(d("", "Waterloo", Some("Queen • Bohemian")), Some(("Queen".into(), "Bohemian".into())), "one part empty: the library name");
+        assert_eq!(d("  ", "  ", Some("Solo Artist")), Some(("Solo Artist".into(), "".into())), "no separator: all artist");
+        assert_eq!(d("", "", Some("A • B • C")), Some(("A".into(), "B • C".into())), "only the first separator splits");
+        assert_eq!(d("", "", Some("  A  •  B  ")), Some(("A".into(), "B".into())));
+        assert_eq!(d("", "", Some("A•B")), Some(("A•B".into(), "".into())), "the separator needs its spaces");
+        assert_eq!(d("", "", Some(" • ")), Some(("".into(), "".into())));
+        assert_eq!(d("Abba • Live", "Waterloo", None), Some(("Abba".into(), "Live • Waterloo".into())), "a separator inside the artist moves the split");
+        assert_eq!(d("\u{1f}Abba\u{1c}", "T", None), Some(("Abba".into(), "T".into())), "Python strips U+001C..U+001F; Rust's trim would not");
+        assert_eq!(d("", "", None), None, "the fallback is needed");
+    }
+
+    #[test]
+    fn the_display_op_is_routed_by_the_json_glue() {
+        assert_eq!(start_json(r#"{"op":"display","artist":"A","title":"B"}"#).unwrap(), r#"{"artist":"A","title":"B"}"#);
+        assert_eq!(start_json(r#"{"op":"display","artist":"","title":"B","fallback":"X • Y"}"#).unwrap(), r#"{"artist":"X","title":"Y"}"#);
+        assert!(start_json(r#"{"op":"display","artist":"","title":""}"#).is_err());
+        assert!(start_json(r#"{"op":"display","title":"B"}"#).is_err());
     }
 
     #[test]

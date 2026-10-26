@@ -104,6 +104,37 @@ class StartShadow:
             self._say(f"check_engine error: {exc!r}")
             return None
 
+    def check_display(self, artist, title, entry_artist, entry_title, fallback):
+        """Compare the artist and title the app published for the song that just started with Rust. `entry_artist` / `entry_title` are the entry's raw values as text,
+        `fallback` is the library display name the app looked up (None when it did not need one). Never raises; returns agree, or None when skipped."""
+        try:
+            if not self.available:
+                return None
+            req = {"op": "display", "artist": str(entry_artist), "title": str(entry_title)}
+            if fallback is not None:
+                req["fallback"] = str(fallback)
+            buf = ctypes.create_string_buffer(_OUT_CAP * 8)
+            n = self._lib.singws_start_json(json.dumps(req, allow_nan=False).encode(), buf, _OUT_CAP * 8)
+            if n < 0:
+                self._say(f"display call failed code={n}")
+                return None
+            got = json.loads(buf.raw[:n].decode())
+            want = {"artist": str(artist), "title": str(title)}
+            self.checks += 1
+            agree = got == want
+            if not agree:
+                self.mismatches += 1
+                self._say(f"MISMATCH display app={want!r} rust={got!r} entry=({str(entry_artist)[:60]!r}, {str(entry_title)[:60]!r}) fallback={str(fallback)[:80]!r}")
+            elif "display" not in self._seen:
+                self._seen.add("display")
+                self._say("decision route=display agree=1")
+            if self.checks % SUMMARY_EVERY == 0:
+                self._say(f"summary checks={self.checks} mismatches={self.mismatches}")
+            return agree
+        except Exception as exc:
+            self._say(f"check_display error: {exc!r}")
+            return None
+
     def check_pick(self, facts, singer, song):
         """Compare who the app picked to sing next (`singer` = index in the queue as it was before the pick, `song` = index in that singer's songs; both None when
         nobody could sing) with Rust. `facts` is :func:`pick_facts` of the queue taken before the loop ran. Never raises; returns agree, or None when skipped."""

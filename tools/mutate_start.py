@@ -58,6 +58,19 @@ M = [
     ('"song": p.and_then(|x| x.1)}', '"song": p.map(|_| 0)}', None),
     ("!matches!(c, 'd' | 's' | 't')", "!matches!(c, 'd' | 's')", None),
     ('    let last = singers.last()?;', '    let last = singers.first()?;', None),
+    # ---- display payload
+    ('    let shown: String = if !a.is_empty() && !t.is_empty() {', '    let shown: String = if !a.is_empty() || !t.is_empty() {', None),
+    ('    let (a, t) = (py_strip(entry_artist), py_strip(entry_title));', '    let (a, t) = (entry_artist, entry_title);', None),
+    ('    let (a, t) = (py_strip(entry_artist), py_strip(entry_title));', '    let (a, t) = (py_strip(entry_artist), entry_title);', None),
+    ('    Some(match shown.split_once(" • ") {', '    Some(match shown.rsplit_once(" • ") {', None),
+    ('        Some((x, y)) => (py_strip(x).to_string(), py_strip(y).to_string()),', '        Some((x, y)) => (x.to_string(), py_strip(y).to_string()),', None),
+    ('        Some((x, y)) => (py_strip(x).to_string(), py_strip(y).to_string()),', '        Some((x, y)) => (py_strip(x).to_string(), y.to_string()),', None),
+    ('        None => (py_strip(&shown).to_string(), String::new()),', '        None => (shown.clone(), String::new()),', None),
+    ('        None => (py_strip(&shown).to_string(), String::new()),', '        None => (py_strip(&shown).to_string(), py_strip(&shown).to_string()),', None),
+    ("    c.is_whitespace() || ('\\u{1c}'..='\\u{1f}').contains(&c)", "    c.is_whitespace()", None),
+    ("('\\u{1c}'..='\\u{1f}')", "('\\u{1c}'..='\\u{1e}')", None),
+    ('fallback?.to_string() };', 'fallback.unwrap_or("").to_string() };', None),
+    ('        return Ok(serde_json::json!({"artist": artist, "title": title}).to_string());', '        return Ok(serde_json::json!({"artist": title, "title": artist}).to_string());', None),
 ]
 
 

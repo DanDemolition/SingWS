@@ -60,7 +60,7 @@ class Wiring(unittest.TestCase):
         finally:
             for p in reversed(patches):
                 p.stop()
-        routes = [x.split("route=")[1].split()[0] for x in lines if "[START-SHADOW] decision route=" in x and not x.split("route=")[1].startswith(("pick", "engine"))]
+        routes = [x.split("route=")[1].split()[0] for x in lines if "[START-SHADOW] decision route=" in x and not x.split("route=")[1].startswith(("pick", "engine", "display"))]
         mism = [x for x in lines if "[START-SHADOW] MISMATCH" in x]
         return calls, routes, mism, lines
 
@@ -207,6 +207,64 @@ class PickWiring(unittest.TestCase):
         self.assertIsNone(start_shadow.pick_facts([{"songs": "abc"}]))
         self.assertEqual(start_shadow.pick_facts([{"songs": None}]), [{"skipped": False, "songs": ""}])
         self.assertEqual(start_shadow.pick_facts([{"skipped": 1, "songs": [{"skipped": True}, {"skipped": 0}, ("x", 1), {}]}]), [{"skipped": True, "songs": "sdtd"}])
+
+
+class DisplayWiring(unittest.TestCase):
+    """The artist and title published when a song starts, from the REAL `play_next_file`: random entry artists / titles (spaces, Python-only whitespace, the " • "
+    separator inside them, empty parts) and random library fallback names must give the payload Rust computes."""
+    bare_app = base.ShowCriticalRegressionTests.bare_app
+    playback_app = base.ShowCriticalRegressionTests.playback_app
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = base.load_main_module()
+        if not start_shadow.StartShadow(lambda s: None).available:
+            raise unittest.SkipTest("libsingws_dsp_ffi.dylib with the start shadow is not built")
+
+    def run_one(self, artist, title, fallback, *, enabled=True):
+        entry = {"request_uid": "rid-1", "song_info": "/lib/a.mp3", "skipped": False}
+        if artist is not None:
+            entry["artist"] = artist
+        if title is not None:
+            entry["title"] = title
+        app = self.playback_app([{"name": "Dana", "singer_id": "sid-Dana", "skipped": False, "songs": [entry]}])
+        app.settings = {"start_shadow": enabled}
+        app.lookup_display_name = lambda path, **k: fallback
+        app.play_mp3 = lambda *a, **k: True
+        lines = []
+        self.singws._START_SHADOW = start_shadow.StartShadow(lambda text: lines.append(str(text)))
+        with mock.patch.object(self.singws, "_diag", lambda *a, **k: None), mock.patch.object(self.singws.os.path, "exists", lambda p: True):
+            app.play_next_file()
+        return app._pending_play_start_context["payload"], lines
+
+    def test_random_names_give_the_payload_rust_computes(self):
+        import random
+        rng = random.Random(20261026)
+        pieces = ["Abba", "  ", "", " Queen ", "A • B", "•", " • ", "x\u00a0", "\u001cZed\u001f", "ñandú", "日本", "Tom\tPetty", "😀", "Lee ", "\n"]
+        shown = compared = 0
+        for case in range(600):
+            artist = rng.choice([None, 0, ""] + pieces)
+            title = rng.choice([None, ""] + pieces)
+            fallback = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 3)))
+            payload, lines = self.run_one(artist, title, fallback)
+            self.assertEqual([x for x in lines if "MISMATCH" in x], [], (case, artist, title, fallback, payload))
+            self.assertTrue(any("decision route=display" in x for x in lines), (case, "every start must be compared", lines))
+            compared += 1
+            if payload["artist"] and payload["title"]:
+                shown += 1
+        self.assertEqual(compared, 600)
+        self.assertGreater(shown, 50)
+
+    def test_known_payloads(self):
+        self.assertEqual(self.run_one("Abba", "Waterloo", "x")[0]["artist"], "Abba")
+        p, _ = self.run_one(None, None, "Queen • Bohemian Rhapsody • Live")
+        self.assertEqual((p["artist"], p["title"], p["singer"]), ("Queen", "Bohemian Rhapsody • Live", "Dana"))
+        p, _ = self.run_one(None, None, "Just A Name")
+        self.assertEqual((p["artist"], p["title"]), ("Just A Name", ""))
+
+    def test_the_setting_off_logs_nothing(self):
+        p, lines = self.run_one("A", "B", "x", enabled=False)
+        self.assertEqual(lines, [])
 
 
 class EngineWiring(unittest.TestCase):

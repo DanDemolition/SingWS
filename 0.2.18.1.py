@@ -60465,10 +60465,12 @@ class KaraokeApp(QWidget):
         if isinstance(entry, dict):
             entry_artist = str(entry.get("artist") or "").strip()
             entry_title = str(entry.get("title") or "").strip()
+        _display_fallback = None
         if entry_artist and entry_title:
             display_name = f"{entry_artist} • {entry_title}"
         else:
             display_name = self.lookup_display_name(song_path_display, artist_title_only=True)
+            _display_fallback = display_name
         artist = ""
         title = ""
         if " • " in display_name:
@@ -60477,6 +60479,13 @@ class KaraokeApp(QWidget):
             title = title.strip()
         else:
             artist = (display_name or "").strip()
+        try:
+            _ds = _start_shadow_for(self.settings)
+            if _ds is not None and isinstance(display_name, str):
+                _ds.check_display(artist, title, str(entry.get("artist") or "") if isinstance(entry, dict) else "",
+                                  str(entry.get("title") or "") if isinstance(entry, dict) else "", _display_fallback)
+        except Exception:
+            pass
         singer_display = duet_display if duet_display else singer.get("name", "")
         singer_id = self._ensure_singer_id(singer)
         request_id = self._ensure_queue_entry_id(entry)
