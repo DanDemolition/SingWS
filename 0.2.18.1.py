@@ -49838,6 +49838,129 @@ class KaraokeApp(QWidget):
             return False, "not_renamed"
         return True, "renamed"
 
+    def shell_queue_set_singer_brand(self, singer_id: str, brands: str, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Set (or, with an empty list, clear) a singer's preferred disc-brand priority, e.g. "KV, SC, SBI": the rotation menu's Preferred Brand Override after Save / Clear."""
+        import unicodedata
+        idx = self._queue_singer_index_by_id(singer_id)
+        if idx < 0:
+            return False, "unknown_singer"
+        singer = self.queue[idx]
+        singer_name = str(singer.get("name", "") or "").strip()
+        if not singer_name:
+            return False, "unknown_singer"
+        text = str(brands or "").strip()
+        if len(text) > 200 or any(unicodedata.category(c) == "Cc" for c in text):
+            return False, "bad_brands"
+        names = normalize_disc_priority(text, max_items=10)
+        if text and not names:
+            return False, "bad_brands"
+        if names == self._singer_disc_priority_override(singer_name):
+            return True, "no_change"
+        if dry_run:
+            return True, "dry_run: would change the brand priority"
+        if not names:
+            self.clear_singer_brand_override(idx)
+            return True, "brand_cleared"
+        value = ", ".join(names)
+        singer["preferred_disc_priority"] = value
+        self._set_singer_preference(singer_name, "preferred_disc_priority", value)
+        try:
+            self.save_data()
+        except Exception:
+            pass
+        try:
+            self.update_queue_display()
+        except Exception:
+            pass
+        return True, "brand_set"
+
+    def shell_queue_message_singer(self, singer_id: str, message: str, request_id: str = "", *, dry_run: bool = False) -> tuple[bool, str]:
+        """Send a direct message to a singer's phone through the server (the rotation menu's Direct Message). Returns at once with "sending"; the real outcome
+        comes back as a `notice` message when the server has answered. A message cannot be taken back, so: 1-500 characters, the same text to the same singer is
+        refused for 30 seconds (a double tap), and a dry run checks everything (including that the network settings are there) and sends nothing."""
+        import unicodedata
+        idx = self._queue_singer_index_by_id(singer_id)
+        if idx < 0:
+            return False, "unknown_singer"
+        name = str(self.queue[idx].get("name", "") or "").strip()
+        if not name:
+            return False, "unknown_singer"
+        text = str(message or "").replace("\r\n", "\n").strip()
+        if not text or len(text) > 500 or any(unicodedata.category(c) == "Cc" and c not in "\n\t" for c in text):
+            return False, "bad_message"
+        if not (str(self.settings.get("base_url", "") or "").strip() and str(self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
+                and str(self.settings.get("api_key", "") or "").strip()):
+            return False, "network_not_configured"
+        recent = getattr(self, "_shell_recent_messages", None)
+        if recent is None:
+            recent = self._shell_recent_messages = {}
+        key = (self._normalize_singer_pref_key(name), text)
+        now = time.monotonic()
+        for k, at in list(recent.items()):
+            if now - at > 30.0:
+                recent.pop(k, None)
+        if key in recent:
+            return False, "duplicate_message"
+        if dry_run:
+            return True, "dry_run: would send the message"
+        recent[key] = now
+
+        def work():
+            try:
+                ok, error = self._net_send_direct_message(name, text)
+            except Exception as exc:
+                ok, error = False, str(exc)
+            if not ok:
+                recent.pop(key, None)  # a failed send may be tried again
+            _diag(f"[SHELL-CMD] id={request_id} message to {name!r} {'delivered' if ok else 'FAILED: ' + str(error)[:120]}")
+            notice = {"type": "notice", "request_id": request_id, "ok": bool(ok), "code": "message_sent" if ok else "message_failed", "message": str(error or "")[:120]}
+
+            def deliver():
+                worker = getattr(self, "host_relay_worker", None)
+                if worker is not None and worker.is_connected():
+                    worker.send_json(notice)
+
+            self._run_on_ui_thread(deliver)
+
+        threading.Thread(target=work, daemon=True, name="shell-direct-message").start()
+        return True, "sending"
+
+    def shell_queue_replace_song(self, entry_id: str, song_id, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Swap one queued song for another LIBRARY song (by song-index id), keeping the singer, place and the song's key / speed: the Replace Track dialog after OK.
+        Refuses an unknown song, a file that is not on disk, a CDG without its MP3, a song this singer already has queued, and the song that is playing right now."""
+        singer_idx, song_idx = self._queue_entry_position_by_id(entry_id)
+        if singer_idx < 0:
+            return False, "unknown_entry"
+        track = song_index.find_by_id(song_id)
+        if not track:
+            return False, "unknown_song"
+        path = str(track.get("path") or "").strip()
+        if not path or not os.path.exists(path):
+            return False, "file_missing"
+        songs = self.queue[singer_idx].get("songs", [])
+        entry = songs[song_idx]
+        if self._song_info_primary_path(entry.get("song_info")) == path:
+            return True, "no_change"
+        for other in songs:
+            if other is not entry and isinstance(other, dict) and not other.get("skipped") and self._song_info_primary_path(other.get("song_info")) == path:
+                return False, "duplicate"
+        try:
+            # the checks Add Song makes (a CDG needs its MP3, a zip must hold a pair), which the Replace Track dialog does not repeat; builds throwaway data only
+            self._waiting_for_add_song_data_from_track({"key": 0}, track)
+            self._build_queue_entry_from_track_choice(entry, track)
+        except FileNotFoundError:
+            return False, "missing_mp3"
+        except ValueError:
+            return False, "bad_zip" if path.lower().endswith(".zip") else "bad_song"
+        current_request_id = str(getattr(self, "_current_karaoke_request_id", "") or "").strip()
+        if bool(getattr(self, "karaoke_playing", False)) and current_request_id and str(self._ensure_queue_entry_id(entry) or "") == current_request_id:
+            return False, "song_playing"
+        if dry_run:
+            return True, "dry_run: would replace the song"
+        if not self._replace_queue_song_with_track(singer_idx, song_idx, track, source="shell"):
+            return False, "not_replaced"
+        return True, "replaced"
+
     def shell_bg_next(self, *, dry_run: bool = False) -> tuple[bool, str]:
         """Skip to the next background-music track (the app's own `_bg_main_next`), refused while a karaoke song is playing and when there is no playlist."""
         if getattr(self, "karaoke_playing", False):
@@ -49999,7 +50122,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50098,9 +50221,9 @@ class KaraokeApp(QWidget):
         entry_id = str(args.get("entry_id") or "").strip()
         if action in ("queue.move_singer", "queue.move_song") and where not in ("up", "down", "top", "bottom"):
             return remember(False, "bad_direction")
-        if action in ("queue.move_singer", "queue.remove_singer", "queue.skip_singer", "queue.rename_singer") and self._queue_singer_index_by_id(singer_id) < 0:
+        if action in ("queue.move_singer", "queue.remove_singer", "queue.skip_singer", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer") and self._queue_singer_index_by_id(singer_id) < 0:
             return remember(False, "unknown_singer")
-        if action in ("queue.move_song", "queue.remove_song", "queue.set_song_key", "queue.set_song_tempo") and self._queue_entry_position_by_id(entry_id)[0] < 0:
+        if action in ("queue.move_song", "queue.remove_song", "queue.set_song_key", "queue.set_song_tempo", "queue.replace_song") and self._queue_entry_position_by_id(entry_id)[0] < 0:
             return remember(False, "unknown_entry")
         if action == "queue.skip_singer" and not isinstance(args.get("skipped"), bool):
             return remember(False, "bad_skipped")
@@ -50121,6 +50244,33 @@ class KaraokeApp(QWidget):
                 return remember(False, "bad_name")
             try:
                 ok, code = self.shell_queue_rename_singer(singer_id, new_name, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action == "queue.set_singer_brand":
+            brands = args.get("brands")
+            if not isinstance(brands, str):
+                return remember(False, "bad_brands")
+            try:
+                ok, code = self.shell_queue_set_singer_brand(singer_id, brands, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action == "queue.message_singer":
+            message = args.get("message")
+            if not isinstance(message, str):
+                return remember(False, "bad_message")
+            try:
+                ok, code = self.shell_queue_message_singer(singer_id, message, request_id, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action == "queue.replace_song":
+            song_id = args.get("song_id")
+            if not isinstance(song_id, int) or isinstance(song_id, bool) or song_id <= 0:
+                return remember(False, "bad_song_id")
+            try:
+                ok, code = self.shell_queue_replace_song(entry_id, song_id, dry_run=(mode == "dry_run"))
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)

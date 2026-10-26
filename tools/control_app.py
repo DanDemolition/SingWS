@@ -121,7 +121,10 @@ async def main():
     for name in ("_shell_commands_mode", "_queue_signature", "_shell_queue_summary", "_execute_shell_queue_command", "_queue_singer_index_by_id",
                  "_queue_entry_position_by_id", "shell_queue_move_singer", "shell_queue_move_song", "shell_queue_remove_singer", "shell_queue_remove_song",
                  "shell_queue_set_singer_skipped", "_finish_shell_queue_removal", "toggle_singer_skip", "_step_karaoke_key", "_step_karaoke_tempo",
-                 "shell_queue_set_song_modifier", "shell_queue_rename_singer", "_queue_song_entry"):
+                 "shell_queue_set_song_modifier", "shell_queue_rename_singer", "_queue_song_entry",
+                 "shell_queue_set_singer_brand", "shell_queue_message_singer", "shell_queue_replace_song", "_set_singer_preference", "_clear_singer_preference",
+                 "_singer_disc_priority_override", "_normalize_singer_pref_key", "clear_singer_brand_override", "_replace_queue_song_with_track",
+                 "_build_queue_entry_from_track_choice", "_waiting_for_add_song_data_from_track"):
         if hasattr(m.KaraokeApp, name):
             setattr(app, name, types.MethodType(getattr(m.KaraokeApp, name), app))
     app._SHELL_QUEUE_ACTIONS = m.KaraokeApp._SHELL_QUEUE_ACTIONS
@@ -136,12 +139,25 @@ async def main():
         return True
 
     app._rename_rotation_singer = _rename
+    # brand priority, direct message and replace: the stand-in keeps the preference store, "sends" messages into a list and skips the server pushes
+    app.singer_preferences = {}
+    app._get_singer_history_record = lambda *a, **k: None
+    app._shell_recent_messages = None
+    app.settings.update({"base_url": "https://example.test", "user": args.tenant, "api_key": "k"})
+    sent_messages = []
+    app._net_send_direct_message = lambda name, text, system_notice=False: (sent_messages.append([name, text]), (True, ""))[1]
+    app._push_remote_request_replacement = lambda entry, **kw: None
+    app._schedule_next_up_prescan = lambda: None
+    app.post_rotation = lambda: None
+    if not hasattr(app, "save_data") or args.library is None:
+        app.save_data = getattr(app, "save_data", lambda: None)
     app.update_queue_display = lambda: None
 
     def snapshot():
         return {"order": [s["singer_id"] for s in app.queue], "songs": {s["singer_id"]: [e.get("request_uid") or e.get("display_name") or "?" for e in s["songs"]] for s in app.queue},
                 "skipped": {s["singer_id"]: bool(s.get("skipped")) for s in app.queue},
-                "names": {s["singer_id"]: s["name"] for s in app.queue}, "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played)}
+                "names": {s["singer_id"]: s["name"] for s in app.queue}, "brands": {s["singer_id"]: s.get("preferred_disc_priority") for s in app.queue},
+                "titles": {s["singer_id"]: [str(e.get("title") or e.get("song_info")) for e in s["songs"]] for s in app.queue}, "messages": list(sent_messages), "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played)}
 
     async def pump():
         while True:

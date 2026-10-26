@@ -171,6 +171,27 @@ def scenario_the_output_preview_says_so_when_nothing_is_on_the_singer_screen():
         assert pv["url"] == "" and pv["status"] == "No active singer screen preview", pv
 
 
+def scenario_the_shell_sets_a_brand_priority_replaces_a_song_and_sends_a_direct_message_through_the_relay():
+    """Brand override, Replace Track and Direct Message through the real shell and relay into the app's REAL routines; the message's late outcome arrives as a notice."""
+    with cl.Stack("apply", library=True) as st:
+        ids = st.song_ids
+        view0, p0, _ = run_shell(st, [], snapshot_after=4000)
+        assert view0 is not None, p0.stderr[-800:]
+        entry = view0["singers"][0]["songs"][0]["entry_id"]
+        script = [{"label": "Brand", "command": "queue.set_singer_brand", "args": {"singer_id": "s1", "brands": "kv, sc"}},
+                  {"label": "Replace", "command": "queue.replace_song", "args": {"entry_id": entry, "song_id": ids["a.mp4"]}},
+                  {"label": "Message", "command": "queue.message_singer", "args": {"singer_id": "s2", "message": "You are up next"}}]
+        view, p, _ = run_shell(st, script, snapshot_after=9000)
+        assert view is not None, p.stderr[-800:]
+        names = [c["command"] for c in commands_seen(st)]
+        assert names[-3:] == ["queue.set_singer_brand", "queue.replace_song", "queue.message_singer"], names
+        last, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == commands_seen(st)[-1]["request_id"], timeout=5)
+        assert last["brands"]["s1"] and last["brands"]["s1"].replace(" ", "").lower().startswith("kv"), last["brands"]
+        assert last["titles"]["s1"] == ["Title 0", "Title2"], last["titles"]  # a.mp4 is "Artist 0 - Title 0" in the throwaway library; the singer's other song is untouched
+        assert last["messages"] == [["Sam", "You are up next"]], last["messages"]
+        assert view["result"]["kind"] == "ok" and view["result"]["text"] == "Message delivered", view["result"]
+
+
 def scenario_the_music_tab_follows_the_players_position_and_drives_the_background_music():
     """The real shell's Music tab over the real relay: the app says it is on track 2 of 4, so the played tracks hide; play/pause and volume reach the app."""
     import tempfile

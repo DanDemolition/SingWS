@@ -68,6 +68,20 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
             let name = args.get("name").and_then(Value::as_str).map(str::trim).unwrap_or("");
             need(!name.is_empty() && name.chars().count() <= 60 && !name.chars().any(char::is_control), "name must be a name of 1-60 characters with no control characters")
         }
+        "queue.set_singer_brand" => {
+            need(text(args, "singer_id").is_some(), "singer_id is required")?;
+            let brands = args.get("brands").and_then(Value::as_str);
+            need(brands.is_some_and(|b| b.chars().count() <= 200 && !b.chars().any(char::is_control)), "brands must be text of at most 200 characters, such as KV, SC, SBI (empty clears)")
+        }
+        "queue.message_singer" => {
+            need(text(args, "singer_id").is_some(), "singer_id is required")?;
+            let m = args.get("message").and_then(Value::as_str).map(str::trim).unwrap_or("");
+            need(!m.is_empty() && m.chars().count() <= 500 && !m.chars().any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r'), "message must be 1-500 characters")
+        }
+        "queue.replace_song" => {
+            need(text(args, "entry_id").is_some(), "entry_id is required")?;
+            need(args.get("song_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "song_id must be a whole number from the library search")
+        }
         "bg.next" => Ok(()),
         "bg.play_track" => {
             need(args.get("index").and_then(Value::as_u64).is_some(), "index must be a whole number, 0 or more")?;
@@ -156,6 +170,8 @@ pub enum Incoming {
     Ack(Ack),
     /// relay or app error such as `app_offline`, `bad_token`, `unauthorized`
     Error { request_id: Option<String>, code: String, message: String },
+    /// a late outcome the app reports after it already acknowledged a command (a direct message: "sending" first, delivered or failed later)
+    Notice { request_id: String, ok: bool, code: String, message: String },
     Other(String),
     NotJson,
 }
@@ -229,6 +245,7 @@ pub fn parse_incoming(text: &str) -> Incoming {
             code: s(&v, "code"),
             message: s(&v, "message"),
         },
+        "notice" => Incoming::Notice { request_id: s(&v, "request_id"), ok: b(&v, "ok"), code: s(&v, "code"), message: s(&v, "message") },
         other => Incoming::Other(other.to_string()),
     }
 }
@@ -335,6 +352,23 @@ mod tests {
             ("queue.rename_singer", json!({"singer_id": "s1", "name": "x".repeat(61)})),
             ("queue.rename_singer", json!({"singer_id": "s1", "name": "Da\nna"})),
             ("queue.rename_singer", json!({"singer_id": "s1", "name": 5})),
+            ("queue.set_singer_brand", json!({"brands": "KV"})),
+            ("queue.set_singer_brand", json!({"singer_id": "s1"})),
+            ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": 5})),
+            ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": "K\nV"})),
+            ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": "x".repeat(201)})),
+            ("queue.message_singer", json!({"message": "Hi"})),
+            ("queue.message_singer", json!({"singer_id": "s1"})),
+            ("queue.message_singer", json!({"singer_id": "s1", "message": "   "})),
+            ("queue.message_singer", json!({"singer_id": "s1", "message": "x".repeat(501)})),
+            ("queue.message_singer", json!({"singer_id": "s1", "message": "bell\u{7}"})),
+            ("queue.message_singer", json!({"singer_id": "s1", "message": 5})),
+            ("queue.replace_song", json!({"song_id": 5})),
+            ("queue.replace_song", json!({"entry_id": "e1"})),
+            ("queue.replace_song", json!({"entry_id": "e1", "song_id": 0})),
+            ("queue.replace_song", json!({"entry_id": "e1", "song_id": -2})),
+            ("queue.replace_song", json!({"entry_id": "e1", "song_id": 2.5})),
+            ("queue.replace_song", json!({"entry_id": "e1", "song_id": "5"})),
             ("bg.play_track", json!({"track": "A.mp3"})),
             ("bg.play_track", json!({"index": -1, "track": "A.mp3"})),
             ("bg.play_track", json!({"index": 1.5, "track": "A.mp3"})),
@@ -368,6 +402,13 @@ mod tests {
             ("seek_to", json!({"seconds": 0})),
             ("queue.skip_singer", json!({"singer_id": "a", "skipped": false})),
             ("bg.next", json!({})),
+            ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": ""})),
+            ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": "KV, SC, SBI"})),
+            ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": "x".repeat(200)})),
+            ("queue.message_singer", json!({"singer_id": "s1", "message": "You're up next"})),
+            ("queue.message_singer", json!({"singer_id": "s1", "message": "two\nlines"})),
+            ("queue.message_singer", json!({"singer_id": "s1", "message": "x".repeat(500)})),
+            ("queue.replace_song", json!({"entry_id": "e1", "song_id": 7})),
             ("queue.set_song_key", json!({"entry_id": "e1", "key": -5})),
             ("queue.set_song_key", json!({"entry_id": "e1", "key": 5})),
             ("queue.set_song_key", json!({"entry_id": "e1", "key": 0})),

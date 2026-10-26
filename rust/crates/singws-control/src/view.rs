@@ -101,6 +101,18 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "bad_name" => ("That name is not valid".into(), "warn"),
         "renamed" => ("Singer renamed".into(), "ok"),
         "not_renamed" => ("The app could not rename that singer".into(), "warn"),
+        "brand_set" => ("Brand priority saved".into(), "ok"),
+        "brand_cleared" => ("Brand priority cleared".into(), "ok"),
+        "bad_brands" => ("Enter brands such as KV, SC, SBI: letters and numbers separated by commas".into(), "warn"),
+        "sending" => ("Sending the message…".into(), "ok"),
+        "message_sent" => ("Message delivered".into(), "ok"),
+        "message_failed" => ("The message could not be sent".into(), "warn"),
+        "bad_message" => ("The message must be 1 to 500 characters".into(), "warn"),
+        "duplicate_message" => ("That exact message was just sent to this singer".into(), "warn"),
+        "network_not_configured" => ("The app has no server address, user or API key set, so it cannot send messages".into(), "warn"),
+        "replaced" => ("Song replaced".into(), "ok"),
+        "not_replaced" => ("The app could not replace that song".into(), "warn"),
+        "song_playing" => ("That song is playing now, so it cannot be replaced".into(), "warn"),
         "bad_song_id" | "bad_key" => (format!("The app refused the command ({m})"), "error"),
         "moved" => ("Moved".into(), "ok"),
         "removed" => ("Removed".into(), "ok"),
@@ -246,6 +258,15 @@ impl ViewModel {
                 let (text, kind) = humanize(&a.message);
                 let kind = if a.ok { kind } else if kind == "ok" { "error" } else { kind };
                 self.finish(&a.request_id, (text, kind));
+            }
+            Incoming::Notice { request_id, ok, code, message } => {
+                // the late answer to a command that was already acknowledged ("sending"): shown as its own result
+                let (words, kind) = humanize(code);
+                let text = if !ok && !message.trim().is_empty() { format!("{words}: {}", message.trim()) } else { words };
+                let kind = if *ok { kind } else if kind == "ok" { "warn" } else { kind };
+                let _ = request_id;
+                self.seq += 1;
+                self.result = Some(CommandResult { seq: self.seq, text, kind });
             }
             Incoming::Error { request_id, code, message } => {
                 let words = match code.as_str() {
@@ -539,6 +560,33 @@ mod tests {
         }
         assert_eq!(humanize("bad_tempo").1, "error");
         assert_eq!(humanize("bad_key").1, "error");
+    }
+
+    #[test]
+    fn brand_message_and_replace_answers_are_plain_words() {
+        for code in ["brand_set", "brand_cleared", "sending", "message_sent", "replaced"] {
+            assert_eq!(humanize(code).1, "ok", "{code}");
+            assert_ne!(humanize(code).0, code, "{code} has words");
+        }
+        for code in ["bad_brands", "message_failed", "bad_message", "duplicate_message", "network_not_configured", "not_replaced", "song_playing"] {
+            assert_eq!(humanize(code).1, "warn", "{code}");
+            assert_ne!(humanize(code).0, code, "{code} has words");
+        }
+        assert_eq!(humanize("playing").0, "Playing that track", "the music tab's word is untouched by the replace refusal");
+    }
+
+    #[test]
+    fn a_late_notice_becomes_its_own_result_with_the_servers_reason() {
+        let mut v = ViewModel::new();
+        v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"notice","request_id":"m1","ok":true,"code":"message_sent","message":""}"#)));
+        let r = v.result.clone().unwrap();
+        assert_eq!((r.text.as_str(), r.kind), ("Message delivered", "ok"));
+        v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"notice","request_id":"m2","ok":false,"code":"message_failed","message":"Server returned HTTP 500."}"#)));
+        let r2 = v.result.clone().unwrap();
+        assert_eq!((r2.text.as_str(), r2.kind), ("The message could not be sent: Server returned HTTP 500.", "warn"));
+        assert!(r2.seq > r.seq);
+        v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"notice","request_id":"m3","ok":false,"code":"message_sent","message":""}"#)));
+        assert_eq!(v.result.clone().unwrap().kind, "warn", "a failed notice is never shown as success");
     }
 
     #[test]

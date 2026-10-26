@@ -33,20 +33,34 @@ Item {
         modal: true
         focus: true
         anchors.centerIn: Overlay.overlay
-        width: 320
+        width: kind === "replace" ? 460 : 340
         padding: 14
         background: Rectangle { color: "#1a1838"; radius: 10; border.color: "#4b2bb0" }
-        function openFor(kind, id, name) { editor.kind = kind; editor.targetId = id; editor.targetName = name; nameInput.text = kind === "name" ? name : ""; keyBox.value = 0; speedBox.value = 100; editor.open(); if (kind === "name") nameInput.forceActiveFocus() }
+        property var picked: null          // the library row chosen in the Replace dialog
+        property var found: []
+        function openFor(kind, id, name) {
+            editor.kind = kind; editor.targetId = id; editor.targetName = name
+            nameInput.text = kind === "name" ? name : ""; brandInput.text = ""; messageInput.text = ""; searchInput.text = ""
+            keyBox.value = 0; speedBox.value = 100; editor.picked = null; editor.found = []
+            editor.open()
+            if (kind === "name") nameInput.forceActiveFocus()
+            else if (kind === "brand") brandInput.forceActiveFocus()
+            else if (kind === "message") messageInput.forceActiveFocus()
+            else if (kind === "replace") searchInput.forceActiveFocus()
+        }
         function accept() {
             if (kind === "key") page.act("Key " + keyBox.value + " for " + targetName, "queue.set_song_key", {entry_id: targetId, key: keyBox.value})
             else if (kind === "tempo") page.act("Speed " + speedBox.value + "% for " + targetName, "queue.set_song_tempo", {entry_id: targetId, tempo_percent: speedBox.value})
+            else if (kind === "brand") page.act("Brand priority for " + targetName, "queue.set_singer_brand", {singer_id: targetId, brands: brandInput.text.trim()})
+            else if (kind === "message") { if (messageInput.text.trim() === "") return; page.act("Message to " + targetName, "queue.message_singer", {singer_id: targetId, message: messageInput.text.trim()}) }
+            else if (kind === "replace") { if (picked === null) return; page.act("Replace " + targetName, "queue.replace_song", {entry_id: targetId, song_id: picked.id}) }
             else if (nameInput.text.trim() !== "") page.act("Rename " + targetName, "queue.rename_singer", {singer_id: targetId, name: nameInput.text.trim()})
             else return
             editor.close()
         }
         contentItem: ColumnLayout {
             spacing: 10
-            Label { text: editor.kind === "key" ? "Change key" : (editor.kind === "tempo" ? "Change speed" : "Rename singer"); color: "#ffffff"; font.pixelSize: 15; font.weight: Font.DemiBold }
+            Label { text: editor.kind === "key" ? "Change key" : (editor.kind === "tempo" ? "Change speed" : (editor.kind === "brand" ? "Preferred brand priority" : (editor.kind === "message" ? "Direct message" : (editor.kind === "replace" ? "Replace song" : "Rename singer")))); color: "#ffffff"; font.pixelSize: 15; font.weight: Font.DemiBold }
             Label { text: editor.targetName; color: "#9a97c0"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
             SpinBox { id: keyBox; visible: editor.kind === "key"; from: -5; to: 5; editable: true; Layout.fillWidth: true; Accessible.name: "Key in semitones"; textFromValue: function (v) { return (v > 0 ? "+" : "") + v + " semitones" } }
             SpinBox { id: speedBox; visible: editor.kind === "tempo"; from: 70; to: 130; stepSize: 5; editable: true; Layout.fillWidth: true; Accessible.name: "Speed in percent"; textFromValue: function (v) { return v + "%" } }
@@ -61,12 +75,77 @@ Item {
                 background: Rectangle { color: "#12102a"; radius: 8; border.color: nameInput.activeFocus ? "#7c3aed" : "#2a2650" }
                 onAccepted: editor.accept()
             }
+            TextField {
+                id: brandInput
+                visible: editor.kind === "brand"
+                Layout.fillWidth: true
+                maximumLength: 200
+                placeholderText: "KV, SC, SBI"
+                color: "#e8e6f5"
+                placeholderTextColor: "#7a77a0"
+                selectByMouse: true
+                Accessible.name: "Brand priority list"
+                background: Rectangle { color: "#12102a"; radius: 8; border.color: brandInput.activeFocus ? "#7c3aed" : "#2a2650" }
+                onAccepted: editor.accept()
+            }
+            Label { visible: editor.kind === "brand"; Layout.fillWidth: true; wrapMode: Text.Wrap; color: "#9a97c0"; font.pixelSize: 11; text: "Disc brands in order of preference for this singer's requests. Leave empty and press OK to clear it." }
+            ScrollView {
+                visible: editor.kind === "message"
+                Layout.fillWidth: true
+                Layout.preferredHeight: 110
+                TextArea {
+                    id: messageInput
+                    wrapMode: TextArea.Wrap
+                    color: "#e8e6f5"
+                    selectByMouse: true
+                    placeholderText: "Type your message here"
+                    placeholderTextColor: "#7a77a0"
+                    Accessible.name: "Message to the singer"
+                    onTextChanged: if (length > 500) remove(500, length)
+                    background: Rectangle { color: "#12102a"; radius: 8; border.color: messageInput.activeFocus ? "#7c3aed" : "#2a2650" }
+                }
+            }
+            Label { visible: editor.kind === "message"; Layout.fillWidth: true; color: "#9a97c0"; font.pixelSize: 11; text: messageInput.length + " / 500. It goes to the singer's phone; it cannot be taken back." }
+            LibraryPanel { id: replaceSearch; onResultsJsonChanged: editor.found = JSON.parse(replaceSearch.resultsJson) }
+            Timer { id: replaceDebounce; interval: 150; onTriggered: replaceSearch.search(searchInput.text) }
+            TextField {
+                id: searchInput
+                visible: editor.kind === "replace"
+                Layout.fillWidth: true
+                placeholderText: "Search artist, title or disc id"
+                color: "#e8e6f5"
+                placeholderTextColor: "#7a77a0"
+                selectByMouse: true
+                Accessible.name: "Search for the replacement song"
+                background: Rectangle { color: "#12102a"; radius: 8; border.color: searchInput.activeFocus ? "#7c3aed" : "#2a2650" }
+                onTextChanged: replaceDebounce.restart()
+            }
+            ListView {
+                id: replaceList
+                visible: editor.kind === "replace"
+                Layout.fillWidth: true
+                Layout.preferredHeight: 190
+                clip: true
+                model: editor.found
+                ScrollBar.vertical: ScrollBar {}
+                delegate: Rectangle {
+                    width: replaceList.width
+                    height: 30
+                    radius: 6
+                    color: editor.picked !== null && editor.picked.id === modelData.id ? "#4b2bb0" : (hit.containsMouse ? "#2a2650" : "transparent")
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: modelData.artist + ", " + modelData.title
+                    Label { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; verticalAlignment: Text.AlignVCenter; elide: Text.ElideRight; color: "#e8e6f5"; font.pixelSize: 12; text: modelData.artist + " • " + modelData.title }
+                    MouseArea { id: hit; anchors.fill: parent; hoverEnabled: true; onClicked: editor.picked = modelData }
+                }
+            }
+            Label { visible: editor.kind === "replace"; Layout.fillWidth: true; elide: Text.ElideRight; color: "#9a97c0"; font.pixelSize: 11; text: editor.picked !== null ? "Replace with: " + editor.picked.artist + " • " + editor.picked.title : replaceSearch.status }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
                 Item { Layout.fillWidth: true }
                 Button { text: "Cancel"; onClicked: editor.close() }
-                Button { text: "OK"; highlighted: true; onClicked: editor.accept() }
+                Button { text: editor.kind === "message" ? "Send" : "OK"; highlighted: true; enabled: editor.kind !== "replace" || editor.picked !== null; onClicked: editor.accept() }
             }
         }
     }
@@ -361,6 +440,8 @@ Item {
                         Btn { text: "▲"; implicitWidth: 34; onClicked: page.act("Move " + card.singer.name + " up", "queue.move_singer", {singer_id: card.singer.singer_id, direction: "up"}) }
                         Btn { text: "▼"; implicitWidth: 34; onClicked: page.act("Move " + card.singer.name + " down", "queue.move_singer", {singer_id: card.singer.singer_id, direction: "down"}) }
                         Btn { text: "Rename"; onClicked: editor.openFor("name", card.singer.singer_id, card.singer.name) }
+                        Btn { text: "Brand"; onClicked: editor.openFor("brand", card.singer.singer_id, card.singer.name) }
+                        Btn { text: "Message"; onClicked: editor.openFor("message", card.singer.singer_id, card.singer.name) }
                         Btn { text: card.singer.skipped ? "Unskip" : "Skip"; onClicked: page.act((card.singer.skipped ? "Unskip " : "Skip ") + card.singer.name, "queue.skip_singer", {singer_id: card.singer.singer_id, skipped: !card.singer.skipped}) }
                         Btn {
                             text: page.confirmSinger === card.singer.singer_id ? "Confirm remove" : "Remove"
@@ -379,6 +460,7 @@ Item {
                             Layout.leftMargin: 28
                             spacing: 6
                             Label { text: (song.artist !== "" ? song.artist + " • " : "") + song.title; color: song.skipped ? "#8a87aa" : "#c9c6e8"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                            Btn { text: "Replace"; implicitWidth: 58; implicitHeight: 26; onClicked: editor.openFor("replace", song.entry_id, song.title) }
                             Btn { text: "Key"; implicitWidth: 40; implicitHeight: 26; onClicked: editor.openFor("key", song.entry_id, song.title) }
                             Btn { text: "Speed"; implicitWidth: 50; implicitHeight: 26; onClicked: editor.openFor("tempo", song.entry_id, song.title) }
                             Btn { text: "▲"; implicitWidth: 28; implicitHeight: 26; onClicked: page.act("Move song up", "queue.move_song", {entry_id: song.entry_id, direction: "up"}) }
