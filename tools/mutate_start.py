@@ -48,6 +48,16 @@ M = [
     ('set_shadow_audio: if i.supports_shadow_audio { Some(voice) } else { None } }', 'set_shadow_audio: Some(voice) }', None),
     ('set_shadow_audio: if i.supports_shadow_audio { Some(voice) } else { None } }', 'set_shadow_audio: if i.supports_shadow_audio { Some(true) } else { None } }', None),
     ('    if v.get("op").and_then(serde_json::Value::as_str) == Some("engine") {', '    if v.get("op").and_then(serde_json::Value::as_str) == Some("route") {', None),
+    # ---- who sings next
+    ('        if !s.skipped {\n            if let Some(j) = first_playable(s) {', '        if true {\n            if let Some(j) = first_playable(s) {', None),
+    ('    let first_playable = |s: &PickSinger| s.songs.chars().position(|c| c != \'s\');', '    let first_playable = |s: &PickSinger| s.songs.chars().position(|c| c == \'d\');', None),
+    ('    if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }', '    if !last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }', None),
+    ('    if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }', '    None', None),
+    ('Some((singers.len() - 1, first_playable(last)))', 'Some((0, first_playable(last)))', None),
+    ('Some((singers.len() - 1, first_playable(last)))', 'Some((singers.len() - 1, None))', None),
+    ('"song": p.and_then(|x| x.1)}', '"song": p.map(|_| 0)}', None),
+    ("!matches!(c, 'd' | 's' | 't')", "!matches!(c, 'd' | 's')", None),
+    ('    let last = singers.last()?;', '    let last = singers.first()?;', None),
 ]
 
 

@@ -104,6 +104,36 @@ class StartShadow:
             self._say(f"check_engine error: {exc!r}")
             return None
 
+    def check_pick(self, facts, singer, song):
+        """Compare who the app picked to sing next (`singer` = index in the queue as it was before the pick, `song` = index in that singer's songs; both None when
+        nobody could sing) with Rust. `facts` is :func:`pick_facts` of the queue taken before the loop ran. Never raises; returns agree, or None when skipped."""
+        try:
+            if not self.available or facts is None:
+                return None
+            payload = json.dumps({"op": "pick", "singers": facts}, allow_nan=False)
+            buf = ctypes.create_string_buffer(_OUT_CAP)
+            n = self._lib.singws_start_json(payload.encode(), buf, _OUT_CAP)
+            if n < 0:
+                self._say(f"pick call failed code={n}")
+                return None
+            got = json.loads(buf.raw[:n].decode())
+            want = {"singer": singer, "song": song}
+            self.checks += 1
+            agree = got == want
+            kind = "pick_none" if singer is None else "pick"
+            if not agree:
+                self.mismatches += 1
+                self._say(f"MISMATCH pick app={want} rust={got} queue={json.dumps(facts)[:200]}")
+            elif kind not in self._seen:
+                self._seen.add(kind)
+                self._say(f"decision route={kind} agree=1")
+            if self.checks % SUMMARY_EVERY == 0:
+                self._say(f"summary checks={self.checks} mismatches={self.mismatches}")
+            return agree
+        except Exception as exc:
+            self._say(f"check_pick error: {exc!r}")
+            return None
+
     def check(self, observed, song_info, *, external=False, has_primary=False, primary_exists=None, zip_cached=None, mp3g=None, pair=None):
         """Compare the route the app is taking (`observed`) with Rust's. Never raises; returns agree, or None when skipped."""
         try:
@@ -137,6 +167,30 @@ def engine_facts(want_rust, supports, engine, voice_error=False):
     """The request for `_karaoke_rust_voice_for_song`'s decision. `engine` is "none", "headless" or "running"."""
     return {"op": "engine", "want_rust": bool(want_rust), "supports_shadow_audio": bool(supports), "engine": str(engine), "voice_error": bool(voice_error)}
 
+
+def pick_facts(queue):
+    """The queue as the pick loop sees it: [{"skipped": bool, "songs": "dds..."}] with d = dict entry not skipped, s = dict entry skipped, t = older tuple entry.
+    None when the queue holds something the pick loop itself would raise on (a singer that is not a dict, `songs` that is not a list)."""
+    out = []
+    for singer in queue:
+        if not isinstance(singer, dict):
+            return None
+        songs = singer.get("songs", [])
+        if songs is None:
+            songs = []
+        if not isinstance(songs, (list, tuple)):
+            return None
+        kinds = []
+        for song in songs:
+            if isinstance(song, dict):
+                kinds.append("s" if song.get("skipped", False) else "d")
+            else:
+                kinds.append("t")
+        out.append({"skipped": bool(singer.get("skipped", False)), "songs": "".join(kinds)})
+    return out
+
+
+StartShadow.pick_facts = staticmethod(pick_facts)  # the app calls it on the instance it already holds
 
 def _load_lib():
     try:

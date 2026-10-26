@@ -60,7 +60,7 @@ class Wiring(unittest.TestCase):
         finally:
             for p in reversed(patches):
                 p.stop()
-        routes = [x.split("route=")[1].split()[0] for x in lines if "[START-SHADOW] decision route=" in x]
+        routes = [x.split("route=")[1].split()[0] for x in lines if "[START-SHADOW] decision route=" in x and not x.split("route=")[1].startswith(("pick", "engine"))]
         mism = [x for x in lines if "[START-SHADOW] MISMATCH" in x]
         return calls, routes, mism, lines
 
@@ -119,6 +119,94 @@ class Wiring(unittest.TestCase):
 
         calls, routes, mism, lines = self.run_start("/lib/a.mp4", shadow_factory=lambda s: Bad())
         self.assertEqual(calls, ["play_mp4"])
+
+
+class PickWiring(unittest.TestCase):
+    """Who sings next, from the REAL `play_next_file` over random queues (skipped singers, singers without songs, skipped songs, older tuple entries): the shadow's Rust answer must
+    equal the singer and song the real method picked. Nothing is logged for a locked rotation."""
+    bare_app = base.ShowCriticalRegressionTests.bare_app
+    playback_app = base.ShowCriticalRegressionTests.playback_app
+
+    @classmethod
+    def setUpClass(cls):
+        cls.singws = base.load_main_module()
+        if not start_shadow.StartShadow(lambda s: None).available:
+            raise unittest.SkipTest("libsingws_dsp_ffi.dylib with the start shadow is not built")
+
+    def run_queue(self, queue, *, locked=False, enabled=True):
+        app = self.playback_app(queue)
+        app.settings = {"start_shadow": enabled}
+        app._is_rotation_locked = lambda: locked
+        app._rotation_reweave_locked_tail = lambda: None
+        app._ensure_queue_entry_id = lambda entry: (entry.setdefault("request_uid", f"rid-{entry.get('song_info')}") if isinstance(entry, dict) else f"rid-{entry[0]}")
+        picked = {}
+        original_pop = None
+        app.play_mp3 = lambda *a, **k: (picked.setdefault("path", a[0]), True)[1]
+        lines = []
+        self.singws._START_SHADOW = start_shadow.StartShadow(lambda text: lines.append(str(text)))
+        with mock.patch.object(self.singws, "_diag", lambda *a, **k: None), mock.patch.object(self.singws.os.path, "exists", lambda p: True):
+            app.play_next_file()
+        return app, picked, lines
+
+    def test_random_queues_pick_the_same_singer_and_song_as_rust(self):
+        import random
+        rng = random.Random(20261026)
+        checked = picks = nones = 0
+        for case in range(400):
+            queue = []
+            for i in range(rng.randint(0, 7)):
+                songs = []
+                for j in range(rng.randint(0, 4)):
+                    r = rng.random()
+                    path = f"/lib/s{i}_{j}.mp3"
+                    if r < 0.2:
+                        songs.append({"request_uid": f"r{i}{j}", "song_info": path, "skipped": True})
+                    elif r < 0.3:
+                        songs.append((path, 0))  # an older tuple-format entry
+                    else:
+                        songs.append({"request_uid": f"r{i}{j}", "song_info": path, "skipped": False})
+                queue.append({"name": f"S{i}", "singer_id": f"sid{i}", "skipped": rng.random() < 0.25, "songs": songs})
+            app, picked, lines = self.run_queue(queue)
+            mism = [x for x in lines if "MISMATCH" in x]
+            self.assertEqual(mism, [], (case, mism))
+            decisions = [x for x in lines if "decision route=pick" in x]
+            if queue:
+                self.assertEqual(len(decisions), 1, (case, "a non-empty queue must produce exactly one compared pick (a skipped comparison would hide a disagreement)", lines))
+                checked += 1
+            if picked.get("path"):
+                picks += 1
+            else:
+                nones += 1
+        self.assertGreater(picks, 100)
+        self.assertGreater(nones, 10)
+
+    def test_the_all_skipped_quirk_is_what_the_app_really_does(self):
+        """Documented finding: with every singer skipped, the loop is left holding the last one it looked at and that SKIPPED singer's song starts. The shadow models the
+        app, not the wish, so it must agree (and the quirk stays visible here until the operator decides to change it)."""
+        q = [{"name": "A", "singer_id": "a", "skipped": True, "songs": [{"request_uid": "x", "song_info": "/lib/a.mp3", "skipped": False}]},
+             {"name": "B", "singer_id": "b", "skipped": True, "songs": [{"request_uid": "y", "song_info": "/lib/b.mp3", "skipped": False}]}]
+        app, picked, lines = self.run_queue(q)
+        self.assertEqual(picked["path"], "/lib/b.mp3", "the LAST skipped singer sings")
+        self.assertEqual([x for x in lines if "MISMATCH" in x], [])
+        self.assertTrue(any("decision route=pick agree=1" in x for x in lines))
+
+    def test_a_locked_rotation_is_not_compared_and_off_logs_nothing(self):
+        q = lambda: [{"name": "A", "singer_id": "a", "skipped": True, "songs": [{"request_uid": "x", "song_info": "/lib/a.mp3", "skipped": False}]},
+                     {"name": "B", "singer_id": "b", "skipped": False, "songs": [{"request_uid": "y", "song_info": "/lib/b.mp3", "skipped": False}]}]
+        app, picked, lines = self.run_queue(q(), locked=True)
+        self.assertEqual(picked["path"], "/lib/b.mp3")
+        self.assertFalse(any("route=pick" in x or "MISMATCH" in x for x in lines), lines)
+        app, picked, lines = self.run_queue(q(), enabled=False)
+        self.assertEqual(picked["path"], "/lib/b.mp3")
+        self.assertEqual(lines, [])
+        app, picked, lines = self.run_queue(q())
+        self.assertTrue(any("decision route=pick agree=1" in x for x in lines), lines)
+
+    def test_a_queue_with_something_odd_in_it_is_skipped_by_the_shadow(self):
+        self.assertIsNone(start_shadow.pick_facts([{"songs": [], "skipped": False}, "not a dict"]))
+        self.assertIsNone(start_shadow.pick_facts([{"songs": "abc"}]))
+        self.assertEqual(start_shadow.pick_facts([{"songs": None}]), [{"skipped": False, "songs": ""}])
+        self.assertEqual(start_shadow.pick_facts([{"skipped": 1, "songs": [{"skipped": True}, {"skipped": 0}, ("x", 1), {}]}]), [{"skipped": True, "songs": "sdtd"}])
 
 
 class EngineWiring(unittest.TestCase):

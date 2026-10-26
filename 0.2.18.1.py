@@ -60162,6 +60162,14 @@ class KaraokeApp(QWidget):
                 pass
 
         _pn_clock.mark("snapshot_rotation")
+        _pick_shadow, _pick_facts = None, None
+        try:
+            _pick_shadow = _start_shadow_for(self.settings)
+            # a locked rotation reweaves its tail while the loop runs, which the plain pick rule does not model (not compared, not logged)
+            if _pick_shadow is not None and not self._is_rotation_locked():
+                _pick_facts = _pick_shadow.pick_facts(queue_snapshot)
+        except Exception:
+            _pick_shadow, _pick_facts = None, None
         singer = None
         attempts_remaining = max(0, len(self.queue))
         while attempts_remaining > 0:
@@ -60191,6 +60199,11 @@ class KaraokeApp(QWidget):
                 self._rotation_reweave_locked_tail()
             singer = None
         if singer is None:
+            if _pick_facts is not None:
+                try:
+                    _pick_shadow.check_pick(_pick_facts, None, None)
+                except Exception:
+                    pass
             QTimer.singleShot(0, self.update_queue_display)
             self._next_in_progress = False
             self._set_play_control_starting(False)
@@ -60214,6 +60227,11 @@ class KaraokeApp(QWidget):
                     first_non_skipped_idx = i
                     break
 
+            if _pick_facts is not None:
+                try:
+                    _pick_shadow.check_pick(_pick_facts, next((_i for _i, _s in enumerate(queue_snapshot) if _s is singer), None), first_non_skipped_idx if first_non_skipped_idx >= 0 else None)
+                except Exception:
+                    pass
             # If no non-skipped songs (empty or all skipped), move to bottom and STOP
             if first_non_skipped_idx == -1:
                 try:

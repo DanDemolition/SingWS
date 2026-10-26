@@ -209,6 +209,35 @@ pub fn engine_route(i: &EngineInput) -> EngineAnswer {
     EngineAnswer { voice, reason, set_shadow_audio: if i.supports_shadow_audio { Some(voice) } else { None } }
 }
 
+/// One singer as the pick loop of `play_next_file` sees it: the singer's own skipped flag and the kind of each queued song, one character each:
+/// `d` a dict entry that is not skipped, `s` a dict entry that is skipped, `t` an older tuple/list entry (never skipped).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PickSinger {
+    #[serde(default)]
+    pub skipped: bool,
+    pub songs: String,
+}
+
+/// Who sings next and which of their songs, exactly as the pick loop of `play_next_file` ends up with them (not as one might wish it did):
+/// * the first singer, in queue order, who is not skipped and has at least one song that is not skipped is picked, with that first song;
+/// * when there is no such singer the loop has popped everybody once and is left holding the LAST singer it looked at, which it forgets (`None`) when that singer was
+///   not skipped but had nothing playable, and KEEPS when that singer was skipped: the app then goes on with a skipped singer (the "all singers are skipped" quirk,
+///   found by the shadow on 2026-10-26 and reported to the operator, not changed);
+/// * the song is that singer's first song that is not skipped, or `None` inside the answer when there is none (the app then starts nothing).
+/// Returns `None` when no singer is left to go on with.
+pub fn pick(singers: &[PickSinger]) -> Option<(usize, Option<usize>)> {
+    let first_playable = |s: &PickSinger| s.songs.chars().position(|c| c != 's');
+    for (i, s) in singers.iter().enumerate() {
+        if !s.skipped {
+            if let Some(j) = first_playable(s) {
+                return Some((i, Some(j)));
+            }
+        }
+    }
+    let last = singers.last()?;
+    if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }
+}
+
 /// JSON in, JSON out. `{"op":"engine", ...}` is an [`EngineInput`] and answers `{"voice":..,"reason":"..","set_shadow_audio":null|bool}`; anything else is an
 /// [`Input`] (the start route) and answers `{"route":"<name>"}`.
 pub fn start_json(request: &str) -> Result<String, String> {
@@ -217,6 +246,14 @@ pub fn start_json(request: &str) -> Result<String, String> {
         let input: EngineInput = serde_json::from_value(v).map_err(|e| e.to_string())?;
         let a = engine_route(&input);
         return Ok(serde_json::json!({"voice": a.voice, "reason": a.reason, "set_shadow_audio": a.set_shadow_audio}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("pick") {
+        let singers: Vec<PickSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        if singers.iter().any(|s| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'))) {
+            return Err("songs may only contain d, s and t".into());
+        }
+        let p = pick(&singers);
+        return Ok(serde_json::json!({"singer": p.map(|x| x.0), "song": p.and_then(|x| x.1)}).to_string());
     }
     let input: Input = serde_json::from_value(v).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"route": route(&input).name()}).to_string())
@@ -361,6 +398,41 @@ mod tests {
         assert!(start_json(r#"{"op":"engine","want_rust":true,"supports_shadow_audio":true,"engine":"weird"}"#).is_err());
         // the default op is still the start route
         assert_eq!(start_json(r#"{"info":{"str":"/l/a.mp3"}}"#).unwrap(), r#"{"route":"mp3"}"#);
+    }
+
+    fn q(spec: &[(&str, bool)]) -> Vec<PickSinger> {
+        spec.iter().map(|(songs, skipped)| PickSinger { skipped: *skipped, songs: (*songs).into() }).collect()
+    }
+
+    #[test]
+    fn the_first_unskipped_singer_with_a_playable_song_goes_next_and_skipped_songs_are_passed_over() {
+        assert_eq!(pick(&q(&[("d", false), ("d", false)])), Some((0, Some(0))));
+        assert_eq!(pick(&q(&[("d", true), ("d", false)])), Some((1, Some(0))), "a skipped singer is passed over");
+        assert_eq!(pick(&q(&[("", false), ("ss", false), ("sd", false)])), Some((2, Some(1))), "no songs, or only skipped songs, is passed over; the first unskipped song is taken");
+        assert_eq!(pick(&q(&[("s", false), ("t", false)])), Some((1, Some(0))), "an older tuple entry is never skipped");
+        assert_eq!(pick(&q(&[("sst", false)])), Some((0, Some(2))));
+        assert_eq!(pick(&q(&[])), None);
+    }
+
+    #[test]
+    fn when_nobody_qualifies_the_loop_keeps_the_last_singer_only_if_that_singer_was_skipped() {
+        assert_eq!(pick(&q(&[("dd", true), ("", false), ("ss", false)])), None, "the last singer was not skipped: forgotten");
+        assert_eq!(pick(&q(&[("d", false), ("", false)])), Some((0, Some(0))), "unrelated: a qualifying singer wins");
+        assert_eq!(pick(&q(&[("dd", true), ("", false), ("ss", true)])), Some((2, None)), "the last singer is skipped with nothing playable: kept, but there is no song");
+        assert_eq!(pick(&q(&[("ss", false), ("sd", true)])), Some((1, Some(1))), "the last singer is skipped but has a song: the app goes on with them");
+        assert_eq!(pick(&q(&[("d", true)])), Some((0, Some(0))), "a single skipped singer still sings");
+        assert_eq!(pick(&q(&[("d", true), ("d", true)])), Some((1, Some(0))), "of several skipped singers it is the last one");
+    }
+
+    #[test]
+    fn the_pick_op_is_routed_by_the_json_glue_and_rejects_bad_shapes() {
+        let r = start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"d"},{"songs":"sd"}]}"#).unwrap();
+        assert_eq!(r, r#"{"singer":1,"song":1}"#);
+        assert_eq!(start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"ss"}]}"#).unwrap(), r#"{"singer":0,"song":null}"#, "kept singer without a playable song");
+        assert_eq!(start_json(r#"{"op":"pick","singers":[]}"#).unwrap(), r#"{"singer":null,"song":null}"#);
+        assert!(start_json(r#"{"op":"pick","singers":[{"songs":"dx"}]}"#).is_err());
+        assert!(start_json(r#"{"op":"pick"}"#).is_err());
+        assert!(start_json(r#"{"op":"pick","singers":[{"skipped":true}]}"#).is_err());
     }
 
     #[test]

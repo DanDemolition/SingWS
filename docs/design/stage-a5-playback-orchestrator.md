@@ -30,6 +30,15 @@ Rust engine is running (absent or headless = not running), and whether building 
 `error`, or empty), and what the bridge is told (`setShadowAudio(voice)` only when the bridge supports it). The app calls `check_engine` at the end of that method with its own
 answer; Rust must give the same one. Tested against the REAL method over 144 fact combinations (`EngineWiring` in test_start_shadow_wiring.py).
 
+## Step 3 (built): who sings next (`pick` in `singws-start`, `"op":"pick"`)
+The first half of `play_next_file`: the loop that pops singers from the front of the queue (a skipped singer, or one without an unskipped song, goes to the bottom) and then
+takes the first unskipped song of the singer it stopped on. The app calls `check_pick` with the queue as it was before the loop (singers as `{skipped, songs:"dst.."}`), the
+index of the singer it ended up with and the index of the song; Rust computes both from the facts alone. A locked rotation (which reweaves its tail during the loop) is not
+compared yet.
+**Finding (2026-10-26, reported to the operator, NOT changed):** when every singer is skipped, the loop ends holding the last singer it looked at and, because the skipped branch
+`continue`s without clearing `singer`, that SKIPPED singer's next song starts. (A last singer who is not skipped but has nothing playable is forgotten, so nothing starts.)
+`test_the_all_skipped_quirk_is_what_the_app_really_does` pins it; the Rust rule models it; changing the app is the operator's call.
+
 ## Next steps (not built)
 3. Transport arguments: key, tempo, start offset, loop and duration the transport receives (`_start_karaoke_transport`).
 4. Confirmed-start bookkeeping (what is published to the screen and the server once the transport accepts).
