@@ -82,6 +82,22 @@ class LedgerFile(unittest.TestCase):
         gl.record(data, {"PLAN-SHADOW:window": True}, "c", ["z.log"], "2026-10-30")
         self.assertEqual({r["decision"]: r["verdict"] for r in gl.status(data)}["PLAN-SHADOW:window"], "READY")
 
+    def test_an_after_show_zip_is_read_with_its_logs_and_its_reduced_settings(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            archive = os.path.join(d, "singws-show-20261028-2145.zip")
+            with zipfile.ZipFile(archive, "w") as z:
+                z.writestr("singws-show-20261028-2145/singws_2026-10-28.log", "\n".join([tsr.LAUNCH] + tsr.FULL) + "\n")
+                z.writestr("singws-show-20261028-2145/singws_2026-10-27.log", "\n".join([tsr.LAUNCH]) + "\n")
+                z.writestr("singws-show-20261028-2145/settings.json", json.dumps({"plan_shadow": True, "queue_shadow": True, "settings_shadow": True}))
+                z.writestr("singws-show-20261028-2145/notes.txt", "ignored")
+            path = os.path.join(d, "ledger.json")
+            self.assertEqual(gl.main(["add", archive, "--label", "rehearsal intel", "--ledger", path, "--date", "2026-10-28"]), 0)
+            data = json.load(open(path))
+            entry = data["decisions"]["PLAN-SHADOW:window"]["clean"][0]
+            self.assertEqual(entry["logs"], ["singws_2026-10-27.log", "singws_2026-10-28.log"], "log names without the extraction prefix; notes.txt and folders ignored")
+            self.assertEqual(entry["label"], "rehearsal intel")
+
     def test_a_missing_or_broken_ledger_starts_empty_and_no_log_is_an_error(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(gl.load(os.path.join(d, "nope.json"))["decisions"], {})

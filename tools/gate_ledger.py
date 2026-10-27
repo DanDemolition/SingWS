@@ -2,6 +2,7 @@
 """Gate ledger for the Rust migration (operator's policy, 2026-10-26): ONE clean show per decision, rehearsals count as shows, gates run side by side with the build.
 
     python3 tools/gate_ledger.py add LOG [LOG ...] --label "rehearsal 2026-10-28 intel"    record what the logs prove (last app launch in each log; --all for every launch)
+    python3 tools/gate_ledger.py add singws-show-20261028-2145.zip --label "rehearsal intel"   the zip made by after_show.sh (every launch in its logs, its reduced settings.json)
     python3 tools/gate_ledger.py status                                                    one line per decision: how many clean shows, READY or what is missing
     python3 tools/gate_ledger.py status --json
 
@@ -18,7 +19,9 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shadow_report as sr  # noqa: E402
@@ -81,6 +84,29 @@ def decisions_proven(reports):
     return out
 
 
+def expand_inputs(paths, workdir):
+    """Log files from the arguments; an `after_show.sh` zip contributes the logs inside it and its reduced settings.json. Returns (logs, settings_path_or_None)."""
+    logs, settings = [], None
+    for path in paths:
+        if path.lower().endswith(".zip") and os.path.isfile(path):
+            with zipfile.ZipFile(path) as archive:
+                for info in archive.infolist():
+                    name = os.path.basename(info.filename)
+                    if not name or info.is_dir():
+                        continue
+                    if re.fullmatch(r"singws_[0-9-]+\.log(\.[A-Za-z0-9]+)?", name) or name == "settings.json":
+                        target = os.path.join(workdir, f"{len(logs)}_{name}" if name != "settings.json" else "settings.json")
+                        with archive.open(info) as src, open(target, "wb") as dst:
+                            dst.write(src.read())
+                        if name == "settings.json":
+                            settings = target
+                        else:
+                            logs.append(target)
+        elif os.path.isfile(path):
+            logs.append(path)
+    return logs, settings
+
+
 def load(path=LEDGER):
     try:
         with open(path, encoding="utf-8") as handle:
@@ -104,7 +130,7 @@ def save(data, path=LEDGER):
 def record(data, proven, label, logs, when=None):
     """Add one session to the ledger. Returns (newly_clean, newly_bad) decision lists."""
     when = when or time.strftime("%Y-%m-%d")
-    entry = {"label": label, "date": when, "logs": sorted(os.path.basename(p) for p in logs)}
+    entry = {"label": label, "date": when, "logs": sorted(re.sub(r"^\d+_", "", os.path.basename(p)) for p in logs)}
     good, bad = [], []
     for decision, clean in sorted(proven.items()):
         row = data["decisions"].setdefault(decision, {"clean": [], "bad": []})
@@ -160,18 +186,20 @@ def main(argv=None):
         rows = status(load(args.ledger))
         print(json.dumps(rows, indent=2) if args.json else render(rows))
         return 1 if any(r["verdict"] == "REGRESSED" for r in rows) else 0
-    paths = [p for p in args.logs if os.path.isfile(p)]
+    work = tempfile.TemporaryDirectory()
+    paths, zip_settings = expand_inputs(args.logs, work.name)
     if not paths:
         print("no log file found", file=sys.stderr)
         return 2
     settings = None
     try:
-        with open(args.settings, encoding="utf-8") as handle:
+        with open(zip_settings or args.settings, encoding="utf-8") as handle:
             loaded = json.load(handle)
         settings = loaded if isinstance(loaded, dict) else None
     except (OSError, ValueError):
         settings = None
-    reports = sr.analyse(sr.read_lines(paths, last_launch_only=not args.all), settings)
+    every_launch = args.all or bool(zip_settings)   # an after_show zip holds the whole evening, usually more than one launch
+    reports = sr.analyse(sr.read_lines(paths, last_launch_only=not every_launch), settings)
     proven = decisions_proven(reports)
     data = load(args.ledger)
     good, bad = record(data, proven, args.label, paths, args.date)
