@@ -520,6 +520,13 @@ pub fn start_json(request: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// compare as JSON values: another crate in the same build may turn on key-order preservation, which changes the text but not the meaning
+    fn same_json(actual: &str, expected: &str) {
+        let a: serde_json::Value = serde_json::from_str(actual).unwrap();
+        let b: serde_json::Value = serde_json::from_str(expected).unwrap();
+        assert_eq!(a, b, "{actual} vs {expected}");
+    }
+
     fn s(v: &str) -> Info {
         Info::Str(v.into())
     }
@@ -648,13 +655,13 @@ mod tests {
     #[test]
     fn the_engine_op_is_routed_by_the_json_glue() {
         let r = start_json(r#"{"op":"engine","want_rust":true,"supports_shadow_audio":true,"engine":"running"}"#).unwrap();
-        assert_eq!(r, r#"{"reason":"","set_shadow_audio":true,"voice":true}"#);
+        same_json(&r, r#"{"reason":"","set_shadow_audio":true,"voice":true}"#);
         let r = start_json(r#"{"op":"engine","want_rust":true,"supports_shadow_audio":false,"engine":"none","voice_error":false}"#).unwrap();
-        assert_eq!(r, r#"{"reason":"bridge_unsupported","set_shadow_audio":null,"voice":false}"#);
+        same_json(&r, r#"{"reason":"bridge_unsupported","set_shadow_audio":null,"voice":false}"#);
         assert!(start_json(r#"{"op":"engine","want_rust":true}"#).is_err());
         assert!(start_json(r#"{"op":"engine","want_rust":true,"supports_shadow_audio":true,"engine":"weird"}"#).is_err());
         // the default op is still the start route
-        assert_eq!(start_json(r#"{"info":{"str":"/l/a.mp3"}}"#).unwrap(), r#"{"route":"mp3"}"#);
+        same_json(&start_json(r#"{"info":{"str":"/l/a.mp3"}}"#).unwrap(), r#"{"route":"mp3"}"#);
     }
 
     fn q(spec: &[(&str, bool)]) -> Vec<PickSinger> {
@@ -686,9 +693,9 @@ mod tests {
     #[test]
     fn the_pick_op_is_routed_by_the_json_glue_and_rejects_bad_shapes() {
         let r = start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"d"},{"songs":"sd"}]}"#).unwrap();
-        assert_eq!(r, r#"{"lock_cleared":false,"queue":[0],"singer":1,"song":1}"#, "the skipped singer went to the bottom; the picked one left the queue");
-        assert_eq!(start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"ss"}]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[0],"singer":null,"song":null}"#, "a skipped singer is not picked");
-        assert_eq!(start_json(r#"{"op":"pick","singers":[]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[],"singer":null,"song":null}"#);
+        same_json(&r, r#"{"lock_cleared":false,"queue":[0],"singer":1,"song":1}"#);
+        same_json(&start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"ss"}]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[0],"singer":null,"song":null}"#);
+        same_json(&start_json(r#"{"op":"pick","singers":[]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[],"singer":null,"song":null}"#);
         assert!(start_json(r#"{"op":"pick","singers":[{"songs":"dx"}]}"#).is_err());
         assert!(start_json(r#"{"op":"pick"}"#).is_err());
         assert!(start_json(r#"{"op":"pick","singers":[{"skipped":true}]}"#).is_err());
@@ -712,8 +719,8 @@ mod tests {
 
     #[test]
     fn the_display_op_is_routed_by_the_json_glue() {
-        assert_eq!(start_json(r#"{"op":"display","artist":"A","title":"B"}"#).unwrap(), r#"{"artist":"A","title":"B"}"#);
-        assert_eq!(start_json(r#"{"op":"display","artist":"","title":"B","fallback":"X • Y"}"#).unwrap(), r#"{"artist":"X","title":"Y"}"#);
+        same_json(&start_json(r#"{"op":"display","artist":"A","title":"B"}"#).unwrap(), r#"{"artist":"A","title":"B"}"#);
+        same_json(&start_json(r#"{"op":"display","artist":"","title":"B","fallback":"X • Y"}"#).unwrap(), r#"{"artist":"X","title":"Y"}"#);
         assert!(start_json(r#"{"op":"display","artist":"","title":""}"#).is_err());
         assert!(start_json(r#"{"op":"display","title":"B"}"#).is_err());
     }
@@ -785,7 +792,7 @@ mod tests {
     #[test]
     fn the_after_start_op_is_routed_by_the_json_glue() {
         let r = start_json(r#"{"op":"after_start","rotation_mode":true,"marker_was_top":true,"queue":[{"songs":"d","round_sung":false,"marker":false}],"singer":{"songs":"d","marker":true}}"#).unwrap();
-        assert_eq!(r, r#"{"order":[0,1],"queue":[{"has_sung":false,"marker":false,"round_sung":false},{"has_sung":true,"marker":true,"round_sung":true}]}"#);
+        same_json(&r, r#"{"order":[0,1],"queue":[{"has_sung":false,"marker":false,"round_sung":false},{"has_sung":true,"marker":true,"round_sung":true}]}"#);
         assert!(start_json(r#"{"op":"after_start","queue":[{"songs":"x"}],"singer":{"songs":"d"}}"#).is_err());
         assert!(start_json(r#"{"op":"after_start","queue":[]}"#).is_err());
     }
@@ -822,7 +829,7 @@ mod tests {
     #[test]
     fn the_reweave_op_is_routed_by_the_json_glue() {
         let r = start_json(r#"{"op":"reweave","queue":[{"active":true},{"active":true,"marker":true},{"active":true,"lock_new":true,"lock_order":3}]}"#).unwrap();
-        assert_eq!(r, r#"{"order":[0,1,2]}"#);
+        same_json(&r, r#"{"order":[0,1,2]}"#);
         assert!(start_json(r#"{"op":"reweave"}"#).is_err());
     }
 
