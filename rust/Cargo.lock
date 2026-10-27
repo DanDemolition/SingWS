@@ -2143,6 +2143,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-cdg"
+version = "0.1.0"
+
+[[package]]
 name = "singws-control"
 version = "0.1.0"
 dependencies = [
@@ -2241,6 +2245,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "serde_json",
+ "singws-cdg",
  "singws-control",
  "singws-uimodel",
 ]

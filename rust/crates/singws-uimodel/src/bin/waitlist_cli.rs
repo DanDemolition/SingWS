@@ -17,7 +17,9 @@ fn handle(r: &Value) -> Result<Value, String> {
         "sections" => {
             let names: HashSet<String> = r.get("first_time_names").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
             let (acc, loc) = (ids(r.get("accepted_ids")), ids(r.get("local_ids")));
-            let ctx = w::Context { first_time_names: &names, accepted_ids: &acc, local_ids: &loc };
+            // the accepted ids the Pending Acceptance rows use (the app: accepted minus deferred); absent = the same as `accepted_ids`
+            let pending_acc = if r.get("pending_accepted_ids").is_some() { ids(r.get("pending_accepted_ids")) } else { acc.clone() };
+            let ctx = w::Context { first_time_names: &names, accepted_ids: &acc, pending_accepted_ids: &pending_acc, local_ids: &loc };
             let pending = r.get("pending_acceptance").and_then(Value::as_array);
             let secs = w::sections(pending.map(|v| v.as_slice()), r.get("waiting").unwrap_or(&null), r.get("show_removed").and_then(Value::as_bool).unwrap_or(false), r.get("removed").unwrap_or(&null), &ctx)?;
             Ok(Value::Array(

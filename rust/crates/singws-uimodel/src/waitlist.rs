@@ -752,6 +752,9 @@ pub struct Section {
 pub struct Context<'a> {
     pub first_time_names: &'a HashSet<String>,
     pub accepted_ids: &'a HashSet<i64>,
+    /// the accepted ids the Pending Acceptance rows are judged against: the app takes the accepted set MINUS the deferred ids (a deferred add is "accepted" for the
+    /// waitlist but is exactly what the pending rows list)
+    pub pending_accepted_ids: &'a HashSet<i64>,
     pub local_ids: &'a HashSet<i64>,
 }
 
@@ -802,7 +805,7 @@ pub fn pending_acceptance_rows(pending: &[Value], ctx: &Context) -> R<Vec<Row>> 
             }
         }
         let req = Value::Object(req);
-        if ctx.accepted_ids.contains(&request_id(&req)?) {
+        if ctx.pending_accepted_ids.contains(&request_id(&req)?) {
             continue;
         }
         rows.push(build_row(&req, "pending_acceptance", false, first_time_of(ctx, &req)?)?);
@@ -854,12 +857,29 @@ pub fn sections(pending_acceptance: Option<&[Value]>, waiting: &Value, show_remo
     Ok(out)
 }
 
+/// The sections for a `waitlist_snapshot.json` the app wrote: the raw requests plus the app's own answers (`local_ids`, `accepted_ids`, `pending_accepted_ids`,
+/// `first_time_names`). `pending_acceptance` is null while the app's "deferred adds" setting is off (no such section); a missing `pending_accepted_ids` means the same
+/// ids as `accepted_ids`.
+pub fn sections_from_snapshot(snapshot: &Value) -> R<Vec<Section>> {
+    if !snapshot.is_object() {
+        return decline("the snapshot is not an object");
+    }
+    let id_set = |key: &str| -> HashSet<i64> { get(snapshot, key).as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default() };
+    let names: HashSet<String> = get(snapshot, "first_time_names").as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+    let accepted = id_set("accepted_ids");
+    let pending_accepted = if get(snapshot, "pending_accepted_ids").is_array() { id_set("pending_accepted_ids") } else { accepted.clone() };
+    let local = id_set("local_ids");
+    let ctx = Context { first_time_names: &names, accepted_ids: &accepted, pending_accepted_ids: &pending_accepted, local_ids: &local };
+    let pending = get(snapshot, "pending_acceptance").as_array();
+    sections(pending.map(|v| v.as_slice()), get(snapshot, "waiting"), get(snapshot, "show_removed").as_bool().unwrap_or(false), get(snapshot, "removed"), &ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ctx<'a>(f: &'a HashSet<String>, a: &'a HashSet<i64>, l: &'a HashSet<i64>) -> Context<'a> {
-        Context { first_time_names: f, accepted_ids: a, local_ids: l }
+        Context { first_time_names: f, accepted_ids: a, pending_accepted_ids: a, local_ids: l }
     }
 
     #[test]
@@ -1032,5 +1052,40 @@ mod tests {
         assert_eq!(splitext_ext("x.tar.gz"), ".gz");
         assert_eq!(splitext_ext("/a/..x.mp3"), ".mp3");
         assert_eq!(splitext_ext("file."), ".");
+    }
+
+    #[test]
+    fn a_snapshot_draws_waiting_pending_and_removed_sections() {
+        let snap = json!({
+            "version": 1,
+            "pending_acceptance": [{"request_id": 9, "singer": "Cy", "artist": "ABBA", "title": "SOS", "deferred_at": 1792000500}],
+            "waiting": {"5": {"request_id": 5, "singer": "Ann", "artist": "Queen", "title": "Radio", "request_time": 1792000000}, "6": {"request_id": 6, "singer": "Bo", "artist": "A", "title": "B"}},
+            "show_removed": true,
+            "removed": {"3": {"request_id": 3, "singer": "Di", "artist": "X", "title": "Y", "removed_at": 300}},
+            "local_ids": [6], "accepted_ids": [], "pending_accepted_ids": [], "first_time_names": ["Ann"]
+        });
+        let secs = sections_from_snapshot(&snap).unwrap();
+        let keys: Vec<_> = secs.iter().map(|s| (s.key, s.rows.len())).collect();
+        assert_eq!(keys, [("pending_acceptance", 1), ("waitlist", 1), ("removed", 1)]);
+        assert_eq!(secs[1].rows[0].request_id, 5);
+        assert!(secs[1].rows[0].first_time_singer);
+        assert!(!secs[0].rows[0].first_time_singer);
+    }
+
+    #[test]
+    fn accepted_waiting_requests_are_hidden_but_a_deferred_one_still_shows_as_pending() {
+        let both = json!({"pending_acceptance": [{"request_id": 7, "singer": "Ann", "artist": "A", "title": "T"}], "waiting": {"7": {"request_id": 7, "singer": "Ann", "artist": "A", "title": "T"}},
+            "removed": {}, "local_ids": [], "accepted_ids": [7], "pending_accepted_ids": [], "first_time_names": []});
+        let keys: Vec<_> = sections_from_snapshot(&both).unwrap().iter().map(|s| s.key).collect();
+        assert_eq!(keys, ["pending_acceptance"]);
+        // without `pending_accepted_ids` the pending row is judged against `accepted_ids` as well
+        let mut legacy = both.clone();
+        legacy.as_object_mut().unwrap().remove("pending_accepted_ids");
+        assert!(sections_from_snapshot(&legacy).unwrap().is_empty());
+        // no deferred-adds list (setting off): no pending section at all
+        let mut off = both.clone();
+        off["pending_acceptance"] = Value::Null;
+        assert!(sections_from_snapshot(&off).unwrap().is_empty());
+        assert!(sections_from_snapshot(&json!([1])).is_err());
     }
 }

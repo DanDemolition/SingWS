@@ -25,7 +25,10 @@ ApplicationWindow {
 
     // the audience's rotation screen in a window of its own (opened from the Rotation tab, or with --tv)
     TvWindow { id: tv }
+    // the karaoke-display DEMO (Stage E): only with --display-demo FILE.cdg; connected to nothing
+    KaraokeDisplay { id: display }
     Component.onCompleted: {
+        if (win.arg("--display-demo") !== "") display.open(win.arg("--display-demo"))
         if (win.arg("--tv") !== "") { tv.show(); if (win.arg("--tv") === "fullscreen") tv.visibility = Window.FullScreen }
     }
 
@@ -43,9 +46,9 @@ ApplicationWindow {
                 id: tabs
                 Layout.fillWidth: true
                 background: Rectangle { color: "transparent" }
-                currentIndex: ({"history": 1, "rotation": 2, "controls": 3, "music": 4, "eq": 5, "settings": 6})[win.arg("--tab")] || (parseInt(win.arg("--tab")) || 0)
+                currentIndex: ({"history": 1, "rotation": 2, "controls": 3, "music": 4, "eq": 5, "settings": 6, "ticker": 7, "waitlist": 8})[win.arg("--tab")] || (parseInt(win.arg("--tab")) || 0)
                 Repeater {
-                    model: ["Library", "Singer history", "Rotation", "Controls", "Music", "EQ", "Settings"]
+                    model: ["Library", "Singer history", "Rotation", "Controls", "Music", "EQ", "Settings", "Ticker", "Waitlist"]
                     TabButton {
                         text: modelData
                         font.pixelSize: 13
@@ -66,6 +69,8 @@ ApplicationWindow {
                 MusicPage { control: control }
                 EqPage { control: control }
                 SettingsPage {}
+                TickerPage {}
+                WaitlistPage {}
             }
         }
     }

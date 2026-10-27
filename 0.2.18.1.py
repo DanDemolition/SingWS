@@ -23,7 +23,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen, renderer_raise_script
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.2.0"
+APP_VERSION = "1.0.2.2"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -1854,6 +1854,7 @@ SINGER_PREFS_PATH = APP_USER_DIR / "singer_preferences.json"
 SINGER_HISTORY_PATH = APP_USER_DIR / "singer_history.json"
 REMOTE_REQUEST_TOMBSTONES_PATH = APP_USER_DIR / "remote_request_tombstones.json"
 WAITLIST_REMOVED_TONIGHT_PATH = APP_USER_DIR / "waitlist_removed_tonight.json"
+WAITLIST_SNAPSHOT_PATH = APP_USER_DIR / "waitlist_snapshot.json"
 DEFERRED_REMOTE_ADDS_PATH = APP_USER_DIR / "deferred_remote_adds.json"
 HOST_REQUEST_SYNC_PATH = APP_USER_DIR / "host_request_sync.json"
 IMAGES_DIR = APP_USER_DIR / "images"
@@ -4163,6 +4164,9 @@ DEFAULTS = {
     # Stage A5 shadow: at each point where play_next_file commits to a start route (external KaraFun, refusal, ZIP preparation, mp4, mp3, MP3+G, CDG+MP3) compare it with
     # the Rust singws-start rules and LOG disagreements only; the app's own route is always used and nothing extra is read from disk.
     "start_shadow": True,
+    # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
+    # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default off.
+    "waitlist_snapshot": False,
     # Stage D1 shadow: compare the settings store steps (load, DEFAULTS fill, serialize-before-save) with the Rust singws-store
     # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
     # two-architecture package gate passes. Read from the settings dict being processed.
@@ -28156,6 +28160,14 @@ class KaraokeApp(QWidget):
         # by _start_mpv_karaoke_transport; silently changing clocks/renderers
         # in the middle of a live show is no longer permitted.
         _song_memory_hook(self, "start")      # per-song memory trail ([MEMORY-SONG])
+        try:
+            _tf = object.__getattribute__(self, "__dict__").pop("_transport_shadow_facts", None)
+            _tsh = _start_shadow_for(self.settings) if _tf is not None else None
+            if _tsh is not None:
+                _tsh.check_transport(_tf, {"audio_path": audio_path, "video_path": video_path, "mode": mode, "semitones": semitones, "start_seconds": start_seconds,
+                                           "loop_seconds": loop_seconds, "duration_seconds": duration_seconds})
+        except Exception:
+            pass
         self._karaoke_played_this_session = True      # background music may resume after a song even if its Play was never pressed
         started = self._start_mpv_karaoke_transport(
             audio_path=audio_path,
@@ -28193,6 +28205,15 @@ class KaraokeApp(QWidget):
         self.preview_window.force_black = False
         self.preview_window.update()
 
+    def _stash_transport_shadow(self, kind, **args):
+        """Hand the wrapper's own arguments to the start shadow for the `_start_karaoke_transport` call that follows (compared there). Never raises."""
+        try:
+            sh = _start_shadow_for(self.settings)
+            if sh is not None:
+                object.__getattribute__(self, "__dict__")["_transport_shadow_facts"] = sh.transport_facts(kind, **args)
+        except Exception:
+            pass
+
     def _play_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
         self._prepare_karaoke_start(song_path)
@@ -28212,6 +28233,7 @@ class KaraokeApp(QWidget):
             )
         except Exception:
             pass
+        self._stash_transport_shadow("mp4", song=song_path, semitones=semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
         return self._start_karaoke_transport(
             audio_path=song_path,
             video_path=song_path,
@@ -28234,6 +28256,7 @@ class KaraokeApp(QWidget):
             SingWSLogger.log_playback_start("CDG", cdg_path, semitones, current_singer, duration)
         except Exception:
             pass
+        self._stash_transport_shadow("cdg", cdg=cdg_path, mp3=mp3_path, semitones=semitones, start_seconds=start_seconds, loop_seconds=loop_seconds, duration_seconds=duration_seconds)
         started = self._start_karaoke_transport(
             audio_path=mp3_path,
             video_path=cdg_path,
@@ -28261,6 +28284,7 @@ class KaraokeApp(QWidget):
         self._prepare_karaoke_start(song_path)
         self._current_karaoke_mode = "mp3"
         self._current_karaoke_semitones = int(semitones or 0)
+        self._stash_transport_shadow("mp3", song=song_path, semitones=semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
         return self._start_karaoke_transport(
             audio_path=song_path,
             video_path=None,
@@ -30223,6 +30247,15 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
+    def _shadow_performance(self, event, action, **observed):
+        """Tell the start shadow what was just done with the pending performance record (`event` None = a caller the rule does not model). Never raises."""
+        try:
+            sh = _start_shadow_for(self.settings) if event else None
+            if sh is not None:
+                sh.check_performance(event, action, **observed)
+        except Exception:
+            pass
+
     @_perf_timed("ui_songend_commit_performance")
     def _commit_pending_performance(self, reason: str = "song_completed") -> bool:
         """Record the song that just finished as actually performed.
@@ -30237,10 +30270,13 @@ class KaraokeApp(QWidget):
             return False
         pending = state.pop("_pending_performance", None)
         if not isinstance(pending, dict):
+            self._shadow_performance("media_end" if reason == "song_completed" else None, "none")
             return False
         request_id = pending.get("remote_request_id")
+        _completed = _recorded = False
         if request_id is not None:
             try:
+                _completed = True
                 self._complete_remote_request(
                     request_id,
                     entry=pending.get("entry"),
@@ -30250,6 +30286,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
         try:
+            _recorded = True
             self._record_singer_history_play(
                 str(pending.get("singer_name") or ""),
                 pending.get("entry"),
@@ -30261,6 +30298,7 @@ class KaraokeApp(QWidget):
             self._sync_singer_history_async(reason)
         except Exception:
             pass
+        self._shadow_performance("media_end" if reason == "song_completed" else None, "commit", has_request_id=request_id is not None, complete_remote=_completed, record_history=_recorded, reason=reason)
         _diag(
             f"[PERFORMANCE] recorded reason={reason} "
             f"singer={str(pending.get('singer_name') or '')!r} request_id={request_id}"
@@ -30276,9 +30314,11 @@ class KaraokeApp(QWidget):
             return False
         pending = state.pop("_pending_performance", None)
         if not isinstance(pending, dict):
+            self._shadow_performance("stop" if reason == "stop_playback" else None, "none", reason="")
             return False
         singer_name = str(pending.get("singer_name") or "")
         request_id = pending.get("remote_request_id")
+        _tombstone_reason = ""
         _diag(
             f"[PERFORMANCE] not recorded reason={reason} "
             f"singer={singer_name!r} request_id={request_id}"
@@ -30291,14 +30331,17 @@ class KaraokeApp(QWidget):
         # singer is still free to request it again from their phone.
         try:
             if request_id is not None:
+                _tombstone_reason = f"host_stopped:{reason}"
                 self._delete_remote_request(
                     request_id,
                     entry=pending.get("entry"),
                     singer_name=singer_name,
-                    reason=f"host_stopped:{reason}",
+                    reason=_tombstone_reason,
                 )
         except Exception as e:
             _diag(f"[PERFORMANCE] could not retire request {request_id}: {e}")
+        self._shadow_performance("stop" if reason == "stop_playback" else None, "discard", has_request_id=request_id is not None, tombstone=bool(_tombstone_reason),
+                                 reason=reason, tombstone_reason=_tombstone_reason)
         return True
 
     @_perf_timed("ui_songend_cleanup")
@@ -33263,6 +33306,13 @@ class KaraokeApp(QWidget):
             effective_start = float(self._mp3g_pending_start.get(str(zip_path), 0.0))
         effective_loop = loop_seconds or self._mp3g_pending_loop.get(str(zip_path))
         effective_duration = float(duration_seconds or self._mp3g_pending_duration.get(str(zip_path), 0.0) or 0.0)
+        try:
+            _zsh = _start_shadow_for(self.settings)
+            if _zsh is not None:
+                _zsh.check_zip_args(_zsh.zip_facts(start_seconds, loop_seconds, duration_seconds, self._mp3g_pending_start.get(str(zip_path)), self._mp3g_pending_loop.get(str(zip_path)),
+                                                   self._mp3g_pending_duration.get(str(zip_path))), (effective_start, effective_loop, effective_duration))
+        except Exception:
+            pass
         # Cached ZIPs can start immediately; uncached extraction happens in a
         # worker so Python zipfile or fallback `unzip` cannot freeze the GUI.
         cdg_path, mp3_path = self.zip_cache.cached_paths_if_ready(zip_path)
@@ -34599,6 +34649,96 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _waitlist_snapshot_payload(self) -> dict:
+        """What the Rust shell's Waitlist page needs to draw the same sections as `_waiting_for_add_sections`: the raw requests plus the answers only the app can give
+        (which requests are already in the queue, which singers have not sung tonight). Request dicts pass through JSON as they are."""
+        state = object.__getattribute__(self, "__dict__")
+        waiting = state.get("_waiting_for_add_requests", {})
+        if not isinstance(waiting, dict):
+            waiting = {}
+        removed = state.get("_waiting_for_add_removed_tonight", {})
+        if not isinstance(removed, dict):
+            removed = {}
+        pending = None
+        if self._pending_acceptance_enabled():
+            pending = [dict(x) if isinstance(x, dict) else x for x in (state.get("_deferred_remote_adds", []) or [])]
+        try:
+            local_ids = sorted(int(v) for v in (self._queue_remote_request_ids() or []))
+        except Exception:
+            local_ids = []
+        identity_sets = self._accepted_request_identity_sets()
+        try:
+            deferred_ids = self._deferred_remote_request_ids()
+        except Exception:
+            deferred_ids = set()
+        # like `_waiting_for_add_sections`: the Pending Acceptance rows judge against the accepted ids MINUS the deferred ones
+        pending_identity_sets = (set(identity_sets[0]) - set(deferred_ids), identity_sets[1], identity_sets[2])
+        accepted = set()
+        pending_accepted = set()
+        names = set()
+
+        def note(req, sets, into):
+            try:
+                rid = int(self._waiting_for_add_request_id(req))
+            except Exception:
+                rid = 0
+            if rid > 0 and self._request_matches_accepted_queue_item(req, identity_sets=sets):
+                into.add(rid)
+            singer = str(req.get("singer") or "")
+            if singer and self._is_first_time_waitlist_singer(singer):
+                names.add(singer)
+
+        for req in list(waiting.values()) + list(removed.values()):
+            if isinstance(req, dict):
+                note(req, identity_sets, accepted)
+        for item in pending or []:
+            if isinstance(item, dict):
+                # the request `_pending_acceptance_rows` builds from a deferred add (its id and singer, when the meta lacks them)
+                req = dict(item.get("remote_meta") or {})
+                try:
+                    req.setdefault("request_id", int(item.get("request_id") or 0))
+                except Exception:
+                    pass
+                if not req.get("singer"):
+                    req["singer"] = item.get("singer")
+                note(req, pending_identity_sets, pending_accepted)
+        payload = {
+            "version": 1,
+            "pending_acceptance": pending,
+            "waiting": waiting,
+            "show_removed": bool(state.get("_waiting_for_add_show_removed", False)),
+            "removed": removed,
+            "local_ids": local_ids,
+            "accepted_ids": sorted(accepted),
+            "pending_accepted_ids": sorted(pending_accepted),
+            "first_time_names": sorted(names),
+        }
+        return json.loads(json.dumps(payload, default=str))
+
+    def _write_waitlist_snapshot(self) -> bool:
+        """Write `waitlist_snapshot.json` (atomic, unchanged content is skipped by `_save_json_atomic`'s digest). Never raises."""
+        try:
+            if not bool((getattr(self, "settings", None) or {}).get("waitlist_snapshot", False)):
+                return False
+            _save_json_atomic(WAITLIST_SNAPSHOT_PATH, self._waitlist_snapshot_payload())
+            return True
+        except Exception as exc:
+            _diag(f"[WAITLIST-SNAPSHOT] write failed: {exc!r}")
+            return False
+
+    def _schedule_waitlist_snapshot(self) -> None:
+        """Coalesce the snapshot writes that follow one burst of changes into one; a no-op while the setting is off."""
+        if not bool((getattr(self, "settings", None) or {}).get("waitlist_snapshot", False)):
+            return
+        state = object.__getattribute__(self, "__dict__")
+        timer = state.get("_waitlist_snapshot_timer")
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._write_waitlist_snapshot)
+            self._waitlist_snapshot_timer = timer
+        timer.start(250)
+
     def _schedule_waiting_for_add_view_refresh(self, delay_ms: int | None = None, *, reason: str = "coalesced"):
         try:
             app = QApplication.instance()
@@ -34614,6 +34754,10 @@ class KaraokeApp(QWidget):
             return
         try:
             self._update_waiting_for_add_nav_state()
+        except Exception:
+            pass
+        try:
+            self._schedule_waitlist_snapshot()
         except Exception:
             pass
         if state.get("waiting_for_add_list") is None:
@@ -60497,6 +60641,16 @@ class KaraokeApp(QWidget):
         singer_display = duet_display if duet_display else singer.get("name", "")
         singer_id = self._ensure_singer_id(singer)
         request_id = self._ensure_queue_entry_id(entry)
+        _confirm_shadow, _confirm_facts = None, None
+        try:
+            _confirm_shadow = _start_shadow_for(self.settings)
+            if _confirm_shadow is not None:
+                _confirm_facts = _confirm_shadow.confirmed_facts(singer.get("name", ""), duet_display, current_song_dur, song_info,
+                                                                 str(entry.get("artist") or "") if isinstance(entry, dict) else "",
+                                                                 str(entry.get("title") or "") if isinstance(entry, dict) else "", _display_fallback,
+                                                                 command_source, singer_id, request_id, remote_request_id, key, tempo_percent)
+        except Exception:
+            _confirm_facts = None
 
         # start_ok means asynchronous preroll was accepted, not that sound has
         # started. Commit every visible/active identity and rotation mutation
@@ -60544,6 +60698,8 @@ class KaraokeApp(QWidget):
                     f"singer={str(singer_display or '')!r}"
                 )
                 return
+            _seen_ctx = getattr(self, "_pending_play_start_context", None)             # for the start shadow, before they are cleared
+            _seen_countdown = getattr(self, "_pending_playback_countdown_payload", None)
             self._pending_play_start_token = None
             self._pending_play_start_rollback = None
             self._pending_playback_countdown_payload = None
@@ -60627,6 +60783,13 @@ class KaraokeApp(QWidget):
             # media end; stop_playback discards it on a host stop, skip or
             # removal. Duplicate protection is unaffected: the request stays
             # 'active', which already blocks re-adding while it is queued.
+            _leftover = False
+            try:
+                _leftover = isinstance(object.__getattribute__(self, "__dict__").get("_pending_performance"), dict)
+                if _confirm_shadow is not None and _leftover:
+                    _confirm_shadow.note("pending_performance_overwritten", "(a song was still pending its sung / not-sung decision when the next one was confirmed; its record is replaced)")
+            except Exception:
+                pass
             try:
                 self._pending_performance = {
                     "remote_request_id": remote_request_id,
@@ -60638,6 +60801,28 @@ class KaraokeApp(QWidget):
                 }
             except Exception:
                 self._pending_performance = None
+            try:
+                if isinstance(self._pending_performance, dict):
+                    self._shadow_performance("confirmed", "overwritten" if _leftover else "set")
+            except Exception:
+                pass
+            try:
+                if _confirm_facts is not None:
+                    _seen = {"singer_name": self._current_karaoke_singer_name, "singer_display": self._current_karaoke_singer_display, "eta_hold": self._eta_hold_current_secs,
+                             "song_path": self._current_karaoke_song_path, "artist": self._current_karaoke_artist, "title": self._current_karaoke_title,
+                             "singer_id": self._current_karaoke_singer_id, "request_id": self._current_karaoke_request_id}
+                    if isinstance(_seen_ctx, dict) and isinstance(_seen_ctx.get("payload"), dict):
+                        _seen.update({"command_source": _seen_ctx.get("command_source"), "ctx_singer": _seen_ctx["payload"].get("singer"), "ctx_artist": _seen_ctx["payload"].get("artist"),
+                                      "ctx_title": _seen_ctx["payload"].get("title")})
+                    if isinstance(_seen_countdown, dict):
+                        _seen.update({"countdown_singer": _seen_countdown.get("singer"), "countdown_artist": _seen_countdown.get("artist"), "countdown_title": _seen_countdown.get("title")})
+                    if isinstance(self._pending_performance, dict):
+                        _pp = self._pending_performance
+                        _seen.update({"perf_singer_name": _pp.get("singer_name"), "perf_request_id": _pp.get("remote_request_id"), "perf_song_path": _pp.get("song_path"),
+                                      "perf_key": _pp.get("key"), "perf_tempo": _pp.get("tempo_percent")})
+                    _confirm_shadow.check_confirmed(_confirm_facts, _seen)
+            except Exception:
+                pass
             try:
                 self._send_stage_notifications_for_transition(singer_display or singer.get("name", ""))
             except Exception:

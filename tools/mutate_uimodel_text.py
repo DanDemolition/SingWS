@@ -200,6 +200,7 @@ MUTANTS = {
         ("wait_rows.sort_by(|a, b| cmp_key(&a.order, &b.order));", "", None),
         ("let lead = base.len() - base.trim_start_matches('.').len();", "let lead = 0;", None),
         ("if c == b'_' {\n                    if !(i > 0 && i + 1 < b.len()", "if false {\n                    if !(i > 0 && i + 1 < b.len()", None),
+        ('if ctx.pending_accepted_ids.contains(&request_id(&req)?) {', 'if ctx.accepted_ids.contains(&request_id(&req)?) {', None),
     ],
 }
 

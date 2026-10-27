@@ -103,6 +103,16 @@ Rank 20, size S each as QML; zero parity risk, all judged by eye (`--snapshot`).
 
 Not planned: phrase start (dead), library locations from remote (operator decision), duplicate manager (file moves; keep local and supervised), KaraFun automation dialogs.
 
+## 3b. Shell pages ported since (2026-10-27)
+
+| Page | Source of its data | Rules | Checked by |
+|---|---|---|---|
+| **Ticker** (tab 8, read-only) | `queue.json` + `settings.json` (`ticker_custom_*`) in the profile, reloaded every 3 s | `singws-uimodel::ticker::view` (equal to the app's ticker text: `tools/ticker_parity.py`) | `ticker_panel` unit tests, `test_shell_panels.py` (draws, broken/missing queue), screenshot. Limit: the app's "now singing" parts are not on disk, so a custom message that uses them reads as if nobody is singing |
+
+| **Waitlist** (tab 9, read-only) | `waitlist_snapshot.json`, written by the Python app (setting `waitlist_snapshot`, **default off**) whenever its waiting-for-add view would refresh (coalesced, 250 ms), reloaded by the page every 3 s | `singws-uimodel::waitlist::sections_from_snapshot` (equal to the app's `_waiting_for_add_sections`: `tools/waitlist_parity.py`) | `test_waitlist_snapshot.py` (250 random states through the REAL app methods vs the Rust CLI, row text included; setting off writes nothing; coalescing; write failure and hook failure never reach the app; the app never reads the file), `waitlist_panel` unit tests, `test_shell_panels.py`, screenshot |
+
+How the snapshot works: the app's requests are plain JSON (`waiting`, `removed`, `pending_acceptance` = the deferred adds, null while "defer adds" is off) plus the answers only the app can give: `local_ids` (already in the queue), `accepted_ids` (the waitlist hides these), `pending_accepted_ids` (the Pending Acceptance rows hide these: the app's accepted set MINUS the deferred ids, so a deferred add that is also still waiting shows only as pending) and `first_time_names`. The shell never writes the file and the app never reads it. The status line says how old the snapshot is and calls it stale after two minutes (app closed, or the setting turned off). Turn it on by setting `"waitlist_snapshot": true` in the app's settings.json.
+
 ## 4. Built in this change
 
 Three modules in `rust/crates/singws-uimodel` (toolkit-free, no Qt, read-only), each with a CLI, unit tests, a differential parity tool and a mutation pass:
