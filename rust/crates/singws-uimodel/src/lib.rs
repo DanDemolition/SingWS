@@ -5,6 +5,7 @@
 
 pub mod eq_view;
 pub mod fuzzy;
+pub mod header;
 pub mod hero;
 pub mod history;
 pub mod music;
