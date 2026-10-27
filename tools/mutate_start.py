@@ -135,6 +135,32 @@ M = [
     ('let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;', 'let t = transport_args(&kind, &text("song"), &text("mp3"), &text("cdg"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;', None),
     ('let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;', 'let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("duration"), num("loop")).ok_or("unknown kind")?;', None),
     ('zip_args(num("start"), num("loop"), num("duration"), num("pend_start"), num("pend_loop"), num("pend_duration"))', 'zip_args(num("start"), num("loop"), num("duration"), num("pend_loop"), num("pend_start"), num("pend_duration"))', None),
+    # ---- the confirmed-start payload
+    ('        _ => name.map(str::to_string),\n    };', '        _ => None,\n    };', None),
+    ('        Some(d) if !d.is_empty() => Some(d.to_string()),', '        Some(d) => Some(d.to_string()),', None),
+    ('        Some(d) if !d.is_empty() => Some(d.to_string()),', '        Some(_) => name.map(str::to_string),', None),
+    ('        perf_singer_name: if singer_name.is_empty() { display_raw.clone() } else { Some(singer_name.clone()) },', '        perf_singer_name: display_raw.clone(),', None),
+    ('        perf_singer_name: if singer_name.is_empty() { display_raw.clone() } else { Some(singer_name.clone()) },', '        perf_singer_name: Some(singer_name.clone()),', None),
+    ('        perf_singer_name: if singer_name.is_empty() { display_raw.clone() } else { Some(singer_name.clone()) },', '        perf_singer_name: if singer_name.is_empty() { None } else { Some(singer_name.clone()) },', None),
+    ('        singer_display: display_raw.unwrap_or_default(),', '        singer_display: singer_name.clone(),', None),
+    ('        eta_hold: duration.max(0),', '        eta_hold: duration,', None),
+    ('        eta_hold: duration.max(0),', '        eta_hold: duration.max(1),', None),
+    ('        Info::Seq(items) => items.first()?.text().to_string(),', '        Info::Seq(items) => items.last()?.text().to_string(),', None),
+    ('        countdown_artist: py_strip(entry_artist).to_string(),', '        countdown_artist: artist.clone(),', None),
+    ('        countdown_artist: py_strip(entry_artist).to_string(),', '        countdown_artist: entry_artist.to_string(),', None),
+    ('        countdown_title: py_strip(entry_title).to_string(),', '        countdown_title: title.clone(),', None),
+    ('        countdown_title: py_strip(entry_title).to_string(),', '        countdown_title: entry_title.to_string(),', None),
+    ('            Some(c) if !c.is_empty() => c.to_string(),\n            _ => "internal".to_string(),', '            Some(c) => c.to_string(),\n            _ => "internal".to_string(),', None),
+    ('            _ => "internal".to_string(),', '            _ => "manual".to_string(),', None),
+    ('    let singer_name = name.unwrap_or("").to_string();', '    let singer_name = name.unwrap_or("x").to_string();', None),
+    ('"singer_id": echo("singer_id"), "request_id": echo("request_id"),', '"singer_id": echo("request_id"), "request_id": echo("singer_id"),', None),
+    ('"perf_request_id": echo("remote_request_id"), "perf_song_path": c.song_path, "perf_key": echo("key"), "perf_tempo": echo("tempo_percent"),', '"perf_request_id": echo("request_id"), "perf_song_path": c.song_path, "perf_key": echo("key"), "perf_tempo": echo("tempo_percent"),', None),
+    ('"perf_key": echo("key"), "perf_tempo": echo("tempo_percent"),', '"perf_key": echo("tempo_percent"), "perf_tempo": echo("key"),', None),
+    ('"ctx_singer": c.singer_display, "ctx_artist": c.artist, "ctx_title": c.title,', '"ctx_singer": c.singer_name, "ctx_artist": c.artist, "ctx_title": c.title,', None),
+    ('"ctx_artist": c.artist, "ctx_title": c.title,', '"ctx_artist": c.title, "ctx_title": c.artist,', None),
+    ('"countdown_singer": c.singer_display,', '"countdown_singer": c.singer_name,', None),
+    ('"perf_song_path": c.song_path,', '"perf_song_path": c.title,', None),
+    ('"song_path": c.song_path, "artist": c.artist, "title": c.title,\n            "singer_id"', '"song_path": c.song_path, "artist": c.title, "title": c.artist,\n            "singer_id"', None),
 ]
 
 
@@ -146,7 +172,7 @@ def differential():
     b = subprocess.run(["cargo", "build", "--release", "-p", "singws-dsp-ffi", "--quiet"], cwd=ROOT / "rust", env=ENV, capture_output=True, text=True)
     if b.returncode != 0:
         return 1  # does not compile: counts as caught
-    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
+    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_start_shadow_confirmed", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
 
 
 def main():

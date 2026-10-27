@@ -470,6 +470,58 @@ pub fn display_payload(entry_artist: &str, entry_title: &str, fallback: Option<&
 }
 
 
+/// What `play_next_file` publishes for the song that started (the "immutable display payload" plus the bookkeeping around it), derived from the singer, the entry and the song
+/// that was picked. Every field is a decision the app makes in `_commit_pending_start`, the pending start context or the pending performance record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Confirmed {
+    /// `str(singer.get("name") or "")`
+    pub singer_name: String,
+    /// `str(singer_display or "")`, where `singer_display` is the duet display when it is not empty, else the singer's name
+    pub singer_display: String,
+    /// `max(0, int(current_song_dur or 0))`
+    pub eta_hold: i64,
+    /// `str(song_path_display or "")`: the text path itself, or the first element of a tuple/list entry
+    pub song_path: String,
+    pub artist: String,
+    pub title: String,
+    /// the countdown payload's artist and title: the ENTRY's own, stripped, with no library fallback
+    pub countdown_artist: String,
+    pub countdown_title: String,
+    /// `str(command_source or "internal")`
+    pub command_source: String,
+    /// the pending performance record's `singer_name`: the singer's name, else the (raw) singer display, which is `None` when the singer has no name and no duet display
+    pub perf_singer_name: Option<String>,
+}
+
+pub fn confirmed(name: Option<&str>, duet: Option<&str>, duration: i64, info: &Info, entry_artist: &str, entry_title: &str, fallback: Option<&str>, command_source: Option<&str>) -> Option<Confirmed> {
+    let singer_name = name.unwrap_or("").to_string();
+    let display_raw: Option<String> = match duet {
+        Some(d) if !d.is_empty() => Some(d.to_string()),
+        _ => name.map(str::to_string),
+    };
+    let song_path = match info {
+        Info::Str(p) => p.clone(),
+        Info::Seq(items) => items.first()?.text().to_string(),
+        Info::Other(_) => return None,
+    };
+    let (artist, title) = display_payload(entry_artist, entry_title, fallback)?;
+    Some(Confirmed {
+        perf_singer_name: if singer_name.is_empty() { display_raw.clone() } else { Some(singer_name.clone()) },
+        singer_display: display_raw.unwrap_or_default(),
+        singer_name,
+        eta_hold: duration.max(0),
+        song_path,
+        artist,
+        title,
+        countdown_artist: py_strip(entry_artist).to_string(),
+        countdown_title: py_strip(entry_title).to_string(),
+        command_source: match command_source {
+            Some(c) if !c.is_empty() => c.to_string(),
+            _ => "internal".to_string(),
+        },
+    })
+}
+
 /// What reaches `_start_karaoke_transport` for each wrapper (`_play_mp4`, `_play_cdg`, `_play_mp3`): which path is the audio and which the picture, the mode name, the key as a
 /// whole number (`int(semitones or 0)`), and which of start / loop / duration the wrapper forwards. `_play_mp4` forwards no duration, `_play_mp3` forwards neither loop nor
 /// duration (the transport's defaults, `None`, apply), `_play_cdg` forwards all three.
@@ -532,6 +584,29 @@ pub fn start_json(request: &str) -> Result<String, String> {
         let fallback = text("fallback");
         let (artist, title) = display_payload(&a, &t, fallback.as_deref()).ok_or("the display name is needed but was not given")?;
         return Ok(serde_json::json!({"artist": artist, "title": title}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("confirmed") {
+        let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+        let info: Info = serde_json::from_value(v.get("info").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        let c = confirmed(
+            text("name").as_deref(),
+            text("duet").as_deref(),
+            v.get("duration").and_then(serde_json::Value::as_i64).ok_or("duration is required")?,
+            &info,
+            &text("artist").ok_or("artist is required")?,
+            &text("title").ok_or("title is required")?,
+            text("fallback").as_deref(),
+            text("command_source").as_deref(),
+        )
+        .ok_or("the song path or the display name is missing")?;
+        let echo = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        return Ok(serde_json::json!({
+            "singer_name": c.singer_name, "singer_display": c.singer_display, "eta_hold": c.eta_hold, "song_path": c.song_path, "artist": c.artist, "title": c.title,
+            "singer_id": echo("singer_id"), "request_id": echo("request_id"),
+            "command_source": c.command_source, "ctx_singer": c.singer_display, "ctx_artist": c.artist, "ctx_title": c.title,
+            "countdown_singer": c.singer_display, "countdown_artist": c.countdown_artist, "countdown_title": c.countdown_title,
+            "perf_singer_name": c.perf_singer_name, "perf_request_id": echo("remote_request_id"), "perf_song_path": c.song_path, "perf_key": echo("key"), "perf_tempo": echo("tempo_percent"),
+        }).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("transport") {
         let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
@@ -927,6 +1002,50 @@ mod tests {
         assert!(start_json(r#"{"op":"transport","kind":"mp3"}"#).is_err());
         let r = start_json(r#"{"op":"zip_args","start":0,"pend_start":4.5,"duration":null,"pend_duration":120}"#).unwrap();
         assert_eq!(r, r#"{"duration_seconds":120.0,"loop_seconds":null,"start_seconds":4.5}"#);
+    }
+
+    #[test]
+    fn the_confirmed_start_publishes_the_duet_display_else_the_name() {
+        let info = Info::Str("/l/a.mp4".into());
+        let c = confirmed(Some("Dana"), Some("Dana & Lee"), 215, &info, " A ", "T", None, Some("web")).unwrap();
+        assert_eq!((c.singer_name.as_str(), c.singer_display.as_str(), c.eta_hold, c.song_path.as_str()), ("Dana", "Dana & Lee", 215, "/l/a.mp4"));
+        assert_eq!((c.artist.as_str(), c.title.as_str(), c.countdown_artist.as_str(), c.command_source.as_str()), ("A", "T", "A", "web"));
+        assert_eq!(c.perf_singer_name.as_deref(), Some("Dana"), "the performance record keeps the singer's own name");
+        let c = confirmed(Some("Dana"), Some(""), -5, &info, "", "", Some("Artist \u{2022} Title"), None).unwrap();
+        assert_eq!((c.singer_display.as_str(), c.eta_hold, c.command_source.as_str()), ("Dana", 0, "internal"), "an empty duet display is ignored; a negative duration is clamped; no source means internal");
+        assert_eq!((c.countdown_artist.as_str(), c.countdown_title.as_str()), ("", ""), "the countdown never takes the library fallback");
+    }
+
+    #[test]
+    fn a_singer_with_no_name_is_recorded_under_the_duet_display_or_nothing() {
+        let info = Info::Str("/l/a.mp3".into());
+        let c = confirmed(Some(""), Some("The Duo"), 1, &info, "A", "T", None, None).unwrap();
+        assert_eq!((c.singer_name.as_str(), c.singer_display.as_str(), c.perf_singer_name.as_deref()), ("", "The Duo", Some("The Duo")));
+        let c = confirmed(Some(""), None, 1, &info, "A", "T", None, None).unwrap();
+        assert_eq!(c.perf_singer_name.as_deref(), Some(""));
+        let c = confirmed(None, None, 1, &info, "A", "T", None, None).unwrap();
+        assert_eq!((c.singer_name.as_str(), c.singer_display.as_str(), c.perf_singer_name), ("", "", None), "a singer record whose name is null leaves the performance without a name (the app later reads it as empty)");
+    }
+
+    #[test]
+    fn the_song_path_is_the_text_or_the_first_element_of_the_older_shapes() {
+        let at = |info: Info| confirmed(Some("D"), None, 1, &info, "A", "T", None, None).map(|c| c.song_path);
+        assert_eq!(at(Info::Str("/l/a.zip".into())).as_deref(), Some("/l/a.zip"));
+        assert_eq!(at(Info::Seq(vec![Item::S("/l/a.cdg".into()), Item::S("/l/a.mp3".into())])).as_deref(), Some("/l/a.cdg"));
+        assert_eq!(at(Info::Seq(vec![Item::O("<obj>".into())])).as_deref(), Some("<obj>"));
+        assert!(at(Info::Seq(vec![])).is_none() && at(Info::Other(true)).is_none());
+        assert!(confirmed(Some("D"), None, 1, &Info::Str("x".into()), "", "T", None, None).is_none(), "a display name is needed when the entry has no artist");
+    }
+
+    #[test]
+    fn the_confirmed_op_echoes_ids_and_the_record_values() {
+        let r = start_json(r#"{"op":"confirmed","name":"Dana","duet":null,"duration":90,"info":{"str":"/l/a.mp3"},"artist":"A","title":"T","command_source":null,
+            "singer_id":"sid","request_id":"rid","remote_request_id":7,"key":-2,"tempo_percent":null}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!((v["singer_id"].as_str(), v["request_id"].as_str(), v["perf_request_id"].as_i64(), v["perf_key"].as_i64(), v["command_source"].as_str()), (Some("sid"), Some("rid"), Some(7), Some(-2), Some("internal")));
+        assert!(v["perf_tempo"].is_null());
+        assert_eq!((v["ctx_singer"].as_str(), v["countdown_singer"].as_str(), v["eta_hold"].as_i64()), (Some("Dana"), Some("Dana"), Some(90)));
+        assert!(start_json(r#"{"op":"confirmed","name":"D","duration":1,"info":{"other":true},"artist":"A","title":"T"}"#).is_err());
     }
 
     #[test]

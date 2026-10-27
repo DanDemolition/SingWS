@@ -60524,6 +60524,16 @@ class KaraokeApp(QWidget):
         singer_display = duet_display if duet_display else singer.get("name", "")
         singer_id = self._ensure_singer_id(singer)
         request_id = self._ensure_queue_entry_id(entry)
+        _confirm_shadow, _confirm_facts = None, None
+        try:
+            _confirm_shadow = _start_shadow_for(self.settings)
+            if _confirm_shadow is not None:
+                _confirm_facts = _confirm_shadow.confirmed_facts(singer.get("name", ""), duet_display, current_song_dur, song_info,
+                                                                 str(entry.get("artist") or "") if isinstance(entry, dict) else "",
+                                                                 str(entry.get("title") or "") if isinstance(entry, dict) else "", _display_fallback,
+                                                                 command_source, singer_id, request_id, remote_request_id, key, tempo_percent)
+        except Exception:
+            _confirm_facts = None
 
         # start_ok means asynchronous preroll was accepted, not that sound has
         # started. Commit every visible/active identity and rotation mutation
@@ -60571,6 +60581,8 @@ class KaraokeApp(QWidget):
                     f"singer={str(singer_display or '')!r}"
                 )
                 return
+            _seen_ctx = getattr(self, "_pending_play_start_context", None)             # for the start shadow, before they are cleared
+            _seen_countdown = getattr(self, "_pending_playback_countdown_payload", None)
             self._pending_play_start_token = None
             self._pending_play_start_rollback = None
             self._pending_playback_countdown_payload = None
@@ -60655,6 +60667,11 @@ class KaraokeApp(QWidget):
             # removal. Duplicate protection is unaffected: the request stays
             # 'active', which already blocks re-adding while it is queued.
             try:
+                if _confirm_shadow is not None and isinstance(object.__getattribute__(self, "__dict__").get("_pending_performance"), dict):
+                    _confirm_shadow.note("pending_performance_overwritten", "(a song was still pending its sung / not-sung decision when the next one was confirmed; its record is replaced)")
+            except Exception:
+                pass
+            try:
                 self._pending_performance = {
                     "remote_request_id": remote_request_id,
                     "singer_name": str(singer.get("name", "") or "") or singer_display,
@@ -60665,6 +60682,23 @@ class KaraokeApp(QWidget):
                 }
             except Exception:
                 self._pending_performance = None
+            try:
+                if _confirm_facts is not None:
+                    _seen = {"singer_name": self._current_karaoke_singer_name, "singer_display": self._current_karaoke_singer_display, "eta_hold": self._eta_hold_current_secs,
+                             "song_path": self._current_karaoke_song_path, "artist": self._current_karaoke_artist, "title": self._current_karaoke_title,
+                             "singer_id": self._current_karaoke_singer_id, "request_id": self._current_karaoke_request_id}
+                    if isinstance(_seen_ctx, dict) and isinstance(_seen_ctx.get("payload"), dict):
+                        _seen.update({"command_source": _seen_ctx.get("command_source"), "ctx_singer": _seen_ctx["payload"].get("singer"), "ctx_artist": _seen_ctx["payload"].get("artist"),
+                                      "ctx_title": _seen_ctx["payload"].get("title")})
+                    if isinstance(_seen_countdown, dict):
+                        _seen.update({"countdown_singer": _seen_countdown.get("singer"), "countdown_artist": _seen_countdown.get("artist"), "countdown_title": _seen_countdown.get("title")})
+                    if isinstance(self._pending_performance, dict):
+                        _pp = self._pending_performance
+                        _seen.update({"perf_singer_name": _pp.get("singer_name"), "perf_request_id": _pp.get("remote_request_id"), "perf_song_path": _pp.get("song_path"),
+                                      "perf_key": _pp.get("key"), "perf_tempo": _pp.get("tempo_percent")})
+                    _confirm_shadow.check_confirmed(_confirm_facts, _seen)
+            except Exception:
+                pass
             try:
                 self._send_stage_notifications_for_transition(singer_display or singer.get("name", ""))
             except Exception:

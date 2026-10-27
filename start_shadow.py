@@ -186,6 +186,22 @@ class StartShadow:
             self._say(f"check_zip_args error: {exc!r}")
             return None
 
+    def check_confirmed(self, req, observed):
+        """Compare what the app published once a started song was confirmed (`observed`: any of the keys Rust answers: singer_name, singer_display, eta_hold, song_path, artist, title,
+        singer_id, request_id, command_source, ctx_*, countdown_*, perf_*) with Rust's answer for `req` (from :func:`confirmed_facts`). Only the keys the app could read are compared.
+        Never raises; returns agree, or None when skipped."""
+        try:
+            if not self.available or req is None or not observed:
+                return None
+            got = self._ask(req, _OUT_CAP * 8)
+            if got is None:
+                return None
+            want = dict(observed)
+            return self._verdict("confirmed", all(k in got and got[k] == v for k, v in want.items()), want, {k: got.get(k) for k in want}, {k: v for k, v in req.items() if k != "op"})
+        except Exception as exc:
+            self._say(f"check_confirmed error: {exc!r}")
+            return None
+
     def reweave_order(self, queue):
         """Rust's new order (indices into `queue`) for the rotation lock's reweave, or None when it cannot answer."""
         try:
@@ -418,6 +434,34 @@ def zip_facts(start_seconds, loop_seconds, duration_seconds, pend_start, pend_lo
 
 StartShadow.transport_facts = staticmethod(transport_facts)
 StartShadow.zip_facts = staticmethod(zip_facts)
+
+
+def confirmed_facts(name, duet, duration, song_info, entry_artist, entry_title, fallback, command_source, singer_id, request_id, remote_request_id, key, tempo_percent):
+    """The request for the payload `play_next_file` publishes once a started song is confirmed, or None for anything the rule does not model (a name, duet display or command source
+    that is neither text nor None, a duration that is not a whole number, a song path that is not text / too long for the shadow, ids that are not text, values that are not JSON)."""
+    try:
+        for x in (name, duet, command_source):
+            if x is not None and not isinstance(x, str):
+                return None
+        if isinstance(duration, bool) or not isinstance(duration, int) or not isinstance(singer_id, str) or not isinstance(request_id, str):
+            return None
+        info = info_request(song_info)
+        if "other" in info or ("seq" in info and not info["seq"]):
+            return None
+        first = info["str"] if "str" in info else (info["seq"][0].get("s") if "s" in info["seq"][0] else info["seq"][0]["o"])
+        if len(first) >= _TEXT_CAP:
+            return None
+        req = {"op": "confirmed", "name": name, "duet": duet, "duration": duration, "info": info, "artist": str(entry_artist), "title": str(entry_title),
+               "command_source": command_source, "singer_id": singer_id, "request_id": request_id, "remote_request_id": remote_request_id, "key": key, "tempo_percent": tempo_percent}
+        if fallback is not None:
+            req["fallback"] = str(fallback)
+        json.dumps(req, allow_nan=False)
+        return req
+    except Exception:
+        return None
+
+
+StartShadow.confirmed_facts = staticmethod(confirmed_facts)
 
 
 def reweave_facts(queue):

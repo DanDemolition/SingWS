@@ -64,6 +64,18 @@ with Rust's answer on entry; a direct call with no wrapper in front of it is sim
 Only plain finite numbers and text are modelled; anything else is skipped, never reported. Tested against the REAL chain (`play_next_file` -> `play_*` -> transport recorder) over
 300 random starts, and `play_mp3g_zip` over 400 random calls/stashes (`test_start_shadow_transport.py`); mutation-tested (27 mutants, one documented equivalent).
 
+## Step 7 (built): what is published when a started song is confirmed (`confirmed`, `"op":"confirmed"`)
+`_commit_pending_start` runs when the transport's `started` signal arrives. Besides the rotation flags (step 5) and the artist/title (step 4) it publishes: the singer card name
+(`singer_display` = the duet display when it is not empty, else the name; the plain `singer_name` is kept separately), the ETA hold (`max(0, duration)`), the song path (the text
+path, or the first element of an older tuple/list entry), the singer and request ids, the start context's `command_source` (`internal` when empty), the countdown payload (which
+uses the ENTRY's artist/title, stripped, with no library fallback, unlike the published artist/title) and the **pending performance record** (`singer_name`, remote request id,
+song path, key, tempo preset). One quirk is copied: the record's `singer_name` is the singer's own name, else the raw singer display, which is **null** for a singer record whose
+name is null and that has no duet display.
+The app builds the facts when the start is validated (`confirmed_facts`), snapshots the start context and countdown payload at the top of the commit (before they are cleared), and
+after the record is stored compares every value it can read (current-singer attributes, context, countdown, record) with Rust's answer. Values the rule does not model (a name that is
+not text, a duration that is not a whole number, a path of 4096+ characters, values that are not JSON) are skipped. Tested against the REAL `play_next_file` and its commit over 500
+random starts (`test_start_shadow_confirmed.py`) and mutation-tested (25 mutants).
+It also notes `NOTE pending_performance_overwritten` when a confirmed start finds the previous song's record still stored (nothing committed or discarded it): see step 8.
+
 ## Next steps (not built)
-3. Confirmed-start bookkeeping (what is published to the screen and the server once the transport accepts).
-4. Only after steps 1-3 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.
+3. Only after steps 1-3 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.
