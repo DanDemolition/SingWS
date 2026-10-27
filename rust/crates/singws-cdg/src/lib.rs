@@ -295,6 +295,69 @@ pub fn side_fill_color(rgba: &[u8], width: usize, height: usize) -> (u8, u8, u8)
     best.map_or((0, 0, 0), |b| b.0)
 }
 
+/// How the app's display window lays the 300x216 picture into the window (`cdg_display_mode`): `Fit` on black, `SideFill` on the picture's own
+/// edge colour, `Stretch` to the whole window. (`blur` is not ported: it needs Qt's smooth scaling.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DisplayMode {
+    Fit,
+    SideFill,
+    Stretch,
+}
+
+/// Qt's `QSize::scaled(KeepAspectRatio)`: integer truncation, width first.
+pub fn fit_size(iw: usize, ih: usize, w: usize, h: usize) -> (usize, usize) {
+    let rw = h as u64 * iw as u64 / ih as u64;
+    if rw <= w as u64 { (rw as usize, h) } else { (w, (w as u64 * ih as u64 / iw as u64) as usize) }
+}
+
+/// Qt's `QImage::scaled(.., FastTransformation)` for an upscale: nearest neighbour in 16.16 fixed point, step = floor(65536*src/dst), starting
+/// half a step in. Verified identical to Qt on 8 window sizes (see tools/cdg_display_parity.py).
+pub fn scale_nearest(src: &[u8], iw: usize, ih: usize, w: usize, h: usize) -> Vec<u8> {
+    let axis = |n: usize, d: usize| -> Vec<usize> {
+        let step = (65536 * n) / d;
+        (0..d).map(|i| (((step / 2) + i * step) >> 16).min(n - 1)).collect()
+    };
+    let (xs, ys) = (axis(iw, w), axis(ih, h));
+    let mut out = Vec::with_capacity(w * h * 4);
+    for &sy in &ys {
+        for &sx in &xs {
+            let o = (sy * iw + sx) * 4;
+            out.extend_from_slice(&src[o..o + 4]);
+        }
+    }
+    out
+}
+
+/// The picture as the display window draws it: `frame` (300x216 RGBA, already cleaned if the app cleans it) scaled and centred in a
+/// `win_w` x `win_h` opaque RGBA window. Source-over compositing; exact for alpha 0 and 255 (the decoder's only values unless
+/// DEFINE_TRANSPARENT is used), rounded for in-between alphas.
+pub fn compose(frame: &[u8], win_w: usize, win_h: usize, mode: DisplayMode) -> Vec<u8> {
+    let (iw, ih) = (WIDTH, HEIGHT);
+    let (sw, sh) = if mode == DisplayMode::Stretch { (win_w, win_h) } else { fit_size(iw, ih, win_w, win_h) };
+    let bg = if mode == DisplayMode::SideFill { side_fill_color(frame, iw, ih) } else { (0, 0, 0) };
+    let scaled = scale_nearest(frame, iw, ih, sw, sh);
+    let mut out = Vec::with_capacity(win_w * win_h * 4);
+    for _ in 0..win_w * win_h {
+        out.extend_from_slice(&[bg.0, bg.1, bg.2, 255]);
+    }
+    let (x0, y0) = ((win_w - sw) / 2, (win_h - sh) / 2);
+    for y in 0..sh {
+        for x in 0..sw {
+            let s = &scaled[(y * sw + x) * 4..][..4];
+            let d = ((y0 + y) * win_w + x0 + x) * 4;
+            let a = s[3] as u32;
+            if a == 255 {
+                out[d..d + 3].copy_from_slice(&s[..3]);
+            } else if a > 0 {
+                for c in 0..3 {
+                    out[d + c] = ((s[c] as u32 * a + out[d + c] as u32 * (255 - a) + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A whole CDG file with seek by time.
 pub struct CdgPlayer {
     data: Vec<u8>,

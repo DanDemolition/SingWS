@@ -6,7 +6,8 @@ Needs PyQt6 + numpy (the main checkout's .venv/bin/python). QT_QPA_PLATFORM=offs
 import ast, os, subprocess, sys, tempfile
 from pathlib import Path
 import numpy as np
-from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtGui import QColor, QImage, QPainter
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -56,6 +57,29 @@ def main():
             n += 1
             if (col.red(), col.green(), col.blue()) != tuple(sides[i * 3:i * 3 + 3]):
                 bad += 1; print("SIDEFILL DIFF", f.name, i)
+    # layout + nearest scaling + compositing, against Qt itself (QImage.scaled FastTransformation, QPainter on an opaque window image)
+    for f in files[:6]:
+        raw = run(f)
+        count = len(raw) // c.FRAME
+        for (ww, wh) in ((1280, 720), (1920, 1080), (1000, 500), (901, 333), (500, 400), (300, 216)):
+            for mode in ("fit", "sidefill", "stretch"):
+                out = run(f, "--compose", f"{ww}x{wh}:{mode}")
+                size = ww * wh * 4
+                for i in range(0, count, 53):
+                    fr = raw[i * c.FRAME:(i + 1) * c.FRAME]
+                    if any(fr[k] not in (0, 255) for k in range(3, c.FRAME, 4)):
+                        continue  # in-between alphas: Rust rounds its own way
+                    img = QImage(fr, 300, 216, 1200, QImage.Format.Format_RGBA8888).copy()
+                    aspect = Qt.AspectRatioMode.IgnoreAspectRatio if mode == "stretch" else Qt.AspectRatioMode.KeepAspectRatio
+                    sc = img.scaled(QSize(ww, wh), aspect, Qt.TransformationMode.FastTransformation)
+                    dst = QImage(ww, wh, QImage.Format.Format_ARGB32_Premultiplied)
+                    dst.fill(side(img) if mode == "sidefill" else QColor("black"))
+                    pt = QPainter(dst); pt.drawImage((ww - sc.width()) // 2, (wh - sc.height()) // 2, sc); pt.end()
+                    ref = dst.convertToFormat(QImage.Format.Format_RGBA8888)
+                    ptr = ref.constBits(); ptr.setsize(ref.sizeInBytes())
+                    n += 1
+                    if bytes(ptr)[:size] != out[i * size:(i + 1) * size]:
+                        bad += 1; print("COMPOSE DIFF", f.name, i, ww, wh, mode)
     print(f"{n} comparisons, {bad} differences")
     return 1 if bad else 0
 
