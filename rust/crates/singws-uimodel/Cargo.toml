@@ -36,3 +36,19 @@ path = "src/bin/music_cli.rs"
 [[bin]]
 name = "singws-eq-cli"
 path = "src/bin/eq_cli.rs"
+
+[[bin]]
+name = "singws-ticker-cli"
+path = "src/bin/ticker_cli.rs"
+
+[[bin]]
+name = "singws-waitlist-cli"
+path = "src/bin/waitlist_cli.rs"
+
+[[bin]]
+name = "singws-hero-cli"
+path = "src/bin/hero_cli.rs"
+
+[[bin]]
+name = "singws-header-cli"
+path = "src/bin/header_cli.rs"

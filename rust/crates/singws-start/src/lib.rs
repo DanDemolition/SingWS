@@ -469,6 +469,203 @@ pub fn display_payload(entry_artist: &str, entry_title: &str, fallback: Option<&
     })
 }
 
+
+/// What `play_next_file` publishes for the song that started (the "immutable display payload" plus the bookkeeping around it), derived from the singer, the entry and the song
+/// that was picked. Every field is a decision the app makes in `_commit_pending_start`, the pending start context or the pending performance record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Confirmed {
+    /// `str(singer.get("name") or "")`
+    pub singer_name: String,
+    /// `str(singer_display or "")`, where `singer_display` is the duet display when it is not empty, else the singer's name
+    pub singer_display: String,
+    /// `max(0, int(current_song_dur or 0))`
+    pub eta_hold: i64,
+    /// `str(song_path_display or "")`: the text path itself, or the first element of a tuple/list entry
+    pub song_path: String,
+    pub artist: String,
+    pub title: String,
+    /// the countdown payload's artist and title: the ENTRY's own, stripped, with no library fallback
+    pub countdown_artist: String,
+    pub countdown_title: String,
+    /// `str(command_source or "internal")`
+    pub command_source: String,
+    /// the pending performance record's `singer_name`: the singer's name, else the (raw) singer display, which is `None` when the singer has no name and no duet display
+    pub perf_singer_name: Option<String>,
+}
+
+pub fn confirmed(name: Option<&str>, duet: Option<&str>, duration: i64, info: &Info, entry_artist: &str, entry_title: &str, fallback: Option<&str>, command_source: Option<&str>) -> Option<Confirmed> {
+    let singer_name = name.unwrap_or("").to_string();
+    let display_raw: Option<String> = match duet {
+        Some(d) if !d.is_empty() => Some(d.to_string()),
+        _ => name.map(str::to_string),
+    };
+    let song_path = match info {
+        Info::Str(p) => p.clone(),
+        Info::Seq(items) => items.first()?.text().to_string(),
+        Info::Other(_) => return None,
+    };
+    let (artist, title) = display_payload(entry_artist, entry_title, fallback)?;
+    Some(Confirmed {
+        perf_singer_name: if singer_name.is_empty() { display_raw.clone() } else { Some(singer_name.clone()) },
+        singer_display: display_raw.unwrap_or_default(),
+        singer_name,
+        eta_hold: duration.max(0),
+        song_path,
+        artist,
+        title,
+        countdown_artist: py_strip(entry_artist).to_string(),
+        countdown_title: py_strip(entry_title).to_string(),
+        command_source: match command_source {
+            Some(c) if !c.is_empty() => c.to_string(),
+            _ => "internal".to_string(),
+        },
+    })
+}
+
+/// What happens to the pending performance record (the "sung" decision) at each event of a song's life. A song is stored when its start is confirmed; a real media end commits it
+/// (the request is completed on the server when it has a remote id, the play goes into the singer history); a stop of any kind (the Stop button, a skip, a removal, closing the
+/// app: all of them go through `stop_playback`) discards it, which tombstones the request on the server when it has a remote id and records nothing; and `_finish_media_end_cleanup`
+/// commits BEFORE it stops, so a stop that follows a media end finds nothing to discard. An event with nothing stored changes nothing. Storing over a record that is still pending
+/// replaces it without committing or discarding it (`overwritten`): the rule reports it, it does not endorse it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerfStep {
+    pub action: &'static str,
+    pub pending: bool,
+    pub complete_remote: bool,
+    pub record_history: bool,
+    pub tombstone: bool,
+    pub reason: &'static str,
+    pub tombstone_reason: &'static str,
+}
+
+pub fn performance_step(pending: bool, event: &str, has_request_id: bool) -> Option<PerfStep> {
+    let none = |pending: bool| PerfStep { action: "none", pending, complete_remote: false, record_history: false, tombstone: false, reason: "", tombstone_reason: "" };
+    Some(match (event, pending) {
+        ("confirmed", false) => PerfStep { action: "set", pending: true, ..none(true) },
+        ("confirmed", true) => PerfStep { action: "overwritten", pending: true, ..none(true) },
+        ("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: true, reason: "song_completed", ..none(false) },
+        ("stop", true) => PerfStep { action: "discard", pending: false, tombstone: has_request_id, reason: "stop_playback", tombstone_reason: if has_request_id { "host_stopped:stop_playback" } else { "" }, ..none(false) },
+        ("media_end" | "stop", false) => none(false),
+        _ => return None,
+    })
+}
+
+/// What reaches `_start_karaoke_transport` for each wrapper (`_play_mp4`, `_play_cdg`, `_play_mp3`): which path is the audio and which the picture, the mode name, the key as a
+/// whole number (`int(semitones or 0)`), and which of start / loop / duration the wrapper forwards. `_play_mp4` forwards no duration, `_play_mp3` forwards neither loop nor
+/// duration (the transport's defaults, `None`, apply), `_play_cdg` forwards all three.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransportArgs {
+    pub audio_path: String,
+    pub video_path: Option<String>,
+    pub mode: &'static str,
+    pub semitones: i64,
+    pub start_seconds: Option<f64>,
+    pub loop_seconds: Option<f64>,
+    pub duration_seconds: Option<f64>,
+}
+
+pub fn transport_args(kind: &str, song: &str, cdg: &str, mp3: &str, semitones: f64, start: Option<f64>, loop_s: Option<f64>, duration: Option<f64>) -> Option<TransportArgs> {
+    let key = semitones.trunc() as i64;
+    Some(match kind {
+        "mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: None },
+        "cdg" => TransportArgs { audio_path: mp3.into(), video_path: Some(cdg.into()), mode: "cdg", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: duration },
+        "mp3" => TransportArgs { audio_path: song.into(), video_path: None, mode: "audio", semitones: key, start_seconds: start, loop_seconds: None, duration_seconds: None },
+        _ => return None,
+    })
+}
+
+/// Python truthiness of an optional number: `None` and zero are falsy.
+fn truthy(x: Option<f64>) -> bool {
+    matches!(x, Some(v) if v != 0.0)
+}
+
+/// `play_mp3g_zip` merges what the caller passed with what an earlier, not yet extracted call stashed for the same ZIP: the start offset when the caller's is not positive, the loop
+/// and the duration when the caller's is falsy. The duration always becomes a float (0.0 when nothing is known).
+pub fn zip_args(start: Option<f64>, loop_s: Option<f64>, duration: Option<f64>, pend_start: Option<f64>, pend_loop: Option<f64>, pend_duration: Option<f64>) -> (f64, Option<f64>, f64) {
+    let mut eff_start = if truthy(start) { start.unwrap_or(0.0) } else { 0.0 };
+    if eff_start <= 0.0 {
+        eff_start = pend_start.unwrap_or(0.0);
+    }
+    let eff_loop = if truthy(loop_s) { loop_s } else { pend_loop };
+    let eff_duration = if truthy(duration) {
+        duration.unwrap_or(0.0)
+    } else if truthy(pend_duration) {
+        pend_duration.unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    (eff_start, eff_loop, eff_duration)
+}
+
+/// The facts about the first playable song of one singer that the whole start plan needs (everything `route`, `engine_route`, `transport_args` and `display_payload` read).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PlanEntry {
+    pub route: Input,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// the primary path (mp4, mp3 or the ZIP's own path), the CDG picture and the MP3 audio of a CDG start
+    #[serde(default)]
+    pub song: String,
+    #[serde(default)]
+    pub cdg: String,
+    #[serde(default)]
+    pub mp3: String,
+    #[serde(default)]
+    pub semitones: f64,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default, rename = "loop")]
+    pub loop_s: Option<f64>,
+    #[serde(default)]
+    pub duration: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PlanSinger {
+    #[serde(flatten)]
+    pub pick: PickSinger,
+    /// the facts of this singer's first playable song; only the picked singer's are read
+    #[serde(default)]
+    pub entry: Option<PlanEntry>,
+}
+
+/// The whole start plan: who is picked (with the queue after the loop), the route of their song, who plays the sound, the transport arguments and the published artist and title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plan {
+    pub pick: Pick,
+    /// `None` when nobody is picked, the picked singer has no playable song, or the entry's facts were not supplied
+    pub route: Option<String>,
+    pub engine: Option<EngineAnswer>,
+    pub transport: Option<TransportArgs>,
+    pub display: Option<(String, String)>,
+}
+
+/// The rules of steps 1-6 in the order `play_next_file` applies them. Nothing is decided here that a single rule does not already decide: this only chains them, so a
+/// disagreement with the real start is a disagreement in the ORDER of the rules. A route that does not start a song (a rejection, a ZIP still being prepared, an error)
+/// has no engine, transport or display part.
+pub fn start_plan(singers: &[PlanSinger], rotation_mode: bool, setting_locked: bool, engine: Option<&EngineInput>) -> Plan {
+    let picks: Vec<PickSinger> = singers.iter().map(|s| s.pick.clone()).collect();
+    let pick = pick_loop(&picks, rotation_mode, setting_locked);
+    let mut plan = Plan { pick, route: None, engine: None, transport: None, display: None };
+    let Some(entry) = plan.pick.singer.and_then(|i| if plan.pick.song.is_some() { singers[i].entry.as_ref() } else { None }) else { return plan };
+    let r = route(&entry.route);
+    plan.route = Some(r.name());
+    let kind = match r {
+        Route::Mp4 => "mp4",
+        Route::Mp3 => "mp3",
+        Route::CdgMp3Dual | Route::Mp3gZip => "cdg",
+        _ => return plan,
+    };
+    plan.engine = engine.map(engine_route);
+    plan.transport = transport_args(kind, &entry.song, &entry.cdg, &entry.mp3, entry.semitones, entry.start, entry.loop_s, entry.duration);
+    plan.display = display_payload(&entry.artist, &entry.title, entry.fallback.as_deref());
+    plan
+}
+
 /// JSON in, JSON out. `{"op":"engine", ...}` is an [`EngineInput`] and answers `{"voice":..,"reason":"..","set_shadow_audio":null|bool}`; anything else is an
 /// [`Input`] (the start route) and answers `{"route":"<name>"}`.
 pub fn start_json(request: &str) -> Result<String, String> {
@@ -484,6 +681,50 @@ pub fn start_json(request: &str) -> Result<String, String> {
         let fallback = text("fallback");
         let (artist, title) = display_payload(&a, &t, fallback.as_deref()).ok_or("the display name is needed but was not given")?;
         return Ok(serde_json::json!({"artist": artist, "title": title}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("confirmed") {
+        let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+        let info: Info = serde_json::from_value(v.get("info").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        let c = confirmed(
+            text("name").as_deref(),
+            text("duet").as_deref(),
+            v.get("duration").and_then(serde_json::Value::as_i64).ok_or("duration is required")?,
+            &info,
+            &text("artist").ok_or("artist is required")?,
+            &text("title").ok_or("title is required")?,
+            text("fallback").as_deref(),
+            text("command_source").as_deref(),
+        )
+        .ok_or("the song path or the display name is missing")?;
+        let echo = |k: &str| v.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        return Ok(serde_json::json!({
+            "singer_name": c.singer_name, "singer_display": c.singer_display, "eta_hold": c.eta_hold, "song_path": c.song_path, "artist": c.artist, "title": c.title,
+            "singer_id": echo("singer_id"), "request_id": echo("request_id"),
+            "command_source": c.command_source, "ctx_singer": c.singer_display, "ctx_artist": c.artist, "ctx_title": c.title,
+            "countdown_singer": c.singer_display, "countdown_artist": c.countdown_artist, "countdown_title": c.countdown_title,
+            "perf_singer_name": c.perf_singer_name, "perf_request_id": echo("remote_request_id"), "perf_song_path": c.song_path, "perf_key": echo("key"), "perf_tempo": echo("tempo_percent"),
+        }).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("performance") {
+        let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let event = v.get("event").and_then(serde_json::Value::as_str).ok_or("event is required")?;
+        let p = performance_step(flag("pending"), event, flag("has_request_id")).ok_or("unknown event")?;
+        return Ok(serde_json::json!({"action": p.action, "pending": p.pending, "complete_remote": p.complete_remote, "record_history": p.record_history, "tombstone": p.tombstone,
+            "reason": p.reason, "tombstone_reason": p.tombstone_reason}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("transport") {
+        let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        let num = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+        let kind = text("kind");
+        let key = num("semitones").ok_or("semitones is required")?;
+        let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;
+        return Ok(serde_json::json!({"audio_path": t.audio_path, "video_path": t.video_path, "mode": t.mode, "semitones": t.semitones,
+            "start_seconds": t.start_seconds, "loop_seconds": t.loop_seconds, "duration_seconds": t.duration_seconds}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("zip_args") {
+        let num = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+        let (s, l, d) = zip_args(num("start"), num("loop"), num("duration"), num("pend_start"), num("pend_loop"), num("pend_duration"));
+        return Ok(serde_json::json!({"start_seconds": s, "loop_seconds": l, "duration_seconds": d}).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("after_start") {
         let queue: Vec<RotSinger> = serde_json::from_value(v.get("queue").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
@@ -503,6 +744,26 @@ pub fn start_json(request: &str) -> Result<String, String> {
         let q: Vec<LockSinger> = serde_json::from_value(v.get("queue").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
         return Ok(serde_json::json!({"order": reweave(&q)}).to_string());
     }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("plan") {
+        let singers: Vec<PlanSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        if singers.iter().any(|s| s.pick.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'))) {
+            return Err("songs may only contain d, s and t".into());
+        }
+        let engine: Option<EngineInput> = match v.get("engine") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(e) => Some(serde_json::from_value(e.clone()).map_err(|e| e.to_string())?),
+        };
+        let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let p = start_plan(&singers, flag("rotation_mode"), flag("setting_locked"), engine.as_ref());
+        let t = p.transport.as_ref().map(|t| serde_json::json!({"audio_path": t.audio_path, "video_path": t.video_path, "mode": t.mode, "semitones": t.semitones, "start_seconds": t.start_seconds, "loop_seconds": t.loop_seconds, "duration_seconds": t.duration_seconds}));
+        return Ok(serde_json::json!({
+            "singer": p.pick.singer, "song": p.pick.song, "queue": p.pick.queue, "lock_cleared": p.pick.lock_cleared,
+            "route": p.route,
+            "engine": p.engine.as_ref().map(|e| serde_json::json!({"voice": e.voice, "reason": e.reason, "set_shadow_audio": e.set_shadow_audio})),
+            "transport": t,
+            "display": p.display.as_ref().map(|(a, b)| serde_json::json!({"artist": a, "title": b})),
+        }).to_string());
+    }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("pick") {
         let singers: Vec<PickSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
         if singers.iter().any(|s| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'))) {
@@ -519,6 +780,13 @@ pub fn start_json(request: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// compare as JSON values: another crate in the same build may turn on key-order preservation, which changes the text but not the meaning
+    fn same_json(actual: &str, expected: &str) {
+        let a: serde_json::Value = serde_json::from_str(actual).unwrap();
+        let b: serde_json::Value = serde_json::from_str(expected).unwrap();
+        assert_eq!(a, b, "{actual} vs {expected}");
+    }
 
     fn s(v: &str) -> Info {
         Info::Str(v.into())
@@ -648,13 +916,13 @@ mod tests {
     #[test]
     fn the_engine_op_is_routed_by_the_json_glue() {
         let r = start_json(r#"{"op":"engine","want_rust":true,"supports_shadow_audio":true,"engine":"running"}"#).unwrap();
-        assert_eq!(r, r#"{"reason":"","set_shadow_audio":true,"voice":true}"#);
+        same_json(&r, r#"{"reason":"","set_shadow_audio":true,"voice":true}"#);
         let r = start_json(r#"{"op":"engine","want_rust":true,"supports_shadow_audio":false,"engine":"none","voice_error":false}"#).unwrap();
-        assert_eq!(r, r#"{"reason":"bridge_unsupported","set_shadow_audio":null,"voice":false}"#);
+        same_json(&r, r#"{"reason":"bridge_unsupported","set_shadow_audio":null,"voice":false}"#);
         assert!(start_json(r#"{"op":"engine","want_rust":true}"#).is_err());
         assert!(start_json(r#"{"op":"engine","want_rust":true,"supports_shadow_audio":true,"engine":"weird"}"#).is_err());
         // the default op is still the start route
-        assert_eq!(start_json(r#"{"info":{"str":"/l/a.mp3"}}"#).unwrap(), r#"{"route":"mp3"}"#);
+        same_json(&start_json(r#"{"info":{"str":"/l/a.mp3"}}"#).unwrap(), r#"{"route":"mp3"}"#);
     }
 
     fn q(spec: &[(&str, bool)]) -> Vec<PickSinger> {
@@ -686,9 +954,9 @@ mod tests {
     #[test]
     fn the_pick_op_is_routed_by_the_json_glue_and_rejects_bad_shapes() {
         let r = start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"d"},{"songs":"sd"}]}"#).unwrap();
-        assert_eq!(r, r#"{"lock_cleared":false,"queue":[0],"singer":1,"song":1}"#, "the skipped singer went to the bottom; the picked one left the queue");
-        assert_eq!(start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"ss"}]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[0],"singer":null,"song":null}"#, "a skipped singer is not picked");
-        assert_eq!(start_json(r#"{"op":"pick","singers":[]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[],"singer":null,"song":null}"#);
+        same_json(&r, r#"{"lock_cleared":false,"queue":[0],"singer":1,"song":1}"#);
+        same_json(&start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"ss"}]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[0],"singer":null,"song":null}"#);
+        same_json(&start_json(r#"{"op":"pick","singers":[]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[],"singer":null,"song":null}"#);
         assert!(start_json(r#"{"op":"pick","singers":[{"songs":"dx"}]}"#).is_err());
         assert!(start_json(r#"{"op":"pick"}"#).is_err());
         assert!(start_json(r#"{"op":"pick","singers":[{"skipped":true}]}"#).is_err());
@@ -712,8 +980,8 @@ mod tests {
 
     #[test]
     fn the_display_op_is_routed_by_the_json_glue() {
-        assert_eq!(start_json(r#"{"op":"display","artist":"A","title":"B"}"#).unwrap(), r#"{"artist":"A","title":"B"}"#);
-        assert_eq!(start_json(r#"{"op":"display","artist":"","title":"B","fallback":"X • Y"}"#).unwrap(), r#"{"artist":"X","title":"Y"}"#);
+        same_json(&start_json(r#"{"op":"display","artist":"A","title":"B"}"#).unwrap(), r#"{"artist":"A","title":"B"}"#);
+        same_json(&start_json(r#"{"op":"display","artist":"","title":"B","fallback":"X • Y"}"#).unwrap(), r#"{"artist":"X","title":"Y"}"#);
         assert!(start_json(r#"{"op":"display","artist":"","title":""}"#).is_err());
         assert!(start_json(r#"{"op":"display","title":"B"}"#).is_err());
     }
@@ -785,7 +1053,7 @@ mod tests {
     #[test]
     fn the_after_start_op_is_routed_by_the_json_glue() {
         let r = start_json(r#"{"op":"after_start","rotation_mode":true,"marker_was_top":true,"queue":[{"songs":"d","round_sung":false,"marker":false}],"singer":{"songs":"d","marker":true}}"#).unwrap();
-        assert_eq!(r, r#"{"order":[0,1],"queue":[{"has_sung":false,"marker":false,"round_sung":false},{"has_sung":true,"marker":true,"round_sung":true}]}"#);
+        same_json(&r, r#"{"order":[0,1],"queue":[{"has_sung":false,"marker":false,"round_sung":false},{"has_sung":true,"marker":true,"round_sung":true}]}"#);
         assert!(start_json(r#"{"op":"after_start","queue":[{"songs":"x"}],"singer":{"songs":"d"}}"#).is_err());
         assert!(start_json(r#"{"op":"after_start","queue":[]}"#).is_err());
     }
@@ -822,8 +1090,133 @@ mod tests {
     #[test]
     fn the_reweave_op_is_routed_by_the_json_glue() {
         let r = start_json(r#"{"op":"reweave","queue":[{"active":true},{"active":true,"marker":true},{"active":true,"lock_new":true,"lock_order":3}]}"#).unwrap();
-        assert_eq!(r, r#"{"order":[0,1,2]}"#);
+        same_json(&r, r#"{"order":[0,1,2]}"#);
         assert!(start_json(r#"{"op":"reweave"}"#).is_err());
+    }
+
+    #[test]
+    fn each_wrapper_forwards_its_own_arguments_to_the_transport() {
+        let t = transport_args("mp4", "/l/a.mp4", "", "", 2.0, Some(1.5), Some(4.0), Some(99.0)).unwrap();
+        assert_eq!((t.audio_path.as_str(), t.video_path.as_deref(), t.mode, t.semitones), ("/l/a.mp4", Some("/l/a.mp4"), "mp4", 2));
+        assert_eq!((t.start_seconds, t.loop_seconds, t.duration_seconds), (Some(1.5), Some(4.0), None), "mp4 forwards no duration");
+        let t = transport_args("cdg", "", "/l/a.cdg", "/l/a.mp3", -3.0, Some(0.0), None, Some(200.0)).unwrap();
+        assert_eq!((t.audio_path.as_str(), t.video_path.as_deref(), t.mode, t.semitones), ("/l/a.mp3", Some("/l/a.cdg"), "cdg", -3));
+        assert_eq!((t.start_seconds, t.loop_seconds, t.duration_seconds), (Some(0.0), None, Some(200.0)), "the picture is the cdg, the sound the mp3, duration is forwarded");
+        let t = transport_args("mp3", "/l/a.mp3", "", "", 0.0, Some(7.0), Some(4.0), Some(99.0)).unwrap();
+        assert_eq!((t.video_path.as_deref(), t.mode), (None, "audio"));
+        assert_eq!((t.start_seconds, t.loop_seconds, t.duration_seconds), (Some(7.0), None, None), "mp3 drops loop and duration");
+        assert!(transport_args("zip", "", "", "", 0.0, None, None, None).is_none());
+    }
+
+    #[test]
+    fn the_key_is_truncated_toward_zero_like_pythons_int() {
+        for (k, want) in [(2.9, 2), (-2.9, -2), (0.0, 0), (-0.5, 0), (12.0, 12)] {
+            assert_eq!(transport_args("mp3", "a", "", "", k, None, None, None).unwrap().semitones, want, "{k}");
+        }
+    }
+
+    #[test]
+    fn the_zip_remembers_what_an_earlier_call_stashed_for_it() {
+        assert_eq!(zip_args(Some(3.0), Some(2.0), Some(180.0), Some(9.0), Some(8.0), Some(7.0)), (3.0, Some(2.0), 180.0), "the caller's values win when set");
+        assert_eq!(zip_args(Some(0.0), None, None, Some(9.0), Some(8.0), Some(7.0)), (9.0, Some(8.0), 7.0), "zero / none fall back to the stash");
+        assert_eq!(zip_args(Some(-1.0), Some(0.0), Some(0.0), None, None, None), (0.0, None, 0.0), "a negative start is not kept; nothing stashed means zero / none / 0.0");
+        assert_eq!(zip_args(None, Some(0.0), None, Some(0.0), Some(0.0), None), (0.0, Some(0.0), 0.0), "the stash is returned as is, even a falsy loop");
+    }
+
+    #[test]
+    fn the_transport_ops_are_routed_by_the_json_glue() {
+        let r = start_json(r#"{"op":"transport","kind":"cdg","cdg":"/a.cdg","mp3":"/a.mp3","semitones":2,"start":1.5,"duration":200}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!((v["mode"].as_str(), v["audio_path"].as_str(), v["video_path"].as_str(), v["semitones"].as_i64()), (Some("cdg"), Some("/a.mp3"), Some("/a.cdg"), Some(2)));
+        assert!(v["loop_seconds"].is_null());
+        assert!(start_json(r#"{"op":"transport","kind":"zip","semitones":0}"#).is_err());
+        assert!(start_json(r#"{"op":"transport","kind":"mp3"}"#).is_err());
+        let r = start_json(r#"{"op":"zip_args","start":0,"pend_start":4.5,"duration":null,"pend_duration":120}"#).unwrap();
+        assert_eq!(r, r#"{"duration_seconds":120.0,"loop_seconds":null,"start_seconds":4.5}"#);
+    }
+
+    #[test]
+    fn the_confirmed_start_publishes_the_duet_display_else_the_name() {
+        let info = Info::Str("/l/a.mp4".into());
+        let c = confirmed(Some("Dana"), Some("Dana & Lee"), 215, &info, " A ", "T", None, Some("web")).unwrap();
+        assert_eq!((c.singer_name.as_str(), c.singer_display.as_str(), c.eta_hold, c.song_path.as_str()), ("Dana", "Dana & Lee", 215, "/l/a.mp4"));
+        assert_eq!((c.artist.as_str(), c.title.as_str(), c.countdown_artist.as_str(), c.command_source.as_str()), ("A", "T", "A", "web"));
+        assert_eq!(c.perf_singer_name.as_deref(), Some("Dana"), "the performance record keeps the singer's own name");
+        let c = confirmed(Some("Dana"), Some(""), -5, &info, "", "", Some("Artist \u{2022} Title"), None).unwrap();
+        assert_eq!((c.singer_display.as_str(), c.eta_hold, c.command_source.as_str()), ("Dana", 0, "internal"), "an empty duet display is ignored; a negative duration is clamped; no source means internal");
+        assert_eq!((c.countdown_artist.as_str(), c.countdown_title.as_str()), ("", ""), "the countdown never takes the library fallback");
+    }
+
+    #[test]
+    fn a_singer_with_no_name_is_recorded_under_the_duet_display_or_nothing() {
+        let info = Info::Str("/l/a.mp3".into());
+        let c = confirmed(Some(""), Some("The Duo"), 1, &info, "A", "T", None, None).unwrap();
+        assert_eq!((c.singer_name.as_str(), c.singer_display.as_str(), c.perf_singer_name.as_deref()), ("", "The Duo", Some("The Duo")));
+        let c = confirmed(Some(""), None, 1, &info, "A", "T", None, None).unwrap();
+        assert_eq!(c.perf_singer_name.as_deref(), Some(""));
+        let c = confirmed(None, None, 1, &info, "A", "T", None, None).unwrap();
+        assert_eq!((c.singer_name.as_str(), c.singer_display.as_str(), c.perf_singer_name), ("", "", None), "a singer record whose name is null leaves the performance without a name (the app later reads it as empty)");
+    }
+
+    #[test]
+    fn the_song_path_is_the_text_or_the_first_element_of_the_older_shapes() {
+        let at = |info: Info| confirmed(Some("D"), None, 1, &info, "A", "T", None, None).map(|c| c.song_path);
+        assert_eq!(at(Info::Str("/l/a.zip".into())).as_deref(), Some("/l/a.zip"));
+        assert_eq!(at(Info::Seq(vec![Item::S("/l/a.cdg".into()), Item::S("/l/a.mp3".into())])).as_deref(), Some("/l/a.cdg"));
+        assert_eq!(at(Info::Seq(vec![Item::O("<obj>".into())])).as_deref(), Some("<obj>"));
+        assert!(at(Info::Seq(vec![])).is_none() && at(Info::Other(true)).is_none());
+        assert!(confirmed(Some("D"), None, 1, &Info::Str("x".into()), "", "T", None, None).is_none(), "a display name is needed when the entry has no artist");
+    }
+
+    #[test]
+    fn the_confirmed_op_echoes_ids_and_the_record_values() {
+        let r = start_json(r#"{"op":"confirmed","name":"Dana","duet":null,"duration":90,"info":{"str":"/l/a.mp3"},"artist":"A","title":"T","command_source":null,
+            "singer_id":"sid","request_id":"rid","remote_request_id":7,"key":-2,"tempo_percent":null}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!((v["singer_id"].as_str(), v["request_id"].as_str(), v["perf_request_id"].as_i64(), v["perf_key"].as_i64(), v["command_source"].as_str()), (Some("sid"), Some("rid"), Some(7), Some(-2), Some("internal")));
+        assert!(v["perf_tempo"].is_null());
+        assert_eq!((v["ctx_singer"].as_str(), v["countdown_singer"].as_str(), v["eta_hold"].as_i64()), (Some("Dana"), Some("Dana"), Some(90)));
+        assert!(start_json(r#"{"op":"confirmed","name":"D","duration":1,"info":{"other":true},"artist":"A","title":"T"}"#).is_err());
+    }
+
+    #[test]
+    fn a_media_end_commits_a_stop_discards_and_nothing_pending_changes_nothing() {
+        let c = performance_step(true, "media_end", true).unwrap();
+        assert_eq!((c.action, c.pending, c.complete_remote, c.record_history, c.tombstone, c.reason, c.tombstone_reason), ("commit", false, true, true, false, "song_completed", ""));
+        let c = performance_step(true, "media_end", false).unwrap();
+        assert_eq!((c.complete_remote, c.record_history), (false, true), "a song without a remote request is still recorded in the history");
+        let d = performance_step(true, "stop", true).unwrap();
+        assert_eq!((d.action, d.pending, d.complete_remote, d.record_history, d.tombstone, d.reason, d.tombstone_reason), ("discard", false, false, false, true, "stop_playback", "host_stopped:stop_playback"));
+        let d = performance_step(true, "stop", false).unwrap();
+        assert_eq!((d.record_history, d.tombstone, d.tombstone_reason), (false, false, ""), "a discarded song is never recorded; nothing to retire without a remote id");
+        for ev in ["media_end", "stop"] {
+            let n = performance_step(false, ev, true).unwrap();
+            assert_eq!((n.action, n.pending, n.complete_remote, n.record_history, n.tombstone), ("none", false, false, false, false), "{ev}");
+        }
+    }
+
+    #[test]
+    fn a_media_end_is_followed_by_a_stop_that_finds_nothing() {
+        let after_end = performance_step(true, "media_end", true).unwrap();
+        let then_stop = performance_step(after_end.pending, "stop", true).unwrap();
+        assert_eq!((then_stop.action, then_stop.tombstone), ("none", false), "committing before stopping is what keeps the finished song from being tombstoned");
+    }
+
+    #[test]
+    fn storing_over_a_pending_record_is_reported_as_an_overwrite() {
+        assert_eq!(performance_step(false, "confirmed", true).unwrap().action, "set");
+        let o = performance_step(true, "confirmed", true).unwrap();
+        assert_eq!((o.action, o.pending, o.record_history, o.tombstone), ("overwritten", true, false, false));
+        assert!(performance_step(true, "teleport", true).is_none());
+    }
+
+    #[test]
+    fn the_performance_op_is_routed_by_the_json_glue() {
+        let r = start_json(r#"{"op":"performance","pending":true,"event":"stop","has_request_id":true}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!((v["action"].as_str(), v["tombstone"].as_bool(), v["tombstone_reason"].as_str(), v["pending"].as_bool()), (Some("discard"), Some(true), Some("host_stopped:stop_playback"), Some(false)));
+        assert!(start_json(r#"{"op":"performance","pending":true}"#).is_err());
+        assert!(start_json(r#"{"op":"performance","event":"pause"}"#).is_err());
     }
 
     #[test]
@@ -849,5 +1242,52 @@ mod tests {
             }
         }
         assert_eq!(n, 10 * 2 * 2 * 81);
+    }
+
+    #[test]
+    fn the_plan_chains_pick_route_engine_transport_and_display() {
+        let req = r#"{"op":"plan","rotation_mode":false,"engine":{"want_rust":true,"supports_shadow_audio":true,"engine":"running"},
+            "singers":[{"skipped":true,"songs":"d"},
+                       {"songs":"sd","entry":{"route":{"info":{"str":"/l/a.mp4"},"has_primary":true,"primary_exists":true},"artist":"A","title":"T","song":"/l/a.mp4","semitones":2.7,"start":1.5,"duration":99}}]}"#;
+        let r = start_json(req).unwrap();
+        same_json(&r, r#"{"singer":1,"song":1,"queue":[0],"lock_cleared":false,"route":"mp4",
+            "engine":{"voice":true,"reason":"","set_shadow_audio":true},
+            "transport":{"audio_path":"/l/a.mp4","video_path":"/l/a.mp4","mode":"mp4","semitones":2,"start_seconds":1.5,"loop_seconds":null,"duration_seconds":null},
+            "display":{"artist":"A","title":"T"}}"#);
+    }
+
+    #[test]
+    fn a_route_that_does_not_start_a_song_has_no_engine_transport_or_display() {
+        let req = r#"{"op":"plan","singers":[{"songs":"d","entry":{"route":{"info":{"str":"/l/a.mp4"},"has_primary":true,"primary_exists":false},"artist":"A","title":"T","song":"/l/a.mp4"}}]}"#;
+        same_json(&start_json(req).unwrap(), r#"{"singer":0,"song":0,"queue":[],"lock_cleared":false,"route":"reject_missing_file","engine":null,"transport":null,"display":null}"#);
+    }
+
+    #[test]
+    fn nobody_picked_or_no_facts_means_no_route() {
+        same_json(&start_json(r#"{"op":"plan","singers":[{"skipped":true,"songs":"d"}]}"#).unwrap(), r#"{"singer":null,"song":null,"queue":[0],"lock_cleared":false,"route":null,"engine":null,"transport":null,"display":null}"#);
+        same_json(&start_json(r#"{"op":"plan","singers":[{"songs":"d"}]}"#).unwrap(), r#"{"singer":0,"song":0,"queue":[],"lock_cleared":false,"route":null,"engine":null,"transport":null,"display":null}"#);
+        assert!(start_json(r#"{"op":"plan"}"#).is_err());
+        assert!(start_json(r#"{"op":"plan","singers":[{"songs":"x"}]}"#).is_err());
+    }
+
+    #[test]
+    fn the_plan_of_a_cdg_start_uses_the_pair_and_the_duration() {
+        let req = r#"{"op":"plan","singers":[{"songs":"d","entry":{"route":{"info":{"str":"/l/a.cdg"},"has_primary":true,"primary_exists":true,"pair":true},"artist":"","title":"","fallback":"X • Y","cdg":"/l/a.cdg","mp3":"/l/a.mp3","start":4.0,"loop":9.0,"duration":200}}]}"#;
+        same_json(&start_json(req).unwrap(), r#"{"singer":0,"song":0,"queue":[],"lock_cleared":false,"route":"cdg_mp3_dual","engine":null,
+            "transport":{"audio_path":"/l/a.mp3","video_path":"/l/a.cdg","mode":"cdg","semitones":0,"start_seconds":4.0,"loop_seconds":9.0,"duration_seconds":200.0},"display":{"artist":"X","title":"Y"}}"#);
+    }
+
+    #[test]
+    fn the_plan_runs_the_rotation_lock_clearing_of_the_pick_loop() {
+        let entry = r#""entry":{"route":{"info":{"str":"/l/a.mp3"},"has_primary":true,"primary_exists":true},"artist":"A","title":"T","song":"/l/a.mp3"}"#;
+        let locked = format!(r#"{{"op":"plan","rotation_mode":true,"setting_locked":true,"singers":[{{"songs":"d","lock_new":true,{entry}}},{{"songs":"d","marker":true}}]}}"#);
+        let r: serde_json::Value = serde_json::from_str(&start_json(&locked).unwrap()).unwrap();
+        assert_eq!((r["singer"].clone(), r["lock_cleared"].clone(), r["route"].clone()), (serde_json::json!(0), serde_json::json!(true), serde_json::json!("mp3")), "{r}");
+        let unlocked = locked.replace(r#""setting_locked":true"#, r#""setting_locked":false"#);
+        let r: serde_json::Value = serde_json::from_str(&start_json(&unlocked).unwrap()).unwrap();
+        assert_eq!(r["lock_cleared"], serde_json::json!(false), "{r}");
+        let classic = locked.replace(r#""rotation_mode":true"#, r#""rotation_mode":false"#);
+        let r: serde_json::Value = serde_json::from_str(&start_json(&classic).unwrap()).unwrap();
+        assert_eq!(r["lock_cleared"], serde_json::json!(false), "{r}");
     }
 }

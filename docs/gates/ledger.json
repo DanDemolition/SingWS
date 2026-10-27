@@ -1,0 +1,413 @@
+{
+  "decisions": {
+    "PLAN-SHADOW:crossfade": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "PLAN-SHADOW:window": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "QUEUE-SHADOW:terminal_stale": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "SETTINGS-SHADOW:defaults": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "SETTINGS-SHADOW:load": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "SETTINGS-SHADOW:save": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "SHELL-COMMANDS:dry_run_command": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:deferred_remote_adds.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:queue.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:remote_request_tombstones.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:settings.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:singer_history.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:singer_preferences.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        },
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "TRANSPORT-DRIVE:karafun_end": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "TRANSPORT-SHADOW:session": {
+      "bad": [
+        {
+          "date": "2026-10-23",
+          "label": "dev Mac show 2026-10-23 (first shadow build; KaraFun end disagreed, fixed later)",
+          "logs": [
+            "singws_2026-10-23.log"
+          ]
+        }
+      ],
+      "clean": [
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "WIRE-SHADOW:form": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    },
+    "WIRE-SHADOW:get": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-25",
+          "label": "dev Mac session 2026-10-25 (KaraFun song, shell and phone dry run)",
+          "logs": [
+            "singws_2026-10-25.log"
+          ]
+        },
+        {
+          "date": "2026-10-26",
+          "label": "dev Mac sessions 2026-10-26 (shell and phone dry run, KaraFun song)",
+          "logs": [
+            "singws_2026-10-26.log"
+          ]
+        }
+      ]
+    }
+  },
+  "policy": "one clean show or rehearsal per decision"
+}

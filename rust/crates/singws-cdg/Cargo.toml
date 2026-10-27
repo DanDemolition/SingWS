@@ -11,4 +11,4 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "singws-cdg-dump"
-path = "src/bin/dump.rs"
+path = "src/dump_cli.rs"
