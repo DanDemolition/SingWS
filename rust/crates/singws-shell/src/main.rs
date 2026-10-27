@@ -6,7 +6,6 @@ mod library_panel;
 mod music_panel;
 mod rotation_panel;
 mod settings_panel;
-mod waitlist_panel;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 

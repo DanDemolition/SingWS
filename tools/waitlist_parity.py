@@ -325,49 +325,6 @@ def case_iso(rng):
     compare("iso", py, {"op": "isoclock", "text": text.replace("Z", "+00:00")}, lambda x: x["parsed"], f"text={text!r}")
 
 
-class _DT(__import__("datetime").datetime):
-    cur = 1_792_000_000
-
-    @classmethod
-    def now(cls, tz=None):
-        return cls.fromtimestamp(cls.cur)
-
-
-def case_removed(rng):
-    """`_waitlist_evening_key` and `_load_waitlist_removed_tonight` (the persisted removed-tonight file, as the shell's Waitlist page reads it)."""
-    app = hp.app()
-    now = rng.choice([1_792_000_000, 1_792_000_000 + rng.randrange(86400), 1_790_000_000 + rng.randrange(10 ** 7), 1_700_000_000 + rng.randrange(10 ** 8)])
-    _DT.cur = now
-    app.datetime = _DT
-    f = types.SimpleNamespace(settings={})
-    ka = app.KaraokeApp
-    f._waitlist_evening_key = types.MethodType(ka._waitlist_evening_key, f)
-    f._load_waitlist_removed_tonight = types.MethodType(ka._load_waitlist_removed_tonight, f)
-    compare("evening", lambda: {"key": f._waitlist_evening_key()}, {"op": "evening", "now": now}, lambda r: r["key"], f"now={now}")
-    key = f._waitlist_evening_key()
-    settings = {}
-    for k in ("user", "tenant"):
-        if rng.random() < 0.5:
-            settings[k] = rng.choice(["wsk", "other", "", None, 0, "Ünal", 7])
-    data = rng.choice([
-        {"version": 1, "evening": key, "tenant": rng.choice(["wsk", "other", "", None, 7]), "requests": {}},
-        {"evening": rng.choice([key, "1999-01-01", None, 5]), "tenant": "wsk", "requests": {}},
-        [1, 2], "x", None, {},
-    ])
-    if isinstance(data, dict) and "requests" in data:
-        data["requests"] = rng.choice([
-            {str(rng.randrange(-2, 8)): rand_req(rng) for _ in range(rng.randrange(0, 6))},
-            {"5": {"a": 1}, "05": {"b": 2}, " 7 ": {}, "x": {}, "9": "junk", "1_0": {"c": 3}, "٣": {}}, [], None, "x"])
-    f.settings = settings
-    saved = app._load_json_file
-    app._load_json_file = lambda *a, **k: data if isinstance(data, dict) else {}
-    try:
-        compare("removed", lambda: {"requests": [[k, v] for k, v in f._load_waitlist_removed_tonight().items()]},
-                {"op": "removed_tonight", "data": data, "settings": settings, "now": now}, lambda r: r["requests"], f"data={data!r} settings={settings!r}")
-    finally:
-        app._load_json_file = saved
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cases", type=int, default=1500)
@@ -383,7 +340,6 @@ def main(argv=None):
         case_intake(rng)
         case_iso(rng)
         case_iso(rng)
-        case_removed(rng)
     print("compared:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     print("RESULT: IDENTICAL" if not failures else f"RESULT: {len(failures)} DIFFERENCE(S)")
     return 1 if failures else 0

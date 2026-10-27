@@ -854,83 +854,6 @@ pub fn sections(pending_acceptance: Option<&[Value]>, waiting: &Value, show_remo
     Ok(out)
 }
 
-
-// ---- the removed-tonight file ------------------------------------------------------------------------------------------------------
-
-unsafe extern "C" {
-    fn tzset();
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// `_waitlist_evening_key()`: `(datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%d")` for the epoch second `now` (local wall-clock arithmetic)
-pub fn evening_key(now: i64) -> R<String> {
-    let t: libc::time_t = now as libc::time_t;
-    // SAFETY: tzset and localtime_r get valid pointers to locals
-    let tm = unsafe {
-        tzset();
-        let mut tm: libc::tm = std::mem::zeroed();
-        if t as i64 != now || libc::localtime_r(&t, &mut tm).is_null() {
-            return decline("clock outside the supported range");
-        }
-        tm
-    };
-    let y = tm.tm_year as i64 + 1900;
-    if !(1..=9999).contains(&y) {
-        return decline("clock outside Python's range");
-    }
-    let m = tm.tm_mon as i64 + 1;
-    let yy = y - (m <= 2) as i64;
-    let era = yy.div_euclid(400);
-    let yoe = yy - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + tm.tm_mday as i64 - 1;
-    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
-    let sod = tm.tm_hour as i64 * 3600 + tm.tm_min as i64 * 60 + tm.tm_sec as i64;
-    let (y2, m2, d2) = civil_from_days(days + (sod - 6 * 3600).div_euclid(86400));
-    if !(1..=9999).contains(&y2) {
-        return decline("clock outside Python's range");
-    }
-    Ok(format!("{y2:04}-{m2:02}-{d2:02}"))
-}
-
-/// `_load_waitlist_removed_tonight()` for the parsed `waitlist_removed_tonight.json` (`data`), the settings and the clock: the requests kept (request id, request) in file order,
-/// or none when the file is from another evening or another venue. A duplicate id keeps its first position and the last value, like a dict.
-pub fn removed_tonight(data: &Value, settings: &Value, now: i64) -> R<Vec<(i64, Value)>> {
-    if !data.is_object() {
-        return Ok(Vec::new());
-    }
-    let tenant_v = or_chain(&[get(settings, "user"), get(settings, "tenant")], Value::from(""));
-    let tenant = py_str_or_empty(&tenant_v)?;
-    if get(data, "evening").as_str() != Some(evening_key(now)?.as_str()) || py_str_or_empty(get(data, "tenant"))? != tenant {
-        return Ok(Vec::new());
-    }
-    let Some(rows) = get(data, "requests").as_object() else { return Ok(Vec::new()) };
-    let mut out: Vec<(i64, Value)> = Vec::new();
-    for (key, req) in rows {
-        let Some(rid) = py_int(&Value::String(key.clone()))? else { continue };
-        if rid > 0 && req.is_object() {
-            let rid = i64::try_from(rid).or_else(|_| decline("request id beyond 64 bits"))?;
-            match out.iter_mut().find(|(r, _)| *r == rid) {
-                Some(slot) => slot.1 = req.clone(),
-                None => out.push((rid, req.clone())),
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1100,29 +1023,6 @@ mod tests {
         assert_eq!(request_id(&json!({"request_id": "_10"})).unwrap(), 0);
         assert_eq!(request_id(&json!({"request_id": " +7 "})).unwrap(), 7);
         assert_eq!(request_id(&json!({"id": 3.9})).unwrap(), 3);
-    }
-
-    #[test]
-    fn the_evening_runs_until_six_in_the_morning() {
-        // 2026-10-27 12:00 UTC-ish: whatever the zone, 6 hours earlier is the same or the previous civil day, and the key is a plain date
-        let k = evening_key(1_792_000_000).unwrap();
-        assert_eq!(k.len(), 10);
-        assert_eq!(&k[4..5], "-");
-    }
-
-    #[test]
-    fn removed_tonight_needs_the_same_evening_and_venue() {
-        let now = 1_792_000_000;
-        let ev = evening_key(now).unwrap();
-        let data = json!({"version": 1, "evening": ev, "tenant": "wsk", "requests": {"5": {"request_id": 5}, "x": {"a": 1}, "-2": {}, "7": "junk", "05": {"request_id": 50}, " 9 ": {"request_id": 9}}});
-        let got = removed_tonight(&data, &json!({"user": "wsk"}), now).unwrap();
-        assert_eq!(got.iter().map(|(r, _)| *r).collect::<Vec<_>>(), [5, 9]);
-        assert_eq!(got[0].1, json!({"request_id": 50}), "a duplicate id keeps its place and takes the later value");
-        assert!(removed_tonight(&data, &json!({"user": "other"}), now).unwrap().is_empty());
-        assert_eq!(removed_tonight(&data, &json!({"tenant": "wsk"}), now).unwrap().len(), 2, "tenant is the fallback for user");
-        let old = json!({"evening": "1999-01-01", "tenant": "wsk", "requests": {"5": {}}});
-        assert!(removed_tonight(&old, &json!({"user": "wsk"}), now).unwrap().is_empty());
-        assert!(removed_tonight(&json!([1]), &json!({}), now).unwrap().is_empty());
     }
 
     #[test]

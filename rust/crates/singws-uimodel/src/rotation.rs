@@ -409,7 +409,7 @@ pub struct LiveState {
     pub title: String,
 }
 
-pub fn process_alive(pid: i64) -> bool {
+fn process_alive(pid: i64) -> bool {
     if pid <= 0 || pid > i32::MAX as i64 {
         return false;
     }
