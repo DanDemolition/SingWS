@@ -53,7 +53,48 @@ reweave) is not compared. Tested against the REAL method and its commit callback
 commit appends the SAME singer record again: the queue then holds that singer twice (one record, two rows; `test_the_all_skipped_quirk_puts_the_same_singer_in_the_queue_twice`).
 The shadow still logs `NOTE singer_already_in_queue` (and skips the comparison) as a safety net; it should now never appear.
 
+## Step 6 (built): the arguments that reach the transport (`transport_args`, `zip_args`, `"op":"transport"` / `"op":"zip_args"`)
+Every start route ends in `_start_karaoke_transport(audio_path, video_path, mode, semitones, start_seconds, loop_seconds, duration_seconds)`. The three wrappers forward different
+subsets, which is the whole rule: `_play_mp4` -> audio and picture are the same file, mode `mp4`, **no duration**; `_play_cdg` -> audio is the MP3, picture the CDG, mode `cdg`,
+start + loop + duration; `_play_mp3` -> mode `audio`, no picture, **neither loop nor duration** (the transport's defaults apply). The key is `int(semitones or 0)` (truncated toward
+zero). Each wrapper hands its own raw arguments to the shadow just before the call (`_stash_transport_shadow`), and `_start_karaoke_transport` compares what it actually received
+with Rust's answer on entry; a direct call with no wrapper in front of it is simply not compared.
+`play_mp3g_zip` merges what it is called with and what an earlier not-yet-extracted call stashed for the same ZIP (`_mp3g_pending_*`): start = the call's if positive else the stash's
+(else 0.0), loop = the call's if truthy else the stash as is, duration = `float(call or stash or 0.0)`. That merge is its own comparison (`check_zip_args`, after the values are computed).
+Only plain finite numbers and text are modelled; anything else is skipped, never reported. Tested against the REAL chain (`play_next_file` -> `play_*` -> transport recorder) over
+300 random starts, and `play_mp3g_zip` over 400 random calls/stashes (`test_start_shadow_transport.py`); mutation-tested (27 mutants, one documented equivalent).
+
+## Step 7 (built): what is published when a started song is confirmed (`confirmed`, `"op":"confirmed"`)
+`_commit_pending_start` runs when the transport's `started` signal arrives. Besides the rotation flags (step 5) and the artist/title (step 4) it publishes: the singer card name
+(`singer_display` = the duet display when it is not empty, else the name; the plain `singer_name` is kept separately), the ETA hold (`max(0, duration)`), the song path (the text
+path, or the first element of an older tuple/list entry), the singer and request ids, the start context's `command_source` (`internal` when empty), the countdown payload (which
+uses the ENTRY's artist/title, stripped, with no library fallback, unlike the published artist/title) and the **pending performance record** (`singer_name`, remote request id,
+song path, key, tempo preset). One quirk is copied: the record's `singer_name` is the singer's own name, else the raw singer display, which is **null** for a singer record whose
+name is null and that has no duet display.
+The app builds the facts when the start is validated (`confirmed_facts`), snapshots the start context and countdown payload at the top of the commit (before they are cleared), and
+after the record is stored compares every value it can read (current-singer attributes, context, countdown, record) with Rust's answer. Values the rule does not model (a name that is
+not text, a duration that is not a whole number, a path of 4096+ characters, values that are not JSON) are skipped. Tested against the REAL `play_next_file` and its commit over 500
+random starts (`test_start_shadow_confirmed.py`) and mutation-tested (25 mutants).
+It also notes `NOTE pending_performance_overwritten` when a confirmed start finds the previous song's record still stored (nothing committed or discarded it): see step 8.
+
+## Step 8 (built): when a song counts as sung (`performance_step`, `"op":"performance"`)
+A confirmed start stores a pending performance record (step 7). From then on exactly one of these must happen to it:
+* **media end** -> `_finish_media_end_cleanup` calls `_commit_pending_performance("song_completed")` FIRST: the request is completed on the server when it has a remote id, the play
+  goes into the singer history, the record is gone;
+* **any stop** (the Stop button, a skip, a removal, closing the app, a phrase-preview stop: they all end in `stop_playback`) -> `_discard_pending_performance("stop_playback")`:
+  nothing is recorded, and the request is tombstoned on the server (`host_stopped:stop_playback`) when it has a remote id, so the poll does not re-create it;
+* the stop that `_finish_media_end_cleanup` itself makes right after its commit finds nothing and changes nothing (that ordering is what keeps a finished song from being tombstoned).
+The Rust rule is a tiny state machine over `pending` x event (`confirmed`, `media_end`, `stop`), and the Python shadow keeps the model across the whole show, so it checks more than
+each call in isolation: every event is compared on the action taken, the effects reached (completed / history / tombstone, observed by flags set right before each call) and the
+reasons passed, and a record the model says is stored must really be stored. The call sites pick the event from the reason they pass (`song_completed`, `stop_playback`); any other
+reason is not compared.
+**Finding to watch (not a bug in a reachable path I could find):** storing a confirmed start over a record that is still pending REPLACES it: the earlier song is neither committed
+nor discarded, so it is not recorded and its request is not tombstoned. The Play button never reaches this (pressing Play while a song is playing keeps the song), and a normal end or
+stop clears the record first, but a path that calls `play_next_file(skip_confirmation=True)` while a transport is alive would (the interrupt dialog only guards the button). The shadow
+logs `NOTE pending_performance_overwritten` and the check reports the `overwritten` action. Left as is: pinned in `test_the_next_song_starting_over_a_pending_one_is_reported_not_endorsed`.
+While writing the differential test the shadow caught a bug in its own first Rust rule (the tombstone reason was reported even with no request to tombstone): fixed before commit.
+Tested against the REAL start/commit, `_finish_media_end_cleanup`, `stop_playback` and the commit/discard methods over 300 random event sequences with an independent model in the test
+(`test_start_shadow_performance.py`), mutation-tested (15 mutants).
+
 ## Next steps (not built)
-3. Transport arguments: key, tempo, start offset, loop and duration the transport receives (`_start_karaoke_transport`).
-4. Confirmed-start bookkeeping (what is published to the screen and the server once the transport accepts).
-5. Only after steps 1-4 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.
+3. Only after steps 1-8 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.
