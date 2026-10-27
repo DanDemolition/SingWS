@@ -92,6 +92,15 @@ pub fn build_view(dir: &str, show_removed: bool, now: i64) -> Value {
     let ctx = waitlist::Context { first_time_names: &names, accepted_ids: &accepted, local_ids: &local };
     let pending = f.get("pending_acceptance").and_then(Value::as_array);
     let secs = waitlist::sections(pending.map(|v| v.as_slice()), f.get("waiting").unwrap_or(&null), show_removed, &Value::Object(removed.clone()), &ctx);
+    // the live feed carries the pending adds already merged and filtered by the app
+    let secs = secs.and_then(|mut s| {
+        if let Some(reqs) = f.get("pending_acceptance_requests").and_then(Value::as_array) {
+            if let Some(sec) = waitlist::pending_section(reqs, &ctx)? {
+                s.insert(0, sec);
+            }
+        }
+        Ok(s)
+    });
     let (sections, mut status) = match secs {
         Ok(s) => (s, String::new()),
         Err(e) => (Vec::new(), format!("The waitlist could not be shown: {e}")),
