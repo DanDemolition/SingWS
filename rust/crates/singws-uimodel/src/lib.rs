@@ -5,10 +5,13 @@
 
 pub mod eq_view;
 pub mod fuzzy;
+pub mod hero;
 pub mod history;
 pub mod music;
 pub mod rotation;
 pub mod settings_view;
+pub mod ticker;
+pub mod waitlist;
 mod casefold_table;
 
 use serde_json::{Value, json};
