@@ -50,6 +50,22 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
         for leak in ("sk-SECRET-VALUE", "9876"):
             self.assertNotIn(leak, p.stdout + p.stderr)
 
+    def test_the_ticker_tab_draws_the_audience_text_and_copes_with_a_broken_queue(self):
+        d = self.make_home()
+        (Path(d) / "queue.json").write_text(json.dumps([{"name": "Ann", "songs": [{"title": "x"}]}, {"name": "Skip", "skipped": True, "songs": [{}]}, {"name": "Bo", "songs": [{"title": "y"}]}]))
+        (Path(d) / "settings.json").write_text(json.dumps({"ticker_custom_enabled": True, "ticker_custom_message": "Tip your host", "api_key": "sk-SECRET-VALUE"}))
+        p, shot = self.run_tab("ticker", d)
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+        self.assertGreater(shot.stat().st_size, 5000)
+        self.assertNotIn("sk-SECRET-VALUE", p.stdout + p.stderr)
+        (Path(d) / "queue.json").write_text("{not json")
+        p, shot = self.run_tab("ticker", d)
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+        self.assertGreater(shot.stat().st_size, 5000)
+        (Path(d) / "queue.json").unlink()
+        p, shot = self.run_tab("ticker", d)
+        self.assertEqual(p.returncode, 0, p.stderr[-400:])
+
     def test_the_eq_tab_draws_and_copes_with_unreadable_settings(self):
         d = self.make_home()
         (Path(d) / "settings.json").write_text(json.dumps({"eq_bgm": [5, 4, 3, 1, -1, -1, 1, 3, 4, 5], "eq_karaoke": [0] * 10, "eq_karaoke_enabled": False, "api_key": "sk-SECRET-VALUE"}))

@@ -103,6 +103,14 @@ Rank 20, size S each as QML; zero parity risk, all judged by eye (`--snapshot`).
 
 Not planned: phrase start (dead), library locations from remote (operator decision), duplicate manager (file moves; keep local and supervised), KaraFun automation dialogs.
 
+## 3b. Shell pages ported since (2026-10-27)
+
+| Page | Source of its data | Rules | Checked by |
+|---|---|---|---|
+| **Ticker** (tab 8, read-only) | `queue.json` + `settings.json` (`ticker_custom_*`) in the profile, reloaded every 3 s | `singws-uimodel::ticker::view` (equal to the app's ticker text: `tools/ticker_parity.py`) | `ticker_panel` unit tests, `test_shell_panels.py` (draws, broken/missing queue), screenshot. Limit: the app's "now singing" parts are not on disk, so a custom message that uses them reads as if nobody is singing |
+
+Waitlist page: NOT started. Its requests (`_waiting_for_add_requests`) live only in the app's memory (server snapshots); only the removed-tonight store is on disk. It needs a decision on where the shell gets them (see HANDOFF).
+
 ## 4. Built in this change
 
 Three modules in `rust/crates/singws-uimodel` (toolkit-free, no Qt, read-only), each with a CLI, unit tests, a differential parity tool and a mutation pass:
