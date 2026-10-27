@@ -63,6 +63,12 @@ fn main() {
         for t in ats {
             buf.clear();
             p.render_at(t).write_rgba(&mut buf);
+            if let Some((tv, tr)) = clean {
+                clean_near_black(&mut buf, tv, tr);
+            }
+            if let Some((w, h, m)) = compose_to {
+                buf = compose(&buf, w, h, m);
+            }
             out.write_all(&buf).unwrap();
         }
     }
