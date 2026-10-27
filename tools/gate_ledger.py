@@ -38,7 +38,8 @@ KNOWN = (
     + [f"WIRE-SHADOW:{k}" for k in ("get", "form")]
     + ["TRANSPORT-SHADOW:session"]
     + [f"TRANSPORT-DRIVE:{k}" for k in ("karafun_end", "media_end", "watchdog")]
-    + [f"START-SHADOW:{k}" for k in ("route:mp4", "route:mp3", "route:cdg_mp3_dual", "route:mp3g_zip", "route:external_karafun", "engine", "pick", "display", "rotation")]
+    + [f"START-SHADOW:{k}" for k in ("route:mp4", "route:mp3", "route:cdg_mp3_dual", "route:mp3g_zip", "route:external_karafun", "engine", "pick", "display", "rotation",
+                                                 "transport_args", "zip_args", "confirmed", "performance:confirmed", "performance:media_end", "performance:stop")]
     + ["SHELL-COMMANDS:dry_run_command"]
 )
 
@@ -49,8 +50,15 @@ def _group_start(item):
         return "engine"
     if item in ("pick", "pick_none"):
         return "pick"
-    if item in ("display", "rotation"):
+    if item in ("display", "rotation", "confirmed", "zip_args"):
         return item
+    if item.startswith("transport_"):
+        return "transport_args"
+    if item.startswith("performance_"):
+        for event in ("media_end", "confirmed", "stop"):
+            if item.startswith(f"performance_{event}_"):
+                return f"performance:{event}"
+        return "performance:other"
     return f"route:{item}"
 
 

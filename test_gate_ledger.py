@@ -51,6 +51,14 @@ class DecisionsProven(unittest.TestCase):
         self.assertEqual({k for k in p if k.startswith("START-SHADOW")}, {"START-SHADOW:route:mp4", "START-SHADOW:pick", "START-SHADOW:display", "START-SHADOW:rotation", "START-SHADOW:engine"})
         self.assertTrue(all(p[k] for k in p if k.startswith("START-SHADOW")))
 
+    def test_the_orchestrator_shadows_fold_into_their_decisions(self):
+        lines = [tsr.LAUNCH, tsr.L("START-SHADOW", "enabled available=1")] + [tsr.L("START-SHADOW", f"decision route={k} agree=1") for k in (
+            "transport_mp4", "transport_cdg", "zip_args", "confirmed", "performance_confirmed_stored", "performance_media_end_committed", "performance_stop_discarded")]
+        p = {k: v for k, v in self.proven(lines).items() if k.startswith("START-SHADOW")}
+        self.assertEqual(set(p), {"START-SHADOW:transport_args", "START-SHADOW:zip_args", "START-SHADOW:confirmed", "START-SHADOW:performance:confirmed",
+                                  "START-SHADOW:performance:media_end", "START-SHADOW:performance:stop"})
+        self.assertTrue(all(p.values()))
+
     def test_shell_commands_count_only_when_nothing_failed(self):
         ok = [tsr.LAUNCH, tsr.L("SHELL-CMD", "ready mode=dry_run queue_sig=x singers=1"),
               tsr.L("SHELL-CMD", "id=a action=queue.move_singer mode=dry_run ok=True message=dry_run: would queue.move_singer")]
