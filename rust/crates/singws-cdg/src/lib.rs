@@ -237,6 +237,64 @@ impl CdgDecoder {
     }
 }
 
+/// The app's `_clean_cdg_near_black` on an RGBA frame: pixels whose R, G and B are all <= `threshold` (clamped to 0..=32) and whose alpha is
+/// non-zero are cleared. With `transparent_black` they become fully transparent (all four bytes 0); otherwise pure-black pixels are left alone
+/// and near-black ones lose their RGB but keep their alpha. A threshold of 0 without `transparent_black` changes nothing.
+pub fn clean_near_black(rgba: &mut [u8], threshold: i32, transparent_black: bool) {
+    let t = threshold.clamp(0, 32) as u8;
+    if t == 0 && !transparent_black {
+        return;
+    }
+    for p in rgba.chunks_exact_mut(4) {
+        let (r, g, b, a) = (p[0], p[1], p[2], p[3]);
+        if a > 0 && r <= t && g <= t && b <= t && (transparent_black || r | g | b != 0) {
+            if transparent_black {
+                p.fill(0);
+            } else {
+                p[..3].fill(0);
+            }
+        }
+    }
+}
+
+/// The app's `_cdg_side_fill_color`: the most common opaque edge colour, sampled at 13 points along each edge (ties go to the first seen),
+/// black when every sample is transparent.
+pub fn side_fill_color(rgba: &[u8], width: usize, height: usize) -> (u8, u8, u8) {
+    let px = |x: usize, y: usize| {
+        let o = (y * width + x) * 4;
+        (rgba[o], rgba[o + 1], rgba[o + 2], rgba[o + 3])
+    };
+    let mut counts: Vec<((u8, u8, u8), u32)> = Vec::new();
+    let steps = 12usize;
+    for i in 0..=steps {
+        // Python's round() is half-to-even; the products here never land on .5 for 300x216 but keep the rule exact
+        let rnd = |n: usize| -> usize {
+            let v = n as f64 / steps as f64;
+            let f = v.floor();
+            let d = v - f;
+            (if d > 0.5 || (d == 0.5 && (f as i64) % 2 != 0) { f + 1.0 } else { f }) as usize
+        };
+        let x = rnd((width - 1) * i).min(width - 1);
+        let y = rnd((height - 1) * i).min(height - 1);
+        for (r, g, b, a) in [px(x, 0), px(x, height - 1), px(0, y), px(width - 1, y)] {
+            if a == 0 {
+                continue;
+            }
+            match counts.iter_mut().find(|(k, _)| *k == (r, g, b)) {
+                Some(e) => e.1 += 1,
+                None => counts.push(((r, g, b), 1)),
+            }
+        }
+    }
+    let mut best: Option<((u8, u8, u8), u32)> = None;
+    for e in counts {
+        if best.is_none_or(|b| e.1 > b.1) {
+            best = Some(e);
+        }
+    }
+    best.map_or((0, 0, 0), |b| b.0)
+}
+
 /// A whole CDG file with seek by time.
 pub struct CdgPlayer {
     data: Vec<u8>,
@@ -304,6 +362,17 @@ mod tests {
         p.extend(d);
         p.extend([0; 4]);
         p
+    }
+
+    #[test]
+    fn clean_and_side_fill_basics() {
+        let mut f = vec![0, 0, 0, 255, 5, 5, 5, 200, 40, 40, 40, 255, 3, 3, 3, 0];
+        clean_near_black(&mut f, 10, false);
+        assert_eq!(f, vec![0, 0, 0, 255, 0, 0, 0, 200, 40, 40, 40, 255, 3, 3, 3, 0]);
+        clean_near_black(&mut f, 10, true);
+        assert_eq!(&f[..8], &[0; 8]);
+        let blank = vec![0u8; 300 * 216 * 4];
+        assert_eq!(side_fill_color(&blank, 300, 216), (0, 0, 0));
     }
 
     #[test]
