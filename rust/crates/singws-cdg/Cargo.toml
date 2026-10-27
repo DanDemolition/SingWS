@@ -1,0 +1,14 @@
+[package]
+name = "singws-cdg"
+version = "0.1.0"
+edition = "2024"
+description = "Stage E: a CD+G (karaoke graphics) decoder. Frame-exact against FFmpeg's cdgraphics decoder, which is what libmpv draws CDG with in the app. Pure Rust, no dependencies."
+publish = false
+
+[lib]
+name = "singws_cdg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-cdg-dump"
+path = "src/bin/dump.rs"
