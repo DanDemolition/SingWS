@@ -3,7 +3,7 @@
 or by its differential parity tool against the app's real Python. Equivalent mutants carry a reason. Originals are restored afterwards (also on Ctrl-C).
 Exit 1 when a non-equivalent mutant survives.
 
-Usage:  CARGO_TARGET_DIR=~/.cache/singws-rust-target-ui python3 tools/mutate_uimodel_text.py ticker|hero|waitlist|all
+Usage:  CARGO_TARGET_DIR=~/.cache/singws-rust-target-ui python3 tools/mutate_uimodel_text.py ticker|hero|waitlist|header|all
 """
 import os
 import subprocess
@@ -17,6 +17,36 @@ PY = os.environ.get("SINGWS_PY") or "/Users/daniel/Documents/SingWS/.venv/bin/py
 CARGO = os.path.expanduser("~/.cargo/bin/cargo")
 
 MUTANTS = {
+    "header": [
+        ('Some(v) => truthy(v),\n        None => default,', 'Some(v) => !truthy(v),\n        None => default,', None),
+        ('None => default,\n    }\n}\n\n/// `str(value or default)`', 'None => !default,\n    }\n}\n\n/// `str(value or default)`', None),
+        ('if network_configured { "Connected" } else { "Offline" }', 'if network_configured { "Offline" } else { "Connected" }', None),
+        ('if count != 1 { "s" } else { "" }', 'if count != 0 { "s" } else { "" }', None),
+        ('lower.contains("auth") || lower.contains("failed")', 'lower.contains("auth") && lower.contains("failed")', None),
+        ('lower.contains("auth") || lower.contains("failed")', 'lower.contains("auth")', None),
+        ('"Requests open" } else { "Requests closed" }', '"Requests closed" } else { "Requests open" }', None),
+        ('tone: if waitlist { "good" } else { "mute" }', 'tone: if waitlist { "good" } else { "warn" }', None),
+        ('tone: if online { "good" } else { "warn" }', 'tone: "good"', None),
+        ('format!(" \\u{b7} ends {ends}")', 'format!(" \\u{b7} {ends}")', None),
+        ('dot_token: if accepting { "now_singing" } else { "warning" }', 'dot_token: "now_singing"', None),
+        ('Needs attention: {pending}', 'Needs attention: {rev}', None),
+        ('for k in ["location_name", "venue_name", "tenant", "user"]', 'for k in ["venue_name", "location_name", "tenant", "user"]', None),
+        ('let mut location = String::from("Local");', 'let mut location = String::from("local");', None),
+        ('str_or(get(last, "sync"), "Never")', 'str_or(get(last, "sync"), "None")', None),
+        ('if secs.is_nan() || secs <= 0.0 {', 'if secs.is_nan() || secs < 0.0 {', "zero seconds formats as 0:00 either way"),
+        ('if s.is_object() && !py_strip(&py_str_or_empty(get(s, "name"))?).is_empty() {', 'if s.is_object() {', None),
+        ('let eta = if total > 0.0 { fmt_m_ss(total) } else { "0:00".into() };', 'let eta = fmt_m_ss(total + 1.0);', None),
+        ('if h % 12 == 0 { 12 } else { h % 12 }', 'if h % 12 == 0 { 0 } else { h % 12 }', None),
+        ('if h < 12 { "AM" } else { "PM" }', 'if h <= 12 { "AM" } else { "PM" }', None),
+        ('.floor() as i64).rem_euclid(86400)', '.floor() as i64)', "past midnight the time would print an hour over 23; the h12 fold hides it only for exactly 24, so this is killed by the day-wrap clocks"),
+        ('.replace(\'"\', "&quot;")', '', None),
+        ('"CLASSIC" }', '"ROTATION" }', None),
+        ('(total / 60.0).round_ties_even() as i64', '(total / 60.0).round() as i64', None),
+        ('if count != 0 { text } else { String::new() }', 'text', None),
+        ('text += &format!(" \\u{b7} {minutes} min");', 'text += &format!(" \\u{b7} {minutes} mins");', None),
+        ('if minutes > 0 {', 'if minutes >= 0 {', None),
+        ('if !s.is_object() {\n                break;', 'if !s.is_object() {\n                continue;', None),
+    ],
     "ticker": [
         ('if truthy(get(singer, "skipped")) {\n        return false;', "if false {\n        return false;", None),
         ('if !truthy(get(song, "skipped")) {\n            return true;', 'if truthy(get(song, "skipped")) {\n            return true;', None),
@@ -120,8 +150,8 @@ MUTANTS = {
 }
 
 ONLY = {int(x) for x in os.environ.get("MUTANTS", "").split(",") if x}
-MODULE_TEST = {"ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
-PARITY = {"ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
+MODULE_TEST = {"header": "header", "ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
+PARITY = {"header": ("header_parity.py", ["--cases", "150"]), "ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
 
 
 def run(cmd, timeout):

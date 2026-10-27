@@ -45,7 +45,7 @@ fn py_float(v: &Value) -> R<Option<f64>> {
 }
 
 /// `int(v)`: `Ok(None)` when Python raises. Integers beyond i128 and non-ASCII numerals are declined.
-fn py_int(v: &Value) -> R<Option<i128>> {
+pub(crate) fn py_int(v: &Value) -> R<Option<i128>> {
     match v {
         Value::Bool(b) => Ok(Some(*b as i128)),
         Value::Number(n) => {

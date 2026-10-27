@@ -6,6 +6,7 @@ import _test_profile  # noqa: F401  (isolate SINGWS_HOME)
 import unittest
 from pathlib import Path
 
+from tools import header_parity as header
 from tools import hero_parity as hero
 from tools import ticker_parity as ticker
 from tools import waitlist_parity as waitlist
@@ -37,6 +38,13 @@ class HeroTextParity(unittest.TestCase):
     def test_rust_hero_text_equals_the_apps(self):
         self.assertEqual(_run(hero, 200, 5), 0, hero.failures[:3])
         self.assertGreater(hero.counts.get("text_same", 0), 0)
+
+
+@unittest.skipUnless(Path(header.CLI).exists(), "needs singws-header-cli")
+class HeaderTextParity(unittest.TestCase):
+    def test_rust_header_and_queue_summary_equal_the_apps(self):
+        self.assertEqual(_run(header, 120, 5), 0, header.failures[:3])
+        self.assertGreater(header.counts.get("eta_same", 0), 0)
 
 
 if __name__ == "__main__":

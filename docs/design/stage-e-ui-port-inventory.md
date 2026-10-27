@@ -121,9 +121,10 @@ Three modules in `rust/crates/singws-uimodel` (toolkit-free, no Qt, read-only), 
 |---|---|---|---|---|
 | `ticker` | `get_singer_names_for_ticker`, `is_singer_active`, `_render_ticker_custom_message`, `Ticker._format_queue_text` | `singws-ticker-cli` | `tools/ticker_parity.py` | `tools/mutate_uimodel_text.py ticker`: 26 mutants, 23 killed, 3 documented equivalent |
 | `waitlist` | `_waiting_for_add_row` / `_row_text` / `_order_key` / `_sections`, `_pending_acceptance_rows`, `_is_waiting_for_add_request`, `_remote_request_is_non_actionable`, status / reason / time / version / duration helpers, `datetime.fromisoformat` | `singws-waitlist-cli` | `tools/waitlist_parity.py` | `... waitlist`: 46 mutants, 45 killed, 1 documented equivalent |
+| `header` (step 1) | `_refresh_header_chips`, `_refresh_header_status`, `_set_server_connection_status` state word, `_update_queue_eta_label`, `_fmt_m_ss`, `_refresh_queue_summary` | `singws-header-cli` | `tools/header_parity.py` | `... header`: 28 mutants, 27 killed, 1 documented equivalent |
 | `hero` | `_apply_redesign_hero_text`, `_hero_media_badge_text`, `_hero_remaining_text`, `_fmt_karaoke_time` | `singws-hero-cli` | `tools/hero_parity.py` | `... hero`: 21 mutants, 20 killed, 1 documented equivalent |
 
-`test_stage_e_ui_text_parity.py` runs small fixed-seed versions of the three parity tools (skipped when the CLIs are not built). Rust unit tests: 81 in `singws-uimodel` (8+1+... ticker 10, waitlist 16, hero 4). Not done: the optional read-only QML page.
+`test_stage_e_ui_text_parity.py` runs small fixed-seed versions of the three parity tools (skipped when the CLIs are not built). Rust unit tests: 87 in `singws-uimodel` (8+1+... ticker 10, waitlist 16, hero 4). Not done: the optional read-only QML page.
 
 How to run:
 
