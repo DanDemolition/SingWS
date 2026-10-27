@@ -1848,7 +1848,6 @@ APP_USER_DIR = Path(os.environ.get("SINGWS_HOME") or (Path.home() / "SingWS"))
 APP_USER_DIR.mkdir(parents=True, exist_ok=True)
 SETTINGS_PATH = APP_USER_DIR / "settings.json"
 QUEUE_PATH = APP_USER_DIR / "queue.json"
-LIVE_WAITLIST_PATH = APP_USER_DIR / "waitlist_state.json"  # the live "Waiting for add" requests; written for the read-only Rust shell (setting publish_live_waitlist)
 LIVE_STATE_PATH = APP_USER_DIR / "live_state.json"  # who is on stage right now; written for the read-only Rust shell (setting publish_live_state)
 TRACKS_PATH = APP_USER_DIR / "tracks.json"
 SINGER_PREFS_PATH = APP_USER_DIR / "singer_preferences.json"
@@ -4147,7 +4146,6 @@ DEFAULTS = {
     # A2 for the native media-end decision. Same contract as transport_drive: Rust answers only when it agrees with the
     # retained Python oracle; Python wins every disagreement. Default off until its own local and package gates pass.
     "shell_commands": "dry_run",  # queue.* commands from the Rust shell: "off" | "dry_run" (validate and log only) | "apply"
-    "publish_live_waitlist": False,  # write waitlist_state.json (the live waitlist) for the read-only Rust shell; best effort, never affects the show
     "publish_live_state": True,  # write live_state.json (who is on stage) for the read-only Rust shell; best effort, never affects the show
     "transport_drive_media_end": True,
     # A2 for the KaraFun duration-watchdog decision ("end unverified: tell the operator to press Complete"). Same
@@ -34208,55 +34206,6 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
-    def _publish_live_waitlist(self):
-        """Write waitlist_state.json: the requests on the host's "Waiting for add" page right now, for the read-only Rust shell (setting `publish_live_waitlist`, default off).
-
-        Exactly what the page lists: the rows `_waiting_for_add_sections` builds (so the app's own accepted / already-queued filtering has been applied), as the request
-        dicts plus which singers are on their first turn. Best effort: never raises, writes only when the content changed, plain temp-file rename (no fsync). The pid lets a
-        reader ignore the file once this process is gone."""
-        try:
-            if not bool(self.settings.get("publish_live_waitlist", False)):
-                return
-            waiting, pending, first_turn = {}, [], set()
-            for section in self._waiting_for_add_sections():
-                key = section.get("key")
-                if key not in ("waitlist", "pending_acceptance"):
-                    continue
-                for row in section.get("rows", []):
-                    req = row.get("request") if isinstance(row.get("request"), dict) else {}
-                    if row.get("first_time_singer"):
-                        first_turn.add(str(req.get("singer") or ""))
-                    if key == "pending_acceptance":
-                        pending.append(req)
-                        continue
-                    rid = int(row.get("request_id") or 0)
-                    name = str(rid) if rid > 0 and str(rid) not in waiting else str(900000000 + len(waiting))
-                    waiting[name] = req
-            state = {
-                "version": 1,
-                "pid": os.getpid(),
-                "waiting": waiting,
-                "pending_acceptance_requests": pending,
-                "first_time_names": sorted(first_turn),
-            }
-            sig = json.dumps(state, sort_keys=True, default=str)
-            if sig == getattr(self, "_live_waitlist_sig", None):
-                return
-            state["updated_at"] = int(time.time())
-            tmp = LIVE_WAITLIST_PATH.with_name(f".{LIVE_WAITLIST_PATH.name}.{os.getpid()}.tmp")
-            try:
-                tmp.write_text(json.dumps(state, indent=2, default=str) + "\n", encoding="utf-8")
-                os.replace(tmp, LIVE_WAITLIST_PATH)
-            except Exception:
-                try:
-                    tmp.unlink()
-                except Exception:
-                    pass
-                raise
-            self._live_waitlist_sig = sig
-        except Exception:
-            pass
-
     def _schedule_host_control_state_sync(self):
         try:
             app = QApplication.instance()
@@ -34276,10 +34225,6 @@ class KaraokeApp(QWidget):
     def _sync_host_control_state_now(self):
         try:
             self._publish_live_state()
-        except Exception:
-            pass
-        try:
-            self._publish_live_waitlist()
         except Exception:
             pass
         if bool(getattr(self, "_app_closing", False)) or bool(getattr(self, "_host_control_state_inflight", False)):
@@ -34669,10 +34614,6 @@ class KaraokeApp(QWidget):
             return
         try:
             self._update_waiting_for_add_nav_state()
-        except Exception:
-            pass
-        try:
-            self._publish_live_waitlist()  # for the read-only Rust shell; a no-op unless the setting is on
         except Exception:
             pass
         if state.get("waiting_for_add_list") is None:

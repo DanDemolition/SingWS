@@ -19,13 +19,7 @@ fn handle(r: &Value) -> Result<Value, String> {
             let (acc, loc) = (ids(r.get("accepted_ids")), ids(r.get("local_ids")));
             let ctx = w::Context { first_time_names: &names, accepted_ids: &acc, local_ids: &loc };
             let pending = r.get("pending_acceptance").and_then(Value::as_array);
-            let mut secs = w::sections(pending.map(|v| v.as_slice()), r.get("waiting").unwrap_or(&null), r.get("show_removed").and_then(Value::as_bool).unwrap_or(false), r.get("removed").unwrap_or(&null), &ctx)?;
-            // the live feed's already-merged pending requests
-            if let Some(reqs) = r.get("pending_acceptance_requests").and_then(Value::as_array) {
-                if let Some(sec) = w::pending_section(reqs, &ctx)? {
-                    secs.insert(0, sec);
-                }
-            }
+            let secs = w::sections(pending.map(|v| v.as_slice()), r.get("waiting").unwrap_or(&null), r.get("show_removed").and_then(Value::as_bool).unwrap_or(false), r.get("removed").unwrap_or(&null), &ctx)?;
             Ok(Value::Array(
                 secs.iter().map(|s| json!({"key": s.key, "title": s.title, "helper": s.helper, "rows": s.rows.iter().map(w::row_json).collect::<Vec<_>>()})).collect(),
             ))

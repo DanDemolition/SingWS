@@ -811,30 +811,13 @@ pub fn pending_acceptance_rows(pending: &[Value], ctx: &Context) -> R<Vec<Row>> 
     Ok(rows)
 }
 
-/// The Pending Acceptance section from requests the app has ALREADY merged and filtered (the live feed's `pending_acceptance_requests`: what `_pending_acceptance_rows`
-/// handed to `_waiting_for_add_row`), rows ordered like the app orders them. `None` when there are none.
-pub fn pending_section(reqs: &[Value], ctx: &Context) -> R<Option<Section>> {
-    let mut rows = Vec::new();
-    for req in reqs.iter().filter(|r| r.is_object()) {
-        rows.push(build_row(req, "pending_acceptance", false, first_time_of(ctx, req)?)?);
-    }
-    rows.sort_by(|a, b| cmp_key(&a.order, &b.order));
-    Ok(if rows.is_empty() {
-        None
-    } else {
-        Some(Section { key: "pending_acceptance", title: "Pending Acceptance", helper: Some(PENDING_HELPER), rows })
-    })
-}
-
-const PENDING_HELPER: &str = "These requests will automatically be added when the current song finishes.";
-
 /// `_waiting_for_add_sections`. `waiting` is the `_waiting_for_add_requests` mapping (request id text -> request), `removed` the removed-tonight mapping.
 pub fn sections(pending_acceptance: Option<&[Value]>, waiting: &Value, show_removed: bool, removed: &Value, ctx: &Context) -> R<Vec<Section>> {
     let mut out = Vec::new();
     if let Some(p) = pending_acceptance {
         let rows = pending_acceptance_rows(p, ctx)?;
         if !rows.is_empty() {
-            out.push(Section { key: "pending_acceptance", title: "Pending Acceptance", helper: Some(PENDING_HELPER), rows });
+            out.push(Section { key: "pending_acceptance", title: "Pending Acceptance", helper: Some("These requests will automatically be added when the current song finishes."), rows });
         }
     }
     let mut wait_rows = Vec::new();
@@ -1140,16 +1123,6 @@ mod tests {
         let old = json!({"evening": "1999-01-01", "tenant": "wsk", "requests": {"5": {}}});
         assert!(removed_tonight(&old, &json!({"user": "wsk"}), now).unwrap().is_empty());
         assert!(removed_tonight(&json!([1]), &json!({}), now).unwrap().is_empty());
-    }
-
-    #[test]
-    fn already_merged_pending_requests_become_the_first_section() {
-        let (f, a, l) = (HashSet::new(), HashSet::new(), HashSet::new());
-        let reqs = vec![json!({"request_id": 2, "singer": "B", "queue_position": 2, "request_time": 1792000100}), json!({"request_id": 1, "singer": "A", "queue_position": 1, "request_time": 1792000000}), json!("junk")];
-        let s = pending_section(&reqs, &ctx(&f, &a, &l)).unwrap().unwrap();
-        assert_eq!((s.key, s.rows.iter().map(|r| r.request_id).collect::<Vec<_>>()), ("pending_acceptance", vec![1, 2]));
-        assert_eq!(s.rows[0].status_label, "Pending Acceptance");
-        assert!(pending_section(&[], &ctx(&f, &a, &l)).unwrap().is_none());
     }
 
     #[test]
