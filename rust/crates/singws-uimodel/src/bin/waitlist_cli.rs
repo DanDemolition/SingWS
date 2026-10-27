@@ -33,6 +33,11 @@ fn handle(r: &Value) -> Result<Value, String> {
             Ok(json!({"non_actionable": w::non_actionable(req)?, "waiting": w::is_waiting_for_add(req)?, "status_kind": w::status_kind(req)?}))
         }
         "reason" => Ok(json!({"reason": w::reason_text(r.get("req").unwrap_or(&null))?})),
+        "evening" => Ok(json!({"key": w::evening_key(r.get("now").and_then(Value::as_i64).ok_or("missing now")?)?})),
+        "removed_tonight" => {
+            let got = w::removed_tonight(r.get("data").unwrap_or(&null), r.get("settings").unwrap_or(&null), r.get("now").and_then(Value::as_i64).ok_or("missing now")?)?;
+            Ok(json!({"requests": got.into_iter().map(|(id, req)| json!([id, req])).collect::<Vec<_>>()}))
+        }
         "isoclock" => {
             let t = r.get("text").and_then(Value::as_str).ok_or("missing text")?;
             Ok(json!({"parsed": w::from_isoformat(t)?.is_some()}))
