@@ -135,6 +135,21 @@ class StartShadow:
             self._say(f"check_display error: {exc!r}")
             return None
 
+    def reweave_order(self, queue):
+        """Rust's new order (indices into `queue`) for the rotation lock's reweave, or None when it cannot answer."""
+        try:
+            facts = reweave_facts(queue)
+            if not self.available or facts is None:
+                return None
+            size = _OUT_CAP + 12 * len(facts)
+            buf = ctypes.create_string_buffer(size)
+            n = self._lib.singws_start_json(json.dumps({"op": "reweave", "queue": facts}).encode(), buf, size)
+            if n < 0:
+                return None
+            return json.loads(buf.raw[:n].decode())["order"]
+        except Exception:
+            return None
+
     def note(self, kind, text=""):
         """A one-time `NOTE` line for something the shadow cannot compare but a report reader should know happened. Never raises."""
         try:
@@ -150,20 +165,23 @@ class StartShadow:
         try:
             if not self.available or facts is None:
                 return None
-            payload = json.dumps(facts, allow_nan=False)
-            size = _OUT_CAP + 120 * (len(facts["queue"]) + 1)
+            objects = facts["_objects"]
+            payload = json.dumps({k: v for k, v in facts.items() if k != "_objects"}, allow_nan=False)
+            size = _OUT_CAP + 160 * (len(facts["queue"]) + 1)
             buf = ctypes.create_string_buffer(size)
             n = self._lib.singws_start_json(payload.encode(), buf, size)
             if n < 0:
                 self._say(f"rotation call failed code={n}")
                 return None
-            got = json.loads(buf.raw[:n].decode())["queue"]
-            want = rotation_after(queue_after)
+            answer = json.loads(buf.raw[:n].decode())
+            got = [dict(row, order=i) for row, i in zip(answer["queue"], answer["order"])]
+            index = {id(o): i for i, o in enumerate(objects)}
+            want = [dict(row, order=index.get(id(s), -1)) for row, s in zip(rotation_after(queue_after), queue_after)]
             self.checks += 1
             agree = got == want
             if not agree:
                 self.mismatches += 1
-                self._say(f"MISMATCH rotation app={json.dumps(want)[:240]} rust={json.dumps(got)[:240]} before={json.dumps(facts)[:240]}")
+                self._say(f"MISMATCH rotation app={json.dumps(want)[:240]} rust={json.dumps(got)[:240]} before={json.dumps({k: v for k, v in facts.items() if k != '_objects'})[:240]}")
             elif "rotation" not in self._seen:
                 self._seen.add("rotation")
                 self._say("decision route=rotation agree=1")
@@ -174,26 +192,27 @@ class StartShadow:
             self._say(f"check_rotation error: {exc!r}")
             return None
 
-    def check_pick(self, facts, singer, song):
+    def check_pick(self, facts, singer, song, queue=None, lock_cleared=False, rotation_mode=False, setting_locked=False):
         """Compare who the app picked to sing next (`singer` = index in the queue as it was before the pick, `song` = index in that singer's songs; both None when
         nobody could sing) with Rust. `facts` is :func:`pick_facts` of the queue taken before the loop ran. Never raises; returns agree, or None when skipped."""
         try:
             if not self.available or facts is None:
                 return None
-            payload = json.dumps({"op": "pick", "singers": facts}, allow_nan=False)
-            buf = ctypes.create_string_buffer(_OUT_CAP)
-            n = self._lib.singws_start_json(payload.encode(), buf, _OUT_CAP)
+            payload = json.dumps({"op": "pick", "singers": facts, "rotation_mode": bool(rotation_mode), "setting_locked": bool(setting_locked)}, allow_nan=False)
+            size = _OUT_CAP + 12 * len(facts)
+            buf = ctypes.create_string_buffer(size)
+            n = self._lib.singws_start_json(payload.encode(), buf, size)
             if n < 0:
                 self._say(f"pick call failed code={n}")
                 return None
             got = json.loads(buf.raw[:n].decode())
-            want = {"singer": singer, "song": song}
+            want = {"singer": singer, "song": song, "queue": list(queue) if queue is not None else got["queue"], "lock_cleared": bool(lock_cleared)}
             self.checks += 1
             agree = got == want
             kind = "pick_none" if singer is None else "pick"
             if not agree:
                 self.mismatches += 1
-                self._say(f"MISMATCH pick app={want} rust={got} queue={json.dumps(facts)[:200]}")
+                self._say(f"MISMATCH pick app={want} rust={got} locked={int(bool(setting_locked))} mode={int(bool(rotation_mode))} queue={json.dumps(facts)[:200]}")
             elif kind not in self._seen:
                 self._seen.add(kind)
                 self._say(f"decision route={kind} agree=1")
@@ -239,24 +258,22 @@ def engine_facts(want_rust, supports, engine, voice_error=False):
 
 
 def pick_facts(queue):
-    """The queue as the pick loop sees it: [{"skipped": bool, "songs": "dds..."}] with d = dict entry not skipped, s = dict entry skipped, t = older tuple entry.
-    None when the queue holds something the pick loop itself would raise on (a singer that is not a dict, `songs` that is not a list)."""
+    """The queue as the pick loop sees it: [{"skipped", "songs": "dds..", "marker", "lock_new", "lock_order"}] with d = dict entry not skipped, s = dict entry skipped,
+    t = older tuple entry. None when the queue holds something the pick loop itself would raise on (a singer that is not a dict, `songs` that is not a list) or a lock
+    order the app could not turn into a whole number."""
     out = []
     for singer in queue:
         if not isinstance(singer, dict):
             return None
-        songs = singer.get("songs", [])
-        if songs is None:
-            songs = []
-        if not isinstance(songs, (list, tuple)):
+        kinds = _kinds(singer.get("songs", []))
+        if kinds is None:
             return None
-        kinds = []
-        for song in songs:
-            if isinstance(song, dict):
-                kinds.append("s" if song.get("skipped", False) else "d")
-            else:
-                kinds.append("t")
-        out.append({"skipped": bool(singer.get("skipped", False)), "songs": "".join(kinds)})
+        try:
+            order = int(singer.get("rotation_lock_order", 0) or 0)
+        except Exception:
+            return None
+        out.append({"skipped": bool(singer.get("skipped", False)), "songs": kinds, "marker": bool(singer.get("rotation_marker", False)),
+                    "lock_new": bool(singer.get("rotation_lock_new", False)), "lock_order": order})
     return out
 
 
@@ -276,12 +293,17 @@ def _rot_singer(singer):
     kinds = _kinds(singer.get("songs", []))
     if kinds is None:
         return None
+    try:
+        order = int(singer.get("rotation_lock_order", 0) or 0)
+    except Exception:
+        return None
     return {"skipped": bool(singer.get("skipped", False)), "songs": kinds, "round_sung": (bool(singer["round_sung"]) if "round_sung" in singer else None),
-            "marker": bool(singer.get("rotation_marker", False)), "has_sung": bool(singer.get("has_sung", False))}
+            "marker": bool(singer.get("rotation_marker", False)), "has_sung": bool(singer.get("has_sung", False)),
+            "lock_new": bool(singer.get("rotation_lock_new", False)), "lock_order": order}
 
 
-def rotation_facts(queue, singer, rotation_mode, marker_was_top):
-    """The rotation state right before a started song is committed: the queue WITHOUT the singer, the singer, and the two mode flags. None for anything odd."""
+def rotation_facts(queue, singer, rotation_mode, marker_was_top, setting_locked=False):
+    """The rotation state right before a started song is committed: the queue WITHOUT the singer, the singer, the mode flags and the saved lock. None for anything odd."""
     rows = []
     for other in queue:
         r = _rot_singer(other)
@@ -291,7 +313,9 @@ def rotation_facts(queue, singer, rotation_mode, marker_was_top):
     me = _rot_singer(singer)
     if me is None:
         return None
-    return {"op": "after_start", "queue": rows, "singer": me, "rotation_mode": bool(rotation_mode), "marker_was_top": bool(marker_was_top)}
+    facts = {"op": "after_start", "queue": rows, "singer": me, "rotation_mode": bool(rotation_mode), "marker_was_top": bool(marker_was_top), "setting_locked": bool(setting_locked)}
+    facts["_objects"] = list(queue) + [singer]   # identities, to read the new order back; never sent to Rust
+    return facts
 
 
 def rotation_after(queue):
@@ -303,6 +327,25 @@ def rotation_after(queue):
 
 
 StartShadow.rotation_facts = staticmethod(rotation_facts)
+
+
+def reweave_facts(queue):
+    """The queue as the rotation lock's reweave sees it: [{"active","marker","lock_new","lock_order"}], or None for anything odd (a lock order that is not a number)."""
+    out = []
+    for singer in queue:
+        if not isinstance(singer, dict):
+            return None
+        songs = singer.get("songs", [])
+        kinds = _kinds(songs)
+        if kinds is None:
+            return None
+        try:
+            order = int(singer.get("rotation_lock_order", 0) or 0)
+        except Exception:
+            return None
+        out.append({"active": (not singer.get("skipped", False)) and bool(songs) and any(c != "s" for c in kinds), "marker": bool(singer.get("rotation_marker", False)),
+                    "lock_new": bool(singer.get("rotation_lock_new", False)), "lock_order": order})
+    return out
 
 
 def _load_lib():

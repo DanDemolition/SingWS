@@ -17,7 +17,14 @@ if [[ "$(uname -m)" != "x86_64" ]]; then
     # no longer run under Rosetta. Keep Apple tooling native and translate only
     # Python/PyInstaller, which is what determines the bundle architecture.
     PYTHON_RUN=(arch -x86_64 "$PYTHON")
-    NATIVE_PYTHON="${SINGWS_NATIVE_PYTHON:-.venv-repair/bin/python}"
+    # the arm64 Python that runs the Apple-native tools (dmgbuild, the Mach-O checks): .venv-repair when it exists, else the arm64 build venv
+    NATIVE_PYTHON="${SINGWS_NATIVE_PYTHON:-}"
+    if [[ -z "$NATIVE_PYTHON" ]]; then
+        for candidate in .venv-repair/bin/python .venv-build-arm64/bin/python; do
+            if [[ -x "$candidate" ]]; then NATIVE_PYTHON="$candidate"; break; fi
+        done
+    fi
+    NATIVE_PYTHON="${NATIVE_PYTHON:-.venv-repair/bin/python}"
     export PATH="$(pwd)/tools/native-build-bin:$PATH"
 fi
 

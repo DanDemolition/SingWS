@@ -60145,6 +60145,16 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
 
+        # Stage A5 shadow: the queue and the lock as they are BEFORE the rotation lock is looked at and the pick loop runs
+        _pick_shadow, _pick_facts, _pick_mode, _pick_setting_locked = None, None, False, False
+        try:
+            _pick_shadow = _start_shadow_for(self.settings)
+            if _pick_shadow is not None:
+                _pick_facts = _pick_shadow.pick_facts(queue_snapshot)
+                _pick_mode = bool(self._is_rotation_mode())
+                _pick_setting_locked = bool(self.settings.get("rotation_locked", False))
+        except Exception:
+            _pick_shadow, _pick_facts = None, None
         marker_was_top = False
         if self._is_rotation_mode():
             try:
@@ -60162,14 +60172,6 @@ class KaraokeApp(QWidget):
                 pass
 
         _pn_clock.mark("snapshot_rotation")
-        _pick_shadow, _pick_facts = None, None
-        try:
-            _pick_shadow = _start_shadow_for(self.settings)
-            # a locked rotation reweaves its tail while the loop runs, which the plain pick rule does not model (not compared, not logged)
-            if _pick_shadow is not None and not self._is_rotation_locked():
-                _pick_facts = _pick_shadow.pick_facts(queue_snapshot)
-        except Exception:
-            _pick_shadow, _pick_facts = None, None
         singer = None
         attempts_remaining = max(0, len(self.queue))
         while attempts_remaining > 0:
@@ -60183,6 +60185,9 @@ class KaraokeApp(QWidget):
                 self.queue.append(singer)
                 if self._is_rotation_locked():
                     self._rotation_reweave_locked_tail()
+                # Forget this singer: they are already back at the bottom. Keeping the reference used to start a SKIPPED singer's song when every singer was skipped,
+                # and the commit then appended the same singer to the queue a second time (fixed in 1.0.2.1).
+                singer = None
                 continue
             active_songs = singer.get("songs") and any(
                 (not song.get("skipped", False)) if isinstance(song, dict) else True
@@ -60201,7 +60206,8 @@ class KaraokeApp(QWidget):
         if singer is None:
             if _pick_facts is not None:
                 try:
-                    _pick_shadow.check_pick(_pick_facts, None, None)
+                    _pick_shadow.check_pick(_pick_facts, None, None, [next((_i for _i, _s in enumerate(queue_snapshot) if _s is _x), -1) for _x in self.queue],
+                                            _pick_setting_locked and not bool(self.settings.get("rotation_locked", False)), _pick_mode, _pick_setting_locked)
                 except Exception:
                     pass
             QTimer.singleShot(0, self.update_queue_display)
@@ -60229,7 +60235,9 @@ class KaraokeApp(QWidget):
 
             if _pick_facts is not None:
                 try:
-                    _pick_shadow.check_pick(_pick_facts, next((_i for _i, _s in enumerate(queue_snapshot) if _s is singer), None), first_non_skipped_idx if first_non_skipped_idx >= 0 else None)
+                    _pick_shadow.check_pick(_pick_facts, next((_i for _i, _s in enumerate(queue_snapshot) if _s is singer), None), first_non_skipped_idx if first_non_skipped_idx >= 0 else None,
+                                            [next((_i for _i, _s in enumerate(queue_snapshot) if _s is _x), -1) for _x in self.queue],
+                                            _pick_setting_locked and not bool(self.settings.get("rotation_locked", False)), _pick_mode, _pick_setting_locked)
                 except Exception:
                     pass
             # If no non-skipped songs (empty or all skipped), move to bottom and STOP
@@ -60575,12 +60583,12 @@ class KaraokeApp(QWidget):
             _rot_shadow, _rot_facts = None, None
             try:
                 _rot_shadow = _start_shadow_for(self.settings)
-                if _rot_shadow is not None and not self._is_rotation_locked():
+                if _rot_shadow is not None:
                     if any(_q is singer for _q in self.queue):
                         # the all-singers-skipped quirk: the pick loop already put this singer back at the bottom, so the commit below adds them a second time
                         _rot_shadow.note("singer_already_in_queue", f"singer={singer.get('name', '')!r} queue_len={len(self.queue)} (the commit appends the same singer again)")
                     else:
-                        _rot_facts = _rot_shadow.rotation_facts(self.queue, singer, self._is_rotation_mode(), marker_was_top)
+                        _rot_facts = _rot_shadow.rotation_facts(self.queue, singer, self._is_rotation_mode(), marker_was_top, bool(self.settings.get("rotation_locked", False)))
             except Exception:
                 _rot_facts = None
             singer["has_sung"] = True

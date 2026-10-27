@@ -49,16 +49,8 @@ M = [
     ('set_shadow_audio: if i.supports_shadow_audio { Some(voice) } else { None } }', 'set_shadow_audio: if i.supports_shadow_audio { Some(true) } else { None } }', None),
     ('    if v.get("op").and_then(serde_json::Value::as_str) == Some("engine") {', '    if v.get("op").and_then(serde_json::Value::as_str) == Some("route") {', None),
     # ---- who sings next
-    ('        if !s.skipped {\n            if let Some(j) = first_playable(s) {', '        if true {\n            if let Some(j) = first_playable(s) {', None),
-    ('    let first_playable = |s: &PickSinger| s.songs.chars().position(|c| c != \'s\');', '    let first_playable = |s: &PickSinger| s.songs.chars().position(|c| c == \'d\');', None),
-    ('    if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }', '    if !last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }', None),
-    ('    if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }', '    None', None),
-    ('Some((singers.len() - 1, first_playable(last)))', 'Some((0, first_playable(last)))', None),
-    ('Some((singers.len() - 1, first_playable(last)))', 'Some((singers.len() - 1, None))', None),
-    ('"song": p.and_then(|x| x.1)}', '"song": p.map(|_| 0)}', None),
     ("singers.iter().any(|s| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't')))", "singers.iter().any(|s| s.songs.chars().any(|c| !matches!(c, 'd' | 's')))", None),
     ("let bad = |s: &RotSinger| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'));", "let bad = |s: &RotSinger| s.songs.chars().any(|c| !matches!(c, 'd' | 's'));", None),
-    ('    let last = singers.last()?;', '    let last = singers.first()?;', None),
     # ---- display payload
     ('    let shown: String = if !a.is_empty() && !t.is_empty() {', '    let shown: String = if !a.is_empty() || !t.is_empty() {', None),
     ('    let (a, t) = (py_strip(entry_artist), py_strip(entry_title));', '    let (a, t) = (entry_artist, entry_title);', None),
@@ -76,16 +68,44 @@ M = [
     ('    me.has_sung = true;', '    me.has_sung = false;', None),
     ('        me.round_sung = Some(true);', '        me.round_sung = Some(false);', None),
     ('    if !rotation_mode {\n        return q;\n    }', '    if false {\n        return q;\n    }', None),
-    ('        if let Some(last) = q.last_mut() {\n            last.marker = true;\n        }', '        if let Some(first) = q.first_mut() {\n            first.marker = true;\n        }', None),
     ('    if marked.len() != 1 {', '    if marked.len() > 1 {', None),
     ('    if marked.len() != 1 {', '    if marked.len() < 1 {', None),
     ('    let keep = marked.first().copied().unwrap_or(0);'.replace('    let','        let'), '        let keep = marked.last().copied().unwrap_or(0);', None),
     ('            if s.round_sung.is_none() {\n                s.round_sung = Some(false);', '            if s.round_sung.is_none() {\n                s.round_sung = Some(true);', None),
-    ('    if q.iter().any(RotSinger::active) {', '    if true {', None),
-    ('.all(|s| s.round_sung == Some(true)) {', '.any(|s| s.round_sung == Some(true)) {', None),
-    ('            for s in q.iter_mut().filter(|s| s.active()) {\n                s.round_sung = Some(false);', '            for s in q.iter_mut() {\n                s.round_sung = Some(false);', None),
-    ('        !self.skipped && self.songs.chars().any(|c| c != \'s\')', '        !self.skipped || self.songs.chars().any(|c| c != \'s\')', None),
-    ('        let after = after_start(&queue, &singer, flag("rotation_mode"), flag("marker_was_top"));', '        let after = after_start(&queue, &singer, flag("marker_was_top"), flag("rotation_mode"));', None),
+    ('        let after = after_start(&queue, &singer, flag("rotation_mode"), flag("marker_was_top"), flag("setting_locked"));', '        let after = after_start(&queue, &singer, flag("marker_was_top"), flag("rotation_mode"), flag("setting_locked"));', None),
+    # ---- the rotation lock
+    ('    let pinned = marker_idx.filter(|&i| !q[i].active);', '    let pinned = marker_idx.filter(|&i| q[i].active);', None),
+    ('    let Some(tail_start) = [marker_idx, first_new].into_iter().flatten().min() else {', '    let Some(tail_start) = [marker_idx, first_new].into_iter().flatten().max() else {', None),
+    ('    new_tail.sort_by_key(|&i| q[i].lock_order); // stable, like Python\'s sort', '    new_tail.sort_by_key(|&i| -q[i].lock_order);', None),
+    ('    if let Some(p) = pinned {\n        order.push(p);\n    }', '', None),
+    ('        if Some(i) == pinned {\n            continue;\n        }', '', None),
+    ('        if let Some(&i) = old_tail.get(k) {\n            order.push(i);\n        }\n        if let Some(&i) = new_tail.get(k) {\n            order.push(i);\n        }', '        if let Some(&i) = new_tail.get(k) {\n            order.push(i);\n        }\n        if let Some(&i) = old_tail.get(k) {\n            order.push(i);\n        }', None),
+    ('    mode && setting && !q.is_empty() && marker_index(q, s) != Some(0)', '    mode && setting && !q.is_empty() && marker_index(q, s) == Some(0)', None),
+    ('    mode && setting && !q.is_empty() && marker_index(q, s) != Some(0)', '    mode && !q.is_empty() && marker_index(q, s) != Some(0)', None),
+    ('(lock_new[q[0]] || marker_was_top) {', '(lock_new[q[0]]) {', "a locked rotation never has the marker on top, so marker_was_top is false whenever the lock is on"),
+    ('            setting = false;\n            cleared = true;', '            cleared = true;', "the same step clears every newcomer flag, and a reweave with no newcomers changes nothing, so a lock left on after the clear is invisible"),
+    ('            lock_new.iter_mut().for_each(|x| *x = false);', '', "once the setting is off no reweave runs again, so the cleared newcomer flags are never read"),
+    ('        if s[me].skipped {\n            q.push(me);\n            if is_locked(&q, s, mode, setting) {\n                q = reweave_indices(&q, s, &lock_new);\n            }\n            held = None;', '        if s[me].skipped {\n            q.push(me);\n            held = None;', None),
+    ('        q.push(me);\n        if is_locked(&q, s, mode, setting) {\n            q = reweave_indices(&q, s, &lock_new);\n        }\n        held = None;', '        q.push(me);\n        held = None;', None),
+    ('        held = None;\n    }', '    }', None),
+    ('    if setting_locked && marker_at(&q) != Some(0) {', '    if false && marker_at(&q) != Some(0) {', None),
+    ('    if setting_locked && marker_at(&q) != Some(0) {', '    if setting_locked && marker_at(&q) == Some(0) {', None),
+    ('        if let Some((_, me)) = q.iter_mut().find(|(i, _)| *i == started) {', '        if let Some((_, me)) = q.last_mut() {', None),
+    ('    Pick { singer: held, song: held.and_then(|i| s[i].first_playable()), queue: q, lock_cleared: cleared }', '    Pick { singer: held, song: held.and_then(|i| s[i].first_playable()), queue: q, lock_cleared: false }', None),
+    # ---- pick loop (current code)
+    ('            held = None; // forgotten, like the singer who has nothing playable (the app used to keep a skipped singer here; fixed in 1.0.2.1)\n            continue;', '            continue;', None),
+    ('        if s[me].active() {\n            break;', '        if !s[me].active() {\n            break;', None),
+    ("    fn active(&self) -> bool {\n        !self.skipped && self.songs.chars().any(|c| c != 's')\n    }\n    fn first_playable", "    fn active(&self) -> bool {\n        !self.skipped || self.songs.chars().any(|c| c != 's')\n    }\n    fn first_playable", None),
+    ("        self.songs.chars().position(|c| c != 's')\n    }\n}\n\n/// What the pick loop", "        self.songs.chars().position(|c| c == 'd')\n    }\n}\n\n/// What the pick loop", None),
+    ('    Pick { singer: held, song: held.and_then(|i| s[i].first_playable()), queue: q, lock_cleared: cleared }', '    Pick { singer: held, song: held.map(|_| 0), queue: q, lock_cleared: cleared }', None),
+    ('"song": p.song, "queue": p.queue,', '"song": p.song, "queue": Vec::<usize>::new(),', None),
+    ('"queue": p.queue, "lock_cleared": p.lock_cleared}', '"queue": p.queue, "lock_cleared": false}', None),
+    ('    p.singer.map(|i| (i, p.song))', '    p.singer.map(|i| (i, None))', None),
+    # ---- rotation commit (current code)
+    ('    if q.iter().any(|(_, s)| s.active()) {', '    if true {', None),
+    ('.all(|(_, s)| s.round_sung == Some(true)) {', '.any(|(_, s)| s.round_sung == Some(true)) {', None),
+    ('            for (_, s) in q.iter_mut().filter(|(_, s)| s.active()) {', '            for (_, s) in q.iter_mut() {', None),
+    ("    fn active(&self) -> bool {\n        !self.skipped && self.songs.chars().any(|c| c != 's')\n    }\n}\n\n/// The queue after a song", "    fn active(&self) -> bool {\n        !self.skipped || self.songs.chars().any(|c| c != 's')\n    }\n}\n\n/// The queue after a song", None),
 ]
 
 
@@ -97,7 +117,7 @@ def differential():
     b = subprocess.run(["cargo", "build", "--release", "-p", "singws-dsp-ffi", "--quiet"], cwd=ROOT / "rust", env=ENV, capture_output=True, text=True)
     if b.returncode != 0:
         return 1  # does not compile: counts as caught
-    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
+    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
 
 
 def main():

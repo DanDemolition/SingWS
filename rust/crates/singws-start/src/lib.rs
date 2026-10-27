@@ -210,32 +210,106 @@ pub fn engine_route(i: &EngineInput) -> EngineAnswer {
 }
 
 /// One singer as the pick loop of `play_next_file` sees it: the singer's own skipped flag and the kind of each queued song, one character each:
-/// `d` a dict entry that is not skipped, `s` a dict entry that is skipped, `t` an older tuple/list entry (never skipped).
+/// `d` a dict entry that is not skipped, `s` a dict entry that is skipped, `t` an older tuple/list entry (never skipped); plus, for a rotation, the marker and the
+/// lock fields (`rotation_lock_new`, and `rotation_lock_order` as the whole number the app reads it as).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PickSinger {
     #[serde(default)]
     pub skipped: bool,
     pub songs: String,
+    #[serde(default)]
+    pub marker: bool,
+    #[serde(default)]
+    pub lock_new: bool,
+    #[serde(default)]
+    pub lock_order: i64,
 }
 
-/// Who sings next and which of their songs, exactly as the pick loop of `play_next_file` ends up with them (not as one might wish it did):
-/// * the first singer, in queue order, who is not skipped and has at least one song that is not skipped is picked, with that first song;
-/// * when there is no such singer the loop has popped everybody once and is left holding the LAST singer it looked at, which it forgets (`None`) when that singer was
-///   not skipped but had nothing playable, and KEEPS when that singer was skipped: the app then goes on with a skipped singer (the "all singers are skipped" quirk,
-///   found by the shadow on 2026-10-26 and reported to the operator, not changed);
-/// * the song is that singer's first song that is not skipped, or `None` inside the answer when there is none (the app then starts nothing).
-/// Returns `None` when no singer is left to go on with.
-pub fn pick(singers: &[PickSinger]) -> Option<(usize, Option<usize>)> {
-    let first_playable = |s: &PickSinger| s.songs.chars().position(|c| c != 's');
-    for (i, s) in singers.iter().enumerate() {
-        if !s.skipped {
-            if let Some(j) = first_playable(s) {
-                return Some((i, Some(j)));
-            }
+impl PickSinger {
+    fn active(&self) -> bool {
+        !self.skipped && self.songs.chars().any(|c| c != 's')
+    }
+    fn first_playable(&self) -> Option<usize> {
+        self.songs.chars().position(|c| c != 's')
+    }
+}
+
+/// What the pick loop of `play_next_file` ends with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pick {
+    /// the singer the app goes on with (index into the queue as it was before the loop), `None` when nobody is left
+    pub singer: Option<usize>,
+    /// that singer's first song that is not skipped; `None` inside a picked singer means there is none (the app then starts nothing)
+    pub song: Option<usize>,
+    /// the queue after the loop, as indices into the old one (the picked singer is no longer in it, except in the all-skipped case)
+    pub queue: Vec<usize>,
+    /// the loop cleared the rotation lock (a locked newcomer reached the top)
+    pub lock_cleared: bool,
+}
+
+fn marker_index(q: &[usize], s: &[PickSinger]) -> Option<usize> {
+    q.iter().position(|&i| s[i].marker)
+}
+
+/// `_is_rotation_locked()`: rotation mode, the saved lock, a non-empty queue and the marker not on the top singer (no marker counts as "not on the top").
+fn is_locked(q: &[usize], s: &[PickSinger], mode: bool, setting: bool) -> bool {
+    mode && setting && !q.is_empty() && marker_index(q, s) != Some(0)
+}
+
+fn reweave_indices(q: &[usize], s: &[PickSinger], lock_new: &[bool]) -> Vec<usize> {
+    let facts: Vec<LockSinger> = q.iter().map(|&i| LockSinger { active: s[i].active(), marker: s[i].marker, lock_new: lock_new[i], lock_order: s[i].lock_order }).collect();
+    reweave(&facts).into_iter().map(|k| q[k]).collect()
+}
+
+/// The pick loop of `play_next_file`, step by step as the app runs it:
+/// * in rotation mode, a locked rotation whose top singer is a locked newcomer is unlocked first (the lock and every singer's lock fields are cleared);
+/// * then up to `len` times: the front singer is taken; a skipped singer goes to the bottom and is forgotten; a singer who is not
+///   skipped and has a song that is not skipped is picked; a singer who is not skipped but has nothing playable goes to the bottom and is forgotten; after each move to the
+///   bottom a locked rotation is reweaved (which changes who is in front next);
+/// * a singer who was skipped or had nothing playable is forgotten, so when nobody qualifies nothing starts and the queue is back in its old order (until 1.0.2.1 the
+///   app kept a skipped singer in that spot, started their song and queued them twice).
+pub fn pick_loop(s: &[PickSinger], mode: bool, setting_locked: bool) -> Pick {
+    let n = s.len();
+    let mut q: Vec<usize> = (0..n).collect();
+    let mut setting = setting_locked;
+    let mut lock_new: Vec<bool> = s.iter().map(|x| x.lock_new).collect();
+    let mut cleared = false;
+    if mode {
+        let marker_was_top = marker_index(&q, s) == Some(0);
+        if is_locked(&q, s, mode, setting) && (lock_new[q[0]] || marker_was_top) {
+            setting = false;
+            cleared = true;
+            lock_new.iter_mut().for_each(|x| *x = false);
         }
     }
-    let last = singers.last()?;
-    if last.skipped { Some((singers.len() - 1, first_playable(last))) } else { None }
+    let mut held: Option<usize> = None;
+    for _ in 0..n {
+        let me = q.remove(0);
+        held = Some(me);
+        if s[me].skipped {
+            q.push(me);
+            if is_locked(&q, s, mode, setting) {
+                q = reweave_indices(&q, s, &lock_new);
+            }
+            held = None; // forgotten, like the singer who has nothing playable (the app used to keep a skipped singer here; fixed in 1.0.2.1)
+            continue;
+        }
+        if s[me].active() {
+            break;
+        }
+        q.push(me);
+        if is_locked(&q, s, mode, setting) {
+            q = reweave_indices(&q, s, &lock_new);
+        }
+        held = None;
+    }
+    Pick { singer: held, song: held.and_then(|i| s[i].first_playable()), queue: q, lock_cleared: cleared }
+}
+
+/// The unlocked, classic-mode answer: the singer and the song (kept for the simple callers and tests).
+pub fn pick(singers: &[PickSinger]) -> Option<(usize, Option<usize>)> {
+    let p = pick_loop(singers, false, false);
+    p.singer.map(|i| (i, p.song))
 }
 
 /// One singer's rotation state as `_commit_pending_start` sees it: the same `skipped` / `songs` facts as [`PickSinger`] (a singer is ACTIVE when not skipped and holding a
@@ -251,6 +325,10 @@ pub struct RotSinger {
     pub marker: bool,
     #[serde(default)]
     pub has_sung: bool,
+    #[serde(default)]
+    pub lock_new: bool,
+    #[serde(default)]
+    pub lock_order: i64,
 }
 
 impl RotSinger {
@@ -262,48 +340,112 @@ impl RotSinger {
 /// The queue after a song has started and the app commits it: the singer is marked as having sung (and, in rotation mode, as having sung this round), goes to the
 /// bottom; in rotation mode the marker follows when it was on the top singer, a missing or doubled marker is repaired (the first one wins; none: the first singer), the
 /// missing `round_sung` keys are filled with false, and a round in which every active singer has sung starts over. `queue` is the queue WITHOUT the singer.
-/// (A locked rotation also reweaves its tail; that is not modeled and the app does not compare it.)
-pub fn after_start(queue: &[RotSinger], singer: &RotSinger, rotation_mode: bool, marker_was_top: bool) -> Vec<RotSinger> {
+/// A locked rotation (`setting_locked` and the marker not on the top) reweaves its tail right after the singer is added, before the marker handling. Each returned row is
+/// the singer plus the index it had in `queue` (the started singer has index `queue.len()`).
+pub fn after_start(queue: &[RotSinger], singer: &RotSinger, rotation_mode: bool, marker_was_top: bool, setting_locked: bool) -> Vec<(usize, RotSinger)> {
     let mut me = singer.clone();
     me.has_sung = true;
     if rotation_mode {
         me.round_sung = Some(true);
     }
-    let mut q: Vec<RotSinger> = queue.to_vec();
-    q.push(me);
+    // each row keeps the index it had in `queue` followed by the singer (index queue.len())
+    let mut q: Vec<(usize, RotSinger)> = queue.iter().cloned().enumerate().collect();
+    q.push((queue.len(), me));
     if !rotation_mode {
         return q;
     }
+    let marker_at = |q: &[(usize, RotSinger)]| q.iter().position(|(_, s)| s.marker);
+    if setting_locked && marker_at(&q) != Some(0) {
+        let facts: Vec<LockSinger> = q.iter().map(|(_, s)| LockSinger { active: s.active(), marker: s.marker, lock_new: s.lock_new, lock_order: s.lock_order }).collect();
+        let order = reweave(&facts);
+        q = order.into_iter().map(|k| q[k].clone()).collect();
+    }
     if marker_was_top {
-        for s in q.iter_mut() {
+        for (_, s) in q.iter_mut() {
             s.marker = false;
         }
-        if let Some(last) = q.last_mut() {
-            last.marker = true;
+        // the marker goes to the started singer wherever the reweave left them (not to whoever is last)
+        let started = queue.len();
+        if let Some((_, me)) = q.iter_mut().find(|(i, _)| *i == started) {
+            me.marker = true;
         }
     }
     // repair: exactly one marker; several: keep the first; none: the first singer
-    let marked: Vec<usize> = q.iter().enumerate().filter(|(_, s)| s.marker).map(|(i, _)| i).collect();
+    let marked: Vec<usize> = q.iter().enumerate().filter(|(_, (_, s))| s.marker).map(|(i, _)| i).collect();
     if marked.len() != 1 {
         let keep = marked.first().copied().unwrap_or(0);
-        for (i, s) in q.iter_mut().enumerate() {
+        for (i, (_, s)) in q.iter_mut().enumerate() {
             s.marker = i == keep;
         }
     }
     // round state
-    if q.iter().any(RotSinger::active) {
-        for s in q.iter_mut() {
+    if q.iter().any(|(_, s)| s.active()) {
+        for (_, s) in q.iter_mut() {
             if s.round_sung.is_none() {
                 s.round_sung = Some(false);
             }
         }
-        if q.iter().filter(|s| s.active()).all(|s| s.round_sung == Some(true)) {
-            for s in q.iter_mut().filter(|s| s.active()) {
+        if q.iter().filter(|(_, s)| s.active()).all(|(_, s)| s.round_sung == Some(true)) {
+            for (_, s) in q.iter_mut().filter(|(_, s)| s.active()) {
                 s.round_sung = Some(false);
             }
         }
     }
     q
+}
+
+/// One singer as the rotation lock sees it: active (not skipped and holding a song that is not skipped), the rotation marker, and the lock's own fields.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LockSinger {
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub marker: bool,
+    /// `rotation_lock_new`: a singer who signed up while the rotation was locked
+    #[serde(default)]
+    pub lock_new: bool,
+    /// `int(rotation_lock_order or 0)`
+    #[serde(default)]
+    pub lock_order: i64,
+}
+
+/// `_rotation_reweave_locked_tail` for a locked, non-empty rotation: the new order of the queue as indices into the old one. Everything before the first of (the marker, the
+/// first locked newcomer) stays; from there the existing singers keep their order and the locked newcomers (sorted by their signup order, ties keep queue order) are woven in
+/// after each of them, one for one. A marked singer with nothing to sing is pinned to the front of the tail.
+pub fn reweave(q: &[LockSinger]) -> Vec<usize> {
+    let n = q.len();
+    let marker_idx = q.iter().position(|s| s.marker);
+    let pinned = marker_idx.filter(|&i| !q[i].active);
+    let first_new = q.iter().position(|s| s.lock_new);
+    let Some(tail_start) = [marker_idx, first_new].into_iter().flatten().min() else {
+        return (0..n).collect();
+    };
+    let mut order: Vec<usize> = (0..tail_start).collect();
+    let mut new_tail: Vec<usize> = Vec::new();
+    let mut old_tail: Vec<usize> = Vec::new();
+    for i in tail_start..n {
+        if Some(i) == pinned {
+            continue;
+        }
+        if q[i].lock_new {
+            new_tail.push(i);
+        } else {
+            old_tail.push(i);
+        }
+    }
+    new_tail.sort_by_key(|&i| q[i].lock_order); // stable, like Python's sort
+    if let Some(p) = pinned {
+        order.push(p);
+    }
+    for k in 0..old_tail.len().max(new_tail.len()) {
+        if let Some(&i) = old_tail.get(k) {
+            order.push(i);
+        }
+        if let Some(&i) = new_tail.get(k) {
+            order.push(i);
+        }
+    }
+    order
 }
 
 /// Python's `str.strip()` whitespace: Unicode White_Space plus U+001C..U+001F (which Python also counts as whitespace and Rust does not).
@@ -351,16 +493,24 @@ pub fn start_json(request: &str) -> Result<String, String> {
             return Err("songs may only contain d, s and t".into());
         }
         let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let after = after_start(&queue, &singer, flag("rotation_mode"), flag("marker_was_top"));
-        return Ok(serde_json::json!({"queue": after.iter().map(|s| serde_json::json!({"marker": s.marker, "round_sung": s.round_sung, "has_sung": s.has_sung})).collect::<Vec<_>>()}).to_string());
+        let after = after_start(&queue, &singer, flag("rotation_mode"), flag("marker_was_top"), flag("setting_locked"));
+        return Ok(serde_json::json!({
+            "queue": after.iter().map(|(_, s)| serde_json::json!({"marker": s.marker, "round_sung": s.round_sung, "has_sung": s.has_sung})).collect::<Vec<_>>(),
+            "order": after.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        }).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("reweave") {
+        let q: Vec<LockSinger> = serde_json::from_value(v.get("queue").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        return Ok(serde_json::json!({"order": reweave(&q)}).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("pick") {
         let singers: Vec<PickSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
         if singers.iter().any(|s| s.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'))) {
             return Err("songs may only contain d, s and t".into());
         }
-        let p = pick(&singers);
-        return Ok(serde_json::json!({"singer": p.map(|x| x.0), "song": p.and_then(|x| x.1)}).to_string());
+        let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let p = pick_loop(&singers, flag("rotation_mode"), flag("setting_locked"));
+        return Ok(serde_json::json!({"singer": p.singer, "song": p.song, "queue": p.queue, "lock_cleared": p.lock_cleared}).to_string());
     }
     let input: Input = serde_json::from_value(v).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"route": route(&input).name()}).to_string())
@@ -508,7 +658,7 @@ mod tests {
     }
 
     fn q(spec: &[(&str, bool)]) -> Vec<PickSinger> {
-        spec.iter().map(|(songs, skipped)| PickSinger { skipped: *skipped, songs: (*songs).into() }).collect()
+        spec.iter().map(|(songs, skipped)| PickSinger { skipped: *skipped, songs: (*songs).into(), marker: false, lock_new: false, lock_order: 0 }).collect()
     }
 
     #[test]
@@ -522,21 +672,23 @@ mod tests {
     }
 
     #[test]
-    fn when_nobody_qualifies_the_loop_keeps_the_last_singer_only_if_that_singer_was_skipped() {
-        assert_eq!(pick(&q(&[("dd", true), ("", false), ("ss", false)])), None, "the last singer was not skipped: forgotten");
-        assert_eq!(pick(&q(&[("d", false), ("", false)])), Some((0, Some(0))), "unrelated: a qualifying singer wins");
-        assert_eq!(pick(&q(&[("dd", true), ("", false), ("ss", true)])), Some((2, None)), "the last singer is skipped with nothing playable: kept, but there is no song");
-        assert_eq!(pick(&q(&[("ss", false), ("sd", true)])), Some((1, Some(1))), "the last singer is skipped but has a song: the app goes on with them");
-        assert_eq!(pick(&q(&[("d", true)])), Some((0, Some(0))), "a single skipped singer still sings");
-        assert_eq!(pick(&q(&[("d", true), ("d", true)])), Some((1, Some(0))), "of several skipped singers it is the last one");
+    fn when_nobody_qualifies_nothing_starts_and_nobody_is_kept() {
+        assert_eq!(pick(&q(&[("dd", true), ("", false), ("ss", false)])), None);
+        assert_eq!(pick(&q(&[("d", false), ("", false)])), Some((0, Some(0))), "a qualifying singer wins");
+        assert_eq!(pick(&q(&[("dd", true), ("", false), ("ss", true)])), None, "skipped or nothing playable: nobody");
+        assert_eq!(pick(&q(&[("ss", false), ("sd", true)])), None, "a skipped singer never sings, even as the last one looked at (fixed in 1.0.2.1)");
+        assert_eq!(pick(&q(&[("d", true)])), None, "a single skipped singer does not sing");
+        assert_eq!(pick(&q(&[("d", true), ("d", true)])), None, "all skipped: nothing starts");
+        let all = pick_loop(&q(&[("d", true), ("d", true), ("d", true)]), false, false);
+        assert_eq!(all.queue, vec![0, 1, 2], "every singer went to the bottom once, so the order is as it was");
     }
 
     #[test]
     fn the_pick_op_is_routed_by_the_json_glue_and_rejects_bad_shapes() {
         let r = start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"d"},{"songs":"sd"}]}"#).unwrap();
-        assert_eq!(r, r#"{"singer":1,"song":1}"#);
-        assert_eq!(start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"ss"}]}"#).unwrap(), r#"{"singer":0,"song":null}"#, "kept singer without a playable song");
-        assert_eq!(start_json(r#"{"op":"pick","singers":[]}"#).unwrap(), r#"{"singer":null,"song":null}"#);
+        assert_eq!(r, r#"{"lock_cleared":false,"queue":[0],"singer":1,"song":1}"#, "the skipped singer went to the bottom; the picked one left the queue");
+        assert_eq!(start_json(r#"{"op":"pick","singers":[{"skipped":true,"songs":"ss"}]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[0],"singer":null,"song":null}"#, "a skipped singer is not picked");
+        assert_eq!(start_json(r#"{"op":"pick","singers":[]}"#).unwrap(), r#"{"lock_cleared":false,"queue":[],"singer":null,"song":null}"#);
         assert!(start_json(r#"{"op":"pick","singers":[{"songs":"dx"}]}"#).is_err());
         assert!(start_json(r#"{"op":"pick"}"#).is_err());
         assert!(start_json(r#"{"op":"pick","singers":[{"skipped":true}]}"#).is_err());
@@ -567,19 +719,19 @@ mod tests {
     }
 
     fn rs(songs: &str, skipped: bool, round: Option<bool>, marker: bool, has_sung: bool) -> RotSinger {
-        RotSinger { skipped, songs: songs.into(), round_sung: round, marker, has_sung }
+        RotSinger { skipped, songs: songs.into(), round_sung: round, marker, has_sung, lock_new: false, lock_order: 0 }
     }
-    fn flags(q: &[RotSinger]) -> Vec<(bool, Option<bool>, bool)> {
-        q.iter().map(|s| (s.marker, s.round_sung, s.has_sung)).collect()
+    fn flags(q: &[(usize, RotSinger)]) -> Vec<(bool, Option<bool>, bool)> {
+        q.iter().map(|(_, s)| (s.marker, s.round_sung, s.has_sung)).collect()
     }
 
     #[test]
     fn a_started_singer_goes_to_the_bottom_marked_as_sung() {
         let q = [rs("d", false, Some(false), true, false), rs("d", false, Some(false), false, false)];
         let me = rs("d", false, Some(false), false, false);
-        let out = after_start(&q, &me, false, false);
+        let out = after_start(&q, &me, false, false, false);
         assert_eq!(flags(&out), vec![(true, Some(false), false), (false, Some(false), false), (false, Some(false), true)], "classic mode: only has_sung and the place change");
-        let out = after_start(&q, &me, true, false);
+        let out = after_start(&q, &me, true, false, false);
         assert_eq!(flags(&out), vec![(true, Some(false), false), (false, Some(false), false), (false, Some(true), true)], "rotation mode: sung this round");
     }
 
@@ -587,41 +739,91 @@ mod tests {
     fn the_marker_follows_the_singer_when_it_was_on_the_top_and_is_repaired_otherwise() {
         let q = [rs("d", false, Some(false), false, false), rs("d", false, Some(false), false, false)];
         let me = rs("d", false, None, true, false);
-        assert_eq!(flags(&after_start(&q, &me, true, true)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![false, false, true], "moved to the singer");
+        assert_eq!(flags(&after_start(&q, &me, true, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![false, false, true], "moved to the singer");
         let two = [rs("d", false, Some(false), true, false), rs("d", false, Some(false), true, false)];
-        assert_eq!(flags(&after_start(&two, &me, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false, false], "the first of several wins");
+        assert_eq!(flags(&after_start(&two, &me, true, false, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false, false], "the first of several wins");
         let none = [rs("d", false, Some(false), false, false)];
         let plain = rs("d", false, None, false, false);
-        assert_eq!(flags(&after_start(&none, &plain, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false], "no marker: the first singer");
+        assert_eq!(flags(&after_start(&none, &plain, true, false, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false], "no marker: the first singer");
         let one = [rs("d", false, Some(false), true, false), rs("d", false, Some(false), false, false)];
-        assert_eq!(flags(&after_start(&one, &plain, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false, false], "one marker stays where it is");
-        assert_eq!(flags(&after_start(&[], &plain, true, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true], "alone: marked");
+        assert_eq!(flags(&after_start(&one, &plain, true, false, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, false, false], "one marker stays where it is");
+        assert_eq!(flags(&after_start(&[], &plain, true, false, false)).iter().map(|f| f.0).collect::<Vec<_>>(), vec![true], "alone: marked");
+    }
+
+    #[test]
+    fn in_a_locked_rotation_the_marker_follows_the_started_singer_even_when_the_reweave_moves_them() {
+        // marker on the top singer is impossible while locked, so use marker_was_top = true with a marker elsewhere: the locked reweave puts the newcomer after the started singer
+        let mut newcomer = rs("d", false, Some(false), false, false);
+        newcomer.lock_new = true;
+        newcomer.lock_order = 1;
+        let q = [rs("d", false, Some(false), true, false), newcomer];
+        let me = rs("d", false, None, false, false);
+        let out = after_start(&q, &me, true, true, true);
+        let started_row = out.iter().position(|(i, _)| *i == 2).unwrap();
+        assert!(out[started_row].1.marker, "the started singer carries the marker");
+        assert_eq!(out.iter().filter(|(_, s)| s.marker).count(), 1);
     }
 
     #[test]
     fn a_finished_round_starts_over_and_missing_flags_are_filled() {
         let q = [rs("d", false, Some(true), true, true), rs("s", false, Some(true), false, true), rs("d", true, Some(true), false, true)];
         let me = rs("d", false, None, false, false);
-        let out = after_start(&q, &me, true, false);
+        let out = after_start(&q, &me, true, false, false);
         // active singers: 0 and the new one (1 has only skipped songs, 2 is skipped): everyone active has sung, so the round restarts for them
-        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(true), Some(true), Some(false)], "inactive singers keep their flag");
+        assert_eq!(out.iter().map(|(_, s)| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(true), Some(true), Some(false)], "inactive singers keep their flag");
         let open = [rs("d", false, Some(false), true, false)];
-        let out = after_start(&open, &me, true, false);
-        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(true)], "someone has not sung: no reset");
+        let out = after_start(&open, &me, true, false, false);
+        assert_eq!(out.iter().map(|(_, s)| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(true)], "someone has not sung: no reset");
         let missing = [rs("d", false, None, true, false), rs("s", false, None, false, false)];
-        let out = after_start(&missing, &rs("s", false, None, false, false), true, false);
-        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(false), Some(true)], "nobody active holds a song? the first singer is active, so keys are filled");
+        let out = after_start(&missing, &rs("s", false, None, false, false), true, false, false);
+        assert_eq!(out.iter().map(|(_, s)| s.round_sung).collect::<Vec<_>>(), vec![Some(false), Some(false), Some(true)], "nobody active holds a song? the first singer is active, so keys are filled");
         let nobody = [rs("s", false, None, true, false)];
-        let out = after_start(&nobody, &rs("", false, None, false, false), true, false);
-        assert_eq!(out.iter().map(|s| s.round_sung).collect::<Vec<_>>(), vec![None, Some(true)], "no active singer: nothing is normalized (the started singer keeps what it was given)");
+        let out = after_start(&nobody, &rs("", false, None, false, false), true, false, false);
+        assert_eq!(out.iter().map(|(_, s)| s.round_sung).collect::<Vec<_>>(), vec![None, Some(true)], "no active singer: nothing is normalized (the started singer keeps what it was given)");
     }
 
     #[test]
     fn the_after_start_op_is_routed_by_the_json_glue() {
         let r = start_json(r#"{"op":"after_start","rotation_mode":true,"marker_was_top":true,"queue":[{"songs":"d","round_sung":false,"marker":false}],"singer":{"songs":"d","marker":true}}"#).unwrap();
-        assert_eq!(r, r#"{"queue":[{"has_sung":false,"marker":false,"round_sung":false},{"has_sung":true,"marker":true,"round_sung":true}]}"#);
+        assert_eq!(r, r#"{"order":[0,1],"queue":[{"has_sung":false,"marker":false,"round_sung":false},{"has_sung":true,"marker":true,"round_sung":true}]}"#);
         assert!(start_json(r#"{"op":"after_start","queue":[{"songs":"x"}],"singer":{"songs":"d"}}"#).is_err());
         assert!(start_json(r#"{"op":"after_start","queue":[]}"#).is_err());
+    }
+
+    fn ls(active: bool, marker: bool, lock_new: bool, order: i64) -> LockSinger {
+        LockSinger { active, marker, lock_new, lock_order: order }
+    }
+
+    #[test]
+    fn locked_newcomers_are_woven_in_after_the_existing_singers() {
+        // head: 0 stays; the marker is singer 1; existing 1,2 and newcomers 3 (order 2), 4 (order 1)
+        let q = [ls(true, false, false, 0), ls(true, true, false, 0), ls(true, false, false, 0), ls(true, false, true, 2), ls(true, false, true, 1)];
+        assert_eq!(reweave(&q), vec![0, 1, 4, 2, 3], "old singers first, then newcomers by signup order, interleaved one for one");
+        let q = [ls(true, true, false, 0), ls(true, false, false, 0), ls(true, false, true, 5)];
+        assert_eq!(reweave(&q), vec![0, 2, 1], "the marker first, then the newcomer woven in right after it, then the other old singer");
+    }
+
+    #[test]
+    fn a_marked_singer_with_nothing_to_sing_is_pinned_to_the_front_of_the_tail() {
+        let q = [ls(true, false, false, 0), ls(false, true, false, 0), ls(true, false, false, 0), ls(true, false, true, 1)];
+        assert_eq!(reweave(&q), vec![0, 1, 2, 3]);
+        let q = [ls(true, false, true, 1), ls(false, true, false, 0), ls(true, false, false, 0)];
+        assert_eq!(reweave(&q), vec![1, 2, 0], "the newcomer is the first of the tail, so the pinned marker goes first and the newcomer after the old singer");
+    }
+
+    #[test]
+    fn with_no_marker_and_no_newcomer_nothing_moves_and_ties_keep_queue_order() {
+        assert_eq!(reweave(&[ls(true, false, false, 0), ls(true, false, false, 0)]), vec![0, 1]);
+        assert_eq!(reweave(&[]), Vec::<usize>::new());
+        let q = [ls(true, false, true, 1), ls(true, false, true, 1), ls(true, false, true, 0)];
+        assert_eq!(reweave(&q), vec![2, 0, 1], "ties keep queue order");
+    }
+
+    #[test]
+    fn the_reweave_op_is_routed_by_the_json_glue() {
+        let r = start_json(r#"{"op":"reweave","queue":[{"active":true},{"active":true,"marker":true},{"active":true,"lock_new":true,"lock_order":3}]}"#).unwrap();
+        assert_eq!(r, r#"{"order":[0,1,2]}"#);
+        assert!(start_json(r#"{"op":"reweave"}"#).is_err());
     }
 
     #[test]
