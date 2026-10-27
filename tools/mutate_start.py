@@ -177,6 +177,20 @@ M = [
     ('        ("media_end" | "stop", false) => none(false),', '        ("media_end" | "stop", false) => PerfStep { action: "discard", ..none(false) },', None),
     ('        ("media_end" | "stop", false) => none(false),', '        ("media_end", false) => none(false),', None),
     ('        let p = performance_step(flag("pending"), event, flag("has_request_id")).ok_or("unknown event")?;', '        let p = performance_step(flag("has_request_id"), event, flag("pending")).ok_or("unknown event")?;', None),
+    # ---- the whole start plan
+    ('    let Some(entry) = plan.pick.singer.and_then(|i| if plan.pick.song.is_some() { singers[i].entry.as_ref() } else { None }) else { return plan };', '    let Some(entry) = plan.pick.singer.and_then(|i| singers[i].entry.as_ref()) else { return plan };', "the pick loop only picks a singer who has a playable song, so a picked singer always has one"),
+    ('    let r = route(&entry.route);\n    plan.route = Some(r.name());', '    let r = route(&entry.route);\n    plan.route = None;', None),
+    ('        Route::Mp4 => "mp4",\n        Route::Mp3 => "mp3",\n        Route::CdgMp3Dual | Route::Mp3gZip => "cdg",', '        Route::Mp4 => "mp3",\n        Route::Mp3 => "mp3",\n        Route::CdgMp3Dual | Route::Mp3gZip => "cdg",', None),
+    ('        Route::Mp4 => "mp4",\n        Route::Mp3 => "mp3",\n        Route::CdgMp3Dual | Route::Mp3gZip => "cdg",', '        Route::Mp4 => "mp4",\n        Route::Mp3 => "mp3",\n        Route::CdgMp3Dual => "cdg",', None),
+    ('        Route::CdgMp3Dual | Route::Mp3gZip => "cdg",\n        _ => return plan,', '        Route::CdgMp3Dual | Route::Mp3gZip => "cdg",\n        _ => {}', None),
+    ('    plan.engine = engine.map(engine_route);', '    plan.engine = None;', None),
+    ('    plan.transport = transport_args(kind, &entry.song, &entry.cdg, &entry.mp3, entry.semitones, entry.start, entry.loop_s, entry.duration);', '    plan.transport = transport_args(kind, &entry.song, &entry.cdg, &entry.mp3, entry.semitones, entry.start, None, entry.duration);', None),
+    ('    plan.transport = transport_args(kind, &entry.song, &entry.cdg, &entry.mp3, entry.semitones, entry.start, entry.loop_s, entry.duration);', '    plan.transport = transport_args(kind, &entry.song, &entry.cdg, &entry.mp3, 0.0, entry.start, entry.loop_s, entry.duration);', None),
+    ('    plan.display = display_payload(&entry.artist, &entry.title, entry.fallback.as_deref());', '    plan.display = display_payload(&entry.artist, &entry.title, None);', None),
+    ('    let pick = pick_loop(&picks, rotation_mode, setting_locked);\n    let mut plan', '    let pick = pick_loop(&picks, false, setting_locked);\n    let mut plan', None),
+    ('        let p = start_plan(&singers, flag("rotation_mode"), flag("setting_locked"), engine.as_ref());', '        let p = start_plan(&singers, flag("setting_locked"), flag("rotation_mode"), engine.as_ref());', "pick_loop acts on the two flags only when both are true, so swapping them changes nothing"),
+    ('"display": p.display.as_ref().map(|(a, b)| serde_json::json!({"artist": a, "title": b})),', '"display": p.display.as_ref().map(|(a, b)| serde_json::json!({"artist": b, "title": a})),', None),
+    ('"singer": p.pick.singer, "song": p.pick.song, "queue": p.pick.queue, "lock_cleared": p.pick.lock_cleared,\n            "route"', '"singer": p.pick.singer, "song": p.pick.song, "queue": p.pick.queue, "lock_cleared": false,\n            "route"', None),
 ]
 
 
@@ -188,7 +202,7 @@ def differential():
     b = subprocess.run(["cargo", "build", "--release", "-p", "singws-dsp-ffi", "--quiet"], cwd=ROOT / "rust", env=ENV, capture_output=True, text=True)
     if b.returncode != 0:
         return 1  # does not compile: counts as caught
-    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_start_shadow_confirmed", "test_start_shadow_performance", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
+    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_start_shadow_confirmed", "test_start_shadow_performance", "test_rotation_lock_reweave", "test_start_shadow_plan"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
 
 
 def main():

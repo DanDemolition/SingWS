@@ -96,5 +96,16 @@ While writing the differential test the shadow caught a bug in its own first Rus
 Tested against the REAL start/commit, `_finish_media_end_cleanup`, `stop_playback` and the commit/discard methods over 300 random event sequences with an independent model in the test
 (`test_start_shadow_performance.py`), mutation-tested (15 mutants).
 
+## Step 9 (built, tested only): the whole start plan (`start_plan`, `"op":"plan"`)
+One Rust call that chains steps 1-6 in the order `play_next_file` applies them: the pick loop (with the rotation lock), then the route of the picked singer's first playable song, then, only
+for a route that starts a song (mp4, mp3, CDG pair, extracted ZIP), who plays the sound, the transport arguments and the published artist and title. A rejection, a ZIP still being prepared
+or an error has no engine, transport or display part. Input: the singers (`skipped`, `songs`, marker/lock fields) each with the facts of its first playable song (`entry`: the route facts, artist,
+title, library fallback, paths, key, start, loop, duration); output: singer, song, queue after the loop, `lock_cleared`, route, engine, transport, display.
+Nothing is decided here that a single rule does not already decide, so a disagreement with the real start would be a disagreement in the ORDER of the rules.
+Tested against the REAL `play_next_file` over 300 random queues (`test_start_shadow_plan.py`: skipped singers and songs, every song shape, missing files, uncached ZIPs): the plan's singer, route,
+transport arguments, display and remaining queue equal what the app did. Mutation-tested (`tools/mutate_start.py`, mutants 154-166; two documented equivalent). **Not wired into the app yet:**
+there is no live hook, so this step has no row in the shadow report or the gate ledger.
+
 ## Next steps (not built)
-3. Only after steps 1-8 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.
+1. A live hook that sends the plan's facts at the top of `play_next_file` and compares the plan with the observed start (needs a clean show of steps 1-8 first, so the ledger shows which parts are trusted).
+2. Only after steps 1-9 are CLEAN in real shows: Rust DRIVES the start plan, with Python's decision compared on every call and winning every disagreement, behind a flag.

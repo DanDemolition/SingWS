@@ -597,6 +597,75 @@ pub fn zip_args(start: Option<f64>, loop_s: Option<f64>, duration: Option<f64>, 
     (eff_start, eff_loop, eff_duration)
 }
 
+/// The facts about the first playable song of one singer that the whole start plan needs (everything `route`, `engine_route`, `transport_args` and `display_payload` read).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PlanEntry {
+    pub route: Input,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub fallback: Option<String>,
+    /// the primary path (mp4, mp3 or the ZIP's own path), the CDG picture and the MP3 audio of a CDG start
+    #[serde(default)]
+    pub song: String,
+    #[serde(default)]
+    pub cdg: String,
+    #[serde(default)]
+    pub mp3: String,
+    #[serde(default)]
+    pub semitones: f64,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default, rename = "loop")]
+    pub loop_s: Option<f64>,
+    #[serde(default)]
+    pub duration: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PlanSinger {
+    #[serde(flatten)]
+    pub pick: PickSinger,
+    /// the facts of this singer's first playable song; only the picked singer's are read
+    #[serde(default)]
+    pub entry: Option<PlanEntry>,
+}
+
+/// The whole start plan: who is picked (with the queue after the loop), the route of their song, who plays the sound, the transport arguments and the published artist and title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plan {
+    pub pick: Pick,
+    /// `None` when nobody is picked, the picked singer has no playable song, or the entry's facts were not supplied
+    pub route: Option<String>,
+    pub engine: Option<EngineAnswer>,
+    pub transport: Option<TransportArgs>,
+    pub display: Option<(String, String)>,
+}
+
+/// The rules of steps 1-6 in the order `play_next_file` applies them. Nothing is decided here that a single rule does not already decide: this only chains them, so a
+/// disagreement with the real start is a disagreement in the ORDER of the rules. A route that does not start a song (a rejection, a ZIP still being prepared, an error)
+/// has no engine, transport or display part.
+pub fn start_plan(singers: &[PlanSinger], rotation_mode: bool, setting_locked: bool, engine: Option<&EngineInput>) -> Plan {
+    let picks: Vec<PickSinger> = singers.iter().map(|s| s.pick.clone()).collect();
+    let pick = pick_loop(&picks, rotation_mode, setting_locked);
+    let mut plan = Plan { pick, route: None, engine: None, transport: None, display: None };
+    let Some(entry) = plan.pick.singer.and_then(|i| if plan.pick.song.is_some() { singers[i].entry.as_ref() } else { None }) else { return plan };
+    let r = route(&entry.route);
+    plan.route = Some(r.name());
+    let kind = match r {
+        Route::Mp4 => "mp4",
+        Route::Mp3 => "mp3",
+        Route::CdgMp3Dual | Route::Mp3gZip => "cdg",
+        _ => return plan,
+    };
+    plan.engine = engine.map(engine_route);
+    plan.transport = transport_args(kind, &entry.song, &entry.cdg, &entry.mp3, entry.semitones, entry.start, entry.loop_s, entry.duration);
+    plan.display = display_payload(&entry.artist, &entry.title, entry.fallback.as_deref());
+    plan
+}
+
 /// JSON in, JSON out. `{"op":"engine", ...}` is an [`EngineInput`] and answers `{"voice":..,"reason":"..","set_shadow_audio":null|bool}`; anything else is an
 /// [`Input`] (the start route) and answers `{"route":"<name>"}`.
 pub fn start_json(request: &str) -> Result<String, String> {
@@ -674,6 +743,26 @@ pub fn start_json(request: &str) -> Result<String, String> {
     if v.get("op").and_then(serde_json::Value::as_str) == Some("reweave") {
         let q: Vec<LockSinger> = serde_json::from_value(v.get("queue").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
         return Ok(serde_json::json!({"order": reweave(&q)}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("plan") {
+        let singers: Vec<PlanSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+        if singers.iter().any(|s| s.pick.songs.chars().any(|c| !matches!(c, 'd' | 's' | 't'))) {
+            return Err("songs may only contain d, s and t".into());
+        }
+        let engine: Option<EngineInput> = match v.get("engine") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(e) => Some(serde_json::from_value(e.clone()).map_err(|e| e.to_string())?),
+        };
+        let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let p = start_plan(&singers, flag("rotation_mode"), flag("setting_locked"), engine.as_ref());
+        let t = p.transport.as_ref().map(|t| serde_json::json!({"audio_path": t.audio_path, "video_path": t.video_path, "mode": t.mode, "semitones": t.semitones, "start_seconds": t.start_seconds, "loop_seconds": t.loop_seconds, "duration_seconds": t.duration_seconds}));
+        return Ok(serde_json::json!({
+            "singer": p.pick.singer, "song": p.pick.song, "queue": p.pick.queue, "lock_cleared": p.pick.lock_cleared,
+            "route": p.route,
+            "engine": p.engine.as_ref().map(|e| serde_json::json!({"voice": e.voice, "reason": e.reason, "set_shadow_audio": e.set_shadow_audio})),
+            "transport": t,
+            "display": p.display.as_ref().map(|(a, b)| serde_json::json!({"artist": a, "title": b})),
+        }).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("pick") {
         let singers: Vec<PickSinger> = serde_json::from_value(v.get("singers").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
@@ -1153,5 +1242,52 @@ mod tests {
             }
         }
         assert_eq!(n, 10 * 2 * 2 * 81);
+    }
+
+    #[test]
+    fn the_plan_chains_pick_route_engine_transport_and_display() {
+        let req = r#"{"op":"plan","rotation_mode":false,"engine":{"want_rust":true,"supports_shadow_audio":true,"engine":"running"},
+            "singers":[{"skipped":true,"songs":"d"},
+                       {"songs":"sd","entry":{"route":{"info":{"str":"/l/a.mp4"},"has_primary":true,"primary_exists":true},"artist":"A","title":"T","song":"/l/a.mp4","semitones":2.7,"start":1.5,"duration":99}}]}"#;
+        let r = start_json(req).unwrap();
+        same_json(&r, r#"{"singer":1,"song":1,"queue":[0],"lock_cleared":false,"route":"mp4",
+            "engine":{"voice":true,"reason":"","set_shadow_audio":true},
+            "transport":{"audio_path":"/l/a.mp4","video_path":"/l/a.mp4","mode":"mp4","semitones":2,"start_seconds":1.5,"loop_seconds":null,"duration_seconds":null},
+            "display":{"artist":"A","title":"T"}}"#);
+    }
+
+    #[test]
+    fn a_route_that_does_not_start_a_song_has_no_engine_transport_or_display() {
+        let req = r#"{"op":"plan","singers":[{"songs":"d","entry":{"route":{"info":{"str":"/l/a.mp4"},"has_primary":true,"primary_exists":false},"artist":"A","title":"T","song":"/l/a.mp4"}}]}"#;
+        same_json(&start_json(req).unwrap(), r#"{"singer":0,"song":0,"queue":[],"lock_cleared":false,"route":"reject_missing_file","engine":null,"transport":null,"display":null}"#);
+    }
+
+    #[test]
+    fn nobody_picked_or_no_facts_means_no_route() {
+        same_json(&start_json(r#"{"op":"plan","singers":[{"skipped":true,"songs":"d"}]}"#).unwrap(), r#"{"singer":null,"song":null,"queue":[0],"lock_cleared":false,"route":null,"engine":null,"transport":null,"display":null}"#);
+        same_json(&start_json(r#"{"op":"plan","singers":[{"songs":"d"}]}"#).unwrap(), r#"{"singer":0,"song":0,"queue":[],"lock_cleared":false,"route":null,"engine":null,"transport":null,"display":null}"#);
+        assert!(start_json(r#"{"op":"plan"}"#).is_err());
+        assert!(start_json(r#"{"op":"plan","singers":[{"songs":"x"}]}"#).is_err());
+    }
+
+    #[test]
+    fn the_plan_of_a_cdg_start_uses_the_pair_and_the_duration() {
+        let req = r#"{"op":"plan","singers":[{"songs":"d","entry":{"route":{"info":{"str":"/l/a.cdg"},"has_primary":true,"primary_exists":true,"pair":true},"artist":"","title":"","fallback":"X • Y","cdg":"/l/a.cdg","mp3":"/l/a.mp3","start":4.0,"loop":9.0,"duration":200}}]}"#;
+        same_json(&start_json(req).unwrap(), r#"{"singer":0,"song":0,"queue":[],"lock_cleared":false,"route":"cdg_mp3_dual","engine":null,
+            "transport":{"audio_path":"/l/a.mp3","video_path":"/l/a.cdg","mode":"cdg","semitones":0,"start_seconds":4.0,"loop_seconds":9.0,"duration_seconds":200.0},"display":{"artist":"X","title":"Y"}}"#);
+    }
+
+    #[test]
+    fn the_plan_runs_the_rotation_lock_clearing_of_the_pick_loop() {
+        let entry = r#""entry":{"route":{"info":{"str":"/l/a.mp3"},"has_primary":true,"primary_exists":true},"artist":"A","title":"T","song":"/l/a.mp3"}"#;
+        let locked = format!(r#"{{"op":"plan","rotation_mode":true,"setting_locked":true,"singers":[{{"songs":"d","lock_new":true,{entry}}},{{"songs":"d","marker":true}}]}}"#);
+        let r: serde_json::Value = serde_json::from_str(&start_json(&locked).unwrap()).unwrap();
+        assert_eq!((r["singer"].clone(), r["lock_cleared"].clone(), r["route"].clone()), (serde_json::json!(0), serde_json::json!(true), serde_json::json!("mp3")), "{r}");
+        let unlocked = locked.replace(r#""setting_locked":true"#, r#""setting_locked":false"#);
+        let r: serde_json::Value = serde_json::from_str(&start_json(&unlocked).unwrap()).unwrap();
+        assert_eq!(r["lock_cleared"], serde_json::json!(false), "{r}");
+        let classic = locked.replace(r#""rotation_mode":true"#, r#""rotation_mode":false"#);
+        let r: serde_json::Value = serde_json::from_str(&start_json(&classic).unwrap()).unwrap();
+        assert_eq!(r["lock_cleared"], serde_json::json!(false), "{r}");
     }
 }
