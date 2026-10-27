@@ -161,6 +161,22 @@ M = [
     ('"countdown_singer": c.singer_display,', '"countdown_singer": c.singer_name,', None),
     ('"perf_song_path": c.song_path,', '"perf_song_path": c.title,', None),
     ('"song_path": c.song_path, "artist": c.artist, "title": c.title,\n            "singer_id"', '"song_path": c.song_path, "artist": c.title, "title": c.artist,\n            "singer_id"', None),
+    # ---- when a song counts as sung
+    ('        ("confirmed", false) => PerfStep { action: "set", pending: true, ..none(true) },', '        ("confirmed", false) => PerfStep { action: "set", pending: false, ..none(false) },', None),
+    ('        ("confirmed", true) => PerfStep { action: "overwritten", pending: true, ..none(true) },', '        ("confirmed", true) => PerfStep { action: "set", pending: true, ..none(true) },', None),
+    ('("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: true,', '("media_end", true) => PerfStep { action: "commit", pending: true, complete_remote: has_request_id, record_history: true,', None),
+    ('("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: true,', '("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: true, record_history: true,', None),
+    ('("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: true,', '("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: has_request_id,', None),
+    ('("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: true, reason: "song_completed",', '("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: true, reason: "stop_playback",', None),
+    ('("stop", true) => PerfStep { action: "discard", pending: false, tombstone: has_request_id,', '("stop", true) => PerfStep { action: "discard", pending: false, tombstone: true,', None),
+    ('("stop", true) => PerfStep { action: "discard", pending: false, tombstone: has_request_id,', '("stop", true) => PerfStep { action: "discard", pending: false, tombstone: false,', None),
+    ('("stop", true) => PerfStep { action: "discard", pending: false, tombstone: has_request_id,', '("stop", true) => PerfStep { action: "discard", pending: true, tombstone: has_request_id,', None),
+    ('("stop", true) => PerfStep { action: "discard", pending: false, tombstone: has_request_id, reason: "stop_playback",', '("stop", true) => PerfStep { action: "discard", pending: false, tombstone: has_request_id, record_history: true, reason: "stop_playback",', None),
+    ('tombstone_reason: if has_request_id { "host_stopped:stop_playback" } else { "" }', 'tombstone_reason: "host_stopped:stop_playback"', None),
+    ('tombstone_reason: if has_request_id { "host_stopped:stop_playback" } else { "" }', 'tombstone_reason: if has_request_id { "stop_playback" } else { "" }', None),
+    ('        ("media_end" | "stop", false) => none(false),', '        ("media_end" | "stop", false) => PerfStep { action: "discard", ..none(false) },', None),
+    ('        ("media_end" | "stop", false) => none(false),', '        ("media_end", false) => none(false),', None),
+    ('        let p = performance_step(flag("pending"), event, flag("has_request_id")).ok_or("unknown event")?;', '        let p = performance_step(flag("has_request_id"), event, flag("pending")).ok_or("unknown event")?;', None),
 ]
 
 
@@ -172,7 +188,7 @@ def differential():
     b = subprocess.run(["cargo", "build", "--release", "-p", "singws-dsp-ffi", "--quiet"], cwd=ROOT / "rust", env=ENV, capture_output=True, text=True)
     if b.returncode != 0:
         return 1  # does not compile: counts as caught
-    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_start_shadow_confirmed", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
+    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_start_shadow_confirmed", "test_start_shadow_performance", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
 
 
 def main():

@@ -522,6 +522,34 @@ pub fn confirmed(name: Option<&str>, duet: Option<&str>, duration: i64, info: &I
     })
 }
 
+/// What happens to the pending performance record (the "sung" decision) at each event of a song's life. A song is stored when its start is confirmed; a real media end commits it
+/// (the request is completed on the server when it has a remote id, the play goes into the singer history); a stop of any kind (the Stop button, a skip, a removal, closing the
+/// app: all of them go through `stop_playback`) discards it, which tombstones the request on the server when it has a remote id and records nothing; and `_finish_media_end_cleanup`
+/// commits BEFORE it stops, so a stop that follows a media end finds nothing to discard. An event with nothing stored changes nothing. Storing over a record that is still pending
+/// replaces it without committing or discarding it (`overwritten`): the rule reports it, it does not endorse it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerfStep {
+    pub action: &'static str,
+    pub pending: bool,
+    pub complete_remote: bool,
+    pub record_history: bool,
+    pub tombstone: bool,
+    pub reason: &'static str,
+    pub tombstone_reason: &'static str,
+}
+
+pub fn performance_step(pending: bool, event: &str, has_request_id: bool) -> Option<PerfStep> {
+    let none = |pending: bool| PerfStep { action: "none", pending, complete_remote: false, record_history: false, tombstone: false, reason: "", tombstone_reason: "" };
+    Some(match (event, pending) {
+        ("confirmed", false) => PerfStep { action: "set", pending: true, ..none(true) },
+        ("confirmed", true) => PerfStep { action: "overwritten", pending: true, ..none(true) },
+        ("media_end", true) => PerfStep { action: "commit", pending: false, complete_remote: has_request_id, record_history: true, reason: "song_completed", ..none(false) },
+        ("stop", true) => PerfStep { action: "discard", pending: false, tombstone: has_request_id, reason: "stop_playback", tombstone_reason: if has_request_id { "host_stopped:stop_playback" } else { "" }, ..none(false) },
+        ("media_end" | "stop", false) => none(false),
+        _ => return None,
+    })
+}
+
 /// What reaches `_start_karaoke_transport` for each wrapper (`_play_mp4`, `_play_cdg`, `_play_mp3`): which path is the audio and which the picture, the mode name, the key as a
 /// whole number (`int(semitones or 0)`), and which of start / loop / duration the wrapper forwards. `_play_mp4` forwards no duration, `_play_mp3` forwards neither loop nor
 /// duration (the transport's defaults, `None`, apply), `_play_cdg` forwards all three.
@@ -607,6 +635,13 @@ pub fn start_json(request: &str) -> Result<String, String> {
             "countdown_singer": c.singer_display, "countdown_artist": c.countdown_artist, "countdown_title": c.countdown_title,
             "perf_singer_name": c.perf_singer_name, "perf_request_id": echo("remote_request_id"), "perf_song_path": c.song_path, "perf_key": echo("key"), "perf_tempo": echo("tempo_percent"),
         }).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("performance") {
+        let flag = |k: &str| v.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let event = v.get("event").and_then(serde_json::Value::as_str).ok_or("event is required")?;
+        let p = performance_step(flag("pending"), event, flag("has_request_id")).ok_or("unknown event")?;
+        return Ok(serde_json::json!({"action": p.action, "pending": p.pending, "complete_remote": p.complete_remote, "record_history": p.record_history, "tombstone": p.tombstone,
+            "reason": p.reason, "tombstone_reason": p.tombstone_reason}).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("transport") {
         let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
@@ -1046,6 +1081,46 @@ mod tests {
         assert!(v["perf_tempo"].is_null());
         assert_eq!((v["ctx_singer"].as_str(), v["countdown_singer"].as_str(), v["eta_hold"].as_i64()), (Some("Dana"), Some("Dana"), Some(90)));
         assert!(start_json(r#"{"op":"confirmed","name":"D","duration":1,"info":{"other":true},"artist":"A","title":"T"}"#).is_err());
+    }
+
+    #[test]
+    fn a_media_end_commits_a_stop_discards_and_nothing_pending_changes_nothing() {
+        let c = performance_step(true, "media_end", true).unwrap();
+        assert_eq!((c.action, c.pending, c.complete_remote, c.record_history, c.tombstone, c.reason, c.tombstone_reason), ("commit", false, true, true, false, "song_completed", ""));
+        let c = performance_step(true, "media_end", false).unwrap();
+        assert_eq!((c.complete_remote, c.record_history), (false, true), "a song without a remote request is still recorded in the history");
+        let d = performance_step(true, "stop", true).unwrap();
+        assert_eq!((d.action, d.pending, d.complete_remote, d.record_history, d.tombstone, d.reason, d.tombstone_reason), ("discard", false, false, false, true, "stop_playback", "host_stopped:stop_playback"));
+        let d = performance_step(true, "stop", false).unwrap();
+        assert_eq!((d.record_history, d.tombstone, d.tombstone_reason), (false, false, ""), "a discarded song is never recorded; nothing to retire without a remote id");
+        for ev in ["media_end", "stop"] {
+            let n = performance_step(false, ev, true).unwrap();
+            assert_eq!((n.action, n.pending, n.complete_remote, n.record_history, n.tombstone), ("none", false, false, false, false), "{ev}");
+        }
+    }
+
+    #[test]
+    fn a_media_end_is_followed_by_a_stop_that_finds_nothing() {
+        let after_end = performance_step(true, "media_end", true).unwrap();
+        let then_stop = performance_step(after_end.pending, "stop", true).unwrap();
+        assert_eq!((then_stop.action, then_stop.tombstone), ("none", false), "committing before stopping is what keeps the finished song from being tombstoned");
+    }
+
+    #[test]
+    fn storing_over_a_pending_record_is_reported_as_an_overwrite() {
+        assert_eq!(performance_step(false, "confirmed", true).unwrap().action, "set");
+        let o = performance_step(true, "confirmed", true).unwrap();
+        assert_eq!((o.action, o.pending, o.record_history, o.tombstone), ("overwritten", true, false, false));
+        assert!(performance_step(true, "teleport", true).is_none());
+    }
+
+    #[test]
+    fn the_performance_op_is_routed_by_the_json_glue() {
+        let r = start_json(r#"{"op":"performance","pending":true,"event":"stop","has_request_id":true}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!((v["action"].as_str(), v["tombstone"].as_bool(), v["tombstone_reason"].as_str(), v["pending"].as_bool()), (Some("discard"), Some(true), Some("host_stopped:stop_playback"), Some(false)));
+        assert!(start_json(r#"{"op":"performance","pending":true}"#).is_err());
+        assert!(start_json(r#"{"op":"performance","event":"pause"}"#).is_err());
     }
 
     #[test]

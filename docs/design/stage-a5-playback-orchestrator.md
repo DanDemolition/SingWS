@@ -77,5 +77,24 @@ not text, a duration that is not a whole number, a path of 4096+ characters, val
 random starts (`test_start_shadow_confirmed.py`) and mutation-tested (25 mutants).
 It also notes `NOTE pending_performance_overwritten` when a confirmed start finds the previous song's record still stored (nothing committed or discarded it): see step 8.
 
+## Step 8 (built): when a song counts as sung (`performance_step`, `"op":"performance"`)
+A confirmed start stores a pending performance record (step 7). From then on exactly one of these must happen to it:
+* **media end** -> `_finish_media_end_cleanup` calls `_commit_pending_performance("song_completed")` FIRST: the request is completed on the server when it has a remote id, the play
+  goes into the singer history, the record is gone;
+* **any stop** (the Stop button, a skip, a removal, closing the app, a phrase-preview stop: they all end in `stop_playback`) -> `_discard_pending_performance("stop_playback")`:
+  nothing is recorded, and the request is tombstoned on the server (`host_stopped:stop_playback`) when it has a remote id, so the poll does not re-create it;
+* the stop that `_finish_media_end_cleanup` itself makes right after its commit finds nothing and changes nothing (that ordering is what keeps a finished song from being tombstoned).
+The Rust rule is a tiny state machine over `pending` x event (`confirmed`, `media_end`, `stop`), and the Python shadow keeps the model across the whole show, so it checks more than
+each call in isolation: every event is compared on the action taken, the effects reached (completed / history / tombstone, observed by flags set right before each call) and the
+reasons passed, and a record the model says is stored must really be stored. The call sites pick the event from the reason they pass (`song_completed`, `stop_playback`); any other
+reason is not compared.
+**Finding to watch (not a bug in a reachable path I could find):** storing a confirmed start over a record that is still pending REPLACES it: the earlier song is neither committed
+nor discarded, so it is not recorded and its request is not tombstoned. The Play button never reaches this (pressing Play while a song is playing keeps the song), and a normal end or
+stop clears the record first, but a path that calls `play_next_file(skip_confirmation=True)` while a transport is alive would (the interrupt dialog only guards the button). The shadow
+logs `NOTE pending_performance_overwritten` and the check reports the `overwritten` action. Left as is: pinned in `test_the_next_song_starting_over_a_pending_one_is_reported_not_endorsed`.
+While writing the differential test the shadow caught a bug in its own first Rust rule (the tombstone reason was reported even with no request to tombstone): fixed before commit.
+Tested against the REAL start/commit, `_finish_media_end_cleanup`, `stop_playback` and the commit/discard methods over 300 random event sequences with an independent model in the test
+(`test_start_shadow_performance.py`), mutation-tested (15 mutants).
+
 ## Next steps (not built)
-3. Only after steps 1-3 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.
+3. Only after steps 1-8 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.

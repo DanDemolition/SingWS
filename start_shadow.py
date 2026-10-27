@@ -53,6 +53,7 @@ class StartShadow:
         self.checks = 0
         self.mismatches = 0
         self._seen = set()
+        self._perf_pending = False   # the shadow's own model of "a song is stored, waiting for its sung / not-sung decision"
 
     def _say(self, text):
         try:
@@ -200,6 +201,24 @@ class StartShadow:
             return self._verdict("confirmed", all(k in got and got[k] == v for k, v in want.items()), want, {k: got.get(k) for k in want}, {k: v for k, v in req.items() if k != "op"})
         except Exception as exc:
             self._say(f"check_confirmed error: {exc!r}")
+            return None
+
+    def check_performance(self, event, action, has_request_id=False, complete_remote=False, record_history=False, tombstone=False, reason="", tombstone_reason=""):
+        """Compare what the app did with the pending performance record at `event` (confirmed | media_end | stop) with Rust, which also tracks whether a record is stored across
+        the whole show. `action` is what the app did (set / overwritten / commit / discard / none); the flags say which of its effects it reached. Never raises; returns agree."""
+        try:
+            if not self.available:
+                return None
+            got = self._ask({"op": "performance", "pending": self._perf_pending, "event": event, "has_request_id": bool(has_request_id)})
+            if got is None:
+                return None
+            want = {"action": action, "pending": event == "confirmed", "complete_remote": bool(complete_remote), "record_history": bool(record_history), "tombstone": bool(tombstone),
+                    "reason": reason, "tombstone_reason": tombstone_reason}
+            facts = {"event": event, "model_pending": self._perf_pending, "has_request_id": bool(has_request_id)}
+            self._perf_pending = event == "confirmed"   # what the app did decides the model, so one disagreement is not repeated for the rest of the show
+            return self._verdict(f"performance_{event}_{action}", got == want, want, got, facts)
+        except Exception as exc:
+            self._say(f"check_performance error: {exc!r}")
             return None
 
     def reweave_order(self, queue):

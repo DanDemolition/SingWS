@@ -30243,6 +30243,15 @@ class KaraokeApp(QWidget):
         except Exception:
             return False
 
+    def _shadow_performance(self, event, action, **observed):
+        """Tell the start shadow what was just done with the pending performance record (`event` None = a caller the rule does not model). Never raises."""
+        try:
+            sh = _start_shadow_for(self.settings) if event else None
+            if sh is not None:
+                sh.check_performance(event, action, **observed)
+        except Exception:
+            pass
+
     @_perf_timed("ui_songend_commit_performance")
     def _commit_pending_performance(self, reason: str = "song_completed") -> bool:
         """Record the song that just finished as actually performed.
@@ -30257,10 +30266,13 @@ class KaraokeApp(QWidget):
             return False
         pending = state.pop("_pending_performance", None)
         if not isinstance(pending, dict):
+            self._shadow_performance("media_end" if reason == "song_completed" else None, "none")
             return False
         request_id = pending.get("remote_request_id")
+        _completed = _recorded = False
         if request_id is not None:
             try:
+                _completed = True
                 self._complete_remote_request(
                     request_id,
                     entry=pending.get("entry"),
@@ -30270,6 +30282,7 @@ class KaraokeApp(QWidget):
             except Exception:
                 pass
         try:
+            _recorded = True
             self._record_singer_history_play(
                 str(pending.get("singer_name") or ""),
                 pending.get("entry"),
@@ -30281,6 +30294,7 @@ class KaraokeApp(QWidget):
             self._sync_singer_history_async(reason)
         except Exception:
             pass
+        self._shadow_performance("media_end" if reason == "song_completed" else None, "commit", has_request_id=request_id is not None, complete_remote=_completed, record_history=_recorded, reason=reason)
         _diag(
             f"[PERFORMANCE] recorded reason={reason} "
             f"singer={str(pending.get('singer_name') or '')!r} request_id={request_id}"
@@ -30296,9 +30310,11 @@ class KaraokeApp(QWidget):
             return False
         pending = state.pop("_pending_performance", None)
         if not isinstance(pending, dict):
+            self._shadow_performance("stop" if reason == "stop_playback" else None, "none", reason="")
             return False
         singer_name = str(pending.get("singer_name") or "")
         request_id = pending.get("remote_request_id")
+        _tombstone_reason = ""
         _diag(
             f"[PERFORMANCE] not recorded reason={reason} "
             f"singer={singer_name!r} request_id={request_id}"
@@ -30311,14 +30327,17 @@ class KaraokeApp(QWidget):
         # singer is still free to request it again from their phone.
         try:
             if request_id is not None:
+                _tombstone_reason = f"host_stopped:{reason}"
                 self._delete_remote_request(
                     request_id,
                     entry=pending.get("entry"),
                     singer_name=singer_name,
-                    reason=f"host_stopped:{reason}",
+                    reason=_tombstone_reason,
                 )
         except Exception as e:
             _diag(f"[PERFORMANCE] could not retire request {request_id}: {e}")
+        self._shadow_performance("stop" if reason == "stop_playback" else None, "discard", has_request_id=request_id is not None, tombstone=bool(_tombstone_reason),
+                                 reason=reason, tombstone_reason=_tombstone_reason)
         return True
 
     @_perf_timed("ui_songend_cleanup")
@@ -60666,8 +60685,10 @@ class KaraokeApp(QWidget):
             # media end; stop_playback discards it on a host stop, skip or
             # removal. Duplicate protection is unaffected: the request stays
             # 'active', which already blocks re-adding while it is queued.
+            _leftover = False
             try:
-                if _confirm_shadow is not None and isinstance(object.__getattribute__(self, "__dict__").get("_pending_performance"), dict):
+                _leftover = isinstance(object.__getattribute__(self, "__dict__").get("_pending_performance"), dict)
+                if _confirm_shadow is not None and _leftover:
                     _confirm_shadow.note("pending_performance_overwritten", "(a song was still pending its sung / not-sung decision when the next one was confirmed; its record is replaced)")
             except Exception:
                 pass
@@ -60682,6 +60703,11 @@ class KaraokeApp(QWidget):
                 }
             except Exception:
                 self._pending_performance = None
+            try:
+                if isinstance(self._pending_performance, dict):
+                    self._shadow_performance("confirmed", "overwritten" if _leftover else "set")
+            except Exception:
+                pass
             try:
                 if _confirm_facts is not None:
                     _seen = {"singer_name": self._current_karaoke_singer_name, "singer_display": self._current_karaoke_singer_display, "eta_hold": self._eta_hold_current_secs,
