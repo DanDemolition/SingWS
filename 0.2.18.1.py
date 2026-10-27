@@ -28156,6 +28156,14 @@ class KaraokeApp(QWidget):
         # by _start_mpv_karaoke_transport; silently changing clocks/renderers
         # in the middle of a live show is no longer permitted.
         _song_memory_hook(self, "start")      # per-song memory trail ([MEMORY-SONG])
+        try:
+            _tf = object.__getattribute__(self, "__dict__").pop("_transport_shadow_facts", None)
+            _tsh = _start_shadow_for(self.settings) if _tf is not None else None
+            if _tsh is not None:
+                _tsh.check_transport(_tf, {"audio_path": audio_path, "video_path": video_path, "mode": mode, "semitones": semitones, "start_seconds": start_seconds,
+                                           "loop_seconds": loop_seconds, "duration_seconds": duration_seconds})
+        except Exception:
+            pass
         self._karaoke_played_this_session = True      # background music may resume after a song even if its Play was never pressed
         started = self._start_mpv_karaoke_transport(
             audio_path=audio_path,
@@ -28193,6 +28201,15 @@ class KaraokeApp(QWidget):
         self.preview_window.force_black = False
         self.preview_window.update()
 
+    def _stash_transport_shadow(self, kind, **args):
+        """Hand the wrapper's own arguments to the start shadow for the `_start_karaoke_transport` call that follows (compared there). Never raises."""
+        try:
+            sh = _start_shadow_for(self.settings)
+            if sh is not None:
+                object.__getattribute__(self, "__dict__")["_transport_shadow_facts"] = sh.transport_facts(kind, **args)
+        except Exception:
+            pass
+
     def _play_mp4(self, song_path, semitones=0, start_seconds=0.0, loop_seconds=None):
         self._reset_end_silence_state()
         self._prepare_karaoke_start(song_path)
@@ -28212,6 +28229,7 @@ class KaraokeApp(QWidget):
             )
         except Exception:
             pass
+        self._stash_transport_shadow("mp4", song=song_path, semitones=semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
         return self._start_karaoke_transport(
             audio_path=song_path,
             video_path=song_path,
@@ -28234,6 +28252,7 @@ class KaraokeApp(QWidget):
             SingWSLogger.log_playback_start("CDG", cdg_path, semitones, current_singer, duration)
         except Exception:
             pass
+        self._stash_transport_shadow("cdg", cdg=cdg_path, mp3=mp3_path, semitones=semitones, start_seconds=start_seconds, loop_seconds=loop_seconds, duration_seconds=duration_seconds)
         started = self._start_karaoke_transport(
             audio_path=mp3_path,
             video_path=cdg_path,
@@ -28261,6 +28280,7 @@ class KaraokeApp(QWidget):
         self._prepare_karaoke_start(song_path)
         self._current_karaoke_mode = "mp3"
         self._current_karaoke_semitones = int(semitones or 0)
+        self._stash_transport_shadow("mp3", song=song_path, semitones=semitones, start_seconds=start_seconds, loop_seconds=loop_seconds)
         return self._start_karaoke_transport(
             audio_path=song_path,
             video_path=None,
@@ -33263,6 +33283,13 @@ class KaraokeApp(QWidget):
             effective_start = float(self._mp3g_pending_start.get(str(zip_path), 0.0))
         effective_loop = loop_seconds or self._mp3g_pending_loop.get(str(zip_path))
         effective_duration = float(duration_seconds or self._mp3g_pending_duration.get(str(zip_path), 0.0) or 0.0)
+        try:
+            _zsh = _start_shadow_for(self.settings)
+            if _zsh is not None:
+                _zsh.check_zip_args(_zsh.zip_facts(start_seconds, loop_seconds, duration_seconds, self._mp3g_pending_start.get(str(zip_path)), self._mp3g_pending_loop.get(str(zip_path)),
+                                                   self._mp3g_pending_duration.get(str(zip_path))), (effective_start, effective_loop, effective_duration))
+        except Exception:
+            pass
         # Cached ZIPs can start immediately; uncached extraction happens in a
         # worker so Python zipfile or fallback `unzip` cannot freeze the GUI.
         cdg_path, mp3_path = self.zip_cache.cached_paths_if_ready(zip_path)

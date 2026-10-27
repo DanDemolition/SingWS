@@ -53,7 +53,17 @@ reweave) is not compared. Tested against the REAL method and its commit callback
 commit appends the SAME singer record again: the queue then holds that singer twice (one record, two rows; `test_the_all_skipped_quirk_puts_the_same_singer_in_the_queue_twice`).
 The shadow still logs `NOTE singer_already_in_queue` (and skips the comparison) as a safety net; it should now never appear.
 
+## Step 6 (built): the arguments that reach the transport (`transport_args`, `zip_args`, `"op":"transport"` / `"op":"zip_args"`)
+Every start route ends in `_start_karaoke_transport(audio_path, video_path, mode, semitones, start_seconds, loop_seconds, duration_seconds)`. The three wrappers forward different
+subsets, which is the whole rule: `_play_mp4` -> audio and picture are the same file, mode `mp4`, **no duration**; `_play_cdg` -> audio is the MP3, picture the CDG, mode `cdg`,
+start + loop + duration; `_play_mp3` -> mode `audio`, no picture, **neither loop nor duration** (the transport's defaults apply). The key is `int(semitones or 0)` (truncated toward
+zero). Each wrapper hands its own raw arguments to the shadow just before the call (`_stash_transport_shadow`), and `_start_karaoke_transport` compares what it actually received
+with Rust's answer on entry; a direct call with no wrapper in front of it is simply not compared.
+`play_mp3g_zip` merges what it is called with and what an earlier not-yet-extracted call stashed for the same ZIP (`_mp3g_pending_*`): start = the call's if positive else the stash's
+(else 0.0), loop = the call's if truthy else the stash as is, duration = `float(call or stash or 0.0)`. That merge is its own comparison (`check_zip_args`, after the values are computed).
+Only plain finite numbers and text are modelled; anything else is skipped, never reported. Tested against the REAL chain (`play_next_file` -> `play_*` -> transport recorder) over
+300 random starts, and `play_mp3g_zip` over 400 random calls/stashes (`test_start_shadow_transport.py`); mutation-tested (27 mutants, one documented equivalent).
+
 ## Next steps (not built)
-3. Transport arguments: key, tempo, start offset, loop and duration the transport receives (`_start_karaoke_transport`).
-4. Confirmed-start bookkeeping (what is published to the screen and the server once the transport accepts).
-5. Only after steps 1-4 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.
+3. Confirmed-start bookkeeping (what is published to the screen and the server once the transport accepts).
+4. Only after steps 1-3 are CLEAN in real shows: a Rust orchestrator that produces the whole start plan, still compared with Python before it may drive.

@@ -469,6 +469,54 @@ pub fn display_payload(entry_artist: &str, entry_title: &str, fallback: Option<&
     })
 }
 
+
+/// What reaches `_start_karaoke_transport` for each wrapper (`_play_mp4`, `_play_cdg`, `_play_mp3`): which path is the audio and which the picture, the mode name, the key as a
+/// whole number (`int(semitones or 0)`), and which of start / loop / duration the wrapper forwards. `_play_mp4` forwards no duration, `_play_mp3` forwards neither loop nor
+/// duration (the transport's defaults, `None`, apply), `_play_cdg` forwards all three.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransportArgs {
+    pub audio_path: String,
+    pub video_path: Option<String>,
+    pub mode: &'static str,
+    pub semitones: i64,
+    pub start_seconds: Option<f64>,
+    pub loop_seconds: Option<f64>,
+    pub duration_seconds: Option<f64>,
+}
+
+pub fn transport_args(kind: &str, song: &str, cdg: &str, mp3: &str, semitones: f64, start: Option<f64>, loop_s: Option<f64>, duration: Option<f64>) -> Option<TransportArgs> {
+    let key = semitones.trunc() as i64;
+    Some(match kind {
+        "mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: None },
+        "cdg" => TransportArgs { audio_path: mp3.into(), video_path: Some(cdg.into()), mode: "cdg", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: duration },
+        "mp3" => TransportArgs { audio_path: song.into(), video_path: None, mode: "audio", semitones: key, start_seconds: start, loop_seconds: None, duration_seconds: None },
+        _ => return None,
+    })
+}
+
+/// Python truthiness of an optional number: `None` and zero are falsy.
+fn truthy(x: Option<f64>) -> bool {
+    matches!(x, Some(v) if v != 0.0)
+}
+
+/// `play_mp3g_zip` merges what the caller passed with what an earlier, not yet extracted call stashed for the same ZIP: the start offset when the caller's is not positive, the loop
+/// and the duration when the caller's is falsy. The duration always becomes a float (0.0 when nothing is known).
+pub fn zip_args(start: Option<f64>, loop_s: Option<f64>, duration: Option<f64>, pend_start: Option<f64>, pend_loop: Option<f64>, pend_duration: Option<f64>) -> (f64, Option<f64>, f64) {
+    let mut eff_start = if truthy(start) { start.unwrap_or(0.0) } else { 0.0 };
+    if eff_start <= 0.0 {
+        eff_start = pend_start.unwrap_or(0.0);
+    }
+    let eff_loop = if truthy(loop_s) { loop_s } else { pend_loop };
+    let eff_duration = if truthy(duration) {
+        duration.unwrap_or(0.0)
+    } else if truthy(pend_duration) {
+        pend_duration.unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    (eff_start, eff_loop, eff_duration)
+}
+
 /// JSON in, JSON out. `{"op":"engine", ...}` is an [`EngineInput`] and answers `{"voice":..,"reason":"..","set_shadow_audio":null|bool}`; anything else is an
 /// [`Input`] (the start route) and answers `{"route":"<name>"}`.
 pub fn start_json(request: &str) -> Result<String, String> {
@@ -484,6 +532,20 @@ pub fn start_json(request: &str) -> Result<String, String> {
         let fallback = text("fallback");
         let (artist, title) = display_payload(&a, &t, fallback.as_deref()).ok_or("the display name is needed but was not given")?;
         return Ok(serde_json::json!({"artist": artist, "title": title}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("transport") {
+        let text = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        let num = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+        let kind = text("kind");
+        let key = num("semitones").ok_or("semitones is required")?;
+        let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;
+        return Ok(serde_json::json!({"audio_path": t.audio_path, "video_path": t.video_path, "mode": t.mode, "semitones": t.semitones,
+            "start_seconds": t.start_seconds, "loop_seconds": t.loop_seconds, "duration_seconds": t.duration_seconds}).to_string());
+    }
+    if v.get("op").and_then(serde_json::Value::as_str) == Some("zip_args") {
+        let num = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+        let (s, l, d) = zip_args(num("start"), num("loop"), num("duration"), num("pend_start"), num("pend_loop"), num("pend_duration"));
+        return Ok(serde_json::json!({"start_seconds": s, "loop_seconds": l, "duration_seconds": d}).to_string());
     }
     if v.get("op").and_then(serde_json::Value::as_str) == Some("after_start") {
         let queue: Vec<RotSinger> = serde_json::from_value(v.get("queue").cloned().unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
@@ -824,6 +886,47 @@ mod tests {
         let r = start_json(r#"{"op":"reweave","queue":[{"active":true},{"active":true,"marker":true},{"active":true,"lock_new":true,"lock_order":3}]}"#).unwrap();
         assert_eq!(r, r#"{"order":[0,1,2]}"#);
         assert!(start_json(r#"{"op":"reweave"}"#).is_err());
+    }
+
+    #[test]
+    fn each_wrapper_forwards_its_own_arguments_to_the_transport() {
+        let t = transport_args("mp4", "/l/a.mp4", "", "", 2.0, Some(1.5), Some(4.0), Some(99.0)).unwrap();
+        assert_eq!((t.audio_path.as_str(), t.video_path.as_deref(), t.mode, t.semitones), ("/l/a.mp4", Some("/l/a.mp4"), "mp4", 2));
+        assert_eq!((t.start_seconds, t.loop_seconds, t.duration_seconds), (Some(1.5), Some(4.0), None), "mp4 forwards no duration");
+        let t = transport_args("cdg", "", "/l/a.cdg", "/l/a.mp3", -3.0, Some(0.0), None, Some(200.0)).unwrap();
+        assert_eq!((t.audio_path.as_str(), t.video_path.as_deref(), t.mode, t.semitones), ("/l/a.mp3", Some("/l/a.cdg"), "cdg", -3));
+        assert_eq!((t.start_seconds, t.loop_seconds, t.duration_seconds), (Some(0.0), None, Some(200.0)), "the picture is the cdg, the sound the mp3, duration is forwarded");
+        let t = transport_args("mp3", "/l/a.mp3", "", "", 0.0, Some(7.0), Some(4.0), Some(99.0)).unwrap();
+        assert_eq!((t.video_path.as_deref(), t.mode), (None, "audio"));
+        assert_eq!((t.start_seconds, t.loop_seconds, t.duration_seconds), (Some(7.0), None, None), "mp3 drops loop and duration");
+        assert!(transport_args("zip", "", "", "", 0.0, None, None, None).is_none());
+    }
+
+    #[test]
+    fn the_key_is_truncated_toward_zero_like_pythons_int() {
+        for (k, want) in [(2.9, 2), (-2.9, -2), (0.0, 0), (-0.5, 0), (12.0, 12)] {
+            assert_eq!(transport_args("mp3", "a", "", "", k, None, None, None).unwrap().semitones, want, "{k}");
+        }
+    }
+
+    #[test]
+    fn the_zip_remembers_what_an_earlier_call_stashed_for_it() {
+        assert_eq!(zip_args(Some(3.0), Some(2.0), Some(180.0), Some(9.0), Some(8.0), Some(7.0)), (3.0, Some(2.0), 180.0), "the caller's values win when set");
+        assert_eq!(zip_args(Some(0.0), None, None, Some(9.0), Some(8.0), Some(7.0)), (9.0, Some(8.0), 7.0), "zero / none fall back to the stash");
+        assert_eq!(zip_args(Some(-1.0), Some(0.0), Some(0.0), None, None, None), (0.0, None, 0.0), "a negative start is not kept; nothing stashed means zero / none / 0.0");
+        assert_eq!(zip_args(None, Some(0.0), None, Some(0.0), Some(0.0), None), (0.0, Some(0.0), 0.0), "the stash is returned as is, even a falsy loop");
+    }
+
+    #[test]
+    fn the_transport_ops_are_routed_by_the_json_glue() {
+        let r = start_json(r#"{"op":"transport","kind":"cdg","cdg":"/a.cdg","mp3":"/a.mp3","semitones":2,"start":1.5,"duration":200}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!((v["mode"].as_str(), v["audio_path"].as_str(), v["video_path"].as_str(), v["semitones"].as_i64()), (Some("cdg"), Some("/a.mp3"), Some("/a.cdg"), Some(2)));
+        assert!(v["loop_seconds"].is_null());
+        assert!(start_json(r#"{"op":"transport","kind":"zip","semitones":0}"#).is_err());
+        assert!(start_json(r#"{"op":"transport","kind":"mp3"}"#).is_err());
+        let r = start_json(r#"{"op":"zip_args","start":0,"pend_start":4.5,"duration":null,"pend_duration":120}"#).unwrap();
+        assert_eq!(r, r#"{"duration_seconds":120.0,"loop_seconds":null,"start_seconds":4.5}"#);
     }
 
     #[test]

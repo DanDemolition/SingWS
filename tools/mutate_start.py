@@ -8,8 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "rust/crates/singws-start/src/lib.rs"
-ENV = dict(os.environ, CARGO_TARGET_DIR=os.path.expanduser("~/.cache/singws-rust-target"), QT_QPA_PLATFORM="offscreen")
+ENV = dict(os.environ, CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR") or os.path.expanduser("~/.cache/singws-rust-target"), QT_QPA_PLATFORM="offscreen", SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS="1")
 PY = str(ROOT / ".venv/bin/python")
+FIRST = int(os.environ.get("MUTATE_FIRST", "0"))   # skip the mutants before this index (to run only the newest ones)
 
 M = [
     ('    if i.external {\n        return Route::ExternalKarafun;', '    if false {\n        return Route::ExternalKarafun;', None),
@@ -106,6 +107,34 @@ M = [
     ('.all(|(_, s)| s.round_sung == Some(true)) {', '.any(|(_, s)| s.round_sung == Some(true)) {', None),
     ('            for (_, s) in q.iter_mut().filter(|(_, s)| s.active()) {', '            for (_, s) in q.iter_mut() {', None),
     ("    fn active(&self) -> bool {\n        !self.skipped && self.songs.chars().any(|c| c != 's')\n    }\n}\n\n/// The queue after a song", "    fn active(&self) -> bool {\n        !self.skipped || self.songs.chars().any(|c| c != 's')\n    }\n}\n\n/// The queue after a song", None),
+    # ---- transport arguments
+    ('"mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: None }', '"mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: duration }', None),
+    ('"mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s,', '"mp4" => TransportArgs { audio_path: song.into(), video_path: None, mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s,', None),
+    ('"mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s,', '"mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: None, loop_seconds: loop_s,', None),
+    ('"mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: loop_s,', '"mp4" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()), mode: "mp4", semitones: key, start_seconds: start, loop_seconds: None,', None),
+    ('"cdg" => TransportArgs { audio_path: mp3.into(), video_path: Some(cdg.into()),', '"cdg" => TransportArgs { audio_path: cdg.into(), video_path: Some(mp3.into()),', None),
+    ('mode: "cdg", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: duration }', 'mode: "cdg", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: None }', None),
+    ('mode: "cdg", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: duration }', 'mode: "cdg", semitones: key, start_seconds: start, loop_seconds: None, duration_seconds: duration }', None),
+    ('mode: "cdg", semitones: key, start_seconds: start,', 'mode: "cdg", semitones: key, start_seconds: Some(0.0),', None),
+    ('"mp3" => TransportArgs { audio_path: song.into(), video_path: None, mode: "audio", semitones: key, start_seconds: start, loop_seconds: None, duration_seconds: None }', '"mp3" => TransportArgs { audio_path: song.into(), video_path: None, mode: "audio", semitones: key, start_seconds: start, loop_seconds: loop_s, duration_seconds: None }', None),
+    ('"mp3" => TransportArgs { audio_path: song.into(), video_path: None, mode: "audio", semitones: key, start_seconds: start, loop_seconds: None, duration_seconds: None }', '"mp3" => TransportArgs { audio_path: song.into(), video_path: None, mode: "audio", semitones: key, start_seconds: start, loop_seconds: None, duration_seconds: duration }', None),
+    ('mode: "audio", semitones: key,', 'mode: "mp3", semitones: key,', None),
+    ('"mp3" => TransportArgs { audio_path: song.into(), video_path: None,', '"mp3" => TransportArgs { audio_path: song.into(), video_path: Some(song.into()),', None),
+    ('    let key = semitones.trunc() as i64;', '    let key = semitones.round() as i64;', None),
+    ('    let key = semitones.trunc() as i64;', '    let key = semitones.floor() as i64;', None),
+    ('    matches!(x, Some(v) if v != 0.0)', '    x.is_some()', None),
+    ('    let mut eff_start = if truthy(start) { start.unwrap_or(0.0) } else { 0.0 };', '    let mut eff_start = start.unwrap_or(0.0);', "a start that is zero or none is replaced by the stash and the stash defaults to zero, so only a negative start (handled by the <= 0 test) differs"),
+    ('    if eff_start <= 0.0 {', '    if eff_start < 0.0 {', None),
+    ('    if eff_start <= 0.0 {', '    if eff_start > 0.0 {', None),
+    ('        eff_start = pend_start.unwrap_or(0.0);', '        eff_start = 0.0;', None),
+    ('    let eff_loop = if truthy(loop_s) { loop_s } else { pend_loop };', '    let eff_loop = if loop_s.is_some() { loop_s } else { pend_loop };', None),
+    ('    let eff_loop = if truthy(loop_s) { loop_s } else { pend_loop };', '    let eff_loop = loop_s;', None),
+    ('    let eff_loop = if truthy(loop_s) { loop_s } else { pend_loop };', '    let eff_loop = if truthy(loop_s) { loop_s } else { None };', None),
+    ('    let eff_duration = if truthy(duration) {', '    let eff_duration = if duration.is_some() {', None),
+    ('    } else if truthy(pend_duration) {\n        pend_duration.unwrap_or(0.0)', '    } else if truthy(pend_duration) {\n        0.0', None),
+    ('let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;', 'let t = transport_args(&kind, &text("song"), &text("mp3"), &text("cdg"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;', None),
+    ('let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("loop"), num("duration")).ok_or("unknown kind")?;', 'let t = transport_args(&kind, &text("song"), &text("cdg"), &text("mp3"), key, num("start"), num("duration"), num("loop")).ok_or("unknown kind")?;', None),
+    ('zip_args(num("start"), num("loop"), num("duration"), num("pend_start"), num("pend_loop"), num("pend_duration"))', 'zip_args(num("start"), num("loop"), num("duration"), num("pend_loop"), num("pend_start"), num("pend_duration"))', None),
 ]
 
 
@@ -117,7 +146,7 @@ def differential():
     b = subprocess.run(["cargo", "build", "--release", "-p", "singws-dsp-ffi", "--quiet"], cwd=ROOT / "rust", env=ENV, capture_output=True, text=True)
     if b.returncode != 0:
         return 1  # does not compile: counts as caught
-    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
+    return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_rotation_lock_reweave"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
 
 
 def main():
@@ -125,6 +154,8 @@ def main():
     survivors, killed = [], 0
     try:
         for n, (old, new, note) in enumerate(M):
+            if n < FIRST:
+                continue
             if original.count(old) != 1:
                 print(f"[{n:02d}] PATTERN NOT UNIQUE/FOUND ({original.count(old)}): {old[:60]!r}")
                 survivors.append(n)

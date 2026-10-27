@@ -135,6 +135,57 @@ class StartShadow:
             self._say(f"check_display error: {exc!r}")
             return None
 
+    def _ask(self, request, cap=_OUT_CAP * 2):
+        """One JSON round trip to the start entry point; None (after a log line) when the call fails."""
+        buf = ctypes.create_string_buffer(cap)
+        n = self._lib.singws_start_json(json.dumps(request, allow_nan=False).encode(), buf, cap)
+        if n < 0:
+            self._say(f"{request.get('op')} call failed code={n}")
+            return None
+        return json.loads(buf.raw[:n].decode())
+
+    def _verdict(self, kind, agree, app, rust, facts):
+        self.checks += 1
+        if not agree:
+            self.mismatches += 1
+            self._say(f"MISMATCH {kind} app={json.dumps(app, default=str)[:300]} rust={json.dumps(rust, default=str)[:300]} facts={json.dumps(facts, default=str)[:300]}")
+        elif kind not in self._seen:
+            self._seen.add(kind)
+            self._say(f"decision route={kind} agree=1")
+        if self.checks % SUMMARY_EVERY == 0:
+            self._say(f"summary checks={self.checks} mismatches={self.mismatches}")
+        return agree
+
+    def check_transport(self, req, observed):
+        """Compare the arguments `_start_karaoke_transport` received (`observed`: audio_path, video_path, mode, semitones, start_seconds, loop_seconds, duration_seconds) with what
+        Rust says the wrapper (`req` from :func:`transport_facts`) forwards. Never raises; returns agree, or None when skipped."""
+        try:
+            if not self.available or req is None:
+                return None
+            got = self._ask(req)
+            if got is None:
+                return None
+            want = {k: observed.get(k) for k in TRANSPORT_KEYS}
+            return self._verdict(f"transport_{req['kind']}", got == want, want, got, {k: v for k, v in req.items() if k != "op"})
+        except Exception as exc:
+            self._say(f"check_transport error: {exc!r}")
+            return None
+
+    def check_zip_args(self, req, observed):
+        """Compare the start / loop / duration `play_mp3g_zip` ended up forwarding (`observed` = (start, loop, duration)) with Rust's merge of the call and the values stashed for
+        that ZIP (`req` from :func:`zip_facts`). Never raises; returns agree, or None when skipped."""
+        try:
+            if not self.available or req is None:
+                return None
+            got = self._ask(req)
+            if got is None:
+                return None
+            want = dict(zip(("start_seconds", "loop_seconds", "duration_seconds"), observed))
+            return self._verdict("zip_args", got == want, want, got, {k: v for k, v in req.items() if k != "op"})
+        except Exception as exc:
+            self._say(f"check_zip_args error: {exc!r}")
+            return None
+
     def reweave_order(self, queue):
         """Rust's new order (indices into `queue`) for the rotation lock's reweave, or None when it cannot answer."""
         try:
@@ -327,6 +378,46 @@ def rotation_after(queue):
 
 
 StartShadow.rotation_facts = staticmethod(rotation_facts)
+
+
+TRANSPORT_KEYS = ("audio_path", "video_path", "mode", "semitones", "start_seconds", "loop_seconds", "duration_seconds")
+
+
+def _num(x, allow_none=True):
+    """A plain finite number (not a bool), or None for None; raises ValueError for anything the rule does not model."""
+    if x is None and allow_none:
+        return None
+    if isinstance(x, bool) or not isinstance(x, (int, float)) or x != x or x in (float("inf"), float("-inf")):
+        raise ValueError("not a plain number")
+    return x
+
+
+def transport_facts(kind, song=None, cdg=None, mp3=None, semitones=0, start_seconds=0.0, loop_seconds=None, duration_seconds=None):
+    """The request for the arguments a `_play_*` wrapper forwards to `_start_karaoke_transport` (kind = mp4, cdg or mp3), or None for anything the rule does not model (a path that is
+    not text, a key or time that is not a plain number)."""
+    try:
+        for p in (song, cdg, mp3):
+            if p is not None and not isinstance(p, str):
+                return None
+        req = {"op": "transport", "kind": kind, "song": song or "", "cdg": cdg or "", "mp3": mp3 or "", "semitones": _num(semitones or 0, False)}
+        for key, value in (("start", start_seconds), ("loop", loop_seconds), ("duration", duration_seconds)):
+            req[key] = _num(value)
+        return req
+    except ValueError:
+        return None
+
+
+def zip_facts(start_seconds, loop_seconds, duration_seconds, pend_start, pend_loop, pend_duration):
+    """The request for `play_mp3g_zip`'s merge of its arguments with the values stashed for the ZIP, or None for anything that is not a plain number."""
+    try:
+        return {"op": "zip_args", "start": _num(start_seconds), "loop": _num(loop_seconds), "duration": _num(duration_seconds),
+                "pend_start": _num(pend_start), "pend_loop": _num(pend_loop), "pend_duration": _num(pend_duration)}
+    except ValueError:
+        return None
+
+
+StartShadow.transport_facts = staticmethod(transport_facts)
+StartShadow.zip_facts = staticmethod(zip_facts)
 
 
 def reweave_facts(queue):
