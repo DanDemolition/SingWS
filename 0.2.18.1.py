@@ -1854,6 +1854,7 @@ SINGER_PREFS_PATH = APP_USER_DIR / "singer_preferences.json"
 SINGER_HISTORY_PATH = APP_USER_DIR / "singer_history.json"
 REMOTE_REQUEST_TOMBSTONES_PATH = APP_USER_DIR / "remote_request_tombstones.json"
 WAITLIST_REMOVED_TONIGHT_PATH = APP_USER_DIR / "waitlist_removed_tonight.json"
+WAITLIST_SNAPSHOT_PATH = APP_USER_DIR / "waitlist_snapshot.json"
 DEFERRED_REMOTE_ADDS_PATH = APP_USER_DIR / "deferred_remote_adds.json"
 HOST_REQUEST_SYNC_PATH = APP_USER_DIR / "host_request_sync.json"
 IMAGES_DIR = APP_USER_DIR / "images"
@@ -4163,6 +4164,9 @@ DEFAULTS = {
     # Stage A5 shadow: at each point where play_next_file commits to a start route (external KaraFun, refusal, ZIP preparation, mp4, mp3, MP3+G, CDG+MP3) compare it with
     # the Rust singws-start rules and LOG disagreements only; the app's own route is always used and nothing extra is read from disk.
     "start_shadow": True,
+    # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
+    # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default off.
+    "waitlist_snapshot": False,
     # Stage D1 shadow: compare the settings store steps (load, DEFAULTS fill, serialize-before-save) with the Rust singws-store
     # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
     # two-architecture package gate passes. Read from the settings dict being processed.
@@ -34645,6 +34649,96 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _waitlist_snapshot_payload(self) -> dict:
+        """What the Rust shell's Waitlist page needs to draw the same sections as `_waiting_for_add_sections`: the raw requests plus the answers only the app can give
+        (which requests are already in the queue, which singers have not sung tonight). Request dicts pass through JSON as they are."""
+        state = object.__getattribute__(self, "__dict__")
+        waiting = state.get("_waiting_for_add_requests", {})
+        if not isinstance(waiting, dict):
+            waiting = {}
+        removed = state.get("_waiting_for_add_removed_tonight", {})
+        if not isinstance(removed, dict):
+            removed = {}
+        pending = None
+        if self._pending_acceptance_enabled():
+            pending = [dict(x) if isinstance(x, dict) else x for x in (state.get("_deferred_remote_adds", []) or [])]
+        try:
+            local_ids = sorted(int(v) for v in (self._queue_remote_request_ids() or []))
+        except Exception:
+            local_ids = []
+        identity_sets = self._accepted_request_identity_sets()
+        try:
+            deferred_ids = self._deferred_remote_request_ids()
+        except Exception:
+            deferred_ids = set()
+        # like `_waiting_for_add_sections`: the Pending Acceptance rows judge against the accepted ids MINUS the deferred ones
+        pending_identity_sets = (set(identity_sets[0]) - set(deferred_ids), identity_sets[1], identity_sets[2])
+        accepted = set()
+        pending_accepted = set()
+        names = set()
+
+        def note(req, sets, into):
+            try:
+                rid = int(self._waiting_for_add_request_id(req))
+            except Exception:
+                rid = 0
+            if rid > 0 and self._request_matches_accepted_queue_item(req, identity_sets=sets):
+                into.add(rid)
+            singer = str(req.get("singer") or "")
+            if singer and self._is_first_time_waitlist_singer(singer):
+                names.add(singer)
+
+        for req in list(waiting.values()) + list(removed.values()):
+            if isinstance(req, dict):
+                note(req, identity_sets, accepted)
+        for item in pending or []:
+            if isinstance(item, dict):
+                # the request `_pending_acceptance_rows` builds from a deferred add (its id and singer, when the meta lacks them)
+                req = dict(item.get("remote_meta") or {})
+                try:
+                    req.setdefault("request_id", int(item.get("request_id") or 0))
+                except Exception:
+                    pass
+                if not req.get("singer"):
+                    req["singer"] = item.get("singer")
+                note(req, pending_identity_sets, pending_accepted)
+        payload = {
+            "version": 1,
+            "pending_acceptance": pending,
+            "waiting": waiting,
+            "show_removed": bool(state.get("_waiting_for_add_show_removed", False)),
+            "removed": removed,
+            "local_ids": local_ids,
+            "accepted_ids": sorted(accepted),
+            "pending_accepted_ids": sorted(pending_accepted),
+            "first_time_names": sorted(names),
+        }
+        return json.loads(json.dumps(payload, default=str))
+
+    def _write_waitlist_snapshot(self) -> bool:
+        """Write `waitlist_snapshot.json` (atomic, unchanged content is skipped by `_save_json_atomic`'s digest). Never raises."""
+        try:
+            if not bool((getattr(self, "settings", None) or {}).get("waitlist_snapshot", False)):
+                return False
+            _save_json_atomic(WAITLIST_SNAPSHOT_PATH, self._waitlist_snapshot_payload())
+            return True
+        except Exception as exc:
+            _diag(f"[WAITLIST-SNAPSHOT] write failed: {exc!r}")
+            return False
+
+    def _schedule_waitlist_snapshot(self) -> None:
+        """Coalesce the snapshot writes that follow one burst of changes into one; a no-op while the setting is off."""
+        if not bool((getattr(self, "settings", None) or {}).get("waitlist_snapshot", False)):
+            return
+        state = object.__getattribute__(self, "__dict__")
+        timer = state.get("_waitlist_snapshot_timer")
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._write_waitlist_snapshot)
+            self._waitlist_snapshot_timer = timer
+        timer.start(250)
+
     def _schedule_waiting_for_add_view_refresh(self, delay_ms: int | None = None, *, reason: str = "coalesced"):
         try:
             app = QApplication.instance()
@@ -34660,6 +34754,10 @@ class KaraokeApp(QWidget):
             return
         try:
             self._update_waiting_for_add_nav_state()
+        except Exception:
+            pass
+        try:
+            self._schedule_waitlist_snapshot()
         except Exception:
             pass
         if state.get("waiting_for_add_list") is None:

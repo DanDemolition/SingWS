@@ -69,10 +69,27 @@ def make_fake(first_time, accepted, local_ids, waiting=None, show_removed=False,
             if callable(fn):
                 setattr(f, name, types.MethodType(fn, f))
     f._is_first_time_waitlist_singer = lambda name: name in first_time
-    f._request_matches_accepted_queue_item = lambda req, identity_sets=None: f._waiting_for_add_request_id(req) in accepted
+    # like the app: the deferred adds' ids are part of the accepted set, and the Pending Acceptance rows judge against that set MINUS them
+    def deferred_ids():
+        ids = set()
+        for item in f._deferred_remote_adds or []:
+            try:
+                rid = int(item.get("request_id") or 0)
+            except Exception:
+                rid = 0
+            if rid > 0:
+                ids.add(rid)
+        return ids
+
+    f._deferred_remote_request_ids = deferred_ids
+    f._accepted_request_identity_sets = lambda: (set(accepted) | deferred_ids(), set(), set())
+
+    def matches(req, identity_sets=None):
+        ids = (identity_sets or f._accepted_request_identity_sets())[0]
+        return f._waiting_for_add_request_id(req) in ids
+
+    f._request_matches_accepted_queue_item = matches
     f._queue_remote_request_ids = lambda: list(local_ids)
-    f._accepted_request_identity_sets = lambda: (set(), set(), set())
-    f._deferred_remote_request_ids = lambda: set()
     return f
 
 
@@ -268,8 +285,9 @@ def case_sections(rng):
             for s in secs
         ]
 
-    req = {"op": "sections", "waiting": waiting, "show_removed": show_removed, "removed": removed, "local_ids": local_ids, "accepted_ids": sorted(accepted),
-           "first_time_names": sorted(first_time, key=str)}
+    dids = make_fake(first_time, accepted, local_ids, waiting, show_removed, removed, deferred, defer_on)._deferred_remote_request_ids()
+    req = {"op": "sections", "waiting": waiting, "show_removed": show_removed, "removed": removed, "local_ids": local_ids, "accepted_ids": sorted(set(accepted) | dids),
+           "pending_accepted_ids": sorted(set(accepted) - dids), "first_time_names": sorted(first_time, key=str)}
     if defer_on:
         req["pending_acceptance"] = deferred
     compare("sections", py, req, lambda x: x, desc)

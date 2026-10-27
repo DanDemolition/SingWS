@@ -66,6 +66,20 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
         p, shot = self.run_tab("ticker", d)
         self.assertEqual(p.returncode, 0, p.stderr[-400:])
 
+    def test_the_waitlist_tab_draws_a_snapshot_and_copes_with_a_missing_or_broken_one(self):
+        d = self.make_home()
+        snap = {"version": 1, "pending_acceptance": [{"request_id": 9, "singer": "Gus", "artist": "Adele", "title": "Hello"}],
+                "waiting": {"5": {"request_id": 5, "singer": "Ann", "artist": "Queen", "title": "Radio"}, "6": {"request_id": 6, "singer": "Bo", "artist": "A", "title": "B"}},
+                "show_removed": False, "removed": {}, "local_ids": [6], "accepted_ids": [], "pending_accepted_ids": [], "first_time_names": ["Ann"]}
+        path = Path(d) / "waitlist_snapshot.json"
+        for label, write in (("snapshot", lambda: path.write_text(json.dumps(snap))), ("broken", lambda: path.write_text("{nope")), ("missing", lambda: path.unlink())):
+            write()
+            p, shot = self.run_tab("waitlist", d)
+            self.assertEqual(p.returncode, 0, (label, p.stderr[-400:]))
+            self.assertGreater(shot.stat().st_size, 5000, label)
+            self.assertNotIn("Unable to assign", p.stderr, label)
+            self.assertNotIn("TypeError", p.stderr, label)
+
     def test_the_eq_tab_draws_and_copes_with_unreadable_settings(self):
         d = self.make_home()
         (Path(d) / "settings.json").write_text(json.dumps({"eq_bgm": [5, 4, 3, 1, -1, -1, 1, 3, 4, 5], "eq_karaoke": [0] * 10, "eq_karaoke_enabled": False, "api_key": "sk-SECRET-VALUE"}))
