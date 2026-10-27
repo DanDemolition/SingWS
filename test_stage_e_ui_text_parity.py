@@ -6,7 +6,9 @@ import _test_profile  # noqa: F401  (isolate SINGWS_HOME)
 import unittest
 from pathlib import Path
 
+from tools import diagnostics_parity as diagnostics
 from tools import header_parity as header
+from tools import rows_parity as rows
 from tools import hero_parity as hero
 from tools import ticker_parity as ticker
 from tools import waitlist_parity as waitlist
@@ -45,6 +47,21 @@ class HeaderTextParity(unittest.TestCase):
     def test_rust_header_and_queue_summary_equal_the_apps(self):
         self.assertEqual(_run(header, 120, 5), 0, header.failures[:3])
         self.assertGreater(header.counts.get("eta_same", 0), 0)
+
+
+@unittest.skipUnless(Path(diagnostics.CLI).exists(), "needs singws-diagnostics-cli")
+class DiagnosticsParity(unittest.TestCase):
+    def test_rust_pre_show_report_equals_the_apps(self):
+        self.assertEqual(_run(diagnostics, 150, 5), 0, diagnostics.failures[:3])
+        self.assertGreater(diagnostics.counts.get("same", 0), 0)
+
+
+@unittest.skipUnless(Path(rows.CLI).exists(), "needs singws-rows-cli")
+class RowTextParity(unittest.TestCase):
+    def test_rust_song_row_text_equals_the_apps(self):
+        self.assertEqual(_run(rows, 150, 5), 0, rows.failures[:3])
+        self.assertGreater(rows.counts.get("search_same", 0), 0)
+        self.assertGreater(rows.counts.get("queue_song_same", 0), 0)
 
 
 if __name__ == "__main__":

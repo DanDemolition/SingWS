@@ -122,9 +122,11 @@ Three modules in `rust/crates/singws-uimodel` (toolkit-free, no Qt, read-only), 
 | `ticker` | `get_singer_names_for_ticker`, `is_singer_active`, `_render_ticker_custom_message`, `Ticker._format_queue_text` | `singws-ticker-cli` | `tools/ticker_parity.py` | `tools/mutate_uimodel_text.py ticker`: 26 mutants, 23 killed, 3 documented equivalent |
 | `waitlist` | `_waiting_for_add_row` / `_row_text` / `_order_key` / `_sections`, `_pending_acceptance_rows`, `_is_waiting_for_add_request`, `_remote_request_is_non_actionable`, status / reason / time / version / duration helpers, `datetime.fromisoformat` | `singws-waitlist-cli` | `tools/waitlist_parity.py` | `... waitlist`: 46 mutants, 45 killed, 1 documented equivalent |
 | `header` (step 1) | `_refresh_header_chips`, `_refresh_header_status`, `_set_server_connection_status` state word, `_update_queue_eta_label`, `_fmt_m_ss`, `_refresh_queue_summary` | `singws-header-cli` | `tools/header_parity.py` | `... header`: 28 mutants, 27 killed, 1 documented equivalent |
+| `diagnostics` (step 1) | `_collect_pre_show_diagnostics` rules + `run_pre_show_diagnostics` report text (probes are inputs) | `singws-diagnostics-cli` | `tools/diagnostics_parity.py` | `... diagnostics`: 15 mutants, 15 killed |
+| `rows` (step 1) | `_build_search_row_text`, `_build_queue_song_row_text` (left / right / tooltip; pixel fitting stays with the toolkit), `_queue_singer_status_label`, media badges, `normalize_karafun_duration_seconds`, `_fmt_right_time` | `singws-rows-cli` | `tools/rows_parity.py` | `... rows`: 36 mutants, 36 killed |
 | `hero` | `_apply_redesign_hero_text`, `_hero_media_badge_text`, `_hero_remaining_text`, `_fmt_karaoke_time` | `singws-hero-cli` | `tools/hero_parity.py` | `... hero`: 21 mutants, 20 killed, 1 documented equivalent |
 
-`test_stage_e_ui_text_parity.py` runs small fixed-seed versions of the three parity tools (skipped when the CLIs are not built). Rust unit tests: 87 in `singws-uimodel` (8+1+... ticker 10, waitlist 16, hero 4). Not done: the optional read-only QML page.
+`test_stage_e_ui_text_parity.py` runs small fixed-seed versions of the three parity tools (skipped when the CLIs are not built). Rust unit tests: 98 in `singws-uimodel` (8+1+... ticker 10, waitlist 16, hero 4). Not done: the optional read-only QML page.
 
 How to run:
 
@@ -134,6 +136,8 @@ How to run:
     PY=/Users/daniel/Documents/SingWS/.venv/bin/python
     $PY tools/ticker_parity.py; $PY tools/waitlist_parity.py; $PY tools/hero_parity.py     # TZ=... to try other zones
     python3 tools/mutate_uimodel_text.py all                                                  # slow: rebuilds per mutant
+
+The parity run on queue rows found that the queue song row starts with two EM SPACES (U+2003), not ASCII spaces.
 
 Things the oracle found that the first draft of the port got wrong (all fixed, kept as tests/declines): `fromisoformat` accepts `+05:60` as `+06:00`, a basic-format clock
 with an offset (`T200+05:00`) with odd digit counts, and a `.` before an offset; a JSON integer beyond 64 bits reaches Rust as a rounded float.
