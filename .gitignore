@@ -26,6 +26,7 @@ dist/
 
 # Large local media/tooling artifacts
 bin/
+!rust/crates/*/src/bin/
 bin/ffmpeg*
 bin/ffprobe*
 gstreamer-sdk/

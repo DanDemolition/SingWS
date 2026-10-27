@@ -553,7 +553,7 @@ pub fn localtime(ts: i64) -> Option<Local> {
 
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-fn clock_text(l: &Local) -> String {
+pub fn clock_text(l: &Local) -> String {
     let h12 = if l.hour % 12 == 0 { 12 } else { l.hour % 12 };
     let t = format!("{:02}:{:02} {}", h12, l.minute, if l.hour < 12 { "AM" } else { "PM" });
     t.trim_start_matches('0').to_string()
