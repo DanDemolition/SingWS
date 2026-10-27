@@ -25,7 +25,10 @@ ApplicationWindow {
 
     // the audience's rotation screen in a window of its own (opened from the Rotation tab, or with --tv)
     TvWindow { id: tv }
+    // the karaoke-display DEMO (Stage E): only with --display-demo FILE.cdg; connected to nothing
+    KaraokeDisplay { id: display }
     Component.onCompleted: {
+        if (win.arg("--display-demo") !== "") display.open(win.arg("--display-demo"))
         if (win.arg("--tv") !== "") { tv.show(); if (win.arg("--tv") === "fullscreen") tv.visibility = Window.FullScreen }
     }
 
