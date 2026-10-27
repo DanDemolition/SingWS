@@ -28972,7 +28972,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith(("queue.", "library.", "bg.", "eq.")) or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -34030,7 +34030,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith(("queue.", "library.", "bg.", "eq.")):
+            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34341,7 +34341,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith(("queue.", "library.", "bg.", "eq.")):
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -35293,6 +35293,10 @@ class KaraokeApp(QWidget):
         req = self._selected_waiting_for_add_request()
         if not isinstance(req, dict) or not req.get("_removed_tonight"):
             return
+        self._waitlist_restore_request(req)
+
+    def _waitlist_restore_request(self, req: dict):
+        """The body of the Restore button (also `waitlist.restore`): put a request removed tonight back on the waitlist."""
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
@@ -36917,6 +36921,10 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
+        self._waitlist_remove_request(req, rid)
+
+    def _waitlist_remove_request(self, req: dict, rid: int):
+        """The body of the Remove button (also `waitlist.remove`): archive as removed tonight, tell the server, forget the request."""
         undo = KaraokeApp._begin_undoable_action(self, "Remove Pending Request")
         self._archive_waitlist_removed_tonight(req, reason="waiting_for_add_cleared")
         try:
@@ -49992,6 +50000,29 @@ class KaraokeApp(QWidget):
             self._persist_song_modifier_change(f"Speed {int(value)}% set for {name}" if int(value) != 100 else f"Speed reset for {name}")
         return True, "changed"
 
+    def shell_waitlist_change(self, action: str, request_id: int, *, dry_run: bool = False) -> tuple[bool, str]:
+        """`waitlist.remove` / `waitlist.restore` by request id: the "Waiting for add" page's Remove (clear) and Restore buttons, with no selection and no dialog.
+        The request must be one the page would let the host act on (remove: waiting and not already queued or accepted; restore: removed tonight). Host actions are
+        authoritative: remove archives the request as removed tonight, tells the server to drop it and forgets it here; restore puts that same request back to waiting."""
+        if action == "waitlist.remove":
+            req = getattr(self, "_waiting_for_add_requests", {}).get(request_id)
+            clearable = {self._waiting_for_add_request_id(r) for r in self._waiting_for_add_clearable_requests()}
+            if not isinstance(req, dict) or request_id not in clearable:
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would remove the request from the waitlist"
+            self._waitlist_remove_request(req, request_id)
+            return True, "waitlist_removed"
+        if action == "waitlist.restore":
+            req = getattr(self, "_waiting_for_add_removed_tonight", {}).get(request_id)
+            if not isinstance(req, dict) or not req.get("_removed_tonight"):
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would restore the request to the waitlist"
+            self._waitlist_restore_request(req)
+            return True, "waitlist_restored"
+        return False, f"unknown command: {action}"
+
     def shell_queue_rename_singer(self, singer_id: str, new_name: str, *, dry_run: bool = False) -> tuple[bool, str]:
         """Rename a singer by id (the rotation menu's Rename). Refuses when the new name already belongs to ANOTHER singer: the app asks the host to confirm that merge,
         and a merge should never be one tap on a phone."""
@@ -50298,7 +50329,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50389,6 +50420,15 @@ class KaraokeApp(QWidget):
                 return remember(False, "bad_enabled")
             try:
                 ok, code = self.shell_eq_set(target, gains, enabled, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action in ("waitlist.remove", "waitlist.restore"):
+            waitlist_rid = args.get("request_id")
+            if not isinstance(waitlist_rid, int) or isinstance(waitlist_rid, bool) or waitlist_rid <= 0:
+                return remember(False, "bad_request_id")
+            try:
+                ok, code = self.shell_waitlist_change(action, waitlist_rid, dry_run=(mode == "dry_run"))
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)

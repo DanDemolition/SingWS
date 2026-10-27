@@ -220,7 +220,7 @@ class RelayEntryPointTests(unittest.TestCase):
 
     def test_the_polling_path_also_routes_these_prefixes(self):
         src = (Path(__file__).with_name("0.2.18.1.py")).read_text()
-        self.assertEqual(src.count('action.startswith(("queue.", "library.", "bg.", "eq."))'), 3, "relay injection, polling injection and the executor routing")
+        self.assertEqual(src.count('action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist."))'), 3, "relay injection, polling injection and the executor routing")
 
 
 if __name__ == "__main__":

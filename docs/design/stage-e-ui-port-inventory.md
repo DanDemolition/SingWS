@@ -91,7 +91,7 @@ Rank 20, size S each as QML; zero parity risk, all judged by eye (`--snapshot`).
 1. **Done in this change (S each):** waitlist rows, queue ticker text, hero text view models, with parity and mutation passes (below).
 2. **Next, small and pure:** header chips + pre-show diagnostics + search/queue row text (same method as step 1). A read-only **Waitlist page** and **Ticker preview strip** in the shell
    use the new modules (the ticker string is exactly what the audience sees).
-3. **Waitlist actions** (M): add / replace / clear / restore as `waitlist.*` shell commands with the existing off / dry_run / apply gating, request-id dedupe and
+3. **Waitlist actions** (M; `waitlist.remove` and `waitlist.restore` BUILT 2026-10-27: app commands by request id sharing one body with the page's Remove / Restore buttons, Rust validation and plain-words answers in `singws-control`, `test_shell_waitlist_commands.py` (12 tests), `tools/mutate_waitlist_cmd.py` (24 mutants, 23 killed, 1 documented equivalent); NOT built: `waitlist.add` (the add path goes through `process_external_request` and dialogs), the shell buttons, the phone page, a loopback scenario, the relay/server allow-lists if any): add / replace / clear / restore as `waitlist.*` shell commands with the existing off / dry_run / apply gating, request-id dedupe and
    `expect_queue_sig`. Host actions stay authoritative (AGENTS.md queue rules): a command transitions an existing request, it never recreates one.
 4. **Ticker and Backgrounds settings** (M each): a small `settings.set` command family with a per-key schema (type, range, default, live side effect), starting with keys that have no
    live side effect. This is the template for step 5.
