@@ -428,4 +428,21 @@ mod tests {
             assert_eq!(path_name(p), n, "{p}");
         }
     }
+
+    #[test]
+    fn clock_boundaries_and_out_of_range_minutes_are_refused() {
+        for (v, t) in [(json!(86400), Some(86400)), (json!(86400.4), None), (json!("86400"), Some(86400)), (json!("24:00:00"), Some(86400)), (json!("1:59:59"), Some(7199)),
+                       (json!("1:75:10"), None), (json!("1:60:00"), None), (json!("0:75:10"), None)] {
+            assert_eq!(normalize_karafun_duration(&v).unwrap(), t, "{v}");
+        }
+    }
+
+    #[test]
+    fn an_old_format_song_entry_counts_as_a_ready_song() {
+        // a list entry (not a dict) is never skipped: the singer is NEXT UP, not "NO READY SONG"
+        let old = json!({"name": "Ann", "songs": [["/a/b.mp3", 1, "Duet"]]});
+        assert_eq!(singer_status_label(&old, false, false, true).unwrap(), "NEXT UP");
+        let skipped = json!({"name": "Ann", "songs": [{"skipped": true}]});
+        assert_eq!(singer_status_label(&skipped, false, false, true).unwrap(), "NO READY SONG");
+    }
 }
