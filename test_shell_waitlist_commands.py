@@ -107,6 +107,137 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(sorted(h.app._waiting_for_add_removed_tonight), [5, 6])
 
 
+class AddTests(unittest.TestCase):
+    def harness(self, mode="apply", **kw):
+        h = harness(mode, **kw)
+        a = h.app
+        a._waitlist_add_request = types.MethodType(h.m.KaraokeApp._waitlist_add_request, a)
+        a._mark_waiting_for_add_delivered_async = lambda rid, r: h.record("delivered", rid)
+        a.process_external_request = lambda r: (h.record("process_external", r.get("request_id")), self.outcome)[1]
+        a._add_waiting_for_add_track = lambda r, track: (h.record("add_track", r.get("request_id"), track.get("title")), self.track_outcome)[1]
+        self.outcome, self.track_outcome = True, True
+        return h
+
+    def test_add_from_the_library_does_what_the_button_does(self):
+        h = self.harness(waiting={7: req(7), 8: req(8)})
+        self.assertEqual(run(h, "waitlist.add", {"request_id": 7}, "a1"), (True, "waitlist_added"))
+        a = h.app
+        self.assertNotIn(7, a._waiting_for_add_requests)
+        self.assertIn(8, a._waiting_for_add_requests)
+        self.assertIn(7, a._waiting_for_add_handled_ids)
+        self.assertEqual([c for c in h.calls if c[0] in ("process_external", "delivered", "view_refresh", "toast")],
+                         [("process_external", 7), ("delivered", 7), ("view_refresh", "add_now"), ("toast", "Added waiting request to rotation.")])
+
+    def test_a_replacement_track_is_added_through_the_replacement_path(self):
+        r = dict(req(7), replacement_track={"title": "Other", "artist": "X"})
+        h = self.harness(waiting={7: r})
+        self.assertEqual(run(h, "waitlist.add", {"request_id": 7}, "a1"), (True, "waitlist_added"))
+        self.assertEqual([c for c in h.calls if c[0] in ("add_track", "process_external")], [("add_track", 7, "Other")])
+
+    def test_a_replacement_that_does_not_add_falls_back_to_the_library_like_the_button(self):
+        r = dict(req(7), replacement_track={"title": "Other"})
+        h = self.harness(waiting={7: r})
+        self.track_outcome = False
+        self.assertEqual(run(h, "waitlist.add", {"request_id": 7}, "a1"), (True, "waitlist_added"))
+        self.assertEqual([c[0] for c in h.calls if c[0] in ("add_track", "process_external")], ["add_track", "process_external"])
+
+    def test_a_song_that_cannot_be_added_stays_on_the_waitlist(self):
+        h = self.harness(waiting={7: req(7)})
+        self.outcome = False
+        self.assertEqual(run(h, "waitlist.add", {"request_id": 7}, "a1"), (False, "not_added"))
+        self.assertIn(7, h.app._waiting_for_add_requests)
+        self.assertNotIn(7, h.app._waiting_for_add_handled_ids)
+        self.assertEqual([c for c in h.calls if c[0] in ("delivered", "toast")], [])
+
+    def test_a_replacement_error_is_reported_not_raised(self):
+        h = self.harness(waiting={7: dict(req(7), replacement_track={"title": "Other"})})
+
+        def boom(r, t):
+            raise ValueError("Waiting request has no singer name.")
+
+        h.app._add_waiting_for_add_track = boom
+        self.assertEqual(run(h, "waitlist.add", {"request_id": 7}, "a1"), (False, "add_error"))
+        self.assertIn(7, h.app._waiting_for_add_requests)
+
+    def test_unknown_queued_or_accepted_requests_are_refused_and_dry_run_adds_nothing(self):
+        h = self.harness(waiting={7: req(7), 8: req(8), 9: req(9)}, local_ids=[8], accepted=[9])
+        for n, rid in enumerate((99, 8, 9)):
+            self.assertEqual(run(h, "waitlist.add", {"request_id": rid}, f"u{n}"), (False, "unknown_request"), rid)
+        h2 = self.harness("dry_run", waiting={7: req(7)})
+        ok, msg = run(h2, "waitlist.add", {"request_id": 7}, "d")
+        self.assertTrue(ok and msg.startswith("dry_run"), msg)
+        self.assertEqual([c for c in h2.calls if c[0] in ("process_external", "add_track")], [])
+        self.assertIn(7, h2.app._waiting_for_add_requests)
+        self.assertEqual(run(self.harness("off", waiting={7: req(7)}), "waitlist.add", {"request_id": 7}, "o"), (False, "shell_commands_off"))
+
+    def test_the_add_button_warns_with_the_right_words(self):
+        warned = []
+        for outcome, track_error, want in ((False, None, "That song could not be added from the local library."), (None, "no singer name", "no singer name")):
+            h = self.harness(waiting={7: dict(req(7), replacement_track={"title": "O"}) if track_error else req(7)})
+            a = h.app
+            a._selected_waiting_for_add_request = lambda h=h: h.app._waiting_for_add_requests.get(7)
+            self.outcome = bool(outcome)
+            if track_error:
+                def boom(r, t, msg=track_error):
+                    raise ValueError(msg)
+                a._add_waiting_for_add_track = boom
+            saved = h.m.QMessageBox
+            h.m.QMessageBox = types.SimpleNamespace(warning=lambda parent, title, text: warned.append((title, text)))
+            try:
+                h.m.KaraokeApp._add_selected_waiting_for_add(a)
+            finally:
+                h.m.QMessageBox = saved
+            self.assertEqual(warned[-1], ("Waiting for Add", want))
+            self.assertIn(7, a._waiting_for_add_requests)
+
+    def test_the_add_button_shares_the_body_and_warns_on_failure(self):
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        i = src.index("    def _add_selected_waiting_for_add(self):")
+        body = src[i:i + 900]
+        self.assertIn("self._waitlist_add_request(req, rid)", body)
+        self.assertIn("That song could not be added from the local library.", body)
+
+
+class SummaryTests(unittest.TestCase):
+    """`_shell_waitlist_summary`: the waitlist rows the web remote / phone page shows (published in the relay's `queue` message)."""
+
+    def harness(self, **kw):
+        h = harness(**kw)
+        a = h.app
+        for name in dir(h.m.KaraokeApp):
+            if name.startswith(("_waiting_for_add_", "_pending_acceptance", "_format_waiting", "_is_waiting_for_add", "_remote_request_is_non_actionable")):
+                setattr(a, name, types.MethodType(getattr(h.m.KaraokeApp, name), a))
+        a._shell_waitlist_summary = types.MethodType(h.m.KaraokeApp._shell_waitlist_summary, a)
+        a._is_first_time_waitlist_singer = lambda name: name == "Ann"
+        a._deferred_remote_request_ids = lambda: set()
+        return h
+
+    def test_waiting_rows_follow_the_page_and_removed_rows_are_newest_first(self):
+        removed = {5: dict(req(5, "Old"), _removed_tonight=True, removed_at=100), 6: dict(req(6, "New"), _removed_tonight=True, removed_at=300)}
+        h = self.harness(waiting={7: req(7), 8: req(8, "Bo"), 9: req(9, "Cy"), 10: req(10, "Zed")}, removed=removed, local_ids=[8], accepted=[9])
+        out = h.app._shell_waitlist_summary()
+        self.assertEqual([(r["request_id"], r["first_time"]) for r in out["waiting"]], [(7, True), (10, False)], "queued (8) and accepted (9) requests are not on the page, so not here; only Ann is on a first turn")
+        self.assertEqual(out["waiting"][0], {"request_id": 7, "singer": "Ann", "artist": "Queen", "title": "Radio Ga Ga", "status": "Waitlisted", "first_time": True, "section": "waitlist"})
+        self.assertEqual([(r["request_id"], r["status"]) for r in out["removed"]], [(6, "Removed"), (5, "Removed")])
+
+    def test_removed_rows_are_capped_at_twenty(self):
+        removed = {i: dict(req(i), _removed_tonight=True, removed_at=i) for i in range(1, 31)}
+        out = self.harness(removed=removed).app._shell_waitlist_summary()
+        self.assertEqual((len(out["removed"]), out["removed"][0]["request_id"], out["removed"][-1]["request_id"]), (20, 30, 11))
+
+    def test_it_is_capped_and_never_raises(self):
+        h = self.harness(waiting={i: req(i, f"S{i}") for i in range(1, 60)})
+        self.assertEqual(len(h.app._shell_waitlist_summary()["waiting"]), 40)
+        h.app._waiting_for_add_sections = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        h.app._waiting_for_add_removed_tonight = "not a dict"
+        self.assertEqual(h.app._shell_waitlist_summary(), {"waiting": [], "removed": []})
+
+    def test_the_queue_message_carries_it(self):
+        src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
+        i = src.index('worker.send_json({"type": "queue"')
+        self.assertIn('"waitlist": self._shell_waitlist_summary()', src[i:i + 400])
+
+
 class GatingTests(unittest.TestCase):
     def test_off_refuses_and_dry_run_checks_but_changes_nothing(self):
         for mode, want in (("off", (False, "shell_commands_off")),):
@@ -146,7 +277,7 @@ class GatingTests(unittest.TestCase):
         self.assertEqual(src.count('startswith(("queue.", "library.", "bg.", "eq.", "waitlist."))'), 3)
         i = src.index("    def _execute_host_control_command(self")
         self.assertIn('"waitlist."', src[i:i + 300])
-        self.assertIn('"waitlist.remove", "waitlist.restore")\n', src)
+        self.assertIn('"waitlist.remove", "waitlist.restore", "waitlist.add")\n', src)
 
     def test_the_buttons_and_the_commands_share_one_body(self):
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")

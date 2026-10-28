@@ -82,7 +82,7 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
             need(text(args, "entry_id").is_some(), "entry_id is required")?;
             need(args.get("song_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "song_id must be a whole number from the library search")
         }
-        "waitlist.remove" | "waitlist.restore" => need(args.get("request_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "request_id must be a whole number, 1 or more"),
+        "waitlist.remove" | "waitlist.restore" | "waitlist.add" => need(args.get("request_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "request_id must be a whole number, 1 or more"),
         "bg.next" => Ok(()),
         "bg.play_track" => {
             need(args.get("index").and_then(Value::as_u64).is_some(), "index must be a whole number, 0 or more")?;
@@ -369,6 +369,9 @@ mod tests {
             ("waitlist.remove", json!({"request_id": -3})),
             ("waitlist.remove", json!({"request_id": "7"})),
             ("waitlist.remove", json!({"request_id": 1.5})),
+            ("waitlist.add", json!({})),
+            ("waitlist.add", json!({"request_id": 0})),
+            ("waitlist.add", json!({"request_id": "3"})),
             ("waitlist.restore", json!({})),
             ("waitlist.restore", json!({"request_id": null})),
             ("waitlist.restore", json!({"request_id": true})),
@@ -412,6 +415,7 @@ mod tests {
             ("queue.skip_singer", json!({"singer_id": "a", "skipped": false})),
             ("bg.next", json!({})),
             ("waitlist.remove", json!({"request_id": 1})),
+            ("waitlist.add", json!({"request_id": 12})),
             ("waitlist.restore", json!({"request_id": 1792000000123u64})),
             ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": ""})),
             ("queue.set_singer_brand", json!({"singer_id": "s1", "brands": "KV, SC, SBI"})),
