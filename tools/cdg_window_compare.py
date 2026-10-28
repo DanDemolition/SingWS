@@ -24,11 +24,15 @@ def main():
     ap.add_argument("--at", type=float, nargs="*", default=[3.0, 8.0])
     ap.add_argument("--tolerance", type=int, default=8)
     ap.add_argument("--margin", type=int, default=3, help="ignore this many pixels at the window edge (the frameless window has a faint border/shadow that is not the picture)")
+    ap.add_argument("--fill", choices=["off", "colour", "blur"], default="off", help="bridge side fill mode (0 / 1 / 2 = the app's fit / sidefill / blur)")
+    ap.add_argument("--size", default="640x360", help="output window size in points, e.g. 400x500 for a window narrower than the picture")
     ap.add_argument("--keep", help="write the screenshot and the Rust image here as PNG")
     a = ap.parse_args()
+    global RECT
+    RECT = (60, 80, *map(int, a.size.split("x")))
     app = QApplication([])
     out, prev = QWidget(), QWidget()
-    for w, r in ((out, RECT), (prev, (60, 460, 320, 180))):
+    for w, r in ((out, RECT), (prev, (900, 80, 320, 180))):
         w.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         w.setGeometry(*r); w.show()
     app.processEvents()
@@ -44,6 +48,7 @@ def main():
         if not plugin.loadSingWSMedia(a.cdg, a.mp3, autoplay=False):
             raise SystemExit(plugin.errorString() or "load failed")
         plugin.setVolume(0.0)
+        plugin.setCdgOutputSidefill({'off': 0, 'colour': 1, 'blur': 2}[a.fill])
         end = time.monotonic() + 8
         while time.monotonic() < end and not plugin.visualsReady():
             pump(0.05)
@@ -54,7 +59,7 @@ def main():
             img = QImage(str(shot)).convertToFormat(QImage.Format.Format_RGBA8888)
             ptr = img.constBits(); ptr.setsize(img.sizeInBytes()); got = bytes(ptr)
             w, h = img.width(), img.height()
-            want = subprocess.run([DUMP, a.cdg, "--at", repr(t), "--compose", f"{w}x{h}:fit"], capture_output=True).stdout
+            want = subprocess.run([DUMP, a.cdg, "--at", repr(t), "--bridge", f"{w}x{h}:{a.fill}"], capture_output=True).stdout
             stride = img.bytesPerLine()
             n = over = mx = 0
             for y in range(h):

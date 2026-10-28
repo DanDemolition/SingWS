@@ -1,7 +1,7 @@
 //! `singws-cdg-dump FILE.cdg` writes one raw RGBA 300x216 frame per packet that yields a frame to
 //! stdout (what FFmpeg's rawvideo output gives), for the differential test.
 //! `singws-cdg-dump FILE.cdg --at SECONDS [--at ...]` writes only those frames.
-use singws_cdg::{CdgDecoder, CdgPlayer, HEIGHT, PACKET_BYTES, WIDTH, DisplayMode, clean_near_black, compose, side_fill_color};
+use singws_cdg::{CdgDecoder, CdgPlayer, HEIGHT, PACKET_BYTES, WIDTH, BridgeFill, DisplayMode, clean_near_black, compose_bridge, compose, side_fill_color};
 use std::io::Write;
 
 fn main() {
@@ -12,6 +12,7 @@ fn main() {
     let mut clean: Option<(i32, bool)> = None;
     let mut sidefill = false;
     // --compose WxH:fit|sidefill|stretch composes every frame into a window image
+    let mut bridge_fill: Option<(usize, usize, BridgeFill)> = None;
     let mut compose_to: Option<(usize, usize, DisplayMode)> = None;
     let mut ats = Vec::new();
     let mut i = 1;
@@ -28,6 +29,13 @@ fn main() {
             let (w, h) = dim.split_once('x').expect("WxH");
             let mode = match m { "fit" => DisplayMode::Fit, "sidefill" => DisplayMode::SideFill, _ => DisplayMode::Stretch };
             compose_to = Some((w.parse().unwrap(), h.parse().unwrap(), mode));
+            i += 2;
+        } else if args[i] == "--bridge" {
+            // --bridge WxH:off|colour|blur composes the way the video bridge's shader does
+            let (dim, m) = args[i + 1].split_once(':').expect("WxH:fill");
+            let (w, h) = dim.split_once('x').expect("WxH");
+            let f = match m { "colour" => BridgeFill::Colour, "blur" => BridgeFill::Blur, _ => BridgeFill::Off };
+            bridge_fill = Some((w.parse().unwrap(), h.parse().unwrap(), f));
             i += 2;
         } else if args[i] == "--sidefill" {
             sidefill = true;
@@ -68,6 +76,9 @@ fn main() {
             }
             if let Some((w, h, m)) = compose_to {
                 buf = compose(&buf, w, h, m);
+            }
+            if let Some((w, h, f)) = bridge_fill {
+                buf = compose_bridge(&buf, w, h, f);
             }
             out.write_all(&buf).unwrap();
         }
