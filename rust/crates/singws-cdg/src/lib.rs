@@ -358,6 +358,116 @@ pub fn compose(frame: &[u8], win_w: usize, win_h: usize, mode: DisplayMode) -> V
     out
 }
 
+/// The widescreen fill the video bridge's shader draws behind the picture (`singws_bridge_set_sidefill`; the app's `cdg_display_mode`
+/// sidefill = 1, blur = 2). This is what the audience sees by default; it replaces the painter-only `DisplayMode::SideFill` for the live look.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BridgeFill {
+    Off,
+    /// 1: the corner sample whose colour is closest to the other three
+    Colour,
+    /// 2: a 5x5 weighted blur of the picture, cover-cropped, dimmed to 88 percent
+    Blur,
+}
+
+fn texel(src: &[u8], x: i32, y: i32) -> [f32; 3] {
+    let (x, y) = (x.clamp(0, WIDTH as i32 - 1) as usize, y.clamp(0, HEIGHT as i32 - 1) as usize);
+    let o = (y * WIDTH + x) * 4;
+    [src[o] as f32 / 255.0, src[o + 1] as f32 / 255.0, src[o + 2] as f32 / 255.0]
+}
+
+/// GL_LINEAR with clamp-to-edge on the 300x216 picture; `u` across, `v` down (0 = top row).
+fn bilinear(src: &[u8], u: f32, v: f32) -> [f32; 3] {
+    let (fx, fy) = (u * WIDTH as f32 - 0.5, v * HEIGHT as f32 - 0.5);
+    let (x0, y0) = (fx.floor(), fy.floor());
+    let (tx, ty) = (fx - x0, fy - y0);
+    let (x0, y0) = (x0 as i32, y0 as i32);
+    let (a, b, c, d) = (texel(src, x0, y0), texel(src, x0 + 1, y0), texel(src, x0, y0 + 1), texel(src, x0 + 1, y0 + 1));
+    let mut o = [0.0; 3];
+    for i in 0..3 {
+        o[i] = (a[i] * (1.0 - tx) + b[i] * tx) * (1.0 - ty) + (c[i] * (1.0 - tx) + d[i] * tx) * ty;
+    }
+    o
+}
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The output window as the Rust video bridge's shader draws a CDG song (RGB only: the shader ignores the picture's alpha). Mirrors
+/// `draw_picture` / the `cdgSidefill` branches in rust/crates/singws-video: a full-window background pass (cover-cropped copy of the picture
+/// for the fills), then the fit picture with its left and right 6/300 edges faded into the background.
+pub fn compose_bridge(frame: &[u8], win_w: usize, win_h: usize, fill: BridgeFill) -> Vec<u8> {
+    let (w, h) = (win_w as f32, win_h as f32);
+    let sa = WIDTH as f32 / HEIGHT as f32;
+    let va = w / h;
+    // background-pass uv window: cover (crop) the window
+    let (buvx, buvy, buox, buoy) = if va > sa { (1.0, sa / va, 0.0, (1.0 - sa / va) * 0.5) } else { (va / sa, 1.0, (1.0 - va / sa) * 0.5, 0.0) };
+    // fit quad half-sizes in NDC
+    let (sx, sy) = if va > sa { (sa / va, 1.0) } else { (1.0, va / sa) };
+    let corner = |lx: f32, ty: f32, by: f32, rx: f32| [bilinear(frame, lx, ty), bilinear(frame, rx, ty), bilinear(frame, lx, by), bilinear(frame, rx, by)];
+    let colour_fill = {
+        let c = corner(3.0 / 300.0, 6.0 / 216.0, 210.0 / 216.0, 297.0 / 300.0);
+        let sums: Vec<f32> = (0..4).map(|i| (0..4).filter(|&j| j != i).map(|j| dist(c[i], c[j])).sum()).collect();
+        let (mut k, mut best) = (0, sums[0]);
+        for i in 1..4 {
+            if sums[i] < best {
+                k = i;
+                best = sums[i];
+            }
+        }
+        c[k]
+    };
+    let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let mut out = Vec::with_capacity(win_w * win_h * 4);
+    for py in 0..win_h {
+        for px in 0..win_w {
+            // window uv: x right, y DOWN
+            let (ux, uy) = ((px as f32 + 0.5) / w, (py as f32 + 0.5) / h);
+            let mut rgb = [0.0f32; 3];
+            if fill != BridgeFill::Off {
+                let (u, v) = (ux * buvx + buox, uy * buvy + buoy);
+                rgb = match fill {
+                    BridgeFill::Colour => colour_fill,
+                    BridgeFill::Blur => {
+                        let (mut acc, mut ws) = ([0.0f32; 3], 0.0f32);
+                        for i in -2i32..=2 {
+                            for j in -2i32..=2 {
+                                let c = bilinear(frame, (u + i as f32 * 0.025).clamp(0.005, 0.995), (v + j as f32 * 0.035).clamp(0.0, 1.0));
+                                let wt = 1.0 / (1.0 + 0.06 * (i * i + j * j) as f32);
+                                for k in 0..3 {
+                                    acc[k] += c[k] * wt;
+                                }
+                                ws += wt;
+                            }
+                        }
+                        [acc[0] / ws * 0.88, acc[1] / ws * 0.88, acc[2] / ws * 0.88]
+                    }
+                    BridgeFill::Off => unreachable!(),
+                };
+            }
+            // foreground: the fit quad, nearest sampling
+            let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);
+            if nx.abs() <= sx && ny.abs() <= sy {
+                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);
+                let (tx, ty) = (((fu * WIDTH as f32) as usize).min(WIDTH - 1), ((fv * HEIGHT as f32) as usize).min(HEIGHT - 1));
+                let o = (ty * WIDTH + tx) * 4;
+                let fg = [frame[o] as f32 / 255.0, frame[o + 1] as f32 / 255.0, frame[o + 2] as f32 / 255.0];
+                let a = if fill == BridgeFill::Off { 1.0 } else { smoothstep(0.0, 6.0 / 300.0, fu) * smoothstep(0.0, 6.0 / 300.0, 1.0 - fu) };
+                for k in 0..3 {
+                    rgb[k] = fg[k] * a + rgb[k] * (1.0 - a);
+                }
+            }
+            out.extend_from_slice(&[to8(rgb[0]), to8(rgb[1]), to8(rgb[2]), 255]);
+        }
+    }
+    out
+}
+
 /// A whole CDG file with seek by time.
 pub struct CdgPlayer {
     data: Vec<u8>,
