@@ -517,6 +517,15 @@ impl CdgPlayer {
         &self.state
     }
 
+    /// The picture for an AUDIBLE position and the CDG timing offset (the app's `_effective_cdg_timing_offset_ms`: base 750 ms plus the
+    /// user's fine tuning): the display shows the picture of `position + offset`, a positive offset showing lyrics earlier. Measured against
+    /// the real bridge (tools/cdg_clock_probe.py): a paused seek shows the packet at the position whatever the offset or tempo; while playing
+    /// the picture runs `offset` ahead of the reported position and about 50 ms behind it (render and grab lag, not modelled); tempo changes
+    /// nothing because the position is media time.
+    pub fn render_at_position(&mut self, position_ms: f64, offset_ms: f64) -> &CdgDecoder {
+        self.render_at((position_ms + offset_ms) / 1000.0)
+    }
+
     /// The picture at `seconds` (negative = start; past the end = last frame).
     pub fn render_at(&mut self, seconds: f64) -> &CdgDecoder {
         let idx = if seconds <= 0.0 { 0 } else { (seconds * PACKETS_PER_SECOND).floor() as usize };
@@ -546,6 +555,21 @@ mod tests {
         assert_eq!(&f[..8], &[0; 8]);
         let blank = vec![0u8; 300 * 216 * 4];
         assert_eq!(side_fill_color(&blank, 300, 216), (0, 0, 0));
+    }
+
+    #[test]
+    fn position_plus_offset_picks_the_packet() {
+        let mut data = Vec::new();
+        for i in 0..900u32 {
+            let mut t = vec![0, 1 + (i % 15) as u8, (i % 18) as u8, (i % 50) as u8];
+            t.extend([0xFF; 12]);
+            data.extend(pk(TILE_XOR, &t));
+        }
+        let mut a = CdgPlayer::new(data.clone());
+        let mut b = CdgPlayer::new(data);
+        let by_offset = a.render_at_position(1000.0, 750.0).indexed().to_vec();
+        assert_eq!(b.render_at(1.75).indexed(), &by_offset[..]);
+        assert_eq!(b.seek_packet(525).indexed(), &by_offset[..]);
     }
 
     #[test]
