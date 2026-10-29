@@ -57,8 +57,28 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual((a.settings["api_key"], a.settings["host_controls_pin"], a.settings["ticker_color"], a.settings["ticker_enabled"]), ("SECRET", "1234", "#ffffff", True), c["args"])
         self.assertNotIn("base_url", harness().app.settings)
 
-    def test_the_schema_has_exactly_the_two_ticker_message_keys(self):
-        self.assertEqual(sorted(harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA), ["ticker_custom_enabled", "ticker_custom_message"])
+    def test_the_schema_is_exactly_this_list_and_holds_no_secret_url_path_or_device(self):
+        keys = sorted(harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA)
+        self.assertEqual(keys, sorted(["ticker_custom_enabled", "ticker_custom_message", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled",
+                                       "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec", "ui_record_confirm"]))
+        for k in keys:
+            for bad in ("key", "pin", "token", "password", "secret", "url", "user", "path", "color", "device", "output", "repo", "update"):
+                self.assertNotIn(bad, k)
+
+    def test_a_threshold_is_stored_as_a_float_and_a_whole_number_is_accepted(self):
+        h = harness(settings={"end_silence_trim_threshold_sec": 2.5})
+        self.assertEqual(run(h, {"key": "end_silence_trim_threshold_sec", "value": 6}, "w1"), (True, "setting_changed"))
+        self.assertIs(type(h.app.settings["end_silence_trim_threshold_sec"]), float)
+        self.assertEqual(h.app.settings["end_silence_trim_threshold_sec"], 6.0)
+        self.assertEqual(run(h, {"key": "end_silence_trim_threshold_sec", "value": 6.0}, "w2"), (True, "no_change"))
+
+    def test_the_other_bool_settings_apply_without_touching_the_ticker(self):
+        h = harness()
+        for n, k in enumerate(("loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled", "karaoke_bgm_crossfade_enabled", "ui_record_confirm")):
+            h.app.settings[k] = False
+            self.assertEqual(run(h, {"key": k, "value": True}, f"b{n}"), (True, "setting_changed"), k)
+            self.assertIs(h.app.settings[k], True)
+        self.assertEqual([x for x in h.calls if x[0] == "ticker_update"], [], "only ticker settings refresh the ticker")
 
 
 class ApplyTests(unittest.TestCase):

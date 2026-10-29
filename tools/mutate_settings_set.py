@@ -24,14 +24,21 @@ M = [
     ('        if key in self.settings and type(self.settings[key]) is type(value) and self.settings[key] == value:', '        if self.settings.get(key) == value:', None),
     ('            return True, "dry_run: would change the setting"', '            return False, "dry_run: would change the setting"', None),
     ('        if dry_run:\n            return True, "dry_run: would change the setting"', '        if False:\n            return True, "dry_run: would change the setting"', None),
-    ('        self.settings[key] = value\n        try:\n            self.save_settings()', '        try:\n            self.save_settings()', None),
-    ('        self.settings[key] = value\n        try:\n            self.save_settings()\n        except Exception as exc:', '        self.settings[key] = value\n        try:\n            pass\n        except Exception as exc:', None),
+    ('        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value\n        try:\n            self.save_settings()', '        try:\n            self.save_settings()', None),
+    ('        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value\n        try:\n            self.save_settings()\n        except Exception as exc:', '        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value\n        try:\n            pass\n        except Exception as exc:', None),
     ('                object.__getattribute__(self, "__dict__").pop("_cached_ticker_data", None)', '                pass', None),
     ('            if key.startswith("ticker_"):\n                self.schedule_ticker_update()', '            if False:\n                self.schedule_ticker_update()', None),
     ('        return True, "setting_changed"', '        return True, "no_change"', None),
     ('        if action == "settings.set":\n            try:\n                ok, code = self.shell_settings_set(args.get("key"), args.get("value"), dry_run=(mode == "dry_run"))', '        if action == "settings.set":\n            try:\n                ok, code = self.shell_settings_set(args.get("key"), args.get("value"), dry_run=False)', None),
     ('"waitlist.add", "settings.set")\n', '"waitlist.add")\n', None),
     ('        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):\n            return self._execute_shell_queue_command(action, args)', '        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):\n            return self._execute_shell_queue_command(action, args)', None),
+    ('            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, (int, float)) and math.isfinite(value) and spec["min"] <= value <= spec["max"]', None),
+    ('            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, (int, float)) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]', "an infinite or NaN value is JSON-impossible and fails the range check anyway"),
+    ('and spec["min"] <= value <= spec["max"]', 'and spec["min"] < value <= spec["max"]', None),
+    ('and spec["min"] <= value <= spec["max"]', 'and spec["min"] <= value < spec["max"]', None),
+    ('"end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 60.0},', '"end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 600.0},', None),
+    ('        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value', '        self.settings[key] = value', None),
+    ('        "karaoke_auto_advance": {"type": "bool"},\n', '        "karaoke_auto_advance": {"type": "bool"},\n        "crash_auto_send_logs": {"type": "bool"},\n', None),
 ]
 
 

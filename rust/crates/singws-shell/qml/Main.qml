@@ -68,7 +68,7 @@ ApplicationWindow {
                 ControlsPage { panel: control }
                 MusicPage { control: control }
                 EqPage { control: control }
-                SettingsPage {}
+                SettingsPage { control: control }
                 TickerPage { control: control }
                 WaitlistPage { control: control }
             }

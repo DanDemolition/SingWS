@@ -50008,6 +50008,13 @@ class KaraokeApp(QWidget):
     _SHELL_SETTINGS_SCHEMA = {
         "ticker_custom_enabled": {"type": "bool"},
         "ticker_custom_message": {"type": "text", "max_chars": 200},
+        # read at the moment of use (checked in the code that reads each one), no apply hook in the Settings dialog, not a secret, a URL, a path or a device
+        "loudness_scan_holds_for_playback": {"type": "bool"},
+        "karaoke_auto_advance": {"type": "bool"},
+        "bg_end_silence_trim_enabled": {"type": "bool"},
+        "karaoke_bgm_crossfade_enabled": {"type": "bool"},
+        "end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 60.0},
+        "ui_record_confirm": {"type": "bool"},
     }
 
     @classmethod
@@ -50017,6 +50024,9 @@ class KaraokeApp(QWidget):
             return False
         if spec["type"] == "bool":
             return isinstance(value, bool)
+        if spec["type"] == "float":
+            import math
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]
         if spec["type"] == "text":
             import unicodedata
             return isinstance(value, str) and len(value) <= spec["max_chars"] and not any(unicodedata.category(c) == "Cc" for c in value)
@@ -50033,7 +50043,7 @@ class KaraokeApp(QWidget):
             return True, "no_change"
         if dry_run:
             return True, "dry_run: would change the setting"
-        self.settings[key] = value
+        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value
         try:
             self.save_settings()
         except Exception as exc:
