@@ -12,3 +12,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "singws-cdg-dump"
 path = "src/dump_cli.rs"
+
+[[bin]]
+name = "singws-window-cli"
+path = "src/window_cli.rs"

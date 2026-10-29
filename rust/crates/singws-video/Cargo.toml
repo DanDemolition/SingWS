@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "singws-video-swframe"
+path = "src/swframe.rs"
+
 [dependencies]
 # Runtime only: loads the bundled singws_libmpv.2.dylib (no link-time dependency, no headers needed).
 libloading = "0.8"

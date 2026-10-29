@@ -2248,6 +2248,7 @@ dependencies = [
  "singws-cdg",
  "singws-control",
  "singws-uimodel",
+ "singws-video",
 ]
 
 [[package]]

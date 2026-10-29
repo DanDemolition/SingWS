@@ -24,6 +24,10 @@ pub const RENDER_PARAM_API_TYPE: c_int = 1;
 pub const RENDER_PARAM_OPENGL_INIT_PARAMS: c_int = 2;
 pub const RENDER_PARAM_OPENGL_FBO: c_int = 3;
 pub const RENDER_PARAM_FLIP_Y: c_int = 4;
+pub const RENDER_PARAM_SW_SIZE: c_int = 17;
+pub const RENDER_PARAM_SW_FORMAT: c_int = 18;
+pub const RENDER_PARAM_SW_STRIDE: c_int = 19;
+pub const RENDER_PARAM_SW_POINTER: c_int = 20;
 pub const RENDER_UPDATE_FRAME: u64 = 1;
 
 #[repr(C)]
@@ -376,6 +380,30 @@ impl Mpv {
         let mut ctx: *mut c_void = std::ptr::null_mut();
         let r = unsafe { (self.render_context_create)(&mut ctx, h.0, params.as_mut_ptr()) };
         if r >= 0 { Ok(ctx) } else { Err(r) }
+    }
+    /// Creates a SOFTWARE render context (no GL, no window): frames are drawn into a memory buffer by `render_sw`. This is the path a Qt Quick
+    /// display can use without sharing a GL context with the scene graph (Qt Quick on macOS runs on Metal).
+    pub fn render_context_create_sw(&self, h: Handle) -> Result<*mut c_void, c_int> {
+        let mut api_type = b"sw\0".to_vec();
+        let mut params = [RenderParam { ty: RENDER_PARAM_API_TYPE, data: api_type.as_mut_ptr() as *mut c_void }, RenderParam { ty: 0, data: std::ptr::null_mut() }];
+        let mut ctx: *mut c_void = std::ptr::null_mut();
+        let r = unsafe { (self.render_context_create)(&mut ctx, h.0, params.as_mut_ptr()) };
+        if r >= 0 { Ok(ctx) } else { Err(r) }
+    }
+    /// Draws the current frame into `buf` (`stride * h` bytes, "rgb0": four bytes a pixel, the fourth unused).
+    pub fn render_sw(&self, rc: *mut c_void, w: c_int, h: c_int, stride: usize, buf: &mut [u8]) -> c_int {
+        assert!(buf.len() >= stride * h as usize);
+        let mut size = [w, h];
+        let mut fmt = b"rgb0\0".to_vec();
+        let mut stride_v: usize = stride;
+        let mut params = [
+            RenderParam { ty: RENDER_PARAM_SW_SIZE, data: size.as_mut_ptr() as *mut c_void },
+            RenderParam { ty: RENDER_PARAM_SW_FORMAT, data: fmt.as_mut_ptr() as *mut c_void },
+            RenderParam { ty: RENDER_PARAM_SW_STRIDE, data: &mut stride_v as *mut usize as *mut c_void },
+            RenderParam { ty: RENDER_PARAM_SW_POINTER, data: buf.as_mut_ptr() as *mut c_void },
+            RenderParam { ty: 0, data: std::ptr::null_mut() },
+        ];
+        unsafe { (self.render_context_render)(rc, params.as_mut_ptr()) }
     }
     pub fn render_set_update_callback(&self, rc: *mut c_void, cb: Option<RenderUpdateFn>, ctx: *mut c_void) {
         unsafe { (self.render_context_set_update_callback)(rc, cb, ctx) }

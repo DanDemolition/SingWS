@@ -23,6 +23,25 @@ Window {
     }
 
     CdgDemo { id: demo }
+    // video demo (--display-demo-video FILE): libmpv's software renderer through image://video; no sound
+    VideoDemo { id: vdemo }
+    property bool videoMode: false
+    property int videoSerial: 0
+    function openVideo(path) {
+        var at = arg("--display-at") !== "" ? parseFloat(arg("--display-at")) : -1
+        videoMode = vdemo.load(path, at)
+        loaded = videoMode
+        show()
+    }
+    Timer {
+        interval: 40
+        running: disp.visible && disp.videoMode
+        repeat: true
+        onTriggered: { vdemo.poll(); disp.videoSerial += 1 }
+    }
+    // the audience ticker's text: the real rules (singws-uimodel::ticker, proven equal to the app's), read-only from queue.json / settings.json in SINGWS_HOME
+    TickerPanel { id: tickerPanel }
+    Timer { interval: 3000; running: disp.visible; repeat: true; triggeredOnStart: true; onTriggered: tickerPanel.refresh() }
     property bool loaded: false
     property real fixedAt: arg("--display-at") !== "" ? parseFloat(arg("--display-at")) : -1
     property real positionMs: 0
@@ -42,7 +61,7 @@ Window {
     // the clock: a held moment, or real time looping over the file
     Timer {
         interval: 33
-        running: disp.visible && disp.loaded
+        running: disp.visible && disp.loaded && !disp.videoMode
         repeat: true
         triggeredOnStart: true
         onTriggered: {
@@ -61,14 +80,24 @@ Window {
         anchors.top: parent.top
         anchors.bottom: ticker.top
         Image {
-            id: pic
+            id: vpic
             anchors.fill: parent
-            visible: disp.loaded
+            visible: disp.videoMode
             fillMode: Image.PreserveAspectFit
             smooth: true
             cache: false
             asynchronous: false
-            source: disp.loaded ? "image://cdg/" + Math.floor(disp.positionMs) : ""
+            source: disp.videoMode ? "image://video/" + disp.videoSerial + "/960/540" : ""
+        }
+        Image {
+            id: pic
+            anchors.fill: parent
+            visible: disp.loaded && !disp.videoMode
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            cache: false
+            asynchronous: false
+            source: disp.loaded && !disp.videoMode ? "image://cdg/" + Math.floor(disp.positionMs) : ""
         }
         Text {
             anchors.centerIn: parent
@@ -102,7 +131,7 @@ Window {
             Text {
                 id: names
                 anchors.verticalCenter: parent.verticalCenter
-                text: disp.arg("--display-ticker") !== "" ? disp.arg("--display-ticker") : "1  Sample Singer   2  Another Singer   3  Third Singer"
+                text: disp.arg("--display-ticker") !== "" ? disp.arg("--display-ticker") : (tickerPanel.text !== "" ? tickerPanel.text : "1  Sample Singer   2  Another Singer   3  Third Singer")
                 color: "#39FF88"
                 font.pixelSize: ticker.namesPx
                 font.weight: Font.Bold
@@ -130,9 +159,23 @@ Window {
         }
     }
 
+    // the show-screen effects: the app's own QML (ShowScreenVfx.qml is byte-identical to QML_SHOW_SCREEN_VFX_SOURCE; tools/vfx_source_check.py), on top
+    // of the picture. --display-effect next-up|singer-start|outro, --display-style STYLE, --display-singer/-song/-artist set what it shows.
+    ShowScreenVfx { id: vfx; anchors.fill: parent; z: 5 }
+    function startEffect() {
+        var kind = arg("--display-effect")
+        if (kind === "") return
+        var singer = arg("--display-singer") || "Sample Singer", song = arg("--display-song") || "Sample Song", artist = arg("--display-artist") || "Sample Artist"
+        var style = arg("--display-style") || "moving_spotlights"
+        if (kind === "next-up") vfx.showNextUp(singer, song, artist, arg("--display-ondeck") || "On deck: Another Singer", 10)
+        else if (kind === "singer-start") vfx.showSingerStart(singer, song, artist, style)
+        else if (kind === "outro") vfx.showSongOutro(singer, song, artist, style)
+    }
+    onLoadedChanged: if (loaded) startEffect()
+
     Timer {
-        interval: 900
+        interval: arg("--display-snapshot-after") !== "" ? parseInt(arg("--display-snapshot-after")) : 900
         running: disp.visible && disp.loaded && disp.arg("--display-snapshot") !== ""
-        onTriggered: disp.contentItem.grabToImage(function(r) { r.saveToFile(disp.arg("--display-snapshot")); Qt.quit() })
+        onTriggered: { disp.contentItem.grabToImage(function(r) { r.saveToFile(disp.arg("--display-snapshot")); Qt.quit() }) }
     }
 }
