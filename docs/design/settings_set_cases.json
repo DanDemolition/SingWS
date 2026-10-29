@@ -1,0 +1,313 @@
+{
+ "_comment": "Shared by the Rust validator (singws-control protocol.rs) and the app (_shell_settings_set): every case must give the same accept / refuse answer on both sides.",
+ "cases": [
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "Welcome to SingWS! | %nextSinger"
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": ""
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "  padded  "
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "Caf\u00e9 \u6771\u4eac \ud83c\udf89"
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "tab\there"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "two\nlines"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "bell\u0007"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "nul\u0000"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "c1\u0085x"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": 5
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": [
+     "a"
+    ]
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": true
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "api_key",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "host_controls_pin",
+    "value": "1234"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "base_url",
+    "value": "https://evil.example"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "user",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "shell_commands",
+    "value": "apply"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ticker_enabled",
+    "value": false
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ticker_color",
+    "value": "#ff0000"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "rotation_announcement_message",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "background_image_path",
+    "value": "/etc/passwd"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "background_slideshow_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "TICKER_CUSTOM_MESSAGE",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": " ticker_custom_message",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": null,
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": 5,
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {},
+   "ok": false,
+   "code": "unknown_setting"
+  }
+ ]
+}

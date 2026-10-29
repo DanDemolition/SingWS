@@ -69,7 +69,7 @@ ApplicationWindow {
                 MusicPage { control: control }
                 EqPage { control: control }
                 SettingsPage {}
-                TickerPage {}
+                TickerPage { control: control }
                 WaitlistPage { control: control }
             }
         }
