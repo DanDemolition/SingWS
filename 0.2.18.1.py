@@ -3925,7 +3925,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
         hb_timer = QTimer(owner)
         hb_timer.timeout.connect(_heartbeat)
-        hb_timer.start(250 if light else 50)
+        hb_timer.start(500 if light else 50)
         owner._mt_hb_timer = hb_timer
 
         threshold = max(0.05, float(threshold_ms) / 1000.0)
@@ -4248,7 +4248,7 @@ DEFAULTS = {
     "stall_stack_capture": False,
     # Log a one-line system snapshot (load, memory pressure, busiest processes) when the GUI freezes for over a second.
     "stall_system_snapshot": True,
-    # Light always-on stall watchdog (250 ms heartbeat, logs only GUI stalls >= 1 s, no stack, no event filter) so a long
+    # Light always-on stall watchdog (500 ms heartbeat, logs only GUI stalls >= 1 s, no stack, no event filter) so a long
     # block shows up in a show log even with performance_debug_enabled off. Applies at next launch.
     "stall_watchdog_light": True,
     # Read the first MBs of the NEXT singer's song file on a worker thread so a sleeping/slow external drive is awake and
