@@ -28972,7 +28972,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith(("queue.", "library.", "bg.", "eq.")) or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -29040,7 +29040,7 @@ class KaraokeApp(QWidget):
             if queue_sig is not None:
                 try:
                     worker.send_json({"type": "queue", "user": full["user"], "queue_sig": queue_sig, "singers": self._shell_queue_summary(),
-                                      "updated_at": int(time.time())})
+                                      "waitlist": self._shell_waitlist_summary(), "updated_at": int(time.time())})
                 except Exception:
                     pass
 
@@ -34030,7 +34030,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith(("queue.", "library.", "bg.", "eq.")):
+            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34341,7 +34341,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith(("queue.", "library.", "bg.", "eq.")):
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -35293,6 +35293,10 @@ class KaraokeApp(QWidget):
         req = self._selected_waiting_for_add_request()
         if not isinstance(req, dict) or not req.get("_removed_tonight"):
             return
+        self._waitlist_restore_request(req)
+
+    def _waitlist_restore_request(self, req: dict):
+        """The body of the Restore button (also `waitlist.restore`): put a request removed tonight back on the waitlist."""
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
@@ -36318,17 +36322,22 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
+        ok, code, detail = self._waitlist_add_request(req, rid)
+        if not ok:
+            try:
+                QMessageBox.warning(self, "Waiting for Add", detail if code == "add_error" else "That song could not be added from the local library.")
+            except Exception:
+                pass
+
+    def _waitlist_add_request(self, req: dict, rid: int) -> tuple[bool, str, str]:
+        """The body of the Add button (also `waitlist.add`), with no dialog: returns (ok, code, detail). `add_error` carries the message the button shows in its warning."""
         replacement = req.get("replacement_track") if isinstance(req.get("replacement_track"), dict) else None
         if replacement:
             try:
                 if self._add_waiting_for_add_track(req, replacement):
-                    return
+                    return True, "added", ""
             except Exception as e:
-                try:
-                    QMessageBox.warning(self, "Waiting for Add", str(e))
-                except Exception:
-                    pass
-                return
+                return False, "add_error", str(e)
         ok = False
         try:
             ok = bool(self.process_external_request(dict(req)))
@@ -36336,11 +36345,7 @@ class KaraokeApp(QWidget):
             ok = False
             _diag(f"[WAITING-FOR-ADD] add failed request_id={rid}: {e}")
         if not ok:
-            try:
-                QMessageBox.warning(self, "Waiting for Add", "That song could not be added from the local library.")
-            except Exception:
-                pass
-            return
+            return False, "not_added", ""
         try:
             self._waiting_for_add_handled_ids.add(rid)
         except Exception:
@@ -36355,6 +36360,7 @@ class KaraokeApp(QWidget):
             pass
         self._schedule_waiting_for_add_view_refresh(reason="add_now")
         self._show_processing_notification("Added waiting request to rotation.", level="success")
+        return True, "added", ""
 
     def _update_waiting_for_add_request(self, rid: int, updates: dict) -> dict | None:
         try:
@@ -36917,6 +36923,10 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
+        self._waitlist_remove_request(req, rid)
+
+    def _waitlist_remove_request(self, req: dict, rid: int):
+        """The body of the Remove button (also `waitlist.remove`): archive as removed tonight, tell the server, forget the request."""
         undo = KaraokeApp._begin_undoable_action(self, "Remove Pending Request")
         self._archive_waitlist_removed_tonight(req, reason="waiting_for_add_cleared")
         try:
@@ -49992,6 +50002,38 @@ class KaraokeApp(QWidget):
             self._persist_song_modifier_change(f"Speed {int(value)}% set for {name}" if int(value) != 100 else f"Speed reset for {name}")
         return True, "changed"
 
+    def shell_waitlist_change(self, action: str, request_id: int, *, dry_run: bool = False) -> tuple[bool, str]:
+        """`waitlist.remove` / `waitlist.restore` / `waitlist.add` by request id: the "Waiting for add" page's Remove (clear), Restore and Add buttons, with no selection and no dialog.
+        The request must be one the page would let the host act on (remove: waiting and not already queued or accepted; restore: removed tonight). Host actions are
+        authoritative: remove archives the request as removed tonight, tells the server to drop it and forgets it here; restore puts that same request back to waiting."""
+        if action == "waitlist.remove":
+            req = getattr(self, "_waiting_for_add_requests", {}).get(request_id)
+            clearable = {self._waiting_for_add_request_id(r) for r in self._waiting_for_add_clearable_requests()}
+            if not isinstance(req, dict) or request_id not in clearable:
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would remove the request from the waitlist"
+            self._waitlist_remove_request(req, request_id)
+            return True, "waitlist_removed"
+        if action == "waitlist.add":
+            req = getattr(self, "_waiting_for_add_requests", {}).get(request_id)
+            clearable = {self._waiting_for_add_request_id(r) for r in self._waiting_for_add_clearable_requests()}
+            if not isinstance(req, dict) or request_id not in clearable:
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would add the request to the rotation"
+            ok, code, _detail = self._waitlist_add_request(req, request_id)
+            return (True, "waitlist_added") if ok else (False, code)
+        if action == "waitlist.restore":
+            req = getattr(self, "_waiting_for_add_removed_tonight", {}).get(request_id)
+            if not isinstance(req, dict) or not req.get("_removed_tonight"):
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would restore the request to the waitlist"
+            self._waitlist_restore_request(req)
+            return True, "waitlist_restored"
+        return False, f"unknown command: {action}"
+
     def shell_queue_rename_singer(self, singer_id: str, new_name: str, *, dry_run: bool = False) -> tuple[bool, str]:
         """Rename a singer by id (the rotation menu's Rename). Refuses when the new name already belongs to ANOTHER singer: the app asks the host to confirm that merge,
         and a merge should never be one tap on a phone."""
@@ -50298,7 +50340,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50392,6 +50434,15 @@ class KaraokeApp(QWidget):
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)
+        if action in ("waitlist.remove", "waitlist.restore", "waitlist.add"):
+            waitlist_rid = args.get("request_id")
+            if not isinstance(waitlist_rid, int) or isinstance(waitlist_rid, bool) or waitlist_rid <= 0:
+                return remember(False, "bad_request_id")
+            try:
+                ok, code = self.shell_waitlist_change(action, waitlist_rid, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
         where = str(args.get("direction") or args.get("where") or "").strip().lower()
         singer_id = str(args.get("singer_id") or "").strip()
         entry_id = str(args.get("entry_id") or "").strip()
@@ -50480,6 +50531,37 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             return remember(False, f"failed: {exc}")
         return remember(True, result)
+
+    def _shell_waitlist_summary(self) -> dict:
+        """The "Waiting for add" page for the web remote / phone: compact rows of what the page lists now (waiting, and removed tonight), from the same row builder
+        (`_waiting_for_add_sections` / `_waiting_for_add_row`), so the app's own accepted / already-queued filtering applies. Best effort: never raises."""
+        out = {"waiting": [], "removed": []}
+
+        def compact(row, section):
+            return {"request_id": int(row.get("request_id") or 0), "singer": str(row.get("singer") or ""), "artist": str(row.get("artist") or ""),
+                    "title": str(row.get("title") or ""), "status": str(row.get("status_label") or ""), "first_time": bool(row.get("first_time_singer")),
+                    "section": section}
+
+        try:
+            for section in self._waiting_for_add_sections():
+                if section.get("key") == "waitlist":
+                    out["waiting"] = [compact(r, "waitlist") for r in section.get("rows", [])[:40]]
+        except Exception:
+            pass
+        try:
+            removed = [r for r in (getattr(self, "_waiting_for_add_removed_tonight", {}) or {}).values() if isinstance(r, dict)]
+
+            def removed_at(r):
+                try:
+                    return float(r.get("removed_at") or 0)
+                except Exception:
+                    return 0.0
+
+            removed.sort(key=removed_at, reverse=True)
+            out["removed"] = [compact(self._waiting_for_add_row(r, "removed", selectable=True), "removed") for r in removed[:20]]
+        except Exception:
+            pass
+        return out
 
     def _shell_queue_summary(self) -> list:
         """Compact queue for the shell's rotation list and edit targets (ids, names, titles, flags)."""

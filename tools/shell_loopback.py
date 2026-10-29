@@ -192,6 +192,30 @@ def scenario_the_shell_sets_a_brand_priority_replaces_a_song_and_sends_a_direct_
         assert view["result"]["kind"] == "ok" and view["result"]["text"] == "Message delivered", view["result"]
 
 
+def scenario_the_shell_adds_removes_and_restores_waitlist_requests_through_the_relay():
+    """The waitlist commands through the real shell and relay into the app's REAL waitlist routines (the very bodies the page's buttons call): add one request to the
+    rotation, remove another, restore it; a request that is gone is refused in plain words."""
+    shot = Path(__file__).resolve().parent.parent / "docs/verification/2026-10-27-waitlist-actions.png"
+    with cl.Stack("apply") as st:
+        script = [{"label": "Add Ann", "command": "waitlist.add", "args": {"request_id": 7}},
+                  {"label": "Remove Bo", "command": "waitlist.remove", "args": {"request_id": 8}},
+                  {"label": "Restore Bo", "command": "waitlist.restore", "args": {"request_id": 8}},
+                  {"label": "Remove Ann again", "command": "waitlist.remove", "args": {"request_id": 7}}]
+        view, p, _ = run_shell(st, script, snapshot=shot, snapshot_after=9000)
+        assert view is not None, p.stderr[-800:]
+        cmds = commands_seen(st)
+        assert [c["command"] for c in cmds[-4:]] == ["waitlist.add", "waitlist.remove", "waitlist.restore", "waitlist.remove"], [c["command"] for c in cmds]
+        after_add, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[-4]["request_id"], timeout=5)
+        assert after_add["waitlist"]["waiting"] == [8, 9] and "add_to_rotation:7" in after_add["waitlist"]["events"], after_add["waitlist"]
+        after_rm, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[-3]["request_id"], timeout=5)
+        assert after_rm["waitlist"]["waiting"] == [9] and after_rm["waitlist"]["removed"] == [8], after_rm["waitlist"]
+        assert any(x.startswith("delete_remote:8:") for x in after_rm["waitlist"]["events"]), after_rm["waitlist"]
+        last, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[-1]["request_id"], timeout=5)
+        assert last["waitlist"]["waiting"] == [8, 9] and last["waitlist"]["removed"] == [], last["waitlist"]
+        assert "server_restore:8" in last["waitlist"]["events"], last["waitlist"]
+        assert view["result"]["kind"] == "warn" and "no longer on the waitlist" in view["result"]["text"], view["result"]
+
+
 def scenario_the_music_tab_follows_the_players_position_and_drives_the_background_music():
     """The real shell's Music tab over the real relay: the app says it is on track 2 of 4, so the played tracks hide; play/pause and volume reach the app."""
     import tempfile

@@ -70,7 +70,7 @@ ApplicationWindow {
                 EqPage { control: control }
                 SettingsPage {}
                 TickerPage {}
-                WaitlistPage {}
+                WaitlistPage { control: control }
             }
         }
     }
