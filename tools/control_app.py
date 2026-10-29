@@ -58,6 +58,29 @@ async def main():
     app = h.app
     app.settings.update({"shell_commands": args.mode, "user": args.tenant})
     played = []
+    # the "Waiting for add" page's state: three waiting requests; the app's REAL waitlist methods run on it (bound below), the server calls are recorded
+    waitlist_events = []
+    app._waiting_for_add_requests = {i: {"request_id": i, "singer": n, "artist": "Queen", "title": f"Song {i}", "state": "waiting", "pending_reason": "rotation_full"}
+                                     for i, n in ((7, "Ann"), (8, "Bo"), (9, "Cy"))}
+    app._waiting_for_add_removed_tonight = {}
+    app._waiting_for_add_handled_ids = set()
+    app._remote_request_tombstones = {"requests": {}}
+    app._remote_removed_request_ids = set()
+    app._remote_attention_requests = {}
+    app._pending_remote_order_syncs = {}
+    app._queue_remote_request_ids = lambda: []
+    app._accepted_request_identity_sets = lambda: (set(), set(), set())
+    app._request_matches_accepted_queue_item = lambda req, identity_sets=None: False
+    app._save_waitlist_removed_tonight = lambda: waitlist_events.append("save_removed")
+    app._schedule_waiting_for_add_view_refresh = lambda delay_ms=None, reason="": waitlist_events.append(f"refresh:{reason}")
+    app._show_processing_notification = lambda text, level="info": None
+    app._waiting_for_add_failed_add = lambda req: False
+    app._delete_remote_request = lambda rid, entry=None, singer_name="", reason="": waitlist_events.append(f"delete_remote:{rid}:{reason}")
+    app._restore_waitlist_request_on_server_async = lambda req, revision: waitlist_events.append(f"server_restore:{req.get('request_id')}")
+    app._drop_remote_request_tombstone = lambda rid, reason="": None
+    app._mark_waiting_for_add_delivered_async = lambda rid, req=None: waitlist_events.append(f"delivered:{rid}")
+    app._add_waiting_for_add_track = lambda req, track: False
+    app.process_external_request = lambda req: (waitlist_events.append(f"add_to_rotation:{req.get('request_id')}"), True)[1]
     app.toggle_karaoke_pause = lambda: played.append("pause")
     app.play_next_file = lambda skip_confirmation=False: played.append("next")
     app.stop_and_clear_now_singing = lambda skip_confirmation=False: played.append("stop")
@@ -124,9 +147,26 @@ async def main():
                  "shell_queue_set_song_modifier", "shell_queue_rename_singer", "_queue_song_entry",
                  "shell_queue_set_singer_brand", "shell_queue_message_singer", "shell_queue_replace_song", "_set_singer_preference", "_clear_singer_preference",
                  "_singer_disc_priority_override", "_normalize_singer_pref_key", "clear_singer_brand_override", "_replace_queue_song_with_track",
-                 "_build_queue_entry_from_track_choice", "_waiting_for_add_song_data_from_track"):
+                 "_build_queue_entry_from_track_choice", "_waiting_for_add_song_data_from_track",
+                 "shell_waitlist_change", "_waitlist_remove_request", "_waitlist_restore_request", "_waitlist_add_request", "_archive_waitlist_removed_tonight",
+                 "_waiting_for_add_clearable_requests", "_waiting_for_add_request_id", "_waiting_for_add_order_key"):
         if hasattr(m.KaraokeApp, name):
             setattr(app, name, types.MethodType(getattr(m.KaraokeApp, name), app))
+    # the waitlist summary the phone page shows: the app's real row builder and sections over the stand-in's state
+    for name in dir(m.KaraokeApp):
+        if name.startswith(("_waiting_for_add_", "_pending_acceptance", "_format_waiting", "_is_waiting_for_add", "_remote_request_is_non_actionable")) and not hasattr(app, name):
+            setattr(app, name, types.MethodType(getattr(m.KaraokeApp, name), app))
+    app._shell_waitlist_summary = types.MethodType(m.KaraokeApp._shell_waitlist_summary, app)
+    # settings.set: the app's real schema and routine; the ticker refresh is recorded
+    app._SHELL_SETTINGS_SCHEMA = m.KaraokeApp._SHELL_SETTINGS_SCHEMA
+    app._shell_setting_value_ok = m.KaraokeApp._shell_setting_value_ok
+    app.shell_settings_set = types.MethodType(m.KaraokeApp.shell_settings_set, app)
+    ticker_updates = []
+    _prev_ticker_update = getattr(app, "schedule_ticker_update", None)
+    app.schedule_ticker_update = lambda: ticker_updates.append(1)
+    app.settings.update({"ticker_custom_enabled": False, "ticker_custom_message": "", "api_key": "KEEP-ME"})
+    app._is_first_time_waitlist_singer = lambda name: name == "Ann"
+    app._deferred_remote_request_ids = lambda: set()
     app._SHELL_QUEUE_ACTIONS = m.KaraokeApp._SHELL_QUEUE_ACTIONS
     # the dialogs' own plumbing is stubbed (server push, persistence, the real rename has its own tests); the new key / speed / name stay in the queue so the loopback can read them
     app._queue_limit_name_key = m.KaraokeApp._queue_limit_name_key  # a static method: not bound
@@ -157,7 +197,9 @@ async def main():
         return {"order": [s["singer_id"] for s in app.queue], "songs": {s["singer_id"]: [e.get("request_uid") or e.get("display_name") or "?" for e in s["songs"]] for s in app.queue},
                 "skipped": {s["singer_id"]: bool(s.get("skipped")) for s in app.queue},
                 "names": {s["singer_id"]: s["name"] for s in app.queue}, "brands": {s["singer_id"]: s.get("preferred_disc_priority") for s in app.queue},
-                "titles": {s["singer_id"]: [str(e.get("title") or e.get("song_info")) for e in s["songs"]] for s in app.queue}, "messages": list(sent_messages), "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played)}
+                "titles": {s["singer_id"]: [str(e.get("title") or e.get("song_info")) for e in s["songs"]] for s in app.queue}, "messages": list(sent_messages), "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played),
+                "ticker_updates": len(ticker_updates), "ticker_settings": {"enabled": app.settings.get("ticker_custom_enabled"), "message": app.settings.get("ticker_custom_message"), "api_key": app.settings.get("api_key")},
+                "waitlist": {"waiting": sorted(app._waiting_for_add_requests), "removed": sorted(app._waiting_for_add_removed_tonight), "events": list(waitlist_events)}}
 
     async def pump():
         while True:

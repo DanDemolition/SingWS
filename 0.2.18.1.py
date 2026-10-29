@@ -23,7 +23,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen, renderer_raise_script
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.2.2"
+APP_VERSION = "1.0.2.3"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -3849,6 +3849,36 @@ class _StallAttributionDisabled(Exception):
     """Control-flow marker: skip installing the app-wide attribution filter."""
 
 
+def _prewarm_read_file(path: str, max_bytes: int = 8 * 1024 * 1024):
+    """Read the first few MB of `path` and its paired .mp3 so the drive is awake and the data is in the page cache.
+    Worker thread only; never raises."""
+    t0 = time.monotonic()
+    got = 0
+    try:
+        paths = [path]
+        base, ext = os.path.splitext(path)
+        if ext.lower() == ".cdg":
+            for cand in (base + ".mp3", base + ".MP3"):
+                if os.path.exists(cand):
+                    paths.append(cand)
+                    break
+        for one in paths:
+            with open(one, "rb") as fh:
+                left = max_bytes
+                while left > 0:
+                    chunk = fh.read(min(1024 * 1024, left))
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    left -= len(chunk)
+    except Exception:
+        pass
+    try:
+        _diag(f"[PREWARM] {os.path.basename(path)} read {got // 1024} KB in {int((time.monotonic() - t0) * 1000)}ms")
+    except Exception:
+        pass
+
+
 def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
     """Log the GUI-thread stack when the event loop stalls.
 
@@ -3861,11 +3891,17 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
             return
         if getattr(owner, "_mt_watch_thread", None) is not None:
             return
+        light = False
         try:
             if not bool(getattr(owner, "settings", {}).get("performance_debug_enabled", False)):
-                return
+                if not bool(getattr(owner, "settings", {}).get("stall_watchdog_light", True)):
+                    return
+                light = True
         except Exception:
             return
+        if light:
+            # Cheap variant: slow heartbeat, only stalls of a second or more.
+            threshold_ms = max(int(threshold_ms), 1000)
         import traceback as _traceback
 
         main_ident = threading.main_thread().ident
@@ -3889,7 +3925,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
         hb_timer = QTimer(owner)
         hb_timer.timeout.connect(_heartbeat)
-        hb_timer.start(50)
+        hb_timer.start(250 if light else 50)
         owner._mt_hb_timer = hb_timer
 
         threshold = max(0.05, float(threshold_ms) / 1000.0)
@@ -3981,7 +4017,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
             long_logged = False
             peak = 0.0
             while not bool(getattr(owner, "_mt_watch_stop", False)):
-                time.sleep(0.03)
+                time.sleep(0.1 if light else 0.03)
                 hb = getattr(owner, "_mt_hb", None)
                 if hb is None:
                     continue
@@ -4054,7 +4090,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         watch_thread = threading.Thread(target=_watch, name="singws-main-thread-watchdog", daemon=True)
         owner._mt_watch_thread = watch_thread
         watch_thread.start()
-        _diag(f"[STALL] main-thread watchdog armed threshold={threshold_ms}ms")
+        _diag(f"[STALL] main-thread watchdog armed threshold={threshold_ms}ms{' (light)' if light else ''}")
     except Exception as e:
         try:
             _diag(f"[STALL] watchdog install failed: {e}")
@@ -4212,6 +4248,12 @@ DEFAULTS = {
     "stall_stack_capture": False,
     # Log a one-line system snapshot (load, memory pressure, busiest processes) when the GUI freezes for over a second.
     "stall_system_snapshot": True,
+    # Light always-on stall watchdog (250 ms heartbeat, logs only GUI stalls >= 1 s, no stack, no event filter) so a long
+    # block shows up in a show log even with performance_debug_enabled off. Applies at next launch.
+    "stall_watchdog_light": True,
+    # Read the first MBs of the NEXT singer's song file on a worker thread so a sleeping/slow external drive is awake and
+    # cached before play_next_file checks and loads it on the GUI thread.
+    "prewarm_next_song_file": True,
     "show_safe_stall_diagnostics_migrated": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
@@ -28972,7 +29014,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith(("queue.", "library.", "bg.", "eq.")) or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -29040,7 +29082,7 @@ class KaraokeApp(QWidget):
             if queue_sig is not None:
                 try:
                     worker.send_json({"type": "queue", "user": full["user"], "queue_sig": queue_sig, "singers": self._shell_queue_summary(),
-                                      "updated_at": int(time.time())})
+                                      "waitlist": self._shell_waitlist_summary(), "updated_at": int(time.time())})
                 except Exception:
                     pass
 
@@ -34030,7 +34072,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith(("queue.", "library.", "bg.", "eq.")):
+            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34341,7 +34383,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith(("queue.", "library.", "bg.", "eq.")):
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -35293,6 +35335,10 @@ class KaraokeApp(QWidget):
         req = self._selected_waiting_for_add_request()
         if not isinstance(req, dict) or not req.get("_removed_tonight"):
             return
+        self._waitlist_restore_request(req)
+
+    def _waitlist_restore_request(self, req: dict):
+        """The body of the Restore button (also `waitlist.restore`): put a request removed tonight back on the waitlist."""
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
@@ -36318,17 +36364,22 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
+        ok, code, detail = self._waitlist_add_request(req, rid)
+        if not ok:
+            try:
+                QMessageBox.warning(self, "Waiting for Add", detail if code == "add_error" else "That song could not be added from the local library.")
+            except Exception:
+                pass
+
+    def _waitlist_add_request(self, req: dict, rid: int) -> tuple[bool, str, str]:
+        """The body of the Add button (also `waitlist.add`), with no dialog: returns (ok, code, detail). `add_error` carries the message the button shows in its warning."""
         replacement = req.get("replacement_track") if isinstance(req.get("replacement_track"), dict) else None
         if replacement:
             try:
                 if self._add_waiting_for_add_track(req, replacement):
-                    return
+                    return True, "added", ""
             except Exception as e:
-                try:
-                    QMessageBox.warning(self, "Waiting for Add", str(e))
-                except Exception:
-                    pass
-                return
+                return False, "add_error", str(e)
         ok = False
         try:
             ok = bool(self.process_external_request(dict(req)))
@@ -36336,11 +36387,7 @@ class KaraokeApp(QWidget):
             ok = False
             _diag(f"[WAITING-FOR-ADD] add failed request_id={rid}: {e}")
         if not ok:
-            try:
-                QMessageBox.warning(self, "Waiting for Add", "That song could not be added from the local library.")
-            except Exception:
-                pass
-            return
+            return False, "not_added", ""
         try:
             self._waiting_for_add_handled_ids.add(rid)
         except Exception:
@@ -36355,6 +36402,7 @@ class KaraokeApp(QWidget):
             pass
         self._schedule_waiting_for_add_view_refresh(reason="add_now")
         self._show_processing_notification("Added waiting request to rotation.", level="success")
+        return True, "added", ""
 
     def _update_waiting_for_add_request(self, rid: int, updates: dict) -> dict | None:
         try:
@@ -36917,6 +36965,10 @@ class KaraokeApp(QWidget):
         rid = self._waiting_for_add_request_id(req)
         if rid <= 0:
             return
+        self._waitlist_remove_request(req, rid)
+
+    def _waitlist_remove_request(self, req: dict, rid: int):
+        """The body of the Remove button (also `waitlist.remove`): archive as removed tonight, tell the server, forget the request."""
         undo = KaraokeApp._begin_undoable_action(self, "Remove Pending Request")
         self._archive_waitlist_removed_tonight(req, reason="waiting_for_add_cleared")
         try:
@@ -43874,11 +43926,29 @@ class KaraokeApp(QWidget):
                      f' color:{_v("text_soft")};">{_esc(clause)}</span>')
         return html
 
+    def _prewarm_next_song(self, singer):
+        """Start a background read of the next singer's first song file (setting prewarm_next_song_file). Once per path."""
+        try:
+            if not isinstance(singer, dict) or not bool(self.settings.get("prewarm_next_song_file", True)):
+                return
+            entry = self._first_active_entry_for_singer(singer)
+            if entry is None or self._is_external_karafun_entry(entry):
+                return
+            song_info = entry.get("song_info") if isinstance(entry, dict) else (entry[0] if isinstance(entry, (tuple, list)) and entry else entry)
+            path = str(self._song_info_primary_path(song_info) or "")
+            if not path.startswith("/") or path == getattr(self, "_prewarm_last_path", None):
+                return
+            self._prewarm_last_path = path
+            threading.Thread(target=_prewarm_read_file, args=(path,), name="song-prewarm", daemon=True).start()
+        except Exception:
+            pass
+
     @_perf_timed("ui_last_sung_card")
     def _update_last_sung_card(self):
         try:
             last = str(getattr(self, "_last_sung_singer_display", "") or "").strip()
             next_entry = self._next_singer_entry()
+            self._prewarm_next_song(next_entry)
             nxt = str(next_entry.get("name", "") or "").strip() if isinstance(next_entry, dict) else ""
             next_suffix = self._singer_duet_suffix(next_entry) if isinstance(next_entry, dict) else ""
             # Diagnostics by queue-item identity (singer+path) so two songs by the
@@ -49992,6 +50062,96 @@ class KaraokeApp(QWidget):
             self._persist_song_modifier_change(f"Speed {int(value)}% set for {name}" if int(value) != 100 else f"Speed reset for {name}")
         return True, "changed"
 
+    # The settings the shell may change. KEEP IN STEP with SETTINGS_SCHEMA in rust/crates/singws-control/src/protocol.rs (both are tested against docs/design/settings_set_cases.json).
+    # Only keys with no live effect on a native surface (the ticker's colour, size, speed, enabled flag, the rotation announcement, the backgrounds and every path are
+    # NOT here: their dialogs re-style or re-order live windows, which is never done from a remote) and never a secret: no key, PIN, URL, user or path.
+    _SHELL_SETTINGS_SCHEMA = {
+        "ticker_custom_enabled": {"type": "bool"},
+        "ticker_custom_message": {"type": "text", "max_chars": 200},
+        # read at the moment of use (checked in the code that reads each one), no apply hook in the Settings dialog, not a secret, a URL, a path or a device
+        "loudness_scan_holds_for_playback": {"type": "bool"},
+        "karaoke_auto_advance": {"type": "bool"},
+        "bg_end_silence_trim_enabled": {"type": "bool"},
+        "karaoke_bgm_crossfade_enabled": {"type": "bool"},
+        "end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 60.0},
+        "ui_record_confirm": {"type": "bool"},
+    }
+
+    @classmethod
+    def _shell_setting_value_ok(cls, key, value) -> bool:
+        spec = cls._SHELL_SETTINGS_SCHEMA.get(key) if isinstance(key, str) else None
+        if spec is None:
+            return False
+        if spec["type"] == "bool":
+            return isinstance(value, bool)
+        if spec["type"] == "float":
+            import math
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]
+        if spec["type"] == "text":
+            import unicodedata
+            return isinstance(value, str) and len(value) <= spec["max_chars"] and not any(unicodedata.category(c) == "Cc" for c in value)
+        return False
+
+    def shell_settings_set(self, key, value, *, dry_run: bool = False) -> tuple[bool, str]:
+        """`settings.set` {key, value}: change one schema-listed setting, as the Ticker Settings dialog's OK would for its custom-message fields: store it, save settings.json,
+        drop the ticker's cached text and schedule the usual debounced ticker refresh (the text only: nothing is restyled or re-ordered)."""
+        if not isinstance(key, str) or key not in self._SHELL_SETTINGS_SCHEMA:
+            return False, "unknown_setting"
+        if not self._shell_setting_value_ok(key, value):
+            return False, "bad_value"
+        if key in self.settings and type(self.settings[key]) is type(value) and self.settings[key] == value:
+            return True, "no_change"
+        if dry_run:
+            return True, "dry_run: would change the setting"
+        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value
+        try:
+            self.save_settings()
+        except Exception as exc:
+            _diag(f"[SHELL-CMD] settings.set save failed key={key}: {exc}")
+        try:
+            if key.startswith("ticker_"):
+                object.__getattribute__(self, "__dict__").pop("_cached_ticker_data", None)
+        except Exception:
+            pass
+        try:
+            if key.startswith("ticker_"):
+                self.schedule_ticker_update()
+        except Exception:
+            pass
+        return True, "setting_changed"
+
+    def shell_waitlist_change(self, action: str, request_id: int, *, dry_run: bool = False) -> tuple[bool, str]:
+        """`waitlist.remove` / `waitlist.restore` / `waitlist.add` by request id: the "Waiting for add" page's Remove (clear), Restore and Add buttons, with no selection and no dialog.
+        The request must be one the page would let the host act on (remove: waiting and not already queued or accepted; restore: removed tonight). Host actions are
+        authoritative: remove archives the request as removed tonight, tells the server to drop it and forgets it here; restore puts that same request back to waiting."""
+        if action == "waitlist.remove":
+            req = getattr(self, "_waiting_for_add_requests", {}).get(request_id)
+            clearable = {self._waiting_for_add_request_id(r) for r in self._waiting_for_add_clearable_requests()}
+            if not isinstance(req, dict) or request_id not in clearable:
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would remove the request from the waitlist"
+            self._waitlist_remove_request(req, request_id)
+            return True, "waitlist_removed"
+        if action == "waitlist.add":
+            req = getattr(self, "_waiting_for_add_requests", {}).get(request_id)
+            clearable = {self._waiting_for_add_request_id(r) for r in self._waiting_for_add_clearable_requests()}
+            if not isinstance(req, dict) or request_id not in clearable:
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would add the request to the rotation"
+            ok, code, _detail = self._waitlist_add_request(req, request_id)
+            return (True, "waitlist_added") if ok else (False, code)
+        if action == "waitlist.restore":
+            req = getattr(self, "_waiting_for_add_removed_tonight", {}).get(request_id)
+            if not isinstance(req, dict) or not req.get("_removed_tonight"):
+                return False, "unknown_request"
+            if dry_run:
+                return True, "dry_run: would restore the request to the waitlist"
+            self._waitlist_restore_request(req)
+            return True, "waitlist_restored"
+        return False, f"unknown command: {action}"
+
     def shell_queue_rename_singer(self, singer_id: str, new_name: str, *, dry_run: bool = False) -> tuple[bool, str]:
         """Rename a singer by id (the rotation menu's Rename). Refuses when the new name already belongs to ANOTHER singer: the app asks the host to confirm that merge,
         and a merge should never be one tap on a phone."""
@@ -50298,7 +50458,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "settings.set")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50392,6 +50552,21 @@ class KaraokeApp(QWidget):
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)
+        if action == "settings.set":
+            try:
+                ok, code = self.shell_settings_set(args.get("key"), args.get("value"), dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action in ("waitlist.remove", "waitlist.restore", "waitlist.add"):
+            waitlist_rid = args.get("request_id")
+            if not isinstance(waitlist_rid, int) or isinstance(waitlist_rid, bool) or waitlist_rid <= 0:
+                return remember(False, "bad_request_id")
+            try:
+                ok, code = self.shell_waitlist_change(action, waitlist_rid, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
         where = str(args.get("direction") or args.get("where") or "").strip().lower()
         singer_id = str(args.get("singer_id") or "").strip()
         entry_id = str(args.get("entry_id") or "").strip()
@@ -50480,6 +50655,37 @@ class KaraokeApp(QWidget):
         except Exception as exc:
             return remember(False, f"failed: {exc}")
         return remember(True, result)
+
+    def _shell_waitlist_summary(self) -> dict:
+        """The "Waiting for add" page for the web remote / phone: compact rows of what the page lists now (waiting, and removed tonight), from the same row builder
+        (`_waiting_for_add_sections` / `_waiting_for_add_row`), so the app's own accepted / already-queued filtering applies. Best effort: never raises."""
+        out = {"waiting": [], "removed": []}
+
+        def compact(row, section):
+            return {"request_id": int(row.get("request_id") or 0), "singer": str(row.get("singer") or ""), "artist": str(row.get("artist") or ""),
+                    "title": str(row.get("title") or ""), "status": str(row.get("status_label") or ""), "first_time": bool(row.get("first_time_singer")),
+                    "section": section}
+
+        try:
+            for section in self._waiting_for_add_sections():
+                if section.get("key") == "waitlist":
+                    out["waiting"] = [compact(r, "waitlist") for r in section.get("rows", [])[:40]]
+        except Exception:
+            pass
+        try:
+            removed = [r for r in (getattr(self, "_waiting_for_add_removed_tonight", {}) or {}).values() if isinstance(r, dict)]
+
+            def removed_at(r):
+                try:
+                    return float(r.get("removed_at") or 0)
+                except Exception:
+                    return 0.0
+
+            removed.sort(key=removed_at, reverse=True)
+            out["removed"] = [compact(self._waiting_for_add_row(r, "removed", selectable=True), "removed") for r in removed[:20]]
+        except Exception:
+            pass
+        return out
 
     def _shell_queue_summary(self) -> list:
         """Compact queue for the shell's rotation list and edit targets (ids, names, titles, flags)."""
@@ -63492,12 +63698,17 @@ class KaraokeApp(QWidget):
             song_data = (chosen_path, key, tempo_percent)
         elif ext == ".cdg":
             mp3_path = base + ".mp3"
-            if not os.path.exists(mp3_path):
+            _fs_t0 = time.perf_counter()
+            _mp3_found = os.path.exists(mp3_path)
+            if not _mp3_found:
                 mp3_path_upper = base + ".MP3"
                 if os.path.exists(mp3_path_upper):
                     mp3_path = mp3_path_upper
-                else:
-                    return self._remote_request_failure_payload(req, "cdg_missing_mp3", match_result="matched")
+                    _mp3_found = True
+            # Timed so a slow external drive shows up as its own line (the 2.5-6.8 s prepare_payload times of 2026-10-29).
+            _perf_log_if_slow("remote_request_prepare_fs", (time.perf_counter() - _fs_t0) * 1000.0)
+            if not _mp3_found:
+                return self._remote_request_failure_payload(req, "cdg_missing_mp3", match_result="matched")
             song_data = ((chosen_path, mp3_path), key, tempo_percent)
         elif ext == ".zip":
             if not self.is_mp3g_zip(chosen_path):

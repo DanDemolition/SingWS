@@ -3,6 +3,7 @@
 //! of the search string, ordered by artist/title, then ranked exact < prefix < word-prefix < contains). The typo-tolerant fallback that Python runs when the strict
 //! search finds nothing is NOT ported yet; `SearchResult::fuzzy_fallback_needed` says when Python would have used it.
 
+pub mod diagnostics;
 pub mod eq_view;
 pub mod fuzzy;
 pub mod header;
@@ -10,6 +11,7 @@ pub mod hero;
 pub mod history;
 pub mod music;
 pub mod rotation;
+pub mod rows;
 pub mod settings_view;
 pub mod ticker;
 pub mod waitlist;

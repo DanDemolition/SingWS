@@ -3,7 +3,7 @@
 or by its differential parity tool against the app's real Python. Equivalent mutants carry a reason. Originals are restored afterwards (also on Ctrl-C).
 Exit 1 when a non-equivalent mutant survives.
 
-Usage:  CARGO_TARGET_DIR=~/.cache/singws-rust-target-ui python3 tools/mutate_uimodel_text.py ticker|hero|waitlist|header|all
+Usage:  CARGO_TARGET_DIR=~/.cache/singws-rust-target-ui python3 tools/mutate_uimodel_text.py ticker|hero|waitlist|header|diagnostics|rows|all
 """
 import os
 import subprocess
@@ -17,6 +17,61 @@ PY = os.environ.get("SINGWS_PY") or "/Users/daniel/Documents/SingWS/.venv/bin/py
 CARGO = os.path.expanduser("~/.cargo/bin/cargo")
 
 MUTANTS = {
+    "diagnostics": [
+        ('ok: has_local && screens >= 2,', 'ok: has_local || screens >= 2,', None),
+        ('ok: has_local && screens >= 2,', 'ok: has_local && screens >= 1,', None),
+        ('.map(truthy).unwrap_or(true);\n    let path', '.map(truthy).unwrap_or(false);\n    let path', None),
+        ('ok: karafun_enabled && path.is_some(),', 'ok: path.is_some(),', "the path is already None when the provider is disabled, so the extra condition is redundant"),
+        ('None if !karafun_enabled => "Disabled in settings".into(),', 'None if karafun_enabled => "Disabled in settings".into(),', None),
+        ('let surfaces = truthy(get(facts, "output_host")) && truthy(get(facts, "preview_host"));', 'let surfaces = truthy(get(facts, "output_host")) || truthy(get(facts, "preview_host"));', None),
+        ('settings.get("ticker_enabled").map(truthy).unwrap_or(true) &&', 'settings.get("ticker_enabled").map(truthy).unwrap_or(false) &&', None),
+        ('ok: truthy(qr),', 'ok: true,', None),
+        ('ok: !bg_enabled || files > 0,', 'ok: files > 0,', None),
+        ('ok: !bg_enabled || files > 0,', 'ok: !bg_enabled && files > 0,', None),
+        ('format!("{files} playable files in {folder}")', 'format!("{files} playable files in {}", folder.to_uppercase())', None),
+        ('if folder.is_empty() { "(unset)" } else { &folder }', 'if folder.is_empty() { "" } else { &folder }', None),
+        ('if c.ok { "PASS" } else { "CHECK" }', 'if c.ok { "PASS" } else { "FAIL" }', None),
+        ('lines.join(" | ")', 'lines.join(" ")', None),
+        ('all_passed: passed == checks.len()', 'all_passed: passed > 0', None),
+    ],
+    "rows": [
+        ('if f <= 0.0 {\n        return "--:--".into();', 'if f < 0.0 {\n        return "--:--".into();', "zero is already caught by the truthiness test above"),
+        ('Value::Bool(_) => 1.0,', 'Value::Bool(_) => 0.0,', None),
+        ('_ => return String::new(), // `str <= 0` is a TypeError', '_ => return "--:--".into(),', None),
+        ('Some(s) if s > 0 => format!("{}:{:02}", s / 60, s % 60),', 'Some(s) if s > 0 => format!("{:02}:{:02}", s / 60, s % 60),', None),
+        ('if !f.is_finite() || f <= 0.0 || f > 86400.0 {\n                return Ok(None);', 'if !f.is_finite() || f <= 0.0 || f >= 86400.0 {\n                return Ok(None);', None),
+        ('if !f.is_finite() || f <= 0.0 || f > 86400.0 {\n            return Ok(None);\n        }\n        return Ok(Some(f.round_ties_even() as i64));', 'if !f.is_finite() || f <= 0.0 || f > 86400.0 {\n            return Ok(None);\n        }\n        return Ok(Some(f.round() as i64));', None),
+        ('if *vals.last().unwrap() >= 60 || (vals.len() == 3 && vals[1] >= 60) {', 'if *vals.last().unwrap() >= 60 {', None),
+        ('if *vals.last().unwrap() >= 60 || (vals.len() == 3 && vals[1] >= 60) {', 'if *vals.last().unwrap() > 60 || (vals.len() == 3 && vals[1] >= 60) {', None),
+        ('Ok(if total <= 0 || total > 86400 { None } else { Some(total) })', 'Ok(if total < 0 || total > 86400 { None } else { Some(total) })', None),
+        ('"MP3G" | "MP3+G" => "MP3+G".into(),', '"MP3G" => "MP3+G".into(),', "MP3+G falls through to the 8-character default, which gives the same MP3+G"),
+        ('"KARAOKE" | "KJ" => "KARAOKE".into(),', '"KARAOKE" => "KARAOKE".into(),', None),
+        ('_ => badge.chars().take(8).collect(),', '_ => badge.chars().take(7).collect(),', None),
+        ('let kind = if truthy(get(data, "type")) { get(data, "type") } else { get(data, "song_type") };', 'let kind = get(data, "type");', None),
+        ('if prev_letter { c.to_ascii_lowercase() } else { c.to_ascii_uppercase() }', 'if prev_letter { c.to_ascii_uppercase() } else { c.to_ascii_uppercase() }', None),
+        ('p.split(\'/\').rfind(|c| !c.is_empty() && *c != ".")', 'p.split(\'/\').rfind(|c| !c.is_empty())', None),
+        ('let dur = if truthy(get(track, "duration")) { get(track, "duration") } else { get(track, "duration_secs") };', 'let dur = get(track, "duration");', None),
+        ('let disc_src = if truthy(get(track, "discid")) { get(track, "discid") } else { get(track, "disc_id") };', 'let disc_src = get(track, "discid");', None),
+        ('"KaraFun ONLINE".to_string()', '"KaraFun Online".to_string()', None),
+        ('let show_disc = !disc_id.is_empty() && !catalog_only;', 'let show_disc = !disc_id.is_empty();', None),
+        ('let media_badge = if catalog_only { String::new() } else { track_media_badge(track)? };', 'let media_badge = track_media_badge(track)?;', None),
+        ('tooltip_parts.push(format!("File: {}", path_name(&path)));', 'tooltip_parts.push(format!("File: {}", path));', None),
+        ('meta.push(format!("Format: {media_badge}"));', 'meta.push(format!("Type: {media_badge}"));', None),
+        ('n if n >= 3 =>', 'n if n > 3 =>', None),
+        ('2 => (parts[0].to_string(), parts[1].to_string(), fb),', '2 => (parts[0].to_string(), parts[1].to_string(), String::new()),', None),
+        ('if artist.is_empty() || title.is_empty() {\n        let (a2, t2, d2)', 'if artist.is_empty() && title.is_empty() {\n        let (a2, t2, d2)', None),
+        ('if disc_id.is_empty() {\n            disc_id = d2;', 'if true {\n            disc_id = d2;', None),
+        ('dur_txt = format!("~{}", fmt_m_ss_int(normalize_karafun_duration(dur)?));', 'dur_txt = format!("{}", fmt_m_ss_int(normalize_karafun_duration(dur)?));', None),
+        ('right_parts.push(format!("KEY {key:+}"));', 'right_parts.push(format!("KEY {key}"));', None),
+        ('let off_speed = tempo.filter(|t| *t != 100);', 'let off_speed = tempo;', None),
+        ('right_parts.push("DUET".to_string());', 'right_parts.push("DUET ".to_string());', None),
+        ('if estimated { format!("Estimated duration: {dur_txt}") }', 'if !estimated { format!("Estimated duration: {dur_txt}") }', None),
+        ('if is_next && has_active', 'if is_next', None),
+        ('labels.push(if songs.is_empty() { "WAITING FOR SONG" } else { "NO READY SONG" });', 'labels.push(if songs.is_empty() { "NO READY SONG" } else { "WAITING FOR SONG" });', None),
+        ('let has_active = songs.iter().any(|s| if s.is_object() { !truthy(get(s, "skipped")) } else { true });', 'let has_active = songs.iter().any(|s| !truthy(get(s, "skipped")));', "`get` on a non-object is null, which is not truthy, so an old-format entry counts as ready either way"),
+        ('if truthy(get(singer, "skipped")) {\n        return Ok("SKIPPED".into());', 'if false {\n        return Ok("SKIPPED".into());', None),
+        ('_ => raise("strip() of a non-text value"),', '_ => Ok(String::new()),', None),
+    ],
     "header": [
         ('Some(v) => truthy(v),\n        None => default,', 'Some(v) => !truthy(v),\n        None => default,', None),
         ('None => default,\n    }\n}\n\n/// `str(value or default)`', 'None => !default,\n    }\n}\n\n/// `str(value or default)`', None),
@@ -150,8 +205,8 @@ MUTANTS = {
 }
 
 ONLY = {int(x) for x in os.environ.get("MUTANTS", "").split(",") if x}
-MODULE_TEST = {"header": "header", "ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
-PARITY = {"header": ("header_parity.py", ["--cases", "150"]), "ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
+MODULE_TEST = {"diagnostics": "diagnostics", "rows": "rows", "header": "header", "ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
+PARITY = {"diagnostics": ("diagnostics_parity.py", ["--cases", "150"]), "rows": ("rows_parity.py", ["--cases", "200"]), "header": ("header_parity.py", ["--cases", "150"]), "ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
 
 
 def run(cmd, timeout):
@@ -199,6 +254,7 @@ def one(module):
                 print(f"[{module} {n:02d}] SURVIVED  {old[:70]!r}")
     finally:
         src.write_text(text)
+        os.utime(src, None)  # a restore inside the same mtime tick as the last mutant can leave cargo with a stale build
         run([CARGO, "build", "--release", "-p", "singws-uimodel"], 400)
     print(f"{module}: {len(MUTANTS[module])} mutants, killed {killed}, equivalent {equivalents}, survivors {survivors}")
     return survivors

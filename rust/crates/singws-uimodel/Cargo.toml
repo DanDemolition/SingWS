@@ -52,3 +52,11 @@ path = "src/bin/hero_cli.rs"
 [[bin]]
 name = "singws-header-cli"
 path = "src/bin/header_cli.rs"
+
+[[bin]]
+name = "singws-rows-cli"
+path = "src/bin/rows_cli.rs"
+
+[[bin]]
+name = "singws-diagnostics-cli"
+path = "src/bin/diagnostics_cli.rs"

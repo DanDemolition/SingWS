@@ -1,0 +1,789 @@
+{
+ "_comment": "Shared by the Rust validator (singws-control protocol.rs) and the app (_shell_settings_set): every case must give the same accept / refuse answer on both sides.",
+ "cases": [
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "Welcome to SingWS! | %nextSinger"
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": ""
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "  padded  "
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "Caf\u00e9 \u6771\u4eac \ud83c\udf89"
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "tab\there"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "two\nlines"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "bell\u0007"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "nul\u0000"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": "c1\u0085x"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": 5
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": [
+     "a"
+    ]
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message",
+    "value": true
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_message"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ticker_custom_enabled"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "api_key",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "host_controls_pin",
+    "value": "1234"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "base_url",
+    "value": "https://evil.example"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "user",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "shell_commands",
+    "value": "apply"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ticker_enabled",
+    "value": false
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ticker_color",
+    "value": "#ff0000"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "rotation_announcement_message",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "background_image_path",
+    "value": "/etc/passwd"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "background_slideshow_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "TICKER_CUSTOM_MESSAGE",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": " ticker_custom_message",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "",
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": null,
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": 5,
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "value": "x"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {},
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "loudness_scan_holds_for_playback",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "loudness_scan_holds_for_playback",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "loudness_scan_holds_for_playback",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "loudness_scan_holds_for_playback",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "loudness_scan_holds_for_playback",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "loudness_scan_holds_for_playback"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_auto_advance",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karaoke_auto_advance",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karaoke_auto_advance",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_auto_advance",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_auto_advance",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_auto_advance"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_end_silence_trim_enabled",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_end_silence_trim_enabled",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_end_silence_trim_enabled",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_end_silence_trim_enabled",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_end_silence_trim_enabled",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_end_silence_trim_enabled"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_bgm_crossfade_enabled",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karaoke_bgm_crossfade_enabled",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karaoke_bgm_crossfade_enabled",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_bgm_crossfade_enabled",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_bgm_crossfade_enabled",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karaoke_bgm_crossfade_enabled"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ui_record_confirm",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ui_record_confirm",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "ui_record_confirm",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ui_record_confirm",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ui_record_confirm",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "ui_record_confirm"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 0.5
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 60
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 2.5
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 6.0
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 0.49
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 60.01
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": -1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 0
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": "2.5"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": true
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": [
+     2.5
+    ]
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_threshold_sec",
+    "value": 1e+308
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "crash_auto_send_logs",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "auto_update_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "auto_update_manifest_url",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "auto_update_repo",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "auto_update_download_dir",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "karafun_request_url",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "karafun_audio_output_name",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "audio_output_name",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "master_audio_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "quick_gpu_surfaces",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "queue_mode",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "rotation_locked",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ui_show_redesign",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "filename_format",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "disc_id_priority",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  }
+ ]
+}

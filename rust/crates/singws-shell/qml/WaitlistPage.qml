@@ -7,6 +7,12 @@ Item {
     id: page
 
     WaitlistPanel { id: panel }
+    property var control: null   // the shared ControlPanel (Main.qml); null when the page is used on its own
+    property var cview: control ? JSON.parse(control.viewJson) : ({enabled: false})
+    Connections { target: page.control; function onViewJsonChanged() { page.cview = JSON.parse(page.control.viewJson) } }
+    // connected to the app: the buttons work; otherwise the page stays read-only
+    property bool live: cview.enabled === true
+    function act(label, command, requestId) { if (control) control.send(label, command, JSON.stringify({request_id: requestId}), false) }
     property var sections: JSON.parse(panel.sectionsJson)
     // the flat list the ListView draws: a header per section, then its rows
     property var items: {
@@ -26,8 +32,19 @@ Item {
         anchors.fill: parent
         spacing: 10
 
-        Label { text: "WAITLIST (read-only)"; color: "#e8e6f5"; font.pixelSize: 15; font.weight: Font.DemiBold }
+        Label { text: page.live ? "WAITLIST" : "WAITLIST (read-only: not connected to the app)"; color: "#e8e6f5"; font.pixelSize: 15; font.weight: Font.DemiBold }
         Label { Layout.fillWidth: true; text: panel.status; color: "#9a97c0"; font.pixelSize: 12; wrapMode: Text.Wrap }
+        // what the app answered to the last button
+        Rectangle {
+            Layout.fillWidth: true
+            visible: page.live && page.cview.result !== undefined && page.cview.result !== null
+            height: visible ? resultText.implicitHeight + 14 : 0
+            radius: 6
+            color: !page.cview.result ? "transparent" : (page.cview.result.kind === "ok" ? "#12301f" : (page.cview.result.kind === "warn" ? "#33290f" : "#3a1414"))
+            Label { id: resultText; anchors.fill: parent; anchors.margins: 7; wrapMode: Text.Wrap; color: "#ffffff"; font.pixelSize: 13; text: page.cview.result ? page.cview.result.text : "" }
+            Accessible.role: Accessible.StaticText
+            Accessible.name: page.cview.result ? page.cview.result.text : ""
+        }
 
         ListView {
             id: list
@@ -39,7 +56,7 @@ Item {
             ScrollBar.vertical: ScrollBar {}
             delegate: Rectangle {
                 width: list.width
-                height: modelData.header ? (modelData.helper ? 54 : 34) : rowText.implicitHeight + 16
+                height: modelData.header ? (modelData.helper ? 54 : 34) : Math.max(rowText.implicitHeight + 16, page.live && !modelData.header && (modelData.key === "waitlist" || modelData.key === "removed") ? 44 : 0)
                 radius: 6
                 color: modelData.header ? (modelData.key === "pending_acceptance" ? "#0e3a52" : modelData.key === "removed" ? "#4a1d1d" : "#1f2540")
                                         : ((modelData.row && modelData.row.first_time_singer) ? "#16341f" : "#1a1838")
@@ -52,11 +69,48 @@ Item {
                     Label { text: modelData.title || ""; color: "#e8e6f5"; font.pixelSize: 14; font.weight: Font.DemiBold }
                     Label { visible: !!modelData.helper; text: modelData.helper || ""; color: "#9a97c0"; font.pixelSize: 12; width: parent.width; elide: Text.ElideRight }
                 }
+                // host actions: Add / Remove on the waitlist, Restore on what was removed tonight (pending adds are added by the app itself)
+                Row {
+                    id: buttons
+                    visible: page.live && !modelData.header && (modelData.key === "waitlist" || modelData.key === "removed")
+                    anchors.right: parent.right
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+                    property bool sure: false
+                    Timer { id: sureTimer; interval: 3000; onTriggered: buttons.sure = false }
+                    Button {
+                        visible: modelData.key === "waitlist"
+                        text: "Add"
+                        implicitHeight: 30
+                        onClicked: page.act("Add " + modelData.row.singer, "waitlist.add", modelData.row.request_id)
+                        Accessible.name: "Add " + (modelData.row ? modelData.row.singer : "") + " to the rotation"
+                    }
+                    Button {
+                        visible: modelData.key === "waitlist"
+                        text: buttons.sure ? "Sure?" : "Remove"
+                        implicitHeight: 30
+                        onClicked: {
+                            if (!buttons.sure) { buttons.sure = true; sureTimer.restart(); return }
+                            buttons.sure = false
+                            page.act("Remove " + modelData.row.singer, "waitlist.remove", modelData.row.request_id)
+                        }
+                        Accessible.name: (buttons.sure ? "Confirm removing " : "Remove ") + (modelData.row ? modelData.row.singer : "") + " from the waitlist"
+                    }
+                    Button {
+                        visible: modelData.key === "removed"
+                        text: "Restore"
+                        implicitHeight: 30
+                        onClicked: page.act("Restore " + modelData.row.singer, "waitlist.restore", modelData.row.request_id)
+                        Accessible.name: "Restore " + (modelData.row ? modelData.row.singer : "") + " to the waitlist"
+                    }
+                }
                 Label {
                     id: rowText
                     visible: !modelData.header
                     anchors.fill: parent
                     anchors.margins: 8
+                    anchors.rightMargin: buttons.visible ? buttons.width + 16 : 8
                     text: (modelData.header || !modelData.row) ? "" : modelData.row.text
                     color: "#ffffff"
                     font.pixelSize: 13

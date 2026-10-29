@@ -75,6 +75,16 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "clock_skew" => ("This computer's clock and the app's clock are too far apart".into(), "error"),
         "unknown_singer" => ("That singer is no longer in the rotation".into(), "warn"),
         "unknown_entry" => ("That song is no longer in the queue".into(), "warn"),
+        "unknown_request" => ("That request is no longer on the waitlist (it may have been added, removed or restored already); look at the Waitlist again".into(), "warn"),
+        "setting_changed" => ("Setting saved".into(), "ok"),
+        "unknown_setting" => ("The shell may not change that setting".into(), "warn"),
+        "bad_value" => ("That value is not allowed for this setting".into(), "warn"),
+        "waitlist_added" => ("Request added to the rotation".into(), "ok"),
+        "not_added" => ("That song could not be added from the local library. Use Replace or add it by hand".into(), "warn"),
+        "add_error" => ("The app could not add that replacement song; look at the request in the app".into(), "warn"),
+        "waitlist_removed" => ("Request removed from the waitlist".into(), "ok"),
+        "waitlist_restored" => ("Request put back on the waitlist".into(), "ok"),
+        "bad_request_id" => (format!("The app refused the command ({m})"), "error"),
         "shell_commands_off" => ("Remote control is switched off in the app (setting shell_commands)".into(), "error"),
         "no_change" => ("Already there; nothing changed".into(), "ok"),
         "bad_direction" | "bad_skipped" | "missing_request_id" | "missing_sent_at" => (format!("The app refused the command ({m})"), "error"),
@@ -405,6 +415,28 @@ mod tests {
         assert!(v.result.clone().unwrap().seq > r.seq, "every result gets a new sequence number so the UI can notice repeats");
         v.apply(&ack("unknown-id", true, "removed"));
         assert_eq!(v.result.clone().unwrap().text, "Removed", "an ack for something not tracked still shows");
+    }
+
+    #[test]
+    fn waitlist_answers_are_plain_words() {
+        for (code, ok, kind, text) in [
+            ("setting_changed", true, "ok", "Setting saved"),
+            ("unknown_setting", false, "warn", "The shell may not change that setting"),
+            ("bad_value", false, "warn", "That value is not allowed for this setting"),
+            ("waitlist_added", true, "ok", "Request added to the rotation"),
+            ("not_added", false, "warn", "That song could not be added from the local library"),
+            ("add_error", false, "warn", "The app could not add that replacement"),
+            ("waitlist_removed", true, "ok", "Request removed from the waitlist"),
+            ("waitlist_restored", true, "ok", "Request put back on the waitlist"),
+            ("unknown_request", false, "warn", "That request is no longer on the waitlist"),
+            ("bad_request_id", false, "error", "The app refused the command (bad_request_id)"),
+        ] {
+            let mut v = ViewModel::new();
+            v.apply(&ack("w", ok, code));
+            let r = v.result.clone().unwrap();
+            assert!(r.text.starts_with(text), "{code}: {}", r.text);
+            assert_eq!(r.kind, kind, "{code}");
+        }
     }
 
     #[test]
