@@ -3849,6 +3849,36 @@ class _StallAttributionDisabled(Exception):
     """Control-flow marker: skip installing the app-wide attribution filter."""
 
 
+def _prewarm_read_file(path: str, max_bytes: int = 8 * 1024 * 1024):
+    """Read the first few MB of `path` and its paired .mp3 so the drive is awake and the data is in the page cache.
+    Worker thread only; never raises."""
+    t0 = time.monotonic()
+    got = 0
+    try:
+        paths = [path]
+        base, ext = os.path.splitext(path)
+        if ext.lower() == ".cdg":
+            for cand in (base + ".mp3", base + ".MP3"):
+                if os.path.exists(cand):
+                    paths.append(cand)
+                    break
+        for one in paths:
+            with open(one, "rb") as fh:
+                left = max_bytes
+                while left > 0:
+                    chunk = fh.read(min(1024 * 1024, left))
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    left -= len(chunk)
+    except Exception:
+        pass
+    try:
+        _diag(f"[PREWARM] {os.path.basename(path)} read {got // 1024} KB in {int((time.monotonic() - t0) * 1000)}ms")
+    except Exception:
+        pass
+
+
 def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
     """Log the GUI-thread stack when the event loop stalls.
 
@@ -3861,11 +3891,17 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
             return
         if getattr(owner, "_mt_watch_thread", None) is not None:
             return
+        light = False
         try:
             if not bool(getattr(owner, "settings", {}).get("performance_debug_enabled", False)):
-                return
+                if not bool(getattr(owner, "settings", {}).get("stall_watchdog_light", True)):
+                    return
+                light = True
         except Exception:
             return
+        if light:
+            # Cheap variant: slow heartbeat, only stalls of a second or more.
+            threshold_ms = max(int(threshold_ms), 1000)
         import traceback as _traceback
 
         main_ident = threading.main_thread().ident
@@ -3889,7 +3925,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
         hb_timer = QTimer(owner)
         hb_timer.timeout.connect(_heartbeat)
-        hb_timer.start(50)
+        hb_timer.start(250 if light else 50)
         owner._mt_hb_timer = hb_timer
 
         threshold = max(0.05, float(threshold_ms) / 1000.0)
@@ -3981,7 +4017,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
             long_logged = False
             peak = 0.0
             while not bool(getattr(owner, "_mt_watch_stop", False)):
-                time.sleep(0.03)
+                time.sleep(0.1 if light else 0.03)
                 hb = getattr(owner, "_mt_hb", None)
                 if hb is None:
                     continue
@@ -4054,7 +4090,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
         watch_thread = threading.Thread(target=_watch, name="singws-main-thread-watchdog", daemon=True)
         owner._mt_watch_thread = watch_thread
         watch_thread.start()
-        _diag(f"[STALL] main-thread watchdog armed threshold={threshold_ms}ms")
+        _diag(f"[STALL] main-thread watchdog armed threshold={threshold_ms}ms{' (light)' if light else ''}")
     except Exception as e:
         try:
             _diag(f"[STALL] watchdog install failed: {e}")
@@ -4212,6 +4248,12 @@ DEFAULTS = {
     "stall_stack_capture": False,
     # Log a one-line system snapshot (load, memory pressure, busiest processes) when the GUI freezes for over a second.
     "stall_system_snapshot": True,
+    # Light always-on stall watchdog (250 ms heartbeat, logs only GUI stalls >= 1 s, no stack, no event filter) so a long
+    # block shows up in a show log even with performance_debug_enabled off. Applies at next launch.
+    "stall_watchdog_light": True,
+    # Read the first MBs of the NEXT singer's song file on a worker thread so a sleeping/slow external drive is awake and
+    # cached before play_next_file checks and loads it on the GUI thread.
+    "prewarm_next_song_file": True,
     "show_safe_stall_diagnostics_migrated": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
@@ -43884,11 +43926,29 @@ class KaraokeApp(QWidget):
                      f' color:{_v("text_soft")};">{_esc(clause)}</span>')
         return html
 
+    def _prewarm_next_song(self, singer):
+        """Start a background read of the next singer's first song file (setting prewarm_next_song_file). Once per path."""
+        try:
+            if not isinstance(singer, dict) or not bool(self.settings.get("prewarm_next_song_file", True)):
+                return
+            entry = self._first_active_entry_for_singer(singer)
+            if entry is None or self._is_external_karafun_entry(entry):
+                return
+            song_info = entry.get("song_info") if isinstance(entry, dict) else (entry[0] if isinstance(entry, (tuple, list)) and entry else entry)
+            path = str(self._song_info_primary_path(song_info) or "")
+            if not path.startswith("/") or path == getattr(self, "_prewarm_last_path", None):
+                return
+            self._prewarm_last_path = path
+            threading.Thread(target=_prewarm_read_file, args=(path,), name="song-prewarm", daemon=True).start()
+        except Exception:
+            pass
+
     @_perf_timed("ui_last_sung_card")
     def _update_last_sung_card(self):
         try:
             last = str(getattr(self, "_last_sung_singer_display", "") or "").strip()
             next_entry = self._next_singer_entry()
+            self._prewarm_next_song(next_entry)
             nxt = str(next_entry.get("name", "") or "").strip() if isinstance(next_entry, dict) else ""
             next_suffix = self._singer_duet_suffix(next_entry) if isinstance(next_entry, dict) else ""
             # Diagnostics by queue-item identity (singer+path) so two songs by the
@@ -63638,12 +63698,17 @@ class KaraokeApp(QWidget):
             song_data = (chosen_path, key, tempo_percent)
         elif ext == ".cdg":
             mp3_path = base + ".mp3"
-            if not os.path.exists(mp3_path):
+            _fs_t0 = time.perf_counter()
+            _mp3_found = os.path.exists(mp3_path)
+            if not _mp3_found:
                 mp3_path_upper = base + ".MP3"
                 if os.path.exists(mp3_path_upper):
                     mp3_path = mp3_path_upper
-                else:
-                    return self._remote_request_failure_payload(req, "cdg_missing_mp3", match_result="matched")
+                    _mp3_found = True
+            # Timed so a slow external drive shows up as its own line (the 2.5-6.8 s prepare_payload times of 2026-10-29).
+            _perf_log_if_slow("remote_request_prepare_fs", (time.perf_counter() - _fs_t0) * 1000.0)
+            if not _mp3_found:
+                return self._remote_request_failure_payload(req, "cdg_missing_mp3", match_result="matched")
             song_data = ((chosen_path, mp3_path), key, tempo_percent)
         elif ext == ".zip":
             if not self.is_mp3g_zip(chosen_path):
