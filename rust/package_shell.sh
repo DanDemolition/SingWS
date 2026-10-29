@@ -26,7 +26,11 @@ cat > "$A/Contents/Info.plist" <<'P'
 </dict></plist>
 P
 # macdeployqt's SQL-plugin errors (missing ODBC/Postgres libs) are harmless; we drop those drivers.
-"$QT_ROOT/bin/macdeployqt" "$A" -qmldir=crates/singws-shell/qml >/dev/null 2>&1 || true
+# qmlimportscanner skips any path with a dot-folder in it (a .claude worktree, say) and finds no QML imports, so the bundle would launch without
+# QtQuick.Controls. Scan a copy outside such a path.
+QML_COPY="$(mktemp -d)/qml"; cp -R crates/singws-shell/qml "$QML_COPY"
+"$QT_ROOT/bin/macdeployqt" "$A" -qmldir="$QML_COPY" >/dev/null 2>&1 || true
+[[ -d "$A/Contents/Resources/qml/QtQuick/Controls" ]] || { echo "macdeployqt bundled no QML imports: the shell would not start" >&2; exit 3; }
 rm -rf "$A/Contents/PlugIns/sqldrivers"
 codesign --force --deep --sign "${SIGN_IDENTITY:-SingWS Local Code Signing}" "$A"
 codesign --verify --deep --strict "$A"
