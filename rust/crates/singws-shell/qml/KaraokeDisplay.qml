@@ -23,6 +23,9 @@ Window {
     }
 
     CdgDemo { id: demo }
+    // the audience ticker's text: the real rules (singws-uimodel::ticker, proven equal to the app's), read-only from queue.json / settings.json in SINGWS_HOME
+    TickerPanel { id: tickerPanel }
+    Timer { interval: 3000; running: disp.visible; repeat: true; triggeredOnStart: true; onTriggered: tickerPanel.refresh() }
     property bool loaded: false
     property real fixedAt: arg("--display-at") !== "" ? parseFloat(arg("--display-at")) : -1
     property real positionMs: 0
@@ -102,7 +105,7 @@ Window {
             Text {
                 id: names
                 anchors.verticalCenter: parent.verticalCenter
-                text: disp.arg("--display-ticker") !== "" ? disp.arg("--display-ticker") : "1  Sample Singer   2  Another Singer   3  Third Singer"
+                text: disp.arg("--display-ticker") !== "" ? disp.arg("--display-ticker") : (tickerPanel.text !== "" ? tickerPanel.text : "1  Sample Singer   2  Another Singer   3  Third Singer")
                 color: "#39FF88"
                 font.pixelSize: ticker.namesPx
                 font.weight: Font.Bold
@@ -130,9 +133,23 @@ Window {
         }
     }
 
+    // the show-screen effects: the app's own QML (ShowScreenVfx.qml is byte-identical to QML_SHOW_SCREEN_VFX_SOURCE; tools/vfx_source_check.py), on top
+    // of the picture. --display-effect next-up|singer-start|outro, --display-style STYLE, --display-singer/-song/-artist set what it shows.
+    ShowScreenVfx { id: vfx; anchors.fill: parent; z: 5 }
+    function startEffect() {
+        var kind = arg("--display-effect")
+        if (kind === "") return
+        var singer = arg("--display-singer") || "Sample Singer", song = arg("--display-song") || "Sample Song", artist = arg("--display-artist") || "Sample Artist"
+        var style = arg("--display-style") || "moving_spotlights"
+        if (kind === "next-up") vfx.showNextUp(singer, song, artist, arg("--display-ondeck") || "On deck: Another Singer", 10)
+        else if (kind === "singer-start") vfx.showSingerStart(singer, song, artist, style)
+        else if (kind === "outro") vfx.showSongOutro(singer, song, artist, style)
+    }
+    onLoadedChanged: if (loaded) startEffect()
+
     Timer {
-        interval: 900
+        interval: arg("--display-snapshot-after") !== "" ? parseInt(arg("--display-snapshot-after")) : 900
         running: disp.visible && disp.loaded && disp.arg("--display-snapshot") !== ""
-        onTriggered: disp.contentItem.grabToImage(function(r) { r.saveToFile(disp.arg("--display-snapshot")); Qt.quit() })
+        onTriggered: { disp.contentItem.grabToImage(function(r) { r.saveToFile(disp.arg("--display-snapshot")); Qt.quit() }) }
     }
 }
