@@ -15,6 +15,7 @@
 //! `floor(t * 300)` (see [`CdgPlayer::render_at`]).
 
 pub mod window_rules;
+pub mod track_display;
 
 pub const PACKET_BYTES: usize = 24;
 pub const PACKETS_PER_SECOND: f64 = 300.0;
