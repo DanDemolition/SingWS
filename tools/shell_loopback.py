@@ -216,6 +216,26 @@ def scenario_the_shell_adds_removes_and_restores_waitlist_requests_through_the_r
         assert view["result"]["kind"] == "warn" and "no longer on the waitlist" in view["result"]["text"], view["result"]
 
 
+def scenario_the_shell_edits_a_waitlist_request_and_the_singer_history_through_the_relay():
+    """waitlist.edit and history.edit_song / history.add_song through the real shell and relay into the app's REAL routines (the dialogs' own Save bodies): the request keeps its id and
+    the server is told; the history is backed up first and committed; a bad key range is refused by the shell's own validator and never reaches the wire."""
+    with cl.Stack("apply") as st:
+        script = [{"label": "Edit Ann", "command": "waitlist.edit", "args": {"request_id": 7, "singer": "Ann", "artist": "Oasis", "title": "Wonderwall", "key": 2, "tempo": -5}},
+                  {"label": "Edit song", "command": "history.edit_song", "args": {"singer_key": "ann", "song_key": "queen|radio ga ga", "artist": "Queen", "title": "Radio Ga Ga (Live)",
+                                                                                  "disc_id": "SC1", "song_type": "cdg", "key": -1, "tempo_percent": 95}},
+                  {"label": "Add song", "command": "history.add_song", "args": {"singer_key": "ann", "artist": "ABBA", "title": "Waterloo", "disc_id": "", "song_type": "", "key": 0, "tempo_percent": 100}},
+                  {"label": "Bad key", "command": "history.add_song", "args": {"singer_key": "ann", "artist": "", "title": "X", "disc_id": "", "song_type": "", "key": 99, "tempo_percent": 100}}]
+        view, p, _ = run_shell(st, script, snapshot_after=9000)
+        assert view is not None, p.stderr[-800:]
+        cmds = [c for c in commands_seen(st) if c["command"] in ("waitlist.edit", "history.edit_song", "history.add_song")]
+        assert [c["command"] for c in cmds] == ["waitlist.edit", "history.edit_song", "history.add_song"], [c["command"] for c in cmds]  # the bad key never reached the wire
+        last, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[-1]["request_id"], timeout=5)
+        assert "push:7:Wonderwall:2:95" in last["waitlist"]["events"], last["waitlist"]
+        assert last["waitlist"]["waiting"] == [7, 8, 9], "the edited request kept its place"
+        assert last["history"]["commits"] == ["history_song_edit", "history_song_add"], last["history"]
+        assert sorted(v[0] for v in last["history"]["songs"].values()) == ["Radio Ga Ga (Live)", "Waterloo"], last["history"]
+
+
 def scenario_the_shell_changes_the_ticker_message_and_cannot_touch_anything_else():
     """settings.set through the real shell and relay into the app's REAL routine: the two ticker message settings change, the ticker text is refreshed; a secret key and an
     over-long message are refused by the shell's own validator and never reach the wire."""

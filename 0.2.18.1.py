@@ -29014,7 +29014,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")) or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -34072,7 +34072,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):
+            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34383,7 +34383,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -36558,6 +36558,48 @@ class KaraokeApp(QWidget):
         self._show_processing_notification("Added selected song to rotation.", level="success")
         return True
 
+    def _waitlist_apply_edit(self, req: dict, rid: int, singer: str, artist: str, title: str, key: int, tempo: int):
+        """The body of the Edit Waitlist Request dialog's Save (also `waitlist.edit`): update the SAME request (its id and place never change) and tell the server.
+        Returns the updated request, or None when it is no longer on the waitlist."""
+        updated = self._update_waiting_for_add_request(rid, {
+            "singer": singer,
+            "artist": artist,
+            "title": title,
+            "key": int(key),
+            "tempo": int(tempo),
+            "attention_reason": "host_edited_waitlist_metadata",
+            "pending_status": "Metadata edited",
+        })
+        if updated is None:
+            return None
+        try:
+            replacement = updated.get("replacement_track") if isinstance(updated.get("replacement_track"), dict) else None
+            if replacement:
+                entry = self._build_queue_entry_from_track_choice({
+                    "remote_request_id": rid,
+                    "key": int(updated.get("key") or 0),
+                    "tempo_percent": 100 + int(updated.get("tempo") or 0),
+                }, replacement)
+            else:
+                entry = {
+                    "remote_request_id": rid,
+                    "artist": artist,
+                    "title": title,
+                    "key": int(updated.get("key") or 0),
+                    "tempo_percent": 100 + int(updated.get("tempo") or 0),
+                }
+            entry["remote_request_id"] = rid
+            self._push_remote_request_replacement(
+                entry,
+                singer_name=singer,
+                old_artist=str(req.get("artist") or ""),
+                old_title=str(req.get("title") or ""),
+                source="waiting_metadata_edit",
+            )
+        except Exception:
+            pass
+        return updated
+
     def _edit_selected_waiting_for_add_metadata(self):
         req = self._selected_waiting_for_add_request()
         if not req:
@@ -36634,43 +36676,8 @@ class KaraokeApp(QWidget):
             if not singer or not title:
                 QMessageBox.warning(dlg, "Waitlist Request", "Singer and song title are required.")
                 return
-            updated = self._update_waiting_for_add_request(rid, {
-                "singer": singer,
-                "artist": artist,
-                "title": title,
-                "key": int(key_spin.value()),
-                "tempo": int(tempo_spin.value()),
-                "attention_reason": "host_edited_waitlist_metadata",
-                "pending_status": "Metadata edited",
-            })
-            if updated is None:
+            if self._waitlist_apply_edit(req, rid, singer, artist, title, int(key_spin.value()), int(tempo_spin.value())) is None:
                 return
-            try:
-                replacement = updated.get("replacement_track") if isinstance(updated.get("replacement_track"), dict) else None
-                if replacement:
-                    entry = self._build_queue_entry_from_track_choice({
-                        "remote_request_id": rid,
-                        "key": int(updated.get("key") or 0),
-                        "tempo_percent": 100 + int(updated.get("tempo") or 0),
-                    }, replacement)
-                else:
-                    entry = {
-                        "remote_request_id": rid,
-                        "artist": artist,
-                        "title": title,
-                        "key": int(updated.get("key") or 0),
-                        "tempo_percent": 100 + int(updated.get("tempo") or 0),
-                    }
-                entry["remote_request_id"] = rid
-                self._push_remote_request_replacement(
-                    entry,
-                    singer_name=singer,
-                    old_artist=str(req.get("artist") or ""),
-                    old_title=str(req.get("title") or ""),
-                    source="waiting_metadata_edit",
-                )
-            except Exception:
-                pass
             self._show_processing_notification("Waitlist request updated.", level="success")
             dlg.accept()
 
@@ -38340,6 +38347,90 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
 
+    def _history_song_apply_edit(self, singer_key: str, song_key: str | None, fields: dict) -> str:
+        """The body of the Edit / Add Song History dialog's Save (also `history.edit_song` / `history.add_song`): rewrite or add one song in a singer's history record
+        and return its (possibly new) key. The caller commits (`_commit_singer_history_change`)."""
+        record = self.singer_history.get("singers", {}).get(singer_key)
+        songs = record.setdefault("songs", {})
+        existing = dict(songs.get(song_key, {})) if song_key else {}
+        if song_key:
+            songs.pop(song_key, None)
+        new_song = dict(existing)
+        new_song["artist"] = str(fields.get("artist", "") or "").strip()
+        new_song["title"] = str(fields.get("title", "") or "").strip()
+        new_song["disc_id"] = str(fields.get("disc_id", "") or "").strip()
+        new_song["song_type"] = str(fields.get("song_type", "") or "").strip().upper()
+        new_song["last_key"] = int(fields.get("last_key", 0))
+        new_song["last_tempo_percent"] = int(fields.get("last_tempo_percent", 100))
+        new_song["updated_at"] = int(time.time())
+        new_song.setdefault("songid", str(new_song.get("disc_id", "") or ""))
+        new_song.setdefault("path", str(existing.get("path", "") or ""))
+        new_song.setdefault("play_count", int(existing.get("play_count") or 0))
+        new_song.setdefault("first_performed_at", int(existing.get("first_performed_at") or 0))
+        new_song.setdefault("last_performed_at", int(existing.get("last_performed_at") or 0))
+        new_key = self._normalize_history_song_key(
+            new_song.get("artist", ""),
+            new_song.get("title", ""),
+            new_song.get("songid", ""),
+            new_song.get("path", ""),
+            new_song.get("provider", ""),
+            new_song.get("provider_track_id", ""),
+        )
+        if not new_key:
+            new_key = song_key or f"manual|{time.time()}"
+        songs[new_key] = new_song
+        record["unique_song_count"] = len(songs)
+        record["updated_at"] = int(time.time())
+        return new_key
+
+    def _history_edit_backup(self, reason: str) -> bool:
+        """Write the in-memory singer history to cache-backups/history-edits/ before a remote edit changes it (newest 30 kept). False when it could not be written."""
+        try:
+            folder = APP_USER_DIR / "cache-backups" / "history-edits"
+            folder.mkdir(parents=True, exist_ok=True)
+            _save_json_atomic(folder / f"singer_history-{time.strftime('%Y%m%d-%H%M%S')}-{reason}.json", self.singer_history)
+            for old in sorted(folder.glob("singer_history-*.json"))[:-30]:
+                try:
+                    old.unlink()
+                except Exception:
+                    pass
+            return True
+        except Exception as exc:
+            _diag(f"[SHELL-CMD] history backup failed: {exc}")
+            return False
+
+    def shell_history_song(self, action: str, args: dict, *, dry_run: bool = False) -> tuple[bool, str]:
+        """`history.edit_song` / `history.add_song`: the Edit / Add Song History dialog's Save, by singer key (and song key for an edit). Like the dialog's buttons it refuses
+        while karaoke plays. The history is backed up first (a failed backup refuses the edit) and the change goes through the dialog's own commit, so it syncs to the server."""
+        import unicodedata
+        singer_key = args.get("singer_key")
+        song_key = args.get("song_key") if action == "history.edit_song" else None
+        if not isinstance(singer_key, str) or not singer_key or (action == "history.edit_song" and (not isinstance(song_key, str) or not song_key)):
+            return False, "bad_history_key"
+        def clean(name, limit, required=False):
+            v = args.get(name)
+            if not isinstance(v, str) or len(v) > limit or any(unicodedata.category(c) == "Cc" for c in v) or (required and not v.strip()):
+                return None
+            return v
+        artist, title, disc_id, song_type = clean("artist", 100), clean("title", 100, True), clean("disc_id", 40), clean("song_type", 10)
+        key, tempo = args.get("key"), args.get("tempo_percent")
+        if None in (artist, title, disc_id, song_type) or not all(isinstance(n, int) and not isinstance(n, bool) for n in (key, tempo)) or not -24 <= key <= 24 or not 50 <= tempo <= 200:
+            return False, "bad_history_value"
+        if bool(getattr(self, "karaoke_playing", False)):
+            return False, "playback_active"
+        record = (self.singer_history.get("singers", {}) or {}).get(singer_key)
+        if not isinstance(record, dict):
+            return False, "unknown_history_singer"
+        if song_key is not None and song_key not in (record.get("songs", {}) or {}):
+            return False, "unknown_history_song"
+        if dry_run:
+            return True, "dry_run: would change the singer history"
+        if not self._history_edit_backup("history_song_edit" if song_key else "history_song_add"):
+            return False, "backup_failed"
+        self._history_song_apply_edit(singer_key, song_key, {"artist": artist, "title": title, "disc_id": disc_id, "song_type": song_type, "last_key": key, "last_tempo_percent": tempo})
+        self._commit_singer_history_change("history_song_edit" if song_key else "history_song_add")
+        return True, "history_song_saved"
+
     def _edit_history_song_dialog(self, singer_key: str, song_key: str | None = None):
         record = self.singer_history.get("singers", {}).get(singer_key)
         if not isinstance(record, dict):
@@ -38398,34 +38489,10 @@ class KaraokeApp(QWidget):
         layout.addWidget(buttons)
 
         def handle_save():
-            if song_key:
-                songs.pop(song_key, None)
-            new_song = dict(existing)
-            new_song["artist"] = str(artist_edit.text() or "").strip()
-            new_song["title"] = str(title_edit.text() or "").strip()
-            new_song["disc_id"] = str(disc_edit.text() or "").strip()
-            new_song["song_type"] = str(type_edit.text() or "").strip().upper()
-            new_song["last_key"] = int(key_spin.value())
-            new_song["last_tempo_percent"] = int(tempo_spin.value())
-            new_song["updated_at"] = int(time.time())
-            new_song.setdefault("songid", str(new_song.get("disc_id", "") or ""))
-            new_song.setdefault("path", str(existing.get("path", "") or ""))
-            new_song.setdefault("play_count", int(existing.get("play_count") or 0))
-            new_song.setdefault("first_performed_at", int(existing.get("first_performed_at") or 0))
-            new_song.setdefault("last_performed_at", int(existing.get("last_performed_at") or 0))
-            new_key = self._normalize_history_song_key(
-                new_song.get("artist", ""),
-                new_song.get("title", ""),
-                new_song.get("songid", ""),
-                new_song.get("path", ""),
-                new_song.get("provider", ""),
-                new_song.get("provider_track_id", ""),
-            )
-            if not new_key:
-                new_key = song_key or f"manual|{time.time()}"
-            songs[new_key] = new_song
-            record["unique_song_count"] = len(songs)
-            record["updated_at"] = int(time.time())
+            new_key = self._history_song_apply_edit(singer_key, song_key, {
+                "artist": artist_edit.text(), "title": title_edit.text(), "disc_id": disc_edit.text(), "song_type": type_edit.text(),
+                "last_key": int(key_spin.value()), "last_tempo_percent": int(tempo_spin.value()),
+            })
             dlg.accept()
             self._commit_singer_history_change("history_song_edit" if song_key else "history_song_add")
             try:
@@ -50138,7 +50205,7 @@ class KaraokeApp(QWidget):
             pass
         return True, "setting_changed"
 
-    def shell_waitlist_change(self, action: str, request_id: int, *, dry_run: bool = False) -> tuple[bool, str]:
+    def shell_waitlist_change(self, action: str, request_id: int, *, dry_run: bool = False, fields: dict | None = None) -> tuple[bool, str]:
         """`waitlist.remove` / `waitlist.restore` / `waitlist.add` by request id: the "Waiting for add" page's Remove (clear), Restore and Add buttons, with no selection and no dialog.
         The request must be one the page would let the host act on (remove: waiting and not already queued or accepted; restore: removed tonight). Host actions are
         authoritative: remove archives the request as removed tonight, tells the server to drop it and forgets it here; restore puts that same request back to waiting."""
@@ -50160,6 +50227,17 @@ class KaraokeApp(QWidget):
                 return True, "dry_run: would add the request to the rotation"
             ok, code, _detail = self._waitlist_add_request(req, request_id)
             return (True, "waitlist_added") if ok else (False, code)
+        if action == "waitlist.edit":
+            req = getattr(self, "_waiting_for_add_requests", {}).get(request_id)
+            clearable = {self._waiting_for_add_request_id(r) for r in self._waiting_for_add_clearable_requests()}
+            if not isinstance(req, dict) or request_id not in clearable:
+                return False, "unknown_request"
+            f = fields or {}
+            if dry_run:
+                return True, "dry_run: would edit the request"
+            if self._waitlist_apply_edit(req, request_id, f["singer"], f["artist"], f["title"], f["key"], f["tempo"]) is None:
+                return False, "unknown_request"
+            return True, "waitlist_edited"
         if action == "waitlist.restore":
             req = getattr(self, "_waiting_for_add_removed_tonight", {}).get(request_id)
             if not isinstance(req, dict) or not req.get("_removed_tonight"):
@@ -50476,7 +50554,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "settings.set")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "waitlist.edit", "history.edit_song", "history.add_song", "settings.set")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50576,12 +50654,29 @@ class KaraokeApp(QWidget):
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)
-        if action in ("waitlist.remove", "waitlist.restore", "waitlist.add"):
+        if action in ("history.edit_song", "history.add_song"):
+            try:
+                ok, code = self.shell_history_song(action, args, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action in ("waitlist.remove", "waitlist.restore", "waitlist.add", "waitlist.edit"):
             waitlist_rid = args.get("request_id")
             if not isinstance(waitlist_rid, int) or isinstance(waitlist_rid, bool) or waitlist_rid <= 0:
                 return remember(False, "bad_request_id")
+            fields = None
+            if action == "waitlist.edit":
+                import unicodedata
+                def _t(name, limit, required=False):
+                    v = args.get(name)
+                    ok_t = isinstance(v, str) and len(v) <= limit and not any(unicodedata.category(c) == "Cc" for c in v) and not (required and not v.strip())
+                    return v.strip() if ok_t else None
+                fields = {"singer": _t("singer", 60, True), "artist": _t("artist", 100), "title": _t("title", 100, True), "key": args.get("key"), "tempo": args.get("tempo")}
+                if None in (fields["singer"], fields["artist"], fields["title"]) or not all(isinstance(n, int) and not isinstance(n, bool) for n in (fields["key"], fields["tempo"])) \
+                        or not -12 <= fields["key"] <= 12 or not -30 <= fields["tempo"] <= 30:
+                    return remember(False, "bad_waitlist_value")
             try:
-                ok, code = self.shell_waitlist_change(action, waitlist_rid, dry_run=(mode == "dry_run"))
+                ok, code = self.shell_waitlist_change(action, waitlist_rid, dry_run=(mode == "dry_run"), fields=fields)
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)

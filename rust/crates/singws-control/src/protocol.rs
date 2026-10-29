@@ -22,6 +22,16 @@ fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
 }
 
+/// text of at most `max` characters with no control characters (`required`: not blank)
+fn line(args: &Value, key: &str, max: usize, required: bool) -> bool {
+    args.get(key).and_then(Value::as_str).is_some_and(|t| t.chars().count() <= max && !t.chars().any(char::is_control) && !(required && t.trim().is_empty()))
+}
+
+/// a whole JSON number (7 and 7.0 are NOT the same: only integers) from `lo` to `hi`
+fn whole(args: &Value, key: &str, lo: i64, hi: i64) -> bool {
+    args.get(key).and_then(Value::as_i64).is_some_and(|v| (lo..=hi).contains(&v))
+}
+
 fn number(args: &Value, key: &str) -> Option<f64> {
     args.get(key).and_then(Value::as_f64).filter(|v| v.is_finite())
 }
@@ -143,6 +153,26 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
         }
         "settings.set" => validate_setting(args).map_err(|e| format!("{command}: {e}")),
         "waitlist.remove" | "waitlist.restore" | "waitlist.add" => need(args.get("request_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "request_id must be a whole number, 1 or more"),
+        "waitlist.edit" => {
+            need(args.get("request_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "request_id must be a whole number, 1 or more")?;
+            need(line(args, "singer", 60, true), "singer must be 1-60 characters with no control characters")?;
+            need(line(args, "artist", 100, false), "artist must be at most 100 characters with no control characters")?;
+            need(line(args, "title", 100, true), "title must be 1-100 characters with no control characters")?;
+            need(whole(args, "key", -12, 12), "key must be a whole number from -12 to 12")?;
+            need(whole(args, "tempo", -30, 30), "tempo must be a whole number from -30 to 30")
+        }
+        "history.edit_song" | "history.add_song" => {
+            need(line(args, "singer_key", 200, true), "singer_key is required")?;
+            if command == "history.edit_song" {
+                need(line(args, "song_key", 400, true), "song_key is required")?;
+            }
+            need(line(args, "artist", 100, false), "artist must be at most 100 characters with no control characters")?;
+            need(line(args, "title", 100, true), "title must be 1-100 characters with no control characters")?;
+            need(line(args, "disc_id", 40, false), "disc_id must be at most 40 characters with no control characters")?;
+            need(line(args, "song_type", 10, false), "song_type must be at most 10 characters with no control characters")?;
+            need(whole(args, "key", -24, 24), "key must be a whole number from -24 to 24")?;
+            need(whole(args, "tempo_percent", 50, 200), "tempo_percent must be a whole number from 50 to 200")
+        }
         "bg.next" => Ok(()),
         "bg.play_track" => {
             need(args.get("index").and_then(Value::as_u64).is_some(), "index must be a whole number, 0 or more")?;
@@ -444,6 +474,23 @@ mod tests {
             ("queue.message_singer", json!({"singer_id": "s1", "message": "x".repeat(501)})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": "bell\u{7}"})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": 5})),
+            ("waitlist.edit", json!({"request_id": 0, "singer": "A", "artist": "", "title": "T", "key": 0, "tempo": 0})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": " ", "artist": "", "title": "T", "key": 0, "tempo": 0})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": "A", "artist": "", "title": "", "key": 0, "tempo": 0})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": "A", "artist": "", "title": "T", "key": 13, "tempo": 0})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": "A", "artist": "", "title": "T", "key": 0, "tempo": 31})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": "A", "artist": "", "title": "T", "key": 1.0, "tempo": 0})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": "A\nB", "artist": "", "title": "T", "key": 0, "tempo": 0})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": "A", "artist": "x".repeat(101), "title": "T", "key": 0, "tempo": 0})),
+            ("waitlist.edit", json!({"request_id": 3, "singer": "A", "title": "T", "key": 0, "tempo": 0})),
+            ("history.edit_song", json!({"singer_key": "ann", "artist": "", "title": "T", "disc_id": "", "song_type": "", "key": 0, "tempo_percent": 100})),
+            ("history.edit_song", json!({"singer_key": "ann", "song_key": "k", "artist": "", "title": "", "disc_id": "", "song_type": "", "key": 0, "tempo_percent": 100})),
+            ("history.edit_song", json!({"singer_key": "ann", "song_key": "k", "artist": "", "title": "T", "disc_id": "", "song_type": "", "key": 25, "tempo_percent": 100})),
+            ("history.edit_song", json!({"singer_key": "ann", "song_key": "k", "artist": "", "title": "T", "disc_id": "", "song_type": "", "key": 0, "tempo_percent": 49})),
+            ("history.edit_song", json!({"singer_key": "ann", "song_key": "k", "artist": "", "title": "T", "disc_id": "x".repeat(41), "song_type": "", "key": 0, "tempo_percent": 100})),
+            ("history.add_song", json!({"artist": "", "title": "T", "disc_id": "", "song_type": "", "key": 0, "tempo_percent": 100})),
+            ("history.add_song", json!({"singer_key": "ann", "artist": "", "title": "T", "disc_id": "", "song_type": "", "key": 0, "tempo_percent": 201})),
+            ("history.add_song", json!({"singer_key": "ann", "artist": "", "title": "T", "disc_id": "", "song_type": "ZIPZIPZIPZIP", "key": 0, "tempo_percent": 100})),
             ("waitlist.remove", json!({})),
             ("waitlist.remove", json!({"request_id": 0})),
             ("waitlist.remove", json!({"request_id": -3})),
@@ -494,6 +541,10 @@ mod tests {
             ("seek_to", json!({"seconds": 0})),
             ("queue.skip_singer", json!({"singer_id": "a", "skipped": false})),
             ("bg.next", json!({})),
+            ("waitlist.edit", json!({"request_id": 4, "singer": "Ann", "artist": "", "title": "Wonderwall", "key": -12, "tempo": 30})),
+            ("waitlist.edit", json!({"request_id": 4, "singer": "x".repeat(60), "artist": "x".repeat(100), "title": "x".repeat(100), "key": 12, "tempo": -30})),
+            ("history.edit_song", json!({"singer_key": "ann", "song_key": "oasis|wonderwall", "artist": "Oasis", "title": "Wonderwall", "disc_id": "SC123", "song_type": "cdg", "key": -24, "tempo_percent": 50})),
+            ("history.add_song", json!({"singer_key": "ann", "artist": "", "title": "T", "disc_id": "", "song_type": "", "key": 24, "tempo_percent": 200})),
             ("waitlist.remove", json!({"request_id": 1})),
             ("waitlist.add", json!({"request_id": 12})),
             ("waitlist.restore", json!({"request_id": 1792000000123u64})),

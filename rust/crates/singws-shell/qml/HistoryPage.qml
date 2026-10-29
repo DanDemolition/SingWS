@@ -12,6 +12,54 @@ Item {
     }
 
     HistoryPanel { id: panel }
+    property var control: null   // the shared ControlPanel (Main.qml); null when the page is used on its own
+    property var cview: control ? JSON.parse(control.viewJson) : ({enabled: false})
+    Connections { target: page.control; function onViewJsonChanged() { page.cview = JSON.parse(page.control.viewJson) } }
+    property bool live: cview.enabled === true
+    // the edit form: songKey "" = add a song to the selected singer, otherwise edit that song. The app backs the history up first and refuses while a song plays.
+    property string editSongKey: ""
+    function openEdit(songKey) {
+        editSongKey = songKey
+        var f = songKey === "" ? ({artist: "", title: "", disc_id: "", song_type: "", key: 0, tempo_percent: 100}) : JSON.parse(panel.songFields(page.selectedKey, songKey) || "{}")
+        fArtist.text = f.artist || ""; fTitle.text = f.title || ""; fDisc.text = f.disc_id || ""; fType.text = f.song_type || ""
+        fKey.value = f.key === undefined ? 0 : f.key; fTempo.value = f.tempo_percent === undefined ? 100 : f.tempo_percent
+        editDialog.open()
+    }
+    Dialog {
+        id: editDialog
+        title: page.editSongKey === "" ? "Add song to " + panel.singerName : "Edit song for " + panel.singerName
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(page.width - 40, 460)
+        standardButtons: Dialog.Save | Dialog.Cancel
+        Overlay.modal: Rectangle { color: "#aa000000" }
+        background: Rectangle { color: "#1a1838"; radius: 10; border.color: "#2a2650" }
+        header: Label { text: editDialog.title; color: "#ffffff"; font.pixelSize: 15; font.weight: Font.DemiBold; padding: 14 }
+        onAccepted: {
+            if (!control || fTitle.text.trim() === "") return
+            var args = {singer_key: page.selectedKey, artist: fArtist.text, title: fTitle.text, disc_id: fDisc.text, song_type: fType.text, key: fKey.value, tempo_percent: fTempo.value}
+            if (page.editSongKey !== "") args.song_key = page.editSongKey
+            control.send(page.editSongKey === "" ? "Add song" : "Edit song", page.editSongKey === "" ? "history.add_song" : "history.edit_song", JSON.stringify(args), false)
+        }
+        contentItem: ColumnLayout {
+            spacing: 6
+            Label { text: "The history is backed up before it changes. Not allowed while a song plays."; color: "#9a97c0"; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
+            Label { text: "Artist"; color: "#c9c6e8"; font.pixelSize: 12 }
+            TextField { id: fArtist; Layout.fillWidth: true; maximumLength: 100; selectByMouse: true; Accessible.name: "Artist" }
+            Label { text: "Title"; color: "#c9c6e8"; font.pixelSize: 12 }
+            TextField { id: fTitle; Layout.fillWidth: true; maximumLength: 100; selectByMouse: true; Accessible.name: "Title (required)" }
+            Label { text: "Disc ID"; color: "#c9c6e8"; font.pixelSize: 12 }
+            TextField { id: fDisc; Layout.fillWidth: true; maximumLength: 40; selectByMouse: true; Accessible.name: "Disc ID" }
+            Label { text: "Song type (CDG, ZIP, MP4)"; color: "#c9c6e8"; font.pixelSize: 12 }
+            TextField { id: fType; Layout.fillWidth: true; maximumLength: 10; selectByMouse: true; Accessible.name: "Song type" }
+            RowLayout {
+                Label { text: "Key"; color: "#c9c6e8"; font.pixelSize: 12 }
+                SpinBox { id: fKey; from: -24; to: 24; editable: true; Accessible.name: "Key, -24 to 24" }
+                Label { text: "Tempo %"; color: "#c9c6e8"; font.pixelSize: 12 }
+                SpinBox { id: fTempo; from: 50; to: 200; editable: true; Accessible.name: "Tempo percent, 50 to 200" }
+            }
+        }
+    }
 
     property var singers: []
     property var songs: []
@@ -104,7 +152,21 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
-            Label { text: panel.singerName; color: "#ffffff"; font.pixelSize: 18; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                Label { text: panel.singerName; color: "#ffffff"; font.pixelSize: 18; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
+                Button { visible: page.live && page.selectedKey !== ""; text: "Add song"; implicitHeight: 28; onClicked: page.openEdit(""); Accessible.name: "Add a song to this singer's history" }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                visible: page.live && page.cview.result !== undefined && page.cview.result !== null
+                height: visible ? htext.implicitHeight + 12 : 0
+                radius: 6
+                color: !page.cview.result ? "transparent" : (page.cview.result.kind === "ok" ? "#12301f" : (page.cview.result.kind === "warn" ? "#33290f" : "#3a1414"))
+                Label { id: htext; anchors.fill: parent; anchors.margins: 6; wrapMode: Text.Wrap; color: "#ffffff"; font.pixelSize: 12; text: page.cview.result ? page.cview.result.text : "" }
+                Accessible.role: Accessible.StaticText
+                Accessible.name: page.cview.result ? page.cview.result.text : ""
+            }
             Label { text: panel.summary; color: "#9a97c0"; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true }
             TextField {
                 id: songField
@@ -126,15 +188,29 @@ Item {
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Rectangle {
                     width: songList.width
-                    height: scol.implicitHeight + 12
+                    height: Math.max(scol.implicitHeight + 12, page.live && modelData.selectable ? 40 : 0)
                     radius: 6
                     color: modelData.selectable ? "#1a1838" : "transparent"
                     Accessible.role: Accessible.ListItem
                     Accessible.name: modelData.title + ", " + modelData.detail
+                    Button {
+                        id: editBtn
+                        visible: page.live && modelData.selectable
+                        anchors.right: parent.right
+                        anchors.rightMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Edit"
+                        implicitHeight: 28
+                        onClicked: page.openEdit(modelData.key)
+                        Accessible.name: "Edit " + modelData.title
+                    }
                     ColumnLayout {
                         id: scol
                         anchors.fill: parent
-                        anchors.margins: 6
+                        anchors.rightMargin: editBtn.visible ? editBtn.width + 16 : 6
+                        anchors.leftMargin: 6
+                        anchors.topMargin: 6
+                        anchors.bottomMargin: 6
                         spacing: 0
                         Label { text: modelData.title; color: modelData.selectable ? "#ffffff" : "#b4b8c6"; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
                         Label { visible: modelData.detail !== ""; text: modelData.detail; color: "#c9c6e8"; font.pixelSize: 11; wrapMode: Text.Wrap; Layout.fillWidth: true }
