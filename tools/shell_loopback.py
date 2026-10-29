@@ -234,6 +234,23 @@ def scenario_the_shell_changes_the_ticker_message_and_cannot_touch_anything_else
         assert view["result"]["kind"] in ("warn", "error") and "settings.set" in view["result"]["text"].lower() or "cannot be changed" in view["result"]["text"] or "not allowed" in view["result"]["text"], view["result"]
 
 
+def scenario_the_shell_changes_the_queue_estimate_settings_and_refuses_a_fractional_padding():
+    """Group 2 of settings.set: the two queue-ETA keys through the real shell and relay into the app's REAL routine; the queue display is refreshed once per real change; a padding
+    of 90.5 and one of 601 are refused by the shell's own validator and never reach the wire."""
+    with cl.Stack("apply") as st:
+        script = [{"label": "All songs", "command": "settings.set", "args": {"key": "rotation_estimate_include_all_songs", "value": True}},
+                  {"label": "Padding", "command": "settings.set", "args": {"key": "rotation_padding_sec", "value": 45}},
+                  {"label": "Fraction", "command": "settings.set", "args": {"key": "rotation_padding_sec", "value": 90.5}},
+                  {"label": "Too big", "command": "settings.set", "args": {"key": "rotation_padding_sec", "value": 601}}]
+        view, p, _ = run_shell(st, script, snapshot_after=9000)
+        assert view is not None, p.stderr[-800:]
+        cmds = [c for c in commands_seen(st) if c["command"] == "settings.set"]
+        assert len(cmds) == 2, [c["args"] for c in cmds]
+        last, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[-1]["request_id"], timeout=5)
+        assert last["eta"] == {"all": True, "pad": 45}, last["eta"]
+        assert last["queue_display_updates"] == 2, last["queue_display_updates"]
+
+
 def scenario_the_music_tab_follows_the_players_position_and_drives_the_background_music():
     """The real shell's Music tab over the real relay: the app says it is on track 2 of 4, so the played tracks hide; play/pause and volume reach the app."""
     import tempfile

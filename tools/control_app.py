@@ -161,6 +161,9 @@ async def main():
     app._SHELL_SETTINGS_SCHEMA = m.KaraokeApp._SHELL_SETTINGS_SCHEMA
     app._shell_setting_value_ok = m.KaraokeApp._shell_setting_value_ok
     app.shell_settings_set = types.MethodType(m.KaraokeApp.shell_settings_set, app)
+    app._SHELL_SETTINGS_QUEUE_REFRESH = m.KaraokeApp._SHELL_SETTINGS_QUEUE_REFRESH
+    queue_display_updates = []
+    app.update_queue_display = lambda: queue_display_updates.append(1)
     ticker_updates = []
     _prev_ticker_update = getattr(app, "schedule_ticker_update", None)
     app.schedule_ticker_update = lambda: ticker_updates.append(1)
@@ -191,14 +194,14 @@ async def main():
     app.post_rotation = lambda: None
     if not hasattr(app, "save_data") or args.library is None:
         app.save_data = getattr(app, "save_data", lambda: None)
-    app.update_queue_display = lambda: None
+    app.update_queue_display = lambda: queue_display_updates.append(1)
 
     def snapshot():
         return {"order": [s["singer_id"] for s in app.queue], "songs": {s["singer_id"]: [e.get("request_uid") or e.get("display_name") or "?" for e in s["songs"]] for s in app.queue},
                 "skipped": {s["singer_id"]: bool(s.get("skipped")) for s in app.queue},
                 "names": {s["singer_id"]: s["name"] for s in app.queue}, "brands": {s["singer_id"]: s.get("preferred_disc_priority") for s in app.queue},
                 "titles": {s["singer_id"]: [str(e.get("title") or e.get("song_info")) for e in s["songs"]] for s in app.queue}, "messages": list(sent_messages), "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played),
-                "ticker_updates": len(ticker_updates), "ticker_settings": {"enabled": app.settings.get("ticker_custom_enabled"), "message": app.settings.get("ticker_custom_message"), "api_key": app.settings.get("api_key")},
+                "ticker_updates": len(ticker_updates), "queue_display_updates": len(queue_display_updates), "eta": {"all": app.settings.get("rotation_estimate_include_all_songs"), "pad": app.settings.get("rotation_padding_sec")}, "ticker_settings": {"enabled": app.settings.get("ticker_custom_enabled"), "message": app.settings.get("ticker_custom_message"), "api_key": app.settings.get("api_key")},
                 "waitlist": {"waiting": sorted(app._waiting_for_add_requests), "removed": sorted(app._waiting_for_add_removed_tonight), "events": list(waitlist_events)}}
 
     async def pump():

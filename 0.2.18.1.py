@@ -50075,7 +50075,13 @@ class KaraokeApp(QWidget):
         "karaoke_bgm_crossfade_enabled": {"type": "bool"},
         "end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 60.0},
         "ui_record_confirm": {"type": "bool"},
+        # queue ETA text (group 2): the Settings dialog's handlers store the value, save and call update_queue_display(); so does shell_settings_set
+        "rotation_estimate_include_all_songs": {"type": "bool"},
+        "rotation_padding_sec": {"type": "int", "min": 0, "max": 600},
+        # group 3: seconds between the music fade-out and the karaoke start (negative = overlap). The dialog stores the value and sets the live attribute _transition_gap_sec, read at the next song start
+        "bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 3.0},
     }
+    _SHELL_SETTINGS_QUEUE_REFRESH = frozenset({"rotation_estimate_include_all_songs", "rotation_padding_sec"})
 
     @classmethod
     def _shell_setting_value_ok(cls, key, value) -> bool:
@@ -50087,6 +50093,8 @@ class KaraokeApp(QWidget):
         if spec["type"] == "float":
             import math
             return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]
+        if spec["type"] == "int":
+            return isinstance(value, int) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]
         if spec["type"] == "text":
             import unicodedata
             return isinstance(value, str) and len(value) <= spec["max_chars"] and not any(unicodedata.category(c) == "Cc" for c in value)
@@ -50116,6 +50124,16 @@ class KaraokeApp(QWidget):
         try:
             if key.startswith("ticker_"):
                 self.schedule_ticker_update()
+        except Exception:
+            pass
+        try:
+            if key == "bg_to_karaoke_gap_sec":
+                self._transition_gap_sec = float(self.settings[key])
+        except Exception:
+            pass
+        try:
+            if key in self._SHELL_SETTINGS_QUEUE_REFRESH:
+                self.update_queue_display()
         except Exception:
             pass
         return True, "setting_changed"

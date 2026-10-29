@@ -37,6 +37,9 @@ pub const SETTINGS_SCHEMA: &[(&str, SettingKind)] = &[
     ("karaoke_bgm_crossfade_enabled", SettingKind::Bool),
     ("end_silence_trim_threshold_sec", SettingKind::Float { min: 0.5, max: 60.0 }),
     ("ui_record_confirm", SettingKind::Bool),
+    ("rotation_estimate_include_all_songs", SettingKind::Bool),
+    ("rotation_padding_sec", SettingKind::Int { min: 0, max: 600 }),
+    ("bg_to_karaoke_gap_sec", SettingKind::Float { min: -3.0, max: 3.0 }),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +49,8 @@ pub enum SettingKind {
     Text { max_chars: usize },
     /// a finite number from `min` to `max` (whole numbers are fine)
     Float { min: f64, max: f64 },
+    /// a whole number from `min` to `max` (a fractional number such as 90.0 is refused, like the app)
+    Int { min: i64, max: i64 },
 }
 
 fn validate_setting(args: &Value) -> Result<(), String> {
@@ -63,6 +68,11 @@ fn validate_setting(args: &Value) -> Result<(), String> {
         SettingKind::Float { min, max } => {
             if !value.is_number() || !value.as_f64().is_some_and(|v| v.is_finite() && (*min..=*max).contains(&v)) {
                 return Err(format!("{key} must be a number from {min} to {max}"));
+            }
+        }
+        SettingKind::Int { min, max } => {
+            if !value.as_i64().is_some_and(|v| (*min..=*max).contains(&v)) {
+                return Err(format!("{key} must be a whole number from {min} to {max}"));
             }
         }
         SettingKind::Text { max_chars } => {

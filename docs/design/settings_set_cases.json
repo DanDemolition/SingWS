@@ -763,14 +763,6 @@
   },
   {
    "args": {
-    "key": "bg_to_karaoke_gap_sec",
-    "value": true
-   },
-   "ok": false,
-   "code": "unknown_setting"
-  },
-  {
-   "args": {
     "key": "filename_format",
     "value": true
    },
@@ -784,6 +776,230 @@
    },
    "ok": false,
    "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "rotation_estimate_include_all_songs",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "rotation_estimate_include_all_songs",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "rotation_estimate_include_all_songs",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_estimate_include_all_songs",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_estimate_include_all_songs",
+    "value": 0
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_estimate_include_all_songs",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 0
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 90
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 600
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 1
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": -1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 601
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 90.5
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 90.0
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": "90"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": true
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "rotation_padding_sec",
+    "value": 1000000000000000000000000000000
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": -3
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 3
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 0
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": -1.5
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 1.0
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": -3.01
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 3.01
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": "1"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": true
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
   }
  ]
 }
