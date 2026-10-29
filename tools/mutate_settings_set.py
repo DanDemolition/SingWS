@@ -34,11 +34,21 @@ M = [
     ('        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):\n            return self._execute_shell_queue_command(action, args)', '        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):\n            return self._execute_shell_queue_command(action, args)', None),
     ('            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, (int, float)) and math.isfinite(value) and spec["min"] <= value <= spec["max"]', None),
     ('            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, (int, float)) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]', "an infinite or NaN value is JSON-impossible and fails the range check anyway"),
-    ('and spec["min"] <= value <= spec["max"]', 'and spec["min"] < value <= spec["max"]', None),
-    ('and spec["min"] <= value <= spec["max"]', 'and spec["min"] <= value < spec["max"]', None),
+    ('math.isfinite(value) and spec["min"] <= value <= spec["max"]', 'math.isfinite(value) and spec["min"] < value <= spec["max"]', None),
+    ('math.isfinite(value) and spec["min"] <= value <= spec["max"]', 'math.isfinite(value) and spec["min"] <= value < spec["max"]', None),
     ('"end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 60.0},', '"end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 600.0},', None),
     ('        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value', '        self.settings[key] = value', None),
     ('        "karaoke_auto_advance": {"type": "bool"},\n', '        "karaoke_auto_advance": {"type": "bool"},\n        "crash_auto_send_logs": {"type": "bool"},\n', None),
+    ('            return isinstance(value, int) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, (int, float)) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]', None),
+    ('            return isinstance(value, int) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, int) and spec["min"] <= value <= spec["max"]', None),
+    ('            return isinstance(value, int) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, int) and not isinstance(value, bool) and spec["min"] < value <= spec["max"]', None),
+    ('            return isinstance(value, int) and not isinstance(value, bool) and spec["min"] <= value <= spec["max"]', '            return isinstance(value, int) and not isinstance(value, bool) and spec["min"] <= value < spec["max"]', None),
+    ('"rotation_padding_sec": {"type": "int", "min": 0, "max": 600},', '"rotation_padding_sec": {"type": "int", "min": 0, "max": 6000},', None),
+    ('"rotation_padding_sec": {"type": "int", "min": 0, "max": 600},', '"rotation_padding_sec": {"type": "int", "min": -5, "max": 600},', None),
+    ('            if key in self._SHELL_SETTINGS_QUEUE_REFRESH:\n                self.update_queue_display()', '            if False:\n                self.update_queue_display()', None),
+    ('            if key in self._SHELL_SETTINGS_QUEUE_REFRESH:', '            if key.startswith("rotation_estimate"):', None),
+    ('    _SHELL_SETTINGS_QUEUE_REFRESH = frozenset({"rotation_estimate_include_all_songs", "rotation_padding_sec"})', '    _SHELL_SETTINGS_QUEUE_REFRESH = frozenset({"rotation_padding_sec"})', None),
+    ('        "rotation_estimate_include_all_songs": {"type": "bool"},\n', '        "rotation_estimate_include_all_songs": {"type": "bool"},\n        "queue_mode": {"type": "text", "max_chars": 20},\n', None),
 ]
 
 

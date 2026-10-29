@@ -24,6 +24,7 @@ def harness(mode="apply", settings=None):
     a.settings.update(settings or {})
     a.save_settings = lambda: h.record("save_settings")
     a.schedule_ticker_update = lambda: h.record("ticker_update")
+    a.update_queue_display = lambda: h.record("queue_display")
     a._cached_ticker_data = (["Ann"], "old")
     assert "_cached_ticker_data" in object.__getattribute__(a, "__dict__")
     for name in ("shell_settings_set",):
@@ -60,7 +61,8 @@ class SchemaTests(unittest.TestCase):
     def test_the_schema_is_exactly_this_list_and_holds_no_secret_url_path_or_device(self):
         keys = sorted(harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA)
         self.assertEqual(keys, sorted(["ticker_custom_enabled", "ticker_custom_message", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled",
-                                       "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec", "ui_record_confirm"]))
+                                       "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec", "ui_record_confirm",
+                                       "rotation_estimate_include_all_songs", "rotation_padding_sec"]))
         for k in keys:
             for bad in ("key", "pin", "token", "password", "secret", "url", "user", "path", "color", "device", "output", "repo", "update"):
                 self.assertNotIn(bad, k)
@@ -79,6 +81,50 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual(run(h, {"key": k, "value": True}, f"b{n}"), (True, "setting_changed"), k)
             self.assertIs(h.app.settings[k], True)
         self.assertEqual([x for x in h.calls if x[0] == "ticker_update"], [], "only ticker settings refresh the ticker")
+
+
+class QueueEtaGroupTests(unittest.TestCase):
+    """Group 2: the two queue-ETA settings. The Settings dialog stores, saves and calls update_queue_display(); so does the command, and nothing else."""
+
+    def test_each_change_is_stored_saved_and_refreshes_the_queue_display_once(self):
+        h = harness(settings={"rotation_estimate_include_all_songs": False, "rotation_padding_sec": 90})
+        self.assertEqual(run(h, {"key": "rotation_estimate_include_all_songs", "value": True}, "q1"), (True, "setting_changed"))
+        self.assertEqual(run(h, {"key": "rotation_padding_sec", "value": 45}, "q2"), (True, "setting_changed"))
+        self.assertIs(h.app.settings["rotation_estimate_include_all_songs"], True)
+        self.assertEqual(h.app.settings["rotation_padding_sec"], 45)
+        self.assertIs(type(h.app.settings["rotation_padding_sec"]), int)
+        self.assertEqual([x[0] for x in h.calls if x[0] in ("save_settings", "queue_display", "ticker_update")],
+                         ["save_settings", "queue_display", "save_settings", "queue_display"])
+
+    def test_same_value_and_dry_run_write_and_refresh_nothing(self):
+        h = harness(settings={"rotation_padding_sec": 90}, mode="apply")
+        self.assertEqual(run(h, {"key": "rotation_padding_sec", "value": 90}, "q3"), (True, "no_change"))
+        d = harness(settings={"rotation_padding_sec": 90}, mode="dry_run")
+        ok, msg = run(d, {"key": "rotation_padding_sec", "value": 10}, "q4")
+        self.assertTrue(ok and msg.startswith("dry_run"))
+        self.assertEqual(d.app.settings["rotation_padding_sec"], 90)
+        for x in (h, d):
+            self.assertEqual([c for c in x.calls if c[0] in ("save_settings", "queue_display")], [])
+
+    def test_other_settings_never_refresh_the_queue_display(self):
+        h = harness()
+        run(h, {"key": "karaoke_auto_advance", "value": False}, "q5")
+        run(h, {"key": "ticker_custom_message", "value": "hi"}, "q6")
+        self.assertEqual([c for c in h.calls if c[0] == "queue_display"], [])
+
+    def test_the_dialogs_own_handlers_store_the_same_keys_the_same_way(self):
+        src = (Path(__file__).parent / "0.2.18.1.py").read_text()
+        self.assertIn('self.settings["rotation_estimate_include_all_songs"] = bool(checked)', src)
+        self.assertIn('self.settings["rotation_padding_sec"] = max(0, int(value))', src)
+        self.assertIn("padding_spin.setRange(0, 600)", src)  # the schema's range is the dialog's range
+        spec = harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA["rotation_padding_sec"]
+        self.assertEqual((spec["min"], spec["max"]), (0, 600))
+
+    def test_a_failing_refresh_still_reports_the_change(self):
+        h = harness(settings={"rotation_padding_sec": 90})
+        h.app.update_queue_display = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        self.assertEqual(run(h, {"key": "rotation_padding_sec", "value": 5}, "q7"), (True, "setting_changed"))
+        self.assertEqual(h.app.settings["rotation_padding_sec"], 5)
 
 
 class ApplyTests(unittest.TestCase):

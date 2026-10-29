@@ -17,7 +17,7 @@ Item {
     Connections { target: page.control; function onViewJsonChanged() { page.cview = JSON.parse(page.control.viewJson) } }
     // connected to the app: the few settings the app lets the shell change (KaraokeApp._SHELL_SETTINGS_SCHEMA) get a button; everything else stays read-only
     property bool live: cview.enabled === true
-    readonly property var boolKeys: ["ticker_custom_enabled", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled", "karaoke_bgm_crossfade_enabled", "ui_record_confirm"]
+    readonly property var boolKeys: ["ticker_custom_enabled", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled", "karaoke_bgm_crossfade_enabled", "ui_record_confirm", "rotation_estimate_include_all_songs"]
     function setSetting(label, key, value) { if (control) control.send(label, "settings.set", JSON.stringify({key: key, value: value}), false) }
     property var rows: JSON.parse(panel.rowsJson)
     Connections { target: panel; function onRowsJsonChanged() { page.rows = JSON.parse(panel.rowsJson) } }
@@ -94,6 +94,24 @@ Item {
                         validator: DoubleValidator { bottom: 0.5; top: 60.0; decimals: 2; notation: DoubleValidator.StandardNotation }
                         selectByMouse: true
                         Accessible.name: "Seconds of silence before the karaoke song ends early (0.5 to 60)"
+                    }
+                    TextField {
+                        id: paddingField
+                        visible: page.live && modelData.key === "rotation_padding_sec"
+                        implicitWidth: 64
+                        implicitHeight: 26
+                        text: modelData.value
+                        validator: IntValidator { bottom: 0; top: 600 }
+                        selectByMouse: true
+                        Accessible.name: "Seconds added per singer in the queue time estimate (0 to 600)"
+                    }
+                    Button {
+                        visible: paddingField.visible
+                        text: "Set"
+                        implicitHeight: 26
+                        enabled: paddingField.acceptableInput
+                        onClicked: page.setSetting("Set " + modelData.key, modelData.key, parseInt(paddingField.text, 10))
+                        Accessible.name: "Save the queue padding"
                     }
                     Button {
                         visible: thresholdField.visible
