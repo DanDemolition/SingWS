@@ -274,10 +274,10 @@ class GatingTests(unittest.TestCase):
 
     def test_the_host_command_entry_points_route_waitlist_commands(self):
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertEqual(src.count('startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings."))'), 3)
+        self.assertEqual(src.count('startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings."))'), 3)
         i = src.index("    def _execute_host_control_command(self")
         self.assertIn('"waitlist."', src[i:i + 300])
-        self.assertIn('"waitlist.remove", "waitlist.restore", "waitlist.add", "settings.set")\n', src)
+        self.assertIn('"waitlist.remove", "waitlist.restore", "waitlist.add", "waitlist.edit", "history.edit_song", "history.add_song", "settings.set")\n', src)
 
     def test_the_buttons_and_the_commands_share_one_body(self):
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")

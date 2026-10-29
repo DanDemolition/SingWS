@@ -22,6 +22,11 @@ pub mod qobject {
         #[qinvokable]
         fn refresh(self: Pin<&mut HistoryPanel>, singer_search: &QString);
 
+        /// The fields the Edit form starts from for one song, as JSON ("" when the singer or song is not in the store).
+        #[qinvokable]
+        #[cxx_name = "songFields"]
+        fn song_fields(self: Pin<&mut HistoryPanel>, singer_key: &QString, song_key: &QString) -> QString;
+
         #[qinvokable]
         #[cxx_name = "selectSinger"]
         fn select_singer(self: Pin<&mut HistoryPanel>, singer_key: &QString, song_query: &QString);
@@ -99,6 +104,12 @@ fn now_epoch() -> i64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+/// The Edit form's starting values for one song (`""` when not found): the same fields the app's Edit Song History dialog fills in.
+pub fn song_fields_json(store: &Store, singer_key: &str, song_key: &str) -> String {
+    let Some(song) = store.singers.iter().find(|s| s.key == singer_key).and_then(|s| s.songs.iter().find(|x| x.key == song_key)) else { return String::new() };
+    serde_json::json!({"artist": song.artist, "title": song.title, "disc_id": song.disc_id, "song_type": song.song_type, "key": song.last_key, "tempo_percent": song.last_tempo_percent}).to_string()
+}
+
 impl qobject::HistoryPanel {
     /// (Re)load the store if the file changed; `Err` carries the text to show.
     fn ensure_store(mut self: Pin<&mut Self>) -> Result<(), String> {
@@ -138,6 +149,13 @@ impl qobject::HistoryPanel {
         }
     }
 
+    fn song_fields(mut self: Pin<&mut Self>, singer_key: &QString, song_key: &QString) -> QString {
+        if self.as_mut().ensure_store().is_err() {
+            return QString::from("");
+        }
+        QString::from(song_fields_json(self.rust().store.as_ref().unwrap(), &singer_key.to_string(), &song_key.to_string()).as_str())
+    }
+
     fn select_singer(mut self: Pin<&mut Self>, singer_key: &QString, song_query: &QString) {
         if self.as_mut().ensure_store().is_err() {
             return;
@@ -157,5 +175,22 @@ impl qobject::HistoryPanel {
                 self.as_mut().set_song_meta(QString::from(format!("Could not list songs: {e}").as_str()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_edit_form_starts_from_the_stored_song_and_is_empty_for_anything_unknown() {
+        let raw = serde_json::json!({"singers": {"ann": {"name": "Ann", "songs": {"queen|radio ga ga": {"artist": "Queen", "title": "Radio Ga Ga", "disc_id": "SC1", "song_type": "CDG", "last_key": -2, "last_tempo_percent": 90}}}}});
+        let store = history::normalize(&raw).unwrap();
+        let s = &store.singers[0];
+        let key = s.songs[0].key.clone();
+        let v: serde_json::Value = serde_json::from_str(&song_fields_json(&store, &s.key, &key)).unwrap();
+        assert_eq!(v, serde_json::json!({"artist": "Queen", "title": "Radio Ga Ga", "disc_id": "SC1", "song_type": "CDG", "key": -2, "tempo_percent": 90}));
+        assert_eq!(song_fields_json(&store, "nobody", &key), "");
+        assert_eq!(song_fields_json(&store, &s.key, "nope"), "");
     }
 }

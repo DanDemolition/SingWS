@@ -43,6 +43,19 @@ impl Default for WaitlistPanelRust {
     }
 }
 
+/// What the Edit form starts from: the request's key and tempo as the app's own dialog reads them (`int(req.get("key") or req.get("key_change") or 0)`, `int(req.get("tempo") or 0)`),
+/// from the snapshot's raw request with the same id (`waiting` is an object keyed by id). A value that is not a whole number counts as 0, like the dialog's `except`.
+fn with_edit_fields(mut row: Value, snapshot: &Value) -> Value {
+    let id = row.get("request_id").and_then(Value::as_i64).unwrap_or(0);
+    let raw = snapshot.get("waiting").and_then(Value::as_object).and_then(|m| m.get(&id.to_string()));
+    let whole = |v: Option<&Value>| v.and_then(Value::as_i64).filter(|n| *n != 0);
+    let key = raw.and_then(|r| whole(r.get("key")).or_else(|| whole(r.get("key_change")))).unwrap_or(0);
+    let tempo = raw.and_then(|r| whole(r.get("tempo"))).unwrap_or(0);
+    row["key"] = json!(key);
+    row["tempo"] = json!(tempo);
+    row
+}
+
 /// (sections as JSON, status line) for the snapshot in `dir`; `now` is the clock the file's age is measured against
 pub fn load(dir: &str, now: SystemTime) -> (Value, String) {
     let path = format!("{dir}/waitlist_snapshot.json");
@@ -61,7 +74,10 @@ pub fn load(dir: &str, now: SystemTime) -> (Value, String) {
     match waitlist::sections_from_snapshot(&snapshot) {
         Ok(sections) => {
             let rows: usize = sections.iter().map(|s| s.rows.len()).sum();
-            let json_sections: Vec<Value> = sections.iter().map(|s| json!({"key": s.key, "title": s.title, "helper": s.helper, "rows": s.rows.iter().map(waitlist::row_json).collect::<Vec<_>>()})).collect();
+            let json_sections: Vec<Value> = sections
+                .iter()
+                .map(|s| json!({"key": s.key, "title": s.title, "helper": s.helper, "rows": s.rows.iter().map(|r| with_edit_fields(waitlist::row_json(r), &snapshot)).collect::<Vec<_>>()}))
+                .collect();
             let mut status = if rows == 0 { "Nobody is waiting".to_string() } else { format!("{rows} request{}", if rows == 1 { "" } else { "s" }) };
             match age {
                 Some(a) if a > STALE_SECS => status.push_str(&format!("   •   snapshot is {}m old, the app may be closed", a / 60)),
@@ -129,5 +145,15 @@ mod tests {
         assert!(load(&d, SystemTime::now()).1.starts_with("Waitlist unavailable"));
         std::fs::write(format!("{d}/waitlist_snapshot.json"), r#"{"waiting":{},"removed":{}}"#).unwrap();
         assert!(load(&d, SystemTime::now()).1.starts_with("Nobody is waiting"));
+    }
+
+    #[test]
+    fn edit_fields_come_from_the_raw_request_like_the_dialog_reads_them() {
+        let snap = json!({"waiting": {"5": {"request_id": 5, "key": 0, "key_change": 3, "tempo": -4}, "6": {"request_id": 6, "key": "x", "tempo": 2.5}, "7": {"request_id": 7, "key": -2}}});
+        let f = |id: i64| with_edit_fields(json!({"request_id": id}), &snap);
+        assert_eq!((f(5)["key"].clone(), f(5)["tempo"].clone()), (json!(3), json!(-4)), "key 0 falls through to key_change, like `req.get(\"key\") or req.get(\"key_change\")`");
+        assert_eq!((f(6)["key"].clone(), f(6)["tempo"].clone()), (json!(0), json!(0)), "not a whole number counts as 0");
+        assert_eq!((f(7)["key"].clone(), f(7)["tempo"].clone()), (json!(-2), json!(0)));
+        assert_eq!((f(99)["key"].clone(), f(99)["tempo"].clone()), (json!(0), json!(0)), "unknown id");
     }
 }

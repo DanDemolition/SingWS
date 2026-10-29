@@ -64,7 +64,7 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 currentIndex: tabs.currentIndex
                 LibraryPage { control: control }
-                HistoryPage {}
+                HistoryPage { control: control }
                 RotationPage { tv: tv }
                 ControlsPage { panel: control }
                 MusicPage { control: control }

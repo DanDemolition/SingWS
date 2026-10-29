@@ -219,8 +219,8 @@ class GateTests(unittest.TestCase):
 
     def test_the_host_entry_points_route_settings_commands(self):
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
-        self.assertEqual(src.count('startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings."))'), 3)
-        self.assertIn('"waitlist.add", "settings.set")\n', src)
+        self.assertEqual(src.count('startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings."))'), 3)
+        self.assertIn('"waitlist.add", "waitlist.edit", "history.edit_song", "history.add_song", "settings.set")\n', src)
 
 
 if __name__ == "__main__":

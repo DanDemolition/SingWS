@@ -81,6 +81,12 @@ async def main():
     app._mark_waiting_for_add_delivered_async = lambda rid, req=None: waitlist_events.append(f"delivered:{rid}")
     app._add_waiting_for_add_track = lambda req, track: False
     app.process_external_request = lambda req: (waitlist_events.append(f"add_to_rotation:{req.get('request_id')}"), True)[1]
+    app._push_remote_request_replacement = lambda entry, **k: waitlist_events.append(f"push:{entry.get('remote_request_id')}:{entry.get('title')}:{entry.get('key')}:{entry.get('tempo_percent')}")
+    history_commits = []
+    app.singer_history = {"singers": {"ann": {"name": "Ann", "songs": {"queen|radio ga ga": {"artist": "Queen", "title": "Radio Ga Ga", "disc_id": "SC1", "song_type": "CDG",
+                                                                                      "last_key": 0, "last_tempo_percent": 100, "play_count": 2}}}}}
+    app.karaoke_playing = False
+    app._commit_singer_history_change = lambda reason="": history_commits.append(reason)
     app.toggle_karaoke_pause = lambda: played.append("pause")
     app.play_next_file = lambda skip_confirmation=False: played.append("next")
     app.stop_and_clear_now_singing = lambda skip_confirmation=False: played.append("stop")
@@ -148,7 +154,8 @@ async def main():
                  "shell_queue_set_singer_brand", "shell_queue_message_singer", "shell_queue_replace_song", "_set_singer_preference", "_clear_singer_preference",
                  "_singer_disc_priority_override", "_normalize_singer_pref_key", "clear_singer_brand_override", "_replace_queue_song_with_track",
                  "_build_queue_entry_from_track_choice", "_waiting_for_add_song_data_from_track",
-                 "shell_waitlist_change", "_waitlist_remove_request", "_waitlist_restore_request", "_waitlist_add_request", "_archive_waitlist_removed_tonight",
+                 "shell_waitlist_change", "_waitlist_apply_edit", "_update_waiting_for_add_request", "shell_history_song", "_history_song_apply_edit", "_history_edit_backup",
+                 "_normalize_history_song_key", "_waitlist_remove_request", "_waitlist_restore_request", "_waitlist_add_request", "_archive_waitlist_removed_tonight",
                  "_waiting_for_add_clearable_requests", "_waiting_for_add_request_id", "_waiting_for_add_order_key"):
         if hasattr(m.KaraokeApp, name):
             setattr(app, name, types.MethodType(getattr(m.KaraokeApp, name), app))
@@ -189,7 +196,7 @@ async def main():
     app.settings.update({"base_url": "https://example.test", "user": args.tenant, "api_key": "k"})
     sent_messages = []
     app._net_send_direct_message = lambda name, text, system_notice=False: (sent_messages.append([name, text]), (True, ""))[1]
-    app._push_remote_request_replacement = lambda entry, **kw: None
+    pass  # _push_remote_request_replacement is recorded above
     app._schedule_next_up_prescan = lambda: None
     app.post_rotation = lambda: None
     if not hasattr(app, "save_data") or args.library is None:
@@ -202,7 +209,7 @@ async def main():
                 "names": {s["singer_id"]: s["name"] for s in app.queue}, "brands": {s["singer_id"]: s.get("preferred_disc_priority") for s in app.queue},
                 "titles": {s["singer_id"]: [str(e.get("title") or e.get("song_info")) for e in s["songs"]] for s in app.queue}, "messages": list(sent_messages), "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played),
                 "ticker_updates": len(ticker_updates), "queue_display_updates": len(queue_display_updates), "eta": {"all": app.settings.get("rotation_estimate_include_all_songs"), "pad": app.settings.get("rotation_padding_sec")}, "ticker_settings": {"enabled": app.settings.get("ticker_custom_enabled"), "message": app.settings.get("ticker_custom_message"), "api_key": app.settings.get("api_key")},
-                "waitlist": {"waiting": sorted(app._waiting_for_add_requests), "removed": sorted(app._waiting_for_add_removed_tonight), "events": list(waitlist_events)}}
+                "history": {"commits": list(history_commits), "songs": {k: [v["title"], v["last_key"], v["last_tempo_percent"]] for k, v in app.singer_history["singers"]["ann"]["songs"].items()}}, "waitlist": {"waiting": sorted(app._waiting_for_add_requests), "removed": sorted(app._waiting_for_add_removed_tonight), "events": list(waitlist_events)}}
 
     async def pump():
         while True:

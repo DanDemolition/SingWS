@@ -83,6 +83,14 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "not_added" => ("That song could not be added from the local library. Use Replace or add it by hand".into(), "warn"),
         "add_error" => ("The app could not add that replacement song; look at the request in the app".into(), "warn"),
         "waitlist_removed" => ("Request removed from the waitlist".into(), "ok"),
+        "waitlist_edited" => ("Request updated (its place on the waitlist is unchanged)".into(), "ok"),
+        "bad_waitlist_value" => ("That request edit is not valid (singer and title are required; key -12 to 12, tempo -30 to 30)".into(), "warn"),
+        "history_song_saved" => ("Singer history saved (a backup was written first)".into(), "ok"),
+        "bad_history_key" | "bad_history_value" => ("That history edit is not valid".into(), "warn"),
+        "unknown_history_singer" => ("That singer is no longer in the history".into(), "warn"),
+        "unknown_history_song" => ("That song is no longer in the singer's history".into(), "warn"),
+        "playback_active" => ("Stop karaoke playback first; history is not edited while a song plays".into(), "warn"),
+        "backup_failed" => ("The history backup could not be written, so nothing was changed".into(), "error"),
         "waitlist_restored" => ("Request put back on the waitlist".into(), "ok"),
         "bad_request_id" => (format!("The app refused the command ({m})"), "error"),
         "shell_commands_off" => ("Remote control is switched off in the app (setting shell_commands)".into(), "error"),
@@ -420,6 +428,10 @@ mod tests {
     #[test]
     fn waitlist_answers_are_plain_words() {
         for (code, ok, kind, text) in [
+            ("waitlist_edited", true, "ok", "Request updated (its place on the waitlist is unchanged)"),
+            ("history_song_saved", true, "ok", "Singer history saved (a backup was written first)"),
+            ("playback_active", false, "warn", "Stop karaoke playback first; history is not edited while a song plays"),
+            ("backup_failed", false, "error", "The history backup could not be written, so nothing was changed"),
             ("setting_changed", true, "ok", "Setting saved"),
             ("unknown_setting", false, "warn", "The shell may not change that setting"),
             ("bad_value", false, "warn", "That value is not allowed for this setting"),
