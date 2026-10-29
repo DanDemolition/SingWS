@@ -15,6 +15,7 @@
 //! `floor(t * 300)` (see [`CdgPlayer::render_at`]).
 
 pub mod window_rules;
+pub mod track_display;
 
 pub const PACKET_BYTES: usize = 24;
 pub const PACKETS_PER_SECOND: f64 = 300.0;
@@ -269,7 +270,8 @@ pub fn side_fill_color(rgba: &[u8], width: usize, height: usize) -> (u8, u8, u8)
     let mut counts: Vec<((u8, u8, u8), u32)> = Vec::new();
     let steps = 12usize;
     for i in 0..=steps {
-        // Python's round() is half-to-even; the products here never land on .5 for 300x216 but keep the rule exact
+        // Python's round() is half-to-even. For 300x216 the 7th sample lands exactly on 149.5 and 107.5 (both floors odd, so both round up);
+        // other sizes hit k.5 with an even k (tests cover 302, 306, 308)
         let rnd = |n: usize| -> usize {
             let v = n as f64 / steps as f64;
             let f = v.floor();
@@ -312,12 +314,13 @@ pub fn fit_size(iw: usize, ih: usize, w: usize, h: usize) -> (usize, usize) {
     if rw <= w as u64 { (rw as usize, h) } else { (w, (w as u64 * ih as u64 / iw as u64) as usize) }
 }
 
-/// Qt's `QImage::scaled(.., FastTransformation)` for an upscale: nearest neighbour in 16.16 fixed point, step = floor(65536*src/dst), starting
-/// half a step in. Verified identical to Qt on 8 window sizes (see tools/cdg_display_parity.py).
+/// Qt's `QImage::scaled(.., FastTransformation)`: nearest neighbour in 16.16 fixed point, step = floor(65536*src/dst), starting half a step in
+/// and one fixed-point unit short of it, so an exact tie (a downscale by a whole ratio such as 300 -> 150) takes the lower texel like Qt does.
+/// Identical to Qt on 598 source/destination length pairs, up and down (checked one axis at a time; tools/cdg_display_parity.py checks pictures).
 pub fn scale_nearest(src: &[u8], iw: usize, ih: usize, w: usize, h: usize) -> Vec<u8> {
     let axis = |n: usize, d: usize| -> Vec<usize> {
         let step = (65536 * n) / d;
-        (0..d).map(|i| (((step / 2) + i * step) >> 16).min(n - 1)).collect()
+        (0..d).map(|i| (((step / 2) + i * step).saturating_sub(1) >> 16).min(n - 1)).collect()
     };
     let (xs, ys) = (axis(iw, w), axis(ih, h));
     let mut out = Vec::with_capacity(w * h * 4);
@@ -620,5 +623,327 @@ mod tests {
         let mut fresh = CdgPlayer::new(a.data.clone());
         let want = fresh.seek_packet(298).indexed().to_vec();
         assert_eq!(a.seek_packet(298).indexed(), &want[..]);
+    }
+
+    /// A deterministic 300x216 test picture with distinct corners, a gradient and hard edges.
+    fn sample_frame() -> Vec<u8> {
+        let mut f = Vec::with_capacity(WIDTH * HEIGHT * 4);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let corner = match (x < 150, y < 108) {
+                    (true, true) => [200, 30, 30],
+                    (false, true) => [30, 200, 30],
+                    (true, false) => [30, 30, 200],
+                    (false, false) => [220, 220, 40],
+                };
+                let edge = x < 6 || x >= WIDTH - 6 || y < 6 || y >= HEIGHT - 6;
+                let rgb = if edge { [corner[2], corner[0], corner[1]] } else { [corner[0] / 2 + (x % 100) as u8, corner[1] / 2 + (y % 100) as u8, corner[2] / 2 + ((x + y) % 60) as u8] };
+                f.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+        }
+        f
+    }
+
+    fn fnv(b: &[u8]) -> u64 {
+        b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &c| (h ^ c as u64).wrapping_mul(0x0000_0100_0000_01b3))
+    }
+
+    #[test]
+    fn fit_size_truncates_like_qt() {
+        assert_eq!(fit_size(300, 216, 1280, 720), (1000, 720));
+        assert_eq!(fit_size(300, 216, 500, 400), (500, 360));
+        assert_eq!(fit_size(300, 216, 901, 333), (462, 333));
+        assert_eq!(fit_size(300, 216, 300, 216), (300, 216));
+        // exactly as wide as allowed: the height branch is taken (Qt: rw <= w), not the width one (which would give 216)
+        assert_eq!(fit_size(300, 216, 301, 217), (301, 217));
+        // width-limited: the height is truncated, not rounded
+        assert_eq!(fit_size(300, 216, 301, 1000), (301, 216));
+    }
+
+    #[test]
+    fn scale_nearest_is_the_fixed_point_step() {
+        // 4 -> 10: step = floor(65536*4/10) = 26214; sample i is (13107 + i*26214) >> 16
+        let src: Vec<u8> = (0..4u8).flat_map(|v| [v, v, v, 255]).collect();
+        let out = scale_nearest(&src, 4, 1, 10, 1);
+        let got: Vec<u8> = out.chunks(4).map(|p| p[0]).collect();
+        assert_eq!(got, vec![0, 0, 0, 1, 1, 2, 2, 2, 3, 3]);
+        // the last sample is clamped to the source
+        let one = scale_nearest(&src, 4, 1, 4, 1);
+        assert_eq!(one, src);
+        // rows use the same rule
+        let col: Vec<u8> = (0..4u8).flat_map(|v| [v, 0, 0, 255]).collect();
+        let tall = scale_nearest(&col, 1, 4, 1, 10);
+        assert_eq!(tall.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), vec![0, 0, 0, 1, 1, 2, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn scale_nearest_downscale_ties_take_the_lower_texel_like_qt() {
+        // 300 -> 150: sample positions are (i + 0.5) * 2 = 1, 3, 5 ... exactly on a texel boundary; Qt takes 0, 2, 4
+        let src: Vec<u8> = (0..300u32).flat_map(|v| [(v % 256) as u8, (v / 256) as u8, 0, 255]).collect();
+        let out = scale_nearest(&src, 300, 1, 150, 1);
+        let got: Vec<u32> = out.chunks(4).map(|p| p[0] as u32 + 256 * p[1] as u32).collect();
+        assert_eq!(&got[..5], &[0, 2, 4, 6, 8]);
+        // 216 -> 18: 12 * i + 5 (exact ratio 12, Qt) and the last sample is still inside the picture
+        let col: Vec<u8> = (0..216u32).flat_map(|v| [v as u8, 0, 0, 255]).collect();
+        let out = scale_nearest(&col, 1, 216, 1, 18);
+        let got: Vec<u32> = out.chunks(4).map(|p| p[0] as u32).collect();
+        assert_eq!(&got[..4], &[5, 17, 29, 41]);
+        assert_eq!(got[17], 209);
+        // 300 -> 1 and 1 -> 300 do not read outside the picture
+        assert_eq!(scale_nearest(&src, 300, 1, 1, 1).len(), 4);
+        assert_eq!(scale_nearest(&src[..4], 1, 1, 300, 1).len(), 300 * 4);
+    }
+
+    #[test]
+    fn scale_nearest_offset_is_exactly_one_unit() {
+        // 300 -> 463: output 302 sits where (step/2 + 302*step) has 1 in the low bits; Qt picks texel 196 (an offset of 2 would give 195)
+        let src: Vec<u8> = (0..300u32).flat_map(|v| [(v % 256) as u8, (v / 256) as u8, 0, 255]).collect();
+        let out = scale_nearest(&src, 300, 1, 463, 1);
+        let p = &out[302 * 4..][..4];
+        assert_eq!(p[0] as u32 + 256 * p[1] as u32, 196);
+        let out = scale_nearest(&src, 300, 1, 634, 1);
+        let p = &out[568 * 4..][..4];
+        assert_eq!(p[0] as u32 + 256 * p[1] as u32, 269);
+    }
+
+    #[test]
+    fn compose_centres_with_floor_on_both_axes() {
+        // 305x300: the picture is 305 x 219 (width-limited), so 81 spare rows: 40 above, 41 below (floor); 301x216... see the next window
+        let mut f = vec![0u8; WIDTH * HEIGHT * 4];
+        for p in f.chunks_exact_mut(4) {
+            p.copy_from_slice(&[90, 91, 92, 255]);
+        }
+        let out = compose(&f, 305, 300, DisplayMode::Fit);
+        let row = |y: usize| &out[(y * 305 + 150) * 4..][..4];
+        assert_eq!(row(39), &[0, 0, 0, 255]);
+        assert_eq!(row(40), &[90, 91, 92, 255]);
+        assert_eq!(row(258), &[90, 91, 92, 255]);
+        assert_eq!(row(259), &[0, 0, 0, 255]);
+        // 901x333: the picture is 462 wide, 439 spare columns: 219 left, 220 right
+        let out = compose(&f, 901, 333, DisplayMode::Fit);
+        let col = |x: usize| &out[(100 * 901 + x) * 4..][..4];
+        assert_eq!(col(218), &[0, 0, 0, 255]);
+        assert_eq!(col(219), &[90, 91, 92, 255]);
+        assert_eq!(col(680), &[90, 91, 92, 255]);
+        assert_eq!(col(681), &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn compose_partial_alpha_on_a_bright_background() {
+        // background (200, 220, 240): the (255 - a) weight is large enough here that a wrong weight changes the rounded result
+        let mut f = vec![0u8; WIDTH * HEIGHT * 4];
+        for p in f.chunks_exact_mut(4) {
+            p.copy_from_slice(&[200, 220, 240, 255]);
+        }
+        for (x, px) in [[10u8, 20, 30, 100], [250, 5, 0, 200], [0, 0, 0, 3], [255, 255, 255, 128]].iter().enumerate() {
+            f[(100 * WIDTH + 100 + x) * 4..][..4].copy_from_slice(px);
+        }
+        let out = compose(&f, 2 * WIDTH, HEIGHT, DisplayMode::SideFill);
+        let at = |x: usize| &out[(100 * 2 * WIDTH + WIDTH / 2 + 100 + x) * 4..][..4];
+        assert_eq!(at(0), &[125, 142, 158, 255][..]);
+        assert_eq!(at(1), &[239, 51, 52, 255][..]);
+        assert_eq!(at(2), &[198, 217, 237, 255][..]);
+        assert_eq!(at(3), &[228, 238, 248, 255][..]);
+    }
+
+    #[test]
+    fn compose_blends_partial_alpha_and_centres() {
+        // one red pixel with alpha 128 on the black window, then on the side-fill colour
+        let mut f = vec![0u8; WIDTH * HEIGHT * 4];
+        for p in f.chunks_exact_mut(4) {
+            p.copy_from_slice(&[10, 20, 30, 255]);
+        }
+        for p in f.chunks_exact_mut(4).take(WIDTH) {
+            p.copy_from_slice(&[255, 0, 0, 128]);
+        }
+        let out = compose(&f, WIDTH, HEIGHT, DisplayMode::Fit);
+        assert_eq!(&out[..4], &[128, 0, 0, 255]);
+        assert_eq!(&out[4 * WIDTH..4 * WIDTH + 4], &[10, 20, 30, 255]);
+        let mut g = f.clone();
+        for p in g.chunks_exact_mut(4).take(WIDTH) {
+            p[3] = 0;
+        }
+        assert_eq!(&compose(&g, WIDTH, HEIGHT, DisplayMode::Fit)[..4], &[0, 0, 0, 255]);
+        // a wide window: the picture is centred, bars are the window background
+        let wide = compose(&f, 2 * WIDTH, HEIGHT, DisplayMode::Fit);
+        assert_eq!(&wide[..4], &[0, 0, 0, 255]);
+        let x0 = (2 * WIDTH - WIDTH) / 2;
+        assert_eq!(&wide[(HEIGHT / 2 * 2 * WIDTH + x0) * 4..][..4], &[10, 20, 30, 255]);
+        assert_eq!(&wide[(HEIGHT / 2 * 2 * WIDTH + x0 - 1) * 4..][..4], &[0, 0, 0, 255]);
+        let sf = compose(&f, 2 * WIDTH, HEIGHT, DisplayMode::SideFill);
+        assert_eq!(&sf[..4], &[10, 20, 30, 255]);
+        // stretch fills the whole window
+        let st = compose(&f, 2 * WIDTH, HEIGHT, DisplayMode::Stretch);
+        assert_eq!(&st[(HEIGHT / 2 * 2 * WIDTH) * 4..][..4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn side_fill_picks_the_most_common_edge_colour_first_seen_on_ties() {
+        let mut f = vec![0u8; WIDTH * HEIGHT * 4];
+        for p in f.chunks_exact_mut(4) {
+            p.copy_from_slice(&[1, 2, 3, 255]);
+        }
+        assert_eq!(side_fill_color(&f, WIDTH, HEIGHT), (1, 2, 3));
+        // left edge a different colour: top and bottom (2 of 4 edges, 13 samples each) are still the majority
+        for y in 0..HEIGHT {
+            f[(y * WIDTH) * 4..][..4].copy_from_slice(&[9, 9, 9, 255]);
+        }
+        assert_eq!(side_fill_color(&f, WIDTH, HEIGHT), (1, 2, 3));
+        // transparent edge samples do not count
+        for p in f.chunks_exact_mut(4) {
+            p[3] = 0;
+        }
+        assert_eq!(side_fill_color(&f, WIDTH, HEIGHT), (0, 0, 0));
+    }
+
+    /// Pinned output of `compose_bridge`. There is no CPU reference for the GL shader, so these hashes pin the Rust port as it was when it was
+    /// compared on screen with the real audience window (0 pixels beyond tolerance, fit / colour / blur, landscape and portrait). A change to
+    /// the picture maths must come with a fresh on-screen comparison (tools/cdg_window_compare.py) and new hashes.
+    #[test]
+    fn compose_bridge_is_pinned() {
+        let f = sample_frame();
+        let mut got = Vec::new();
+        for (w, h) in [(640usize, 360usize), (400, 500), (300, 216), (211, 97)] {
+            for fill in [BridgeFill::Off, BridgeFill::Colour, BridgeFill::Blur] {
+                got.push(fnv(&compose_bridge(&f, w, h, fill)));
+            }
+        }
+        let want: Vec<u64> = vec![
+            14048955622114239725, 847979852600862693, 11333714022539983672, 15274494003484929749, 6478389082910589469, 11922220376167693918, 4320324006446734613, 7532078087554515445, 11445142463088536617, 2351742098073275432, 11264101343107794192, 9116975756021995183,
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn compose_bridge_properties() {
+        let f = sample_frame();
+        // Off: letterbox bars are black, the picture is the nearest-scaled frame
+        let off = compose_bridge(&f, 640, 360, BridgeFill::Off);
+        assert_eq!(&off[..4], &[0, 0, 0, 255]);
+        let mid = (180 * 640 + 320) * 4;
+        assert_eq!(&off[mid + 3..mid + 4], &[255]);
+        // Colour: the bars take the colour of the corner sample closest to the other three
+        let col = compose_bridge(&f, 640, 360, BridgeFill::Colour);
+        assert_ne!(&col[..3], &[0, 0, 0]);
+        // Blur is dimmed: a flat white picture fills the bars at 88 percent
+        let white: Vec<u8> = std::iter::repeat([255u8, 255, 255, 255]).take(WIDTH * HEIGHT).flatten().collect();
+        let b = compose_bridge(&white, 640, 360, BridgeFill::Blur);
+        assert_eq!(&b[..3], &[224, 224, 224]);
+        // and a flat picture's centre stays white
+        assert_eq!(&b[mid..mid + 3], &[255, 255, 255]);
+    }
+
+    /// All-transparent `w` x `h` frame with the given opaque pixels set (x, y, rgb).
+    fn sparse(w: usize, h: usize, px: &[(usize, usize, [u8; 3])]) -> Vec<u8> {
+        let mut f = vec![0u8; w * h * 4];
+        for &(x, y, c) in px {
+            f[(y * w + x) * 4..][..4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+        f
+    }
+
+    #[test]
+    fn side_fill_sample_positions_round_half_to_even_like_python() {
+        // The 7th of 13 sample points sits at (size-1)*6/12 = (size-1)/2. For an even size-1... odd size-1 that is k.5 and Python's round()
+        // goes to the even neighbour. Values checked against the app's _cdg_side_fill_color on the same images.
+        let (a, b) = ([10, 0, 0], [0, 20, 0]);
+        // (width, pixel with the lower index, expected colour): 150.5 -> 150, 152.5 -> 152, 153.5 -> 154, 149.5 -> 150
+        for (w, lo, want) in [(302usize, 150usize, (10, 0, 0)), (306, 152, (10, 0, 0)), (308, 153, (0, 20, 0)), (300, 149, (0, 20, 0))] {
+            let top = sparse(w, 216, &[(lo, 0, a), (lo + 1, 0, b)]);
+            assert_eq!(side_fill_color(&top, w, 216), want, "top edge, width {w}");
+        }
+        for (h, lo, want) in [(302usize, 150usize, (10, 0, 0)), (306, 152, (10, 0, 0)), (308, 153, (0, 20, 0))] {
+            let left = sparse(300, h, &[(0, lo, a), (0, lo + 1, b)]);
+            assert_eq!(side_fill_color(&left, 300, h), want, "left edge, height {h}");
+        }
+        // the bottom and right edges use the same positions
+        let bottom = sparse(308, 216, &[(153, 215, a), (154, 215, b)]);
+        assert_eq!(side_fill_color(&bottom, 308, 216), (0, 20, 0));
+        let right = sparse(300, 308, &[(299, 153, a), (299, 154, b)]);
+        assert_eq!(side_fill_color(&right, 300, 308), (0, 20, 0));
+    }
+
+    #[test]
+    fn side_fill_ties_go_to_the_first_colour_seen_and_majorities_win() {
+        // top edge colour A at the 1st sample only, B at the 2nd only: A has 2 votes (top and left edge), B 1 -> A (first seen, the top edge comes first at i = 0)
+        let w = 300;
+        let top = sparse(w, 216, &[(0, 0, [1, 1, 1]), (25, 0, [2, 2, 2])]);
+        // x = round(299*i/12): i=1 -> 25 (24.9)
+        assert_eq!(side_fill_color(&top, w, 216), (1, 1, 1));
+        // A also sits at the left-edge sample (0, 0), so it has 2 votes; B at x = 25 and 50 has 2 as well: a tie goes to A, seen first
+        let top2 = sparse(w, 216, &[(0, 0, [1, 1, 1]), (25, 0, [2, 2, 2]), (50, 0, [2, 2, 2])]);
+        assert_eq!(side_fill_color(&top2, w, 216), (1, 1, 1));
+        // a third B vote (x = 75) wins
+        let top3 = sparse(w, 216, &[(0, 0, [1, 1, 1]), (25, 0, [2, 2, 2]), (50, 0, [2, 2, 2]), (75, 0, [2, 2, 2])]);
+        assert_eq!(side_fill_color(&top3, w, 216), (2, 2, 2));
+        // the colour is compared without alpha handling beyond transparent/opaque: a semi-transparent sample still votes
+        let mut semi = sparse(w, 216, &[(0, 0, [3, 3, 3])]);
+        semi[3] = 77;
+        assert_eq!(side_fill_color(&semi, w, 216), (3, 3, 3));
+    }
+
+    #[test]
+    fn compose_partial_alpha_is_rounded_to_nearest() {
+        // opaque (20,40,60) picture, side-fill background (20,40,60); single interior pixels with their own alpha
+        let mut f = sparse(WIDTH, HEIGHT, &[]);
+        for p in f.chunks_exact_mut(4) {
+            p.copy_from_slice(&[20, 40, 60, 255]);
+        }
+        let set = |f: &mut Vec<u8>, x: usize, y: usize, px: [u8; 4]| f[(y * WIDTH + x) * 4..][..4].copy_from_slice(&px);
+        set(&mut f, 100, 100, [250, 10, 128, 100]);
+        set(&mut f, 101, 100, [255, 255, 255, 254]);
+        set(&mut f, 102, 100, [255, 255, 255, 1]);
+        set(&mut f, 103, 100, [128, 128, 128, 1]);
+        set(&mut f, 104, 100, [127, 127, 127, 1]);
+        // 1:1 in a window twice as wide, picture at x0 = WIDTH / 2
+        let out = compose(&f, 2 * WIDTH, HEIGHT, DisplayMode::SideFill);
+        let at = |x: usize| &out[(100 * 2 * WIDTH + WIDTH / 2 + x) * 4..][..4];
+        // (s*a + bg*(255-a) + 127) / 255 per channel, worked by hand
+        assert_eq!(at(100), &[110, 28, 87, 255][..]);
+        assert_eq!(at(101), &[254, 254, 254, 255][..]);
+        assert_eq!(at(102), &[21, 41, 61, 255][..]);
+        // the rounding term: (128 + 20*254 + 127)/255 = 21 with +127, 21 with +128 -- these two pin the .5 edge: n = 127 -> 0 with +127, 1 with +128
+        let mut g = sparse(WIDTH, HEIGHT, &[]);
+        for p in g.chunks_exact_mut(4) {
+            p.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        set(&mut g, 7, 7, [127, 127, 127, 1]);
+        set(&mut g, 8, 7, [128, 128, 128, 1]);
+        let o = compose(&g, WIDTH, HEIGHT, DisplayMode::Fit);
+        // (127*1 + 0*254 + 127)/255 = 0 (254/255), but with +128 it would be 1; (128 + 127)/255 = 1, without +127 it would be 0
+        assert_eq!(&o[(7 * WIDTH + 7) * 4..][..4], &[0, 0, 0, 255]);
+        assert_eq!(&o[(7 * WIDTH + 8) * 4..][..4], &[1, 1, 1, 255]);
+        let _ = (at(103), at(104));
+    }
+
+    /// A deterministic pseudo-random picture: every texel is different, so a one-texel shift of any sample point changes the output.
+    fn noise_frame() -> Vec<u8> {
+        let mut s = 0x9E37_79B9u32;
+        let mut f = Vec::with_capacity(WIDTH * HEIGHT * 4);
+        for _ in 0..WIDTH * HEIGHT {
+            for _ in 0..3 {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                f.push((s >> 24) as u8);
+            }
+            f.push(255);
+        }
+        f
+    }
+
+    #[test]
+    fn compose_bridge_is_pinned_on_noise() {
+        // see compose_bridge_is_pinned: every sample position and kernel tap matters on this picture
+        let f = noise_frame();
+        let mut got = Vec::new();
+        for (w, h) in [(640usize, 360usize), (400, 500), (300, 216), (211, 97), (100, 18), (1000, 36), (25, 19), (26, 18)] {
+            for fill in [BridgeFill::Off, BridgeFill::Colour, BridgeFill::Blur] {
+                got.push(fnv(&compose_bridge(&f, w, h, fill)));
+            }
+        }
+        let want: Vec<u64> = vec![
+            11874557248417483512, 11902828660258321364, 3955552042324344177, 11346715785299743367, 1366077491637955261, 12798927378604934352, 3574462564336687661, 12331715865879986115, 13747073093272899691, 13904132285520996794, 17295131000763183487, 4502574457107367778, 2222069142446841814, 9637906161902579645, 16157606295003066001, 1002928137741541572, 2246646071310370718, 383309623747252508,
+            8909105907851778006, 8909105907851778006, 8909105907851778006, 990943005705645604, 9601055432519064091, 14801219898315228905,
+        ];
+        assert_eq!(got, want);
     }
 }

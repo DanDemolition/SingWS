@@ -2145,6 +2145,9 @@ dependencies = [
 [[package]]
 name = "singws-cdg"
 version = "0.1.0"
+dependencies = [
+ "unicode-normalization",
+]
 
 [[package]]
 name = "singws-control"

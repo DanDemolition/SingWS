@@ -14,6 +14,8 @@ fn main() {
     // --compose WxH:fit|sidefill|stretch composes every frame into a window image
     let mut bridge_fill: Option<(usize, usize, BridgeFill)> = None;
     let mut compose_to: Option<(usize, usize, DisplayMode)> = None;
+    // --raw-in: FILE holds raw 300x216 RGBA frames instead of CDG packets (to feed --clean / --sidefill / --compose arbitrary pixels)
+    let mut raw_in = false;
     let mut ats = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -37,6 +39,9 @@ fn main() {
             let f = match m { "colour" => BridgeFill::Colour, "blur" => BridgeFill::Blur, _ => BridgeFill::Off };
             bridge_fill = Some((w.parse().unwrap(), h.parse().unwrap(), f));
             i += 2;
+        } else if args[i] == "--raw-in" {
+            raw_in = true;
+            i += 1;
         } else if args[i] == "--sidefill" {
             sidefill = true;
             i += 1;
@@ -48,10 +53,16 @@ fn main() {
     let mut buf = Vec::new();
     if ats.is_empty() {
         let mut d = CdgDecoder::new();
-        for p in data.chunks_exact(PACKET_BYTES) {
-            if d.apply(p) {
+        let frame_bytes = WIDTH * HEIGHT * 4;
+        let chunk = if raw_in { frame_bytes } else { PACKET_BYTES };
+        for p in data.chunks_exact(chunk) {
+            if raw_in || d.apply(p) {
                 buf.clear();
-                d.write_rgba(&mut buf);
+                if raw_in {
+                    buf.extend_from_slice(p);
+                } else {
+                    d.write_rgba(&mut buf);
+                }
                 if sidefill {
                     let (r, g, b) = side_fill_color(&buf, WIDTH, HEIGHT);
                     out.write_all(&[r, g, b]).unwrap();

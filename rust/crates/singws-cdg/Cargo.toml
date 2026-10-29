@@ -2,7 +2,7 @@
 name = "singws-cdg"
 version = "0.1.0"
 edition = "2024"
-description = "Stage E: a CD+G (karaoke graphics) decoder. Frame-exact against FFmpeg's cdgraphics decoder, which is what libmpv draws CDG with in the app. Pure Rust, no dependencies."
+description = "Stage E: a CD+G (karaoke graphics) decoder. Frame-exact against FFmpeg's cdgraphics decoder, which is what libmpv draws CDG with in the app. Pure Rust; the only dependency is unicode-normalization (NFC for the track-name port)."
 publish = false
 
 [lib]
@@ -16,3 +16,10 @@ path = "src/dump_cli.rs"
 [[bin]]
 name = "singws-window-cli"
 path = "src/window_cli.rs"
+
+[[bin]]
+name = "singws-track-display-cli"
+path = "src/track_display_cli.rs"
+
+[dependencies]
+unicode-normalization = "0.1"
