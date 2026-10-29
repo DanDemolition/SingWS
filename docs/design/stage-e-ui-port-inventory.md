@@ -103,6 +103,24 @@ Rank 20, size S each as QML; zero parity risk, all judged by eye (`--snapshot`).
 
 Not planned: phrase start (dead), library locations from remote (operator decision), duplicate manager (file moves; keep local and supervised), KaraFun automation dialogs.
 
+## 3c. Where Stage E stands (2026-10-29, after settings groups 1-3)
+
+Settings: 11 keys changeable through `settings.set` (groups 1-3); every other key reviewed and refused on purpose (docs/design/stage-e-settings-classification.md).
+**Network dialog:** its read side is the Settings tab (all 17 keys appear; `api_key` and `host_controls_pin` are masked by `settings_view::is_secret_key`, pinned by its tests). Its write side is
+secrets, URLs, location detection and sync threads, so it stays a local dialog by design (same reasoning as library locations). Nothing more to port.
+
+| Item | State | Why |
+|---|---|---|
+| Text/state view models (ticker, waitlist, hero, header, diagnostics, rows, history, music, EQ) | **done**, parity + mutation tested | |
+| Shell pages (Library, History, Rotation, Controls, Music, EQ, Settings, Ticker, Waitlist) and the commands behind them | **done** | |
+| Dialogs (key, speed, rename, brand priority, direct message, replace track, add, waitlist actions) | **done** | |
+| Settings | **done as far as the rules allow** (11 keys) | the rest restyle live windows, drive engines/workers or are secrets/URLs/paths |
+| Network, Library locations | **by design local** | secrets / files / threads |
+| Edit history song, edit waitlist metadata, search track editor | **not built**: need NEW write commands against the history store / song index | data-changing; needs the operator's decision and a backup-first design (see the 2026-09-29 history incident) |
+| Chat | **blocked**: the relay does not carry room chat | server work |
+| Duplicate song manager, KaraFun automation dialogs, phrase start | **not planned** | destructive file moves / macOS automation / dead code |
+| Audience window, preview, rotation screen, tickers, soundboard strip | **gated** (step 7) | native surfaces: only after the Rust video bridge presenter exists and a show has run clean on the TV (AGENTS rules 4 and 6) |
+
 ## 3b. Shell pages ported since (2026-10-27)
 
 | Page | Source of its data | Rules | Checked by |
