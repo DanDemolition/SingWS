@@ -1132,7 +1132,9 @@ mod tests {
         assert!(start_json(r#"{"op":"transport","kind":"zip","semitones":0}"#).is_err());
         assert!(start_json(r#"{"op":"transport","kind":"mp3"}"#).is_err());
         let r = start_json(r#"{"op":"zip_args","start":0,"pend_start":4.5,"duration":null,"pend_duration":120}"#).unwrap();
-        assert_eq!(r, r#"{"duration_seconds":120.0,"loop_seconds":null,"start_seconds":4.5}"#);
+        let got: serde_json::Value = serde_json::from_str(&r).unwrap();
+        let want: serde_json::Value = serde_json::from_str(r#"{"duration_seconds":120.0,"loop_seconds":null,"start_seconds":4.5}"#).unwrap();
+        assert_eq!(got, want);
     }
 
     #[test]
