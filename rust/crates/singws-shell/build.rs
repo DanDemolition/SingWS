@@ -14,6 +14,7 @@ fn main() {
         .file("src/waitlist_panel.rs")
         .file("src/eq_panel.rs")
         .file("src/cdg_demo.rs")
+        .file("src/video_demo.rs")
         .cpp_file("cpp/cdg_provider.cpp")
         .build();
 }

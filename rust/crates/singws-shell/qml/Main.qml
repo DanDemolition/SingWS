@@ -29,6 +29,7 @@ ApplicationWindow {
     KaraokeDisplay { id: display }
     Component.onCompleted: {
         if (win.arg("--display-demo") !== "") display.open(win.arg("--display-demo"))
+        if (win.arg("--display-demo-video") !== "") display.openVideo(win.arg("--display-demo-video"))
         if (win.arg("--tv") !== "") { tv.show(); if (win.arg("--tv") === "fullscreen") tv.visibility = Window.FullScreen }
     }
 

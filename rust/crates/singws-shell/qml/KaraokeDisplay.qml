@@ -23,6 +23,22 @@ Window {
     }
 
     CdgDemo { id: demo }
+    // video demo (--display-demo-video FILE): libmpv's software renderer through image://video; no sound
+    VideoDemo { id: vdemo }
+    property bool videoMode: false
+    property int videoSerial: 0
+    function openVideo(path) {
+        var at = arg("--display-at") !== "" ? parseFloat(arg("--display-at")) : -1
+        videoMode = vdemo.load(path, at)
+        loaded = videoMode
+        show()
+    }
+    Timer {
+        interval: 40
+        running: disp.visible && disp.videoMode
+        repeat: true
+        onTriggered: { vdemo.poll(); disp.videoSerial += 1 }
+    }
     // the audience ticker's text: the real rules (singws-uimodel::ticker, proven equal to the app's), read-only from queue.json / settings.json in SINGWS_HOME
     TickerPanel { id: tickerPanel }
     Timer { interval: 3000; running: disp.visible; repeat: true; triggeredOnStart: true; onTriggered: tickerPanel.refresh() }
@@ -45,7 +61,7 @@ Window {
     // the clock: a held moment, or real time looping over the file
     Timer {
         interval: 33
-        running: disp.visible && disp.loaded
+        running: disp.visible && disp.loaded && !disp.videoMode
         repeat: true
         triggeredOnStart: true
         onTriggered: {
@@ -64,14 +80,24 @@ Window {
         anchors.top: parent.top
         anchors.bottom: ticker.top
         Image {
-            id: pic
+            id: vpic
             anchors.fill: parent
-            visible: disp.loaded
+            visible: disp.videoMode
             fillMode: Image.PreserveAspectFit
             smooth: true
             cache: false
             asynchronous: false
-            source: disp.loaded ? "image://cdg/" + Math.floor(disp.positionMs) : ""
+            source: disp.videoMode ? "image://video/" + disp.videoSerial + "/960/540" : ""
+        }
+        Image {
+            id: pic
+            anchors.fill: parent
+            visible: disp.loaded && !disp.videoMode
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            cache: false
+            asynchronous: false
+            source: disp.loaded && !disp.videoMode ? "image://cdg/" + Math.floor(disp.positionMs) : ""
         }
         Text {
             anchors.centerIn: parent
