@@ -763,14 +763,6 @@
   },
   {
    "args": {
-    "key": "bg_to_karaoke_gap_sec",
-    "value": true
-   },
-   "ok": false,
-   "code": "unknown_setting"
-  },
-  {
-   "args": {
     "key": "filename_format",
     "value": true
    },
@@ -925,6 +917,86 @@
    "args": {
     "key": "rotation_padding_sec",
     "value": 1000000000000000000000000000000
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": -3
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 3
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 0
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": -1.5
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 1.0
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": -3.01
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": 3.01
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": "1"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": true
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "bg_to_karaoke_gap_sec",
+    "value": null
    },
    "ok": false,
    "code": "bad_value"

@@ -49,6 +49,10 @@ M = [
     ('            if key in self._SHELL_SETTINGS_QUEUE_REFRESH:', '            if key.startswith("rotation_estimate"):', None),
     ('    _SHELL_SETTINGS_QUEUE_REFRESH = frozenset({"rotation_estimate_include_all_songs", "rotation_padding_sec"})', '    _SHELL_SETTINGS_QUEUE_REFRESH = frozenset({"rotation_padding_sec"})', None),
     ('        "rotation_estimate_include_all_songs": {"type": "bool"},\n', '        "rotation_estimate_include_all_songs": {"type": "bool"},\n        "queue_mode": {"type": "text", "max_chars": 20},\n', None),
+    ('                self._transition_gap_sec = float(self.settings[key])', '                pass', None),
+    ('            if key == "bg_to_karaoke_gap_sec":', '            if key == "bg_to_karaoke":', None),
+    ('"bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 3.0},', '"bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 30.0},', None),
+    ('"bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 3.0},', '"bg_to_karaoke_gap_sec": {"type": "float", "min": 0.0, "max": 3.0},', None),
 ]
 
 

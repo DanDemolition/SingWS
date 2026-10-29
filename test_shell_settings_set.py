@@ -62,7 +62,7 @@ class SchemaTests(unittest.TestCase):
         keys = sorted(harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA)
         self.assertEqual(keys, sorted(["ticker_custom_enabled", "ticker_custom_message", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled",
                                        "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec", "ui_record_confirm",
-                                       "rotation_estimate_include_all_songs", "rotation_padding_sec"]))
+                                       "rotation_estimate_include_all_songs", "rotation_padding_sec", "bg_to_karaoke_gap_sec"]))
         for k in keys:
             for bad in ("key", "pin", "token", "password", "secret", "url", "user", "path", "color", "device", "output", "repo", "update"):
                 self.assertNotIn(bad, k)
@@ -125,6 +125,35 @@ class QueueEtaGroupTests(unittest.TestCase):
         h.app.update_queue_display = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
         self.assertEqual(run(h, {"key": "rotation_padding_sec", "value": 5}, "q7"), (True, "setting_changed"))
         self.assertEqual(h.app.settings["rotation_padding_sec"], 5)
+
+
+class TransitionGapTests(unittest.TestCase):
+    """Group 3: bg_to_karaoke_gap_sec. Stored as a float and mirrored into the live attribute the song start reads, exactly as the dialog does; nothing else is touched."""
+
+    def test_it_sets_the_setting_and_the_live_attribute(self):
+        h = harness(settings={"bg_to_karaoke_gap_sec": 0.0})
+        h.app._transition_gap_sec = 0.0
+        self.assertEqual(run(h, {"key": "bg_to_karaoke_gap_sec", "value": -1}, "g1"), (True, "setting_changed"))
+        self.assertIs(type(h.app.settings["bg_to_karaoke_gap_sec"]), float)
+        self.assertEqual((h.app.settings["bg_to_karaoke_gap_sec"], h.app._transition_gap_sec), (-1.0, -1.0))
+        self.assertEqual(run(h, {"key": "bg_to_karaoke_gap_sec", "value": -1.0}, "g2"), (True, "no_change"))
+        self.assertEqual([c for c in h.calls if c[0] in ("queue_display", "ticker_update")], [])
+
+    def test_dry_run_and_refusals_leave_the_attribute_alone(self):
+        d = harness(mode="dry_run", settings={"bg_to_karaoke_gap_sec": 0.0})
+        d.app._transition_gap_sec = 0.0
+        run(d, {"key": "bg_to_karaoke_gap_sec", "value": 2}, "g3")
+        h = harness(settings={"bg_to_karaoke_gap_sec": 0.0})
+        h.app._transition_gap_sec = 0.0
+        run(h, {"key": "bg_to_karaoke_gap_sec", "value": 3.5}, "g4")
+        self.assertEqual((d.app._transition_gap_sec, h.app._transition_gap_sec), (0.0, 0.0))
+
+    def test_the_range_is_the_dialogs_range(self):
+        src = (Path(__file__).parent / "0.2.18.1.py").read_text()
+        self.assertIn("bg_gap_spin.setRange(-3.0, 3.0)", src)
+        self.assertIn("self._transition_gap_sec = gap", src)
+        spec = harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA["bg_to_karaoke_gap_sec"]
+        self.assertEqual((spec["min"], spec["max"]), (-3.0, 3.0))
 
 
 class ApplyTests(unittest.TestCase):

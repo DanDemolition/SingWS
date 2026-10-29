@@ -50078,6 +50078,8 @@ class KaraokeApp(QWidget):
         # queue ETA text (group 2): the Settings dialog's handlers store the value, save and call update_queue_display(); so does shell_settings_set
         "rotation_estimate_include_all_songs": {"type": "bool"},
         "rotation_padding_sec": {"type": "int", "min": 0, "max": 600},
+        # group 3: seconds between the music fade-out and the karaoke start (negative = overlap). The dialog stores the value and sets the live attribute _transition_gap_sec, read at the next song start
+        "bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 3.0},
     }
     _SHELL_SETTINGS_QUEUE_REFRESH = frozenset({"rotation_estimate_include_all_songs", "rotation_padding_sec"})
 
@@ -50122,6 +50124,11 @@ class KaraokeApp(QWidget):
         try:
             if key.startswith("ticker_"):
                 self.schedule_ticker_update()
+        except Exception:
+            pass
+        try:
+            if key == "bg_to_karaoke_gap_sec":
+                self._transition_gap_sec = float(self.settings[key])
         except Exception:
             pass
         try:

@@ -105,6 +105,24 @@ Item {
                         selectByMouse: true
                         Accessible.name: "Seconds added per singer in the queue time estimate (0 to 600)"
                     }
+                    TextField {
+                        id: gapField
+                        visible: page.live && modelData.key === "bg_to_karaoke_gap_sec"
+                        implicitWidth: 64
+                        implicitHeight: 26
+                        text: modelData.value
+                        validator: DoubleValidator { bottom: -3.0; top: 3.0; decimals: 1; notation: DoubleValidator.StandardNotation }
+                        selectByMouse: true
+                        Accessible.name: "Seconds between the music fade-out and the karaoke start, negative means overlap (-3 to 3)"
+                    }
+                    Button {
+                        visible: gapField.visible
+                        text: "Set"
+                        implicitHeight: 26
+                        enabled: gapField.acceptableInput
+                        onClicked: page.setSetting("Set " + modelData.key, modelData.key, parseFloat(gapField.text))
+                        Accessible.name: "Save the music-to-karaoke gap"
+                    }
                     Button {
                         visible: paddingField.visible
                         text: "Set"
