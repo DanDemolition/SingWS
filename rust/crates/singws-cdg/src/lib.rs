@@ -14,6 +14,8 @@
 //! packet, so the picture at time `t` is the state after packet
 //! `floor(t * 300)` (see [`CdgPlayer::render_at`]).
 
+pub mod window_rules;
+
 pub const PACKET_BYTES: usize = 24;
 pub const PACKETS_PER_SECOND: f64 = 300.0;
 pub const WIDTH: usize = 300;
