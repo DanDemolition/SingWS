@@ -76,6 +76,9 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "unknown_singer" => ("That singer is no longer in the rotation".into(), "warn"),
         "unknown_entry" => ("That song is no longer in the queue".into(), "warn"),
         "unknown_request" => ("That request is no longer on the waitlist (it may have been added, removed or restored already); look at the Waitlist again".into(), "warn"),
+        "setting_changed" => ("Setting saved".into(), "ok"),
+        "unknown_setting" => ("The shell may not change that setting".into(), "warn"),
+        "bad_value" => ("That value is not allowed for this setting".into(), "warn"),
         "waitlist_added" => ("Request added to the rotation".into(), "ok"),
         "not_added" => ("That song could not be added from the local library. Use Replace or add it by hand".into(), "warn"),
         "add_error" => ("The app could not add that replacement song; look at the request in the app".into(), "warn"),
@@ -417,6 +420,9 @@ mod tests {
     #[test]
     fn waitlist_answers_are_plain_words() {
         for (code, ok, kind, text) in [
+            ("setting_changed", true, "ok", "Setting saved"),
+            ("unknown_setting", false, "warn", "The shell may not change that setting"),
+            ("bad_value", false, "warn", "That value is not allowed for this setting"),
             ("waitlist_added", true, "ok", "Request added to the rotation"),
             ("not_added", false, "warn", "That song could not be added from the local library"),
             ("add_error", false, "warn", "The app could not add that replacement"),

@@ -28972,7 +28972,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")) or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -34030,7 +34030,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):
+            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34341,7 +34341,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.")):
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "settings.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -50002,6 +50002,64 @@ class KaraokeApp(QWidget):
             self._persist_song_modifier_change(f"Speed {int(value)}% set for {name}" if int(value) != 100 else f"Speed reset for {name}")
         return True, "changed"
 
+    # The settings the shell may change. KEEP IN STEP with SETTINGS_SCHEMA in rust/crates/singws-control/src/protocol.rs (both are tested against docs/design/settings_set_cases.json).
+    # Only keys with no live effect on a native surface (the ticker's colour, size, speed, enabled flag, the rotation announcement, the backgrounds and every path are
+    # NOT here: their dialogs re-style or re-order live windows, which is never done from a remote) and never a secret: no key, PIN, URL, user or path.
+    _SHELL_SETTINGS_SCHEMA = {
+        "ticker_custom_enabled": {"type": "bool"},
+        "ticker_custom_message": {"type": "text", "max_chars": 200},
+        # read at the moment of use (checked in the code that reads each one), no apply hook in the Settings dialog, not a secret, a URL, a path or a device
+        "loudness_scan_holds_for_playback": {"type": "bool"},
+        "karaoke_auto_advance": {"type": "bool"},
+        "bg_end_silence_trim_enabled": {"type": "bool"},
+        "karaoke_bgm_crossfade_enabled": {"type": "bool"},
+        "end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 60.0},
+        "ui_record_confirm": {"type": "bool"},
+    }
+
+    @classmethod
+    def _shell_setting_value_ok(cls, key, value) -> bool:
+        spec = cls._SHELL_SETTINGS_SCHEMA.get(key) if isinstance(key, str) else None
+        if spec is None:
+            return False
+        if spec["type"] == "bool":
+            return isinstance(value, bool)
+        if spec["type"] == "float":
+            import math
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and spec["min"] <= value <= spec["max"]
+        if spec["type"] == "text":
+            import unicodedata
+            return isinstance(value, str) and len(value) <= spec["max_chars"] and not any(unicodedata.category(c) == "Cc" for c in value)
+        return False
+
+    def shell_settings_set(self, key, value, *, dry_run: bool = False) -> tuple[bool, str]:
+        """`settings.set` {key, value}: change one schema-listed setting, as the Ticker Settings dialog's OK would for its custom-message fields: store it, save settings.json,
+        drop the ticker's cached text and schedule the usual debounced ticker refresh (the text only: nothing is restyled or re-ordered)."""
+        if not isinstance(key, str) or key not in self._SHELL_SETTINGS_SCHEMA:
+            return False, "unknown_setting"
+        if not self._shell_setting_value_ok(key, value):
+            return False, "bad_value"
+        if key in self.settings and type(self.settings[key]) is type(value) and self.settings[key] == value:
+            return True, "no_change"
+        if dry_run:
+            return True, "dry_run: would change the setting"
+        self.settings[key] = float(value) if self._SHELL_SETTINGS_SCHEMA[key]["type"] == "float" else value
+        try:
+            self.save_settings()
+        except Exception as exc:
+            _diag(f"[SHELL-CMD] settings.set save failed key={key}: {exc}")
+        try:
+            if key.startswith("ticker_"):
+                object.__getattribute__(self, "__dict__").pop("_cached_ticker_data", None)
+        except Exception:
+            pass
+        try:
+            if key.startswith("ticker_"):
+                self.schedule_ticker_update()
+        except Exception:
+            pass
+        return True, "setting_changed"
+
     def shell_waitlist_change(self, action: str, request_id: int, *, dry_run: bool = False) -> tuple[bool, str]:
         """`waitlist.remove` / `waitlist.restore` / `waitlist.add` by request id: the "Waiting for add" page's Remove (clear), Restore and Add buttons, with no selection and no dialog.
         The request must be one the page would let the host act on (remove: waiting and not already queued or accepted; restore: removed tonight). Host actions are
@@ -50340,7 +50398,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "settings.set")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50431,6 +50489,12 @@ class KaraokeApp(QWidget):
                 return remember(False, "bad_enabled")
             try:
                 ok, code = self.shell_eq_set(target, gains, enabled, dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action == "settings.set":
+            try:
+                ok, code = self.shell_settings_set(args.get("key"), args.get("value"), dry_run=(mode == "dry_run"))
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)

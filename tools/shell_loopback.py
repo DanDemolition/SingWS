@@ -216,6 +216,24 @@ def scenario_the_shell_adds_removes_and_restores_waitlist_requests_through_the_r
         assert view["result"]["kind"] == "warn" and "no longer on the waitlist" in view["result"]["text"], view["result"]
 
 
+def scenario_the_shell_changes_the_ticker_message_and_cannot_touch_anything_else():
+    """settings.set through the real shell and relay into the app's REAL routine: the two ticker message settings change, the ticker text is refreshed; a secret key and an
+    over-long message are refused by the shell's own validator and never reach the wire."""
+    with cl.Stack("apply") as st:
+        script = [{"label": "Set message", "command": "settings.set", "args": {"key": "ticker_custom_message", "value": "Tip your host | %nextSinger"}},
+                  {"label": "Show message", "command": "settings.set", "args": {"key": "ticker_custom_enabled", "value": True}},
+                  {"label": "Steal the key", "command": "settings.set", "args": {"key": "api_key", "value": "x"}},
+                  {"label": "Too long", "command": "settings.set", "args": {"key": "ticker_custom_message", "value": "x" * 201}}]
+        view, p, _ = run_shell(st, script, snapshot_after=9000)
+        assert view is not None, p.stderr[-800:]
+        cmds = [c for c in commands_seen(st) if c["command"] == "settings.set"]
+        assert len(cmds) == 2, [c["args"] for c in cmds]  # the two refused ones never reached the wire
+        last, _ = st.app_events.wait_for(lambda e: e.get("event") == "after" and e["request_id"] == cmds[-1]["request_id"], timeout=5)
+        assert last["ticker_settings"] == {"enabled": True, "message": "Tip your host | %nextSinger", "api_key": "k"}, last["ticker_settings"]  # "k" is the stand-in's own key: the refused "x" never arrived
+        assert last["ticker_updates"] == 2, last["ticker_updates"]
+        assert view["result"]["kind"] in ("warn", "error") and "settings.set" in view["result"]["text"].lower() or "cannot be changed" in view["result"]["text"] or "not allowed" in view["result"]["text"], view["result"]
+
+
 def scenario_the_music_tab_follows_the_players_position_and_drives_the_background_music():
     """The real shell's Music tab over the real relay: the app says it is on track 2 of 4, so the played tracks hide; play/pause and volume reach the app."""
     import tempfile

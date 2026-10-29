@@ -157,6 +157,14 @@ async def main():
         if name.startswith(("_waiting_for_add_", "_pending_acceptance", "_format_waiting", "_is_waiting_for_add", "_remote_request_is_non_actionable")) and not hasattr(app, name):
             setattr(app, name, types.MethodType(getattr(m.KaraokeApp, name), app))
     app._shell_waitlist_summary = types.MethodType(m.KaraokeApp._shell_waitlist_summary, app)
+    # settings.set: the app's real schema and routine; the ticker refresh is recorded
+    app._SHELL_SETTINGS_SCHEMA = m.KaraokeApp._SHELL_SETTINGS_SCHEMA
+    app._shell_setting_value_ok = m.KaraokeApp._shell_setting_value_ok
+    app.shell_settings_set = types.MethodType(m.KaraokeApp.shell_settings_set, app)
+    ticker_updates = []
+    _prev_ticker_update = getattr(app, "schedule_ticker_update", None)
+    app.schedule_ticker_update = lambda: ticker_updates.append(1)
+    app.settings.update({"ticker_custom_enabled": False, "ticker_custom_message": "", "api_key": "KEEP-ME"})
     app._is_first_time_waitlist_singer = lambda name: name == "Ann"
     app._deferred_remote_request_ids = lambda: set()
     app._SHELL_QUEUE_ACTIONS = m.KaraokeApp._SHELL_QUEUE_ACTIONS
@@ -190,6 +198,7 @@ async def main():
                 "skipped": {s["singer_id"]: bool(s.get("skipped")) for s in app.queue},
                 "names": {s["singer_id"]: s["name"] for s in app.queue}, "brands": {s["singer_id"]: s.get("preferred_disc_priority") for s in app.queue},
                 "titles": {s["singer_id"]: [str(e.get("title") or e.get("song_info")) for e in s["songs"]] for s in app.queue}, "messages": list(sent_messages), "mods": {s["singer_id"]: [[e.get("key"), e.get("tempo_percent")] for e in s["songs"]] for s in app.queue}, "sig": app._queue_signature(), "played": list(played),
+                "ticker_updates": len(ticker_updates), "ticker_settings": {"enabled": app.settings.get("ticker_custom_enabled"), "message": app.settings.get("ticker_custom_message"), "api_key": app.settings.get("api_key")},
                 "waitlist": {"waiting": sorted(app._waiting_for_add_requests), "removed": sorted(app._waiting_for_add_removed_tonight), "events": list(waitlist_events)}}
 
     async def pump():

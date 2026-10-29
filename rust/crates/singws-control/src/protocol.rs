@@ -26,6 +26,55 @@ fn number(args: &Value, key: &str) -> Option<f64> {
     args.get(key).and_then(Value::as_f64).filter(|v| v.is_finite())
 }
 
+/// The settings the shell may change, with the shape of each value. KEEP IN STEP with `KaraokeApp._SHELL_SETTINGS_SCHEMA` (both are tested against
+/// docs/design/settings_set_cases.json). Only keys with no live side effect on a native surface and no secret: never a key, PIN, URL, user or path.
+pub const SETTINGS_SCHEMA: &[(&str, SettingKind)] = &[
+    ("ticker_custom_enabled", SettingKind::Bool),
+    ("ticker_custom_message", SettingKind::Text { max_chars: 200 }),
+    ("loudness_scan_holds_for_playback", SettingKind::Bool),
+    ("karaoke_auto_advance", SettingKind::Bool),
+    ("bg_end_silence_trim_enabled", SettingKind::Bool),
+    ("karaoke_bgm_crossfade_enabled", SettingKind::Bool),
+    ("end_silence_trim_threshold_sec", SettingKind::Float { min: 0.5, max: 60.0 }),
+    ("ui_record_confirm", SettingKind::Bool),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettingKind {
+    Bool,
+    /// text of at most `max_chars` characters with no control characters (empty clears)
+    Text { max_chars: usize },
+    /// a finite number from `min` to `max` (whole numbers are fine)
+    Float { min: f64, max: f64 },
+}
+
+fn validate_setting(args: &Value) -> Result<(), String> {
+    let key = args.get("key").and_then(Value::as_str).ok_or("key is required")?;
+    let Some((_, kind)) = SETTINGS_SCHEMA.iter().find(|(k, _)| *k == key) else {
+        return Err(format!("{key} cannot be changed from the shell"));
+    };
+    let value = args.get("value").ok_or("value is required")?;
+    match kind {
+        SettingKind::Bool => {
+            if !value.is_boolean() {
+                return Err(format!("{key} must be true or false"));
+            }
+        }
+        SettingKind::Float { min, max } => {
+            if !value.is_number() || !value.as_f64().is_some_and(|v| v.is_finite() && (*min..=*max).contains(&v)) {
+                return Err(format!("{key} must be a number from {min} to {max}"));
+            }
+        }
+        SettingKind::Text { max_chars } => {
+            let Some(t) = value.as_str() else { return Err(format!("{key} must be text")) };
+            if t.chars().count() > *max_chars || t.chars().any(char::is_control) {
+                return Err(format!("{key} must be at most {max_chars} characters with no control characters"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse anything the app would reject for its shape, so a bug in the shell can never put a malformed command on the wire.
 pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
     if !(args.is_object() || args.is_null()) {
@@ -82,6 +131,7 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
             need(text(args, "entry_id").is_some(), "entry_id is required")?;
             need(args.get("song_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "song_id must be a whole number from the library search")
         }
+        "settings.set" => validate_setting(args).map_err(|e| format!("{command}: {e}")),
         "waitlist.remove" | "waitlist.restore" | "waitlist.add" => need(args.get("request_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "request_id must be a whole number, 1 or more"),
         "bg.next" => Ok(()),
         "bg.play_track" => {
@@ -268,6 +318,26 @@ pub fn browser_url(ws_url: &str, user: &str, token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_set_agrees_with_the_shared_case_table() {
+        let table: Value = serde_json::from_str(include_str!("../../../../docs/design/settings_set_cases.json")).unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() > 30);
+        for c in cases {
+            let ok = c["ok"].as_bool().unwrap();
+            assert_eq!(validate_command("settings.set", &c["args"]).is_ok(), ok, "{}", c["args"]);
+        }
+    }
+
+    #[test]
+    fn the_settings_schema_never_holds_a_secret_or_a_surface_setting() {
+        for (k, _) in SETTINGS_SCHEMA {
+            for bad in ["key", "pin", "token", "password", "secret", "url", "user", "path", "color", "device", "output", "repo", "update"] {
+                assert!(!k.contains(bad), "{k} looks like {bad}");
+            }
+        }
+    }
 
     #[test]
     fn request_ids_are_unique_and_sort_by_creation() {
