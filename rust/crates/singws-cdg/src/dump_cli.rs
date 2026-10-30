@@ -1,7 +1,7 @@
 //! `singws-cdg-dump FILE.cdg` writes one raw RGBA 300x216 frame per packet that yields a frame to
 //! stdout (what FFmpeg's rawvideo output gives), for the differential test.
 //! `singws-cdg-dump FILE.cdg --at SECONDS [--at ...]` writes only those frames.
-use singws_cdg::{CdgDecoder, CdgPlayer, HEIGHT, PACKET_BYTES, WIDTH, BridgeFill, DisplayMode, clean_near_black, compose_bridge, compose, side_fill_color};
+use singws_cdg::{BgFrame, BgVideo, CdgDecoder, CdgPlayer, HEIGHT, PACKET_BYTES, WIDTH, BridgeFill, DisplayMode, clean_near_black, compose_bridge, compose_bridge_background, compose, side_fill_color};
 use std::io::Write;
 
 fn main() {
@@ -16,6 +16,11 @@ fn main() {
     let mut compose_to: Option<(usize, usize, DisplayMode)> = None;
     // --raw-in: FILE holds raw 300x216 RGBA frames instead of CDG packets (to feed --clean / --sidefill / --compose arbitrary pixels)
     let mut raw_in = false;
+    // --bg FILE:WxH [--bg-opacity F] [--bg-prev FILE:WxH --bg-prev-opacity F --bg-mix F]: with --bridge, compose over a background animation (shader modes 4 and 5);
+    // the files hold raw RGBA frames
+    let mut bg_file: Option<(String, usize, usize)> = None;
+    let mut bg_prev: Option<(String, usize, usize)> = None;
+    let (mut bg_opacity, mut bg_prev_opacity, mut bg_mix) = (1.0f32, 0.0f32, 1.0f32);
     let mut ats = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -38,6 +43,21 @@ fn main() {
             let (w, h) = dim.split_once('x').expect("WxH");
             let f = match m { "colour" => BridgeFill::Colour, "blur" => BridgeFill::Blur, _ => BridgeFill::Off };
             bridge_fill = Some((w.parse().unwrap(), h.parse().unwrap(), f));
+            i += 2;
+        } else if args[i] == "--bg" || args[i] == "--bg-prev" {
+            let (f, dim) = args[i + 1].rsplit_once(':').expect("FILE:WxH");
+            let (w, h) = dim.split_once('x').expect("WxH");
+            let v = Some((f.to_string(), w.parse().unwrap(), h.parse().unwrap()));
+            if args[i] == "--bg" { bg_file = v } else { bg_prev = v }
+            i += 2;
+        } else if args[i] == "--bg-opacity" {
+            bg_opacity = args[i + 1].parse().unwrap();
+            i += 2;
+        } else if args[i] == "--bg-prev-opacity" {
+            bg_prev_opacity = args[i + 1].parse().unwrap();
+            i += 2;
+        } else if args[i] == "--bg-mix" {
+            bg_mix = args[i + 1].parse().unwrap();
             i += 2;
         } else if args[i] == "--raw-in" {
             raw_in = true;
@@ -89,7 +109,21 @@ fn main() {
                 buf = compose(&buf, w, h, m);
             }
             if let Some((w, h, f)) = bridge_fill {
-                buf = compose_bridge(&buf, w, h, f);
+                buf = match &bg_file {
+                    Some((file, bw, bh)) => {
+                        let cur = std::fs::read(file).expect("read bg");
+                        let prev = bg_prev.as_ref().map(|(f, w, h)| (std::fs::read(f).expect("read bg-prev"), *w, *h));
+                        let video = BgVideo {
+                            current: BgFrame { rgba: &cur, w: *bw, h: *bh },
+                            opacity: bg_opacity,
+                            previous: prev.as_ref().map(|(d, w, h)| BgFrame { rgba: d, w: *w, h: *h }),
+                            previous_opacity: bg_prev_opacity,
+                            mix: bg_mix,
+                        };
+                        compose_bridge_background(&buf, w, h, &video)
+                    }
+                    None => compose_bridge(&buf, w, h, f),
+                };
             }
             out.write_all(&buf).unwrap();
         }

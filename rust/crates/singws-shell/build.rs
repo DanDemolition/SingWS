@@ -16,6 +16,9 @@ fn main() {
         .file("src/eq_panel.rs")
         .file("src/cdg_demo.rs")
         .file("src/video_demo.rs")
+        .file("src/idle_panel.rs")
+        .file("src/placement_panel.rs")
         .cpp_file("cpp/cdg_provider.cpp")
+        .cpp_file("cpp/screens.cpp")
         .build();
 }

@@ -15,6 +15,7 @@
 //! `floor(t * 300)` (see [`CdgPlayer::render_at`]).
 
 pub mod window_rules;
+pub mod idle_overlay;
 pub mod track_display;
 
 pub const PACKET_BYTES: usize = 24;
@@ -374,19 +375,24 @@ pub enum BridgeFill {
     Blur,
 }
 
-fn texel(src: &[u8], x: i32, y: i32) -> [f32; 3] {
-    let (x, y) = (x.clamp(0, WIDTH as i32 - 1) as usize, y.clamp(0, HEIGHT as i32 - 1) as usize);
-    let o = (y * WIDTH + x) * 4;
+/// GL_LINEAR with clamp-to-edge on the 300x216 picture; `u` across, `v` down (0 = top row).
+fn bilinear(src: &[u8], u: f32, v: f32) -> [f32; 3] {
+    bilinear_wh(src, WIDTH, HEIGHT, u, v)
+}
+
+fn texel_wh(src: &[u8], w: usize, h: usize, x: i32, y: i32) -> [f32; 3] {
+    let (x, y) = (x.clamp(0, w as i32 - 1) as usize, y.clamp(0, h as i32 - 1) as usize);
+    let o = (y * w + x) * 4;
     [src[o] as f32 / 255.0, src[o + 1] as f32 / 255.0, src[o + 2] as f32 / 255.0]
 }
 
-/// GL_LINEAR with clamp-to-edge on the 300x216 picture; `u` across, `v` down (0 = top row).
-fn bilinear(src: &[u8], u: f32, v: f32) -> [f32; 3] {
-    let (fx, fy) = (u * WIDTH as f32 - 0.5, v * HEIGHT as f32 - 0.5);
+/// GL_LINEAR with clamp-to-edge on any RGBA picture (the bridge's background-video texture).
+fn bilinear_wh(src: &[u8], w: usize, h: usize, u: f32, v: f32) -> [f32; 3] {
+    let (fx, fy) = (u * w as f32 - 0.5, v * h as f32 - 0.5);
     let (x0, y0) = (fx.floor(), fy.floor());
     let (tx, ty) = (fx - x0, fy - y0);
     let (x0, y0) = (x0 as i32, y0 as i32);
-    let (a, b, c, d) = (texel(src, x0, y0), texel(src, x0 + 1, y0), texel(src, x0, y0 + 1), texel(src, x0 + 1, y0 + 1));
+    let (a, b, c, d) = (texel_wh(src, w, h, x0, y0), texel_wh(src, w, h, x0 + 1, y0), texel_wh(src, w, h, x0, y0 + 1), texel_wh(src, w, h, x0 + 1, y0 + 1));
     let mut o = [0.0; 3];
     for i in 0..3 {
         o[i] = (a[i] * (1.0 - tx) + b[i] * tx) * (1.0 - ty) + (c[i] * (1.0 - tx) + d[i] * tx) * ty;
@@ -401,6 +407,25 @@ fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Whether the window pixel (`px`, `py`) is covered by the fit quad (the 300x216 picture, aspect kept, centred) in a `w` x `h` window. OpenGL covers a
+/// pixel when its centre is inside the quad and, when the centre lies exactly on an edge, the left (and top) edge counts and the right (and bottom) edge
+/// does not: found on a 1554x666 window, where the quad is exactly 925 pixels wide and its right edge falls on a pixel centre (the pixel in that
+/// column is not drawn). Exact integer arithmetic, so the tie is decided and not left to float rounding.
+fn fit_quad_covers(px: usize, py: usize, w: usize, h: usize) -> bool {
+    let (px, py, w, h) = (px as i64, py as i64, w as i64, h as i64);
+    let (pw, ph) = (WIDTH as i64, HEIGHT as i64);
+    if ph * w > pw * h {
+        // wider than the picture: full height, width h * 300 / 216 centred: compare 2 * (px + 1/2) with w -+ that width, scaled by 2 * ph
+        let c = 2 * ph * (2 * px + 1);
+        c >= 2 * ph * w - 2 * pw * h && c < 2 * ph * w + 2 * pw * h
+    } else if ph * w < pw * h {
+        let c = 2 * pw * (2 * py + 1);
+        c >= 2 * pw * h - 2 * ph * w && c < 2 * pw * h + 2 * ph * w
+    } else {
+        true
+    }
 }
 
 /// The output window as the Rust video bridge's shader draws a CDG song (RGB only: the shader ignores the picture's alpha). Mirrors
@@ -457,7 +482,7 @@ pub fn compose_bridge(frame: &[u8], win_w: usize, win_h: usize, fill: BridgeFill
             }
             // foreground: the fit quad, nearest sampling
             let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);
-            if nx.abs() <= sx && ny.abs() <= sy {
+            if fit_quad_covers(px, py, win_w, win_h) {
                 let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);
                 let (tx, ty) = (((fu * WIDTH as f32) as usize).min(WIDTH - 1), ((fv * HEIGHT as f32) as usize).min(HEIGHT - 1));
                 let o = (ty * WIDTH + tx) * 4;
@@ -465,6 +490,87 @@ pub fn compose_bridge(frame: &[u8], win_w: usize, win_h: usize, fill: BridgeFill
                 let a = if fill == BridgeFill::Off { 1.0 } else { smoothstep(0.0, 6.0 / 300.0, fu) * smoothstep(0.0, 6.0 / 300.0, 1.0 - fu) };
                 for k in 0..3 {
                     rgb[k] = fg[k] * a + rgb[k] * (1.0 - a);
+                }
+            }
+            out.extend_from_slice(&[to8(rgb[0]), to8(rgb[1]), to8(rgb[2]), 255]);
+        }
+    }
+    out
+}
+
+/// One decoded frame of the bridge's background animation (the 16:9 texture the second libmpv core renders into), RGBA, top row first.
+pub struct BgFrame<'a> {
+    pub rgba: &'a [u8],
+    pub w: usize,
+    pub h: usize,
+}
+
+/// The bridge's background-video state for one picture (`draw_picture` with `background_active`): the animation's opacity, and while a new animation
+/// dissolves in over the old one, the previous frame with its own opacity and the crossfade mix (1.0 = the new one only).
+pub struct BgVideo<'a> {
+    pub current: BgFrame<'a>,
+    pub opacity: f32,
+    pub previous: Option<BgFrame<'a>>,
+    pub previous_opacity: f32,
+    pub mix: f32,
+}
+
+/// The output window when a CDG song plays over a background video (the shader's modes 4 and 5, which replace every widescreen fill). Pass 1 (mode 4)
+/// stretches the animation over the whole window, with no crop and no aspect ratio kept, scaled by its opacity (black shows through below 1.0), the
+/// previous animation fading out as `previous * previous_opacity * (1 - mix)`. Pass 2 (mode 5) draws the fit CDG picture with its backdrop keyed out:
+/// the picture's backdrop colours are the corner samples of the border (3,6 / 297,6 / 3,210 / 297,210 in picture pixels) and of the tile area (12,18 /
+/// 288,18 / 12,198 / 288,198), each the one closest to the other three; a pixel whose colour is within 0.16 of the border, tile or panel backdrop (within
+/// 0.28 when its red is below 0.20) is not drawn, everything else is drawn opaque. The picture is sampled nearest.
+pub fn compose_bridge_background(frame: &[u8], win_w: usize, win_h: usize, bg: &BgVideo) -> Vec<u8> {
+    let (w, h) = (win_w as f32, win_h as f32);
+    let sa = WIDTH as f32 / HEIGHT as f32;
+    let va = w / h;
+    let (sx, sy) = if va > sa { (sa / va, 1.0) } else { (1.0, va / sa) };
+    let nearest = |u: f32, v: f32| -> [f32; 3] {
+        let (tx, ty) = (((u * WIDTH as f32) as usize).min(WIDTH - 1), ((v * HEIGHT as f32) as usize).min(HEIGHT - 1));
+        let o = (ty * WIDTH + tx) * 4;
+        [frame[o] as f32 / 255.0, frame[o + 1] as f32 / 255.0, frame[o + 2] as f32 / 255.0]
+    };
+    // the closest-to-the-others corner colour, ties to the earlier corner (the shader's `if (s1 < best)` chain)
+    let pick = |c: [[f32; 3]; 4]| -> [f32; 3] {
+        let sums: Vec<f32> = (0..4).map(|i| (0..4).filter(|&j| j != i).map(|j| dist(c[i], c[j])).sum()).collect();
+        let (mut k, mut best) = (0, sums[0]);
+        for i in 1..4 {
+            if sums[i] < best {
+                k = i;
+                best = sums[i];
+            }
+        }
+        c[k]
+    };
+    let (lx, rx, ty, by) = (0.0 + 1.0 * (3.0f32 / 300.0), 0.0 + 1.0 * (297.0f32 / 300.0), 6.0f32 / 216.0, 210.0f32 / 216.0);
+    let border = pick([nearest(lx, ty), nearest(rx, ty), nearest(lx, by), nearest(rx, by)]);
+    let (lx, rx, ty, by) = (0.0 + 1.0 * (12.0f32 / 300.0), 0.0 + 1.0 * (288.0f32 / 300.0), 18.0f32 / 216.0, 198.0f32 / 216.0);
+    let inner = [nearest(lx, ty), nearest(rx, ty), nearest(lx, by), nearest(rx, by)];
+    let tile = pick(inner);
+    let panel = if dist(inner[2], inner[3]) < 0.10 { inner[2] } else { tile };
+    let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    let mut out = Vec::with_capacity(win_w * win_h * 4);
+    for py in 0..win_h {
+        for px in 0..win_w {
+            let (ux, uy) = ((px as f32 + 0.5) / w, (py as f32 + 0.5) / h);
+            let new = bilinear_wh(bg.current.rgba, bg.current.w, bg.current.h, ux, uy);
+            let old = match &bg.previous {
+                Some(p) => bilinear_wh(p.rgba, p.w, p.h, ux, uy),
+                None => [0.0; 3],
+            };
+            let prev_op = if bg.previous.is_some() { bg.previous_opacity } else { 0.0 };
+            let mut rgb = [0.0f32; 3];
+            for k in 0..3 {
+                rgb[k] = old[k] * prev_op * (1.0 - bg.mix) + new[k] * bg.opacity;
+            }
+            let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);
+            if fit_quad_covers(px, py, win_w, win_h) {
+                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);
+                let fg = nearest(fu, fv);
+                let delta = dist(fg, border).min(dist(fg, tile).min(dist(fg, panel)));
+                if !(delta < 0.16 || (fg[0] < 0.20 && delta < 0.28)) {
+                    rgb = fg;
                 }
             }
             out.extend_from_slice(&[to8(rgb[0]), to8(rgb[1]), to8(rgb[2]), 255]);
@@ -540,6 +646,166 @@ impl CdgPlayer {
 
 #[cfg(test)]
 mod tests {
+    fn solid(w: usize, h: usize, rgb: [u8; 3]) -> Vec<u8> {
+        (0..w * h).flat_map(|_| [rgb[0], rgb[1], rgb[2], 255]).collect()
+    }
+
+    fn px(img: &[u8], w: usize, x: usize, y: usize) -> [u8; 3] {
+        let o = (y * w + x) * 4;
+        [img[o], img[o + 1], img[o + 2]]
+    }
+
+    #[test]
+    fn background_video_replaces_the_picture_backdrop_and_keeps_the_lyrics() {
+        let mut pic = solid(WIDTH, HEIGHT, [10, 20, 30]);
+        // two lyric pixels in the tile area, and a dark one the shader still keys out
+        for (x, y, c) in [(100usize, 100usize, [255u8, 255, 255]), (101, 100, [10, 20, 200])] {
+            let o = (y * WIDTH + x) * 4;
+            pic[o..o + 3].copy_from_slice(&c);
+        }
+        let bg = solid(64, 36, [100, 150, 200]);
+        let v = BgVideo { current: BgFrame { rgba: &bg, w: 64, h: 36 }, opacity: 0.5, previous: None, previous_opacity: 0.0, mix: 1.0 };
+        let out = compose_bridge_background(&pic, WIDTH, HEIGHT, &v);
+        assert_eq!(px(&out, WIDTH, 5, 5), [50, 75, 100], "backdrop pixels show the animation at half opacity");
+        assert_eq!(px(&out, WIDTH, 100, 100), [255, 255, 255]);
+        assert_eq!(px(&out, WIDTH, 101, 100), [10, 20, 200]);
+        assert_eq!(px(&out, WIDTH, 102, 100), [50, 75, 100]);
+        // a window of another shape: the animation covers all of it, the picture is fitted and keyed
+        let wide = compose_bridge_background(&pic, 600, 216, &v);
+        assert_eq!(px(&wide, 600, 3, 3), [50, 75, 100]);
+        assert_eq!(px(&wide, 600, 300, 100), [50, 75, 100]);
+        assert_eq!(px(&wide, 600, 150 + 100, 100), [255, 255, 255]);
+    }
+
+    #[test]
+    fn keying_thresholds() {
+        // black backdrop; the animation is white so a keyed-out pixel shows white and a drawn one shows its own colour
+        let white = solid(4, 4, [255, 255, 255]);
+        let v = BgVideo { current: BgFrame { rgba: &white, w: 4, h: 4 }, opacity: 1.0, previous: None, previous_opacity: 0.0, mix: 1.0 };
+        let mut pic = solid(WIDTH, HEIGHT, [0, 0, 0]);
+        // reds around the 0.16 / 0.20 / 0.28 limits, and colours the dark-red rule (red under 0.20, delta under 0.28) does and does not reach
+        let cases: [[u8; 3]; 8] = [[40, 0, 0], [41, 0, 0], [48, 0, 0], [51, 0, 0], [0, 41, 0], [0, 0, 80], [200, 0, 0], [0, 120, 0]];
+        let expect_drawn = |c: [u8; 3]| -> bool {
+            let d = ((c[0] as f32 / 255.0).powi(2) + (c[1] as f32 / 255.0).powi(2) + (c[2] as f32 / 255.0).powi(2)).sqrt();
+            !(d < 0.16 || (c[0] as f32 / 255.0 < 0.20 && d < 0.28))
+        };
+        for (n, c) in cases.iter().enumerate() {
+            let o = (100 * WIDTH + 60 + n * 10) * 4;
+            pic[o..o + 3].copy_from_slice(c);
+        }
+        let out = compose_bridge_background(&pic, WIDTH, HEIGHT, &v);
+        for (n, c) in cases.iter().enumerate() {
+            let got = px(&out, WIDTH, 60 + n * 10, 100);
+            let want = if expect_drawn(*c) { *c } else { [255, 255, 255] };
+            assert_eq!(got, want, "pixel {c:?}");
+        }
+    }
+
+    #[test]
+    fn keying_reads_the_backdrop_at_exact_pixels() {
+        let white = solid(4, 4, [255, 255, 255]);
+        let v = BgVideo { current: BgFrame { rgba: &white, w: 4, h: 4 }, opacity: 1.0, previous: None, previous_opacity: 0.0, mix: 1.0 };
+        let put = |pic: &mut Vec<u8>, x: usize, y: usize, c: [u8; 3]| {
+            let o = (y * WIDTH + x) * 4;
+            pic[o..o + 3].copy_from_slice(&c);
+        };
+        // the border samples (3,6) (297,6) (3,210) (297,210) and the inner ones (12,18) (288,18) (12,198) (288,198), with the picture black everywhere
+        // else: a lyric pixel of the sampled colour must be keyed out (shown as the white animation), which only happens when each sample hits its pixel
+        for (set, probe) in [([(3, 6), (297, 6), (3, 210), (297, 210)], [200u8, 0, 0]), ([(12, 18), (288, 18), (12, 198), (288, 198)], [0u8, 200, 0])] {
+            // all four samples carry the colour except one that differs (the closest-to-the-others rule picks the common colour)
+            let mut pic = solid(WIDTH, HEIGHT, [0, 0, 0]);
+            for (i, (x, y)) in set.iter().enumerate() {
+                put(&mut pic, *x, *y, if i == 3 { [0, 0, 200] } else { probe });
+            }
+            put(&mut pic, 150, 100, probe);
+            let out = compose_bridge_background(&pic, WIDTH, HEIGHT, &v);
+            assert_eq!(px(&out, WIDTH, 150, 100), [255, 255, 255], "samples {set:?} must be read at exactly those pixels");
+            // the neighbours of the sample pixels are not read: the sample pixels themselves (colour `probe`) are keyed too
+            for (x, y) in set.iter().take(3) {
+                assert_eq!(px(&out, WIDTH, *x, *y), [255, 255, 255]);
+            }
+        }
+    }
+
+    #[test]
+    fn tied_backdrop_corners_pick_the_first() {
+        // border samples A A B B: every corner's distance sum ties, the shader keeps the first (A); inner samples are far from both
+        let white = solid(4, 4, [255, 255, 255]);
+        let v = BgVideo { current: BgFrame { rgba: &white, w: 4, h: 4 }, opacity: 1.0, previous: None, previous_opacity: 0.0, mix: 1.0 };
+        let mut pic = solid(WIDTH, HEIGHT, [0, 90, 0]);
+        let put = |pic: &mut Vec<u8>, x: usize, y: usize, c: [u8; 3]| {
+            let o = (y * WIDTH + x) * 4;
+            pic[o..o + 3].copy_from_slice(&c);
+        };
+        let (a, b) = ([200u8, 0, 0], [0u8, 0, 200]);
+        put(&mut pic, 3, 6, a);
+        put(&mut pic, 297, 6, a);
+        put(&mut pic, 3, 210, b);
+        put(&mut pic, 297, 210, b);
+        put(&mut pic, 100, 100, a);
+        put(&mut pic, 101, 100, b);
+        let out = compose_bridge_background(&pic, WIDTH, HEIGHT, &v);
+        assert_eq!(px(&out, WIDTH, 100, 100), [255, 255, 255], "A is the backdrop and is keyed out");
+        assert_eq!(px(&out, WIDTH, 101, 100), b, "B is not, and is drawn");
+    }
+
+    #[test]
+    fn quad_edges_follow_the_gl_fill_rule() {
+        // 1554x666: the picture is exactly 925 wide, from 314.5 to 1239.5, so both edges fall on pixel centres: the left one is drawn, the right one not
+        assert!(!fit_quad_covers(313, 100, 1554, 666) && fit_quad_covers(314, 100, 1554, 666));
+        assert!(fit_quad_covers(1238, 100, 1554, 666) && !fit_quad_covers(1239, 100, 1554, 666));
+        // full height in a wide window, full width in a tall one, everything when the aspect matches
+        assert!(fit_quad_covers(700, 0, 1554, 666) && fit_quad_covers(700, 665, 1554, 666));
+        assert!(fit_quad_covers(0, 400, 401, 1006) && fit_quad_covers(400, 400, 401, 1006));
+        assert!(!fit_quad_covers(0, 100, 401, 1006) && !fit_quad_covers(0, 900, 401, 1006));
+        assert!(fit_quad_covers(0, 0, 300, 216) && fit_quad_covers(299, 215, 300, 216));
+        // the same rule in compose_bridge_background: a keyed-out picture leaves the animation's colour at the right-edge column but a drawn one does not
+        let mut pic = solid(WIDTH, HEIGHT, [0, 0, 0]);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                if x == WIDTH - 20 {
+                    let o = (y * WIDTH + x) * 4;
+                    pic[o..o + 3].copy_from_slice(&[255, 0, 0]);
+                }
+            }
+        }
+        let white = solid(4, 4, [255, 255, 255]);
+        let v = BgVideo { current: BgFrame { rgba: &white, w: 4, h: 4 }, opacity: 1.0, previous: None, previous_opacity: 0.0, mix: 1.0 };
+        let out = compose_bridge_background(&pic, 1554, 666, &v);
+        assert_eq!(px(&out, 1554, 1239, 300), [255, 255, 255]);
+        let out = compose_bridge(&pic, 1554, 666, BridgeFill::Off);
+        assert_eq!(px(&out, 1554, 1239, 300), [0, 0, 0], "outside the quad: black, and the picture's last column ends at 1238");
+        assert_eq!(px(&out, 1554, 1238, 300), [0, 0, 0]);
+    }
+
+    #[test]
+    fn crossfade_mixes_the_previous_animation_out() {
+        let pic = solid(WIDTH, HEIGHT, [0, 0, 0]);
+        let red = solid(4, 4, [200, 0, 0]);
+        let green = solid(4, 4, [0, 100, 0]);
+        let v = BgVideo { current: BgFrame { rgba: &green, w: 4, h: 4 }, opacity: 1.0, previous: Some(BgFrame { rgba: &red, w: 4, h: 4 }), previous_opacity: 1.0, mix: 0.25 };
+        assert_eq!(px(&compose_bridge_background(&pic, WIDTH, HEIGHT, &v), WIDTH, 2, 2), [150, 100, 0]);
+        // the previous opacity scales its share, and a previous animation without a frame counts as nothing
+        let v2 = BgVideo { previous_opacity: 0.5, ..v };
+        assert_eq!(px(&compose_bridge_background(&pic, WIDTH, HEIGHT, &v2), WIDTH, 2, 2), [75, 100, 0]);
+        let v3 = BgVideo { previous: None, previous_opacity: 1.0, mix: 0.0, ..v2 };
+        assert_eq!(px(&compose_bridge_background(&pic, WIDTH, HEIGHT, &v3), WIDTH, 2, 2), [0, 100, 0]);
+    }
+
+    #[test]
+    fn the_animation_is_stretched_bilinearly_to_the_window() {
+        // a horizontal ramp 0..255 over 4 texels: window pixels between texel centres interpolate
+        let ramp: Vec<u8> = (0..4).flat_map(|x| [x * 85, x * 85, x * 85, 255]).collect();
+        let pic = solid(WIDTH, HEIGHT, [0, 0, 0]);
+        let v = BgVideo { current: BgFrame { rgba: &ramp, w: 4, h: 1 }, opacity: 1.0, previous: None, previous_opacity: 0.0, mix: 1.0 };
+        let out = compose_bridge_background(&pic, 8, 2, &v);
+        // window x=0 centre is u = 1/16: left of the first texel centre (1/8): clamp to texel 0
+        assert_eq!(px(&out, 8, 0, 0), [0, 0, 0]);
+        // window x=2 centre is u = 5/16 = between texel centres 3/8 (texel 1) and 1/8 (texel 0): 0.5 of the way... exactly 0.5 between 0 and 85
+        assert_eq!(px(&out, 8, 2, 0)[0], 64);
+        assert_eq!(px(&out, 8, 7, 1), [255, 255, 255]);
+    }
+
     use super::*;
 
     fn pk(inst: u8, data: &[u8]) -> Vec<u8> {
@@ -940,9 +1206,10 @@ mod tests {
                 got.push(fnv(&compose_bridge(&f, w, h, fill)));
             }
         }
+        // (100, 18), (25, 19) and (26, 18) have their quad edges on pixel centres: the left/top edge pixel is drawn, the right/bottom one is not (see
+        // fit_quad_covers); every other window is unchanged by that rule
         let want: Vec<u64> = vec![
-            11874557248417483512, 11902828660258321364, 3955552042324344177, 11346715785299743367, 1366077491637955261, 12798927378604934352, 3574462564336687661, 12331715865879986115, 13747073093272899691, 13904132285520996794, 17295131000763183487, 4502574457107367778, 2222069142446841814, 9637906161902579645, 16157606295003066001, 1002928137741541572, 2246646071310370718, 383309623747252508,
-            8909105907851778006, 8909105907851778006, 8909105907851778006, 990943005705645604, 9601055432519064091, 14801219898315228905,
+            11874557248417483512, 11902828660258321364, 3955552042324344177, 11346715785299743367, 1366077491637955261, 12798927378604934352, 3574462564336687661, 12331715865879986115, 13747073093272899691, 13904132285520996794, 17295131000763183487, 4502574457107367778, 9256136854640342143, 9637906161902579645, 16157606295003066001, 1002928137741541572, 2246646071310370718, 383309623747252508, 9150065405374326612, 2466199957908382145, 11996356855741344074, 781250813190250917, 9601055432519064091, 14801219898315228905,
         ];
         assert_eq!(got, want);
     }

@@ -1,6 +1,8 @@
 //! singws-shell: the Rust-owned Qt Quick shell (Stage E). READ-ONLY panel 1: song library search.
 mod cdg_demo;
 mod video_demo;
+mod idle_panel;
+mod placement_panel;
 mod control_panel;
 mod eq_panel;
 mod history_panel;

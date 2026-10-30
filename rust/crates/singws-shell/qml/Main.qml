@@ -30,6 +30,9 @@ ApplicationWindow {
     Component.onCompleted: {
         if (win.arg("--display-demo") !== "") display.open(win.arg("--display-demo"))
         if (win.arg("--display-demo-video") !== "") display.openVideo(win.arg("--display-demo-video"))
+        if (Qt.application.arguments.indexOf("--display-idle") >= 0) display.openIdle()
+        if (Qt.application.arguments.indexOf("--display-where") >= 0) display.where()
+        if (win.arg("--display-simulate-screen-events") !== "") display.simulateScreenEvents()
         if (win.arg("--tv") !== "") { tv.show(); if (win.arg("--tv") === "fullscreen") tv.visibility = Window.FullScreen }
     }
 
