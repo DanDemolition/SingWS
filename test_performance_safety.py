@@ -805,23 +805,19 @@ class PerformanceSafetyTests(unittest.TestCase):
             layer.index("if(va>ca)sx=(GLfloat)(ca/va)"),
         )
 
-    def test_stall_stack_capture_is_opt_in(self):
-        # Walking the running main thread's frames from the watchdog thread is
-        # a use-after-free; it segfaulted the app on 2026-08-09 23:15:41
-        # (EXC_BAD_ACCESS at 0x0 in frame_back_get, thread
-        # "singws-main-thread-watchdog"). Timing is safe and stays on.
-        self.assertIn('"stall_stack_capture": False', MAIN_SOURCE)
+    def test_stall_stack_capture_is_a_signal_dump_on_the_main_thread_not_a_cross_thread_frame_walk(self):
+        # Walking the running main thread's frames from the watchdog thread is a use-after-free; it segfaulted the app on 2026-08-09
+        # 23:15:41 (EXC_BAD_ACCESS at 0x0 in frame_back_get, thread "singws-main-thread-watchdog"). Stacks are now written by
+        # faulthandler's handler running ON the main thread (test_safe_stall_stacks.py proves it end to end), so capture is on by default.
+        self.assertIn('"stall_stack_capture": True', MAIN_SOURCE)
         start = MAIN_SOURCE.index("def _install_main_thread_watchdog")
         end = MAIN_SOURCE.index("# Settings defaults", start)
         watchdog = MAIN_SOURCE[start:end]
-        self.assertIn('get("stall_stack_capture", False)', watchdog)
+        self.assertIn('get("stall_stack_capture", True)', watchdog)
         self.assertIn("if _stack_capture_enabled():", watchdog)
-        # The dangerous call must sit behind the gate, never before it.
-        # Match the call itself, not the explanation in the comment above it.
-        self.assertLess(
-            watchdog.index("if _stack_capture_enabled():"),
-            watchdog.index("frame = sys._current_frames().get(main_ident)"),
-        )
+        self.assertNotIn("_current_frames", watchdog)
+        self.assertNotIn("format_stack", watchdog)
+        self.assertLess(watchdog.index("if _stack_capture_enabled():"), watchdog.index("stack = _request_stall_dump(gap)"))
         # Stall detection and recovery timing must survive with capture off.
         self.assertIn("GUI thread recovered after", watchdog)
 
@@ -843,7 +839,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         )
         for timer_name in expected_timers:
             self.assertIn(f'_perf_log_if_slow("{timer_name}"', MAIN_SOURCE)
-        self.assertIn('"stall_stack_capture": False', MAIN_SOURCE)
+        self.assertIn('"stall_stack_capture": True', MAIN_SOURCE)
 
     def test_stall_event_attribution_is_separately_opt_in(self):
         # An application-wide Python event filter makes every Paint/Timer in the
@@ -862,7 +858,7 @@ class PerformanceSafetyTests(unittest.TestCase):
             watchdog.index("installEventFilter"),
         )
         # Stall stacks themselves must survive with attribution off.
-        self.assertIn("sys._current_frames()", watchdog)
+        self.assertIn("_request_stall_dump(gap)", watchdog)
 
     def test_legacy_stall_probes_are_disabled_once_for_show_safety(self):
         self.assertIn('"show_safe_stall_diagnostics_migrated": False', MAIN_SOURCE)
@@ -870,7 +866,8 @@ class PerformanceSafetyTests(unittest.TestCase):
             MAIN_SOURCE.index('if not bool(self.settings.get("show_safe_stall_diagnostics_migrated", False))'):
         ]
         self.assertIn('self.settings["stall_event_attribution"] = False', migration)
-        self.assertIn('self.settings["stall_stack_capture"] = False', migration)
+        # stall_stack_capture is no longer reset here: it is safe now (see stall_stack_capture_safe_migrated).
+        self.assertNotIn('self.settings["stall_stack_capture"] = False', migration[:700])
         self.assertIn('self.settings["show_safe_stall_diagnostics_migrated"] = True', migration)
 
     def test_tracks_json_is_parsed_off_the_gui_thread(self):
@@ -1254,7 +1251,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         self.assertIn("SINGWS_NO_WATCHDOG", watchdog)
         self.assertIn("performance_debug_enabled", watchdog)
         self.assertIn("[STALL]", watchdog)
-        self.assertIn("sys._current_frames()", watchdog)
+        self.assertIn("_request_stall_dump(gap)", watchdog)
         self.assertIn("singws-main-thread-watchdog", watchdog)
         self.assertIn("_install_main_thread_watchdog(self)", MAIN_SOURCE)
         self.assertIn("self._mt_watch_stop = True", MAIN_SOURCE)
