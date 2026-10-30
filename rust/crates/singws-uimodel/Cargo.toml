@@ -60,3 +60,7 @@ path = "src/bin/rows_cli.rs"
 [[bin]]
 name = "singws-diagnostics-cli"
 path = "src/bin/diagnostics_cli.rs"
+
+[[bin]]
+name = "singws-status-cli"
+path = "src/bin/status_cli.rs"

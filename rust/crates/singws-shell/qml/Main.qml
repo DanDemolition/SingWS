@@ -47,9 +47,9 @@ ApplicationWindow {
                 id: tabs
                 Layout.fillWidth: true
                 background: Rectangle { color: "transparent" }
-                currentIndex: ({"history": 1, "rotation": 2, "controls": 3, "music": 4, "eq": 5, "settings": 6, "ticker": 7, "waitlist": 8})[win.arg("--tab")] || (parseInt(win.arg("--tab")) || 0)
+                currentIndex: ({"history": 1, "rotation": 2, "controls": 3, "music": 4, "eq": 5, "settings": 6, "ticker": 7, "waitlist": 8, "status": 9, "diagnostics": 10})[win.arg("--tab")] || (parseInt(win.arg("--tab")) || 0)
                 Repeater {
-                    model: ["Library", "Singer history", "Rotation", "Controls", "Music", "EQ", "Settings", "Ticker", "Waitlist"]
+                    model: ["Library", "Singer history", "Rotation", "Controls", "Music", "EQ", "Settings", "Ticker", "Waitlist", "Status", "Diagnostics"]
                     TabButton {
                         text: modelData
                         font.pixelSize: 13
@@ -72,6 +72,8 @@ ApplicationWindow {
                 SettingsPage { control: control }
                 TickerPage { control: control }
                 WaitlistPage { control: control }
+                StatusPage { }
+                DiagnosticsPage { }
             }
         }
     }

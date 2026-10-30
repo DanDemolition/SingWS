@@ -1855,6 +1855,7 @@ SINGER_HISTORY_PATH = APP_USER_DIR / "singer_history.json"
 REMOTE_REQUEST_TOMBSTONES_PATH = APP_USER_DIR / "remote_request_tombstones.json"
 WAITLIST_REMOVED_TONIGHT_PATH = APP_USER_DIR / "waitlist_removed_tonight.json"
 WAITLIST_SNAPSHOT_PATH = APP_USER_DIR / "waitlist_snapshot.json"
+STATUS_SNAPSHOT_PATH = APP_USER_DIR / "status_snapshot.json"
 DEFERRED_REMOTE_ADDS_PATH = APP_USER_DIR / "deferred_remote_adds.json"
 HOST_REQUEST_SYNC_PATH = APP_USER_DIR / "host_request_sync.json"
 IMAGES_DIR = APP_USER_DIR / "images"
@@ -4239,6 +4240,9 @@ DEFAULTS = {
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default off.
     "waitlist_snapshot": False,
+    # Read-only status snapshot for the Rust shell's Status and Diagnostics pages: whenever the header or the ETA line refreshes, write status_snapshot.json (the
+    # header's connection / diagnostics words, the queue summary inputs and the pre-show check facts). The app never reads it back. Default off.
+    "status_snapshot": False,
     # Stage D1 shadow: compare the settings store steps (load, DEFAULTS fill, serialize-before-save) with the Rust singws-store
     # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
     # two-architecture package gate passes. Read from the settings dict being processed.
@@ -34849,6 +34853,111 @@ class KaraokeApp(QWidget):
             _diag(f"[WAITLIST-SNAPSHOT] write failed: {exc!r}")
             return False
 
+    _STATUS_SNAPSHOT_SETTING_KEYS = (
+        "requests_accepting", "use_waiting_for_add", "location_name", "venue_name", "tenant", "user", "queue_mode",
+        "karafun_provider_enabled", "ticker_enabled", "bg_video_folder", "bg_video_enabled",
+    )
+
+    def _status_snapshot_diagnostic_facts(self) -> dict:
+        """The probes `_collect_pre_show_diagnostics` makes, as plain facts (each guarded the way that method guards it)."""
+        state = object.__getattribute__(self, "__dict__")
+        try:
+            local_name = self._safe_local_audio_output_name()
+        except Exception:
+            local_name = None
+        try:
+            screen_count = len(QApplication.screens())
+        except Exception:
+            screen_count = 0
+        settings = state.get("settings") or {}
+        try:
+            karafun_path = self._karafun_application_path() if bool(settings.get("karafun_provider_enabled", True)) else None
+        except Exception:
+            karafun_path = None
+        try:
+            qr_url = self._header_qr_url()
+        except Exception:
+            qr_url = ""
+        try:
+            bg_files = scan_background_video_folder(str(settings.get("bg_video_folder", "") or "").strip())
+        except Exception:
+            bg_files = []
+        return {
+            "local_name": local_name,
+            "screen_count": screen_count,
+            "karafun_path": str(karafun_path) if karafun_path else None,
+            "output_host": state.get("_mpv_output_host") is not None,
+            "preview_host": state.get("_mpv_preview_host") is not None,
+            "show_ticker": getattr(state.get("video_window"), "ticker", None) is not None,
+            "qr_url": qr_url,
+            "bg_files": list(bg_files),
+        }
+
+    def _status_snapshot_payload(self, now: float | None = None) -> dict:
+        """What the Rust shell's Status and Diagnostics pages need: the inputs of the header pills / status line / ETA line and the facts of the pre-show checks.
+        The probe facts are re-taken at most every 30 seconds (they touch audio devices and the file system)."""
+        state = object.__getattribute__(self, "__dict__")
+        now = time.time() if now is None else now
+        settings = state.get("settings") or {}
+        cached = state.get("_status_snapshot_diag_cache")
+        if not cached or now - cached[0] >= 30.0:
+            cached = (now, self._status_snapshot_diagnostic_facts())
+            self._status_snapshot_diag_cache = cached
+        try:
+            total_secs = self._compute_queue_eta_seconds()[1]
+        except Exception:
+            total_secs = 0
+        attention = state.get("_remote_attention_requests", None)
+        queue = [{"name": s.get("name"), "rotation_marker": bool(s.get("rotation_marker"))} for s in (self.queue or []) if isinstance(s, dict)]
+        payload = {
+            "version": 1,
+            "taken_at": int(now),
+            "settings": {k: settings[k] for k in self._STATUS_SNAPSHOT_SETTING_KEYS if k in settings},
+            "connection": state.get("_server_connection_state", ""),
+            "network_configured": bool(self.is_network_configured()),
+            "last": {
+                "received": state.get("_last_request_received_summary", ""),
+                "accepted": state.get("_last_request_accepted_summary", ""),
+                "sync": state.get("_last_sync_time_label", ""),
+                "error": state.get("_last_server_error", ""),
+            },
+            "attention": dict(attention) if isinstance(attention, dict) else None,
+            "queue_rev": state.get("_queue_revision", 0),
+            "queue": queue,
+            "total_secs": total_secs,
+            "locked": bool(self._is_rotation_locked()),
+            "looping": bool(state.get("_intro_loop_active", False)),
+            "diagnostics": cached[1],
+        }
+        return json.loads(json.dumps(payload, default=str))
+
+    def _write_status_snapshot(self) -> bool:
+        """Write `status_snapshot.json` (atomic). Never raises."""
+        try:
+            if not bool((getattr(self, "settings", None) or {}).get("status_snapshot", False)):
+                return False
+            _save_json_atomic(STATUS_SNAPSHOT_PATH, self._status_snapshot_payload())
+            return True
+        except Exception as exc:
+            _diag(f"[STATUS-SNAPSHOT] write failed: {exc!r}")
+            return False
+
+    def _schedule_status_snapshot(self) -> None:
+        """Coalesce the writes that follow one burst of header refreshes into one; a no-op while the setting is off."""
+        try:
+            if not bool((getattr(self, "settings", None) or {}).get("status_snapshot", False)):
+                return
+            state = object.__getattribute__(self, "__dict__")
+            timer = state.get("_status_snapshot_timer")
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._write_status_snapshot)
+                self._status_snapshot_timer = timer
+            timer.start(500)
+        except Exception:
+            pass
+
     def _schedule_waitlist_snapshot(self) -> None:
         """Coalesce the snapshot writes that follow one burst of changes into one; a no-op while the setting is off."""
         if not bool((getattr(self, "settings", None) or {}).get("waitlist_snapshot", False)):
@@ -40033,6 +40142,7 @@ class KaraokeApp(QWidget):
                 self.header_location_label.setText(f"• {tenant_name}")
         except Exception:
             pass
+        self._schedule_status_snapshot()
 
     def _set_server_connection_status(self, connected: bool, message: str = ""):
         msg = str(message or "").strip()
@@ -54840,6 +54950,7 @@ class KaraokeApp(QWidget):
         self._queue_eta_minutes = int(round(total_secs / 60.0)) if total_secs > 0 else 0
         self._refresh_header_chips()
         self._refresh_queue_summary()
+        self._schedule_status_snapshot()
 
     def _refresh_queue_summary(self):
         """'7 singers \u00b7 24 min' beside UP NEXT (redesign only)."""
