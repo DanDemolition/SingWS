@@ -208,6 +208,20 @@ class VerdictTests(unittest.TestCase):
             drive = {r.name: r for r in sr.analyse(rows, {"transport_drive": False, "transport_drive_media_end": True})}
             self.assertEqual(drive["TRANSPORT-DRIVE"].verdict, "NOT EXERCISED")
 
+    def test_the_whole_start_plan_is_listed_and_a_switched_off_plan_is_said_so(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "x.log"
+            path.write_text("\n".join([LAUNCH] + FULL + [L("START-SHADOW", "decision route=plan agree=1")]) + "\n", encoding="utf-8")
+            rows = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True), {"start_shadow": True, "plan_shadow_live": True})}
+            self.assertIn("plan", rows["START-SHADOW"].seen)
+            self.assertEqual(rows["START-SHADOW"].verdict, "CLEAN")
+            self.assertNotIn("plan_shadow_live", rows["START-SHADOW"].detail)
+            path.write_text("\n".join([LAUNCH] + FULL) + "\n", encoding="utf-8")
+            off = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True), {"start_shadow": True, "plan_shadow_live": False})}
+            self.assertIn("plan_shadow_live", off["START-SHADOW"].detail)
+            on = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True), {"start_shadow": True})}
+            self.assertNotIn("plan_shadow_live", on["START-SHADOW"].detail)   # the setting defaults to on
+
     def test_settings_never_override_what_the_log_actually_shows(self):
         # the setting says off, but the log has decisions: the log wins
         with tempfile.TemporaryDirectory() as td:

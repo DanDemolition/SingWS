@@ -51,6 +51,13 @@ class DecisionsProven(unittest.TestCase):
         self.assertEqual({k for k in p if k.startswith("START-SHADOW")}, {"START-SHADOW:route:mp4", "START-SHADOW:pick", "START-SHADOW:display", "START-SHADOW:rotation", "START-SHADOW:engine"})
         self.assertTrue(all(p[k] for k in p if k.startswith("START-SHADOW")))
 
+    def test_the_whole_start_plan_is_its_own_decision(self):
+        lines = [tsr.LAUNCH, tsr.L("START-SHADOW", "enabled available=1"), tsr.L("START-SHADOW", "decision route=plan agree=1")]
+        self.assertEqual({k: v for k, v in self.proven(lines).items() if k.startswith("START-SHADOW")}, {"START-SHADOW:plan": True})
+        bad = lines + [tsr.L("START-SHADOW", "MISMATCH plan app={} rust={} route=mp4")]
+        self.assertIs(self.proven(bad)["START-SHADOW:plan"], False)
+        self.assertIn("START-SHADOW:plan", gl.KNOWN)
+
     def test_the_orchestrator_shadows_fold_into_their_decisions(self):
         lines = [tsr.LAUNCH, tsr.L("START-SHADOW", "enabled available=1")] + [tsr.L("START-SHADOW", f"decision route={k} agree=1") for k in (
             "transport_mp4", "transport_cdg", "zip_args", "confirmed", "performance_confirmed_stored", "performance_media_end_committed", "performance_stop_discarded")]

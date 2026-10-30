@@ -17,6 +17,7 @@ Shadows and the log lines they write:
   QUEUE-SHADOW      decision branch=tombstone|terminal_stale|id_reuse|terminal_reuse   (server poll rows for removed requests)
   PLAN-SHADOW       decision op=window|crossfade kind=...        (background-music track changes)
   START-SHADOW      decision route=mp4|mp3|cdg_mp3_dual|mp3g_zip|zip_prepare|reject_*|external_karafun agree=1   (the route play_next_file takes for each started song)
+                    decision route=plan agree=1 (setting plan_shadow_live): the whole start plan, one line per song start, checked at once: who was picked, route, transport, artist/title
   STORE-SHADOW      decision store=<file> layout=... agree=1     (every store file the app writes; Rust must reproduce the bytes)
   WIRE-SHADOW       decision endpoint=<file> kind=get|form|json agree=1   (what requests sent vs what the Rust request builder would send)
   TRANSPORT-SHADOW  session N summary ... total_mismatches=M    (KaraFun and native song lifecycle)
@@ -145,6 +146,8 @@ def analyse(rows, settings=None):
                 if configured == "dry_run" and r.modes.get("apply"):
                     r.errors.append(f"{r.modes['apply']} command(s) were APPLIED although shell_commands was dry_run in settings.json")
                     r.verdict = "ERROR"
+            if r.name == "START-SHADOW" and on and "plan" not in r.seen and not bool(settings.get("plan_shadow_live", True)):
+                r.detail = (r.detail + "; " if r.detail else "") + "whole-start plan (plan_shadow_live) is off in settings.json"
             if r.name == "TRANSPORT-DRIVE":  # the drive has one flag per decision
                 on = on or bool(settings.get("transport_drive_media_end", False)) or bool(settings.get("transport_drive_watchdog", False))
             if r.verdict in ("NOT ENABLED", "NOT EXERCISED") and not r.seen:

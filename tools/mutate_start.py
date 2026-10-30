@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Mutation test for rust/crates/singws-start/src/lib.rs: every mutant must be caught by the crate's own tests OR by the Python differential test
-(test_start_shadow and test_start_shadow_wiring, which needs the release dylib rebuilt for each mutant). Equivalent mutants are documented in the list."""
+(test_start_shadow and test_start_shadow_wiring, which needs the release dylib rebuilt for each mutant). Equivalent mutants are documented in the list.
+
+The second list, PM, mutates the Python GLUE of the live whole-start-plan shadow (the plan_* methods of start_shadow.py and the hooks in 0.2.18.1.py); each of those must be
+caught by test_start_shadow_plan_live and its neighbours. MUTATE_FIRST counts across both lists (Rust first); MUTATE_ONLY=py runs only the glue mutants, =rust only the Rust ones."""
 import os
 import subprocess
 import sys
@@ -10,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "rust/crates/singws-start/src/lib.rs"
 ENV = dict(os.environ, CARGO_TARGET_DIR=os.environ.get("CARGO_TARGET_DIR") or os.path.expanduser("~/.cache/singws-rust-target"), QT_QPA_PLATFORM="offscreen", SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS="1")
 PY = str(ROOT / ".venv/bin/python")
+IDS = {int(x) for x in os.environ.get("MUTATE_IDS", "").split(",") if x}   # run only these glue mutants (indices as printed)
 FIRST = int(os.environ.get("MUTATE_FIRST", "0"))   # skip the mutants before this index (to run only the newest ones)
 
 M = [
@@ -193,6 +197,141 @@ M = [
     ('"singer": p.pick.singer, "song": p.pick.song, "queue": p.pick.queue, "lock_cleared": p.pick.lock_cleared,\n            "route"', '"singer": p.pick.singer, "song": p.pick.song, "queue": p.pick.queue, "lock_cleared": false,\n            "route"', None),
 ]
 
+SHADOW = ROOT / "start_shadow.py"
+APP = ROOT / "0.2.18.1.py"
+_ARM = "_plan_shadow.plan_arm(_plan_pick_facts, queue_snapshot, self.queue, singer, first_non_skipped_idx, _pick_mode, _pick_setting_locked,"
+_ARGS = "song_info, primary_path, key, phrase_start,\n                                      intro_loop_seconds, current_song_dur, entry, (cached_cdg"
+_PLAN_FIN = '            if self.plan_off or not self.available:\n                return None\n            route, rf'
+_SLOW = "            if time.perf_counter() - started > PLAN_SLOW_SECONDS:"
+_ROUTE_KEYS = '            for k in ("primary_exists", "zip_cached", "mp3g", "pair"):'
+_ENTRY_END = '"semitones": semitones, "start": start, "loop": loop, "duration": duration}'
+_WANT = '"singer": plan["singer"], "song": plan["song"], "queue": plan["queue"], "lock_cleared": plan["lock_cleared"], "route": route}'
+_UNPL = 'UNPLANNED_ROUTES = ("external_karafun", "reject_missing_file", "zip_prepare")'
+_STARTR = 'START_ROUTES = ("mp4", "mp3", "cdg_mp3_dual", "mp3g_zip")'
+_FACTS_CHECK = "if facts is None or len(facts) != len(queue_snapshot):"
+_IDX_CHECK = "if id(singer) not in index or any(id(x) not in index for x in queue_after):"
+_OFF_ARM = "            if self.plan_off or not self.available:\n                return\n            if len(queue_snapshot)"
+_STARTED = '            if plan is not None and plan["route"] in START_ROUTES:\n                self.plan_finish(plan, artist, title, fallback)'
+_ROUTE_REJECT = "            if route not in START_ROUTES:\n                self._plan = None\n                self.plan_finish(plan, None, None, None)"
+_TRANSPORT_SET = '                self._plan["transport"] = {k: observed.get(k) for k in TRANSPORT_KEYS}'
+_GOT_NONE = '            if got is None:\n                return None\n            want = {"singer": plan'
+_TRANSPORT_WANT = '            if route in START_ROUTES:\n                want["transport"]'
+_MISMATCH = '            agree = have == want\n            self.checks += 1\n            if not agree:\n                self.mismatches += 1\n                self._say(f"MISMATCH plan'
+_RETURN = '            return agree\n        except Exception as exc:\n            self._say(f"plan error'
+_DECISION = '            else:\n                self._say("decision route=plan agree=1")\n            if self.checks % SUMMARY_EVERY == 0:'
+_ROUTE_SET = '            plan["route"], plan["route_facts"] = route, dict(facts or {})'
+_TRANSPORT_KW = '"semitones": semitones, "start_seconds": start_seconds,'
+PM = [
+    # ---- start_shadow.py: arming
+    (SHADOW, _OFF_ARM, _OFF_ARM.replace("self.plan_off or not self.available", "not self.available"), None),
+    (SHADOW, _OFF_ARM, _OFF_ARM.replace("self.plan_off or not self.available", "self.plan_off"), None),
+    (SHADOW, "len(queue_snapshot) > PLAN_MAX_SINGERS", "len(queue_snapshot) >= PLAN_MAX_SINGERS", None),
+    (SHADOW, _FACTS_CHECK, "if facts is None:", None),
+    (SHADOW, _FACTS_CHECK, "if len(facts) != len(queue_snapshot):", None),
+    (SHADOW, _IDX_CHECK, "if id(singer) not in index:", None),
+    (SHADOW, _IDX_CHECK, "if any(id(x) not in index for x in queue_after):", None),
+    (SHADOW, 'cdg, mp3 = song_info, song_info[:-4] + ".mp3"', 'cdg, mp3 = song_info, song_info[:-3] + ".mp3"', None),
+    (SHADOW, 'cdg, mp3 = song_info, song_info[:-4] + ".mp3"', "cdg, mp3 = song_info, song_info", None),
+    (SHADOW, 'elif isinstance(song_info, str) and song_info.endswith(".cdg"):', "elif isinstance(song_info, str):", None),
+    (SHADOW, 'elif isinstance(song_info, str) and song_info.endswith(".zip") and zip_paths:', 'elif isinstance(song_info, str) and song_info.endswith(".cdg") and zip_paths:', None),
+    (SHADOW, "cdg, mp3 = zip_paths", "cdg, mp3 = zip_paths[1], zip_paths[0]", None),
+    (SHADOW, "if isinstance(song_info, (tuple, list)) and len(song_info) == 2 and all(isinstance(x, str) for x in song_info):", "if isinstance(song_info, (tuple, list)) and len(song_info) == 2:",
+     "a two-item tuple with a non-text item reaches the later isinstance guard, which blanks cdg and mp3 the same way"),
+    (SHADOW, 'if not (isinstance(cdg, str) and isinstance(mp3, str)):\n                cdg = mp3 = ""', 'if False:\n                cdg = mp3 = ""', "second line of defence behind the all(isinstance) test above it"),
+    (SHADOW, 'primary = primary_path if isinstance(primary_path, str) else ""', "primary = primary_path", "a non-text primary path is not a start the plan models; no queue the app can build produces one for a route that starts"),
+    (SHADOW, '"artist": str(entry.get("artist") or "").strip() if isinstance(entry, dict) else "",', '"artist": str(entry.get("artist") or "") if isinstance(entry, dict) else "",', None),
+    (SHADOW, '"title": str(entry.get("title") or "").strip() if isinstance(entry, dict) else "", "route"', '"title": str(entry.get("title") or "") if isinstance(entry, dict) else "", "route"', None),
+    # ---- start_shadow.py: observing
+    (SHADOW, "            if route in UNPLANNED_ROUTES:", "            if False:", None),
+    (SHADOW, _UNPL, _UNPL.replace('"external_karafun", ', ""), None),
+    (SHADOW, _UNPL, _UNPL.replace('"reject_missing_file", ', ""), None),
+    (SHADOW, _UNPL, _UNPL.replace(', "zip_prepare"', ""), None),
+    (SHADOW, _STARTR, _STARTR.replace(', "mp3g_zip"', ""), None),
+    (SHADOW, _STARTR, _STARTR.replace('"mp3", ', ""), None),
+    (SHADOW, _ROUTE_SET, _ROUTE_SET.replace("dict(facts or {})", "{}"), None),
+    (SHADOW, _ROUTE_SET, _ROUTE_SET + "\n            self._plan = None", None),
+    (SHADOW, _ROUTE_REJECT, _ROUTE_REJECT.replace("route not in START_ROUTES", "False"), None),
+    (SHADOW, _ROUTE_REJECT, _ROUTE_REJECT.replace("                self._plan = None\n", ""), "plan_started is not reached after a rejecting route, and the next plan_arm replaces a plan that was judged"),
+    (SHADOW, _TRANSPORT_SET, _TRANSPORT_SET.replace('{k: observed.get(k) for k in TRANSPORT_KEYS}', "dict(observed)"), "the app passes exactly TRANSPORT_KEYS, so the filter changes nothing"),
+    (SHADOW, _TRANSPORT_SET, "                pass", None),
+    (SHADOW, _STARTED, _STARTED.replace(' and plan["route"] in START_ROUTES', ""), "a plan whose route is not a start route was judged and cleared in plan_route"),
+    (SHADOW, _STARTED, _STARTED.replace("artist, title, fallback", "artist, artist, fallback"), None),
+    (SHADOW, "            plan, self._plan = self._plan, None\n", "            plan = self._plan\n", "the next plan_arm replaces a plan that was judged"),
+    # ---- start_shadow.py: the one call and its verdict
+    (SHADOW, _PLAN_FIN, _PLAN_FIN.replace("self.plan_off or not self.available", "not self.available"), "plan_arm refuses to arm while plan_off, and plan_finish is only reached with an armed plan"),
+    (SHADOW, _PLAN_FIN, _PLAN_FIN.replace("self.plan_off or not self.available", "self.plan_off"), "plan_arm refuses to arm when the library is not available"),
+    (SHADOW, 'req_route = {"external": False,', 'req_route = {"external": True,', None),
+    (SHADOW, '"has_primary": bool(rf.get("has_primary", bool(plan["primary"])))}', '"has_primary": True}', None),
+    (SHADOW, _ROUTE_KEYS, _ROUTE_KEYS.replace('"primary_exists", ', ""), None),
+    (SHADOW, _ROUTE_KEYS, _ROUTE_KEYS.replace('"zip_cached", ', ""), None),
+    (SHADOW, _ROUTE_KEYS, _ROUTE_KEYS.replace('"mp3g", ', ""), None),
+    (SHADOW, _ROUTE_KEYS, _ROUTE_KEYS.replace(', "pair"', ""), None),
+    (SHADOW, "                    req_route[k] = bool(rf[k])", "                    req_route[k] = True", None),
+    (SHADOW, _ENTRY_END, _ENTRY_END.replace('"semitones": semitones', '"semitones": 0'), None),
+    (SHADOW, _ENTRY_END, _ENTRY_END.replace('"start": start', '"start": 0.0'), None),
+    (SHADOW, _ENTRY_END, _ENTRY_END.replace('"loop": loop', '"loop": None'), "the app never starts a song with an intro loop (the retired phrase and intro-loop path), so loop is always None"),
+    (SHADOW, _ENTRY_END, _ENTRY_END.replace('"duration": duration', '"duration": None'), None),
+    (SHADOW, '            if fallback is not None:\n                entry["fallback"]', '            if False:\n                entry["fallback"]', None),
+    (SHADOW, 'singers[plan["singer"]]["entry"] = entry', 'singers[0]["entry"] = entry', None),
+    (SHADOW, '"rotation_mode": plan["rotation_mode"], "setting_locked"', '"rotation_mode": False, "setting_locked"', None),
+    (SHADOW, '"setting_locked": plan["setting_locked"]}', '"setting_locked": False}', None),
+    (SHADOW, _SLOW, _SLOW.replace(">", ">="), "a duration exactly equal to the limit cannot come from a real clock; the injected clock steps whole seconds"),
+    (SHADOW, _SLOW, _SLOW.replace(">", "<"), None),
+    (SHADOW, "                self.plan_off = True\n", "                self.plan_off = False\n", None),
+    (SHADOW, "PLAN_SLOW_SECONDS = 0.025", "PLAN_SLOW_SECONDS = 1e9", None),
+    (SHADOW, _GOT_NONE, '            want = {"singer": plan', None),
+    (SHADOW, _WANT, _WANT.replace('"route": route}', '"route": plan["route"] or route}'), "plan[\"route\"] is route whenever this runs"),
+    (SHADOW, _WANT, _WANT.replace('"song": plan["song"], ', ""), None),
+    (SHADOW, _WANT, _WANT.replace('"queue": plan["queue"], ', ""), None),
+    (SHADOW, _WANT, _WANT.replace('"lock_cleared": plan["lock_cleared"], ', ""), None),
+    (SHADOW, _WANT, _WANT.replace('"singer": plan["singer"], ', ""), None),
+    (SHADOW, _WANT, _WANT.replace('"route": route}', '"route": "mp4"}'), None),
+    (SHADOW, _TRANSPORT_WANT, _TRANSPORT_WANT.replace("route in START_ROUTES", "True"), None),
+    (SHADOW, _TRANSPORT_WANT, _TRANSPORT_WANT.replace("route in START_ROUTES", "False"), None),
+    (SHADOW, '                want["display"] = {"artist": str(artist), "title": str(title)}', '                want["display"] = {"artist": str(title), "title": str(artist)}', None),
+    (SHADOW, '                have["transport"], have["display"] = got.get("transport"), got.get("display")', '                have["transport"], have["display"] = got.get("display"), got.get("transport")', None),
+    (SHADOW, '                have["transport"] = have["display"] = None\n', '                have["transport"] = have["display"] = 0\n', None),
+    (SHADOW, _MISMATCH, _MISMATCH.replace("have == want", "True"), None),
+    (SHADOW, '                self.mismatches += 1\n                self._say(f"MISMATCH plan', '                self._say(f"MISMATCH plan', None),
+    (SHADOW, '                self._say("decision route=plan agree=1")', '                self._say("decision route=plan agree=0")', None),
+    (SHADOW, _DECISION, '            elif "plan" not in self._seen:\n                self._seen.add("plan")\n                self._say("decision route=plan agree=1")\n            if self.checks % SUMMARY_EVERY == 0:', None),
+    (SHADOW, '            self.checks += 1\n            if not agree:\n                self.mismatches += 1\n                self._say(f"MISMATCH plan', '            if not agree:\n                self.mismatches += 1\n                self._say(f"MISMATCH plan', None),
+    (SHADOW, _RETURN, _RETURN.replace("return agree", "return None"), "the app does not read the return value; the tests read the log lines"),
+    # ---- 0.2.18.1.py: the hooks
+    (APP, 'def _start_shadow_for(settings, flag="start_shadow"):', 'def _start_shadow_for(settings, flag="plan_shadow_live"):', None),
+    (APP, '            _plan = _start_shadow_for(self.settings, "plan_shadow_live")', "            _plan = _start_shadow_for(self.settings)", None),
+    (APP, "                _plan.plan_route(route, song_info, facts)", "                _plan.plan_route(route, song_info, {})", None),
+    (APP, '            _psh = _start_shadow_for(self.settings, "plan_shadow_live")', "            _psh = _start_shadow_for(self.settings)", None),
+    (APP, "                _psh.plan_transport({" + '"audio_path": audio_path, "video_path": video_path, "mode": mode, ' + _TRANSPORT_KW,
+     "                _psh.plan_transport({" + '"audio_path": audio_path, "video_path": video_path, "mode": mode, ' + _TRANSPORT_KW.replace("semitones: ", "semitones: ").replace('"semitones": semitones', '"semitones": 0'), None),
+    (APP, '"loop_seconds": loop_seconds, "duration_seconds": duration_seconds})\n        except Exception:\n            pass\n        self._karaoke_played_this_session',
+     '"loop_seconds": loop_seconds, "duration_seconds": None})\n        except Exception:\n            pass\n        self._karaoke_played_this_session', None),
+    (APP, '            _plan_probe = _start_shadow_for(self.settings, "plan_shadow_live")', "            _plan_probe = _start_shadow_for(self.settings)", None),
+    (APP, "            if _plan_probe is not None and not _plan_probe.plan_off:", "            if _plan_probe is not None:", "plan_arm refuses to arm once the shadow is off, so facts computed for it are never used"),
+    (APP, "                _plan_pick_facts = _plan_probe.pick_facts(queue_snapshot)\n                _pick_mode = bool(self._is_rotation_mode())", "                _plan_pick_facts = _plan_probe.pick_facts(queue_snapshot)\n                _pick_mode = False", None),
+    (APP, '                _pick_setting_locked = bool(self.settings.get("rotation_locked", False))\n        except Exception:\n            _plan_pick_facts = None',
+     "                _pick_setting_locked = False\n        except Exception:\n            _plan_pick_facts = None", None),
+    (APP, '            _plan_shadow = _start_shadow_for(self.settings, "plan_shadow_live")', "            _plan_shadow = _start_shadow_for(self.settings)", None),
+    (APP, _ARM, _ARM.replace("queue_snapshot, self.queue,", "queue_snapshot, queue_snapshot,"), None),
+    (APP, _ARM, _ARM.replace("first_non_skipped_idx,", "0,"), None),
+    (APP, _ARM, _ARM.replace("_pick_mode, _pick_setting_locked,", "False, _pick_setting_locked,"), None),
+    (APP, _ARM, _ARM.replace("_pick_mode, _pick_setting_locked,", "_pick_mode, False,"), None),
+    (APP, '_pick_setting_locked and not bool(self.settings.get("rotation_locked", False)), song_info, primary_path', "False, song_info, primary_path", None),
+    (APP, _ARGS, _ARGS.replace("song_info, primary_path,", "song_info, song_info,"), "primary_path is song_info for every text song_info and the plan only models text songs"),
+    (APP, _ARGS, _ARGS.replace("primary_path, key,", "primary_path, 0,"), None),
+    (APP, _ARGS, _ARGS.replace("key, phrase_start,", "key, 0.0,"), None),
+    (APP, _ARGS, _ARGS.replace("current_song_dur, entry,", "0, entry,"), None),
+    (APP, _ARGS, _ARGS.replace("current_song_dur, entry,", "current_song_dur, {},"), None),
+    (APP, _ARGS, _ARGS.replace("intro_loop_seconds,", "0,"), None),
+    (APP, "entry, (cached_cdg, cached_mp3) if _zip_cached else None)", "entry, None)", None),
+    (APP, "entry, (cached_cdg, cached_mp3) if _zip_cached else None)", "entry, (cached_mp3, cached_cdg) if _zip_cached else None)", None),
+    (APP, '            _plan_done = _start_shadow_for(self.settings, "plan_shadow_live")', "            _plan_done = _start_shadow_for(self.settings)", None),
+    (APP, "_plan_done.plan_started(artist, title, _display_fallback)", "_plan_done.plan_started(artist, title, None)", None),
+    (APP, "_plan_done.plan_started(artist, title, _display_fallback)", "_plan_done.plan_started(title, artist, _display_fallback)", None),
+    (APP, '"transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live")', '"transport_drive_media_end", "transport_drive_watchdog", "start_shadow")', None),
+    (APP, '    "plan_shadow_live": True,', '    "plan_shadow_live": False,', None),
+]
+
 
 def cargo_test():
     return subprocess.run(["cargo", "test", "-p", "singws-start", "--quiet"], cwd=ROOT / "rust", env=ENV, capture_output=True, text=True).returncode
@@ -205,12 +344,45 @@ def differential():
     return subprocess.run([PY, "-m", "unittest", "test_start_shadow", "test_start_shadow_wiring", "test_start_shadow_transport", "test_start_shadow_confirmed", "test_start_shadow_performance", "test_rotation_lock_reweave", "test_start_shadow_plan"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
 
 
+def glue_tests():
+    return subprocess.run([PY, "-m", "unittest", "test_start_shadow_plan_live", "test_start_shadow_plan", "test_start_shadow_wiring"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
+
+
+def run_glue(first, survivors):
+    """The glue mutants: the mutated file is restored after every mutant."""
+    killed = 0
+    for k, (path, old, new, note) in enumerate(PM):
+        n = len(M) + k
+        if n < first or (IDS and n not in IDS):
+            continue
+        original = path.read_text()
+        if original.count(old) != 1:
+            print(f"[{n:03d}] PATTERN NOT UNIQUE/FOUND ({original.count(old)}): {old[:70]!r}")
+            survivors.append(n)
+            continue
+        try:
+            path.write_text(original.replace(old, new))
+            code = glue_tests()
+        finally:
+            path.write_text(original)
+        if code != 0:
+            killed += 1
+            print(f"[{n:03d}] killed by the glue tests")
+        elif note:
+            killed += 1
+            print(f"[{n:03d}] EQUIVALENT ({note})")
+        else:
+            print(f"[{n:03d}] SURVIVED {path.name}: {old[:70]!r}")
+            survivors.append(n)
+    return killed
+
+
 def main():
     original = SRC.read_text()
     survivors, killed = [], 0
     try:
         for n, (old, new, note) in enumerate(M):
-            if n < FIRST:
+            if n < FIRST or os.environ.get("MUTATE_ONLY") == "py":
                 continue
             if original.count(old) != 1:
                 print(f"[{n:02d}] PATTERN NOT UNIQUE/FOUND ({original.count(old)}): {old[:60]!r}")
@@ -234,7 +406,9 @@ def main():
     finally:
         SRC.write_text(original)
         subprocess.run(["cargo", "build", "--release", "-p", "singws-dsp-ffi", "--quiet"], cwd=ROOT / "rust", env=ENV, capture_output=True)
-    print(f"killed {killed} of {len(M)}; survivors: {survivors}")
+    if os.environ.get("MUTATE_ONLY") != "rust":
+        killed += run_glue(FIRST, survivors)
+    print(f"killed {killed} of {len(M) + len(PM)}; survivors: {survivors}")
     return 1 if survivors else 0
 
 

@@ -17,10 +17,15 @@ from __future__ import annotations
 
 import ctypes
 import json
+import time
 
 _OUT_CAP = 512
 _TEXT_CAP = 4096
 SUMMARY_EVERY = 25
+PLAN_MAX_SINGERS = 400          # a queue longer than this is not sent: the call must stay far below a frame
+PLAN_SLOW_SECONDS = 0.025       # one plan call slower than this switches the plan shadow off for the rest of the session
+UNPLANNED_ROUTES = ("external_karafun", "reject_missing_file", "zip_prepare")   # taken before the plan is armed, so not part of the live plan comparison
+START_ROUTES = ("mp4", "mp3", "cdg_mp3_dual", "mp3g_zip")   # the routes that start a song (the others reject or prepare, so the plan has no transport or display part)
 
 ROUTES = ("external_karafun", "reject_missing_file", "zip_prepare", "cdg_mp3_dual", "mp4", "mp3", "mp3g_zip", "reject_unsupported_tuple", "reject_invalid_zip",
           "reject_missing_cdg_audio_pair", "reject_unsupported_format")
@@ -53,6 +58,8 @@ class StartShadow:
         self.checks = 0
         self.mismatches = 0
         self._seen = set()
+        self._plan = None            # the armed whole-start plan context of the song being started (see plan_arm)
+        self.plan_off = False        # set after one plan call was too slow
         self._perf_pending = False   # the shadow's own model of "a song is stored, waiting for its sung / not-sung decision"
 
     def _say(self, text):
@@ -219,6 +226,132 @@ class StartShadow:
             return self._verdict(f"performance_{event}_{action}", got == want, want, got, facts)
         except Exception as exc:
             self._say(f"check_performance error: {exc!r}")
+            return None
+
+    # ---- Stage A5 step 9: the whole start plan, compared with what the app did -------------------------------------------------------------------------------
+    def plan_arm(self, facts, queue_snapshot, queue_after, singer, song_index, rotation_mode, setting_locked, lock_cleared, song_info, primary_path, key, start_seconds, loop_seconds,
+                 duration_seconds, entry, zip_paths):
+        """Remember what the app has decided so far for the song it is about to start: the queue as it was before the pick (`queue_snapshot`, with `facts` = :func:`pick_facts`
+        of it taken BEFORE the pick loop popped the song), the queue after the pick loop
+        (`queue_after`, without the picked singer), the picked `singer` and the index of their song, the mode flags, and the song's own facts. Cheap: nothing is sent to Rust here.
+        Never raises."""
+        try:
+            self._plan = None
+            if self.plan_off or not self.available:
+                return
+            if len(queue_snapshot) > PLAN_MAX_SINGERS:
+                self.note("plan_skipped_long_queue", f"queue_len={len(queue_snapshot)}")
+                return
+            if facts is None or len(facts) != len(queue_snapshot):
+                return
+            index = {id(s): i for i, s in enumerate(queue_snapshot)}
+            if id(singer) not in index or any(id(x) not in index for x in queue_after):
+                return
+            primary = primary_path if isinstance(primary_path, str) else ""
+            cdg = mp3 = ""
+            if isinstance(song_info, (tuple, list)) and len(song_info) == 2 and all(isinstance(x, str) for x in song_info):
+                cdg, mp3 = song_info
+            elif isinstance(song_info, str) and song_info.endswith(".cdg"):
+                cdg, mp3 = song_info, song_info[:-4] + ".mp3"
+            elif isinstance(song_info, str) and song_info.endswith(".zip") and zip_paths:
+                cdg, mp3 = zip_paths
+            if not (isinstance(cdg, str) and isinstance(mp3, str)):
+                cdg = mp3 = ""
+            self._plan = {"facts": facts, "singer": index[id(singer)], "song": song_index, "queue": [index[id(x)] for x in queue_after], "lock_cleared": bool(lock_cleared),
+                          "rotation_mode": bool(rotation_mode), "setting_locked": bool(setting_locked), "song_info": song_info, "primary": primary, "cdg": cdg, "mp3": mp3,
+                          "key": key, "start": start_seconds, "loop": loop_seconds, "duration": duration_seconds,
+                          "artist": str(entry.get("artist") or "").strip() if isinstance(entry, dict) else "",
+                          "title": str(entry.get("title") or "").strip() if isinstance(entry, dict) else "", "route": None, "route_facts": None, "transport": None}
+        except Exception as exc:
+            self._plan = None
+            self._say(f"plan_arm error: {exc!r}")
+
+    def plan_route(self, route, song_info, facts):
+        """The route the app took (called from the same place as :meth:`check`). A route that rejects the start finishes the plan comparison here: no transport or display follows.
+        Never raises."""
+        try:
+            plan = self._plan
+            if plan is None:
+                return
+            if route in UNPLANNED_ROUTES:   # decided before the plan was armed: whatever is armed is left over from an earlier start that was refused by the transport
+                self._plan = None
+                return
+            plan["route"], plan["route_facts"] = route, dict(facts or {})
+            if route not in START_ROUTES:
+                self._plan = None
+                self.plan_finish(plan, None, None, None)
+        except Exception as exc:
+            self._plan = None
+            self._say(f"plan_route error: {exc!r}")
+
+    def plan_transport(self, observed):
+        """The arguments `_start_karaoke_transport` received for the armed start. Never raises."""
+        try:
+            if self._plan is not None:
+                self._plan["transport"] = {k: observed.get(k) for k in TRANSPORT_KEYS}
+        except Exception:
+            pass
+
+    def plan_started(self, artist, title, fallback):
+        """The song started: compare the whole plan with the route, the transport arguments and the published artist and title. Never raises."""
+        try:
+            plan, self._plan = self._plan, None
+            if plan is not None and plan["route"] in START_ROUTES:
+                self.plan_finish(plan, artist, title, fallback)
+        except Exception as exc:
+            self._plan = None
+            self._say(f"plan_started error: {exc!r}")
+
+    def plan_finish(self, plan, artist, title, fallback):
+        """One Rust call for the armed plan, one verdict. Never raises, drops the call when the library errors, and switches itself off after one slow call."""
+        try:
+            if self.plan_off or not self.available:
+                return None
+            route, rf = plan["route"], plan["route_facts"] or {}
+            info = plan["song_info"]
+            req_route = {"external": False, "info": info_request(info), "has_primary": bool(rf.get("has_primary", bool(plan["primary"])))}
+            for k in ("primary_exists", "zip_cached", "mp3g", "pair"):
+                if rf.get(k) is not None:
+                    req_route[k] = bool(rf[k])
+            try:
+                semitones, start, loop, duration = _num(plan["key"] or 0, False), _num(plan["start"]), _num(plan["loop"]), _num(plan["duration"])
+            except ValueError:
+                return None   # a key or time the rule does not model (not a plain number): nothing to compare
+            entry = {"route": req_route, "artist": plan["artist"], "title": plan["title"], "song": plan["primary"], "cdg": plan["cdg"], "mp3": plan["mp3"],
+                     "semitones": semitones, "start": start, "loop": loop, "duration": duration}
+            if fallback is not None:
+                entry["fallback"] = str(fallback)
+            singers = [dict(f) for f in plan["facts"]]
+            singers[plan["singer"]]["entry"] = entry
+            req = {"op": "plan", "singers": singers, "rotation_mode": plan["rotation_mode"], "setting_locked": plan["setting_locked"]}
+            started = time.perf_counter()
+            got = self._ask(req, cap=_OUT_CAP * 4 + 12 * len(singers))
+            if time.perf_counter() - started > PLAN_SLOW_SECONDS:
+                self.plan_off = True
+                self._say("NOTE plan_shadow_off a plan call was slow, not checking any more this session")
+            if got is None:
+                return None
+            want = {"singer": plan["singer"], "song": plan["song"], "queue": plan["queue"], "lock_cleared": plan["lock_cleared"], "route": route}
+            have = {k: got.get(k) for k in want}
+            if route in START_ROUTES:
+                want["transport"] = plan["transport"]
+                want["display"] = {"artist": str(artist), "title": str(title)}
+                have["transport"], have["display"] = got.get("transport"), got.get("display")
+            else:
+                have["transport"] = have["display"] = None
+                want["transport"] = want["display"] = None
+            agree = have == want
+            self.checks += 1
+            if not agree:
+                self.mismatches += 1
+                self._say(f"MISMATCH plan app={json.dumps(want, default=str)[:400]} rust={json.dumps(have, default=str)[:400]} route={route}")
+            else:
+                self._say("decision route=plan agree=1")
+            if self.checks % SUMMARY_EVERY == 0:
+                self._say(f"summary checks={self.checks} mismatches={self.mismatches}")
+            return agree
+        except Exception as exc:
+            self._say(f"plan error: {exc!r}")
             return None
 
     def reweave_order(self, queue):

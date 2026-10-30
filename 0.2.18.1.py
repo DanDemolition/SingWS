@@ -1922,11 +1922,11 @@ def _plan_shadow_for(settings):
 _START_SHADOW = None
 
 
-def _start_shadow_for(settings):
-    """The Stage A5 song-start routing shadow, or None when the setting is off or the library is missing. Never raises."""
+def _start_shadow_for(settings, flag="start_shadow"):
+    """The Stage A5 song-start routing shadow, or None when the setting `flag` is off or the library is missing. Never raises."""
     global _START_SHADOW
     try:
-        if not bool((settings or {}).get("start_shadow", False)):
+        if not bool((settings or {}).get(flag, False)):
             return None
         if _START_SHADOW is None:
             import start_shadow
@@ -4116,7 +4116,7 @@ MPV_CDG_BASE_OFFSET_MS = -50
 MPV_MP4_BASE_OFFSET_MS = 0
 
 _RUST_EVIDENCE_FLAGS = ("queue_shadow", "plan_shadow", "settings_shadow", "store_shadow", "wire_shadow", "publish_live_state",
-                        "transport_drive_media_end", "transport_drive_watchdog", "start_shadow")
+                        "transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live")
 
 
 def _migrate_rust_evidence_defaults(settings) -> bool:
@@ -4200,6 +4200,9 @@ DEFAULTS = {
     # Stage A5 shadow: at each point where play_next_file commits to a start route (external KaraFun, refusal, ZIP preparation, mp4, mp3, MP3+G, CDG+MP3) compare it with
     # the Rust singws-start rules and LOG disagreements only; the app's own route is always used and nothing extra is read from disk.
     "start_shadow": True,
+    # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
+    # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
+    "plan_shadow_live": True,
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default off.
     "waitlist_snapshot": False,
@@ -28222,6 +28225,13 @@ class KaraokeApp(QWidget):
             if _tsh is not None:
                 _tsh.check_transport(_tf, {"audio_path": audio_path, "video_path": video_path, "mode": mode, "semitones": semitones, "start_seconds": start_seconds,
                                            "loop_seconds": loop_seconds, "duration_seconds": duration_seconds})
+        except Exception:
+            pass
+        try:
+            _psh = _start_shadow_for(self.settings, "plan_shadow_live")
+            if _psh is not None:
+                _psh.plan_transport({"audio_path": audio_path, "video_path": video_path, "mode": mode, "semitones": semitones, "start_seconds": start_seconds,
+                                     "loop_seconds": loop_seconds, "duration_seconds": duration_seconds})
         except Exception:
             pass
         self._karaoke_played_this_session = True      # background music may resume after a song even if its Play was never pressed
@@ -60500,6 +60510,12 @@ class KaraokeApp(QWidget):
                 shadow.check(route, song_info, **facts)
         except Exception:
             pass
+        try:
+            _plan = _start_shadow_for(self.settings, "plan_shadow_live")
+            if _plan is not None:
+                _plan.plan_route(route, song_info, facts)
+        except Exception:
+            pass
 
     @_perf_timed("ui_songstart_play_next")
     def play_next_file(self, skip_confirmation=False, *, command_source="internal"):
@@ -60632,6 +60648,15 @@ class KaraokeApp(QWidget):
                 _pick_setting_locked = bool(self.settings.get("rotation_locked", False))
         except Exception:
             _pick_shadow, _pick_facts = None, None
+        _plan_pick_facts = None
+        try:
+            _plan_probe = _start_shadow_for(self.settings, "plan_shadow_live")
+            if _plan_probe is not None and not _plan_probe.plan_off:
+                _plan_pick_facts = _plan_probe.pick_facts(queue_snapshot)
+                _pick_mode = bool(self._is_rotation_mode())
+                _pick_setting_locked = bool(self.settings.get("rotation_locked", False))
+        except Exception:
+            _plan_pick_facts = None
         marker_was_top = False
         if self._is_rotation_mode():
             try:
@@ -60868,6 +60893,14 @@ class KaraokeApp(QWidget):
             "title": countdown_title,
         }
 
+        try:
+            _plan_shadow = _start_shadow_for(self.settings, "plan_shadow_live")
+            if _plan_shadow is not None:
+                _plan_shadow.plan_arm(_plan_pick_facts, queue_snapshot, self.queue, singer, first_non_skipped_idx, _pick_mode, _pick_setting_locked,
+                                      _pick_setting_locked and not bool(self.settings.get("rotation_locked", False)), song_info, primary_path, key, phrase_start,
+                                      intro_loop_seconds, current_song_dur, entry, (cached_cdg, cached_mp3) if _zip_cached else None)
+        except Exception:
+            pass
         # Normalize shapes we might see in the queue
         start_ok = False
         if isinstance(song_info, (tuple, list)):
@@ -60964,6 +60997,12 @@ class KaraokeApp(QWidget):
             title = title.strip()
         else:
             artist = (display_name or "").strip()
+        try:
+            _plan_done = _start_shadow_for(self.settings, "plan_shadow_live")
+            if _plan_done is not None:
+                _plan_done.plan_started(artist, title, _display_fallback)
+        except Exception:
+            pass
         try:
             _ds = _start_shadow_for(self.settings)
             if _ds is not None and isinstance(display_name, str):
