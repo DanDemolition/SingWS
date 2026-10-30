@@ -3880,6 +3880,11 @@ def _prewarm_read_file(path: str, max_bytes: int = 8 * 1024 * 1024):
         pass
 
 
+STALL_STACK_FILE_MAX_BYTES = 4 * 1024 * 1024   # singws_stall_stacks.log is restarted at launch once it grows past this
+STALL_STACK_MIN_INTERVAL_S = 5.0               # at most one all-thread stack dump per this many seconds
+STALL_STACK_MAX_DUMPS_PER_SESSION = 150
+
+
 def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
     """Log the GUI-thread stack when the event loop stalls.
 
@@ -4003,9 +4008,55 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
         def _stack_capture_enabled() -> bool:
             try:
-                return bool(getattr(owner, "settings", {}).get("stall_stack_capture", False))
+                return bool(getattr(owner, "settings", {}).get("stall_stack_capture", True))
             except Exception:
                 return False
+
+        # Stall stacks without touching the main thread's frames from this thread. Walking them from here while the main thread runs
+        # crashed the app on 2026-08-09 (use-after-free in frame_back_get).
+        # faulthandler's signal handler is built for this: this thread only SENDS a signal to the main thread, and the handler then
+        # runs ON the main thread and writes every thread's traceback straight to a file. Nothing happens until a stall is detected.
+        stall_dump = {"ready": False, "count": 0, "last": 0.0, "file": None}
+        try:
+            import faulthandler as _faulthandler
+            import signal as _signal
+
+            _dump_path = LOGS_DIR / "singws_stall_stacks.log"
+            try:
+                _mode = "w" if (_dump_path.exists() and _dump_path.stat().st_size > STALL_STACK_FILE_MAX_BYTES) else "a"
+            except OSError:
+                _mode = "a"
+            _dump_fh = open(_dump_path, _mode, buffering=1, encoding="utf-8")
+            _faulthandler.register(_signal.SIGUSR2, file=_dump_fh, all_threads=True, chain=False)
+            stall_dump["file"] = _dump_fh
+            stall_dump["ready"] = True
+            owner._stall_dump_file = _dump_fh
+        except Exception as _dump_exc:
+            try:
+                _diag(f"[STALL] stack dump unavailable: {_dump_exc}")
+            except Exception:
+                pass
+
+        def _request_stall_dump(gap_s: float) -> str:
+            """Ask the main thread to write all thread stacks to singws_stall_stacks.log. Returns the text for the [STALL] log line."""
+            if not stall_dump["ready"]:
+                return "(stack dump unavailable)"
+            now = time.monotonic()
+            if stall_dump["count"] >= STALL_STACK_MAX_DUMPS_PER_SESSION:
+                return "(stack dump limit reached for this session)"
+            if now - float(stall_dump["last"]) < STALL_STACK_MIN_INTERVAL_S:
+                return "(stack dump skipped: another was written moments ago)"
+            try:
+                stall_dump["count"] += 1
+                stall_dump["last"] = now
+                number = stall_dump["count"]
+                fh = stall_dump["file"]
+                fh.write(f"\n===== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} stall dump #{number} (blocked for ~{int(gap_s * 1000)}ms so far) =====\n")
+                fh.flush()
+                _signal.pthread_kill(main_ident, _signal.SIGUSR2)
+                return f"(all-thread stacks written to singws_stall_stacks.log as dump #{number})"
+            except Exception as exc:
+                return f"(stack dump failed: {exc})"
 
         def _system_snapshot_enabled() -> bool:
             try:
@@ -4026,26 +4077,11 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
                 if gap >= threshold:
                     peak = max(peak, gap)
                     if not stall_logged:
-                        # Walking the main thread's frame chain from here is a
-                        # use-after-free: sys._current_frames() hands back live
-                        # frames, and format_stack() follows f_back while the
-                        # main thread is still executing and freeing them. It
-                        # segfaulted this app on 2026-08-09 23:15:41 --
-                        # EXC_BAD_ACCESS at 0x0 on thread
-                        # "singws-main-thread-watchdog", inside frame_back_get.
-                        # Detecting the stall only reads a float and is safe, so
-                        # timing stays on and the stack is opt-in.
+                        # Never walk the main thread's frames from this thread (use-after-free; it segfaulted this app on
+                        # 2026-08-09 23:15:41 in frame_back_get). _request_stall_dump signals the main thread instead.
                         stack = "(stack capture off; set stall_stack_capture to enable)"
                         if _stack_capture_enabled():
-                            try:
-                                frame = sys._current_frames().get(main_ident)
-                                stack = (
-                                    "".join(_traceback.format_stack(frame, limit=14))
-                                    if frame is not None
-                                    else "(main-thread frame unavailable)"
-                                )
-                            except Exception as exc:
-                                stack = f"(stack capture failed: {exc})"
+                            stack = _request_stall_dump(gap)
                         # When the block is inside Qt's C++ the Python stack is
                         # just app.exec() and names nothing, so fall back to the
                         # last expensive event the filter saw dispatched.
@@ -4249,7 +4285,7 @@ DEFAULTS = {
     # thread to do it, which is a use-after-free -- it segfaulted the app on
     # 2026-08-09. Stall timing does not need this and stays on; enable only to
     # chase a specific stall, on a machine that is not running a show.
-    "stall_stack_capture": False,
+    "stall_stack_capture": True,
     # Log a one-line system snapshot (load, memory pressure, busiest processes) when the GUI freezes for over a second.
     "stall_system_snapshot": True,
     # Light always-on stall watchdog (500 ms heartbeat, logs only GUI stalls >= 1 s, no stack, no event filter) so a long
@@ -4259,6 +4295,7 @@ DEFAULTS = {
     # cached before play_next_file checks and loads it on the GUI thread.
     "prewarm_next_song_file": True,
     "show_safe_stall_diagnostics_migrated": False,
+    "stall_stack_capture_safe_migrated": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
     "auto_update_enabled": True,        # check GitHub Releases in the background at startup
@@ -4832,7 +4869,7 @@ _TRAILING_SILENCE_CACHE: dict[str, float] = {}
 _TRAILING_SILENCE_LOCK = threading.Lock()
 
 
-def detect_trailing_silence(path, noise_db=-55.0, *, duration_hint=0.0, raise_on_error=False) -> float:
+def detect_trailing_silence(path, noise_db=-65.0, *, duration_hint=0.0, raise_on_error=False) -> float:
     """Trailing-silence length for `path`, cached per resolved audio file.
 
     The live meter cannot distinguish a quiet outro, a fade, or a reverb tail
@@ -4869,6 +4906,11 @@ def trailing_silence_cached(path) -> float | None:
     with _TRAILING_SILENCE_LOCK:
         return _TRAILING_SILENCE_CACHE.get(str(path or ""))
 
+
+# The most trailing "silence" the app will credit when it decides where a karaoke song's audio really ends (the background music may start
+# at most this long before the file's end). A scan can mistake a quiet but audible ending for silence; 2026-10-29 "Disillusioned" was
+# credited 17.9 s and the music faded in over its last 18 seconds. A genuinely long silent tail just means a few seconds of quiet.
+AUDIO_END_MAX_CREDITED_SILENCE_S = 8.0
 
 # Trailing-silence (dead-air) detection tunables for background music.
 BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
@@ -21221,6 +21263,7 @@ class RotationView(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._set_housekeeping_timers_running(True)
         self._apply_effects_visibility()
         self._tick_animated_backdrop()
         self._schedule_ticker_surface_reassert()
@@ -21232,6 +21275,25 @@ class RotationView(QMainWindow):
         super().hideEvent(event)
         self._apply_effects_visibility()
         self._tick_animated_backdrop()
+        # A closed or minimized window paints nothing; do not keep waking the GUI thread for it every 125 ms and 1 s.
+        self._set_housekeeping_timers_running(False)
+
+    def _set_housekeeping_timers_running(self, running: bool):
+        """Start or stop the backdrop and ticker-surface timers. They are restarted by showEvent, which also runs their work once."""
+        try:
+            backdrop = getattr(self, "_backdrop_animation_timer", None)
+            guard = getattr(self, "_ticker_surface_guard_timer", None)
+            if running:
+                if backdrop is not None and not backdrop.isActive():
+                    backdrop.start(125)
+                if guard is not None and not guard.isActive():
+                    guard.start(1000)
+            else:
+                for timer in (backdrop, guard):
+                    if timer is not None and timer.isActive():
+                        timer.stop()
+        except Exception:
+            pass
 
     def _apply_scroll_cadence(self):
         """Use the ticker's display-aware 60-120 FPS repaint cadence."""
@@ -22887,8 +22949,13 @@ class KaraokeApp(QWidget):
             # previously crashed in frame_back_get. Keep the lightweight stall
             # timer, but retire both costly probes once on upgrade.
             self.settings["stall_event_attribution"] = False
-            self.settings["stall_stack_capture"] = False
             self.settings["show_safe_stall_diagnostics_migrated"] = True
+            changed = True
+        if not bool(self.settings.get("stall_stack_capture_safe_migrated", False)):
+            # Stall stacks are now written by faulthandler's signal handler on the main thread (no cross-thread frame walking), so the
+            # unsafe-capture reset above no longer applies: turn it on once for every profile.
+            self.settings["stall_stack_capture"] = True
+            self.settings["stall_stack_capture_safe_migrated"] = True
             changed = True
         if not bool(self.settings.get("ffmpeg_cdg_timing_migrated", False)):
             # GStreamer used a zero-offset pipeline clock. FFmpeg CDG playback
@@ -42723,6 +42790,12 @@ class KaraokeApp(QWidget):
                 f"source={source} duration={duration:.2f}s file={os.path.basename(scan_path)}"
             )
             return
+        if trailing > AUDIO_END_MAX_CREDITED_SILENCE_S:
+            _diag(
+                f"[END-AUDIO] trailing silence {trailing:.2f}s capped to {AUDIO_END_MAX_CREDITED_SILENCE_S:.1f}s "
+                f"source={source} file={os.path.basename(scan_path)}"
+            )
+            trailing = AUDIO_END_MAX_CREDITED_SILENCE_S
         self._karaoke_audio_end_s = max(0.0, duration - trailing)
         _diag(
             f"[END-AUDIO] last audible audio at {self._karaoke_audio_end_s:.2f}s "

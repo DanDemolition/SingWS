@@ -114,7 +114,7 @@ def probe_duration_seconds(path: str) -> float:
 
 def detect_trailing_silence(
     path: str,
-    noise_db: float = -55.0,
+    noise_db: float = -65.0,
     max_scan_seconds: float = 60.0,
     sr: int = 16000,
     *,
@@ -185,7 +185,7 @@ def detect_trailing_silence(
         # exactly the Sound Choice-era material that needs it most.
         #
         # Admit a second, deliberately narrow case: at least three seconds of
-        # a stable terminal floor, itself no louder than -38 dBFS, following
+        # a stable terminal floor, itself no louder than -46 dBFS (was -38, which also took a steady quiet synth pad for hiss and cut the end of songs), following
         # materially louder programme audio.  The relative threshold stops at
         # the beginning of that floor.  Short pauses, quiet musical outros and
         # active fades do not satisfy all three conditions.
@@ -196,12 +196,12 @@ def detect_trailing_silence(
         terminal = rms_db[-floor_windows:]
         floor_db = float(np.median(terminal))
         floor_spread = float(np.percentile(terminal, 90) - np.percentile(terminal, 10))
-        if floor_db > -38.0 or floor_spread > 3.0:
+        if floor_db > -46.0 or floor_spread > 3.0:
             return 0.0
         programme_peak = float(np.percentile(rms_db[:-floor_windows], 95))
         if programme_peak < floor_db + 12.0:
             return 0.0
-        adaptive_threshold = min(-32.0, floor_db + 6.0)
+        adaptive_threshold = min(-40.0, floor_db + 6.0)
         meaningful = np.flatnonzero(rms_db > adaptive_threshold)
         if meaningful.size == 0:
             return 0.0

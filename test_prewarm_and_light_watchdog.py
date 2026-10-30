@@ -108,8 +108,8 @@ class LightWatchdogSourceTests(unittest.TestCase):
         self.assertIn("threshold_ms = max(int(threshold_ms), 1000)", body)
         self.assertIn("hb_timer.start(500 if light else 50)", body)
         self.assertIn("time.sleep(0.1 if light else 0.03)", body)
-        # stack capture and the event filter stay opt-in whatever mode
-        self.assertIn('"stall_stack_capture", False', body)
+        # the signal-based stack dump is on in either mode; the event filter stays opt-in
+        self.assertIn('"stall_stack_capture", True', body)
         self.assertIn('"stall_event_attribution", False', body)
 
 
