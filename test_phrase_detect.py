@@ -342,8 +342,19 @@ class DetectTrailingSilenceTests(ToneWavFixture, unittest.TestCase):
         self.assertAlmostEqual(pd.detect_trailing_silence(path), 0.0, delta=0.15)
 
     def test_long_stable_analogue_noise_floor_counts_as_dead_tail(self):
-        path = self._write_wav((2.0, 0.5), (4.0, 0.01))
+        path = self._write_wav((2.0, 0.5), (4.0, 0.003))
         self.assertAlmostEqual(pd.detect_trailing_silence(path), 4.0, delta=0.15)
+
+    def test_a_long_steady_quiet_tone_at_minus_40_dbfs_is_music_not_dead_air(self):
+        # 2026-10-29 show: "Disillusioned" ended in a quiet steady passage; the old -38 dBFS floor rule called it hiss and the
+        # background music faded in over the last 18 seconds. Anything louder than -46 dBFS now counts as audio.
+        path = self._write_wav((2.0, 0.5), (6.0, 0.01))
+        self.assertEqual(pd.detect_trailing_silence(path), 0.0)
+
+    def test_the_default_gate_is_more_sensitive_than_minus_55_dbfs(self):
+        # 0.0015 is about -56 dBFS: audible to a careful listener, below the old gate, above the new one.
+        path = self._write_wav((2.0, 0.5), (3.0, 0.0015), (1.0, 0.0))
+        self.assertAlmostEqual(pd.detect_trailing_silence(path), 1.0, delta=0.15)
 
     def test_long_quiet_musical_outro_is_not_treated_as_dead_tail(self):
         path = self._write_wav((2.0, 0.5), (4.0, 0.02))

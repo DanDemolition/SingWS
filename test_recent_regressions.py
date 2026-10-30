@@ -515,7 +515,7 @@ class RecentRegressionTests(unittest.TestCase):
             self.assertEqual(self.singws.detect_trailing_silence(
                 "track.mp3", duration_hint=320.0, raise_on_error=True), 9.7)
             self.assertEqual(self.singws.trailing_silence_cached("track.mp3"), 9.7)
-            scan.assert_called_with("track.mp3", noise_db=-55.0,
+            scan.assert_called_with("track.mp3", noise_db=-65.0,
                                     duration_hint=320.0, raise_on_error=True)
 
     def test_rotation_data_omits_empty_singer_and_keeps_active_numbers_contiguous(self):

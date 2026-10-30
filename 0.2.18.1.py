@@ -4828,7 +4828,7 @@ _TRAILING_SILENCE_CACHE: dict[str, float] = {}
 _TRAILING_SILENCE_LOCK = threading.Lock()
 
 
-def detect_trailing_silence(path, noise_db=-55.0, *, duration_hint=0.0, raise_on_error=False) -> float:
+def detect_trailing_silence(path, noise_db=-65.0, *, duration_hint=0.0, raise_on_error=False) -> float:
     """Trailing-silence length for `path`, cached per resolved audio file.
 
     The live meter cannot distinguish a quiet outro, a fade, or a reverb tail
@@ -4865,6 +4865,11 @@ def trailing_silence_cached(path) -> float | None:
     with _TRAILING_SILENCE_LOCK:
         return _TRAILING_SILENCE_CACHE.get(str(path or ""))
 
+
+# The most trailing "silence" the app will credit when it decides where a karaoke song's audio really ends (the background music may start
+# at most this long before the file's end). A scan can mistake a quiet but audible ending for silence; 2026-10-29 "Disillusioned" was
+# credited 17.9 s and the music faded in over its last 18 seconds. A genuinely long silent tail just means a few seconds of quiet.
+AUDIO_END_MAX_CREDITED_SILENCE_S = 8.0
 
 # Trailing-silence (dead-air) detection tunables for background music.
 BG_SILENCE_LEVEL = 0.02     # RMS meter (0..1) at/below this counts as silence
@@ -42613,6 +42618,12 @@ class KaraokeApp(QWidget):
                 f"source={source} duration={duration:.2f}s file={os.path.basename(scan_path)}"
             )
             return
+        if trailing > AUDIO_END_MAX_CREDITED_SILENCE_S:
+            _diag(
+                f"[END-AUDIO] trailing silence {trailing:.2f}s capped to {AUDIO_END_MAX_CREDITED_SILENCE_S:.1f}s "
+                f"source={source} file={os.path.basename(scan_path)}"
+            )
+            trailing = AUDIO_END_MAX_CREDITED_SILENCE_S
         self._karaoke_audio_end_s = max(0.0, duration - trailing)
         _diag(
             f"[END-AUDIO] last audible audio at {self._karaoke_audio_end_s:.2f}s "
