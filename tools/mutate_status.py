@@ -79,7 +79,7 @@ PYTHON = [
     ('            if timer is None:\n                timer = QTimer(self)\n                timer.setSingleShot(True)\n                timer.timeout.connect(self._write_status_snapshot)\n                self._status_snapshot_timer = timer', '            if True:\n                timer = QTimer(self)\n                timer.setSingleShot(True)\n                timer.timeout.connect(self._write_status_snapshot)\n                self._status_snapshot_timer = timer', None),
     ('        self._refresh_queue_summary()\n        self._schedule_status_snapshot()', '        self._refresh_queue_summary()', None),
     ('                self.header_location_label.setText(f"• {tenant_name}")\n        except Exception:\n            pass\n        self._schedule_status_snapshot()', '                self.header_location_label.setText(f"• {tenant_name}")\n        except Exception:\n            pass', None),
-    ('    "status_snapshot": False,', '    "status_snapshot": True,', None),
+    ('    "status_snapshot": True,', '    "status_snapshot": False,', None),
     ('STATUS_SNAPSHOT_PATH = APP_USER_DIR / "status_snapshot.json"', 'STATUS_SNAPSHOT_PATH = APP_USER_DIR / "status_snapshot.json"\n_x = STATUS_SNAPSHOT_PATH.read_text() if STATUS_SNAPSHOT_PATH.exists() else ""', None),
 ]
 

@@ -4205,8 +4205,8 @@ DEFAULTS = {
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default off.
     "waitlist_snapshot": False,
     # Read-only status snapshot for the Rust shell's Status and Diagnostics pages: whenever the header or the ETA line refreshes, write status_snapshot.json (the
-    # header's connection / diagnostics words, the queue summary inputs and the pre-show check facts). The app never reads it back. Default off.
-    "status_snapshot": False,
+    # header's connection / diagnostics words, the queue summary inputs and the pre-show check facts). The app never reads it back. Default on.
+    "status_snapshot": True,
     # Stage D1 shadow: compare the settings store steps (load, DEFAULTS fill, serialize-before-save) with the Rust singws-store
     # implementation and LOG disagreements only; Rust never writes and the app's own result is always used. Default off until its
     # two-architecture package gate passes. Read from the settings dict being processed.

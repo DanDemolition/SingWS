@@ -130,8 +130,8 @@ class StatusSnapshot(unittest.TestCase):
         lines = [f"{'PASS' if ok else 'CHECK'}  {label}: {detail}" for ok, label, detail in checks]
         return app, checks, lines
 
-    def test_the_setting_is_off_by_default(self):
-        self.assertIs(self.singws.DEFAULTS.get("status_snapshot"), False)
+    def test_the_setting_is_on_by_default(self):
+        self.assertIs(self.singws.DEFAULTS.get("status_snapshot"), True)
 
     def test_with_the_setting_off_nothing_is_written_and_no_timer_exists(self):
         app = self.make_app(enabled=False)
