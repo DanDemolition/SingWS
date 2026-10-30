@@ -13,6 +13,7 @@ pub mod music;
 pub mod rotation;
 pub mod rows;
 pub mod settings_view;
+pub mod status;
 pub mod ticker;
 pub mod waitlist;
 mod casefold_table;

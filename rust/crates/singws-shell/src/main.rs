@@ -8,6 +8,7 @@ mod library_panel;
 mod music_panel;
 mod rotation_panel;
 mod settings_panel;
+mod status_panel;
 mod ticker_panel;
 mod waitlist_panel;
 

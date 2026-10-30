@@ -117,6 +117,31 @@ class RenderThreadRotationTests(unittest.TestCase):
         self.assertFalse(hasattr(view, "_native_backdrop_plugin"))
         self.assertFalse(hasattr(view, "_cdg_backdrop"))
 
+    def test_a_hidden_rotation_window_stops_its_housekeeping_timers_and_a_shown_one_restarts_them(self):
+        owner = mod.QWidget()
+        owner.settings = {}
+        owner.karaoke_playing = False
+        view = mod.RotationView(owner)
+        self.addCleanup(owner.close)
+        self.addCleanup(view.close)
+        view.show()
+        _APP.processEvents()
+        self.assertTrue(view._backdrop_animation_timer.isActive())
+        self.assertTrue(view._ticker_surface_guard_timer.isActive())
+        view.hide()
+        _APP.processEvents()
+        self.assertFalse(view._backdrop_animation_timer.isActive())
+        self.assertFalse(view._ticker_surface_guard_timer.isActive())
+        view.show()
+        _APP.processEvents()
+        self.assertTrue(view._backdrop_animation_timer.isActive())
+        self.assertTrue(view._ticker_surface_guard_timer.isActive())
+
+    def test_the_timer_switch_never_raises_without_timers(self):
+        view = mod.RotationView.__new__(mod.RotationView)
+        view._set_housekeeping_timers_running(False)
+        view._set_housekeeping_timers_running(True)
+
     def test_show_transitions_use_a_top_rotation_overlay_without_video_frames(self):
         owner = mod.QWidget()
         owner.settings = {}
