@@ -21217,6 +21217,7 @@ class RotationView(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._set_housekeeping_timers_running(True)
         self._apply_effects_visibility()
         self._tick_animated_backdrop()
         self._schedule_ticker_surface_reassert()
@@ -21228,6 +21229,25 @@ class RotationView(QMainWindow):
         super().hideEvent(event)
         self._apply_effects_visibility()
         self._tick_animated_backdrop()
+        # A closed or minimized window paints nothing; do not keep waking the GUI thread for it every 125 ms and 1 s.
+        self._set_housekeeping_timers_running(False)
+
+    def _set_housekeeping_timers_running(self, running: bool):
+        """Start or stop the backdrop and ticker-surface timers. They are restarted by showEvent, which also runs their work once."""
+        try:
+            backdrop = getattr(self, "_backdrop_animation_timer", None)
+            guard = getattr(self, "_ticker_surface_guard_timer", None)
+            if running:
+                if backdrop is not None and not backdrop.isActive():
+                    backdrop.start(125)
+                if guard is not None and not guard.isActive():
+                    guard.start(1000)
+            else:
+                for timer in (backdrop, guard):
+                    if timer is not None and timer.isActive():
+                        timer.stop()
+        except Exception:
+            pass
 
     def _apply_scroll_cadence(self):
         """Use the ticker's display-aware 60-120 FPS repaint cadence."""
