@@ -161,7 +161,7 @@ def case_status(rng):
 
     def py():
         a = app()
-        f = types.SimpleNamespace(settings=s, header_status_label=Rec(), header_location_label=Rec())
+        f = types.SimpleNamespace(settings=s, header_status_label=Rec(), header_location_label=Rec(), _schedule_status_snapshot=lambda: None)
         f._refresh_header_chips = lambda: None
         f.is_network_configured = lambda: net
         if conn is not None:
@@ -229,7 +229,7 @@ def case_eta(rng):
     def py():
         CUR[0] = now
         a = app()
-        f = types.SimpleNamespace(settings=s, queue=q, queue_label=Rec(), _intro_loop_active=looping)
+        f = types.SimpleNamespace(settings=s, queue=q, queue_label=Rec(), _intro_loop_active=looping, _schedule_status_snapshot=lambda: None)
         f._rotation_recompute_round_state = lambda force_reset=False: None
         f._compute_queue_eta_seconds = lambda: (len(q), total)
         f._is_rotation_locked = lambda: locked
