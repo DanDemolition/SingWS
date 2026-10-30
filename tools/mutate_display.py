@@ -149,8 +149,6 @@ M = [
     (L, "[acc[0] / ws * 0.88, acc[1] / ws * 0.88, acc[2] / ws * 0.88]", "[acc[0] / ws * 0.9, acc[1] / ws * 0.88, acc[2] / ws * 0.88]", None),
     (L, "[acc[0] / ws * 0.88, acc[1] / ws * 0.88, acc[2] / ws * 0.88]", "[acc[0] / ws * 0.88, acc[1] / ws * 0.9, acc[2] / ws * 0.88]", None),
     (L, "[acc[0] / ws * 0.88, acc[1] / ws * 0.88, acc[2] / ws * 0.88]", "[acc[0] / ws * 0.88, acc[1] / ws * 0.88, acc[2] / ws * 0.9]", None),
-    (L, "if nx.abs() <= sx && ny.abs() <= sy {", "if nx.abs() < sx && ny.abs() <= sy {", None),
-    (L, "if nx.abs() <= sx && ny.abs() <= sy {", "if nx.abs() <= sx || ny.abs() <= sy {", None),
     (L, "let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);", "let (fu, fv) = ((nx / sx + 1.0) * 0.5, (ny / sy + 1.0) * 0.5);", None),
     (L, "let (tx, ty) = (((fu * WIDTH as f32) as usize).min(WIDTH - 1), ((fv * HEIGHT as f32) as usize).min(HEIGHT - 1));", "let (tx, ty) = (((fu * WIDTH as f32) as usize), ((fv * HEIGHT as f32) as usize).min(HEIGHT - 1));", None),
     (L, "let (tx, ty) = (((fu * WIDTH as f32) as usize).min(WIDTH - 1), ((fv * HEIGHT as f32) as usize).min(HEIGHT - 1));", "let (tx, ty) = (((fu * WIDTH as f32) as usize).min(WIDTH - 1), ((fv * HEIGHT as f32) as usize));", None),
@@ -400,9 +398,6 @@ NEW += [
  (L, "let delta = dist(fg, border).min(dist(fg, tile).min(dist(fg, panel)));", "let delta = dist(fg, border).min(dist(fg, tile));", None),
  (L, "let delta = dist(fg, border).min(dist(fg, tile).min(dist(fg, panel)));", "let delta = dist(fg, border).min(dist(fg, panel));", "when the panel colour differs from the tile colour the panel colour is c2, which is also one of the four inner samples the tile colour is picked from; the distance to border/tile alone gives the same decision except where only the panel colour is near, which needs a disc with three different backdrop colours"),
  (L, "let delta = dist(fg, border).min(dist(fg, tile).min(dist(fg, panel)));", "let delta = dist(fg, tile).min(dist(fg, panel));", None),
- (L, "let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);\n            if nx.abs() <= sx && ny.abs() <= sy {\n                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);\n                let fg = nearest(fu, fv);", "let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);\n            if nx.abs() < sx && ny.abs() <= sy {\n                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);\n                let fg = nearest(fu, fv);", None),
- (L, "let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);\n            if nx.abs() <= sx && ny.abs() <= sy {\n                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);\n                let fg = nearest(fu, fv);", "let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);\n            if nx.abs() <= sx && ny.abs() <= sy {\n                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (ny / sy + 1.0) * 0.5);\n                let fg = nearest(fu, fv);", None),
- (L, "let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);\n            if nx.abs() <= sx && ny.abs() <= sy {\n                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);\n                let fg = nearest(fu, fv);", "let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);\n            if nx.abs() <= sx || ny.abs() <= sy {\n                let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);\n                let fg = nearest(fu, fv);", None),
  (L, "let (sx, sy) = if va > sa { (sa / va, 1.0) } else { (1.0, va / sa) };\n    let nearest", "let (sx, sy) = if va >= sa { (sa / va, 1.0) } else { (1.0, va / sa) };\n    let nearest", "at va == sa both branches give (1.0, 1.0)"),
  (L, "let (sx, sy) = if va > sa { (sa / va, 1.0) } else { (1.0, va / sa) };\n    let nearest", "let (sx, sy) = if va < sa { (sa / va, 1.0) } else { (1.0, va / sa) };\n    let nearest", None),
  (L, "let (sx, sy) = if va > sa { (sa / va, 1.0) } else { (1.0, va / sa) };\n    let nearest", "let (sx, sy) = if va > sa { (va / sa, 1.0) } else { (1.0, va / sa) };\n    let nearest", None),
@@ -425,6 +420,29 @@ NEW2 = [
 ]
 NEW += NEW2
 M += NEW
+
+NEW3 = [
+ # the fit quad coverage rule (shared by compose_bridge and compose_bridge_background) and the bg composite's picture coordinates
+ (L, "if ph * w > pw * h {\n        // wider", "if ph * w >= pw * h {\n        // wider", "at an exact aspect match the wide branch covers every pixel too (lo = 0 and hi = 2 * ph * w)"),
+ (L, "if ph * w > pw * h {\n        // wider", "if ph * w < pw * h {\n        // wider", None),
+ (L, "} else if ph * w < pw * h {", "} else if ph * w <= pw * h {", "same: the tall branch at an exact match covers everything"),
+ (L, "} else if ph * w < pw * h {", "} else if ph * w > pw * h {", None),
+ (L, "let c = 2 * ph * (2 * px + 1);", "let c = 2 * ph * (2 * px);", None),
+ (L, "let c = 2 * pw * (2 * py + 1);", "let c = 2 * pw * (2 * py);", None),
+ (L, "c >= 2 * ph * w - 2 * pw * h && c < 2 * ph * w + 2 * pw * h", "c > 2 * ph * w - 2 * pw * h && c < 2 * ph * w + 2 * pw * h", None),
+ (L, "c >= 2 * ph * w - 2 * pw * h && c < 2 * ph * w + 2 * pw * h", "c >= 2 * ph * w - 2 * pw * h && c <= 2 * ph * w + 2 * pw * h", None),
+ (L, "c >= 2 * pw * h - 2 * ph * w && c < 2 * pw * h + 2 * ph * w", "c > 2 * pw * h - 2 * ph * w && c < 2 * pw * h + 2 * ph * w", None),
+ (L, "c >= 2 * pw * h - 2 * ph * w && c < 2 * pw * h + 2 * ph * w", "c >= 2 * pw * h - 2 * ph * w && c <= 2 * pw * h + 2 * ph * w", None),
+ (L, "c >= 2 * ph * w - 2 * pw * h && c < 2 * ph * w + 2 * pw * h", "c >= 2 * ph * w - 2 * pw * h || c < 2 * ph * w + 2 * pw * h", None),
+ (L, "c >= 2 * ph * w - 2 * pw * h && c < 2 * ph * w + 2 * pw * h", "c >= 2 * ph * w - 2 * pw * h && c < 2 * ph * w + 2 * pw * h + 2", None),
+ (L, "let (pw, ph) = (WIDTH as i64, HEIGHT as i64);", "let (pw, ph) = (HEIGHT as i64, WIDTH as i64);", None),
+ (L, "let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);", "let (fu, fv) = ((nx / sx + 1.0) * 0.5, (ny / sy + 1.0) * 0.5);", None, 1),
+ (L, "let (fu, fv) = ((nx / sx + 1.0) * 0.5, (1.0 - ny / sy) * 0.5);", "let (fu, fv) = ((nx / sx - 1.0) * 0.5, (1.0 - ny / sy) * 0.5);", None, 1),
+ (L, "let (nx, ny) = (ux * 2.0 - 1.0, 1.0 - uy * 2.0);", "let (nx, ny) = (ux * 2.0 - 1.0, uy * 2.0 - 1.0);", None, 1),
+ (L, "if fit_quad_covers(px, py, win_w, win_h) {", "if fit_quad_covers(py, px, win_w, win_h) {", None, 1),
+ (L, "if fit_quad_covers(px, py, win_w, win_h) {", "if fit_quad_covers(px, py, win_h, win_w) {", None, 0),
+]
+M += NEW3
 
 
 def run(cmd, **kw):

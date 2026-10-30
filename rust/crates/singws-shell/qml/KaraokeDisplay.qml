@@ -99,6 +99,8 @@ Window {
         onTriggered: {
             disp.refreshes += 1
             console.log("[SCREEN] settled " + (Date.now() - disp.lastScreenEvent) + " ms after the last event; surfaces refreshed (#" + disp.refreshes + ")")
+            console.log("[SCREEN] topology " + placement.topology(disp.arg("--display-screens")))
+            if (disp.hasArg("--display-place")) console.log("[SCREEN] window now at " + disp.x + "," + disp.y + " " + disp.width + "x" + disp.height + " on screen " + (disp.screen ? disp.screen.name : "?"))
             if (disp.hasArg("--display-simulate-screen-events")) Qt.quit()
         }
     }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write a made-up CDG whose palette has PARTIAL alpha (DEFINE_TRANSPARENT before the palette load), for checking what the audience window does with it
-(`tools/cdg_window_compare.py --expect-alpha`). Colour 0 is opaque black; colours 1..7 are saturated and get alphas 191, 127, 63, 3 (and 255 for the rest)
+(`tools/cdg_window_compare.py alpha.cdg silent.mp3 --at 5`). Colour 0 is opaque black; colours 1..7 are saturated and get alphas 191, 127, 63, 3 (and 255 for the rest)
 in vertical bands. No show data. Usage: make_alpha_cdg.py OUT.cdg"""
 import sys
 
