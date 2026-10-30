@@ -21,5 +21,9 @@ path = "src/window_cli.rs"
 name = "singws-track-display-cli"
 path = "src/track_display_cli.rs"
 
+[[bin]]
+name = "singws-idle-overlay-cli"
+path = "src/idle_overlay_cli.rs"
+
 [dependencies]
 unicode-normalization = "0.1"

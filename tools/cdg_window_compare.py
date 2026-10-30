@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QApplication, QWidget
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mpv_playback_iina import MpvPlaybackPlugin  # noqa: E402
 
-DUMP = os.environ.get("CARGO_TARGET_DIR", str(Path.home() / ".cache/singws-rust-target-cdg")) + "/release/singws-cdg-dump"
+DUMP = os.environ.get("CARGO_TARGET_DIR", str(Path.home() / ".cache/singws-rust-target-display")) + "/release/singws-cdg-dump"
 RECT = (60, 80, 640, 360)
 
 
@@ -26,6 +26,9 @@ def main():
     ap.add_argument("--margin", type=int, default=3, help="ignore this many pixels at the window edge (the frameless window has a faint border/shadow that is not the picture)")
     ap.add_argument("--fill", choices=["off", "colour", "blur"], default="off", help="bridge side fill mode (0 / 1 / 2 = the app's fit / sidefill / blur)")
     ap.add_argument("--size", default="640x360", help="output window size in points, e.g. 400x500 for a window narrower than the picture")
+    ap.add_argument("--bg", help="a (static) background video to play under the lyrics: compares the shader's modes 4 and 5 (needs ffmpeg to read its frame)")
+    ap.add_argument("--bg-size", default="1280x720", help="size of the --bg video's frame (the bridge's background texture is 16:9)")
+    ap.add_argument("--bg-opacity", type=float, default=1.0)
     ap.add_argument("--keep", help="write the screenshot and the Rust image here as PNG")
     a = ap.parse_args()
     global RECT
@@ -52,6 +55,15 @@ def main():
         end = time.monotonic() + 8
         while time.monotonic() < end and not plugin.visualsReady():
             pump(0.05)
+        bg_args = []
+        if a.bg:
+            if not plugin.loadBackgroundVideo(a.bg, a.bg_opacity):
+                raise SystemExit("background video did not load: " + str(plugin.errorString()))
+            pump(3.0)
+            bgraw = Path(tempfile.mkdtemp()) / "bg.rgba"
+            with open(bgraw, "wb") as f:
+                subprocess.run(["ffmpeg", "-v", "error", "-ss", "1", "-i", a.bg, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], stdout=f, check=True)
+            bg_args = ["--bg", f"{bgraw}:{a.bg_size}", "--bg-opacity", repr(a.bg_opacity)]
         for t in a.at:
             plugin.pauseMedia(); pump(0.4); plugin.seekMedia(int(t * 1000)); pump(2.0)
             shot = Path(tempfile.mkdtemp()) / "s.png"
@@ -59,7 +71,7 @@ def main():
             img = QImage(str(shot)).convertToFormat(QImage.Format.Format_RGBA8888)
             ptr = img.constBits(); ptr.setsize(img.sizeInBytes()); got = bytes(ptr)
             w, h = img.width(), img.height()
-            want = subprocess.run([DUMP, a.cdg, "--at", repr(t), "--bridge", f"{w}x{h}:{a.fill}"], capture_output=True).stdout
+            want = subprocess.run([DUMP, a.cdg, "--at", repr(t), "--bridge", f"{w}x{h}:{a.fill}", *bg_args], capture_output=True).stdout
             stride = img.bytesPerLine()
             n = over = mx = 0
             for y in range(h):
