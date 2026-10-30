@@ -3,6 +3,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+# A forgotten rust/build_dsp.sh ships a stale Rust library (1.0.2.4 did); refuse to build one.
+python3 tools/check_native_libs_fresh.py --arch arm64 --require || { echo "!! the Rust DSP library is stale or missing: run ./rust/build_dsp.sh first"; exit 1; }
 
 # A Python.org framework extracted for a portable build cannot live at its
 # installer path under /Library.  Carry the explicit shim through this shell;
