@@ -2240,6 +2240,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-scan"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha1",
+ "singws-dbw",
+ "zip",
+]
+
+[[package]]
 name = "singws-shell"
 version = "0.1.0"
 dependencies = [
