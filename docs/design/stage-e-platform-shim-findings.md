@@ -36,11 +36,12 @@ needs the operator at the Mac; nothing here was installed, signed with the local
 2. **Observed, here:** `cargo build` produces an *ad-hoc, linker-signed* binary: `Signature=adhoc`, `flags=adhoc,linker-signed`, `Identifier=singws_mac_probe-<hash>`,
    designated requirement `cdhash H"..."`, no Info.plist, no team id. For an ad-hoc binary the designated requirement **is** the code hash, and the identifier carries a build hash
    too, so every rebuild is a *different* identity to TCC. (Inference from the requirement, not a TCC experiment.)
-3. **UNVERIFIED (needs the operator):** whether a TCC grant (Accessibility, Automation/Apple Events, Location) given to the probe survives a rebuild when it is signed with the
-   local self-signed certificate and a fixed `--identifier`. The expected answer is yes (the requirement becomes `identifier "..." and certificate leaf = H"..."`), but TCC has
-   historically also keyed on path; this has not been tried. Procedure for the owner: sign the probe `codesign --force -s "<local cert>" --identifier com.singws.mac-probe`,
-   run it from the Terminal, add it in System Settings > Privacy & Security > Accessibility, run `singws-mac-probe` (expect `ax_is_trusted: true` even with the parent's trust
-   removed — test by launching through `launchctl asuser` or a LaunchAgent so the responsible process is the probe itself), rebuild, re-sign, run again.
+3. **VERIFIED by the operator, 2026-10-31 (Apple Silicon, arm64):** a TCC Accessibility grant attaches to a Rust binary signed with the local certificate
+   ("SingWS Local Code Signing", fixed `--identifier com.singws.mac-probe`, `rust/build_mac.sh`) and **survives a rebuild**. Method: the probe was run as its own launchd job
+   (`launchctl submit ... singws-mac-probe --json`) so its responsible process is itself, not the terminal. Results: before any grant `ax_trusted: false`; after adding the
+   binary in System Settings > Privacy & Security > Accessibility `ax_trusted: true`; after a rebuild (file hash changed `e955...` to `ee5f...`) and re-sign with the same
+   command, still `ax_trusted: true`. The designated requirement was identical across both builds: `identifier "com.singws.mac-probe" and certificate root = H"5a2f5011..."`.
+   Not covered: an Intel Mac, a different path for the binary, and the grant for an app bundle (SingWS.app) rather than a bare binary.
 4. **UNVERIFIED:** NSAppleScript to *System Events* from the probe: the first run will show an Automation prompt naming the probe's responsible process. `tools/platform_parity.py --system-events`
    does exactly that and is opt-in for this reason (it was NOT run here).
 5. **UNVERIFIED:** CoreLocation from a bare command-line binary. A tool without an Info.plist / `NSLocationUsageDescription` is generally not offered the Location prompt at all
