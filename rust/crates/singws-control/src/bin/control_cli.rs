@@ -25,6 +25,7 @@ fn incoming_json(m: &Incoming) -> Value {
         Incoming::Error { request_id, code, message } => json!({"type": "error", "request_id": request_id, "code": code, "message": message}),
         Incoming::Notice { request_id, ok, code, message } => json!({"type": "notice", "request_id": request_id, "ok": ok, "code": code, "message": message}),
         Incoming::Chat(c) => json!({"type": "chat", "chat": c}),
+        Incoming::ChatMedia { media_ref, uri, pending } => json!({"type": "chat_media", "ref": media_ref, "has_uri": !uri.is_empty(), "pending": pending}),
         Incoming::Other(t) => json!({"type": "other", "name": t}),
         Incoming::NotJson => json!({"type": "not_json"}),
     }

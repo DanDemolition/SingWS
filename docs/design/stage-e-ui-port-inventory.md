@@ -186,12 +186,12 @@ the ticker needs `_now_singing_parts`. They are explicit inputs, the same places
 **Data.** The app (`_shell_chat_summary`, next to `_shell_waitlist_summary`) turns the chat state its Chat page already holds (`_room_messages`, `_chat_messages`; no new storage, no new endpoint)
 into a bounded summary and sends it as its OWN relay message `{"type":"chat","user","chat":{...},"updated_at"}` right after each `queue` message (same gate: `shell_commands` not `off`).
 It is a separate message because the relay drops host messages over 64 KB and the worst-case summary is about 50 KB. The relay needed no change (it forwards every host-app message to the browsers).
-Caps: 25 Everyone rows, 10 Private threads and 10 Host chat threads of 5 rows each, text clipped to 120 characters. A picture or GIF is the word `photo` / `gif` (never a URL or id), the text of a
+Caps: 25 Everyone rows, 10 Private threads and 10 Host chat threads of 5 rows each, text clipped to 120 characters. A picture or GIF is the word `photo` / `gif` plus an opaque `media_ref` (`photo:<id>` / `gif:<id>`; never an address or key), the text of a
 removed message is withheld, held / blocked / reported flags travel. Unread: Everyone and Private from the page's own counters, Host chat summed over the threads sent.
 
 **Rust.** `singws-uimodel::chat` (+ `singws-chat-cli`): tags, time stamps, tab labels and rows, equal to `_render_room_chat`, `_chat_tab_labels` and `_render_host_chat_transcript`;
 `tools/chat_parity.py` feeds random chat state through the REAL `_shell_chat_summary` and the REAL page renderers and compares message by message (IDENTICAL on 1,500+ cases, 5 fixed-offset zones);
-mutants in `tools/mutate_uimodel_text.py chat`. `singws-control` parses the `chat` message into the view model (`chat`) and validates `chat.say`; the shell's **Chat** tab draws plain text only.
+mutants in `tools/mutate_uimodel_text.py chat`. `singws-control` parses the `chat` message into the view model (`chat`) and validates `chat.say`; the shell's **Chat** tab draws text as plain text and pictures/GIFs as small thumbnails: the shell asks `chat.media {ref}` (read-only, answered in `chat_media`, only for a ref the chat summary currently shows, never for a removed row); the app re-encodes its own copy (the one the chat page downloaded with the venue key) to a JPEG of at most 240 px and 60 KB, so the shell never holds the key or contacts GIPHY. A GIF is its still, as in the app. Refusals: `unknown_media`, `media_too_big`; a picture the app has not downloaded yet is answered `pending` and asked for again every 3 s.
 
 **`chat.say` {channel: "group" | "host", text, singer_key (host only)}.** The only chat command. Private threads cannot be spoken in. Gated by `shell_commands` (`off` refuses, `dry_run` checks and sends nothing,
 `apply` sends), request-id dedupe, 10 s expiry. The Everyone path posts exactly what the page's Send posts (host name from `host_chat_name`; the host is never muted: the server's rule); Host chat goes through
@@ -208,8 +208,9 @@ mutants in `tools/mutate_uimodel_text.py chat`. `singws-control` parses the `cha
 | `network_not_configured` | no server address, user or API key |
 | `duplicate_message` | the same text to the same place within 30 s (a double tap); a failed send may be retried at once |
 
-Known limits: the Host chat unread total ignores threads beyond the 10 sent; "needs attention" is one total (the page shows it per tab); Private thread names assume a singer's display name does not change
-between messages; the shell's tab is plain text (no pictures / GIFs); the Everyone Send asks twice in the shell ("Sure?").
+Known limits: the Host chat unread total covers every conversation (the summary carries `more.host` / `more.dm` for the threads it leaves out, shown as "N more conversations in the app");
+"needs attention" is sent per tab (`attention_by`); a Private thread is identified by the two singers' keys, its label is the name the app's `_room_display_name` finds first;
+the Everyone Send asks twice in the shell ("Sure?"); a GIF shows as a still; a real send to a live venue has only been tested against stand-ins (see the handover note).
 
 ## 5. A repository finding
 

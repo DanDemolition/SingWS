@@ -72,6 +72,18 @@ fn attachment_label(m: &Value) -> &'static str {
     }
 }
 
+/// The opaque thumbnail reference of a picture/GIF row (`photo:<digits>` or `gif:<letters, digits, - _ up to 64>`), "" for anything else or a removed row.
+pub fn media_ref(m: &Value) -> String {
+    let r = s(m, "media_ref");
+    if s(m, "status") == "removed" { return String::new(); }
+    let ok = match r.split_once(':') {
+        Some(("photo", id)) => !id.is_empty() && id.len() <= 12 && id.chars().all(|c| c.is_ascii_digit()),
+        Some(("gif", id)) => !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        _ => false,
+    };
+    if ok { r } else { String::new() }
+}
+
 /// One message row. `thread`: see [`tags`]; `host_chat` rows are the Host chat transcript (no tags, stamp without seconds, "(removed)" in place of the text).
 pub fn row(m: &Value, thread: Option<(&str, &str)>, host_chat: bool, utc_offset_min: i64) -> Value {
     let removed = s(m, "status") == "removed";
@@ -85,6 +97,7 @@ pub fn row(m: &Value, thread: Option<(&str, &str)>, host_chat: bool, utc_offset_
         "body": body,
         // the app shows "(removed)" alone for a removed Host chat picture, but still draws the attachment in the room views
         "attachment": if removed && host_chat { "" } else { attachment_label(m) },
+        "media_ref": media_ref(m),
         "status": s(m, "status"),
     })
 }
@@ -227,6 +240,20 @@ mod tests {
         assert_eq!(view(&json!({"reachable": false}), "group", 0)["status"], "Room chat: could not reach the server");
         assert!(view(&json!({}), "group", 0)["status"].as_str().unwrap().starts_with("Room chat is off"));
         assert_eq!(view(&json!("garbage"), "group", 0)["group"], json!([]));
+    }
+
+    #[test]
+    fn only_well_formed_media_refs_of_live_rows_pass() {
+        let m = |r: &str, st: &str| json!({"media_ref": r, "status": st});
+        for good in ["photo:77", "gif:g-1_X", &format!("gif:{}", "a".repeat(64))] {
+            assert_eq!(media_ref(&m(good, "")), good);
+        }
+        assert_eq!(media_ref(&m("photo:5", "held")), "photo:5");
+        for bad in ["photo:", "photo:x1", "photo:1234567890123", "gif:", "gif:a/b", "gif:../x", "gif:a b", &format!("gif:{}", "a".repeat(65)), "file:1", "photo", ""] {
+            assert_eq!(media_ref(&m(bad, "")), "", "{bad}");
+        }
+        assert_eq!(media_ref(&m("photo:5", "removed")), "");
+        assert_eq!(row(&m("photo:5", ""), None, false, 0)["media_ref"], "photo:5");
     }
 
     #[test]

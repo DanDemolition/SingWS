@@ -41,6 +41,16 @@ pub mod qobject {
         #[cxx_name = "setPreview"]
         fn set_preview(self: Pin<&mut ControlPanel>, on: bool);
 
+        /// The thumbnail address (a small JPEG data address) of a chat picture or GIF, "" until the app has sent it. Re-ask when `media_rev` in the view changes.
+        #[qinvokable]
+        #[cxx_name = "mediaUri"]
+        fn media_uri(self: &ControlPanel, media_ref: &QString) -> QString;
+
+        /// Ask the app for the thumbnail of a chat picture or GIF (`chat.media`, read-only, answered with a `chat_media` message); no result banner.
+        #[qinvokable]
+        #[cxx_name = "requestMedia"]
+        fn request_media(self: Pin<&mut ControlPanel>, media_ref: &QString);
+
         #[qinvokable]
         #[cxx_name = "dumpView"]
         fn dump_view(self: &ControlPanel, path: &QString);
@@ -256,6 +266,17 @@ impl qobject::ControlPanel {
     fn send_with_sig(self: Pin<&mut Self>, label: &QString, command: &QString, args_json: &QString, sig: &QString) {
         let args: Value = serde_json::from_str(&args_json.to_string()).unwrap_or(Value::Object(Default::default()));
         self.send_with(&label.to_string(), &command.to_string(), args, Some(sig.to_string()));
+    }
+
+    fn media_uri(&self, media_ref: &QString) -> QString {
+        QString::from(self.rust().vm.lock().unwrap().media_uri(&media_ref.to_string()).as_str())
+    }
+
+    fn request_media(self: Pin<&mut Self>, media_ref: &QString) {
+        let r = media_ref.to_string();
+        if singws_control::protocol::valid_media_ref(&r) {
+            self.send_internal("", "chat.media", serde_json::json!({"ref": r}), false);
+        }
     }
 
     fn dump_view(&self, path: &QString) {

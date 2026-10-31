@@ -148,6 +148,7 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
             let m = args.get("message").and_then(Value::as_str).map(str::trim).unwrap_or("");
             need(!m.is_empty() && m.chars().count() <= 500 && !m.chars().any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r'), "message must be 1-500 characters")
         }
+        "chat.media" => need(args.get("ref").and_then(Value::as_str).is_some_and(valid_media_ref), "ref must be a picture or GIF reference from the chat"),
         "chat.say" => {
             let channel = args.get("channel").and_then(Value::as_str);
             need(matches!(channel, Some("group" | "host")), "channel must be \"group\" (Everyone) or \"host\" (one singer's Host chat)")?;
@@ -263,6 +264,18 @@ pub struct Ack {
     pub message: String,
 }
 
+/// The largest thumbnail address the shell keeps (the app sends at most 60,000).
+pub const MEDIA_URI_MAX: usize = 70_000;
+
+/// `photo:<1-12 digits>` or `gif:<1-64 letters, digits, - or _>`: the opaque reference of a chat picture.
+pub fn valid_media_ref(r: &str) -> bool {
+    match r.split_once(':') {
+        Some(("photo", id)) => !id.is_empty() && id.len() <= 12 && id.bytes().all(|c| c.is_ascii_digit()),
+        Some(("gif", id)) => !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
     Hello { role: String },
@@ -276,6 +289,8 @@ pub enum Incoming {
     Notice { request_id: String, ok: bool, code: String, message: String },
     /// the app's room chat summary (Everyone, Private threads, Host chat); read-only. Anything that is not an object arrives as null.
     Chat(Value),
+    /// a thumbnail of one chat picture / GIF the shell asked for (`chat.media`): `uri` is a small JPEG data address, empty while the app is still fetching it
+    ChatMedia { media_ref: String, uri: String, pending: bool },
     Other(String),
     NotJson,
 }
@@ -350,6 +365,16 @@ pub fn parse_incoming(text: &str) -> Incoming {
             message: s(&v, "message"),
         },
         "chat" => Incoming::Chat(v.get("chat").filter(|c| c.is_object()).cloned().unwrap_or(Value::Null)),
+        "chat_media" => {
+            let r = s(&v, "ref");
+            let uri = s(&v, "uri");
+            let good = uri.starts_with("data:image/jpeg;base64,") && uri.len() <= MEDIA_URI_MAX && uri[23..].bytes().all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/' || c == b'=');
+            if valid_media_ref(&r) {
+                Incoming::ChatMedia { media_ref: r, uri: if good { uri } else { String::new() }, pending: !good }
+            } else {
+                Incoming::Other("chat_media".to_string())
+            }
+        }
         "notice" => Incoming::Notice { request_id: s(&v, "request_id"), ok: b(&v, "ok"), code: s(&v, "code"), message: s(&v, "message") },
         other => Incoming::Other(other.to_string()),
     }
@@ -488,6 +513,12 @@ mod tests {
             ("queue.message_singer", json!({"singer_id": "s1", "message": "x".repeat(501)})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": "bell\u{7}"})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": 5})),
+            ("chat.media", json!({})),
+            ("chat.media", json!({"ref": "photo:"})),
+            ("chat.media", json!({"ref": "photo:x"})),
+            ("chat.media", json!({"ref": "gif:a/b"})),
+            ("chat.media", json!({"ref": "file:1"})),
+            ("chat.media", json!({"ref": 5})),
             ("chat.say", json!({"text": "hi"})),
             ("chat.say", json!({"channel": "dm", "text": "hi"})),
             ("chat.say", json!({"channel": "GROUP", "text": "hi"})),
@@ -582,6 +613,8 @@ mod tests {
             ("queue.message_singer", json!({"singer_id": "s1", "message": "You're up next"})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": "two\nlines"})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": "x".repeat(500)})),
+            ("chat.media", json!({"ref": "photo:77"})),
+            ("chat.media", json!({"ref": "gif:g-1_X"})),
             ("chat.say", json!({"channel": "group", "text": "Welcome everyone! 🎤"})),
             ("chat.say", json!({"channel": "group", "text": "x".repeat(300)})),
             ("chat.say", json!({"channel": "group", "singer_key": 5, "text": "the key is ignored for Everyone"})),

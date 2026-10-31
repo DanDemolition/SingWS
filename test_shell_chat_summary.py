@@ -44,7 +44,7 @@ class GroupTests(unittest.TestCase):
     def test_group_rows_are_oldest_first_with_the_row_shape(self):
         out = app(room=[gm(2, "b"), gm(1, "a"), gm(3, "host says", frm="Host", host=True, from_key="@host")])._shell_chat_summary()
         self.assertEqual([r["text"] for r in out["group"]], ["a", "b", "host says"])
-        self.assertEqual(out["group"][0], {"id": 1, "from": "Ann", "host": False, "at": 1001, "text": "a", "attachment": "", "status": "", "reports": 0, "flag": ""})
+        self.assertEqual(out["group"][0], {"id": 1, "from": "Ann", "host": False, "at": 1001, "text": "a", "attachment": "", "media_ref": "", "status": "", "reports": 0, "flag": ""})
         self.assertTrue(out["group"][2]["host"])
         self.assertEqual((out["group_enabled"], out["dm_enabled"], out["reachable"], out["unread"]["group"], out["unread"]["dm"]), (True, True, True, 2, 1))
 
@@ -53,14 +53,18 @@ class GroupTests(unittest.TestCase):
         self.assertEqual((len(out["group"]), out["group"][0]["id"], out["group"][-1]["id"]), (25, 25, 49))
         self.assertEqual(len(out["group"][0]["text"]), 120)
 
-    def test_attachments_are_placeholders_never_urls_or_media_ids(self):
+    def test_attachments_are_placeholders_with_an_opaque_media_ref_never_an_address(self):
         photo = gm(1, "look", kind="image", media_id=77)
-        gif = gm(2, "", kind="gif", gif={"id": "g", "preview": "https://media.giphy.com/x.gif", "full": "https://media.giphy.com/y.gif"})
+        gif = gm(2, "", kind="gif", gif={"id": "g-1_x", "preview": "https://media.giphy.com/x.gif", "full": "https://media.giphy.com/y.gif"})
         out = app(room=[photo, gif])._shell_chat_summary()
-        self.assertEqual([r["attachment"] for r in out["group"]], ["photo", "gif"])
+        self.assertEqual([(r["attachment"], r["media_ref"]) for r in out["group"]], [("photo", "photo:77"), ("gif", "gif:g-1_x")])
         blob = json.dumps(out)
-        for forbidden in ("giphy", "http", "media_id", "77"):
+        for forbidden in ("giphy", "http", "media_id", "y.gif"):
             self.assertNotIn(forbidden, blob)
+        removed = gm(3, "", kind="gif", status="removed", gif={"id": "g", "preview": "https://media.giphy.com/x.gif"})
+        odd = gm(4, "", kind="gif", gif={"id": "../etc", "preview": "https://media.giphy.com/x.gif"})
+        out = app(room=[removed, odd])._shell_chat_summary()
+        self.assertEqual([(r["attachment"], r["media_ref"]) for r in out["group"]], [("gif", ""), ("gif", "")], "removed or odd ids: placeholder only")
 
     def test_a_picture_or_gif_the_page_would_not_draw_is_not_announced(self):
         rows = [gm(1, "a", kind="image"), gm(2, "b", kind="image", media_id=0), gm(3, "c", kind="gif"), gm(4, "d", kind="gif", gif={"id": "g", "preview": "http://evil.example/x.gif"}),
@@ -144,7 +148,7 @@ class RobustTests(unittest.TestCase):
         self.assertIsInstance(a._shell_chat_summary(), dict)
 
     def test_the_worst_case_message_fits_the_relay_limit(self):
-        room = [gm(i, "é" * 300, frm="S" * 30) for i in range(1, 200)]
+        room = [gm(i, "é" * 300, frm="S" * 30, kind="gif", gif={"id": "g" * 64, "preview": "https://media.giphy.com/x"}) for i in range(1, 200)]
         room += [dict(gm(1000 + i, "é" * 300, frm="S" * 30), channel="dm", to_key=f"t{i}", from_key=f"f{i}") for i in range(200)]
         host = [{"id": i, "singer": f"S{i % 20}", "singer_key": f"s{i % 20}", "message": "é" * 300, "direction": "in", "read": False, "created_at": i} for i in range(300)]
         out = app(room=room, host=host)._shell_chat_summary()
