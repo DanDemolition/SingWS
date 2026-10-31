@@ -44,7 +44,7 @@ class GroupTests(unittest.TestCase):
     def test_group_rows_are_oldest_first_with_the_row_shape(self):
         out = app(room=[gm(2, "b"), gm(1, "a"), gm(3, "host says", frm="Host", host=True, from_key="@host")])._shell_chat_summary()
         self.assertEqual([r["text"] for r in out["group"]], ["a", "b", "host says"])
-        self.assertEqual(out["group"][0], {"id": 1, "from": "Ann", "host": False, "at": 1001, "text": "a", "attachment": "", "status": "", "reports": 0})
+        self.assertEqual(out["group"][0], {"id": 1, "from": "Ann", "host": False, "at": 1001, "text": "a", "attachment": "", "status": "", "reports": 0, "flag": ""})
         self.assertTrue(out["group"][2]["host"])
         self.assertEqual((out["group_enabled"], out["dm_enabled"], out["reachable"], out["unread"]["group"], out["unread"]["dm"]), (True, True, True, 2, 1))
 
