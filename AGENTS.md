@@ -339,19 +339,18 @@ report in hand, leave it out.
 Facts about the development Mac that are not visible from the source tree, and
 that have each cost a session's worth of wrong reasoning at least once.
 
-### The dev Mac is Intel (x86_64)
+### The dev Mac is Apple Silicon (arm64); the Intel Mac is a different machine
 
-arm64 binaries cannot execute here at all — `lipo`-thinning an arm64 python and
-running it gives "bad CPU type in executable". `SingWS-*-arm64-installer.dmg` can
-be produced (PyInstaller `target_arch='arm64'`) but never smoke-tested locally;
-only the x86_64 flavour actually launches. Since 0.4.4.0 arm64 is expected to be
-built natively on an Apple Silicon Mac and copied in.
+Corrected 2026-10-31 (sessions measured an M1 Max, macOS 27): this Mac is **arm64** and runs arm64 builds natively. x86_64 code runs here only under
+**Rosetta**, so an x86_64 result from this Mac is NOT an Intel-hardware result (Intel GPU/driver, Metal/GL behaviour and timing are untested here). Real Intel
+runs happen on the operator's separate Intel Mac (venue/rehearsal), reached through the `local-installs/intel-<version>` folder (DMG, `install_on_intel.sh`,
+`check_launch.sh`, `after_show.sh`) and the logs it sends back. Never say "tested on Intel" for something that only ran under Rosetta.
 
-`build_all.sh` reads as though the host were Apple Silicon — it calls the arm64
-flavour "(dev)" and labels Intel "the Intel test machine". Those comments are
-wrong about this machine. Nor does `verify_macos_arch.py --require arm64
---require x86_64` passing say anything about the host: it checks which slices a
-binary contains, not which one can run.
+Building: the arm64 installer is built natively here (`./build_singws_mac_arm64.sh`); the Intel installer is also built on this Mac
+(`SINGWS_NATIVE_PYTHON=.venv-build-arm64/bin/python SINGWS_BUILD_PYTHON=.venv-build-intel-rosetta/bin/python ./build_singws_mac_intel.sh`, see HANDOFF.md) and then
+copied to the Intel Mac by hand. `build_all.sh` reads correctly for this machine (arm64 is the "dev" flavour, Intel the "Intel test machine"). Note that
+`verify_macos_arch.py --require arm64 --require x86_64` passing says nothing about which slice can run: it checks which slices a binary contains.
+Older text in this repository that says the dev Mac is Intel (and that arm64 cannot execute here) is out of date.
 
 ### Running the tests
 
