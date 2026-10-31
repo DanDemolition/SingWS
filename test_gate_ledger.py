@@ -43,6 +43,17 @@ class DecisionsProven(unittest.TestCase):
         self.assertIs(p["TRANSPORT-DRIVE:media_end"], True)
         self.assertIs(p["TRANSPORT-DRIVE:karafun_end"], False)
 
+    def test_start_drive_decisions_are_judged_per_decision(self):
+        d = "python={} rust={} selected={} owner=rust disagreement="
+        lines = [tsr.LAUNCH, tsr.L("START-DRIVE", "decision=route " + d + "0"), tsr.L("START-DRIVE", "decision=pick " + d + "0"), tsr.L("START-DRIVE", "decision=pick_none " + d + "0"),
+                 tsr.L("START-DRIVE", "decision=transport_cdg " + d + "0"), tsr.L("START-DRIVE", "decision=display " + d + "1"),
+                 tsr.L("START-DRIVE", "decision=performance_confirmed_set " + d + "0")]
+        p = {k: v for k, v in self.proven(lines).items() if k.startswith("START-DRIVE")}
+        self.assertEqual(p, {"START-DRIVE:route": True, "START-DRIVE:pick": True, "START-DRIVE:transport_args": True, "START-DRIVE:display": False,
+                             "START-DRIVE:performance:confirmed": True})
+        for key in p:
+            self.assertIn(key, gl.KNOWN)
+
     def test_start_shadow_kinds_are_folded_into_their_decisions(self):
         lines = [tsr.LAUNCH, tsr.L("START-SHADOW", "enabled available=1"), tsr.L("START-SHADOW", "decision route=mp4 agree=1"), tsr.L("START-SHADOW", "decision route=pick agree=1"),
                  tsr.L("START-SHADOW", "decision route=pick_none agree=1"), tsr.L("START-SHADOW", "decision route=display agree=1"),

@@ -199,6 +199,8 @@ M = [
 
 SHADOW = ROOT / "start_shadow.py"
 APP = ROOT / "0.2.18.1.py"
+REPORT = ROOT / "tools/shadow_report.py"
+LEDGER = ROOT / "tools/gate_ledger.py"
 _ARM = "_plan_shadow.plan_arm(_plan_pick_facts, queue_snapshot, self.queue, singer, first_non_skipped_idx, _pick_mode, _pick_setting_locked,"
 _ARGS = "song_info, primary_path, key, phrase_start,\n                                      intro_loop_seconds, current_song_dur, entry, (cached_cdg"
 _PLAN_FIN = '            if self.plan_off or not self.available:\n                return None\n            route, rf'
@@ -330,6 +332,42 @@ PM = [
     (APP, "_plan_done.plan_started(artist, title, _display_fallback)", "_plan_done.plan_started(title, artist, _display_fallback)", None),
     (APP, '"transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live")', '"transport_drive_media_end", "transport_drive_watchdog", "start_shadow")', None),
     (APP, '    "plan_shadow_live": True,', '    "plan_shadow_live": False,', None),
+    # ---- Stage A5 start drive (start_drive): selection, logging, flag wiring, report and ledger rows
+    (SHADOW, "            if not self.drive:\n                return None\n            selected,", "            selected,", None),
+    (SHADOW, "    if not enabled or rust_value is None:\n", "    if not enabled:\n", None),
+    (SHADOW, "    if not same:\n        return python_value, True, \"python-fallback\"", "    if False:\n        return python_value, True, \"python-fallback\"", None),
+    (SHADOW, "    if not same:\n        return python_value, True, \"python-fallback\"", "    if same:\n        return python_value, True, \"python-fallback\"", None),
+    (SHADOW, "return python_value, True, \"python-fallback\"", "return rust_value, True, \"python-fallback\"", None),
+    (SHADOW, "return python_value, True, \"python-fallback\"", "return python_value, False, \"python-fallback\"", None),
+    (SHADOW, "    return rust_value, False, \"rust\"", "    return rust_value, False, \"python\"", None),
+    (SHADOW, "    same = (python_value == rust_value) if agree is None else bool(agree)", "    same = (python_value == rust_value)", None),
+    (SHADOW, "                self.drive_disagreements += 1\n", "                pass\n", None),
+    (SHADOW, "sort_keys=True)[:400]", "sort_keys=True)[:10]", None),
+    (SHADOW, "owner={owner} disagreement={int(disagreed)}", "owner={owner} disagreement=0", None),
+    (SHADOW, "python={show(python_value)} rust={show(rust_value)} selected={show(selected)}", "python={show(rust_value)} rust={show(python_value)} selected={show(selected)}", None),
+    (SHADOW, '            self._drive("engine", agree, want, got)\n', "", None),
+    (SHADOW, '            self._drive("display", agree, want, got)\n', "", None),
+    (SHADOW, '        self._drive(kind, agree, app, rust)\n', "", None),
+    (SHADOW, '            self._drive("plan", agree, want, have)\n', "", None),
+    (SHADOW, '            self._drive("rotation", agree, want, got)\n', "", None),
+    (SHADOW, '            self._drive("pick_none" if singer is None else "pick", agree, want, got)\n', "", None),
+    (SHADOW, '            self._drive("route", agree, observed, got)\n', "", None),
+    (SHADOW, '            self._drive("route", agree, observed, got)', '            self._drive("route", agree, got, observed)', None),
+    (SHADOW, '            self._drive("pick_none" if singer is None else "pick", agree, want, got)', '            self._drive("pick_none" if singer is None else "pick", agree, got, want)', None),
+    (SHADOW, '            self._drive("display", agree, want, got)', '            self._drive("display", agree, got, want)', None),
+    (SHADOW, '            self._drive("plan", agree, want, have)', '            self._drive("plan", agree, have, want)', None),
+    (APP, '        _START_SHADOW.drive = bool((settings or {}).get("start_drive", False))\n', "", None),
+    (APP, '        _START_SHADOW.drive = bool((settings or {}).get("start_drive", False))', '        _START_SHADOW.drive = True', None),
+    (APP, '        _START_SHADOW.drive = bool((settings or {}).get("start_drive", False))', '        _START_SHADOW.drive = bool((settings or {}).get("start_drive", True))', None),
+    (APP, '    "start_drive": False,', '    "start_drive": True,', None),
+    (APP, '"transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live")', '"transport_drive_media_end", "transport_drive_watchdog", "start_shadow", "plan_shadow_live", "start_drive")', None),
+    (REPORT, 'OPTIONAL_ROWS = {"SHELL-COMMANDS", "START-DRIVE"}', 'OPTIONAL_ROWS = {"SHELL-COMMANDS"}', None),
+    (REPORT, '    "START-DRIVE": ("start_drive", False),', '    "START-DRIVE": ("start_drive", True),', None),
+    (REPORT, '    for t, msg in by_tag.get("START-DRIVE", []):', '    for t, msg in by_tag.get("START-DRIVE", [])[:0]:', None),
+    (REPORT, '    r.detail = ", ".join(f"{k}: {counts[k]}" + (f" ({bad[k]} disagreement(s))" if bad[k] else "") for k in sorted(counts))\n    r.verdict = _verdict(r, set())', '    r.detail = ""\n    r.verdict = "CLEAN"', None),
+    (LEDGER, '                return name if name == "route" else _group_start(name)', '                return _group_start(name)', None),
+    (LEDGER, '        if r.name == "START-DRIVE":   # judged per decision', '        if False:   # judged per decision', None),
+    (LEDGER, '''and not (group(name) in bad or "*" in bad)''', 'and not bad', None),
 ]
 
 
@@ -345,7 +383,7 @@ def differential():
 
 
 def glue_tests():
-    return subprocess.run([PY, "-m", "unittest", "test_start_shadow_plan_live", "test_start_shadow_plan", "test_start_shadow_wiring"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
+    return subprocess.run([PY, "-m", "unittest", "test_start_shadow_plan_live", "test_start_shadow_plan", "test_start_shadow_wiring", "test_start_drive", "test_shadow_report", "test_gate_ledger"], cwd=ROOT, env=ENV, capture_output=True, text=True).returncode
 
 
 def run_glue(first, survivors):
