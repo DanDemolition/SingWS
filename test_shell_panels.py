@@ -80,7 +80,7 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
             self.assertNotIn("Unable to assign", p.stderr, label)
             self.assertNotIn("TypeError", p.stderr, label)
 
-    def test_the_status_and_diagnostics_tabs_draw_a_snapshot_and_cope_with_a_missing_or_broken_one(self):
+    def test_the_status_diagnostics_and_now_playing_tabs_draw_a_snapshot_and_cope_with_a_missing_or_broken_one(self):
         d = self.make_home()
         import time
         snap = {"version": 1, "taken_at": int(time.time()), "settings": {"venue_name": "Joe's", "use_waiting_for_add": True, "api_key": "sk-SECRET-VALUE"}, "connection": "Connected",
@@ -88,7 +88,8 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
                 "locked": False, "looping": True,
                 "diagnostics": {"local_name": "MacBook Speakers", "screen_count": 2, "karafun_path": None, "output_host": True, "preview_host": True, "show_ticker": True, "qr_url": "https://x/", "bg_files": []}}
         path = Path(d) / "status_snapshot.json"
-        for tab in ("status", "diagnostics"):
+        snap["hero"] = {"kicker": "NOW SINGING", "singer": "Ann", "subtitle": "Radio Ga Ga \u00b7 Queen", "meta": "SC8671", "format": "ZIP", "remaining": "03:21"}
+        for tab in ("status", "diagnostics", "nowplaying"):
             for label, write in (("snapshot", lambda: path.write_text(json.dumps(snap))), ("broken", lambda: path.write_text("{nope")), ("foreign", lambda: path.write_text('{"version": 9}')), ("missing", lambda: path.unlink())):
                 write()
                 p, shot = self.run_tab(tab, d)

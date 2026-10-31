@@ -18,6 +18,7 @@ import os
 import random
 import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -155,6 +156,60 @@ def case(rng):
     compare("split", lambda: list(f._split_display_artist_title_disc(dn, fb)), {"op": "split", "display": dn, "fallback": fb}, lambda r: r["parts"], f"{dn!r} {fb!r}")
 
 
+LIB_ARTISTS = ["Queen", "Abba", "Adele", "Éva Ünal", "The Beatles", "Queen", "Journey"]
+LIB_TITLES = ["Radio Ga Ga", "Dancing Queen", "Hello", "Don't Stop Believin'", "Let It Be", "Bohemian Rhapsody", "Ünal's Song"]
+
+
+def library_case(rng, workdir):
+    """The Library tab: a real song index built by `song_index`, searched by `song_index.search_songs`, each row through the real `_build_search_row_text`, against
+    the Rust search + `providers_for` + `library_row` over the same file."""
+    import song_index
+    a, f = fake()
+    tracks = []
+    for i in range(rng.randint(3, 12)):
+        t = {"path": rng.choice(["/lib/", "/lib/sub/", "/x y/"]) + f"f{i}" + rng.choice([".zip", ".mp3", ".mp4", ".cdg", ".MKV", "", ".flac"]),
+             "artist": rng.choice(LIB_ARTISTS), "title": rng.choice(LIB_TITLES)}
+        for k, vals in (("discid", DISC), ("duration", [245, 61, 0, "3:45", None, 3725, 245.5, "245"]), ("type", TYPES), ("provider", PROV), ("display", TEXT)):
+            if rng.random() < 0.6:
+                t[k] = rng.choice(vals)
+        tracks.append(t)
+    if rng.random() < 0.4:      # a song with only a display name: the row falls back to it
+        tracks.append({"path": f"/lib/only-display-{rng.randint(0, 9)}.zip", "artist": "", "title": "", "display": "Zed Zorro Song", "type": rng.choice(TYPES[:5])})
+    tj = Path(workdir) / "tracks.json"
+    db = Path(workdir) / "singws.db"
+    if db.exists():
+        db.unlink()
+    tj.write_text(json.dumps(tracks))
+    song_index._clear_read_caches()
+    song_index.rebuild_from_tracks_json(tj, db, verbose=False)
+    for q in ("zorro", rng.choice(LIB_ARTISTS).lower(), rng.choice(LIB_TITLES).split()[0], "queen radio", "qeen", "zzzz", rng.choice(LIB_ARTISTS) + " " + rng.choice(LIB_TITLES).split()[0]):
+        rows = song_index.search_songs(q, dbfile=db, limit=500)
+        try:
+            want = []
+            for r in rows:
+                x = f._build_search_row_text(r)
+                want.append({"path": r["path"], "left": x[2], "right": x[3], "tooltip": x[1]})
+            err = None
+        except Exception as exc:  # noqa: BLE001
+            want, err = None, repr(exc)
+        got = rust({"op": "library_db", "db": str(db), "query": q})
+        if "error" in got:
+            if "decline" in got["error"]:
+                tally("library_declined")
+            elif err is None:
+                fail(f"library: Rust errored ({got['error']}) but Python returned rows: query={q!r} tracks={tracks!r}")
+            else:
+                tally("library_both_error")
+            continue
+        if err is not None:
+            fail(f"library: Python raised ({err}) but Rust returned rows: query={q!r} tracks={tracks!r}")
+        elif got["rows"] != want:
+            fail(f"library: query={q!r}\n python={want!r}\n rust  ={got['rows']!r}\n tracks={tracks!r}")
+        else:
+            tally("library_same")
+            tally("library_rows", len(want))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cases", type=int, default=1500)
@@ -166,6 +221,9 @@ def main(argv=None):
     rng = random.Random(args.seed)
     for _ in range(args.cases):
         case(rng)
+    with tempfile.TemporaryDirectory() as workdir:
+        for _ in range(max(10, args.cases // 15)):
+            library_case(rng, workdir)
     print("compared:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     print("RESULT: IDENTICAL" if not failures else f"RESULT: {len(failures)} DIFFERENCE(S)")
     return 1 if failures else 0

@@ -120,6 +120,26 @@ pub fn search(db: &Path, query: &str, limit: i64) -> Result<SearchResult, String
     Ok(SearchResult { rows, fuzzy_fallback_needed, fuzzy_used: false })
 }
 
+/// The `provider` column for these song ids (`songs.provider`, "local" by default). Empty where the column or the table is missing (an older index): the row
+/// then reads as a local song, which is what the app's row text does for a track without a provider.
+pub fn providers_for(db: &Path, ids: &[i64]) -> std::collections::HashMap<i64, String> {
+    let mut out = std::collections::HashMap::new();
+    if ids.is_empty() || !db.exists() {
+        return out;
+    }
+    let Ok(con) = singws_db::open_readonly(db) else { return out };
+    let marks = vec!["?"; ids.len()].join(",");
+    let Ok(mut stmt) = con.prepare(&format!("SELECT id, provider FROM songs WHERE id IN ({marks})")) else { return out };
+    let params: Vec<rusqlite::types::Value> = ids.iter().map(|i| rusqlite::types::Value::Integer(*i)).collect();
+    let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1).unwrap_or(None)))) else { return out };
+    for (id, p) in rows.flatten() {
+        if let Some(p) = p {
+            out.insert(id, p);
+        }
+    }
+    out
+}
+
 /// Strict search first; when it finds nothing the app's typo-tolerant scan (see `fuzzy`). `budget` bounds the scan's wall time (None = no bound).
 pub fn search_with_fuzzy(db: &Path, query: &str, limit: i64, budget: Option<std::time::Duration>) -> Result<SearchResult, String> {
     let strict = search(db, query, limit)?;
@@ -211,6 +231,19 @@ mod tests {
             .unwrap();
         }
         (dir, db)
+    }
+
+    #[test]
+    fn providers_come_from_the_column_when_the_index_has_one() {
+        let (dir, db) = fixture(&[("A", "x", "a x", Some(10)), ("B", "y", "b y", Some(20))]);
+        assert!(providers_for(&db, &[1, 2]).is_empty(), "no provider column: nothing, so the rows read as local");
+        let con = Connection::open(&db).unwrap();
+        con.execute_batch("ALTER TABLE songs ADD COLUMN provider TEXT DEFAULT 'local'; UPDATE songs SET provider='karafun_streaming' WHERE id=2;").unwrap();
+        drop(con);
+        let p = providers_for(&db, &[1, 2, 99]);
+        assert_eq!((p.get(&1).map(String::as_str), p.get(&2).map(String::as_str), p.get(&99)), (Some("local"), Some("karafun_streaming"), None));
+        assert!(providers_for(&db, &[]).is_empty() && providers_for(&dir.join("nope.db"), &[1]).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

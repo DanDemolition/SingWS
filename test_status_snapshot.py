@@ -14,6 +14,7 @@ import random
 import re
 import subprocess
 import tempfile
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -220,6 +221,89 @@ class StatusSnapshot(unittest.TestCase):
             seen["all_passed"] += got["report"]["all_passed"]
             seen["empty"] += app.queue_summary_label.text == ""
         self.assertTrue(all(n > 10 for n in seen.values()), seen)
+
+    def hero_labels(self, app, rng):
+        class Lab:
+            def __init__(self, t=""):
+                self.t = t
+
+            def text(self):
+                return self.t
+
+            def setText(self, t):
+                self.t = t
+
+            def styleSheet(self):
+                return ""
+
+            def setStyleSheet(self, _css):
+                pass
+
+        for n in ("rotation_summary_kicker", "rotation_summary_title", "rotation_summary_subtitle", "rotation_summary_meta", "karaoke_remaining_label"):
+            setattr(app, n, Lab())
+        app._hero_format_text = ""
+        app._subtitle_css_off = ""      # a never-initialised QWidget raises RuntimeError for attributes that were never set
+        app._hero_media_badge_text = types.MethodType(self.singws.KaraokeApp._hero_media_badge_text, app)
+
+    def test_the_hero_card_is_the_one_the_app_drew_with_its_time_left_signed(self):
+        if not Path(CLI).exists():
+            self.skipTest("needs singws-status-cli (cargo build --release -p singws-uimodel)")
+        rng = random.Random(20261030)
+        texts = ["", "  ", "Radio Ga Ga", " Queen ", "Bohemian Rhapsody (Live)", "SC8671", "Éva ünal", "a · b"]
+        paths = ["", "/x/a.zip", "/x/b.MP4", "x.cdg", "KaraFun_Streaming:kf_1", "/x/noext", "/x/a.flac"]
+        remaining = ["", "03:21", "-03:21", " 0:09 ", "-", "  -1:00", "00:00"]
+        seen = {"signed": 0, "format": 0, "ready": 0}
+        for case in range(120):
+            app = self.make_app(rng)
+            self.hero_labels(app, rng)
+            app.rotation_summary_kicker.setText(rng.choice(["NOW SINGING", "ON DECK", "ROTATION WAITING"]))
+            app.rotation_summary_title.setText(rng.choice(NAMES))
+            app._apply_redesign_hero_text(rng.choice(texts), rng.choice(texts), rng.choice(texts), rng.choice(paths))
+            app.karaoke_remaining_label.setText(rng.choice(remaining))
+            probes = self.install_probes(app, self.facts(rng))
+            for p in probes:
+                p.start()
+            try:
+                snapshot = app._status_snapshot_payload(now=NOW)
+            finally:
+                for p in probes:
+                    p.stop()
+            got = self.rust_view(snapshot)
+            ctx = (case, snapshot.get("hero"))
+            self.assertNotIn("error", got, ctx)
+            hero = got["hero"]
+            self.assertEqual(hero["kicker"], app.rotation_summary_kicker.text(), ctx)
+            self.assertEqual(hero["singer"], app.rotation_summary_title.text(), ctx)
+            self.assertEqual(hero["subtitle"], app.rotation_summary_subtitle.text(), ctx)
+            self.assertEqual(hero["meta"], app.rotation_summary_meta.text(), ctx)
+            self.assertEqual(hero["format"], app._hero_format_text, ctx)
+            self.assertEqual(hero["remaining"], self.singws.KaraokeApp._hero_remaining_text(app), ctx)
+            seen["signed"] += hero["remaining"].startswith("-")
+            seen["format"] += hero["format"] != ""
+            seen["ready"] += hero["subtitle"] == "Ready to sing"
+        self.assertTrue(all(n > 3 for n in seen.values()), seen)
+
+    def test_a_missing_hero_card_leaves_the_block_out_and_an_old_snapshot_still_draws(self):
+        if not Path(CLI).exists():
+            self.skipTest("needs singws-status-cli (cargo build --release -p singws-uimodel)")
+        app = self.make_app()
+        for p in self.install_probes(app, self.facts(random.Random(5))):
+            p.start()
+        try:
+            snapshot = app._status_snapshot_payload(now=NOW)
+        finally:
+            mock.patch.stopall()
+        self.assertNotIn("hero", snapshot)
+        self.assertIsNone(self.rust_view(snapshot)["hero"])
+
+    def test_the_card_refresh_asks_for_a_snapshot_and_a_broken_hook_cannot_reach_it(self):
+        src = (Path(__file__).parent / "0.2.18.1.py").read_text()
+        body = src.split("def _update_rotation_summary_card(self):", 1)[1][:400]
+        self.assertIn("self._schedule_status_snapshot()", body)
+        app = self.make_app()
+        app.settings["status_snapshot"] = True
+        with mock.patch.object(self.singws, "QTimer", side_effect=RuntimeError("no timer")):
+            app._schedule_status_snapshot()      # must not raise
 
     def test_the_diagnostic_probes_are_taken_at_most_every_thirty_seconds(self):
         app = self.make_app()

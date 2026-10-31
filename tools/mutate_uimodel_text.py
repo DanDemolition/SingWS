@@ -34,7 +34,19 @@ MUTANTS = {
         ('lines.join(" | ")', 'lines.join(" ")', None),
         ('all_passed: passed == checks.len()', 'all_passed: passed > 0', None),
     ],
+    "lib": [
+        ('Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1).unwrap_or(None)))', 'Ok((r.get::<_, i64>(0)?, None::<String>))', None),
+        ('if ids.is_empty() || !db.exists() {', 'if !db.exists() {', "an empty id list makes the IN () list empty, which fails to prepare and returns the same empty map"),
+        ('SELECT id, provider FROM songs WHERE id IN', 'SELECT id, provider FROM songs WHERE id NOT IN', None),
+    ],
     "rows": [
+        ('"duration_secs": r.duration_secs, "song_type": r.song_type, "path": r.path,\n        "display": r.display, "provider": provider});', '"duration_secs": r.duration_secs, "song_type": r.song_type, "path": r.path,\n        "display": r.display, "provider": Value::Null});', None),
+        ('"duration_secs": r.duration_secs, "song_type": r.song_type, "path": r.path,\n        "display": r.display,', '"song_type": r.song_type, "path": r.path,\n        "display": r.display,', None),
+        ('"discid": r.discid, "duration_secs"', '"discid": "", "duration_secs"', None),
+        ('"song_type": r.song_type, "path": r.path,\n        "display"', '"song_type": "", "path": r.path,\n        "display"', None),
+        ('"path": r.path,\n        "display": r.display,', '"path": "",\n        "display": r.display,', None),
+        ('"path": r.path,\n        "display": r.display,', '"path": r.path,\n        "display": "",', None),
+        ('json!({"artist": r.artist, "title": r.title, "discid"', 'json!({"artist": r.title, "title": r.artist, "discid"', None),
         ('if f <= 0.0 {\n        return "--:--".into();', 'if f < 0.0 {\n        return "--:--".into();', "zero is already caught by the truthiness test above"),
         ('Value::Bool(_) => 1.0,', 'Value::Bool(_) => 0.0,', None),
         ('_ => return String::new(), // `str <= 0` is a TypeError', '_ => return "--:--".into(),', None),
@@ -205,8 +217,8 @@ MUTANTS = {
 }
 
 ONLY = {int(x) for x in os.environ.get("MUTANTS", "").split(",") if x}
-MODULE_TEST = {"diagnostics": "diagnostics", "rows": "rows", "header": "header", "ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
-PARITY = {"diagnostics": ("diagnostics_parity.py", ["--cases", "150"]), "rows": ("rows_parity.py", ["--cases", "200"]), "header": ("header_parity.py", ["--cases", "150"]), "ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
+MODULE_TEST = {"lib": "providers", "diagnostics": "diagnostics", "rows": "rows", "header": "header", "ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
+PARITY = {"lib": ("rows_parity.py", ["--cases", "200"]), "diagnostics": ("diagnostics_parity.py", ["--cases", "150"]), "rows": ("rows_parity.py", ["--cases", "200"]), "header": ("header_parity.py", ["--cases", "150"]), "ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
 
 
 def run(cmd, timeout):
