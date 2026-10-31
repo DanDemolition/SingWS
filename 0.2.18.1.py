@@ -50559,9 +50559,6 @@ class KaraokeApp(QWidget):
             if not isinstance(singer_key, str) or not singer_key.strip() or len(singer_key) > 200 or any(unicodedata.category(c) == "Cc" for c in singer_key):
                 return False, "bad_singer_key"
             key = singer_key.strip().casefold()
-            known = set(self._chat_conversations()) | {str(m.get("thread") or "").casefold() for m in self._host_chat_media_rows()}
-            if key not in known:
-                return False, "unknown_conversation"
             singer = self._host_chat_singer_name(key)
             if not singer:
                 return False, "unknown_conversation"
@@ -51144,7 +51141,13 @@ class KaraokeApp(QWidget):
             mine = bool(m.get("host")) or str(m.get("from_key") or "") == "@host"
             sender = str(m.get("from") or m.get("from_key") or "")
         kind = str(m.get("kind") or "")
-        attachment = "photo" if kind == "image" else ("gif" if kind == "gif" else "")
+        gif = m.get("gif") if isinstance(m.get("gif"), dict) else None
+        if kind == "image" and int(m.get("media_id") or 0):
+            attachment = "photo"
+        elif kind == "gif" and gif and re.match(r"^https://(media[0-9]*|i)\.giphy\.com/", str(gif.get("preview") or "")):
+            attachment = "gif"
+        else:
+            attachment = ""  # the same conditions under which `_room_attachment_html` shows a picture or a GIF
         text = "" if status == "removed" else str(m.get("message") or "")[:self._SHELL_CHAT_TEXT_MAX]
         return {"id": int(m.get("id") or 0), "from": sender, "host": mine, "at": int(m.get("created_at") or 0), "text": text,
                 "attachment": attachment, "status": status, "reports": int(m.get("reports") or 0), "flag": str(m.get("flag") or "")[:24]}

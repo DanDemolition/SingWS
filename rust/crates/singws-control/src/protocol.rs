@@ -148,6 +148,16 @@ pub fn validate_command(command: &str, args: &Value) -> Result<(), String> {
             let m = args.get("message").and_then(Value::as_str).map(str::trim).unwrap_or("");
             need(!m.is_empty() && m.chars().count() <= 500 && !m.chars().any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r'), "message must be 1-500 characters")
         }
+        "chat.say" => {
+            let channel = args.get("channel").and_then(Value::as_str);
+            need(matches!(channel, Some("group" | "host")), "channel must be \"group\" (Everyone) or \"host\" (one singer's Host chat)")?;
+            let t = args.get("text").and_then(Value::as_str).map(str::trim).unwrap_or("");
+            need(!t.is_empty() && t.chars().count() <= 300 && !t.chars().any(char::is_control), "text must be 1-300 characters with no control characters")?;
+            if channel == Some("host") {
+                need(line(args, "singer_key", 200, true), "singer_key is required for Host chat")?;
+            }
+            Ok(())
+        }
         "queue.replace_song" => {
             need(text(args, "entry_id").is_some(), "entry_id is required")?;
             need(args.get("song_id").and_then(Value::as_u64).is_some_and(|id| id >= 1), "song_id must be a whole number from the library search")
@@ -264,6 +274,8 @@ pub enum Incoming {
     Error { request_id: Option<String>, code: String, message: String },
     /// a late outcome the app reports after it already acknowledged a command (a direct message: "sending" first, delivered or failed later)
     Notice { request_id: String, ok: bool, code: String, message: String },
+    /// the app's room chat summary (Everyone, Private threads, Host chat); read-only. Anything that is not an object arrives as null.
+    Chat(Value),
     Other(String),
     NotJson,
 }
@@ -337,6 +349,7 @@ pub fn parse_incoming(text: &str) -> Incoming {
             code: s(&v, "code"),
             message: s(&v, "message"),
         },
+        "chat" => Incoming::Chat(v.get("chat").filter(|c| c.is_object()).cloned().unwrap_or(Value::Null)),
         "notice" => Incoming::Notice { request_id: s(&v, "request_id"), ok: b(&v, "ok"), code: s(&v, "code"), message: s(&v, "message") },
         other => Incoming::Other(other.to_string()),
     }
@@ -475,6 +488,20 @@ mod tests {
             ("queue.message_singer", json!({"singer_id": "s1", "message": "x".repeat(501)})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": "bell\u{7}"})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": 5})),
+            ("chat.say", json!({"text": "hi"})),
+            ("chat.say", json!({"channel": "dm", "text": "hi"})),
+            ("chat.say", json!({"channel": "GROUP", "text": "hi"})),
+            ("chat.say", json!({"channel": "group"})),
+            ("chat.say", json!({"channel": "group", "text": "   "})),
+            ("chat.say", json!({"channel": "group", "text": 5})),
+            ("chat.say", json!({"channel": "group", "text": "x".repeat(301)})),
+            ("chat.say", json!({"channel": "group", "text": "two\nlines"})),
+            ("chat.say", json!({"channel": "group", "text": "bell\u{7}"})),
+            ("chat.say", json!({"channel": "host", "text": "hi"})),
+            ("chat.say", json!({"channel": "host", "singer_key": " ", "text": "hi"})),
+            ("chat.say", json!({"channel": "host", "singer_key": "a\nb", "text": "hi"})),
+            ("chat.say", json!({"channel": "host", "singer_key": "k".repeat(201), "text": "hi"})),
+            ("chat.say", json!({"channel": "host", "singer_key": 4, "text": "hi"})),
             ("waitlist.edit", json!({"request_id": 0, "singer": "A", "artist": "", "title": "T", "key": 0, "tempo": 0})),
             ("waitlist.edit", json!({"request_id": 3, "singer": " ", "artist": "", "title": "T", "key": 0, "tempo": 0})),
             ("waitlist.edit", json!({"request_id": 3, "singer": "A", "artist": "", "title": "", "key": 0, "tempo": 0})),
@@ -555,6 +582,11 @@ mod tests {
             ("queue.message_singer", json!({"singer_id": "s1", "message": "You're up next"})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": "two\nlines"})),
             ("queue.message_singer", json!({"singer_id": "s1", "message": "x".repeat(500)})),
+            ("chat.say", json!({"channel": "group", "text": "Welcome everyone! 🎤"})),
+            ("chat.say", json!({"channel": "group", "text": "x".repeat(300)})),
+            ("chat.say", json!({"channel": "group", "singer_key": 5, "text": "the key is ignored for Everyone"})),
+            ("chat.say", json!({"channel": "host", "singer_key": "ann", "text": "hi Ann"})),
+            ("chat.say", json!({"channel": "host", "singer_key": "k".repeat(200), "text": " padded "})),
             ("queue.replace_song", json!({"entry_id": "e1", "song_id": 7})),
             ("queue.set_song_key", json!({"entry_id": "e1", "key": -5})),
             ("queue.set_song_key", json!({"entry_id": "e1", "key": 5})),

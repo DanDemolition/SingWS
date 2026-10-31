@@ -13,7 +13,7 @@ from unittest import mock
 import test_shell_dialogs_more as td
 
 
-def rig(mode="apply", ok=True, error="", hold=None, room=True):
+def rig(mode="apply", ok=True, error="", hold=None, room=True, http_ok=None):
     h = td.harness(mode)
     a = h.app
     cls = h.m.KaraokeApp
@@ -43,7 +43,7 @@ def rig(mode="apply", ok=True, error="", hold=None, room=True):
         content = b"{}"
 
         def __init__(self):
-            self.ok = ok
+            self.ok = http_ok if http_ok is not None else ok
 
         def json(self):
             return {"ok": ok, "error": error}
@@ -83,6 +83,12 @@ class EveryoneTests(unittest.TestCase):
         self.assertEqual((sent[0]["ok"], sent[0]["code"]), (False, "chat_failed"))
         self.assertIn("Everyone chat is switched off", sent[0]["message"])
         self.assertEqual(run(h, {"channel": "group", "text": "Hi"}, "g2"), (True, "sending"), "after a failure the same text may be sent again")
+
+    def test_a_server_answer_that_says_not_ok_is_a_failure_even_with_http_200(self):
+        h, sent, posts, done = rig(ok=False, error="message_too_long", http_ok=True)
+        run(h, {"channel": "group", "text": "Hi"}, "g1")
+        wait(done)
+        self.assertEqual((sent[0]["ok"], sent[0]["code"]), (False, "chat_failed"))
 
     def test_chat_off_or_not_loaded_is_refused_before_anything_is_sent(self):
         h, *_ = rig()

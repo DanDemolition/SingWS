@@ -46,6 +46,10 @@ name = "singws-waitlist-cli"
 path = "src/bin/waitlist_cli.rs"
 
 [[bin]]
+name = "singws-chat-cli"
+path = "src/bin/chat_cli.rs"
+
+[[bin]]
 name = "singws-hero-cli"
 path = "src/bin/hero_cli.rs"
 
