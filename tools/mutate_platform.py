@@ -47,7 +47,7 @@ M = [
     (PSH, "say(f\"MISMATCH {d}\")", "pass", None),
     (PSH, "if not rs.get(\"supported\"):", "if False:", None),
     (PSH, "if proc.returncode != 0:", "if False:", None),
-    (PSH, "return bool((settings or {}).get(\"platform_shadow\", False)) and sys.platform == \"darwin\"", "return bool((settings or {}).get(\"platform_shadow\", True)) and sys.platform == \"darwin\"", None),
+    (PSH, "return bool((settings or {}).get(\"platform_shadow\", True)) and sys.platform == \"darwin\"", "return bool((settings or {}).get(\"platform_shadow\", False)) and sys.platform == \"darwin\"", None),
     (PSH, "    except Exception as exc:  # noqa: BLE001 - a shadow must never reach the app\n        say(", "    except ZeroDivisionError as exc:  # noqa: BLE001\n        say(", None),
 ]
 

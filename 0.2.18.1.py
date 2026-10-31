@@ -4243,8 +4243,8 @@ DEFAULTS = {
     # "rust" is accepted but NOT wired: it behaves as "python". Read from the settings snapshot each scan; needs the singws-scan-cli helper.
     "scan_engine": "shadow",
     # Stage E step 1 shadow: once at launch, a separate process (singws-mac-probe, Rust) reads the frontmost app, Accessibility trust and whether it can hold a
-    # keep-awake assertion, and [PLATFORM-SHADOW] logs ONLY differences from what this app's Python sees. Python's answers are always the ones used. Default off.
-    "platform_shadow": False,
+    # keep-awake assertion, and [PLATFORM-SHADOW] logs ONLY differences from what this app's Python sees. Python's answers are always the ones used. DEFAULT ON (operator, 2026-10-31); logs "skipped" once per launch if the probe is not bundled.
+    "platform_shadow": True,
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
