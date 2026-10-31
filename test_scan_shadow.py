@@ -41,7 +41,7 @@ class Setting(unittest.TestCase):
     def test_default_is_python_and_the_app_ships_it_off(self):
         self.assertEqual(scan_shadow.effective_engine({}), "python")
         self.assertEqual(scan_shadow.effective_engine({"scan_engine": "garbage"}), "python")
-        self.assertRegex(SOURCE, r'"scan_engine": "python",')
+        self.assertRegex(SOURCE, r'"scan_engine": "shadow",')
 
     def test_shadow_runs_and_rust_is_not_wired(self):
         self.assertEqual(scan_shadow.effective_engine({"scan_engine": "shadow"}), "shadow")

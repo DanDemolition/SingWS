@@ -1,4 +1,4 @@
-"""Stage A5 start drive (setting `start_drive`, default OFF): Rust's start decisions are logged as [START-DRIVE] lines and selected only when they equal Python's.
+"""Stage A5 start drive (setting `start_drive`, default ON): Rust's start decisions are logged as [START-DRIVE] lines and selected only when they equal Python's.
 
 The replay runs random queues through the REAL `play_next_file` three times: the drive off, the drive on with the real Rust answers, and the drive on with every Rust
 answer corrupted. What the app does (queue order, transport arguments, published artist and title) must be identical in all three; the corrupted run must log disagreements
@@ -116,9 +116,9 @@ class DirectChecks(unittest.TestCase):
 
 
 class Setting(unittest.TestCase):
-    def test_default_is_off_and_the_evidence_migration_does_not_switch_it_on(self):
+    def test_default_is_on_and_the_evidence_migration_does_not_touch_it(self):
         singws = base.load_main_module()
-        self.assertIs(singws.DEFAULTS["start_drive"], False)
+        self.assertIs(singws.DEFAULTS["start_drive"], True)
         self.assertNotIn("start_drive", singws._RUST_EVIDENCE_FLAGS)
         saved = {}
         singws._migrate_rust_evidence_defaults(saved)

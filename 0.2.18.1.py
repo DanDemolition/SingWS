@@ -4238,17 +4238,17 @@ DEFAULTS = {
     # Stage A5 shadow: at each point where play_next_file commits to a start route (external KaraFun, refusal, ZIP preparation, mp4, mp3, MP3+G, CDG+MP3) compare it with
     # the Rust singws-start rules and LOG disagreements only; the app's own route is always used and nothing extra is read from disk.
     "start_shadow": True,
-    # Library-scan shadow: "python" (DEFAULT, nothing extra runs) or "shadow" (after a FULL library scan, a separate low-priority process re-scans the
+    # Library-scan shadow: "python" (nothing extra runs) or "shadow" (DEFAULT; after a FULL library scan, a separate low-priority process re-scans the
     # same roots with the Rust scan into a scratch song index and LOGS differences as [SCAN-SHADOW]; the app's own scan is always the one used).
     # "rust" is accepted but NOT wired: it behaves as "python". Read from the settings snapshot each scan; needs the singws-scan-cli helper.
-    "scan_engine": "python",
+    "scan_engine": "shadow",
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
     # Stage A5 start drive: with start_shadow on, every compared start decision (pick, route, engine, transport, zip args, confirmed, display, rotation, plan) logs a
     # [START-DRIVE] line with the retained Python answer, Rust's answer and the one selected. Rust's answer is selected only when it equals Python's; Python wins every
-    # disagreement, so playback is identical either way. DEFAULT OFF: not in the evidence migration, the operator turns it on. Needs start_shadow.
-    "start_drive": False,
+    # disagreement, so playback is identical either way. DEFAULT ON (operator, 2026-10-31). Needs start_shadow.
+    "start_drive": True,
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default on.
     "waitlist_snapshot": True,
