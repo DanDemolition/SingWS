@@ -30,10 +30,10 @@ def fake_probe(directory, reply, exit_code=0):
 
 
 class Setting(unittest.TestCase):
-    def test_default_is_off_and_the_app_wires_the_hook(self):
-        self.assertRegex(SOURCE, r'"platform_shadow": False,')
+    def test_default_is_on_and_the_app_wires_the_hook(self):
+        self.assertRegex(SOURCE, r'"platform_shadow": True,')
         self.assertIn("platform_shadow.start(self.settings", SOURCE)
-        self.assertFalse(ps.enabled({}))
+        self.assertEqual(ps.enabled({}), sys.platform == "darwin")
         self.assertFalse(ps.enabled({"platform_shadow": False}))
         self.assertEqual(ps.enabled({"platform_shadow": True}), sys.platform == "darwin")
 

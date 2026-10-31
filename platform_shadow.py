@@ -2,7 +2,7 @@
 
 SHADOW ONLY. The app never uses the Rust answers: Python's frontmost-app name, Accessibility trust and keep-awake state stay the ones in
 use. The probe runs in a separate low-priority process on a daemon thread, never prompts (Accessibility is read with the prompt option off,
-location is not touched), and every failure is swallowed. Setting ``platform_shadow`` (default False): True runs one comparison at launch.
+location is not touched), and every failure is swallowed. Setting ``platform_shadow`` (default True): True runs one comparison at launch.
 
 Log lines (grep ``PLATFORM-SHADOW``), written ONLY when something differs or the probe could not run:
   ``MISMATCH <what>: app=<python> rust=<rust>``  (each distinct difference is logged once per session)
@@ -27,7 +27,7 @@ _seen: set[str] = set()
 
 
 def enabled(settings) -> bool:
-    return bool((settings or {}).get("platform_shadow", False)) and sys.platform == "darwin"
+    return bool((settings or {}).get("platform_shadow", True)) and sys.platform == "darwin"
 
 
 def find_probe() -> Path | None:

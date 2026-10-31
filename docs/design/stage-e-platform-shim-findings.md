@@ -15,7 +15,7 @@ needs the operator at the Mac; nothing here was installed, signed with the local
   * `location_status` / `device_location_once` — reads the CoreLocation authorization status; requests a fix only when already authorized (status 3 or 4); otherwise declines
     with `not authorized: status N`. It never calls `requestWhenInUseAuthorization`.
 * `singws-mac-probe` (text; `--json` for the shadow; `--hold SECONDS` to hold keep-awake for `pmset`; `--applescript SRC`; `--location`).
-* Shadow: `platform_shadow.py`, setting `platform_shadow` (DEFAULT **False**). Once at launch, after the app's own keep-awake set-up, a daemon thread runs
+* Shadow: `platform_shadow.py`, setting `platform_shadow` (DEFAULT **True** since 2026-10-31, operator; logs `skipped` once per launch while the probe is not bundled). Once at launch, after the app's own keep-awake set-up, a daemon thread runs
   `singws-mac-probe --json` (low priority) and logs `[PLATFORM-SHADOW] MISMATCH ...` only when frontmost app / AX trust / keep-awake differ from Python's own reads.
   Each distinct difference is logged once per session. Python's answers are always the ones used; every call is wrapped.
   Find the probe by `SINGWS_MAC_PROBE_BIN`, next to the app, `Frameworks/`, or `native/singws_mac/<arch>/` (**the specs do not bundle it yet**: no installer was built).

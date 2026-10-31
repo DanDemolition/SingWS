@@ -41,6 +41,11 @@ analyze_bin = project_root / "native" / "singws_analyze" / "x86_64" / "singws-an
 if analyze_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{analyze_bin}'"):
     binaries.append((str(analyze_bin), "."))
 
+# Rust platform probe (rust/build_mac.sh). Optional: without it platform_shadow only logs "skipped".
+mac_probe = project_root / "native" / "singws_mac" / "x86_64" / "singws-mac-probe"
+if mac_probe.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{mac_probe}'"):
+    binaries.append((str(mac_probe), "."))
+
 for helper in (
     "media_helpers.py",
     "libmpv_media_jobs.py",
