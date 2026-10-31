@@ -29182,6 +29182,11 @@ class KaraokeApp(QWidget):
                                       "waitlist": self._shell_waitlist_summary(), "updated_at": int(time.time())})
                 except Exception:
                     pass
+                try:
+                    # Room chat is its own message: the relay passes a host app's messages through unchanged but drops anything over 64 KB, and the queue message is already large.
+                    worker.send_json({"type": "chat", "user": full["user"], "chat": self._shell_chat_summary(), "updated_at": int(time.time())})
+                except Exception:
+                    pass
 
     def fetch_remote_requests_once(self, reason: str = "relay"):
         """Fetch active remote requests from get_requests_v2.php in a background thread.
@@ -51025,6 +51030,80 @@ class KaraokeApp(QWidget):
 
             removed.sort(key=removed_at, reverse=True)
             out["removed"] = [compact(self._waiting_for_add_row(r, "removed", selectable=True), "removed") for r in removed[:20]]
+        except Exception:
+            pass
+        return out
+
+    _SHELL_CHAT_TEXT_MAX = 120
+    _SHELL_CHAT_GROUP_ROWS = 25
+    _SHELL_CHAT_THREADS = 10
+    _SHELL_CHAT_THREAD_ROWS = 5
+
+    def _shell_chat_message(self, m: dict, host_text: bool = False) -> dict:
+        """One room / Host chat message for the shell and the web remote. Read-only and safe to show: a picture or GIF is a placeholder word (never a URL or an
+        id the page could fetch), removed text is withheld, and the text is clipped. `host_text` marks a Host-chat text row (singer_notifications, `direction`)."""
+        status = str(m.get("status") or "")
+        status = status if status in ("held", "removed", "blocked") else ""
+        if host_text:
+            mine = m.get("direction") != "in"
+            sender = str(self.settings.get("host_chat_name", "Host") or "Host") if mine else str(m.get("singer") or "")
+        else:
+            mine = bool(m.get("host")) or str(m.get("from_key") or "") == "@host"
+            sender = str(m.get("from") or m.get("from_key") or "")
+        kind = str(m.get("kind") or "")
+        attachment = "photo" if kind == "image" else ("gif" if kind == "gif" else "")
+        text = "" if status == "removed" else str(m.get("message") or "")[:self._SHELL_CHAT_TEXT_MAX]
+        return {"id": int(m.get("id") or 0), "from": sender, "host": mine, "at": int(m.get("created_at") or 0), "text": text,
+                "attachment": attachment, "status": status, "reports": int(m.get("reports") or 0)}
+
+    def _shell_chat_summary(self) -> dict:
+        """Room chat (Everyone / Private threads / Host chat) for the web remote and the shell, from what the chat page already holds in memory (`_room_messages`,
+        `_chat_messages`); no new storage and no network call. Newest rows last, bounded so the relay message stays small. Best effort: never raises."""
+        out = {"reachable": None, "group_enabled": False, "dm_enabled": False, "unread": {"group": 0, "dm": 0, "host": 0}, "attention": 0,
+               "group": [], "dm": [], "host": []}
+        try:
+            settings = dict(getattr(self, "_room_settings", {}) or {})
+            out["reachable"] = getattr(self, "_room_reachable", None)
+            out["group_enabled"] = bool(settings.get("group_enabled"))
+            out["dm_enabled"] = bool(settings.get("dm_enabled"))
+            new = getattr(self, "_room_new_by_channel", None) or {}
+            out["unread"]["group"] = int(new.get("group", 0) or 0)
+            out["unread"]["dm"] = int(new.get("dm", 0) or 0)
+            out["attention"] = len(getattr(self, "_room_attention_ids", ()) or ())
+            rooms = getattr(self, "_room_messages", {}) or {}
+            ordered = [rooms[k] for k in sorted(rooms) if isinstance(rooms[k], dict)]
+            out["group"] = [self._shell_chat_message(m) for m in ordered if m.get("channel") not in ("dm", "host")][-self._SHELL_CHAT_GROUP_ROWS:]
+            threads = {}
+            for m in ordered:
+                if m.get("channel") != "dm":
+                    continue
+                a, b = self._room_thread_keys(m)
+                if not a or not b:
+                    continue
+                threads.setdefault(tuple(sorted((a, b))), []).append(m)
+            dm = []
+            for (a, b), msgs in threads.items():
+                dm.append({"a": a, "b": b, "a_name": self._room_display_name(a), "b_name": self._room_display_name(b),
+                           "at": max(int(x.get("created_at") or 0) for x in msgs),
+                           "messages": [self._shell_chat_message(x) for x in msgs][-self._SHELL_CHAT_THREAD_ROWS:]})
+            dm.sort(key=lambda t: t["at"], reverse=True)
+            out["dm"] = dm[:self._SHELL_CHAT_THREADS]
+            grouped = self._chat_conversations()
+            media = {}
+            for m in self._host_chat_media_rows():
+                media.setdefault(str(m.get("thread") or "").casefold(), []).append(m)
+            host = []
+            for key in set(grouped) | {k for k in media if k}:
+                entries = [(int(m.get("created_at") or 0), 0, int(m.get("id") or 0), m, True) for m in grouped.get(key, [])]
+                entries += [(int(m.get("created_at") or 0), 1, int(m.get("id") or 0), m, False) for m in media.get(key, [])]
+                entries.sort(key=lambda e: e[:3])
+                unread = sum(1 for m in grouped.get(key, []) if m.get("direction") == "in" and not m.get("read")) + self._host_chat_media_unread(key)
+                host.append({"key": key, "singer": self._host_chat_singer_name(key) or key, "unread": unread,
+                             "at": entries[-1][0] if entries else 0,
+                             "messages": [self._shell_chat_message(e[3], host_text=e[4]) for e in entries][-self._SHELL_CHAT_THREAD_ROWS:]})
+            host.sort(key=lambda t: t["at"], reverse=True)
+            out["host"] = host[:self._SHELL_CHAT_THREADS]
+            out["unread"]["host"] = sum(t["unread"] for t in host)
         except Exception:
             pass
         return out
