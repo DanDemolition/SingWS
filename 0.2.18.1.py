@@ -4238,6 +4238,10 @@ DEFAULTS = {
     # Stage A5 shadow: at each point where play_next_file commits to a start route (external KaraFun, refusal, ZIP preparation, mp4, mp3, MP3+G, CDG+MP3) compare it with
     # the Rust singws-start rules and LOG disagreements only; the app's own route is always used and nothing extra is read from disk.
     "start_shadow": True,
+    # Library-scan shadow: "python" (DEFAULT, nothing extra runs) or "shadow" (after a FULL library scan, a separate low-priority process re-scans the
+    # same roots with the Rust scan into a scratch song index and LOGS differences as [SCAN-SHADOW]; the app's own scan is always the one used).
+    # "rust" is accepted but NOT wired: it behaves as "python". Read from the settings snapshot each scan; needs the singws-scan-cli helper.
+    "scan_engine": "python",
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
@@ -14237,6 +14241,11 @@ class LibraryScanWorker(QObject):
                     result["tracks_persisted"] = False
                     result["tracks_persist_error"] = str(persist_error)
             _perf_log_if_slow("library_scan_worker", float(result.get("scan_time", 0.0) or 0.0) * 1000.0)
+            try:
+                import scan_shadow
+                scan_shadow.start(result, self.roots, self.quick_mode, self.old_tracks, self.settings_snapshot, logging.info)
+            except Exception:
+                pass
         except _LibraryScanCancelled:
             result = {
                 "ok": False,

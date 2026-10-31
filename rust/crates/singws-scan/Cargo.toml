@@ -1,0 +1,20 @@
+[package]
+name = "singws-scan"
+version = "0.1.0"
+edition = "2024"
+description = "Stage E: the library scan (`_build_library_scan_result`, full mode), filename parsing and the ZIP/MP3 duration hint, proven against the app's own Python. Temp databases only (through singws-dbw). Not linked into the app; the app may run the CLI as a log-only shadow (setting scan_engine = shadow)."
+publish = false
+
+[lib]
+name = "singws_scan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-scan-cli"
+path = "src/bin/scan_cli.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+sha1 = "0.10.7"
+zip = { version = "8.6.0", default-features = false, features = ["deflate", "deflate64"] }
+singws-dbw = { path = "../singws-dbw" }
