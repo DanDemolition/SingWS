@@ -57,7 +57,7 @@ for ARCH in $ARCHS; do
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 P
-  # libmpv + its dependencies (the bridge dlopens singws_libmpv.2.dylib; it looks beside the EXECUTABLE, not in ../Frameworks, so SINGWS_LIBMPV is set below)
+  # libmpv + its dependencies (the bridge finds it through ../Frameworks; no SINGWS_LIBMPV override is used)
   cp -R "$ROOT/native/mpv_runtime/artifacts/$ARCH/Frameworks/." "$A/Contents/Frameworks/"
   rm -f "$A/Contents/Frameworks/SHA256SUMS" "$A/Contents/Frameworks/libsingws_mpv_bridge.dylib"   # a loose text file fails strict signing; the Objective-C bridge is not used
   QML_COPY="$(mktemp -d)/qml"; cp -R crates/singws-shell/qml "$QML_COPY"   # qmlimportscanner skips dot-folder paths such as .claude worktrees
@@ -66,11 +66,11 @@ P
   rm -rf "$A/Contents/PlugIns/sqldrivers"
   codesign --force --deep --sign "$IDENTITY" "$A"; codesign --verify --deep --strict "$A"
 
+  [[ $BUILD == 1 ]] && cargo build --release -p singws-mac --bin singws-mac-probe --target $T
+  PROBE="$(arch -$ARCH "$CARGO_TARGET_DIR/$T/release/singws-mac-probe" --json 2>&1 | tr '\n' ' ' | cut -c1-600)"
   H="$OUT/home-$ARCH"; rm -rf "$H"; mkdir -p "$H"; J="$OUT/selfcheck-$ARCH.json"; rm -f "$J"
-  LIBMPV="$A/Contents/Frameworks/singws_libmpv.2.dylib"
-  [[ -e "$LIBMPV" ]] || LIBMPV="$(ls "$A"/Contents/Frameworks/*libmpv*.dylib 2>/dev/null | head -1)"
   RC=0
-  open -n -W --arch $ARCH --env SINGWS_HOME="$H" --env SINGWS_LIBMPV="$LIBMPV" --stdout "$OUT/stdout-$ARCH.txt" --stderr "$OUT/stderr-$ARCH.txt" "$A" \
+  open -n -W --arch $ARCH --env SINGWS_HOME="$H" --stdout "$OUT/stdout-$ARCH.txt" --stderr "$OUT/stderr-$ARCH.txt" "$A" \
     --args --selfcheck --selfcheck-report "$J" --selfcheck-video "$OUT/test.mp4" --selfcheck-audio "$AUDIO" || RC=$?
 
   # --- identity / TCC evidence ---
@@ -103,7 +103,7 @@ for c in json.load(open(sys.argv[1]))["checks"]:
     print(f"- {tag} {c['name']}: {json.dumps(c['detail'])}")
 PY
     else echo "- FAIL no report written (the app did not finish; see stderr)"; fi
-    echo "- (e) singws-mac ax_is_trusted / run_applescript: pending singws-mac (stub, not run)"
+    echo "- same shim run as a plain process from this terminal (\`singws-mac-probe --json\`, responsible process = the terminal/IDE that ran this script): \`$PROBE\`"
   } >> "$REPORT"
 done
 echo "report: $REPORT"; cat "$REPORT"

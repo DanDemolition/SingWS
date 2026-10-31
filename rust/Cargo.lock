@@ -2269,6 +2269,7 @@ dependencies = [
  "singws-bgm-ffi",
  "singws-cdg",
  "singws-control",
+ "singws-mac",
  "singws-uimodel",
  "singws-video",
 ]

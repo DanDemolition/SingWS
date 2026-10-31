@@ -1,7 +1,7 @@
 //! `--selfcheck`: the "no-Python host" spike (docs/design/stage-e-no-python-gap.md, Step 3). One Rust process hosts the Qt Quick shell, the Rust
 //! video bridge (`singws-video`) and the Rust BGM engine (`singws-bgm-ffi`), links them in-process, hands two Qt Quick windows' `winId`s to the bridge
 //! as its output/preview views and plays ~5 s through the BGM engine headless. It writes `selfcheck.json` and changes nothing else.
-//! Item (e), `singws-mac`'s ax_is_trusted / run_applescript, is a marked stub: it lands with that crate, not as a shim here.
+//! Item (e) calls `singws-mac` (ax_is_trusted, frontmost_app_name, run_applescript("return 1+1")) in-process, read-only.
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -288,8 +288,15 @@ impl qobject::SelfCheck {
                 record("bgm_engine", false, json!({"error": "BGM thread panicked"}));
             }
         }
-        // marked stub: the platform checks wait for the singws-mac crate
-        record("singws_mac", false, json!({"status": "pending singws-mac", "items": ["ax_is_trusted", "run_applescript"]}));
+        // item (e): the singws-mac platform shim, in-process. Read-only: no System Events script, nothing that can prompt.
+        let t = Duration::from_secs(10);
+        let script = singws_mac::run_applescript("return 1+1", t);
+        record(
+            "singws_mac",
+            singws_mac::supported() && script.ok && script.out == "2",
+            json!({"ax_is_trusted": singws_mac::ax_is_trusted(), "frontmost_app_name": singws_mac::frontmost_app_name(),
+                   "applescript_1_plus_1": {"ok": script.ok, "out": script.out, "err": script.err}}),
+        );
         let checks = CHECKS.lock().unwrap().clone();
         let doc = json!({"selfcheck": 1, "checks": checks});
         let path = options().report;

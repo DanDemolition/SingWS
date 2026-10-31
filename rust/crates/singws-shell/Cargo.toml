@@ -13,6 +13,7 @@ singws-uimodel = { path = "../singws-uimodel" }
 singws-cdg = { path = "../singws-cdg" }
 singws-video = { path = "../singws-video" }
 singws-bgm-ffi = { path = "../singws-bgm-ffi" }
+singws-mac = { path = "../singws-mac" }
 singws-control = { path = "../singws-control", features = ["tls"] }
 serde_json = "1"
 

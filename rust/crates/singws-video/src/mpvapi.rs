@@ -189,6 +189,8 @@ fn candidates() -> Vec<PathBuf> {
     if let Some(dir) = own_dir() {
         out.push(dir.join("singws_libmpv.2.dylib"));
         out.push(dir.join("Frameworks").join("singws_libmpv.2.dylib"));
+        // linked into an app executable (Contents/MacOS), the bundle's own Frameworks folder is a sibling of the executable's folder
+        out.push(dir.join("..").join("Frameworks").join("singws_libmpv.2.dylib"));
     }
     out
 }
@@ -490,4 +492,13 @@ static API: OnceLock<Result<Mpv, String>> = OnceLock::new();
 /// The process-wide libmpv, loaded on first use.
 pub fn api() -> Result<&'static Mpv, &'static str> {
     API.get_or_init(Mpv::open).as_ref().map_err(|e| e.as_str())
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    #[test]
+    fn looks_in_the_bundle_frameworks_folder_beside_the_executable_folder() {
+        let c = super::candidates();
+        assert!(c.iter().any(|p| p.ends_with("../Frameworks/singws_libmpv.2.dylib")), "{c:?}");
+    }
 }
