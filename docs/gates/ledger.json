@@ -31,6 +31,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -64,6 +71,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -99,6 +113,25 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "QUEUE-SHADOW:tombstone": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -132,6 +165,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -167,6 +207,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -201,6 +248,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -223,6 +277,18 @@
         }
       ]
     },
+    "START-SHADOW:confirmed": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
     "START-SHADOW:display": {
       "bad": [
         {
@@ -234,7 +300,15 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
     },
     "START-SHADOW:engine": {
       "bad": [
@@ -247,7 +321,51 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "START-SHADOW:performance:confirmed": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "START-SHADOW:performance:media_end": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "START-SHADOW:performance:stop": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
     },
     "START-SHADOW:pick": {
       "bad": [
@@ -260,7 +378,27 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "START-SHADOW:plan": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
     },
     "START-SHADOW:rotation": {
       "bad": [
@@ -273,7 +411,15 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
     },
     "START-SHADOW:route:external_karafun": {
       "bad": [
@@ -286,7 +432,15 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
     },
     "START-SHADOW:route:mp3g_zip": {
       "bad": [
@@ -299,7 +453,27 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "START-SHADOW:route:mp4": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
     },
     "START-SHADOW:route:zip_prepare": {
       "bad": [
@@ -312,7 +486,39 @@
           ]
         }
       ],
-      "clean": []
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "START-SHADOW:transport_args": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "START-SHADOW:zip_args": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
     },
     "STORE-SHADOW:bg_playlist.json": {
       "bad": [],
@@ -323,6 +529,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -358,6 +571,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -370,6 +590,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -405,6 +632,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -431,6 +665,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -466,6 +707,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -499,6 +747,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -534,6 +789,25 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
+        }
+      ]
+    },
+    "STORE-SHADOW:status_snapshot.json": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -546,6 +820,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -574,6 +855,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -586,6 +874,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -622,6 +917,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -648,6 +950,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
@@ -676,6 +985,13 @@
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
           ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
+          ]
         }
       ]
     },
@@ -688,6 +1004,13 @@
           "logs": [
             "singws_2026-10-29.log",
             "singws_2026-10-29.log.2026-10-29"
+          ]
+        },
+        {
+          "date": "2026-10-31",
+          "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
+          "logs": [
+            "singws_2026-10-30.log"
           ]
         }
       ]
