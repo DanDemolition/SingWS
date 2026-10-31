@@ -4,6 +4,7 @@ mod chat_panel;
 mod video_demo;
 mod idle_panel;
 mod placement_panel;
+mod selfcheck;
 mod control_panel;
 mod eq_panel;
 mod history_panel;
@@ -24,12 +25,15 @@ unsafe extern "C" {
 fn main() {
     // The native macOS style cannot be customised; the Basic style can. Set before Qt starts (nothing else is running yet).
     unsafe { std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic") };
+    // `--selfcheck` is the no-Python host spike (rust/spike_host.sh): it loads SelfCheck.qml instead of the shell and writes a report.
+    let selfcheck = selfcheck::configure(std::env::args().skip(1));
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
     if let Some(mut engine) = engine.as_mut() {
         // the karaoke-display demo's picture source (image://cdg/<ms>); harmless when --display-demo is not given
         unsafe { singws_cdg_install_provider(engine.as_mut().get_unchecked_mut() as *mut _ as *mut core::ffi::c_void) };
-        engine.load(&QUrl::from("qrc:/qt/qml/com/singws/shell/qml/Main.qml"));
+        let page = if selfcheck { "SelfCheck" } else { "Main" };
+        engine.load(&QUrl::from(format!("qrc:/qt/qml/com/singws/shell/qml/{page}.qml").as_str()));
     }
     if let Some(app) = app.as_mut() {
         app.exec();

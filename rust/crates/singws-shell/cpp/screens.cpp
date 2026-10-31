@@ -31,3 +31,12 @@ extern "C" char *singws_screens_json_live()   // malloc'ed, NUL-terminated; the 
 }
 
 extern "C" void singws_screens_json_free(char *p) { free(p); }
+
+#include <QWindow>
+// The native handle of the window with this title (an NSView* on macOS), 0 when there is none. QML's Window has no winId property.
+extern "C" unsigned long long singws_window_native_id(const char *title)
+{
+    for (QWindow *w : QGuiApplication::allWindows())
+        if (w->title() == QString::fromUtf8(title)) return static_cast<unsigned long long>(w->winId());
+    return 0;
+}
