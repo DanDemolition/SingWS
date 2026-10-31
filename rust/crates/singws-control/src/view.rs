@@ -54,6 +54,8 @@ pub struct ViewModel {
     pub rotation: Value,
     pub queue_sig: Option<String>,
     pub singers: Vec<SingerRow>,
+    /// the app's room chat summary (null until it sends one)
+    pub chat: Value,
     pending: Vec<(String, Option<String>)>,
     pub result: Option<CommandResult>,
     seq: u64,
@@ -123,10 +125,18 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "brand_cleared" => ("Brand priority cleared".into(), "ok"),
         "bad_brands" => ("Enter brands such as KV, SC, SBI: letters and numbers separated by commas".into(), "warn"),
         "sending" => ("Sending the message…".into(), "ok"),
+        "chat_sent" => ("Message sent".into(), "ok"),
+        "chat_failed" => ("The chat message could not be sent".into(), "warn"),
+        "bad_channel" => ("Chat can speak to Everyone or in one singer's Host chat only".into(), "warn"),
+        "bad_text" => ("A chat message must be 1 to 300 characters with no line breaks".into(), "warn"),
+        "bad_singer_key" => ("Pick a Host chat conversation first".into(), "warn"),
+        "unknown_conversation" => ("That Host chat conversation is no longer there; look at the Chat tab again".into(), "warn"),
+        "group_chat_off" => ("Everyone chat is switched off in the web dashboard".into(), "warn"),
+        "chat_not_ready" => ("The app has not loaded the chat yet; try again in a few seconds".into(), "warn"),
         "message_sent" => ("Message delivered".into(), "ok"),
         "message_failed" => ("The message could not be sent".into(), "warn"),
         "bad_message" => ("The message must be 1 to 500 characters".into(), "warn"),
-        "duplicate_message" => ("That exact message was just sent to this singer".into(), "warn"),
+        "duplicate_message" => ("That exact message was just sent there; wait a moment to send it again".into(), "warn"),
         "network_not_configured" => ("The app has no server address, user or API key set, so it cannot send messages".into(), "warn"),
         "replaced" => ("Song replaced".into(), "ok"),
         "not_replaced" => ("The app could not replace that song".into(), "warn"),
@@ -260,6 +270,7 @@ impl ViewModel {
                     }
                 }
             }
+            Incoming::Chat(c) => self.chat = c.clone(),
             Incoming::Queue(q) => {
                 self.queue_sig = Some(q.queue_sig.clone());
                 self.singers = q.singers.clone();
@@ -336,6 +347,7 @@ impl ViewModel {
                 "singer_id": s.singer_id, "name": s.name, "skipped": s.skipped, "marker": s.marker,
                 "songs": s.songs.iter().map(|y| json!({"entry_id": y.entry_id, "artist": y.artist, "title": y.title, "skipped": y.skipped})).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
+            "chat": self.chat,
             "pending": self.pending.len(),
             "result": self.result.as_ref().map(|r| json!({"seq": r.seq, "text": r.text, "kind": r.kind})),
         })
@@ -428,6 +440,15 @@ mod tests {
     #[test]
     fn waitlist_answers_are_plain_words() {
         for (code, ok, kind, text) in [
+            ("chat_sent", true, "ok", "Message sent"),
+            ("chat_failed", false, "warn", "The chat message could not be sent"),
+            ("bad_channel", false, "warn", "Chat can speak to Everyone"),
+            ("bad_text", false, "warn", "A chat message must be 1 to 300"),
+            ("bad_singer_key", false, "warn", "Pick a Host chat conversation"),
+            ("unknown_conversation", false, "warn", "That Host chat conversation is no longer there"),
+            ("group_chat_off", false, "warn", "Everyone chat is switched off"),
+            ("chat_not_ready", false, "warn", "The app has not loaded the chat"),
+            ("duplicate_message", false, "warn", "That exact message was just sent there"),
             ("waitlist_edited", true, "ok", "Request updated (its place on the waitlist is unchanged)"),
             ("history_song_saved", true, "ok", "Singer history saved (a backup was written first)"),
             ("playback_active", false, "warn", "Stop karaoke playback first; history is not edited while a song plays"),
@@ -449,6 +470,19 @@ mod tests {
             assert!(r.text.starts_with(text), "{code}: {}", r.text);
             assert_eq!(r.kind, kind, "{code}");
         }
+    }
+
+    #[test]
+    fn the_chat_summary_is_kept_and_a_late_failure_keeps_its_reason() {
+        let mut v = ViewModel::new();
+        assert_eq!(v.to_json()["chat"], Value::Null);
+        v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"chat","chat":{"group":[{"id":1,"from":"Ann","text":"hi"}]}}"#)));
+        assert_eq!(v.to_json()["chat"]["group"][0]["text"], "hi");
+        v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"chat","chat":"garbage"}"#)));
+        assert_eq!(v.to_json()["chat"], Value::Null, "a summary that is not an object clears the tab instead of showing junk");
+        v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"notice","request_id":"c1","ok":false,"code":"chat_failed","message":"Everyone chat is switched off."}"#)));
+        let r = v.result.clone().unwrap();
+        assert_eq!((r.kind, r.text.as_str()), ("warn", "The chat message could not be sent: Everyone chat is switched off."));
     }
 
     #[test]

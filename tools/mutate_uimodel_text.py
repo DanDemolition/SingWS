@@ -17,6 +17,43 @@ PY = os.environ.get("SINGWS_PY") or "/Users/daniel/Documents/SingWS/.venv/bin/py
 CARGO = os.path.expanduser("~/.cargo/bin/cargo")
 
 MUTANTS = {
+    "chat": [
+        ('    let local = at + utc_offset_min * 60;', '    let local = at - utc_offset_min * 60;', None),
+        ('    let local = at + utc_offset_min * 60;', '    let local = at;', None),
+        ('    if at <= 0 {\n        return String::new();', '    if at < 0 {\n        return String::new();', None),
+        ('    let day = local.rem_euclid(86_400);', '    let day = local % 86_400;', None),
+        ('let h12 = if h % 12 == 0 { 12 } else { h % 12 };', 'let h12 = h % 12;', None),
+        ('let ampm = if h < 12 { "AM" } else { "PM" };', 'let ampm = if h <= 12 { "AM" } else { "PM" };', None),
+        ('if seconds { format!("{h12:02}:{m:02}:{sec:02} {ampm}") }', 'if !seconds { format!("{h12:02}:{m:02}:{sec:02} {ampm}") }', None),
+        ('format!("{h12:02}:{m:02} {ampm}") }', 'format!("{h12}:{m:02} {ampm}") }', None),
+        ('    if host {\n        out.push("HOST".to_string());', '    if !host {\n        out.push("HOST".to_string());', None),
+        ('Some((a, b)) if host => out.push(format!("PRIVATE ↔ {a} / {b}")),', 'Some((a, b)) if host => out.push(format!("PRIVATE ↔ {b} / {a}")),', None),
+        ('out.push(format!("PRIVATE → {}", if from == a { b } else { a }));', 'out.push(format!("PRIVATE → {}", if from == a { a } else { b }));', None),
+        ('None => out.push("GROUP".to_string()),', 'None => {}', None),
+        ('out.push(format!("HELD ({})", s(m, "flag")));', 'out.push("HELD".to_string());', None),
+        ('    if status == "removed" {\n        out.push("REMOVED".to_string());', '    if status != "removed" {\n        out.push("REMOVED".to_string());', None),
+        ('"BLOCKED BY RECIPIENT (they never saw it)"', '"BLOCKED"', None),
+        ('    if reports > 0 {', '    if reports > 1 {', None),
+        ('out.push(format!("REPORTED ×{reports}"));', 'out.push(format!("REPORTED {reports}"));', None),
+        ('Some("photo") => "[photo]",', 'Some("photo") => "[GIF]",', None),
+        ('Some("gif") => "[GIF]",', 'Some("gif") => "",', None),
+        ('let body = if removed && host_chat { "(removed)".to_string() } else { s(m, "text") };', 'let body = if removed { "(removed)".to_string() } else { s(m, "text") };', None),
+        ('let body = if removed && host_chat { "(removed)".to_string() } else { s(m, "text") };', 'let body = s(m, "text");', None),
+        ('"tags": if host_chat { Vec::new() } else { tags(m, thread) },', '"tags": tags(m, thread),', None),
+        ('"stamp": stamp(i(m, "at"), utc_offset_min, !host_chat),', '"stamp": stamp(i(m, "at"), utc_offset_min, host_chat),', None),
+        ('"attachment": if removed && host_chat { "" } else { attachment_label(m) },', '"attachment": attachment_label(m),', None),
+        ('let show = unread > 0 && (key == "host" || key != current);', 'let show = unread > 0 && key != current;', None),
+        ('let show = unread > 0 && (key == "host" || key != current);', 'let show = unread > 0;', None),
+        ('let show = unread > 0 && (key == "host" || key != current);', 'let show = unread >= 0 && (key == "host" || key != current);', None),
+        ('"dm" => "Private",', '"dm" => "Private messages",', None),
+        ('json!({"title": format!("{a} ↔ {b}"),', 'json!({"title": format!("{a} / {b}"),', "the title is shown by the shell only; the parity tool does not draw it. The unit test pins it"),
+        ('let (a, b) = (if a.is_empty() { s(t, "a") } else { a }, if b.is_empty() { s(t, "b") } else { b });', 'let (a, b) = (a, b);', None),
+        ('let name = if name.is_empty() { s(t, "key") } else { name };', 'let name = name;', None),
+        ('"Room chat: could not reach the server".to_string()', '"Room chat is off.".to_string()', None),
+        ('} else if !group_on && !dm_on {', '} else if !group_on || !dm_on {', None),
+        ('} else if attention > 0 {', '} else if attention > 1 {', None),
+        ('if attention == 1 { " needs" } else { "s need" }', 'if attention == 1 { "s need" } else { " needs" }', None),
+    ],
     "diagnostics": [
         ('ok: has_local && screens >= 2,', 'ok: has_local || screens >= 2,', None),
         ('ok: has_local && screens >= 2,', 'ok: has_local && screens >= 1,', None),
@@ -217,8 +254,8 @@ MUTANTS = {
 }
 
 ONLY = {int(x) for x in os.environ.get("MUTANTS", "").split(",") if x}
-MODULE_TEST = {"lib": "providers", "diagnostics": "diagnostics", "rows": "rows", "header": "header", "ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
-PARITY = {"lib": ("rows_parity.py", ["--cases", "200"]), "diagnostics": ("diagnostics_parity.py", ["--cases", "150"]), "rows": ("rows_parity.py", ["--cases", "200"]), "header": ("header_parity.py", ["--cases", "150"]), "ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
+MODULE_TEST = {"chat": "chat", "lib": "providers", "diagnostics": "diagnostics", "rows": "rows", "header": "header", "ticker": "ticker", "hero": "hero", "waitlist": "waitlist"}
+PARITY = {"chat": ("chat_parity.py", ["--cases", "250"]), "lib": ("rows_parity.py", ["--cases", "200"]), "diagnostics": ("diagnostics_parity.py", ["--cases", "150"]), "rows": ("rows_parity.py", ["--cases", "200"]), "header": ("header_parity.py", ["--cases", "150"]), "ticker": ("ticker_parity.py", ["--cases", "250"]), "hero": ("hero_parity.py", ["--cases", "300"]), "waitlist": ("waitlist_parity.py", ["--cases", "50", "--seed", "99"])}
 
 
 def run(cmd, timeout):

@@ -29116,7 +29116,7 @@ class KaraokeApp(QWidget):
         args = data.get("args")
         if not isinstance(args, dict):
             args = {}
-        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.")) or str(args.get("source") or "").strip().lower() == "shell":
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.", "chat.")) or str(args.get("source") or "").strip().lower() == "shell":
             args = dict(args)
             args["_request_id"] = str(request_id or "")
             args["_sent_at"] = data.get("sent_at")
@@ -29185,6 +29185,11 @@ class KaraokeApp(QWidget):
                 try:
                     worker.send_json({"type": "queue", "user": full["user"], "queue_sig": queue_sig, "singers": self._shell_queue_summary(),
                                       "waitlist": self._shell_waitlist_summary(), "updated_at": int(time.time())})
+                except Exception:
+                    pass
+                try:
+                    # Room chat is its own message: the relay passes a host app's messages through unchanged but drops anything over 64 KB, and the queue message is already large.
+                    worker.send_json({"type": "chat", "user": full["user"], "chat": self._shell_chat_summary(), "updated_at": int(time.time())})
                 except Exception:
                     pass
 
@@ -34174,7 +34179,7 @@ class KaraokeApp(QWidget):
             args = command.get("args")
             if not isinstance(args, dict):
                 args = {}
-            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.")):
+            if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.", "chat.")):
                 args = dict(args)
                 args["_request_id"] = f"http:{command_id}"
                 args["_sent_at"] = command.get("sent_at")
@@ -34485,7 +34490,7 @@ class KaraokeApp(QWidget):
         threading.Thread(target=send, daemon=True).start()
 
     def _execute_host_control_command(self, action: str, args: dict) -> tuple[bool, str]:
-        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.")):
+        if action.startswith(("queue.", "library.", "bg.", "eq.", "waitlist.", "history.", "settings.", "chat.")):
             return self._execute_shell_queue_command(action, args)
         if str(args.get("source") or "").strip().lower() == "shell" and action != "state":
             # Transport commands from the Rust shell follow the same switch as its queue commands; the web remote is unaffected.
@@ -50540,6 +50545,90 @@ class KaraokeApp(QWidget):
             pass
         return True, "brand_set"
 
+    def shell_chat_say(self, channel, singer_key, text, request_id: str = "", *, dry_run: bool = False) -> tuple[bool, str]:
+        """`chat.say`: speak as the host in the Everyone room (channel "group") or in one singer's Host chat (channel "host" + that conversation's `singer_key`), through the
+        very paths the Chat page's Send uses. Private threads are not offered. A message cannot be taken back, so everything is checked first: 1-300 characters, no control
+        characters, chat switched on at the server, a Host chat conversation that exists, the server connection configured, and the same text to the same place is refused for
+        30 seconds (a double tap). The host is never muted (the server's rule). A dry run checks all of it and sends nothing. Returns at once with "sending"; the real
+        outcome comes back as a `notice` message."""
+        import unicodedata
+        if channel not in ("group", "host"):
+            return False, "bad_channel"
+        if not isinstance(text, str):
+            return False, "bad_text"
+        body = text.strip()
+        if not body or len(body) > 300 or any(unicodedata.category(c) == "Cc" for c in body):
+            return False, "bad_text"
+        key = ""
+        if channel == "host":
+            if not isinstance(singer_key, str) or not singer_key.strip() or len(singer_key) > 200 or any(unicodedata.category(c) == "Cc" for c in singer_key):
+                return False, "bad_singer_key"
+            key = singer_key.strip().casefold()
+            singer = self._host_chat_singer_name(key)
+            if not singer:
+                return False, "unknown_conversation"
+        else:
+            options = getattr(self, "_room_settings", None) or {}
+            if not options:
+                return False, "chat_not_ready"
+            if not options.get("group_enabled"):
+                return False, "group_chat_off"
+        conn = self._room_chat_conn()
+        if not conn:
+            return False, "network_not_configured"
+        recent = getattr(self, "_shell_recent_chat", None)
+        if recent is None:
+            recent = self._shell_recent_chat = {}
+        marker = (channel, key, body)
+        now = time.monotonic()
+        for k, at in list(recent.items()):
+            if now - at > 30.0:
+                recent.pop(k, None)
+        if marker in recent:
+            return False, "duplicate_message"
+        if dry_run:
+            return True, "dry_run: would send the message"
+        recent[marker] = now
+        base, user, api_key = conn
+        host_name = str(self.settings.get("host_chat_name", "Host") or "Host")
+
+        def work():
+            ok, error = False, ""
+            try:
+                if channel == "host":
+                    ok, error = self._net_send_direct_message(singer, body)
+                else:
+                    r = requests.post(f"{base}/api/v1/host_chat_moderation.php", data={"user": user, "action": "say", "channel": "group", "a": "", "b": "", "message": body, "host_name": host_name},
+                                      headers={"X-API-Key": api_key, "Accept": "application/json"}, timeout=10)
+                    data = r.json() if r.content else {}
+                    ok = bool(r.ok and data.get("ok"))
+                    if not ok:
+                        error = str(data.get("error") or f"Server returned {r.status_code}")
+            except Exception as exc:
+                ok, error = False, str(exc)
+            if not ok:
+                recent.pop(marker, None)  # a failed send may be tried again
+            _diag(f"[SHELL-CMD] id={request_id} chat.say channel={channel} {'delivered' if ok else 'FAILED: ' + str(error)[:120]}")
+            notice = {"type": "notice", "request_id": request_id, "ok": bool(ok), "code": "chat_sent" if ok else "chat_failed",
+                      "message": "" if ok else str(self._ROOM_SAY_ERRORS.get(error, error))[:120]}
+
+            def deliver():
+                if ok:
+                    if channel == "host":
+                        self._chat_data_generation = int(getattr(self, "_chat_data_generation", 0) or 0) + 1
+                        self._chat_last_id = 0
+                        self._chat_messages = []
+                        self._schedule_chat_poll()
+                    self._schedule_room_poll(True)
+                worker = getattr(self, "host_relay_worker", None)
+                if worker is not None and worker.is_connected():
+                    worker.send_json(notice)
+
+            self._run_on_ui_thread(deliver)
+
+        threading.Thread(target=work, daemon=True, name="shell-chat-say").start()
+        return True, "sending"
+
     def shell_queue_message_singer(self, singer_id: str, message: str, request_id: str = "", *, dry_run: bool = False) -> tuple[bool, str]:
         """Send a direct message to a singer's phone through the server (the rotation menu's Direct Message). Returns at once with "sending"; the real outcome
         comes back as a `notice` message when the server has answered. A message cannot be taken back, so: 1-500 characters, the same text to the same singer is
@@ -50788,7 +50877,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "waitlist.edit", "history.edit_song", "history.add_song", "settings.set")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "waitlist.edit", "history.edit_song", "history.add_song", "settings.set", "chat.say")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50885,6 +50974,12 @@ class KaraokeApp(QWidget):
         if action == "settings.set":
             try:
                 ok, code = self.shell_settings_set(args.get("key"), args.get("value"), dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action == "chat.say":
+            try:
+                ok, code = self.shell_chat_say(args.get("channel"), args.get("singer_key"), args.get("text"), request_id, dry_run=(mode == "dry_run"))
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)
@@ -51030,6 +51125,86 @@ class KaraokeApp(QWidget):
 
             removed.sort(key=removed_at, reverse=True)
             out["removed"] = [compact(self._waiting_for_add_row(r, "removed", selectable=True), "removed") for r in removed[:20]]
+        except Exception:
+            pass
+        return out
+
+    _SHELL_CHAT_TEXT_MAX = 120
+    _SHELL_CHAT_GROUP_ROWS = 25
+    _SHELL_CHAT_THREADS = 10
+    _SHELL_CHAT_THREAD_ROWS = 5
+
+    def _shell_chat_message(self, m: dict, host_text: bool = False) -> dict:
+        """One room / Host chat message for the shell and the web remote. Read-only and safe to show: a picture or GIF is a placeholder word (never a URL or an
+        id the page could fetch), removed text is withheld, and the text is clipped. `host_text` marks a Host-chat text row (singer_notifications, `direction`)."""
+        status = str(m.get("status") or "")
+        status = status if status in ("held", "removed", "blocked") else ""
+        if host_text:
+            mine = m.get("direction") != "in"
+            sender = str(self.settings.get("host_chat_name", "Host") or "Host") if mine else str(m.get("singer") or "")
+        else:
+            mine = bool(m.get("host")) or str(m.get("from_key") or "") == "@host"
+            sender = str(m.get("from") or m.get("from_key") or "")
+        kind = str(m.get("kind") or "")
+        gif = m.get("gif") if isinstance(m.get("gif"), dict) else None
+        if kind == "image" and int(m.get("media_id") or 0):
+            attachment = "photo"
+        elif kind == "gif" and gif and re.match(r"^https://(media[0-9]*|i)\.giphy\.com/", str(gif.get("preview") or "")):
+            attachment = "gif"
+        else:
+            attachment = ""  # the same conditions under which `_room_attachment_html` shows a picture or a GIF
+        text = "" if status == "removed" else str(m.get("message") or "")[:self._SHELL_CHAT_TEXT_MAX]
+        return {"id": int(m.get("id") or 0), "from": sender, "host": mine, "at": int(m.get("created_at") or 0), "text": text,
+                "attachment": attachment, "status": status, "reports": int(m.get("reports") or 0), "flag": str(m.get("flag") or "")[:24]}
+
+    def _shell_chat_summary(self) -> dict:
+        """Room chat (Everyone / Private threads / Host chat) for the web remote and the shell, from what the chat page already holds in memory (`_room_messages`,
+        `_chat_messages`); no new storage and no network call. Newest rows last, bounded so the relay message stays small. Best effort: never raises."""
+        out = {"reachable": None, "group_enabled": False, "dm_enabled": False, "unread": {"group": 0, "dm": 0, "host": 0}, "attention": 0,
+               "group": [], "dm": [], "host": []}
+        try:
+            settings = dict(getattr(self, "_room_settings", {}) or {})
+            out["reachable"] = getattr(self, "_room_reachable", None)
+            out["group_enabled"] = bool(settings.get("group_enabled"))
+            out["dm_enabled"] = bool(settings.get("dm_enabled"))
+            new = getattr(self, "_room_new_by_channel", None) or {}
+            out["unread"]["group"] = int(new.get("group", 0) or 0)
+            out["unread"]["dm"] = int(new.get("dm", 0) or 0)
+            out["attention"] = len(getattr(self, "_room_attention_ids", ()) or ())
+            rooms = getattr(self, "_room_messages", {}) or {}
+            ordered = [rooms[k] for k in sorted(rooms) if isinstance(rooms[k], dict)]
+            out["group"] = [self._shell_chat_message(m) for m in ordered if m.get("channel") not in ("dm", "host")][-self._SHELL_CHAT_GROUP_ROWS:]
+            threads = {}
+            for m in ordered:
+                if m.get("channel") != "dm":
+                    continue
+                a, b = self._room_thread_keys(m)
+                if not a or not b:
+                    continue
+                threads.setdefault(tuple(sorted((a, b))), []).append(m)
+            dm = []
+            for (a, b), msgs in threads.items():
+                dm.append({"a": a, "b": b, "a_name": self._room_display_name(a), "b_name": self._room_display_name(b),
+                           "at": max(int(x.get("created_at") or 0) for x in msgs),
+                           "messages": [self._shell_chat_message(x) for x in msgs][-self._SHELL_CHAT_THREAD_ROWS:]})
+            dm.sort(key=lambda t: t["at"], reverse=True)
+            out["dm"] = dm[:self._SHELL_CHAT_THREADS]
+            grouped = self._chat_conversations()
+            media = {}
+            for m in self._host_chat_media_rows():
+                media.setdefault(str(m.get("thread") or "").casefold(), []).append(m)
+            host = []
+            for key in set(grouped) | {k for k in media if k}:
+                entries = [(int(m.get("created_at") or 0), 0, int(m.get("id") or 0), m, True) for m in grouped.get(key, [])]
+                entries += [(int(m.get("created_at") or 0), 1, int(m.get("id") or 0), m, False) for m in media.get(key, [])]
+                entries.sort(key=lambda e: e[:3])
+                unread = sum(1 for m in grouped.get(key, []) if m.get("direction") == "in" and not m.get("read")) + self._host_chat_media_unread(key)
+                host.append({"key": key, "singer": self._host_chat_singer_name(key) or key, "unread": unread,
+                             "at": entries[-1][0] if entries else 0,
+                             "messages": [self._shell_chat_message(e[3], host_text=e[4]) for e in entries][-self._SHELL_CHAT_THREAD_ROWS:]})
+            host.sort(key=lambda t: t["at"], reverse=True)
+            out["host"] = host[:self._SHELL_CHAT_THREADS]
+            out["unread"]["host"] = sum(t["unread"] for t in host)
         except Exception:
             pass
         return out
