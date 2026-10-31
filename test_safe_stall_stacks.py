@@ -77,11 +77,12 @@ class SafeStallStacks(unittest.TestCase):
         body = SOURCE[start:start + 1200]
         self.assertLess(body.index('if not stall_dump["ready"]'), body.index("pthread_kill"))
 
-    def test_capture_defaults_on_and_a_one_time_migration_turns_it_on_for_old_profiles(self):
-        self.assertIn('"stall_stack_capture": True,', SOURCE)
-        migration = SOURCE[SOURCE.index('if not bool(self.settings.get("stall_stack_capture_safe_migrated", False))'):]
-        self.assertIn('self.settings["stall_stack_capture"] = True', migration[:600])
-        self.assertIn('self.settings["stall_stack_capture_safe_migrated"] = True', migration[:600])
+    def test_capture_defaults_off_and_a_one_time_migration_turns_it_off_for_old_profiles(self):
+        # 2026-10-30 23:09: the all-thread faulthandler dump was cut off mid-write and the app died. Opt-in only.
+        self.assertIn('"stall_stack_capture": False,', SOURCE)
+        migration = SOURCE[SOURCE.index('if not bool(self.settings.get("stall_stack_capture_off_migrated", False))'):]
+        self.assertIn('self.settings["stall_stack_capture"] = False', migration[:700])
+        self.assertIn('self.settings["stall_stack_capture_off_migrated"] = True', migration[:700])
         old = SOURCE[SOURCE.index('if not bool(self.settings.get("show_safe_stall_diagnostics_migrated", False))'):][:900]
         self.assertNotIn('self.settings["stall_stack_capture"] = False', old)
 

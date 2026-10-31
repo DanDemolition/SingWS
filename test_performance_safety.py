@@ -808,12 +808,13 @@ class PerformanceSafetyTests(unittest.TestCase):
     def test_stall_stack_capture_is_a_signal_dump_on_the_main_thread_not_a_cross_thread_frame_walk(self):
         # Walking the running main thread's frames from the watchdog thread is a use-after-free; it segfaulted the app on 2026-08-09
         # 23:15:41 (EXC_BAD_ACCESS at 0x0 in frame_back_get, thread "singws-main-thread-watchdog"). Stacks are now written by
-        # faulthandler's handler running ON the main thread (test_safe_stall_stacks.py proves it end to end), so capture is on by default.
-        self.assertIn('"stall_stack_capture": True', MAIN_SOURCE)
+        # faulthandler's handler running ON the main thread (test_safe_stall_stacks.py proves it end to end). It is still opt-in:
+        # the all-thread dump was cut off mid-write and the app died on 2026-10-30 23:09, so capture is OFF by default.
+        self.assertIn('"stall_stack_capture": False', MAIN_SOURCE)
         start = MAIN_SOURCE.index("def _install_main_thread_watchdog")
         end = MAIN_SOURCE.index("# Settings defaults", start)
         watchdog = MAIN_SOURCE[start:end]
-        self.assertIn('get("stall_stack_capture", True)', watchdog)
+        self.assertIn('get("stall_stack_capture", False)', watchdog)
         self.assertIn("if _stack_capture_enabled():", watchdog)
         self.assertNotIn("_current_frames", watchdog)
         self.assertNotIn("format_stack", watchdog)
@@ -839,7 +840,7 @@ class PerformanceSafetyTests(unittest.TestCase):
         )
         for timer_name in expected_timers:
             self.assertIn(f'_perf_log_if_slow("{timer_name}"', MAIN_SOURCE)
-        self.assertIn('"stall_stack_capture": True', MAIN_SOURCE)
+        self.assertIn('"stall_stack_capture": False', MAIN_SOURCE)
 
     def test_stall_event_attribution_is_separately_opt_in(self):
         # An application-wide Python event filter makes every Paint/Timer in the
@@ -866,8 +867,8 @@ class PerformanceSafetyTests(unittest.TestCase):
             MAIN_SOURCE.index('if not bool(self.settings.get("show_safe_stall_diagnostics_migrated", False))'):
         ]
         self.assertIn('self.settings["stall_event_attribution"] = False', migration)
-        # stall_stack_capture is no longer reset here: it is safe now (see stall_stack_capture_safe_migrated).
-        self.assertNotIn('self.settings["stall_stack_capture"] = False', migration[:700])
+        # stall_stack_capture has its own one-time reset (stall_stack_capture_off_migrated), not this block.
+        self.assertNotIn('self.settings["stall_stack_capture"] = False', migration.split("stall_stack_capture_off_migrated")[0])
         self.assertIn('self.settings["show_safe_stall_diagnostics_migrated"] = True', migration)
 
     def test_tracks_json_is_parsed_off_the_gui_thread(self):

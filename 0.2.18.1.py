@@ -23,7 +23,7 @@ from karafun_fullscreen import ensure_renderer_fullscreen, renderer_raise_script
 sys.setswitchinterval(0.001)
 
 _GST_RUNTIME_DEBUG = {}
-APP_VERSION = "1.0.2.5"
+APP_VERSION = "1.0.2.6"
 PROCESS_STARTUP_UTC = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 PROCESS_SESSION_UUID = str(uuid.uuid4())
 PROCESSING_NOTIFICATION_TIMEOUT_MS = 15000
@@ -4008,7 +4008,7 @@ def _install_main_thread_watchdog(owner, threshold_ms: int = 120):
 
         def _stack_capture_enabled() -> bool:
             try:
-                return bool(getattr(owner, "settings", {}).get("stall_stack_capture", True))
+                return bool(getattr(owner, "settings", {}).get("stall_stack_capture", False))
             except Exception:
                 return False
 
@@ -4283,12 +4283,11 @@ DEFAULTS = {
     # chain; mpv keeps the picture and its audio clock) or "mpv" (mpv plays audio and picture, the way back). Read per song; any trouble
     # (no Rust engine, the Objective-C video bridge, a file the voice cannot open) plays that song with mpv audio automatically.
     "karaoke_audio_engine": "rust",
-    # Capture the GUI thread's Python stack when a stall is detected. The
-    # watchdog thread has to walk live frames belonging to the running main
-    # thread to do it, which is a use-after-free -- it segfaulted the app on
-    # 2026-08-09. Stall timing does not need this and stays on; enable only to
-    # chase a specific stall, on a machine that is not running a show.
-    "stall_stack_capture": True,
+    # Capture all-thread Python stacks (faulthandler, SIGUSR2) when a stall is detected. OFF by default: it crashed the app on 2026-08-09
+    # (a watchdog thread walking live frames) and again on 2026-10-30 23:09 (faulthandler reading other threads' frames mid-change:
+    # the dump was cut off, 26 "<invalid frame>" lines before it). Stall timing does not need it and stays on; enable only to chase
+    # a specific stall, on a machine that is not running a show.
+    "stall_stack_capture": False,
     # Log a one-line system snapshot (load, memory pressure, busiest processes) when the GUI freezes for over a second.
     "stall_system_snapshot": True,
     # Light always-on stall watchdog (500 ms heartbeat, logs only GUI stalls >= 1 s, no stack, no event filter) so a long
@@ -4299,6 +4298,7 @@ DEFAULTS = {
     "prewarm_next_song_file": True,
     "show_safe_stall_diagnostics_migrated": False,
     "stall_stack_capture_safe_migrated": False,
+    "stall_stack_capture_off_migrated": False,
     "performance_debug_default_migrated": False,
     "performance_log_interval_sec": 15,
     "auto_update_enabled": True,        # check GitHub Releases in the background at startup
@@ -22954,11 +22954,12 @@ class KaraokeApp(QWidget):
             self.settings["stall_event_attribution"] = False
             self.settings["show_safe_stall_diagnostics_migrated"] = True
             changed = True
-        if not bool(self.settings.get("stall_stack_capture_safe_migrated", False)):
-            # Stall stacks are now written by faulthandler's signal handler on the main thread (no cross-thread frame walking), so the
-            # unsafe-capture reset above no longer applies: turn it on once for every profile.
-            self.settings["stall_stack_capture"] = True
+        if not bool(self.settings.get("stall_stack_capture_off_migrated", False)):
+            # The faulthandler all-thread dump is not safe either (see the DEFAULTS note): turn stack capture back off once for every
+            # profile that 1.0.2.5 switched on. Later operator changes are respected once this marker exists.
+            self.settings["stall_stack_capture"] = False
             self.settings["stall_stack_capture_safe_migrated"] = True
+            self.settings["stall_stack_capture_off_migrated"] = True
             changed = True
         if not bool(self.settings.get("ffmpeg_cdg_timing_migrated", False)):
             # GStreamer used a zero-offset pipeline clock. FFmpeg CDG playback
