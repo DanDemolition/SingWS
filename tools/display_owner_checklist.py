@@ -50,9 +50,9 @@ would open the audience window.
        singws-shell --display-demo-video FILE.mp4   (watch Activity Monitor for 30 s at 720p and 1080p)
    Measured on Apple Silicon only: about 26 percent of one core at 960x540 and 42 percent at 1920x1080.
 7. Sleep and wake with the idle window open: after wake the idle card's meter must still move and the ticker strip must still scroll.
-8. Partial transparency on a REAL disc (DEFINE_TRANSPARENT): libmpv (today's display) blends such pixels over its own grey tile pattern, the Rust
-   picture ignores alpha. Only a disc that uses it shows the difference. If you know one, send the file name; `tools/make_alpha_cdg.py` makes a
-   test file and `tools/cdg_window_compare.py alpha.cdg silent.mp3 --at 5` shows the difference.
+8. Partial transparency on a REAL disc (DEFINE_TRANSPARENT): the Rust picture now copies libmpv (pixels with alpha below 255 are blended over its
+   grey 16-pixel checkerboard, measured on the real window and equal to within 1 level on a made-up file). No real disc that uses it was available.
+   If you know one, send the file name and run `tools/cdg_window_compare.py DISC.cdg DISC.mp3 --at 30`: expect 0 pixels differing by more than 8.
 """
 
 

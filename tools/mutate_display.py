@@ -444,6 +444,29 @@ NEW3 = [
 ]
 M += NEW3
 
+# ---- flatten_on_tiles (partial alpha over libmpv's grey squares), added with the alpha decision
+NEW4 = [
+ (L, "const ALPHA_TILE: usize = 16;", "const ALPHA_TILE: usize = 15;", None),
+ (L, "const ALPHA_TILE: usize = 16;", "const ALPHA_TILE: usize = 17;", None),
+ (L, "const ALPHA_TILE_LIGHT: f32 = 0.93 * 255.0;", "const ALPHA_TILE_LIGHT: f32 = 0.92 * 255.0;", None),
+ (L, "const ALPHA_TILE_DARK: f32 = 0.87 * 255.0;", "const ALPHA_TILE_DARK: f32 = 0.88 * 255.0;", None),
+ (L, "if p[3] == 255 {\n            continue;", "if p[3] >= 254 {\n            continue;", None),
+ (L, "if p[3] == 255 {\n            continue;", "if false {\n            continue;", "alpha 255 goes through the blend as (c * 255 + grey * 0) / 255 + 0.5, which floors back to c exactly: the skip is only a shortcut"),
+ (L, "let (x, y) = (i % WIDTH, i / WIDTH);", "let (x, y) = (i / WIDTH, i % WIDTH);", "only x / ALPHA_TILE + y / ALPHA_TILE is used, and a sum does not change when x and y swap places"),
+ (L, "(x / ALPHA_TILE + y / ALPHA_TILE) % 2 == 0", "(x / ALPHA_TILE + y / ALPHA_TILE) % 2 == 1", None),
+ (L, "(x / ALPHA_TILE + y / ALPHA_TILE) % 2 == 0", "(x / ALPHA_TILE + x / ALPHA_TILE) % 2 == 0", None),
+ (L, "(x / ALPHA_TILE + y / ALPHA_TILE) % 2 == 0", "(x / ALPHA_TILE + y % ALPHA_TILE) % 2 == 0", None),
+ (L, "(*c as f32 * a + grey * (255.0 - a)) / 255.0 + 0.5", "(*c as f32 * a + grey * a) / 255.0 + 0.5", None),
+ (L, "(*c as f32 * a + grey * (255.0 - a)) / 255.0 + 0.5", "(*c as f32 * (255.0 - a) + grey * a) / 255.0 + 0.5", None),
+ (L, "(*c as f32 * a + grey * (255.0 - a)) / 255.0 + 0.5", "(*c as f32 * a + grey * (255.0 - a)) / 255.0", None),
+ (L, ".iter_mut().take(3) {", ".iter_mut().take(2) {", None),
+ (L, ".iter_mut().take(3) {", ".iter_mut().take(4) {", "the fourth entry is alpha, blended into some number and then overwritten by `p[3] = 255` on the next line"),
+ (L, "        p[3] = 255;\n    }\n    out", "        p[3] = 254;\n    }\n    out", None),
+ (L, "let flat = flatten_on_tiles(frame);", "let flat = frame.to_vec();", None, 0),
+ (L, "let flat = flatten_on_tiles(frame);", "let flat = frame.to_vec();", None, 1),
+]
+M += NEW4
+
 
 def run(cmd, **kw):
     return subprocess.run(cmd, cwd=ROOT / "rust", env=ENV, capture_output=True, text=True, **kw)

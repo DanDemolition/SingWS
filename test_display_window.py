@@ -117,6 +117,21 @@ class DisplayParityToolsTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout[-800:] + p.stderr[-400:])
         self.assertIn(" 0 differences", p.stdout)
 
+    def test_partial_alpha_is_blended_over_the_grey_squares_libmpv_draws(self):
+        """tools/make_alpha_cdg.py's colour 3 (alpha 63) on a dark square is (176, 176, 230) in the real bridge window (measured on screen, plus or minus libmpv's dither of 1);
+        the Rust composite must say (175, 175, 230), and an alpha-255 pixel must stay as it is."""
+        with tempfile.TemporaryDirectory() as d:
+            cdg = Path(d) / "alpha.cdg"
+            subprocess.run([sys.executable, str(HERE / "tools" / "make_alpha_cdg.py"), str(cdg)], check=True)
+            p = subprocess.run([str(Path(TARGET) / "release" / "singws-cdg-dump"), str(cdg), "--at", "5", "--bridge", "900x648:off"], capture_output=True, timeout=60)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(len(p.stdout), 900 * 648 * 4, "900x648 is exactly 3 times the 300x216 picture")
+        px = lambda x, y: tuple(p.stdout[(y * 900 + x) * 4:][:4])
+        self.assertEqual(px(295, 271), (175, 175, 230, 255), "the window shows 176 because libmpv dithers by 1")
+        near_transparent = px(3 * 140 + 1, 3 * 90 + 1)  # colour 4, alpha 3: the plain square
+        self.assertTrue(all(215 <= c <= 240 for c in near_transparent[:3]), near_transparent)
+        self.assertEqual(px(1, 1), (0, 0, 0, 255), "the border colour 0 is opaque black")
+
 
 if __name__ == "__main__":
     unittest.main()
