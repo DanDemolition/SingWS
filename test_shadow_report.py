@@ -259,6 +259,23 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(verdicts(lines)["PLAN-SHADOW"], "ERROR")
         self.assertEqual(run(lines)[0], 1)
 
+    def test_start_drive_is_an_optional_row_judged_by_its_disagreements(self):
+        ok = "decision=pick python={} rust={} selected={} owner=rust disagreement=0"
+        self.assertEqual(verdicts([LAUNCH] + FULL)["START-DRIVE"], "NOT ENABLED")
+        self.assertEqual(run([LAUNCH] + FULL, "--require-all")[0], 0)   # off while the flag is off: does not count against --require-all
+        self.assertEqual(verdicts([LAUNCH] + FULL + [L("START-DRIVE", ok)])["START-DRIVE"], "CLEAN")
+        bad = [L("START-DRIVE", "decision=route python=\"mp4\" rust=\"mp3\" selected=\"mp4\" owner=python-fallback disagreement=1")]
+        self.assertEqual(verdicts([LAUNCH] + FULL + bad)["START-DRIVE"], "DISAGREED")
+        self.assertEqual(run([LAUNCH] + FULL + bad)[0], 1)
+        self.assertEqual(verdicts([LAUNCH] + FULL + [L("START-DRIVE", "decision=pick fallback=python error=X")])["START-DRIVE"], "ERROR")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "x.log"
+            path.write_text("\n".join([LAUNCH] + FULL) + "\n", encoding="utf-8")
+            on = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True), {"start_drive": True})}
+            off = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True), {"start_drive": False})}
+            absent = {r.name: r for r in sr.analyse(sr.read_lines([str(path)], True), {})}
+        self.assertEqual((on["START-DRIVE"].verdict, off["START-DRIVE"].verdict, absent["START-DRIVE"].verdict), ("NOT EXERCISED", "NOT ENABLED", "NOT ENABLED"))
+
     def test_drive_fallback_errors_are_reported(self):
         lines = [LAUNCH] + FULL + [L("TRANSPORT-DRIVE", "decision=media_end fallback=python error=RuntimeError('x')")]
         self.assertEqual(verdicts(lines)["TRANSPORT-DRIVE"], "ERROR")

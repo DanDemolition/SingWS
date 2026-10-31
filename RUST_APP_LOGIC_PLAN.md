@@ -380,3 +380,23 @@ Intel show 2026-10-25 (1.0.1.6): RSS 887 MB at launch, 1,577 MB before any karao
 * Step 5 (2026-10-26): `after_start` models the rotation flags after a started song is committed (500 random rotations through the REAL method). **Finding (worse than step 3's):** with every singer skipped the commit appends the singer a second time, so the queue holds the same singer twice. Not changed; pinned by a test; the shadow notes it (`NOTE singer_already_in_queue`). `tools/mutate_start.py`: 70 mutants, all caught (1 documented equivalent).
 * Locked rotations (2026-10-26): the pick loop and the commit now model the rotation lock too (`pick_loop` with `rotation_mode` / `setting_locked`; `reweave`; `after_start` with `setting_locked`), compared against the REAL app over 800 random locked rotations each for the pick and the commit, plus 1,500 for the reweave alone (`test_rotation_lock_reweave.py`). **Fixed (operator asked, 1.0.2.1):** with every singer skipped the app no longer starts a skipped singer or queues them twice. `tools/mutate_start.py`: 87 mutants, all caught or documented as equivalent. The Intel build script now falls back to `.venv-build-arm64` when `.venv-repair` is missing.
 * Merged-tree verification (2026-10-26): full suite 2162 tests OK; `tools/mutate_start.py` 154 of 154 mutants caught; `tools/mutate_cdg.py` 80 of 80; `tools/cdg_diff.py` 22,190 frames in 44 streams identical to FFmpeg's decoder; `tools/gate_ledger.py status` knows the new orchestrator decisions.
+
+### Stage A5: the start drive, setting `start_drive` (2026-10-31, committed, default OFF, not in any build)
+Gate: the 2026-10-30 Intel show (1.0.2.5) put START-SHADOW at 375 checks with 0 disagreements, so the start decisions are READY in `docs/gates/ledger.json`. This is the same step A2 took for the
+transport: Rust's answer is *selected* only when it equals the retained Python answer, Python wins every disagreement, and a flag keeps it off until the operator turns it on.
+* **Setting** `start_drive` (default `False`; deliberately NOT in `_RUST_EVIDENCE_FLAGS`, so the one-time evidence migration never switches it on). It needs `start_shadow` (the Rust answers come from
+  the shadow's calls); `_start_shadow_for` copies the flag onto the shadow on every lookup, so a settings change applies to the next start without a restart.
+* **Hook** (`start_shadow.StartShadow._drive`, `select_start_decision`): every decision the shadow already compares (pick, route, engine, transport arguments, zip arguments, confirmed payload,
+  performance record, published artist/title, rotation flags, and the whole-start plan) logs
+  `[START-DRIVE] decision=<name> python=.. rust=.. selected=.. owner=rust|python-fallback|python disagreement=0|1`. No extra Rust call is made and nothing is read from disk, so the cost is one log
+  line per compared decision (about a dozen per song start). `play_next_file` itself is untouched; with the flag off nothing is logged, and with it on the values the app uses are Python's whether
+  Rust agrees or not. Until the Python oracle is retired, `selected` is therefore a record of who *would* own the decision, not a change of behaviour (same as `transport_drive_media_end`).
+  Agreement is `==` on the compared values, so Rust may spell `95` as `95.0`; the log keeps both spellings.
+* **Tests** `test_start_drive.py`: the selection rule; 120 random queues through the REAL `play_next_file` three times (drive off, on, on with every Rust answer corrupted) must leave the queue,
+  the transport arguments and the published artist and title identical, the corrupted run must log disagreements that select Python's answer, and the off run logs nothing; canned-library checks
+  for the decisions the replay cannot reach (engine, rotation, confirmed); the default and the migration.
+* **Reports** `tools/shadow_report.py` has an optional `START-DRIVE` row (NOT ENABLED while the flag is off, so it does not hold back `--require-all`; DISAGREED on any `disagreement=1`);
+  `tools/gate_ledger.py` records `START-DRIVE:<decision>` per decision (route, pick, engine, transport_args, zip_args, confirmed, performance:*, display, rotation, plan).
+* **Mutation** `tools/mutate_start.py` mutants 267-301 (selection, logging, argument order, every call site, the flag wiring, the report row and the ledger grouping).
+* **Not done / next:** nothing was built or installed. After the operator turns the flag on for a rehearsal or show, run `python3 tools/shadow_report.py` and `python3 tools/gate_ledger.py add <log> --all`;
+  the START-DRIVE row needs one clean show before the flag may default on. Actually *consuming* Rust's value (instead of Python's) at the call sites is a later step and needs its own gate.

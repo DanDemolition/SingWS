@@ -22,6 +22,8 @@ Shadows and the log lines they write:
   WIRE-SHADOW       decision endpoint=<file> kind=get|form|json agree=1   (what requests sent vs what the Rust request builder would send)
   TRANSPORT-SHADOW  session N summary ... total_mismatches=M    (KaraFun and native song lifecycle)
   TRANSPORT-DRIVE   decision=karafun_end|media_end|watchdog ... disagreement=0|1   (Rust-vs-Python drive decisions)
+  START-DRIVE       decision=<pick|route|engine|transport_*|zip_args|confirmed|display|rotation|plan|performance_*> ... disagreement=0|1   (setting start_drive, default
+                    off; needs start_shadow: Rust-vs-Python start decisions, Python wins every disagreement; an optional row, NOT ENABLED while the flag is off)
   SHELL-COMMANDS    [SHELL-CMD] ready mode=... then one line per command from the Rust shell (setting shell_commands: off | dry_run | apply).
                     CLEAN = at least one command and no defect; ERROR = an app-side failure, clock skew, a malformed command, or a command APPLIED
                     during a dry run. Refusals that are normal on a live show (stale_view, unknown_singer/entry, expired) are counted, not errors.
@@ -66,6 +68,7 @@ SETTING_KEYS = {
     "SETTINGS-SHADOW": ("settings_shadow", False), "QUEUE-SHADOW": ("queue_shadow", False), "PLAN-SHADOW": ("plan_shadow", False), "START-SHADOW": ("start_shadow", False),
     "STORE-SHADOW": ("store_shadow", False), "WIRE-SHADOW": ("wire_shadow", False),
     "TRANSPORT-SHADOW": ("transport_shadow", True), "TRANSPORT-DRIVE": ("transport_drive", True),
+    "START-DRIVE": ("start_drive", False),
     "SHELL-COMMANDS": ("shell_commands", False),  # a string setting: "dry_run" or "apply" means on
 }
 DRIVE_REQUIRED = {"karafun_end", "media_end"}
@@ -240,6 +243,27 @@ def _analyse(rows):
         r.verdict = "NOT EXERCISED"  # the drive flags live in settings; no decision line means no song reached those decisions
     reports.append(r)
 
+    # start drive (setting start_drive): same contract, one line per compared start decision
+    r = Report("START-DRIVE")
+    counts, bad = Counter(), Counter()
+    for t, msg in by_tag.get("START-DRIVE", []):
+        kv = _kv(msg)
+        if "fallback=python" in msg or "error=" in msg:
+            r.errors.append(f"{t} {msg[:160]}")
+            continue
+        name = kv.get("decision")
+        if not name:
+            continue
+        counts[name] += 1
+        if kv.get("disagreement") == "1":
+            bad[name] += 1
+            r.disagreements.append(f"{t} {msg[:160]}")
+    r.enabled = bool(counts)
+    r.seen = set(counts)
+    r.detail = ", ".join(f"{k}: {counts[k]}" + (f" ({bad[k]} disagreement(s))" if bad[k] else "") for k in sorted(counts))
+    r.verdict = _verdict(r, set())
+    reports.append(r)
+
     # commands from the Rust shell (setting shell_commands)
     r = Report("SHELL-COMMANDS")
     modes, outcomes, actions = Counter(), Counter(), Counter()
@@ -305,7 +329,7 @@ def render(reports):
 
 
 # rows that only count when their switch is on: remote shell commands are a feature, not one of the Rust shadows every show must exercise
-OPTIONAL_ROWS = {"SHELL-COMMANDS"}
+OPTIONAL_ROWS = {"SHELL-COMMANDS", "START-DRIVE"}
 
 
 def counted(reports):

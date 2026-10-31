@@ -31,6 +31,18 @@ ROUTES = ("external_karafun", "reject_missing_file", "zip_prepare", "cdg_mp3_dua
           "reject_missing_cdg_audio_pair", "reject_unsupported_format")
 
 
+def select_start_decision(python_value, rust_value, enabled, agree=None):
+    """Choose a start decision while keeping Python as the retained oracle (the same contract as ``transport_shadow.select_drive_decision``).
+    Returns (selected, disagreed, owner). Rust's answer is selected only when it equals Python's (`agree`, or plain equality when not given); Python wins every disagreement,
+    and wins when Rust gave no answer or the drive is off."""
+    if not enabled or rust_value is None:
+        return python_value, False, "python"
+    same = (python_value == rust_value) if agree is None else bool(agree)
+    if not same:
+        return python_value, True, "python-fallback"
+    return rust_value, False, "rust"
+
+
 def info_request(song_info):
     """`song_info` as the Rust input describes it: text, a sequence (only the first three items matter), or anything else."""
     if isinstance(song_info, str):
@@ -60,6 +72,8 @@ class StartShadow:
         self._seen = set()
         self._plan = None            # the armed whole-start plan context of the song being started (see plan_arm)
         self.plan_off = False        # set after one plan call was too slow
+        self.drive = False           # setting start_drive, refreshed by the app on every lookup (see _start_shadow_for); default off
+        self.drive_disagreements = 0
         self._perf_pending = False   # the shadow's own model of "a song is stored, waiting for its sung / not-sung decision"
 
     def _say(self, text):
@@ -67,6 +81,24 @@ class StartShadow:
             self._log(f"[START-SHADOW] {text}")
         except Exception:
             pass
+
+    def _drive(self, name, agree, python_value, rust_value):
+        """Stage A5 start drive (setting `start_drive`, default off): one `[START-DRIVE]` line per compared decision, naming the retained Python answer, Rust's, the one selected and who owns it.
+        Rust's answer is selected only when it agrees with Python's, so the selected value is always the Python value and behaviour cannot change. No extra Rust call is made.
+        Returns the selected value, or None when the drive is off. Never raises."""
+        try:
+            if not self.drive:
+                return None
+            selected, disagreed, owner = select_start_decision(python_value, rust_value, True, agree)
+            if disagreed:
+                self.drive_disagreements += 1
+
+            def show(v):
+                return json.dumps(v, default=str, sort_keys=True)[:400]
+            self._log(f"[START-DRIVE] decision={name} python={show(python_value)} rust={show(rust_value)} selected={show(selected)} owner={owner} disagreement={int(disagreed)}")
+            return selected
+        except Exception:
+            return None
 
     def _call(self, request):
         if not self.available:
@@ -98,6 +130,7 @@ class StartShadow:
             want = {"voice": bool(observed.get("voice")), "reason": str(observed.get("reason") or ""), "set_shadow_audio": observed.get("set_shadow_audio")}
             self.checks += 1
             agree = got == want
+            self._drive("engine", agree, want, got)
             kind = f"engine voice={int(want['voice'])} reason={want['reason'] or '-'}"
             if not agree:
                 self.mismatches += 1
@@ -130,6 +163,7 @@ class StartShadow:
             want = {"artist": str(artist), "title": str(title)}
             self.checks += 1
             agree = got == want
+            self._drive("display", agree, want, got)
             if not agree:
                 self.mismatches += 1
                 self._say(f"MISMATCH display app={want!r} rust={got!r} entry=({str(entry_artist)[:60]!r}, {str(entry_title)[:60]!r}) fallback={str(fallback)[:80]!r}")
@@ -153,6 +187,7 @@ class StartShadow:
         return json.loads(buf.raw[:n].decode())
 
     def _verdict(self, kind, agree, app, rust, facts):
+        self._drive(kind, agree, app, rust)
         self.checks += 1
         if not agree:
             self.mismatches += 1
@@ -341,6 +376,7 @@ class StartShadow:
                 have["transport"] = have["display"] = None
                 want["transport"] = want["display"] = None
             agree = have == want
+            self._drive("plan", agree, want, have)
             self.checks += 1
             if not agree:
                 self.mismatches += 1
@@ -398,6 +434,7 @@ class StartShadow:
             want = [dict(row, order=index.get(id(s), -1)) for row, s in zip(rotation_after(queue_after), queue_after)]
             self.checks += 1
             agree = got == want
+            self._drive("rotation", agree, want, got)
             if not agree:
                 self.mismatches += 1
                 self._say(f"MISMATCH rotation app={json.dumps(want)[:240]} rust={json.dumps(got)[:240]} before={json.dumps({k: v for k, v in facts.items() if k != '_objects'})[:240]}")
@@ -428,6 +465,7 @@ class StartShadow:
             want = {"singer": singer, "song": song, "queue": list(queue) if queue is not None else got["queue"], "lock_cleared": bool(lock_cleared)}
             self.checks += 1
             agree = got == want
+            self._drive("pick_none" if singer is None else "pick", agree, want, got)
             kind = "pick_none" if singer is None else "pick"
             if not agree:
                 self.mismatches += 1
@@ -456,6 +494,7 @@ class StartShadow:
                 return None
             self.checks += 1
             agree = got == observed
+            self._drive("route", agree, observed, got)
             if not agree:
                 self.mismatches += 1
                 shown = repr(song_info)

@@ -40,6 +40,8 @@ KNOWN = (
     + [f"TRANSPORT-DRIVE:{k}" for k in ("karafun_end", "media_end", "watchdog")]
     + [f"START-SHADOW:{k}" for k in ("route:mp4", "route:mp3", "route:cdg_mp3_dual", "route:mp3g_zip", "route:external_karafun", "engine", "pick", "display", "plan", "rotation",
                                                  "transport_args", "zip_args", "confirmed", "performance:confirmed", "performance:media_end", "performance:stop")]
+    + [f"START-DRIVE:{k}" for k in ("route", "engine", "pick", "display", "plan", "rotation", "transport_args", "zip_args", "confirmed", "performance:confirmed",
+                                    "performance:media_end", "performance:stop")]
     + ["SHELL-COMMANDS:dry_run_command"]
 )
 
@@ -80,6 +82,16 @@ def decisions_proven(reports):
                 bad.add(m.group(1) if m else "*")
             for name in r.seen:
                 out[f"TRANSPORT-DRIVE:{name}"] = not (name in bad or "*" in bad)
+            continue
+        if r.name == "START-DRIVE":   # judged per decision, like the transport drive: a disagreement on the display does not undo the pick
+            def group(name):
+                return name if name == "route" else _group_start(name)
+            bad = set()
+            for line in list(r.disagreements) + list(r.errors):
+                m = re.search(r"decision=([A-Za-z0-9_]+)", line)
+                bad.add(group(m.group(1)) if m else "*")
+            for name in r.seen:
+                out[f"START-DRIVE:{group(name)}"] = out.get(f"START-DRIVE:{group(name)}", True) and not (group(name) in bad or "*" in bad)
             continue
         if r.name == "TRANSPORT-SHADOW":
             if r.seen:

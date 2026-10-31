@@ -109,3 +109,4 @@ there is no live hook, so this step has no row in the shadow report or the gate 
 ## Next steps (not built)
 1. A live hook that sends the plan's facts at the top of `play_next_file` and compares the plan with the observed start (needs a clean show of steps 1-8 first, so the ledger shows which parts are trusted).
 2. Only after steps 1-9 are CLEAN in real shows: Rust DRIVES the start plan, with Python's decision compared on every call and winning every disagreement, behind a flag.
+   **Built 2026-10-31 as the setting `start_drive` (default off): see RUST_APP_LOGIC_PLAN.md "Stage A5: the start drive".** It logs `[START-DRIVE]` for every compared decision and selects Rust's answer only when it equals Python's.

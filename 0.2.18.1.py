@@ -1933,6 +1933,7 @@ def _start_shadow_for(settings, flag="start_shadow"):
             import start_shadow
             _START_SHADOW = start_shadow.StartShadow(_diag)
             _diag(f"[START-SHADOW] enabled available={int(_START_SHADOW.available)}")
+        _START_SHADOW.drive = bool((settings or {}).get("start_drive", False))
         return _START_SHADOW if _START_SHADOW.available else None
     except Exception:
         return None
@@ -4240,6 +4241,10 @@ DEFAULTS = {
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
+    # Stage A5 start drive: with start_shadow on, every compared start decision (pick, route, engine, transport, zip args, confirmed, display, rotation, plan) logs a
+    # [START-DRIVE] line with the retained Python answer, Rust's answer and the one selected. Rust's answer is selected only when it equals Python's; Python wins every
+    # disagreement, so playback is identical either way. DEFAULT OFF: not in the evidence migration, the operator turns it on. Needs start_shadow.
+    "start_drive": False,
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default on.
     "waitlist_snapshot": True,
