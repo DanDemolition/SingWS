@@ -95,6 +95,27 @@ class PrivateTests(unittest.TestCase):
         self.assertEqual(len(xy["messages"]), 5)
 
 
+class CountTests(unittest.TestCase):
+    def test_attention_is_counted_per_tab_and_adds_up(self):
+        room = [gm(1, status="held"), gm(2, reports=2), gm(3), dict(gm(4), channel="dm", to_key="bo", reports=1), dict(gm(5), channel="dm", to_key="bo", status="held")]
+        a = app(room=room)
+        a._room_attention_ids = {1, 2, 4, 5}
+        out = a._shell_chat_summary()
+        self.assertEqual(out["attention_by"], {"group": 2, "dm": 2})
+        self.assertEqual(out["attention"], 4)
+
+    def test_threads_beyond_the_cap_are_counted_and_host_unread_covers_all_of_them(self):
+        room = [dict(gm(i), channel="dm", from_key=f"a{i}", to_key=f"b{i}") for i in range(1, 15)]
+        host = [{"id": i, "singer": f"S{i}", "singer_key": f"s{i}", "message": "x", "direction": "in", "read": False, "created_at": i} for i in range(1, 14)]
+        out = app(room=room, host=host)._shell_chat_summary()
+        self.assertEqual((len(out["dm"]), out["more"]["dm"]), (10, 4))
+        self.assertEqual((len(out["host"]), out["more"]["host"]), (10, 3))
+        self.assertEqual(out["unread"]["host"], 13, "unread counts every conversation, not only the 10 sent")
+
+    def test_nothing_is_omitted_when_everything_fits(self):
+        self.assertEqual(app()._shell_chat_summary()["more"], {"dm": 0, "host": 0})
+
+
 class HostChatTests(unittest.TestCase):
     def test_text_and_pictures_merge_by_time_and_unread_counts(self):
         host = [{"id": 1, "singer": "Ann", "singer_key": "ann", "message": "hello", "direction": "in", "read": False, "created_at": 100},

@@ -78,7 +78,7 @@ ApplicationWindow {
                 StatusPage { }
                 DiagnosticsPage { }
                 NowPlayingPage { }
-                ChatPage { control: control; demo: win.arg("--chat-demo") }
+                ChatPage { control: control; demo: win.arg("--chat-demo"); demoTab: win.arg("--chat-demo-tab") }
             }
         }
     }

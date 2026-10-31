@@ -14,7 +14,8 @@ Item {
     property var cview: control ? JSON.parse(control.viewJson) : ({enabled: false, chat: null})
     Connections { target: page.control; function onViewJsonChanged() { page.cview = JSON.parse(page.control.viewJson) } }
     property bool live: cview.enabled === true
-    property string tab: "group"
+    property string demoTab: ""   // --chat-demo-tab: which tab a demo opens on (screenshots)
+    property string tab: demo !== "" && demoTab !== "" ? demoTab : "group"
     property string hostKey: ""
     property string sureFor: ""   // "group" while the Everyone send waits for its second tap
     property var view: JSON.parse(panel.render((demo !== "" ? panel.readDemo(demo) : JSON.stringify(cview.chat === undefined ? null : cview.chat)), tab, -new Date().getTimezoneOffset()))
@@ -77,12 +78,12 @@ Item {
             Repeater {
                 model: page.view.tabs
                 delegate: Button {
-                    text: modelData.label
+                    text: modelData.label + (modelData.attention > 0 ? "  ·  " + modelData.attention + " to review" : "")
                     checkable: true
                     checked: page.tab === modelData.key
                     implicitHeight: 32
                     onClicked: { page.tab = modelData.key; page.sureFor = "" }
-                    Accessible.name: modelData.label
+                    Accessible.name: modelData.label + (modelData.attention > 0 ? ", " + modelData.attention + " to review" : "")
                 }
             }
         }
@@ -128,9 +129,10 @@ Item {
         // speaking: Everyone, or the Host chat conversation picked above. Private conversations are read-only here.
         Label {
             Layout.fillWidth: true
-            text: page.tab === "dm" ? "Private conversations are read-only here; speak in them from the app."
+            text: (page.tab === "dm" ? "Private conversations are read-only here; speak in them from the app."
                   : (page.tab === "host" ? (page.hostKey === "" ? "Click a singer above to talk to them." : "Talking to this singer only.")
-                                         : (page.view.group_enabled ? "Everyone in the room will see this." : "Everyone chat is off in the web dashboard."))
+                                         : (page.view.group_enabled ? "Everyone in the room will see this." : "Everyone chat is off in the web dashboard.")))
+                  + (page.tab !== "group" && page.view.more[page.tab] !== "" ? "  " + page.view.more[page.tab] + "." : "")
             color: "#9a97c0"; font.pixelSize: 12; wrapMode: Text.Wrap
         }
         RowLayout {

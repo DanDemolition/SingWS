@@ -103,11 +103,12 @@ pub fn tab_label(key: &str, unread: i64, current: &str) -> String {
 /// The whole Chat tab for `chat` (the summary). `current` is the open tab ("group" | "dm" | "host").
 pub fn view(chat: &Value, current: &str, utc_offset_min: i64) -> Value {
     let unread = chat.get("unread").cloned().unwrap_or(Value::Null);
+    let by = chat.get("attention_by").cloned().unwrap_or(Value::Null);
     let tabs: Vec<Value> = ["group", "dm", "host"]
         .iter()
         .map(|k| {
             let n = i(&unread, k);
-            json!({"key": k, "unread": n, "label": tab_label(k, n, current)})
+            json!({"key": k, "unread": n, "attention": i(&by, k), "label": tab_label(k, n, current)})
         })
         .collect();
     let group_on = chat.get("group_enabled").and_then(Value::as_bool).unwrap_or(false);
@@ -129,7 +130,13 @@ pub fn view(chat: &Value, current: &str, utc_offset_min: i64) -> Value {
             json!({"key": s(t, "key"), "title": name, "unread": i(t, "unread"), "rows": arr(t, "messages").iter().map(|m| row(m, None, true, utc_offset_min)).collect::<Vec<_>>()})
         })
         .collect();
-    let attention = i(chat, "attention");
+    // the open tab's own count when the app sent the per-tab split (Host chat has none), else the total
+    let attention = if by.is_object() { i(&by, current) } else { i(chat, "attention") };
+    let more = chat.get("more").cloned().unwrap_or(Value::Null);
+    let more_note = |k: &str| -> String {
+        let n = i(&more, k);
+        if n > 0 { format!("{n} more conversation{} in the app", if n == 1 { "" } else { "s" }) } else { String::new() }
+    };
     let reachable = chat.get("reachable").and_then(Value::as_bool);
     let status = if reachable == Some(false) {
         "Room chat: could not reach the server".to_string()
@@ -143,6 +150,7 @@ pub fn view(chat: &Value, current: &str, utc_offset_min: i64) -> Value {
     json!({
         "tabs": tabs, "status": status, "group_enabled": group_on, "dm_enabled": dm_on,
         "group": group, "dm": dm, "host": host,
+        "more": {"dm": more_note("dm"), "host": more_note("host")},
     })
 }
 
@@ -219,5 +227,21 @@ mod tests {
         assert_eq!(view(&json!({"reachable": false}), "group", 0)["status"], "Room chat: could not reach the server");
         assert!(view(&json!({}), "group", 0)["status"].as_str().unwrap().starts_with("Room chat is off"));
         assert_eq!(view(&json!("garbage"), "group", 0)["group"], json!([]));
+    }
+
+    #[test]
+    fn attention_is_per_tab_and_omitted_conversations_are_named() {
+        let chat = json!({"group_enabled": true, "attention": 3, "attention_by": {"group": 1, "dm": 2},
+            "unread": {"group": 0, "dm": 0, "host": 0}, "more": {"dm": 1, "host": 4}});
+        let g = view(&chat, "group", 0);
+        assert_eq!(g["status"], "1 message needs attention in the app");
+        assert_eq!(g["tabs"][0]["attention"], 1);
+        assert_eq!(g["tabs"][1]["attention"], 2);
+        assert_eq!(g["tabs"][2]["attention"], 0);
+        assert_eq!(view(&chat, "dm", 0)["status"], "2 messages need attention in the app");
+        assert_eq!(view(&chat, "host", 0)["status"], "", "Host chat has nothing to moderate");
+        assert_eq!(g["more"]["dm"], "1 more conversation in the app");
+        assert_eq!(g["more"]["host"], "4 more conversations in the app");
+        assert_eq!(view(&json!({"group_enabled": true}), "dm", 0)["more"]["dm"], "");
     }
 }

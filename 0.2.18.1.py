@@ -51156,7 +51156,7 @@ class KaraokeApp(QWidget):
         """Room chat (Everyone / Private threads / Host chat) for the web remote and the shell, from what the chat page already holds in memory (`_room_messages`,
         `_chat_messages`); no new storage and no network call. Newest rows last, bounded so the relay message stays small. Best effort: never raises."""
         out = {"reachable": None, "group_enabled": False, "dm_enabled": False, "unread": {"group": 0, "dm": 0, "host": 0}, "attention": 0,
-               "group": [], "dm": [], "host": []}
+               "attention_by": {"group": 0, "dm": 0}, "more": {"dm": 0, "host": 0}, "group": [], "dm": [], "host": []}
         try:
             settings = dict(getattr(self, "_room_settings", {}) or {})
             out["reachable"] = getattr(self, "_room_reachable", None)
@@ -51167,6 +51167,9 @@ class KaraokeApp(QWidget):
             out["unread"]["dm"] = int(new.get("dm", 0) or 0)
             out["attention"] = len(getattr(self, "_room_attention_ids", ()) or ())
             rooms = getattr(self, "_room_messages", {}) or {}
+            for mid in getattr(self, "_room_attention_ids", ()) or ():
+                ch = "dm" if (rooms.get(mid) or {}).get("channel") == "dm" else "group"
+                out["attention_by"][ch] += 1   # per tab; the two add up to "attention"
             ordered = [rooms[k] for k in sorted(rooms) if isinstance(rooms[k], dict)]
             out["group"] = [self._shell_chat_message(m) for m in ordered if m.get("channel") not in ("dm", "host")][-self._SHELL_CHAT_GROUP_ROWS:]
             threads = {}
@@ -51184,6 +51187,7 @@ class KaraokeApp(QWidget):
                            "messages": [self._shell_chat_message(x) for x in msgs][-self._SHELL_CHAT_THREAD_ROWS:]})
             dm.sort(key=lambda t: t["at"], reverse=True)
             out["dm"] = dm[:self._SHELL_CHAT_THREADS]
+            out["more"]["dm"] = max(0, len(dm) - self._SHELL_CHAT_THREADS)
             grouped = self._chat_conversations()
             media = {}
             for m in self._host_chat_media_rows():
@@ -51199,6 +51203,7 @@ class KaraokeApp(QWidget):
                              "messages": [self._shell_chat_message(e[3], host_text=e[4]) for e in entries][-self._SHELL_CHAT_THREAD_ROWS:]})
             host.sort(key=lambda t: t["at"], reverse=True)
             out["host"] = host[:self._SHELL_CHAT_THREADS]
+            out["more"]["host"] = max(0, len(host) - self._SHELL_CHAT_THREADS)
             out["unread"]["host"] = sum(t["unread"] for t in host)
         except Exception:
             pass
