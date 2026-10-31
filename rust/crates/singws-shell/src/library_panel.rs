@@ -18,6 +18,11 @@ pub mod qobject {
 
         #[qinvokable]
         fn search(self: Pin<&mut LibraryPanel>, query: &QString);
+
+        /// test hook (`--dump-library FILE`): write the rows the page is showing
+        #[qinvokable]
+        #[cxx_name = "dumpRows"]
+        fn dump_rows(self: &LibraryPanel, path: &QString);
     }
 }
 
@@ -41,6 +46,10 @@ impl Default for LibraryPanelRust {
 }
 
 impl qobject::LibraryPanel {
+    fn dump_rows(&self, path: &QString) {
+        let _ = std::fs::write(path.to_string(), self.results_json().to_string());
+    }
+
     fn search(mut self: Pin<&mut Self>, query: &QString) {
         let q = query.to_string();
         let db = self.db_path().to_string();

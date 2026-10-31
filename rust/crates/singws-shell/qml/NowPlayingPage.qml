@@ -13,6 +13,13 @@ Item {
     readonly property bool live: hero !== null && hero.kicker === "NOW SINGING"
 
     Component.onCompleted: panel.refresh()
+    function arg(name) {
+        var a = Qt.application.arguments
+        for (var i = 0; i < a.length - 1; i++) if (a[i] === name) return a[i + 1]
+        return ""
+    }
+    // test hook: --dump-nowplaying FILE writes the view the card is drawn from
+    Timer { interval: 2500; running: arg("--dump-nowplaying") !== ""; onTriggered: panel.dumpView(arg("--dump-nowplaying")) }
     Timer { interval: 3000; running: page.visible; repeat: true; onTriggered: panel.refresh() }
 
     ColumnLayout {
@@ -22,7 +29,7 @@ Item {
         Label { text: "NOW PLAYING (read-only: the Show tab's hero card, as of the app's last snapshot)"; color: "#e8e6f5"; font.pixelSize: 15; font.weight: Font.DemiBold }
         Label { Layout.fillWidth: true; text: panel.status; color: page.view.stale ? "#f5c84b" : "#9a97c0"; font.pixelSize: 12; wrapMode: Text.Wrap; Accessible.name: "Status snapshot: " + panel.status }
         Label {
-            visible: page.hero === null && panel.status !== ""
+            visible: page.hero === null && page.view.chips !== undefined
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             color: "#c9c6e8"

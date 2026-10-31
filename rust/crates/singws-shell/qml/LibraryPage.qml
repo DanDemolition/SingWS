@@ -38,6 +38,8 @@ Item {
     }
 
     Component.onCompleted: { if (arg("--query") !== "") field.text = arg("--query") }
+    // test hook: --dump-library FILE writes the rows on screen once the search has answered
+    Timer { interval: 2500; running: arg("--dump-library") !== ""; onTriggered: panel.dumpRows(arg("--dump-library")) }
     Timer { id: debounce; interval: 120; onTriggered: panel.search(field.text) }
 
     ColumnLayout {

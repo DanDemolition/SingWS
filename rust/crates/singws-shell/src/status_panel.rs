@@ -18,6 +18,11 @@ pub mod qobject {
 
         #[qinvokable]
         fn refresh(self: Pin<&mut StatusPanel>);
+
+        /// test hook (`--dump-status FILE`): write the view the page is showing
+        #[qinvokable]
+        #[cxx_name = "dumpView"]
+        fn dump_view(self: &StatusPanel, path: &QString);
     }
 }
 
@@ -82,6 +87,10 @@ fn unix_now() -> i64 {
 }
 
 impl qobject::StatusPanel {
+    fn dump_view(&self, path: &QString) {
+        let _ = std::fs::write(path.to_string(), self.view_json().to_string());
+    }
+
     fn refresh(mut self: Pin<&mut Self>) {
         let dir = self.rust().dir.clone();
         let (view, status) = load(&dir, unix_now());
