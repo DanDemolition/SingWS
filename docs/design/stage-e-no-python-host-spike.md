@@ -47,6 +47,13 @@ The shell calls `singws_mac::{ax_is_trusted, frontmost_app_name, run_applescript
   survives a rebuild is the open half (designated requirement is stable, see above).
 - `frontmost_app_name` was `loginwindow` in both modes (the Mac was at the login window/locked), so it proves the call works, not that the value is meaningful here.
 
+## Real Accessibility grant (2026-10-31, arm64, operator granted it)
+
+On macOS 27 the pane is not called Accessibility: the operator added `~/SingWS-spike/SingWS Spike arm64.app` under System Settings > Privacy & Security > **Device Control** (the app was dragged in from Finder).
+- Before the grant: `ax_is_trusted: false`. After: **`true`**, `frontmost_app_name` = "SingWS Spike", in-process AppleScript `2`; the video/BGM checks unchanged.
+- **Survived a re-sign:** CFBundleVersion changed, bundle re-signed in place with the same local identity (new cdhash, same path), verified strict; re-run still `ax_is_trusted: true`. So a grant to a locally signed bundle persists across rebuilds *of this kind*. Not tested: a changed executable (a true Rust rebuild; the designated requirement does not depend on it, so expected to hold), a different path, x86_64 (separate grant needed per bundle), or a macOS update.
+- Consequence: no re-grant ritual per build as long as the identity ("SingWS Local Code Signing") and bundle id stay the same; a new Mac needs the identity imported or a fresh grant.
+
 ## Findings that matter for stages 6/7
 
 1. **`winId` must be a real, shown window.** First attempts handed the bridge a `QNSView` that was hidden (`window_visible=false`) and the bridge reported
@@ -65,7 +72,7 @@ The shell calls `singws_mac::{ax_is_trusted, frontmost_app_name, run_applescript
 
 - Whether the picture *looks* right on screen (no screenshot: `screencapture` could raise a Screen Recording prompt; presented-frame counts only).
 - Real sound-card output (headless engine only); the render-thread mode; CDG; two Qt versions together (the shell's 6.12 vs PyQt's 6.9).
-- Real Intel hardware; a real TCC grant surviving a rebuild; A System Events (AX-dependent) script and ScreenCaptureKit from the Rust host (deliberately not run: they can prompt).
+- Real Intel hardware; a changed-executable rebuild and a Screen Recording / Automation grant; A System Events (AX-dependent) script and ScreenCaptureKit from the Rust host (deliberately not run: they can prompt).
 
 ## Re-run
 
