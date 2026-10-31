@@ -2207,6 +2207,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-mac"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "serde_json",
+]
+
+[[package]]
 name = "singws-plan"
 version = "0.1.0"
 dependencies = [

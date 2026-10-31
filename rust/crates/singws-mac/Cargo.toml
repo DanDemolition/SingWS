@@ -1,0 +1,21 @@
+[package]
+name = "singws-mac"
+version = "0.1.0"
+edition = "2021"
+description = "Stage E step 1: the macOS platform shim (keep-awake, frontmost app, Accessibility trust, AppleScript runner, one-shot location) behind a small C ABI and a probe CLI. Not linked into the app; the app may run the CLI as a log-only shadow (setting platform_shadow)."
+publish = false
+
+[lib]
+name = "singws_mac"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-mac-probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+
+[build-dependencies]
+# Build-time only: compiles the thin Objective-C shim (macOS only).
+cc = "1"
