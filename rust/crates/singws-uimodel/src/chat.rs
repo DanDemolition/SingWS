@@ -72,6 +72,18 @@ fn attachment_label(m: &Value) -> &'static str {
     }
 }
 
+/// The opaque thumbnail reference of a picture/GIF row (`photo:<digits>` or `gif:<letters, digits, - _ up to 64>`), "" for anything else or a removed row.
+pub fn media_ref(m: &Value) -> String {
+    let r = s(m, "media_ref");
+    if s(m, "status") == "removed" { return String::new(); }
+    let ok = match r.split_once(':') {
+        Some(("photo", id)) => !id.is_empty() && id.len() <= 12 && id.chars().all(|c| c.is_ascii_digit()),
+        Some(("gif", id)) => !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        _ => false,
+    };
+    if ok { r } else { String::new() }
+}
+
 /// One message row. `thread`: see [`tags`]; `host_chat` rows are the Host chat transcript (no tags, stamp without seconds, "(removed)" in place of the text).
 pub fn row(m: &Value, thread: Option<(&str, &str)>, host_chat: bool, utc_offset_min: i64) -> Value {
     let removed = s(m, "status") == "removed";
@@ -85,6 +97,7 @@ pub fn row(m: &Value, thread: Option<(&str, &str)>, host_chat: bool, utc_offset_
         "body": body,
         // the app shows "(removed)" alone for a removed Host chat picture, but still draws the attachment in the room views
         "attachment": if removed && host_chat { "" } else { attachment_label(m) },
+        "media_ref": media_ref(m),
         "status": s(m, "status"),
     })
 }
@@ -103,11 +116,12 @@ pub fn tab_label(key: &str, unread: i64, current: &str) -> String {
 /// The whole Chat tab for `chat` (the summary). `current` is the open tab ("group" | "dm" | "host").
 pub fn view(chat: &Value, current: &str, utc_offset_min: i64) -> Value {
     let unread = chat.get("unread").cloned().unwrap_or(Value::Null);
+    let by = chat.get("attention_by").cloned().unwrap_or(Value::Null);
     let tabs: Vec<Value> = ["group", "dm", "host"]
         .iter()
         .map(|k| {
             let n = i(&unread, k);
-            json!({"key": k, "unread": n, "label": tab_label(k, n, current)})
+            json!({"key": k, "unread": n, "attention": i(&by, k), "label": tab_label(k, n, current)})
         })
         .collect();
     let group_on = chat.get("group_enabled").and_then(Value::as_bool).unwrap_or(false);
@@ -129,7 +143,13 @@ pub fn view(chat: &Value, current: &str, utc_offset_min: i64) -> Value {
             json!({"key": s(t, "key"), "title": name, "unread": i(t, "unread"), "rows": arr(t, "messages").iter().map(|m| row(m, None, true, utc_offset_min)).collect::<Vec<_>>()})
         })
         .collect();
-    let attention = i(chat, "attention");
+    // the open tab's own count when the app sent the per-tab split (Host chat has none), else the total
+    let attention = if by.is_object() { i(&by, current) } else { i(chat, "attention") };
+    let more = chat.get("more").cloned().unwrap_or(Value::Null);
+    let more_note = |k: &str| -> String {
+        let n = i(&more, k);
+        if n > 0 { format!("{n} more conversation{} in the app", if n == 1 { "" } else { "s" }) } else { String::new() }
+    };
     let reachable = chat.get("reachable").and_then(Value::as_bool);
     let status = if reachable == Some(false) {
         "Room chat: could not reach the server".to_string()
@@ -143,6 +163,7 @@ pub fn view(chat: &Value, current: &str, utc_offset_min: i64) -> Value {
     json!({
         "tabs": tabs, "status": status, "group_enabled": group_on, "dm_enabled": dm_on,
         "group": group, "dm": dm, "host": host,
+        "more": {"dm": more_note("dm"), "host": more_note("host")},
     })
 }
 
@@ -219,5 +240,35 @@ mod tests {
         assert_eq!(view(&json!({"reachable": false}), "group", 0)["status"], "Room chat: could not reach the server");
         assert!(view(&json!({}), "group", 0)["status"].as_str().unwrap().starts_with("Room chat is off"));
         assert_eq!(view(&json!("garbage"), "group", 0)["group"], json!([]));
+    }
+
+    #[test]
+    fn only_well_formed_media_refs_of_live_rows_pass() {
+        let m = |r: &str, st: &str| json!({"media_ref": r, "status": st});
+        for good in ["photo:77", "gif:g-1_X", &format!("gif:{}", "a".repeat(64))] {
+            assert_eq!(media_ref(&m(good, "")), good);
+        }
+        assert_eq!(media_ref(&m("photo:5", "held")), "photo:5");
+        for bad in ["photo:", "photo:x1", "photo:1234567890123", "gif:", "gif:a/b", "gif:../x", "gif:a b", &format!("gif:{}", "a".repeat(65)), "file:1", "photo", ""] {
+            assert_eq!(media_ref(&m(bad, "")), "", "{bad}");
+        }
+        assert_eq!(media_ref(&m("photo:5", "removed")), "");
+        assert_eq!(row(&m("photo:5", ""), None, false, 0)["media_ref"], "photo:5");
+    }
+
+    #[test]
+    fn attention_is_per_tab_and_omitted_conversations_are_named() {
+        let chat = json!({"group_enabled": true, "attention": 3, "attention_by": {"group": 1, "dm": 2},
+            "unread": {"group": 0, "dm": 0, "host": 0}, "more": {"dm": 1, "host": 4}});
+        let g = view(&chat, "group", 0);
+        assert_eq!(g["status"], "1 message needs attention in the app");
+        assert_eq!(g["tabs"][0]["attention"], 1);
+        assert_eq!(g["tabs"][1]["attention"], 2);
+        assert_eq!(g["tabs"][2]["attention"], 0);
+        assert_eq!(view(&chat, "dm", 0)["status"], "2 messages need attention in the app");
+        assert_eq!(view(&chat, "host", 0)["status"], "", "Host chat has nothing to moderate");
+        assert_eq!(g["more"]["dm"], "1 more conversation in the app");
+        assert_eq!(g["more"]["host"], "4 more conversations in the app");
+        assert_eq!(view(&json!({"group_enabled": true}), "dm", 0)["more"]["dm"], "");
     }
 }

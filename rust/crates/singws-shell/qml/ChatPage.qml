@@ -14,10 +14,29 @@ Item {
     property var cview: control ? JSON.parse(control.viewJson) : ({enabled: false, chat: null})
     Connections { target: page.control; function onViewJsonChanged() { page.cview = JSON.parse(page.control.viewJson) } }
     property bool live: cview.enabled === true
-    property string tab: "group"
+    property string demoTab: ""   // --chat-demo-tab: which tab a demo opens on (screenshots)
+    property string tab: demo !== "" && demoTab !== "" ? demoTab : "group"
     property string hostKey: ""
     property string sureFor: ""   // "group" while the Everyone send waits for its second tap
     property var view: JSON.parse(panel.render((demo !== "" ? panel.readDemo(demo) : JSON.stringify(cview.chat === undefined ? null : cview.chat)), tab, -new Date().getTimezoneOffset()))
+
+    // pictures and GIFs: the app sends small thumbnails on request (chat.media); a demo file may carry its own under "media"
+    property var demoMedia: demo !== "" ? (JSON.parse(panel.readDemo(demo) === "null" ? "{}" : panel.readDemo(demo)).media || ({})) : ({})
+    function mediaSrc(ref) {
+        if (ref === "") return ""
+        if (demo !== "") return demoMedia[ref] || ""
+        var rev = cview.media_rev   // re-evaluate when the app has sent another thumbnail
+        return control ? control.mediaUri(ref) : ""
+    }
+    function askForMissingMedia() {
+        if (!control || !live) return
+        var asked = 0
+        for (var i = items.length - 1; i >= 0 && asked < 6; i--) {
+            var it = items[i]
+            if (it.kind === "row" && it.row.media_ref !== "" && mediaSrc(it.row.media_ref) === "") { control.requestMedia(it.row.media_ref); asked++ }
+        }
+    }
+    Timer { interval: 3000; repeat: true; running: page.live && page.visible; triggeredOnStart: true; onTriggered: page.askForMissingMedia() }
 
     // the flat list the ListView draws: for each conversation a header, then its rows
     property var items: {
@@ -77,12 +96,12 @@ Item {
             Repeater {
                 model: page.view.tabs
                 delegate: Button {
-                    text: modelData.label
+                    text: modelData.label + (modelData.attention > 0 ? "  ·  " + modelData.attention + " to review" : "")
                     checkable: true
                     checked: page.tab === modelData.key
                     implicitHeight: 32
                     onClicked: { page.tab = modelData.key; page.sureFor = "" }
-                    Accessible.name: modelData.label
+                    Accessible.name: modelData.label + (modelData.attention > 0 ? ", " + modelData.attention + " to review" : "")
                 }
             }
         }
@@ -98,7 +117,7 @@ Item {
             onCountChanged: positionViewAtEnd()
             delegate: Rectangle {
                 width: list.width
-                height: modelData.kind === "header" ? 32 : bodyText.implicitHeight + 12
+                height: modelData.kind === "header" ? 32 : bodyText.implicitHeight + 12 + (pic.visible ? pic.height + 6 : 0)
                 radius: 6
                 color: modelData.kind === "header" ? (modelData.key !== "" && modelData.key === page.hostKey ? "#2d2a66" : "#1f2540")
                                                    : (modelData.row.mine ? "#1b2a45" : "#1a1838")
@@ -111,7 +130,7 @@ Item {
                 }
                 Label {
                     id: bodyText
-                    anchors.fill: parent
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                     anchors.margins: 6
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
@@ -122,15 +141,28 @@ Item {
                           : (modelData.row.who + (modelData.row.tags.length ? "   " + modelData.row.tags.join(" · ") : "") + (modelData.row.stamp ? "   " + modelData.row.stamp : "") + "\n"
                              + modelData.row.body + (modelData.row.attachment ? (modelData.row.body ? " " : "") + modelData.row.attachment : ""))
                 }
+                Image {
+                    id: pic
+                    readonly property string src: modelData.kind === "row" ? page.mediaSrc(modelData.row.media_ref) : ""
+                    visible: src !== "" && status === Image.Ready
+                    source: src
+                    anchors.left: parent.left; anchors.top: bodyText.bottom; anchors.leftMargin: 6; anchors.topMargin: 2
+                    width: Math.min(sourceSize.width, 240); height: visible ? width * sourceSize.height / Math.max(1, sourceSize.width) : 0
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    Accessible.role: Accessible.Graphic
+                    Accessible.name: modelData.kind === "row" ? modelData.row.attachment : ""
+                }
             }
         }
 
         // speaking: Everyone, or the Host chat conversation picked above. Private conversations are read-only here.
         Label {
             Layout.fillWidth: true
-            text: page.tab === "dm" ? "Private conversations are read-only here; speak in them from the app."
+            text: (page.tab === "dm" ? "Private conversations are read-only here; speak in them from the app."
                   : (page.tab === "host" ? (page.hostKey === "" ? "Click a singer above to talk to them." : "Talking to this singer only.")
-                                         : (page.view.group_enabled ? "Everyone in the room will see this." : "Everyone chat is off in the web dashboard."))
+                                         : (page.view.group_enabled ? "Everyone in the room will see this." : "Everyone chat is off in the web dashboard.")))
+                  + (page.tab !== "group" && page.view.more[page.tab] !== "" ? "  " + page.view.more[page.tab] + "." : "")
             color: "#9a97c0"; font.pixelSize: 12; wrapMode: Text.Wrap
         }
         RowLayout {

@@ -50562,6 +50562,57 @@ class KaraokeApp(QWidget):
             pass
         return True, "brand_set"
 
+    _SHELL_CHAT_MEDIA_MAX_URI = 60_000
+
+    def shell_chat_media(self, ref) -> tuple[bool, str]:
+        """Answer `chat.media`: send the thumbnail of one picture / GIF that the chat summary currently shows. Only a `ref` from the summary is served (so the wire
+        cannot ask for any media id), and what is sent is a re-encoded small JPEG (a GIF: its still, the same picture the chat page shows), never the original or an
+        address. A picture the app has not downloaded yet is fetched first and answered `pending`; the shell asks again."""
+        ref = ref if isinstance(ref, str) else ""
+        summary = self._shell_chat_summary()
+        known = {}
+        for rows in [summary.get("group", [])] + [t.get("messages", []) for t in summary.get("dm", []) + summary.get("host", [])]:
+            for r in rows:
+                if r.get("media_ref"):
+                    known[r["media_ref"]] = r
+        if ref not in known:
+            return False, "unknown_media"
+        kind, _, ident = ref.partition(":")
+        rooms = getattr(self, "_room_messages", {}) or {}
+        image = None
+        pending = False
+        if kind == "photo":
+            image = self._room_media.get(int(ident))
+            if image is None:
+                self._room_fetch_media(int(ident)); pending = True
+        else:
+            uri = self._room_media_thumb.get("gif:" + ident)
+            if uri is None:
+                for m in list(rooms.values()) + list(self._host_chat_media_rows()):
+                    g = m.get("gif") if isinstance(m.get("gif"), dict) else None
+                    if g and str(g.get("id") or "") == ident and re.match(r"^https://(media[0-9]*|i)\.giphy\.com/", str(g.get("preview") or "")):
+                        self._room_fetch_gif(ident, str(g["preview"])); break
+                pending = True
+            else:
+                import base64
+                img = QImage(); img.loadFromData(base64.b64decode(uri.split(",", 1)[1]))
+                image = img if not img.isNull() else None
+                pending = image is None
+        worker = self.host_relay_worker
+        if pending or image is None:
+            worker.send_json({"type": "chat_media", "ref": ref, "pending": True})
+            return True, "loading"
+        import base64
+        from PyQt6.QtCore import QBuffer, QIODevice
+        thumb = image.scaledToWidth(240, Qt.TransformationMode.SmoothTransformation) if image.width() > 240 else image
+        buf = QBuffer(); buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        thumb.convertToFormat(QImage.Format.Format_RGB32).save(buf, "JPEG", 70)
+        uri = "data:image/jpeg;base64," + base64.b64encode(bytes(buf.data())).decode("ascii")
+        if len(uri) > self._SHELL_CHAT_MEDIA_MAX_URI:
+            return False, "media_too_big"
+        worker.send_json({"type": "chat_media", "ref": ref, "uri": uri})
+        return True, "sent"
+
     def shell_chat_say(self, channel, singer_key, text, request_id: str = "", *, dry_run: bool = False) -> tuple[bool, str]:
         """`chat.say`: speak as the host in the Everyone room (channel "group") or in one singer's Host chat (channel "host" + that conversation's `singer_key`), through the
         very paths the Chat page's Send uses. Private threads are not offered. A message cannot be taken back, so everything is checked first: 1-300 characters, no control
@@ -50894,7 +50945,7 @@ class KaraokeApp(QWidget):
         self.toggle_singer_skip(idx)
         return "changed"
 
-    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "waitlist.edit", "history.edit_song", "history.add_song", "settings.set", "chat.say")
+    _SHELL_QUEUE_ACTIONS = ("queue.noop", "queue.move_singer", "queue.move_song", "queue.remove_song", "queue.remove_singer", "queue.skip_singer", "queue.add_song", "library.search", "bg.next", "bg.play_track", "eq.set", "queue.set_song_key", "queue.set_song_tempo", "queue.rename_singer", "queue.set_singer_brand", "queue.message_singer", "queue.replace_song", "waitlist.remove", "waitlist.restore", "waitlist.add", "waitlist.edit", "history.edit_song", "history.add_song", "settings.set", "chat.say", "chat.media")
 
     def _log_shell_commands_ready(self) -> None:
         """One launch line when remote shell commands are switched on, so a report can tell "on but never used" from "off"."""
@@ -50991,6 +51042,16 @@ class KaraokeApp(QWidget):
         if action == "settings.set":
             try:
                 ok, code = self.shell_settings_set(args.get("key"), args.get("value"), dry_run=(mode == "dry_run"))
+            except Exception as exc:
+                return remember(False, f"failed: {exc}")
+            return remember(ok, code)
+        if action == "chat.media":
+            # READ-ONLY: a small thumbnail of a picture or GIF that is in the chat summary, as a `chat_media` message. The app's own copy is used (the venue key never leaves it).
+            worker = getattr(self, "host_relay_worker", None)
+            if worker is None or not worker.is_connected():
+                return remember(False, "needs_relay")
+            try:
+                ok, code = self.shell_chat_media(args.get("ref"))
             except Exception as exc:
                 return remember(False, f"failed: {exc}")
             return remember(ok, code)
@@ -51152,8 +51213,8 @@ class KaraokeApp(QWidget):
     _SHELL_CHAT_THREAD_ROWS = 5
 
     def _shell_chat_message(self, m: dict, host_text: bool = False) -> dict:
-        """One room / Host chat message for the shell and the web remote. Read-only and safe to show: a picture or GIF is a placeholder word (never a URL or an
-        id the page could fetch), removed text is withheld, and the text is clipped. `host_text` marks a Host-chat text row (singer_notifications, `direction`)."""
+        """One room / Host chat message for the shell and the web remote. Read-only and safe to show: a picture or GIF is a placeholder word plus an opaque `media_ref`
+        ("photo:<id>" / "gif:<id>", never an address or a key) a client can hand back to `chat.media` to get a small thumbnail from the app, removed text is withheld, and the text is clipped. `host_text` marks a Host-chat text row (singer_notifications, `direction`)."""
         status = str(m.get("status") or "")
         status = status if status in ("held", "removed", "blocked") else ""
         if host_text:
@@ -51171,14 +51232,20 @@ class KaraokeApp(QWidget):
         else:
             attachment = ""  # the same conditions under which `_room_attachment_html` shows a picture or a GIF
         text = "" if status == "removed" else str(m.get("message") or "")[:self._SHELL_CHAT_TEXT_MAX]
+        media_ref = ""
+        if status != "removed":
+            if attachment == "photo":
+                media_ref = f"photo:{int(m.get('media_id') or 0)}"
+            elif attachment == "gif" and re.match(r"^[A-Za-z0-9_-]{1,64}$", str(gif.get("id") or "")):
+                media_ref = f"gif:{gif['id']}"
         return {"id": int(m.get("id") or 0), "from": sender, "host": mine, "at": int(m.get("created_at") or 0), "text": text,
-                "attachment": attachment, "status": status, "reports": int(m.get("reports") or 0), "flag": str(m.get("flag") or "")[:24]}
+                "attachment": attachment, "media_ref": media_ref, "status": status, "reports": int(m.get("reports") or 0), "flag": str(m.get("flag") or "")[:24]}
 
     def _shell_chat_summary(self) -> dict:
         """Room chat (Everyone / Private threads / Host chat) for the web remote and the shell, from what the chat page already holds in memory (`_room_messages`,
         `_chat_messages`); no new storage and no network call. Newest rows last, bounded so the relay message stays small. Best effort: never raises."""
         out = {"reachable": None, "group_enabled": False, "dm_enabled": False, "unread": {"group": 0, "dm": 0, "host": 0}, "attention": 0,
-               "group": [], "dm": [], "host": []}
+               "attention_by": {"group": 0, "dm": 0}, "more": {"dm": 0, "host": 0}, "group": [], "dm": [], "host": []}
         try:
             settings = dict(getattr(self, "_room_settings", {}) or {})
             out["reachable"] = getattr(self, "_room_reachable", None)
@@ -51189,6 +51256,9 @@ class KaraokeApp(QWidget):
             out["unread"]["dm"] = int(new.get("dm", 0) or 0)
             out["attention"] = len(getattr(self, "_room_attention_ids", ()) or ())
             rooms = getattr(self, "_room_messages", {}) or {}
+            for mid in getattr(self, "_room_attention_ids", ()) or ():
+                ch = "dm" if (rooms.get(mid) or {}).get("channel") == "dm" else "group"
+                out["attention_by"][ch] += 1   # per tab; the two add up to "attention"
             ordered = [rooms[k] for k in sorted(rooms) if isinstance(rooms[k], dict)]
             out["group"] = [self._shell_chat_message(m) for m in ordered if m.get("channel") not in ("dm", "host")][-self._SHELL_CHAT_GROUP_ROWS:]
             threads = {}
@@ -51206,6 +51276,7 @@ class KaraokeApp(QWidget):
                            "messages": [self._shell_chat_message(x) for x in msgs][-self._SHELL_CHAT_THREAD_ROWS:]})
             dm.sort(key=lambda t: t["at"], reverse=True)
             out["dm"] = dm[:self._SHELL_CHAT_THREADS]
+            out["more"]["dm"] = max(0, len(dm) - self._SHELL_CHAT_THREADS)
             grouped = self._chat_conversations()
             media = {}
             for m in self._host_chat_media_rows():
@@ -51221,6 +51292,7 @@ class KaraokeApp(QWidget):
                              "messages": [self._shell_chat_message(e[3], host_text=e[4]) for e in entries][-self._SHELL_CHAT_THREAD_ROWS:]})
             host.sort(key=lambda t: t["at"], reverse=True)
             out["host"] = host[:self._SHELL_CHAT_THREADS]
+            out["more"]["host"] = max(0, len(host) - self._SHELL_CHAT_THREADS)
             out["unread"]["host"] = sum(t["unread"] for t in host)
         except Exception:
             pass

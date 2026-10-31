@@ -193,7 +193,7 @@ class GatingTests(unittest.TestCase):
     def test_the_prefix_reaches_the_executor_from_every_entry_point(self):
         src = Path(__file__).with_name("0.2.18.1.py").read_text(encoding="utf-8")
         self.assertEqual(src.count('"history.", "settings.", "chat.")'), 3)
-        self.assertIn('"settings.set", "chat.say")', src)
+        self.assertIn('"settings.set", "chat.say", "chat.media")', src)
 
 
 if __name__ == "__main__":

@@ -56,6 +56,10 @@ pub struct ViewModel {
     pub singers: Vec<SingerRow>,
     /// the app's room chat summary (null until it sends one)
     pub chat: Value,
+    /// thumbnails of chat pictures/GIFs the app sent (`photo:77` / `gif:id` -> a JPEG data address), oldest first, bounded; kept out of `to_json` (they are large)
+    media: Vec<(String, String)>,
+    /// bumped whenever `media` changes so the page can look again
+    pub media_rev: u64,
     pending: Vec<(String, Option<String>)>,
     pub result: Option<CommandResult>,
     seq: u64,
@@ -127,6 +131,8 @@ pub fn humanize(message: &str) -> (String, &'static str) {
         "sending" => ("Sending the message…".into(), "ok"),
         "chat_sent" => ("Message sent".into(), "ok"),
         "chat_failed" => ("The chat message could not be sent".into(), "warn"),
+        "unknown_media" => ("That picture is no longer in the chat the app is showing".into(), "warn"),
+        "media_too_big" => ("That picture is too large to show here; open it in the app".into(), "warn"),
         "bad_channel" => ("Chat can speak to Everyone or in one singer's Host chat only".into(), "warn"),
         "bad_text" => ("A chat message must be 1 to 300 characters with no line breaks".into(), "warn"),
         "bad_singer_key" => ("Pick a Host chat conversation first".into(), "warn"),
@@ -162,7 +168,15 @@ fn text(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
+/// How many chat thumbnails the shell keeps (about 40 KB each at most).
+const MEDIA_KEEP: usize = 40;
+
 impl ViewModel {
+    /// The thumbnail address for a chat picture reference, "" when the app has not sent it yet.
+    pub fn media_uri(&self, media_ref: &str) -> String {
+        self.media.iter().find(|(r, _)| r == media_ref).map(|(_, u)| u.clone()).unwrap_or_default()
+    }
+
     pub fn new() -> Self {
         ViewModel { status: "Not connected".into(), rotation: Value::Null, ..Default::default() }
     }
@@ -271,6 +285,16 @@ impl ViewModel {
                 }
             }
             Incoming::Chat(c) => self.chat = c.clone(),
+            Incoming::ChatMedia { media_ref, uri, pending } => {
+                if !*pending && !uri.is_empty() {
+                    self.media.retain(|(r, _)| r != media_ref);
+                    self.media.push((media_ref.clone(), uri.clone()));
+                    while self.media.len() > MEDIA_KEEP {
+                        self.media.remove(0);
+                    }
+                    self.media_rev += 1;
+                }
+            }
             Incoming::Queue(q) => {
                 self.queue_sig = Some(q.queue_sig.clone());
                 self.singers = q.singers.clone();
@@ -349,6 +373,7 @@ impl ViewModel {
             })).collect::<Vec<_>>(),
             "chat": self.chat,
             "pending": self.pending.len(),
+            "media_rev": self.media_rev,
             "result": self.result.as_ref().map(|r| json!({"seq": r.seq, "text": r.text, "kind": r.kind})),
         })
     }
@@ -483,6 +508,35 @@ mod tests {
         v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"notice","request_id":"c1","ok":false,"code":"chat_failed","message":"Everyone chat is switched off."}"#)));
         let r = v.result.clone().unwrap();
         assert_eq!((r.kind, r.text.as_str()), ("warn", "The chat message could not be sent: Everyone chat is switched off."));
+    }
+
+    fn media_msg(r: &str, uri: &str) -> Output {
+        Output::Message(crate::protocol::parse_incoming(&json!({"type": "chat_media", "ref": r, "uri": uri}).to_string()))
+    }
+
+    #[test]
+    fn chat_thumbnails_are_kept_bounded_and_only_when_well_formed() {
+        let mut v = ViewModel::new();
+        let uri = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+        assert_eq!(v.media_uri("photo:1"), "");
+        v.apply(&media_msg("photo:1", uri));
+        assert_eq!((v.media_uri("photo:1").as_str(), v.media_rev), (uri, 1));
+        assert!(!v.to_json().to_string().contains("base64"), "the big pictures stay out of the view json");
+        // a pending answer, a wrong type, a bad reference, a non-base64 body and an oversized one change nothing
+        v.apply(&Output::Message(crate::protocol::parse_incoming(r#"{"type":"chat_media","ref":"photo:2","pending":true}"#)));
+        for (r, u) in [("photo:2", "data:image/png;base64,AAAA"), ("../x", uri), ("photo:2", "data:image/jpeg;base64,<script>"), ("photo:2", "")] {
+            v.apply(&media_msg(r, u));
+        }
+        v.apply(&media_msg("photo:2", &format!("data:image/jpeg;base64,{}", "A".repeat(crate::protocol::MEDIA_URI_MAX))));
+        assert_eq!((v.media_uri("photo:2").as_str(), v.media_rev), ("", 1));
+        // newest wins for a ref, and the oldest are dropped past the bound
+        v.apply(&media_msg("photo:1", "data:image/jpeg;base64,AAAA"));
+        assert_eq!(v.media_uri("photo:1"), "data:image/jpeg;base64,AAAA");
+        for n in 10..60 {
+            v.apply(&media_msg(&format!("photo:{n}"), uri));
+        }
+        assert_eq!((v.media_uri("photo:1"), v.media_uri("photo:59").is_empty()), (String::new(), false));
+        assert_eq!(v.media.len(), 40);
     }
 
     #[test]
