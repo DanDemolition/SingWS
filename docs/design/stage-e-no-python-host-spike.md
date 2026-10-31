@@ -54,9 +54,7 @@ The shell calls `singws_mac::{ax_is_trusted, frontmost_app_name, run_applescript
    silently doing nothing on a hidden view is a trap for the real host (log line only).
 2. **Qt has no QML `winId` property**; the host needs a small native lookup (`singws_window_native_id` in `cpp/screens.cpp`) to give the bridge the NSView. Same
    thing PyQt's `QWidget.winId()` does for the Python app.
-3. **The bridge looks for `singws_libmpv.2.dylib` beside the *executable* (`Contents/MacOS`) or in `MacOS/Frameworks`, not `Contents/Frameworks`** when linked into
-   an app binary (its `own_dir()` is "the dylib's folder", which is the executable here). The spike sets `SINGWS_LIBMPV`; a real bundle needs either that env, a
-   copy next to the executable, or an `own_dir` fallback to `../Frameworks`.
+3. **libmpv lookup (fixed 2026-10-31):** linked into an app executable, the bridge's `own_dir()` is `Contents/MacOS`, so it never looked in `Contents/Frameworks`. `mpvapi::candidates()` now also tries `../Frameworks/singws_libmpv.2.dylib` (unit test added); the spike no longer sets `SINGWS_LIBMPV` and both architectures load libmpv without it.
 4. `grab_frame` fails with hardware-decoded video (`videotoolbox` frames not convertible by mpv's screenshot): informational only, the report marks it so. The
    DAW-preview path that uses it for MP4 may be affected in a no-Python host; not investigated.
 5. A loose text file (`SHA256SUMS`) in `Contents/Frameworks` breaks strict signing ("main executable failed strict validation"); the spike removes it. Packaging
