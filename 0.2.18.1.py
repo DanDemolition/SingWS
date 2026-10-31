@@ -50368,6 +50368,8 @@ class KaraokeApp(QWidget):
         "karaoke_bgm_crossfade_enabled": {"type": "bool"},
         "end_silence_trim_threshold_sec": {"type": "float", "min": 0.5, "max": 60.0},
         "ui_record_confirm": {"type": "bool"},
+        # the KaraFun tab only stores and saves it (_save_karafun_choice); the song search reads it when a search starts (merges the server catalog rows into the results)
+        "karafun_include_online_search": {"type": "bool"},
         # queue ETA text (group 2): the Settings dialog's handlers store the value, save and call update_queue_display(); so does shell_settings_set
         "rotation_estimate_include_all_songs": {"type": "bool"},
         "rotation_padding_sec": {"type": "int", "min": 0, "max": 600},

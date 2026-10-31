@@ -61,7 +61,7 @@ class SchemaTests(unittest.TestCase):
     def test_the_schema_is_exactly_this_list_and_holds_no_secret_url_path_or_device(self):
         keys = sorted(harness().m.KaraokeApp._SHELL_SETTINGS_SCHEMA)
         self.assertEqual(keys, sorted(["ticker_custom_enabled", "ticker_custom_message", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled",
-                                       "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec", "ui_record_confirm",
+                                       "karaoke_bgm_crossfade_enabled", "end_silence_trim_threshold_sec", "ui_record_confirm", "karafun_include_online_search",
                                        "rotation_estimate_include_all_songs", "rotation_padding_sec", "bg_to_karaoke_gap_sec"]))
         for k in keys:
             for bad in ("key", "pin", "token", "password", "secret", "url", "user", "path", "color", "device", "output", "repo", "update"):
@@ -76,7 +76,7 @@ class SchemaTests(unittest.TestCase):
 
     def test_the_other_bool_settings_apply_without_touching_the_ticker(self):
         h = harness()
-        for n, k in enumerate(("loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled", "karaoke_bgm_crossfade_enabled", "ui_record_confirm")):
+        for n, k in enumerate(("loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled", "karaoke_bgm_crossfade_enabled", "ui_record_confirm", "karafun_include_online_search")):
             h.app.settings[k] = False
             self.assertEqual(run(h, {"key": k, "value": True}, f"b{n}"), (True, "setting_changed"), k)
             self.assertIs(h.app.settings[k], True)

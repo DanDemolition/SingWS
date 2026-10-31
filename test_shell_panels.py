@@ -23,7 +23,8 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
     def make_home(self):
         d = tempfile.mkdtemp(prefix="shell_panels_")
         (Path(d) / "bg_playlist.json").write_text(json.dumps([{"path": "/m/a.mp3", "filename": "Adele - Hello.mp3", "title": "x"}, {"path": "/m/b.mp3", "filename": "Zara - Lush.flac", "title": "y"}]))
-        (Path(d) / "settings.json").write_text(json.dumps({"bg_enabled": True, "bg_volume": 0.5, "api_key": "sk-SECRET-VALUE", "host_controls_pin": "9876"}))
+        (Path(d) / "settings.json").write_text(json.dumps({"bg_enabled": True, "bg_volume": 0.5, "api_key": "sk-SECRET-VALUE", "host_controls_pin": "9876",
+                                                         "base_url": "https://example.test/?t=URLTOKEN", "karafun_request_url": "https://example.test/k?s=REQTOKEN", "user": "venueuser1", "tenant": "tenant77"}))
         return d
 
     def test_the_music_tab_draws(self):
@@ -47,8 +48,15 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
         p, shot = self.run_tab("settings", d)
         self.assertEqual(p.returncode, 0, p.stderr[-400:])
         self.assertGreater(shot.stat().st_size, 5000)
-        for leak in ("sk-SECRET-VALUE", "9876"):
+        for leak in ("sk-SECRET-VALUE", "9876", "URLTOKEN", "REQTOKEN", "venueuser1", "tenant77"):
             self.assertNotIn(leak, p.stdout + p.stderr)
+        # the page also starts with a search typed in, and with one that matches only masked keys
+        for query in ("base_url", "tenant"):
+            p, shot = self.run_tab("settings", d, ("--settings-query", query))
+            self.assertEqual(p.returncode, 0, p.stderr[-400:])
+            self.assertGreater(shot.stat().st_size, 5000)
+            for leak in ("URLTOKEN", "REQTOKEN", "venueuser1", "tenant77"):
+                self.assertNotIn(leak, p.stdout + p.stderr)
 
     def test_the_ticker_tab_draws_the_audience_text_and_copes_with_a_broken_queue(self):
         d = self.make_home()
@@ -140,3 +148,37 @@ class MusicAndSettingsPanelsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SettingsPageMaskingParityTests(unittest.TestCase):
+    """The Settings page hides a value by key name (settings_view.rs). The app's own key names decide what is a secret, so the Rust word list is read from the
+    source and applied here to the real setting names: every secret / URL / identity key must be hidden, and no key the shell may change may be."""
+
+    ROOT = Path(__file__).parent
+
+    def words(self):
+        import re
+        src = (self.ROOT / "rust/crates/singws-uimodel/src/settings_view.rs").read_text()
+        block = src.split("const SECRET_WORDS", 1)[1].split("];", 1)[0]
+        return set(re.findall(r'"([a-z0-9]+)"', block))
+
+    def hidden(self, key):
+        import re
+        return any(w in self.words() for w in re.split(r"[^a-z0-9]+", key.lower()))
+
+    def test_every_secret_url_and_identity_setting_of_the_app_is_masked(self):
+        for k in ("api_key", "host_controls_pin", "base_url", "user", "tenant", "karafun_request_url", "auto_update_manifest_url"):
+            self.assertTrue(self.hidden(k), k)
+
+    def test_no_setting_the_shell_may_change_is_masked_and_every_masked_one_is_refused(self):
+        import re
+        src = (self.ROOT / "0.2.18.1.py").read_text()
+        schema = src.split("_SHELL_SETTINGS_SCHEMA = {", 1)[1].split("\n    }\n", 1)[0]
+        allowed = set(re.findall(r'^\s+"([a-z0-9_]+)": \{"type"', schema, re.M))
+        self.assertGreater(len(allowed), 10)
+        for k in allowed:
+            self.assertFalse(self.hidden(k), f"{k} is changeable from the shell, so its value must be visible")
+        cases = json.loads((self.ROOT / "docs/design/settings_set_cases.json").read_text())["cases"]
+        for c in cases:
+            if isinstance(c["args"].get("key"), str) and self.hidden(c["args"]["key"]):
+                self.assertEqual((c["ok"], c["code"]), (False, "unknown_setting"), c)
