@@ -46,6 +46,11 @@ mac_probe = project_root / "native" / "singws_mac" / "x86_64" / "singws-mac-prob
 if mac_probe.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{mac_probe}'"):
     binaries.append((str(mac_probe), "."))
 
+# Rust log-package helper (rust/build_logpack.sh). Optional: without it logpack_shadow is silently skipped.
+logpack_bin = project_root / "native" / "singws_logpack" / "x86_64" / "singws-logpack"
+if logpack_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{logpack_bin}'"):
+    binaries.append((str(logpack_bin), "."))
+
 for helper in (
     "media_helpers.py",
     "libmpv_media_jobs.py",
@@ -66,6 +71,7 @@ for helper in (
     "plan_shadow.py",
     "scan_shadow.py",
     "platform_shadow.py",
+    "logpack_shadow.py",
     "start_shadow.py",
     "settings_shadow.py",
     "store_shadow.py",
@@ -191,6 +197,7 @@ a = Analysis(
         'plan_shadow',
         'scan_shadow',
         'platform_shadow',
+        'logpack_shadow',
         'start_shadow',
         'settings_shadow',
         'store_shadow',

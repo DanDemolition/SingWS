@@ -2591,6 +2591,15 @@ def _last_show_slice(lines: list[str]) -> tuple[int, int, float]:
     return runs[-1]
 
 
+def _load_settings_for_shadow() -> dict:
+    """Read-only look at settings.json for the log-package shadow (the live self.settings is not reachable from module-level packaging)."""
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8") or "{}") if SETTINGS_PATH.exists() else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _build_last_show_package(days: int = 7, *, crash_log: str | Path | None = None) -> dict:
     """Create a sanitized ZIP holding the log of the last show (one run of the app, even across midnight).
 
@@ -2602,6 +2611,7 @@ def _build_last_show_package(days: int = 7, *, crash_log: str | Path | None = No
     # Asynchronous log writes mean the most recent lines may still be queued;
     # a bundle that stops short of the problem is not worth sending.
     flush_log_queue()
+    shadow_now = time.time()
     found = list(_recent_log_files(days))
 
     def _mtime(path: Path) -> float:
@@ -2613,11 +2623,13 @@ def _build_last_show_package(days: int = 7, *, crash_log: str | Path | None = No
     found.sort(key=lambda path: (_mtime(path), path.name))        # oldest first: midnight rotation makes names sort wrongly
     lines: list[str] = []
     used: list[Path] = []
+    shadow_texts: dict[str, str] = {}
     for path in found:
         try:
             text = Path(path).read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
+        shadow_texts[Path(path).name] = text
         if text and not text.endswith("\n"):
             text += "\n"
         used.append(Path(path))
@@ -2645,16 +2657,32 @@ def _build_last_show_package(days: int = 7, *, crash_log: str | Path | None = No
     # end-of-central-directory record, indistinguishable from a real bundle
     # until you try to open it).
     building = package.with_suffix(".zip.partial")
+    shadow_text = None
+    shadow_extra_raw: list[str] = []
+    shadow_extra_out: list[str] = []
     try:
         with zipfile.ZipFile(building, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             if show_lines:
-                zf.writestr(f"singws_last_show_{stamp}.log", _sanitize_log_text(header + "".join(show_lines)))
+                shadow_text = _sanitize_log_text(header + "".join(show_lines))
+                zf.writestr(f"singws_last_show_{stamp}.log", shadow_text)
             for path in extra:
                 try:
-                    zf.writestr(path.name, _sanitize_log_text(path.read_text(encoding="utf-8", errors="replace")))
+                    raw = path.read_text(encoding="utf-8", errors="replace")
+                    body = _sanitize_log_text(raw)
+                    zf.writestr(path.name, body)
+                    shadow_extra_raw.append(raw)
+                    shadow_extra_out.append(body)
                 except Exception as exc:
                     zf.writestr(f"{path.name}.error.txt", f"Failed to read {path.name}: {exc}")
         os.replace(building, package)
+        try:
+            import logpack_shadow
+            logpack_shadow.start(
+                _load_settings_for_shadow(), logging.info, logs_dir=LOGS_DIR, days=days, now=shadow_now, texts=shadow_texts,
+                extra_texts=shadow_extra_raw,
+                py={"text": shadow_text, "window": window, "used": [p.name for p in used], "extras": shadow_extra_out})
+        except Exception:
+            pass
         return {"package": package, "files": used + extra, "window": window, "error": ""}
     except BaseException as exc:
         # BaseException so a MemoryError — the likely cause when this ran with
@@ -4245,6 +4273,9 @@ DEFAULTS = {
     # Stage E step 1 shadow: once at launch, a separate process (singws-mac-probe, Rust) reads the frontmost app, Accessibility trust and whether it can hold a
     # keep-awake assertion, and [PLATFORM-SHADOW] logs ONLY differences from what this app's Python sees. Python's answers are always the ones used. DEFAULT ON (operator, 2026-10-31); logs "skipped" once per launch if the probe is not bundled.
     "platform_shadow": True,
+    # Stage E shadow: after a bug-report log package is built, a separate low-priority process (singws-logpack, Rust) rebuilds the same last-show log text
+    # from the same inputs and [LOGPACK-SHADOW] logs ONLY a difference (never log text). The Python package is always the one used; nothing is sent by this.
+    "logpack_shadow": True,
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,

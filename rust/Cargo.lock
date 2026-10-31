@@ -2207,6 +2207,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-logpack"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "singws-mac"
 version = "0.1.0"
 dependencies = [

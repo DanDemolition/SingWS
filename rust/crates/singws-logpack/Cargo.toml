@@ -1,0 +1,17 @@
+[package]
+name = "singws-logpack"
+version = "0.1.0"
+edition = "2021"
+description = "Stage E: the Rust counterpart of the app's log redaction (_sanitize_log_text) and last-show log package (_build_last_show_package). Pure functions plus a CLI; the app runs it only as a log-only shadow (setting logpack_shadow) and never uses its answer."
+publish = false
+
+[lib]
+name = "singws_logpack"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-logpack"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
