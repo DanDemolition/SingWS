@@ -160,6 +160,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(run(h, {"channel": "group", "text": "hi again"}, "d3"), (True, "sending"))
         self.assertEqual(run(h, {"channel": "host", "singer_key": "ann", "text": "hi"}, "d4"), (True, "sending"), "same text, other place")
         self.assertEqual(run(h, {"channel": "host", "singer_key": "ann", "text": "hi"}, "d5"), (False, "duplicate_message"))
+        self.assertEqual(run(h, {"channel": "host", "singer_key": "cy", "text": "hi"}, "d4b"), (True, "sending"), "same text to another singer")
         recent = h.app._shell_recent_chat
         for k in list(recent):
             recent[k] -= 31

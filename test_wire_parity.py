@@ -122,8 +122,8 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual([(c["line"], c["function"]) for c in self.facts["verify_disabled"]], [])
 
     def test_the_known_api_surface(self):
-        self.assertEqual(self.facts["total"], 56, "the number of requests.get/post calls changed: review the new call and update docs/network_inventory.md")
-        self.assertEqual((self.facts["get"], self.facts["post"]), (17, 39))
+        self.assertEqual(self.facts["total"], 57, "the number of requests.get/post calls changed: review the new call and update docs/network_inventory.md")
+        self.assertEqual((self.facts["get"], self.facts["post"]), (17, 40))
         self.assertEqual(len(self.facts["endpoints"]), 31)
         for must in ("delete_remote_request.php", "complete_remote_request.php", "set_remote_request_order.php", "upsert_host_request.php",
                      "restore_remote_request.php", "clear_remote_queue.php", "get_requests_v2.php"):

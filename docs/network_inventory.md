@@ -1,4 +1,4 @@
-## HTTP calls: 56 (17 GET, 39 POST) to 31 API endpoints
+## HTTP calls: 57 (17 GET, 40 POST) to 31 API endpoints
 
 ## By endpoint
 - `(non-API url)`  GET  sites=8  body=-  kwargs=allow_redirects,headers,params,stream
@@ -35,13 +35,14 @@
     0.2.18.1.py _schedule_chat_poll.worker  timeout=6
     0.2.18.1.py _clear_chat_history.worker  timeout=8
     0.2.18.1.py _chat_mark_current_read.mark_read  timeout=6
-- `host_chat_moderation.php`  GET/POST  sites=6  body=data  kwargs=data,headers,params
+- `host_chat_moderation.php`  GET/POST  sites=7  body=data  kwargs=data,headers,params
     0.2.18.1.py _schedule_room_poll.worker  timeout=8
     0.2.18.1.py _room_say_send.worker  timeout=10
     0.2.18.1.py search.worker  timeout=12
     0.2.18.1.py _room_action.worker  timeout=8
     0.2.18.1.py _room_clear_night.worker  timeout=10
     0.2.18.1.py _host_chat_send_media.worker  timeout=10
+    0.2.18.1.py shell_chat_say.work  timeout=10
 - `host_commands.php`  GET/POST  sites=3  body=data  kwargs=data,headers,params
     0.2.18.1.py run  timeout=3
     0.2.18.1.py _sync_host_control_state_now.send  timeout=3
@@ -93,7 +94,7 @@
 ## Risk facts for a port
 - calls with NO timeout: 0
 - calls that disable TLS verification: 0
-- endpoints called from several places: 9: chat_media.php x2, complete_remote_request.php x2, delete_remote_request.php x3, get_requests_v2.php x2, host_chat.php x3, host_chat_moderation.php x6, host_commands.php x3, post_rotation.php x3, snapshot.php x2
+- endpoints called from several places: 9: chat_media.php x2, complete_remote_request.php x2, delete_remote_request.php x3, get_requests_v2.php x2, host_chat.php x3, host_chat_moderation.php x7, host_commands.php x3, post_rotation.php x3, snapshot.php x2
 - calls whose URL is not a *.php API path: 8
     0.2.18.1.py _karafun_rows GET self.karafun_search_url
     0.2.18.1.py _fetch_latest_release GET url

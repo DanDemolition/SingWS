@@ -62,6 +62,12 @@ class GroupTests(unittest.TestCase):
         for forbidden in ("giphy", "http", "media_id", "77"):
             self.assertNotIn(forbidden, blob)
 
+    def test_a_picture_or_gif_the_page_would_not_draw_is_not_announced(self):
+        rows = [gm(1, "a", kind="image"), gm(2, "b", kind="image", media_id=0), gm(3, "c", kind="gif"), gm(4, "d", kind="gif", gif={"id": "g", "preview": "http://evil.example/x.gif"}),
+                gm(5, "e", kind="gif", gif="nope"), gm(6, "f", kind="image", media_id=3), gm(7, "g", kind="gif", gif={"id": "g", "preview": "https://i.giphy.com/x.gif"})]
+        out = app(room=rows)._shell_chat_summary()
+        self.assertEqual([r["attachment"] for r in out["group"]], ["", "", "", "", "", "photo", "gif"])
+
     def test_removed_text_is_withheld_and_held_blocked_are_flagged(self):
         out = app(room=[gm(1, "secret", status="removed"), gm(2, "wait", status="held"), gm(3, "x", status="blocked", reports=2), gm(4, "ok", status="weird")])._shell_chat_summary()
         self.assertEqual([(r["status"], r["text"], r["reports"]) for r in out["group"]], [("removed", "", 0), ("held", "wait", 0), ("blocked", "x", 2), ("", "ok", 0)])
