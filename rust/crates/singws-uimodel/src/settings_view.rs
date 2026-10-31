@@ -16,6 +16,8 @@ pub struct Row {
 const SECRET_WORDS: &[&str] = &[
     "key", "keys", "secret", "secrets", "token", "tokens", "pin", "pins", "pass", "password", "passwd", "passphrase", "auth", "authorization", "cookie", "cookies",
     "credential", "credentials", "license", "licence", "hmac", "salt", "apikey",
+    // network identity: a URL can carry a token in its query string, and the account name and tenant identify the venue's server login
+    "url", "urls", "uri", "user", "tenant",
 ];
 
 pub fn is_secret_key(key: &str) -> bool {
@@ -64,24 +66,24 @@ mod tests {
 
     #[test]
     fn secret_keys_are_recognised_by_whole_words() {
-        for k in ["api_key", "host_controls_pin", "relay_token", "smtp_password", "Authorization", "session-cookie", "license.key", "apiKey", "ui_queue_pin_current", "client_secret"] {
+        for k in ["api_key", "host_controls_pin", "relay_token", "smtp_password", "Authorization", "session-cookie", "license.key", "apiKey", "ui_queue_pin_current", "client_secret", "base_url", "karafun_request_url", "auto_update_manifest_url", "user", "tenant"] {
             assert!(is_secret_key(k), "{k} must be hidden");
         }
-        for k in ["monkey_mode", "shipping", "base_url", "ticker_size_index", "bg_volume", "keyboard_shortcuts", "pinned_singers", "passenger_count"] {
+        for k in ["monkey_mode", "shipping", "ticker_size_index", "bg_volume", "keyboard_shortcuts", "pinned_singers", "passenger_count"] {
             assert!(!is_secret_key(k), "{k} must be shown");
         }
     }
 
     #[test]
     fn a_hidden_value_never_reaches_the_row_even_when_it_is_nested_or_long() {
-        let s = json!({"api_key": "sk-live-123456", "host_controls_pin": 4321, "tokens": {"a": "zzz"}, "base_url": "https://wskar.com", "nested": {"api_key": "inner-secret"}});
+        let s = json!({"api_key": "sk-live-123456", "host_controls_pin": 4321, "tokens": {"a": "zzz"}, "base_url": "https://wskar.com/?t=abc123", "nested": {"api_key": "inner-secret"}});
         let r = rows(&s, "").unwrap();
         let all = r.iter().map(|x| format!("{}={}", x.key, x.value)).collect::<Vec<_>>().join("|");
-        for leak in ["sk-live", "4321", "zzz", "inner-secret"] {
+        for leak in ["sk-live", "4321", "zzz", "inner-secret", "abc123"] {
             assert!(!all.contains(leak), "{leak} leaked: {all}");
         }
         assert_eq!(r[0], Row { key: "api_key".into(), value: "hidden".into(), hidden: true });
-        assert_eq!(r[3], Row { key: "base_url".into(), value: "https://wskar.com".into(), hidden: false });
+        assert_eq!(r[3], Row { key: "base_url".into(), value: "hidden".into(), hidden: true });
         assert_eq!(r[4].value, "1 fields", "a nested object is summarised by size, never printed");
     }
 

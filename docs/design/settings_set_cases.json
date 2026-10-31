@@ -1000,6 +1000,206 @@
    },
    "ok": false,
    "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karafun_include_online_search",
+    "value": true
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karafun_include_online_search",
+    "value": false
+   },
+   "ok": true,
+   "code": null
+  },
+  {
+   "args": {
+    "key": "karafun_include_online_search",
+    "value": "true"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karafun_include_online_search",
+    "value": 1
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karafun_include_online_search",
+    "value": 0
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karafun_include_online_search",
+    "value": null
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karafun_include_online_search",
+    "value": "on"
+   },
+   "ok": false,
+   "code": "bad_value"
+  },
+  {
+   "args": {
+    "key": "karafun_launch_at_startup",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "karafun_auto_key_tempo",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "karafun_auto_queue_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "auto_update_check_interval_hours",
+    "value": 12
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "bg_video_shuffle",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "cdg_near_black_cleanup",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "cdg_near_black_threshold",
+    "value": 12
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ui_queue_pin_current",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ui_hero_glow",
+    "value": "soft"
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ui_hero_record_animate",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "show_screen_vfx_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "rotation_vfx_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "ticker_vfx_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "end_silence_trim_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "karaoke_allow_early_silence_trim",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "rotation_lock_insert_count",
+    "value": 12
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "venue_profiles_enabled",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
+  },
+  {
+   "args": {
+    "key": "defer_remote_adds_until_between_singers",
+    "value": true
+   },
+   "ok": false,
+   "code": "unknown_setting"
   }
  ]
 }

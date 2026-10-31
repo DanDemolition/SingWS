@@ -17,7 +17,7 @@ Item {
     Connections { target: page.control; function onViewJsonChanged() { page.cview = JSON.parse(page.control.viewJson) } }
     // connected to the app: the few settings the app lets the shell change (KaraokeApp._SHELL_SETTINGS_SCHEMA) get a button; everything else stays read-only
     property bool live: cview.enabled === true
-    readonly property var boolKeys: ["ticker_custom_enabled", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled", "karaoke_bgm_crossfade_enabled", "ui_record_confirm", "rotation_estimate_include_all_songs"]
+    readonly property var boolKeys: ["ticker_custom_enabled", "loudness_scan_holds_for_playback", "karaoke_auto_advance", "bg_end_silence_trim_enabled", "karaoke_bgm_crossfade_enabled", "ui_record_confirm", "karafun_include_online_search", "rotation_estimate_include_all_songs"]
     function setSetting(label, key, value) { if (control) control.send(label, "settings.set", JSON.stringify({key: key, value: value}), false) }
     property var rows: JSON.parse(panel.rowsJson)
     Connections { target: panel; function onRowsJsonChanged() { page.rows = JSON.parse(panel.rowsJson) } }

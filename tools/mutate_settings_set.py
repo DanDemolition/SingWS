@@ -53,6 +53,11 @@ M = [
     ('            if key == "bg_to_karaoke_gap_sec":', '            if key == "bg_to_karaoke":', None),
     ('"bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 3.0},', '"bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 30.0},', None),
     ('"bg_to_karaoke_gap_sec": {"type": "float", "min": -3.0, "max": 3.0},', '"bg_to_karaoke_gap_sec": {"type": "float", "min": 0.0, "max": 3.0},', None),
+    ('        "karafun_include_online_search": {"type": "bool"},\n', '', None),
+    ('"karafun_include_online_search": {"type": "bool"},', '"karafun_include_online_search": {"type": "text", "max_chars": 5},', None),
+    ('        "karafun_include_online_search": {"type": "bool"},\n', '        "karafun_include_online_search": {"type": "bool"},\n        "karafun_auto_queue_enabled": {"type": "bool"},\n', None),
+    ('        "karafun_include_online_search": {"type": "bool"},\n', '        "karafun_include_online_search": {"type": "bool"},\n        "auto_update_check_interval_hours": {"type": "int", "min": 1, "max": 168},\n', None),
+    ('        "karafun_include_online_search": {"type": "bool"},\n', '        "karafun_include_online_search": {"type": "bool"},\n        "ui_queue_pin_current": {"type": "bool"},\n', None),
 ]
 
 
