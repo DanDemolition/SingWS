@@ -24,6 +24,7 @@ fn incoming_json(m: &Incoming) -> Value {
         Incoming::Ack(a) => json!({"type": "ack", "request_id": a.request_id, "ok": a.ok, "message": a.message}),
         Incoming::Error { request_id, code, message } => json!({"type": "error", "request_id": request_id, "code": code, "message": message}),
         Incoming::Notice { request_id, ok, code, message } => json!({"type": "notice", "request_id": request_id, "ok": ok, "code": code, "message": message}),
+        Incoming::Chat(c) => json!({"type": "chat", "chat": c}),
         Incoming::Other(t) => json!({"type": "other", "name": t}),
         Incoming::NotJson => json!({"type": "not_json"}),
     }

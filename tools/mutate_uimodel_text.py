@@ -52,7 +52,7 @@ MUTANTS = {
         ('"Room chat: could not reach the server".to_string()', '"Room chat is off.".to_string()', None),
         ('} else if !group_on && !dm_on {', '} else if !group_on || !dm_on {', None),
         ('} else if attention > 0 {', '} else if attention > 1 {', None),
-        ('if attention == 1 { "" } else { "s" }', 'if attention == 1 { "s" } else { "" }', None),
+        ('if attention == 1 { " needs" } else { "s need" }', 'if attention == 1 { "s need" } else { " needs" }', None),
     ],
     "diagnostics": [
         ('ok: has_local && screens >= 2,', 'ok: has_local || screens >= 2,', None),

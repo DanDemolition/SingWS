@@ -120,7 +120,7 @@ secrets, URLs, location detection and sync threads, so it stays a local dialog b
 | Header chips / status line / ETA line, pre-show diagnostics | **done 2026-10-30**: shell **Status** and **Diagnostics** tabs (read-only) | the app writes `status_snapshot.json` (setting `status_snapshot`, **default on**, set to false to stop the writes) whenever its header or SINGERS / ETA line refreshes (coalesced 500 ms, atomic; the diagnostics probes are re-taken at most every 30 s); the shell reads it every 3 s and draws it with `singws-uimodel::status`, which only composes the already-proven `header` and `diagnostics` view models (the clock for ENDS is the snapshot's `taken_at`). The file carries the 11 settings the header and checks read (no secrets: no `api_key`, PIN, URL or token), never flows back into the app, and a failing write or hook cannot reach the header. `test_status_snapshot.py` (8, 300 random states through the REAL `_refresh_header_chips` / `_refresh_header_status` / `_update_queue_eta_label` / `_refresh_queue_summary` / `_collect_pre_show_diagnostics` vs `singws-status-cli`), `tools/mutate_status.py`, `status_panel` unit tests, `test_shell_panels.py`, screenshots in docs/verification/. Limit: it is as fresh as the app's last header refresh (the page says how old it is, and calls it old after 5 minutes) |
 | Library row text, Now playing hero card | **done 2026-10-30** (3d): Library tab rows use `rows::library_row`; new read-only **Now playing** tab from the `hero` block of `status_snapshot.json`. Queue song rows / singer status line: not wired on purpose (the relay summary lacks their inputs), reasons in 3d | `tools/rows_parity.py` (real song index), `tools/mutate_uimodel_text.py rows|lib`, `tools/mutate_status.py` (27 Rust mutants, 26 killed, 1 equivalent; 48 Python mutants, 45 killed, 3 equivalent), `test_status_snapshot.py`, `test_shell_screens_rows.py` |
 | Search track editor | **by design local** | it renames the files on disk (`_rename_track_files`): a library file operation like the duplicate manager and library locations, never remote |
-| Chat | **blocked**: the relay does not carry room chat | server work. Decision 2026-10-30: Chat stays blocked until the relay (wskar-relay) and the web remote carry room chat. The server side comes first, then the Rust Chat tab, scheduled after the screens and the settings-keys work. No chat code is written until then |
+| Chat | **done 2026-10-31** (section 3e): shell **Chat** tab, read-only conversations plus one command, `chat.say` | the relay carries a `chat` message from the app; see 3e |
 | Duplicate song manager, KaraFun automation dialogs, phrase start | **not planned** | destructive file moves / macOS automation / dead code |
 | Audience window, preview, rotation screen, tickers, soundboard strip | **gated** (step 7) | native surfaces: only after the Rust video bridge presenter exists and a show has run clean on the TV (AGENTS rules 4 and 6) |
 
@@ -180,6 +180,36 @@ tables differ between Python releases, `str()` of a JSON container.
 
 Seams (inputs the Rust side cannot know): the waitlist needs "is this singer on their first turn tonight" and "does this request already match an accepted queue entry";
 the ticker needs `_now_singing_parts`. They are explicit inputs, the same places the app consults live state.
+
+## 3e. Chat (2026-10-31)
+
+**Data.** The app (`_shell_chat_summary`, next to `_shell_waitlist_summary`) turns the chat state its Chat page already holds (`_room_messages`, `_chat_messages`; no new storage, no new endpoint)
+into a bounded summary and sends it as its OWN relay message `{"type":"chat","user","chat":{...},"updated_at"}` right after each `queue` message (same gate: `shell_commands` not `off`).
+It is a separate message because the relay drops host messages over 64 KB and the worst-case summary is about 50 KB. The relay needed no change (it forwards every host-app message to the browsers).
+Caps: 25 Everyone rows, 10 Private threads and 10 Host chat threads of 5 rows each, text clipped to 120 characters. A picture or GIF is the word `photo` / `gif` (never a URL or id), the text of a
+removed message is withheld, held / blocked / reported flags travel. Unread: Everyone and Private from the page's own counters, Host chat summed over the threads sent.
+
+**Rust.** `singws-uimodel::chat` (+ `singws-chat-cli`): tags, time stamps, tab labels and rows, equal to `_render_room_chat`, `_chat_tab_labels` and `_render_host_chat_transcript`;
+`tools/chat_parity.py` feeds random chat state through the REAL `_shell_chat_summary` and the REAL page renderers and compares message by message (IDENTICAL on 1,500+ cases, 5 fixed-offset zones);
+mutants in `tools/mutate_uimodel_text.py chat`. `singws-control` parses the `chat` message into the view model (`chat`) and validates `chat.say`; the shell's **Chat** tab draws plain text only.
+
+**`chat.say` {channel: "group" | "host", text, singer_key (host only)}.** The only chat command. Private threads cannot be spoken in. Gated by `shell_commands` (`off` refuses, `dry_run` checks and sends nothing,
+`apply` sends), request-id dedupe, 10 s expiry. The Everyone path posts exactly what the page's Send posts (host name from `host_chat_name`; the host is never muted: the server's rule); Host chat goes through
+`_net_send_direct_message`, the call the Host chat tab uses. Answers come as plain words (`view.rs`): `sending` at once, then a `notice` (`chat_sent` / `chat_failed` with the server's reason).
+
+| refusal | meaning |
+|---|---|
+| `shell_commands_off`, `missing_request_id`, `missing_sent_at`, `expired`, `clock_skew` | the usual gate |
+| `bad_channel` | anything but `group` / `host` (Private is not offered) |
+| `bad_text` | not text, blank, over 300 characters, or any control character (no line breaks) |
+| `bad_singer_key` | Host chat without a usable key (text, 1-200 characters, no control characters) |
+| `unknown_conversation` | no such Host chat conversation (never spoken to in the page's data) |
+| `chat_not_ready` / `group_chat_off` | the page has not loaded the chat settings yet / Everyone chat is off in the dashboard |
+| `network_not_configured` | no server address, user or API key |
+| `duplicate_message` | the same text to the same place within 30 s (a double tap); a failed send may be retried at once |
+
+Known limits: the Host chat unread total ignores threads beyond the 10 sent; "needs attention" is one total (the page shows it per tab); Private thread names assume a singer's display name does not change
+between messages; the shell's tab is plain text (no pictures / GIFs); the Everyone Send asks twice in the shell ("Sure?").
 
 ## 5. A repository finding
 

@@ -136,7 +136,7 @@ pub fn view(chat: &Value, current: &str, utc_offset_min: i64) -> Value {
     } else if !group_on && !dm_on {
         "Room chat is off. Turn it on in the web dashboard under \"Singer Chat & Screen Preview\".".to_string()
     } else if attention > 0 {
-        format!("{attention} message{} need attention in the app", if attention == 1 { "" } else { "s" })
+        format!("{attention} message{} attention in the app", if attention == 1 { " needs" } else { "s need" })
     } else {
         String::new()
     };
@@ -159,6 +159,7 @@ mod tests {
         assert_eq!(stamp(t, -420, true), "05:05:09 PM", "Pacific daylight time, the day before");
         assert_eq!(stamp(t + 12 * 3600, 0, true), "12:05:09 PM", "noon hour is 12 PM");
         assert_eq!(stamp(t + 13 * 3600, 0, false), "01:05 PM");
+        assert_eq!(stamp(3600, -420, true), "06:00:00 PM", "the local time may fall before the epoch's midnight");
         assert_eq!(stamp(0, 0, true), "");
         assert_eq!(stamp(-5, 0, true), "");
     }
@@ -212,6 +213,9 @@ mod tests {
         assert_eq!(v["dm"][0]["rows"][0]["tags"], json!(["PRIVATE → bo"]));
         assert_eq!(v["host"][0]["title"], "ann");
         assert_eq!(v["status"], "2 messages need attention in the app");
+        let one = json!({"group_enabled": true, "attention": 1});
+        assert_eq!(view(&one, "group", 0)["status"], "1 message needs attention in the app");
+        assert_eq!(view(&json!({"group_enabled": true, "attention": 0}), "group", 0)["status"], "");
         assert_eq!(view(&json!({"reachable": false}), "group", 0)["status"], "Room chat: could not reach the server");
         assert!(view(&json!({}), "group", 0)["status"].as_str().unwrap().starts_with("Room chat is off"));
         assert_eq!(view(&json!("garbage"), "group", 0)["group"], json!([]));

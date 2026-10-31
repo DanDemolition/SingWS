@@ -6,6 +6,7 @@ import _test_profile  # noqa: F401  (isolate SINGWS_HOME)
 import unittest
 from pathlib import Path
 
+from tools import chat_parity as chat
 from tools import diagnostics_parity as diagnostics
 from tools import header_parity as header
 from tools import rows_parity as rows
@@ -40,6 +41,14 @@ class HeroTextParity(unittest.TestCase):
     def test_rust_hero_text_equals_the_apps(self):
         self.assertEqual(_run(hero, 200, 5), 0, hero.failures[:3])
         self.assertGreater(hero.counts.get("text_same", 0), 0)
+
+
+@unittest.skipUnless(Path(chat.CLI).exists(), "needs singws-chat-cli")
+class ChatTextParity(unittest.TestCase):
+    def test_rust_chat_rows_and_tabs_equal_the_apps(self):
+        self.assertEqual(_run(chat, 120, 5), 0, chat.failures[:3])
+        self.assertGreater(chat.counts.get("room_row_same", 0), 0)
+        self.assertGreater(chat.counts.get("host_row_same", 0), 0)
 
 
 @unittest.skipUnless(Path(header.CLI).exists(), "needs singws-header-cli")

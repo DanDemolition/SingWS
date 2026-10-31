@@ -50,9 +50,9 @@ ApplicationWindow {
                 id: tabs
                 Layout.fillWidth: true
                 background: Rectangle { color: "transparent" }
-                currentIndex: ({"history": 1, "rotation": 2, "controls": 3, "music": 4, "eq": 5, "settings": 6, "ticker": 7, "waitlist": 8, "status": 9, "diagnostics": 10, "nowplaying": 11})[win.arg("--tab")] || (parseInt(win.arg("--tab")) || 0)
+                currentIndex: ({"history": 1, "rotation": 2, "controls": 3, "music": 4, "eq": 5, "settings": 6, "ticker": 7, "waitlist": 8, "status": 9, "diagnostics": 10, "nowplaying": 11, "chat": 12})[win.arg("--tab")] || (parseInt(win.arg("--tab")) || 0)
                 Repeater {
-                    model: ["Library", "Singer history", "Rotation", "Controls", "Music", "EQ", "Settings", "Ticker", "Waitlist", "Status", "Diagnostics", "Now playing"]
+                    model: ["Library", "Singer history", "Rotation", "Controls", "Music", "EQ", "Settings", "Ticker", "Waitlist", "Status", "Diagnostics", "Now playing", "Chat"]
                     TabButton {
                         text: modelData
                         font.pixelSize: 13
@@ -78,6 +78,7 @@ ApplicationWindow {
                 StatusPage { }
                 DiagnosticsPage { }
                 NowPlayingPage { }
+                ChatPage { control: control; demo: win.arg("--chat-demo") }
             }
         }
     }
