@@ -70,7 +70,8 @@ On macOS 27 the pane is not called Accessibility: the operator added `~/SingWS-s
 
 ## Not verified
 
-- Whether the picture *looks* right on screen (no screenshot: `screencapture` could raise a Screen Recording prompt; presented-frame counts only).
+(Operator looked at the two spike windows on 2026-10-31, arm64: they looked right, i.e. the moving test pattern in both. Eyes only: no screenshot, no x86_64 look.)
+
 - Real sound-card output (headless engine only); the render-thread mode; CDG; two Qt versions together (the shell's 6.12 vs PyQt's 6.9).
 - Real Intel hardware; a changed-executable rebuild and a Screen Recording / Automation grant; A System Events (AX-dependent) script and ScreenCaptureKit from the Rust host (deliberately not run: they can prompt).
 
