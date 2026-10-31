@@ -26439,6 +26439,7 @@ class KaraokeApp(QWidget):
             return ""
 
     def _update_rotation_summary_card(self):
+        self._schedule_status_snapshot()      # the shell's Now Playing card follows this card (a coalesced, best-effort write)
         try:
             karaoke_active = bool(getattr(self, "karaoke_playing", False))
             try:
@@ -34939,7 +34940,25 @@ class KaraokeApp(QWidget):
             "looping": bool(state.get("_intro_loop_active", False)),
             "diagnostics": cached[1],
         }
+        hero = self._status_snapshot_hero()
+        if hero is not None:
+            payload["hero"] = hero
         return json.loads(json.dumps(payload, default=str))
+
+    def _status_snapshot_hero(self):
+        """The Show tab's hero card as drawn right now (the labels' own text; the time left is the unsigned label, the shell signs it). None where the card is missing."""
+        try:
+            state = object.__getattribute__(self, "__dict__")
+            return {
+                "kicker": str(self.rotation_summary_kicker.text()),
+                "singer": str(self.rotation_summary_title.text()),
+                "subtitle": str(self.rotation_summary_subtitle.text()),
+                "meta": str(self.rotation_summary_meta.text()),
+                "format": str(state.get("_hero_format_text", "") or ""),
+                "remaining": str(self.karaoke_remaining_label.text()),
+            }
+        except Exception:
+            return None
 
     def _write_status_snapshot(self) -> bool:
         """Write `status_snapshot.json` (atomic). Never raises."""

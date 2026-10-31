@@ -5,6 +5,7 @@
 
 use crate::diagnostics::{self, Report};
 use crate::header::{self, Chip, EtaView, Status};
+use crate::hero;
 use serde_json::Value;
 use singws_dbw::pyval::{R, decline, get};
 
@@ -17,6 +18,40 @@ pub struct StatusView {
     /// `_refresh_queue_summary`: "5 singers · 27 min · LOCKED" (empty when nobody is queued)
     pub summary: String,
     pub report: Report,
+    /// the Show tab's "now playing" hero card; `None` for a snapshot from an app that did not write the block
+    pub hero: Option<HeroCard>,
+}
+
+/// The hero card as the app had it on screen: the labels' own text (the app has already applied `_apply_redesign_hero_text`, proven equal in `hero`), plus the
+/// time left with the minus sign `_hero_remaining_text` always puts on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeroCard {
+    pub kicker: String,
+    pub singer: String,
+    pub subtitle: String,
+    pub meta: String,
+    pub format_text: String,
+    pub remaining: String,
+}
+
+fn text_of(v: &Value) -> String {
+    v.as_str().unwrap_or("").to_string()
+}
+
+/// `None` when the snapshot has no hero block (or it is not an object)
+fn hero_card(snapshot: &Value) -> R<Option<HeroCard>> {
+    let h = get(snapshot, "hero");
+    if !h.is_object() {
+        return Ok(None);
+    }
+    Ok(Some(HeroCard {
+        kicker: text_of(get(h, "kicker")),
+        singer: text_of(get(h, "singer")),
+        subtitle: text_of(get(h, "subtitle")),
+        meta: text_of(get(h, "meta")),
+        format_text: text_of(get(h, "format")),
+        remaining: hero::remaining_text(get(h, "remaining"))?,
+    }))
 }
 
 pub fn view(snapshot: &Value) -> R<StatusView> {
@@ -38,7 +73,8 @@ pub fn view(snapshot: &Value) -> R<StatusView> {
     let status = header::status(settings, connection, net, get(snapshot, "last"), get(snapshot, "attention"), get(snapshot, "queue_rev"))?;
     let summary = header::queue_summary(eta.singer_count, eta.minutes, locked, looping);
     let report = diagnostics::report(&diagnostics_facts(snapshot))?;
-    Ok(StatusView { taken_at, chips, status, eta, summary, report })
+    let hero = hero_card(snapshot)?;
+    Ok(StatusView { taken_at, chips, status, eta, summary, report, hero })
 }
 
 /// The `Facts` of the diagnostics report: the probes the app took plus the settings it keeps in the same snapshot
@@ -99,6 +135,21 @@ mod tests {
         let mut s = snap();
         s["taken_at"] = json!("soon");
         assert!(view(&s).is_err());
+    }
+
+    #[test]
+    fn the_hero_card_copies_the_labels_and_signs_the_time_left() {
+        let mut s = snap();
+        assert_eq!(view(&s).unwrap().hero, None, "an older snapshot has no hero block");
+        s["hero"] = json!({"kicker": "NOW SINGING", "singer": "Ann", "subtitle": "Radio Ga Ga \u{b7} Queen", "meta": "SC8671", "format": "ZIP", "remaining": "03:21"});
+        let h = view(&s).unwrap().hero.unwrap();
+        assert_eq!((h.kicker.as_str(), h.singer.as_str(), h.subtitle.as_str(), h.meta.as_str(), h.format_text.as_str(), h.remaining.as_str()), ("NOW SINGING", "Ann", "Radio Ga Ga \u{b7} Queen", "SC8671", "ZIP", "-03:21"));
+        s["hero"]["remaining"] = json!("-00:09");
+        assert_eq!(view(&s).unwrap().hero.unwrap().remaining, "-00:09");
+        s["hero"]["remaining"] = json!("  ");
+        assert_eq!(view(&s).unwrap().hero.unwrap().remaining, "");
+        s["hero"] = json!([1]);
+        assert_eq!(view(&s).unwrap().hero, None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! `singws-rows-cli`: stdin = `{"op": "search"|"queue_song"|"status"|"split"|"normalize"|"rtime"|"badge", ...}`, stdout = the result or `{"error": ...}`. Read-only; used by tools/rows_parity.py.
+//! `singws-rows-cli`: stdin = `{"op": "search"|"library_db"|"queue_song"|"status"|"split"|"normalize"|"rtime"|"badge", ...}`, stdout = the result or `{"error": ...}`. Read-only; used by tools/rows_parity.py.
 use serde_json::{Value, json};
 use singws_uimodel::rows;
 use std::io::Read;
@@ -15,6 +15,18 @@ fn handle(r: &Value) -> Result<Value, String> {
         "queue_song" => {
             let x = rows::queue_song_row(g("entry"))?;
             Ok(json!({"left": x.left, "right": x.right, "tooltip": x.tooltip}))
+        }
+        // the Library tab's rows for a query over a song index: strict search, else the typo-tolerant scan, then the app's row text for each row
+        "library_db" => {
+            let db = std::path::PathBuf::from(g("db").as_str().ok_or("missing db")?);
+            let res = singws_uimodel::search_with_fuzzy(&db, g("query").as_str().unwrap_or(""), 500, None)?;
+            let providers = singws_uimodel::providers_for(&db, &res.rows.iter().map(|r| r.id).collect::<Vec<_>>());
+            let mut out = Vec::new();
+            for r in &res.rows {
+                let x = rows::library_row(r, providers.get(&r.id).map(String::as_str))?;
+                out.push(json!({"path": r.path, "left": x.left, "right": x.right, "tooltip": x.tooltip}));
+            }
+            Ok(json!({"rows": out}))
         }
         "status" => Ok(json!({"text": rows::singer_status_label(g("singer"), flag("start"), flag("current"), flag("next"))?})),
         "split" => {

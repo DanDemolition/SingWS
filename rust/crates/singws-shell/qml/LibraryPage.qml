@@ -122,7 +122,7 @@ Item {
                 radius: 6
                 color: ListView.isCurrentItem ? "#4b2bb0" : "#1a1838"
                 Accessible.role: Accessible.ListItem
-                Accessible.name: modelData.artist + ", " + modelData.title + ", " + modelData.duration
+                Accessible.name: modelData.left + ", " + modelData.right
                 RowLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 10
@@ -133,7 +133,7 @@ Item {
                         Label { text: modelData.artist; color: "#ffffff"; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
                         Label { text: modelData.title; color: "#c9c6e8"; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                     }
-                    Label { text: modelData.kind.toUpperCase() + "  " + modelData.duration; color: "#9a97c0"; font.pixelSize: 11 }
+                    Label { text: modelData.right; color: "#9a97c0"; font.pixelSize: 11 }
                     Button {
                         text: "Add"
                         implicitHeight: 30
@@ -146,7 +146,10 @@ Item {
                         Accessible.name: "Add " + modelData.title + " for the singer"
                     }
                 }
-                MouseArea { anchors.fill: parent; onClicked: list.currentIndex = index }
+                MouseArea { id: rowArea; anchors.fill: parent; hoverEnabled: true; onClicked: list.currentIndex = index }
+                ToolTip.visible: rowArea.containsMouse && modelData.tooltip !== ""
+                ToolTip.delay: 600
+                ToolTip.text: modelData.tooltip
             }
         }
     }

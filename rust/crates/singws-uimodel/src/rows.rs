@@ -228,6 +228,14 @@ pub fn search_row(track: &Value) -> R<Row> {
     Ok(Row { left, right, tooltip: join_nonempty(&tooltip_parts, "\n") })
 }
 
+/// The row the shell's Library tab shows for a song-index row: the track dict `song_index` returns (`SELECT *`), reduced to the columns the shell reads, run through
+/// `_build_search_row_text`. `provider` is `songs.provider` (None: the column is missing, which reads as a local song).
+pub fn library_row(r: &crate::SongRow, provider: Option<&str>) -> R<Row> {
+    let track = serde_json::json!({"artist": r.artist, "title": r.title, "discid": r.discid, "duration_secs": r.duration_secs, "song_type": r.song_type, "path": r.path,
+        "display": r.display, "provider": provider});
+    search_row(&track)
+}
+
 /// `_split_display_artist_title_disc(display_name, fallback_disc)`
 pub fn split_display(display_name: &str, fallback_disc: &str) -> (String, String, String) {
     let dn = py_strip(display_name);

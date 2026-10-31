@@ -10,6 +10,7 @@ fn handle(r: &Value) -> Result<Value, String> {
         "status": {"dot_token": v.status.dot_token, "text": v.status.text, "tooltip": v.status.tooltip, "location": v.status.location},
         "eta": {"singer_count": v.eta.singer_count, "ends": v.eta.ends, "minutes": v.eta.minutes, "html": v.eta.html},
         "summary": v.summary,
+        "hero": v.hero.as_ref().map(|h| json!({"kicker": h.kicker, "singer": h.singer, "subtitle": h.subtitle, "meta": h.meta, "format": h.format_text, "remaining": h.remaining})),
         "report": {"title": v.report.title, "lines": v.report.lines, "log_line": v.report.log_line, "all_passed": v.report.all_passed},
     }))
 }

@@ -67,6 +67,7 @@ pub fn load(dir: &str, now: i64) -> (Value, String) {
                 "chips": v.chips.iter().map(|c| json!({"text": c.text, "tone": c.tone})).collect::<Vec<_>>(),
                 "statusText": v.status.text, "dotToken": v.status.dot_token, "tooltip": v.status.tooltip, "location": v.status.location,
                 "etaHtml": v.eta.html, "summary": v.summary, "stale": age > STALE_SECS,
+                "hero": v.hero.as_ref().map(|h| json!({"kicker": h.kicker, "singer": h.singer, "subtitle": h.subtitle, "meta": h.meta, "format": h.format_text, "remaining": h.remaining})),
                 "reportTitle": v.report.title, "allPassed": v.report.all_passed,
                 "checks": v.report.checks.iter().map(|c| json!({"ok": c.ok, "label": c.label, "detail": c.detail})).collect::<Vec<_>>(),
             });
@@ -121,6 +122,18 @@ mod tests {
         assert_eq!(v["reportTitle"], "6 of 7 checks passed");
         assert_eq!(v["checks"][2]["detail"], "Application not found");
         assert_eq!(v["summary"], "1 singer \u{b7} 3 min");
+    }
+
+    #[test]
+    fn the_hero_card_travels_to_the_page_and_is_null_for_an_older_snapshot() {
+        let d = dir("d");
+        std::fs::write(format!("{d}/status_snapshot.json"), snapshot()).unwrap();
+        assert!(load(&d, 1_000_020).0["hero"].is_null());
+        let mut s: Value = serde_json::from_str(&snapshot()).unwrap();
+        s["hero"] = json!({"kicker": "NOW SINGING", "singer": "Ann", "subtitle": "Radio Ga Ga \u{b7} Queen", "meta": "SC8671", "format": "ZIP", "remaining": "03:21"});
+        std::fs::write(format!("{d}/status_snapshot.json"), s.to_string()).unwrap();
+        let h = load(&d, 1_000_020).0["hero"].clone();
+        assert_eq!((h["singer"].as_str(), h["remaining"].as_str(), h["format"].as_str()), (Some("Ann"), Some("-03:21"), Some("ZIP")));
     }
 
     #[test]
