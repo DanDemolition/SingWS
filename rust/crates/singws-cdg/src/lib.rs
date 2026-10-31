@@ -428,10 +428,40 @@ fn fit_quad_covers(px: usize, py: usize, w: usize, h: usize) -> bool {
     }
 }
 
-/// The output window as the Rust video bridge's shader draws a CDG song (RGB only: the shader ignores the picture's alpha). Mirrors
+/// The size of one square of the transparency checkerboard libmpv draws behind a video frame that has alpha (`--background=tiles`), in picture
+/// pixels (the bridge's frame texture is the 300x216 picture, so the squares scale with it), and its two greys: 0.93 where `tx + ty` is even
+/// (counted from the picture's top left), 0.87 where it is odd. Measured on the real bridge window with `tools/make_alpha_cdg.py`.
+const ALPHA_TILE: usize = 16;
+const ALPHA_TILE_LIGHT: f32 = 0.93 * 255.0;
+const ALPHA_TILE_DARK: f32 = 0.87 * 255.0;
+
+/// The picture libmpv hands the bridge's shader: every pixel with alpha below 255 blended over the grey checkerboard (so the shader's own RGB-only
+/// reads see an opaque picture). Alpha 255 is untouched. Alpha comes from DEFINE_TRANSPARENT, and palette entries never loaded are transparent
+/// black (alpha 0), which show as the plain tiles. libmpv's own dither (plus or minus 1) is not reproduced.
+pub fn flatten_on_tiles(frame: &[u8]) -> Vec<u8> {
+    let mut out = frame.to_vec();
+    for (i, p) in out.chunks_exact_mut(4).enumerate() {
+        let a = p[3] as f32;
+        if p[3] == 255 {
+            continue;
+        }
+        let (x, y) = (i % WIDTH, i / WIDTH);
+        let grey = if (x / ALPHA_TILE + y / ALPHA_TILE) % 2 == 0 { ALPHA_TILE_LIGHT } else { ALPHA_TILE_DARK };
+        for c in p.iter_mut().take(3) {
+            *c = ((*c as f32 * a + grey * (255.0 - a)) / 255.0 + 0.5) as u8;
+        }
+        p[3] = 255;
+    }
+    out
+}
+
+/// The output window as the Rust video bridge's shader draws a CDG song (RGB only: the shader ignores the picture's alpha, which libmpv has already
+/// blended over its grey tiles: `flatten_on_tiles`). Mirrors
 /// `draw_picture` / the `cdgSidefill` branches in rust/crates/singws-video: a full-window background pass (cover-cropped copy of the picture
 /// for the fills), then the fit picture with its left and right 6/300 edges faded into the background.
 pub fn compose_bridge(frame: &[u8], win_w: usize, win_h: usize, fill: BridgeFill) -> Vec<u8> {
+    let flat = flatten_on_tiles(frame);
+    let frame = &flat[..];
     let (w, h) = (win_w as f32, win_h as f32);
     let sa = WIDTH as f32 / HEIGHT as f32;
     let va = w / h;
@@ -522,6 +552,8 @@ pub struct BgVideo<'a> {
 /// 288,18 / 12,198 / 288,198), each the one closest to the other three; a pixel whose colour is within 0.16 of the border, tile or panel backdrop (within
 /// 0.28 when its red is below 0.20) is not drawn, everything else is drawn opaque. The picture is sampled nearest.
 pub fn compose_bridge_background(frame: &[u8], win_w: usize, win_h: usize, bg: &BgVideo) -> Vec<u8> {
+    let flat = flatten_on_tiles(frame);
+    let frame = &flat[..];
     let (w, h) = (win_w as f32, win_h as f32);
     let sa = WIDTH as f32 / HEIGHT as f32;
     let va = w / h;
@@ -1194,6 +1226,67 @@ mod tests {
             f.push(255);
         }
         f
+    }
+
+    #[test]
+    fn flatten_on_tiles_blends_over_the_measured_grey_squares() {
+        let put = |f: &mut Vec<u8>, x: usize, y: usize, px: [u8; 4]| f[(y * WIDTH + x) * 4..][..4].copy_from_slice(&px);
+        let at = |f: &[u8], x: usize, y: usize| f[(y * WIDTH + x) * 4..][..4].to_vec();
+        let mut f = vec![0u8; WIDTH * HEIGHT * 4]; // alpha 0 everywhere: the plain squares
+        // values read off the real bridge window (tools/make_alpha_cdg.py): alpha 63 blue (34, 34, 255) on a light square is (187, 187, 242);
+        // alpha 191 red (255, 34, 34) is (250 or 251, 85, 85) on a light square (libmpv dithers by 1) and (247, 81, 81) on a dark one; alpha 63 on a dark square is (176, 176, 230)
+        put(&mut f, 130, 90, [34, 34, 255, 63]); // tile (8, 5): odd, dark
+        put(&mut f, 2, 2, [34, 34, 255, 63]); // tile (0, 0): light
+        put(&mut f, 20, 2, [255, 34, 34, 191]); // tile (1, 0): dark
+        put(&mut f, 3, 3, [255, 34, 34, 191]); // light
+        put(&mut f, 100, 100, [1, 2, 3, 255]); // opaque: untouched
+        let g = flatten_on_tiles(&f);
+        assert_eq!(at(&g, 2, 2), [187, 187, 242, 255]);
+        assert_eq!(at(&g, 3, 3), [251, 85, 85, 255]);
+        assert_eq!(at(&g, 20, 2), [247, 81, 81, 255]);
+        assert_eq!(at(&g, 130, 90), [175, 175, 230, 255]);
+        assert_eq!(at(&g, 100, 100), [1, 2, 3, 255]);
+        // fully transparent: the squares themselves, 237 (0.93) where the square's column plus row is even and 222 (0.87) where odd
+        assert_eq!(at(&g, 15, 0), [237, 237, 237, 255]);
+        assert_eq!(at(&g, 16, 0), [222, 222, 222, 255]);
+        assert_eq!(at(&g, 0, 16), [222, 222, 222, 255]);
+        assert_eq!(at(&g, 16, 16), [237, 237, 237, 255]);
+        assert_eq!(at(&g, 299, 215), [222, 222, 222, 255], "tile (18, 13): odd");
+        assert_eq!(at(&g, 32, 15), [237, 237, 237, 255]);
+        // alpha 254 and 1 are the nearest to opaque / transparent and still blend
+        let mut h = vec![0u8; WIDTH * HEIGHT * 4];
+        put(&mut h, 0, 0, [0, 0, 0, 254]);
+        put(&mut h, 1, 0, [255, 255, 255, 1]);
+        let h = flatten_on_tiles(&h);
+        assert_eq!(at(&h, 0, 0), [1, 1, 1, 255]);
+        assert_eq!(at(&h, 1, 0), [237, 237, 237, 255]);
+    }
+
+    #[test]
+    fn compose_bridge_sees_the_picture_blended_over_the_squares() {
+        let mut f = vec![0u8; WIDTH * HEIGHT * 4];
+        for p in f.chunks_exact_mut(4) {
+            p.copy_from_slice(&[10, 20, 30, 255]);
+        }
+        f[(10 * WIDTH + 4) * 4..][..4].copy_from_slice(&[34, 34, 255, 63]);
+        // a window of exactly 3x the picture: picture pixel (4, 10) is window pixels 12..15 x 30..33
+        let out = compose_bridge(&f, 3 * WIDTH, 3 * HEIGHT, BridgeFill::Off);
+        assert_eq!(&out[(31 * 3 * WIDTH + 13) * 4..][..4], &[187, 187, 242, 255]);
+    }
+
+    #[test]
+    fn the_background_video_composite_sees_the_blended_squares_too() {
+        // an all-black opaque picture keys out entirely; one transparent pixel (tile (9, 6): odd, dark) is a grey 222 square and is drawn
+        let mut f = vec![0u8; WIDTH * HEIGHT * 4];
+        for p in f.chunks_exact_mut(4) {
+            p.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        f[(100 * WIDTH + 150) * 4..][..4].copy_from_slice(&[0, 0, 0, 0]);
+        let white = vec![255u8; 4 * 4 * 4];
+        let v = BgVideo { current: BgFrame { rgba: &white, w: 4, h: 4 }, opacity: 1.0, previous: None, previous_opacity: 0.0, mix: 1.0 };
+        let out = compose_bridge_background(&f, 3 * WIDTH, 3 * HEIGHT, &v);
+        assert_eq!(&out[(301 * 3 * WIDTH + 451) * 4..][..4], &[222, 222, 222, 255]);
+        assert_eq!(&out[(301 * 3 * WIDTH + 460) * 4..][..4], &[255, 255, 255, 255]);
     }
 
     #[test]
