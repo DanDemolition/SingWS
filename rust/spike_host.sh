@@ -66,6 +66,8 @@ P
   rm -rf "$A/Contents/PlugIns/sqldrivers"
   codesign --force --deep --sign "$IDENTITY" "$A"; codesign --verify --deep --strict "$A"
 
+  [[ $BUILD == 1 ]] && cargo build --release -p singws-mac --bin singws-mac-probe --target $T
+  PROBE="$(arch -$ARCH "$CARGO_TARGET_DIR/$T/release/singws-mac-probe" --json 2>&1 | tr '\n' ' ' | cut -c1-600)"
   H="$OUT/home-$ARCH"; rm -rf "$H"; mkdir -p "$H"; J="$OUT/selfcheck-$ARCH.json"; rm -f "$J"
   LIBMPV="$A/Contents/Frameworks/singws_libmpv.2.dylib"
   [[ -e "$LIBMPV" ]] || LIBMPV="$(ls "$A"/Contents/Frameworks/*libmpv*.dylib 2>/dev/null | head -1)"
@@ -103,7 +105,7 @@ for c in json.load(open(sys.argv[1]))["checks"]:
     print(f"- {tag} {c['name']}: {json.dumps(c['detail'])}")
 PY
     else echo "- FAIL no report written (the app did not finish; see stderr)"; fi
-    echo "- (e) singws-mac ax_is_trusted / run_applescript: pending singws-mac (stub, not run)"
+    echo "- same shim run as a plain process from this terminal (\`singws-mac-probe --json\`, responsible process = the terminal/IDE that ran this script): \`$PROBE\`"
   } >> "$REPORT"
 done
 echo "report: $REPORT"; cat "$REPORT"
