@@ -4242,6 +4242,9 @@ DEFAULTS = {
     # same roots with the Rust scan into a scratch song index and LOGS differences as [SCAN-SHADOW]; the app's own scan is always the one used).
     # "rust" is accepted but NOT wired: it behaves as "python". Read from the settings snapshot each scan; needs the singws-scan-cli helper.
     "scan_engine": "shadow",
+    # Stage E step 1 shadow: once at launch, a separate process (singws-mac-probe, Rust) reads the frontmost app, Accessibility trust and whether it can hold a
+    # keep-awake assertion, and [PLATFORM-SHADOW] logs ONLY differences from what this app's Python sees. Python's answers are always the ones used. Default off.
+    "platform_shadow": False,
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
@@ -22796,6 +22799,11 @@ class KaraokeApp(QWidget):
                 _diag(f"[KEEP-AWAKE] unavailable: {e}")
             except Exception:
                 pass
+        try:
+            import platform_shadow
+            platform_shadow.start(self.settings, getattr(self, "_mac_keep_awake", None), _diag)
+        except Exception:
+            pass
         self._remote_request_tombstones = self._load_remote_request_tombstones()
         self._deferred_remote_adds = self._load_deferred_remote_adds()
         self._host_request_sync_ops = _load_json_file(
