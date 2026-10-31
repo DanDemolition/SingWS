@@ -4241,8 +4241,8 @@ DEFAULTS = {
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
-    # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default off.
-    "waitlist_snapshot": False,
+    # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default on.
+    "waitlist_snapshot": True,
     # Read-only status snapshot for the Rust shell's Status and Diagnostics pages: whenever the header or the ETA line refreshes, write status_snapshot.json (the
     # header's connection / diagnostics words, the queue summary inputs and the pre-show check facts). The app never reads it back. Default on.
     "status_snapshot": True,

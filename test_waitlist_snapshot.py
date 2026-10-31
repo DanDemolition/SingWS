@@ -79,7 +79,7 @@ class WaitlistSnapshot(unittest.TestCase):
         return json.loads(out.stdout)
 
     def test_the_setting_is_off_by_default(self):
-        self.assertIs(self.singws.DEFAULTS.get("waitlist_snapshot"), False)
+        self.assertIs(self.singws.DEFAULTS.get("waitlist_snapshot"), True)
 
     def test_with_the_setting_off_nothing_is_written_and_no_timer_exists(self):
         app = self.make_app({}, {}, [], [], False, False, enabled=False)
