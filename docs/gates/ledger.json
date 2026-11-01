@@ -38,6 +38,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -79,6 +87,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -119,6 +135,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -173,6 +197,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -213,6 +245,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -255,6 +295,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -277,6 +325,162 @@
         }
       ]
     },
+    "START-DRIVE:confirmed": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:display": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:engine": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:performance:confirmed": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:performance:media_end": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:performance:stop": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:pick": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:plan": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:rotation": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:route": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:transport_args": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
+    "START-DRIVE:zip_args": {
+      "bad": [],
+      "clean": [
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
+        }
+      ]
+    },
     "START-SHADOW:confirmed": {
       "bad": [],
       "clean": [
@@ -285,6 +489,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -307,6 +519,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -328,6 +548,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -339,6 +567,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -352,6 +588,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -363,6 +607,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -385,6 +637,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -396,6 +656,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -418,6 +686,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -438,6 +714,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -460,6 +744,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -471,6 +763,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -505,6 +805,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -516,6 +824,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -536,6 +852,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -598,6 +922,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -639,6 +971,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -672,6 +1012,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -714,6 +1062,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -754,6 +1110,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -796,6 +1160,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -807,6 +1179,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -862,6 +1242,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -881,6 +1269,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -924,6 +1320,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -957,6 +1361,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
@@ -992,6 +1404,14 @@
           "logs": [
             "singws_2026-10-30.log"
           ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
+          ]
         }
       ]
     },
@@ -1011,6 +1431,14 @@
           "label": "show 2026-10-30 intel 1.0.2.5 (two runs, first ended in a native crash during a stall dump)",
           "logs": [
             "singws_2026-10-30.log"
+          ]
+        },
+        {
+          "date": "2026-11-01",
+          "label": "show 2026-10-31 intel 1.0.2.7 (51 songs, 21:20-01:35)",
+          "logs": [
+            "singws_2026-10-31.log",
+            "singws_2026-10-31.log.2026-10-31"
           ]
         }
       ]
