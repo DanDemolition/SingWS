@@ -51,6 +51,11 @@ logpack_bin = project_root / "native" / "singws_logpack" / "x86_64" / "singws-lo
 if logpack_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{logpack_bin}'"):
     binaries.append((str(logpack_bin), "."))
 
+# Rust host relay message builders (rust/build_relaymsg.sh). Optional: without it relay_msg_shadow is silently skipped.
+relaymsg_bin = project_root / "native" / "singws_relaymsg" / "x86_64" / "singws-relaymsg"
+if relaymsg_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{relaymsg_bin}'"):
+    binaries.append((str(relaymsg_bin), "."))
+
 for helper in (
     "media_helpers.py",
     "libmpv_media_jobs.py",
@@ -72,6 +77,7 @@ for helper in (
     "scan_shadow.py",
     "platform_shadow.py",
     "logpack_shadow.py",
+    "relay_msg_shadow.py",
     "start_shadow.py",
     "settings_shadow.py",
     "store_shadow.py",
@@ -198,6 +204,7 @@ a = Analysis(
         'scan_shadow',
         'platform_shadow',
         'logpack_shadow',
+        'relay_msg_shadow',
         'start_shadow',
         'settings_shadow',
         'store_shadow',

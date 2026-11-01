@@ -2255,6 +2255,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-relaymsg"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha1",
+]
+
+[[package]]
 name = "singws-scan"
 version = "0.1.0"
 dependencies = [
