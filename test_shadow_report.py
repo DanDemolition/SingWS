@@ -358,6 +358,19 @@ class QuietShadows(unittest.TestCase):
         self.assertIn("DISAGREED 1", v["RELAY-MSG-SHADOW"])
         self.assertIn("RAN, AGREED", v["SCAN-SHADOW"])
 
+    def test_net_slice_shadow_row_reads_each_state(self):
+        self.assertIn("NET-SLICE-SHADOW", sr.QUIET_TAGS)
+        v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=1"))
+        self.assertIn("NOTHING COMPARED YET (needs a Network Sync Check)", v["NET-SLICE-SHADOW"])
+        v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=1"), ("NET-SLICE-SHADOW", "first check clean (the Rust network slices equal the app's)"))
+        self.assertIn("RAN, AGREED", v["NET-SLICE-SHADOW"])
+        v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=0"))
+        self.assertIn("NO HELPER", v["NET-SLICE-SHADOW"])
+        v = self.verdicts(("NET-SLICE-SHADOW", "off (net_slice_shadow=false)"))
+        self.assertIn("OFF", v["NET-SLICE-SHADOW"])
+        v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=1"), ("NET-SLICE-SHADOW", "MISMATCH probe at $.result.ok: app=x rust=y"))
+        self.assertIn("DISAGREED 1", v["NET-SLICE-SHADOW"])
+
 
 if __name__ == "__main__":
     unittest.main()

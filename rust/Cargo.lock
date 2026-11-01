@@ -2222,6 +2222,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-netslice"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "singws-plan"
 version = "0.1.0"
 dependencies = [
