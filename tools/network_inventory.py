@@ -70,7 +70,13 @@ class Visitor(ast.NodeVisitor):
 
     def visit_Call(self, node):
         fn = node.func
-        if isinstance(fn, ast.Attribute) and fn.attr in METHODS and isinstance(fn.value, ast.Name) and fn.value.id == "requests":
+        # `requests.post(...)`, or `(shadow_post or requests).post(...)` where net_slice_shadow observes the very same call (it forwards it unchanged)
+        is_requests = isinstance(fn, ast.Attribute) and (
+            (isinstance(fn.value, ast.Name) and fn.value.id == "requests")
+            or (isinstance(fn.value, ast.BoolOp) and isinstance(fn.value.op, ast.Or) and len(fn.value.values) == 2
+                and isinstance(fn.value.values[0], ast.Name) and fn.value.values[0].id == "shadow_post"
+                and isinstance(fn.value.values[1], ast.Name) and fn.value.values[1].id == "requests"))
+        if is_requests and fn.attr in METHODS:
             kwargs = {k.arg: k.value for k in node.keywords if k.arg}
             url = node.args[0] if node.args else kwargs.get("url")
             scope = {}
