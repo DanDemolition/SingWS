@@ -103,7 +103,7 @@ class World:
         app.settings = {
             "requests_accepting": True, "base_url": "", "user": "venue", "api_key": "", "karaoke_normalize_enabled": False,
             "empty_rotation_slot_timeout_sec": 180, "defer_remote_adds_until_between_singers": False,
-            "shell_commands": "apply",
+            "shell_commands": "apply", "queue_state_shadow": False,  # the harness drives the Rust side itself
         }
         app.settings.update(self.settings)
         app.settings["use_waiting_for_add"] = bool(self.settings.get("waitlist", False))
