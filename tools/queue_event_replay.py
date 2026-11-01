@@ -499,6 +499,58 @@ def compare(stream: list[dict], impl_a: Implementation, impl_b: Implementation) 
     return {"equal": True, "steps": len(stream), "first_divergence": None}
 
 
+class RustImpl(Implementation):
+    """The Rust queue-state machine (rust/crates/singws-queue-state) behind a line protocol: --init <config json>, one event per line in,
+    one {"result","snapshot"} line out."""
+    name = "rust"
+
+    def __init__(self, binary=None):
+        self.binary = binary or find_rust_binary()
+        self.proc = None
+        self._last = None
+
+    def reset(self, config=None):
+        import subprocess
+        self.close()
+        self.proc = subprocess.Popen([str(self.binary), "--init", json.dumps(config or {})], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+        self._last = None
+
+    def apply(self, event):
+        self.proc.stdin.write(json.dumps(event) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            raise RuntimeError("rust queue-state helper exited")
+        self._last = json.loads(line)
+        return self._last["result"]
+
+    def snapshot(self):
+        return self._last["snapshot"]
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=5)
+            except Exception:
+                self.proc.kill()
+            self.proc = None
+
+    def __del__(self):
+        self.close()
+
+
+def find_rust_binary():
+    cands = [os.environ.get("SINGWS_QUEUE_STATE_BIN", "")]
+    for base in (os.environ.get("CARGO_TARGET_DIR", ""), str(Path.home() / ".cache" / "singws-rust-target"), str(REPO / "rust" / "target")):
+        if base:
+            cands.append(str(Path(base) / "release" / "singws-queue-state"))
+    for c in cands:
+        if c and Path(c).is_file():
+            return Path(c)
+    raise FileNotFoundError("singws-queue-state not built (cargo build --release -p singws-queue-state; or set SINGWS_QUEUE_STATE_BIN)")
+
+
 # ----------------------------------------------------------------------------------------------- commuting orders
 _COMMUTING_OPS = {"remove_song", "skip_singer", "waitlist_remove"}
 
@@ -573,12 +625,21 @@ def adversarial_cases() -> dict[str, list[dict]]:
     }
 
 
-def generate_stream(seed: int, length: int = 40) -> list[dict]:
+def uses_waitlist(stream) -> bool:
+    return any(e.get("op", "").startswith("waitlist_") or e.get("waitlist") or any(r.get("state") == "waiting" for r in e.get("requests", [])) for e in stream)
+
+
+def core_cases() -> dict[str, list[dict]]:
+    """The adversarial cases inside the Rust model's declared scope (no waitlist)."""
+    return {k: v for k, v in adversarial_cases().items() if not uses_waitlist(v)}
+
+
+def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[dict]:
     """A seeded random stream that respects the lifecycle rules: it drives a scratch world while choosing, so it only names
     entities that exist (plus a few deliberate stale references, which must be refused identically by every implementation)."""
     rng = random.Random(seed)
     world = World(queue_mode=rng.choice(["rotation", "classic"]), limit=rng.choice([2, 3, 20]))
-    wl = rng.random() < 0.5
+    wl = rng.random() < 0.5 and profile != "core"
     stream = [{"op": "config", "queue_mode": world.settings["queue_mode"], "limit_pending_max": world.settings["limit_pending_max"], "waitlist": wl}]
     world.apply(stream[0])
     next_rid = 5000
@@ -597,9 +658,9 @@ def generate_stream(seed: int, length: int = 40) -> list[dict]:
             choices += ["remove_song", "move_song", "complete"] * 2
         if singers:
             choices += ["skip", "move_singer", "advance"] * 2 + ["remove_singer"]
-        if snap["waitlist"]:
+        if snap["waitlist"] and profile != "core":
             choices += ["wl_add", "wl_remove"]
-        if snap["removed_tonight"]:
+        if snap["removed_tonight"] and profile != "core":
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
         pick = rng.choice(choices)
@@ -739,6 +800,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("corpus"); c.add_argument("--seeds", type=int, default=20); c.add_argument("--length", type=int, default=40)
     c.add_argument("--fingerprint", action="store_true", help="print only a hash of all snapshots (compare across PYTHONHASHSEED values)")
+    q = sub.add_parser("parity", help="Python vs Rust over the in-scope corpus"); q.add_argument("--seeds", type=int, default=100); q.add_argument("--length", type=int, default=40)
+    q.add_argument("--profile", default="core", choices=["core", "full"]); q.add_argument("--stream", help="also compare this JSONL stream (e.g. from extract)")
     p = sub.add_parser("play"); p.add_argument("file")
     x = sub.add_parser("extract"); x.add_argument("logs", nargs="+"); x.add_argument("--out")
     args = ap.parse_args(argv)
@@ -757,6 +820,19 @@ def main(argv=None):
             r = determinism_check(stream)
             print(f"{'ok ' if r['equal'] else 'BAD'} seed {seed} ({r['steps']} steps)")
             bad += not r["equal"]
+        return 1 if bad else 0
+    if args.cmd == "parity":
+        bad = 0
+        streams = list(core_cases().items() if args.profile == "core" else adversarial_cases().items())
+        streams += [(f"seed{i}", generate_stream(i, args.length, args.profile)) for i in range(args.seeds)]
+        if args.stream:
+            streams.append(("stream:" + args.stream, [json.loads(l) for l in Path(args.stream).read_text().splitlines() if l.strip()]))
+        for name, stream in streams:
+            r = compare(stream, PythonImpl(), RustImpl())
+            if not r["equal"]:
+                bad += 1
+                print(f"DIFF {name}: {json.dumps(r['first_divergence'], default=str)[:600]}")
+        print(f"parity: {len(streams) - bad}/{len(streams)} identical")
         return 1 if bad else 0
     if args.cmd == "play":
         stream = [json.loads(l) for l in Path(args.file).read_text().splitlines() if l.strip()]

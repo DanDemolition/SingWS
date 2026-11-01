@@ -1,0 +1,18 @@
+[package]
+name = "singws-queue-state"
+version = "0.1.0"
+edition = "2021"
+description = "Stage B: the queue/request/rotation/tombstone state machine of the host app, driven by the event schema of tools/queue_event_replay.py (docs/design/stage-b-queue-replay.md). Pure (no I/O, logical clock); reuses singws-queue for the admission rule. Shadow/parity only: the Python queue stays authoritative."
+publish = false
+
+[lib]
+name = "singws_queue_state"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-queue-state"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+singws-queue = { path = "../singws-queue" }
