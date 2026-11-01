@@ -81,6 +81,7 @@ native/singws_dsp/*/*.dylib
 # Built Rust analysis helper; produced by rust/build_analyze.sh
 native/singws_analyze/*/singws-analyze
 native/singws_mac/*/singws-mac-probe
+native/singws_logpack/*/singws-logpack
 # Built host relay message helper; produced by rust/build_relaymsg.sh
 native/singws_relaymsg/*/singws-relaymsg
 native/singws_bgm/

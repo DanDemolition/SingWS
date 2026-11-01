@@ -181,6 +181,14 @@ class InTheApp(unittest.TestCase):
         self.assertEqual(kw["days"], 7)
         self.assertAlmostEqual(kw["now"], time.time(), delta=60)
 
+    def test_quoted_secrets_are_redacted(self):
+        f = self.m._sanitize_log_text
+        self.assertEqual(f("password = 'hunter 2' next"), "password = '***' next")
+        self.assertEqual(f('{"api_key": "abc", "u": 1}'), '{"api_key": "***", "u": 1}')
+        self.assertEqual(f("secret='open\nnext"), "secret='***\nnext")
+        self.assertEqual(f('"token": 123}'), '"token": ***')
+        self.assertEqual(f("user=bob pin=1234"), "user=bob pin=***")
+
     def test_a_failing_shadow_cannot_change_or_break_the_package(self):
         with mock.patch.object(ls, "start", side_effect=RuntimeError("boom")):
             built = self.m._build_last_show_package(7)
