@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import net_slice_shadow as ns
@@ -546,7 +547,9 @@ class Launch(unittest.TestCase):
     def test_announce_says_enabled_off_and_available(self):
         lines = []
         os.environ["SINGWS_NETSLICE_BIN"] = "/nonexistent"
-        self.assertEqual(ns.announce({}, lines.append), "enabled available=0")
+        with mock.patch.object(ns, "find_helper", return_value=None):          # whatever is built under native/ on this machine
+            reset()
+            self.assertEqual(ns.announce({}, lines.append), "enabled available=0")
         reset()
         self.assertEqual(ns.announce({"net_slice_shadow": False}, lines.append), "off (net_slice_shadow=false)")
         self.assertEqual(lines[0], "[NET-SLICE-SHADOW] enabled available=0")
