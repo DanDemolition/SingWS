@@ -427,6 +427,33 @@ mod tests {
     }
 
     #[test]
+    fn app_whitespace_includes_the_ascii_separators() {
+        let mut r = good("k");
+        r["tenant"] = json!("\u{1c}wsk\u{1f}");
+        assert_eq!(build(&r)["result"]["tenant"], "wsk");
+        r["tenant"] = json!("a");
+        assert_eq!(build(&r)["result"]["tenant"], "a");
+        assert_eq!(build(&r)["calls"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn bodies_are_cut_to_300_characters_and_tilde_is_printable() {
+        let long = "x".repeat(400);
+        let calls = vec![resp(500, &long, false), resp(200, "1", false), resp(200, "", false), resp(200, "", false), resp(200, "", false)];
+        let out = build(&req("k", calls));
+        assert_eq!(out["result"]["checks"]["request_intake"]["body"].as_str().unwrap().len(), 300);
+        assert_eq!(py_repr("a~b"), "'a~b'");
+        assert_eq!(py_repr("a\u{7f}"), "'a\\x7f'");
+    }
+
+    #[test]
+    fn a_missing_now_is_unsupported() {
+        let mut r = good("k");
+        r.as_object_mut().unwrap().remove("now");
+        assert!(build(&r).get("unsupported").is_some());
+    }
+
+    #[test]
     fn repr_matches_python() {
         assert_eq!(py_repr("a'b"), "\"a'b\"");
         assert_eq!(py_repr("a'b\"c"), "'a\\'b\"c'");

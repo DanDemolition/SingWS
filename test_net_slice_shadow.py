@@ -177,11 +177,40 @@ class RealHelper(unittest.TestCase):
         reordered["result"] = dict(reversed(list(reordered["result"].items())))
         self.assertIn("<keys>", ns.compare("probe", expected, reordered))
 
+    def test_a_length_difference_and_a_non_object_answer_are_reported(self):
+        batch, _ = self.run_probe(healthy())
+        expected = batch[2]
+        shorter = json.loads(json.dumps(expected))
+        shorter["calls"].pop()
+        self.assertIn("calls.<len>", ns.compare("probe", expected, shorter))
+        self.assertIn("not an object", ns.compare("probe", expected, [1]))
+
+    def test_the_helper_runs_at_low_priority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "nice.txt"
+            helper = Path(tmp) / "singws-netslice"
+            helper.write_text(f"#!/bin/sh\ncat >/dev/null\nps -o ni= -p $$ > {out}\necho '[{{\"unsupported\": \"x\"}}]'\n")
+            helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
+            batch, _ = self.run_probe(healthy())
+            ns.run_shadow([batch], self.lines.append, helper)
+            self.assertGreaterEqual(int(out.read_text().strip()), 10)
+
+    def test_logging_stops_after_max_logged_distinct_differences(self):
+        batch, _ = self.run_probe(healthy())
+        name, req, expected = batch
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(ns.MAX_LOGGED + 5):
+                wrong = json.loads(json.dumps(expected))
+                wrong["result"]["message"] = "x" * (i + 1)
+                ns.run_shadow([batch], self.lines.append, fake_helper(tmp, [wrong]))
+        self.assertEqual(len(self.lines), ns.MAX_LOGGED + 1)
+        self.assertIn("suppressed", self.lines[-1])
+
     def test_unsupported_and_bad_helpers_are_skipped(self):
         batch, _ = self.run_probe(healthy())
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(ns.run_shadow([batch], self.lines.append, fake_helper(tmp, [{"unsupported": "x"}])), "clean")
-            self.assertEqual(ns.run_shadow([batch], self.lines.append, fake_helper(tmp, [], 3)), "skipped")
+            self.assertEqual(ns.run_shadow([batch], self.lines.append, fake_helper(tmp, [{"unsupported": "x"}], 3)), "skipped")
             self.assertEqual(ns.run_shadow([batch], self.lines.append, fake_helper(tmp, [1, 2])), "skipped")
         self.assertTrue(any(l.startswith("[NET-SLICE-SHADOW] skipped") for l in self.lines))
         self.assertEqual(ns.run_shadow([], self.lines.append), "skipped")
@@ -205,7 +234,10 @@ class RealHelper(unittest.TestCase):
             a.requests = real_requests
             a._NET_SLICE_SHADOW_ON = False
         self.assertEqual(results[0], results[1])
-        self.assertEqual(len(submitted), 1)           # only the shadow-on call was handed over
+        self.assertIsInstance(results[1], dict)
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(len(submitted[0][0][1]["calls"]), 5)           # the recorder really was the requests module of the probe
+        self.assertEqual(submitted[0][0][2]["result"], results[1])      # and the app's own result is what the shadow compares           # only the shadow-on call was handed over
         self.assertEqual(submitted[0][0][0], "probe")
 
     def test_an_exception_in_the_probe_still_propagates_with_the_shadow_on(self):

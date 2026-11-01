@@ -82,13 +82,13 @@ class FakeRequests:
         raise AssertionError("unexpected url")
 
 
-BODIES = ["", "0", "1", " 1\n", "1\r\n", "01", "2", "{}", "<html>it's \"down\"</html>", "x" * 400, "tab\there", "ctl\x01\x7f", "back\\slash", "q'q", 'q"q', "'\"", "aé"]
+BODIES = ["", "0", "1", " 1\n", "1\r\n", "01", "2", "{}", "<html>it's \"down\"</html>", "x" * 400, "tab\there", "ctl\x01\x7f", "tilde~brace}", "\x1c1\x1f", "back\\slash", "q'q", 'q"q', "'\"", "aé"]
 STATUSES = [200, 200, 200, 201, 204, 301, 400, 401, 403, 404, 405, 500, 502, None]
 JSON_MSGS = ["Expecting value: line 1 column 1 (char 0)", "x", "", "bad 'quote' \"d\""]
 EXC = [lambda: EX.Timeout("slow"), lambda: EX.ConnectTimeout("ct"), lambda: EX.ReadTimeout("rt"), lambda: EX.ConnectionError("refused"),
        lambda: ValueError("bad value"), lambda: RuntimeError(""), lambda: OSError("os trouble"), lambda: EX.SSLError("tls")]
 BASES = ["https://example.test", "example.test", " example.test/ ", "http://x.test///", "", "   ", "ftp://x.test", "https://wskar.com", "HTTPS://Mixed.Test/path/", "beta.wskar.com/"]
-TENANTS = ["wsk", " wsk ", "", "  ", "a b", "x\ty"]
+TENANTS = ["wsk", " wsk ", "", "  ", "a b", "x\ty", "a", "\x1cwsk\x1f"]
 KEYS = ["", "k", " k ", "  ", "sec ret"]
 TIMEOUTS = [0, 0.3, 1, 3.0, 3, 4.5, 6.0, 10.5, 25]
 
