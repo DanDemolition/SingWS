@@ -155,3 +155,68 @@ class KaraokeVoiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(LIB_OK and getattr(rbe._load() if LIB_OK else None, "singws_bgm_karaoke_resync_info", None) is not None,
+                     "Rust BGM library with karaoke_resync_info not built")
+class ResyncDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="singws-kv-")
+        self.engine = rbe.RustBackgroundEngine(headless=True, sample_rate=RATE)
+        self.k = RustKaraokeVoice(self.engine)
+        self.song = tone_file(self.dir, "song.wav", 440.0, 0.3, 20.0)
+
+    def tearDown(self):
+        self.engine.close()
+
+    def _ready(self):
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            self.engine.render(480)
+            if self.k.is_ready():
+                return
+            time.sleep(0.005)
+
+    def test_a_fresh_song_reports_nothing(self):
+        self.k.load(self.song, paused=False)
+        self._ready()
+        self.engine.render(480)
+        self.assertEqual(self.k.resync_info()[:2], (0, 0))
+
+    def test_a_mid_song_disagreement_is_resynced_and_reported(self):
+        self.k.load(self.song, paused=False)
+        self._ready()
+        self.engine.render(RATE // 2)
+        here = self.k.position_seconds()
+        self.k.slave_to(here + 4.0, 1.0)             # the picture says the song is 4 s further on
+        for _ in range(20):
+            self.engine.render(480)
+        resyncs, guarded, frm, to, master, kind = self.k.resync_info()
+        self.assertEqual((resyncs, guarded, kind), (1, 0, 0))
+        self.assertGreater(to - frm, 3.0)
+
+    def test_near_the_end_a_disagreement_is_held_back_and_reported_once(self):
+        self.k.load(self.song, paused=False)
+        self._ready()
+        self.k.seek_seconds(18.6)
+        self._ready()
+        self.k.slave_to(5.0, 1.0)                    # the picture's clock has gone back to 5 s
+        for _ in range(40):
+            self.engine.render(480)
+        resyncs, guarded, frm, to, master, kind = self.k.resync_info()
+        self.assertEqual((resyncs, guarded, kind), (0, 1, 1))
+        self.assertGreater(self.k.position_seconds(), 18.0, "it kept playing forward")
+
+    def test_loading_another_song_clears_the_counters(self):
+        self.k.load(self.song, paused=False)
+        self._ready()
+        self.k.seek_seconds(18.6)
+        self._ready()
+        self.k.slave_to(5.0, 1.0)
+        for _ in range(10):
+            self.engine.render(480)
+        self.assertEqual(self.k.resync_info()[1], 1)
+        self.k.slave_to(0.0, 0.0)                    # a new song starts with the master paused, as the transport does
+        self.k.load(self.song, paused=False)
+        self._ready()
+        self.assertEqual(self.k.resync_info()[:2], (0, 0))

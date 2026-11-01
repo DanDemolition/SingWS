@@ -248,5 +248,60 @@ class TransportVoiceTests(unittest.TestCase):
         self.assertIn(("stop",), v.calls)
 
 
+class ResyncLogTests(unittest.TestCase):
+    """The transport says in the log when the voice re-seeked itself to the picture's clock or a guard held that back (log only)."""
+
+    class V(FakeVoice):
+        def __init__(self):
+            super().__init__()
+            self.info = (0, 0, 0.0, 0.0, 0.0, 0)
+            self.dur = 300.6
+
+        def resync_info(self): return self.info
+        def duration_seconds(self): return self.dur
+
+    def make(self):
+        v = self.V()
+        t, _p = make(v)
+        lines = []
+        t._voice_log = lines.append
+        return t, v, lines
+
+    def test_the_first_look_only_sets_the_baseline(self):
+        t, v, lines = self.make()
+        v.info = (3, 1, 10.0, 20.0, 20.0, 1)           # counters left over from earlier in the engine's life
+        t._log_voice_resyncs(v)
+        t._log_voice_resyncs(v)
+        self.assertEqual(lines, [])
+
+    def test_a_resync_is_logged_once(self):
+        t, v, lines = self.make()
+        t._log_voice_resyncs(v)                         # baseline
+        v.info = (1, 0, 12.0, 97.5, 97.0, 0)
+        t._log_voice_resyncs(v)
+        t._log_voice_resyncs(v)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("voice re-synced to the picture clock: song 12.00s -> 97.50s (picture clock 97.00s", lines[0])
+
+    def test_a_guarded_resync_is_logged_once_with_its_reason(self):
+        t, v, lines = self.make()
+        t._log_voice_resyncs(v)
+        v.info = (0, 1, 298.9, 5.0, 5.0, 1)
+        t._log_voice_resyncs(v); t._log_voice_resyncs(v)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("kept its place (close to the end of the song)", lines[0])
+        v.info = (0, 2, 100.0, 160.0, 160.0, 2)
+        t._log_voice_resyncs(v)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("the picture clock jumped and did not stay", lines[1])
+
+    def test_a_voice_without_the_diagnostics_is_silent(self):
+        t, _p = make(FakeVoice())
+        lines = []
+        t._voice_log = lines.append
+        t._log_voice_resyncs(t._voice)
+        self.assertEqual(lines, [])
+
+
 if __name__ == "__main__":
     unittest.main()

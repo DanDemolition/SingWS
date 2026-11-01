@@ -91,6 +91,7 @@ class MpvKaraokeTransport(QObject):
         """Use the Rust karaoke voice for the SOUND of this song (call before start()). The picture stays on mpv."""
         self._voice = voice
         self._voice_log = log or print
+        self._voice_resync_seen = None
 
     def voice_active(self) -> bool:
         return self._voice is not None
@@ -347,6 +348,28 @@ class MpvKaraokeTransport(QObject):
         try:
             playing = bool(self.plugin.isPlaying())
             voice.slave_to(self.position_seconds(), self._tempo_ratio if playing else 0.0)
+        except Exception:
+            pass
+        self._log_voice_resyncs(voice)
+
+    def _log_voice_resyncs(self, voice):
+        """Say in the log whenever the voice re-seeked itself to the picture's clock, or a guard held that back (log only, never acts)."""
+        try:
+            info = voice.resync_info() if hasattr(voice, "resync_info") else None
+            if not info:
+                return
+            resyncs, guarded, here, target, master, kind = info
+            seen = getattr(self, "_voice_resync_seen", None)
+            if seen is None:                       # first look at this song: remember where the counters are, say nothing
+                self._voice_resync_seen = (resyncs, guarded)
+                return
+            song = float(voice.duration_seconds()) if hasattr(voice, "duration_seconds") else 0.0
+            if resyncs != seen[0] and kind == 0:
+                self._voice_log(f"[KARAOKE-RUST] voice re-synced to the picture clock: song {here:.2f}s -> {target:.2f}s (picture clock {master:.2f}s, song length {song:.1f}s)")
+            elif guarded != seen[1] and kind in (1, 2):
+                why = "close to the end of the song" if kind == 1 else "the picture clock jumped and did not stay"
+                self._voice_log(f"[KARAOKE-RUST] voice kept its place ({why}): song {here:.2f}s, picture clock {master:.2f}s, song length {song:.1f}s")
+            self._voice_resync_seen = (resyncs, guarded)
         except Exception:
             pass
 

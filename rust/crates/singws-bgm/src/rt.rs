@@ -136,6 +136,11 @@ pub struct Snapshot {
     pub karaoke_flags: AtomicU32,
     pub karaoke_volume: AtomicU32,
     pub karaoke_pending_frames: AtomicU64,
+    /// Karaoke voice follow-the-picture diagnostics (log only): hard resyncs, resyncs a guard held back, and the last event
+    /// [voice position, target, master clock, kind] as f32 bits (kind 0 resynced, 1 held back near the end, 2 held back: clock jump not confirmed).
+    pub karaoke_resyncs: AtomicU32,
+    pub karaoke_guarded: AtomicU32,
+    pub karaoke_last_event: [AtomicU32; 4],
 }
 
 impl Snapshot {
@@ -158,6 +163,9 @@ impl Snapshot {
             karaoke_flags: AtomicU32::new(0),
             karaoke_volume: AtomicU32::new(1.0f32.to_bits()),
             karaoke_pending_frames: AtomicU64::new(0),
+            karaoke_resyncs: AtomicU32::new(0),
+            karaoke_guarded: AtomicU32::new(0),
+            karaoke_last_event: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
         }
     }
     fn f(&self, a: &AtomicU32) -> f32 {
@@ -374,6 +382,12 @@ impl RtEngine {
         s.karaoke_duration_s.store(k.duration_s().to_bits(), Ordering::Relaxed);
         s.karaoke_volume.store(k.volume_now().to_bits(), Ordering::Relaxed);
         s.karaoke_pending_frames.store(k.pending_frames, Ordering::Relaxed);
+        let (resyncs, guarded, last) = k.resync_info();
+        s.karaoke_resyncs.store(resyncs, Ordering::Relaxed);
+        s.karaoke_guarded.store(guarded, Ordering::Relaxed);
+        for (slot, v) in s.karaoke_last_event.iter().zip(last) {
+            slot.store(v.to_bits(), Ordering::Relaxed);
+        }
         let mut kf = 0;
         if k.has_song() {
             kf |= KFLAG_LOADED;

@@ -35,6 +35,13 @@ const TRIM_WINDOW_S: f64 = 1.5;
 /// For an error above this (seconds), e.g. right after a tempo change, the trim may go up to `MAX_TRIM_BIG` for a short while.
 const BIG_ERR: f64 = 0.05;
 const MAX_TRIM_BIG: f64 = 0.10;
+/// No hard resync this close to the end of the song (seconds of song left in the source): a seek there gains nothing, and if the master clock
+/// has gone odd at the end of the picture (a CDG's graphics end, mpv's end of file) it would replay a stretch of earlier audio until the app stops the song.
+const END_GUARD_S: f64 = 2.0;
+/// A disagreement larger than this is more likely a hiccup of the master clock than a voice that really fell behind: it must persist this long
+/// (`JUMP_CONFIRM_S`) before the voice seeks to it.
+const JUMP_ERR: f64 = 5.0;
+const JUMP_CONFIRM_S: f64 = 1.5;
 
 /// The host's karaoke volume goes up to 2.0 (a boost), unlike the music's 0..1.
 fn clamp_karaoke_volume(v: f32) -> f32 {
@@ -89,6 +96,14 @@ pub struct KaraokeVoice {
     /// Output latency of the sound card in seconds: the mix runs this far AHEAD of what is heard, so the voice aims that far behind.
     latency_s: f64,
     last_resync: Option<Instant>,
+    /// When a disagreement larger than `JUMP_ERR` was first seen (it is only acted on once it has lasted `JUMP_CONFIRM_S`).
+    jump_since: Option<Instant>,
+    /// Diagnostics for the control side (log only): hard resyncs done, resyncs the guards held back (one per episode), and the last event as
+    /// [voice position, target, master clock, kind] with kind 0 = resynced, 1 = held back near the end, 2 = held back, clock jump not confirmed.
+    resyncs: u32,
+    guarded: u32,
+    guard_kind: u8,
+    last_event: [f32; 4],
     source_pending: bool,
     /// Frames of silence produced while the source could not deliver yet (a seek in progress).
     pub pending_frames: u64,
@@ -127,6 +142,11 @@ impl KaraokeVoice {
             cur_speed: 1.0,
             latency_s: 0.0,
             last_resync: None,
+            jump_since: None,
+            resyncs: 0,
+            guarded: 0,
+            guard_kind: 0,
+            last_event: [0.0; 4],
             source_pending: false,
             pending_frames: 0,
             underrun_frames: 0,
@@ -156,6 +176,12 @@ impl KaraokeVoice {
         self.reset_stream(0);
         self.playing = !paused;
         self.paused = paused;
+        // the follow-the-picture diagnostics describe THIS song
+        self.resyncs = 0;
+        self.guarded = 0;
+        self.guard_kind = 0;
+        self.jump_since = None;
+        self.last_event = [0.0; 4];
         old
     }
 
@@ -322,18 +348,55 @@ impl KaraokeVoice {
         let aim = expected + self.latency_s * c.rate;
         let err = self.audible_position_s() as f64 - aim; // + : this voice is ahead of the picture
         if err.abs() > RESYNC_ERR {
+            let here = self.audible_position_s();
+            // Guard 1: near the end of the song a seek only replays earlier audio. Hold back and let the song finish.
+            if let Some(len) = self.len_frames {
+                let left = len.saturating_sub(self.in_pos) as f64 / self.rate as f64;
+                if self.eos || left < END_GUARD_S {
+                    self.hold_back(1, [here, aim as f32, expected as f32, 1.0]);
+                    return;
+                }
+            }
+            // Guard 2: a very large disagreement is probably the master clock hiccuping. Act on it only if it lasts.
+            if err.abs() > JUMP_ERR {
+                let since = *self.jump_since.get_or_insert(now);
+                if now.saturating_duration_since(since).as_secs_f64() < JUMP_CONFIRM_S {
+                    self.hold_back(2, [here, aim as f32, expected as f32, 2.0]);
+                    return;
+                }
+            }
+            self.guard_kind = 0;
             let allowed = self.last_resync.map(|t| now.saturating_duration_since(t) > Duration::from_millis(800)).unwrap_or(true);
             if allowed {
                 self.last_resync = Some(now);
+                self.resyncs = self.resyncs.wrapping_add(1);
+                self.last_event = [here, aim as f32, expected as f32, 0.0];
+                self.jump_since = None;
                 self.seek_seconds(aim.max(0.0) as f32);
                 self.trim = 0.0;
             }
             return;
         }
+        self.jump_since = None;
+        self.guard_kind = 0;
         // authority grows with the error: a hair for a few milliseconds, more right after a tempo change (the picture's clock hiccups)
         let limit = if err.abs() > BIG_ERR { (MAX_TRIM + err.abs() * 0.6).min(MAX_TRIM_BIG) } else { MAX_TRIM };
         let want = (-err / TRIM_WINDOW_S).clamp(-limit, limit);
         self.trim += (want - self.trim) * 0.05; // smooth: no audible wobble
+    }
+
+    /// A resync the guards declined: counted once per episode (a new kind, or after the clocks agreed again), never per block.
+    fn hold_back(&mut self, kind: u8, event: [f32; 4]) {
+        if self.guard_kind != kind {
+            self.guard_kind = kind;
+            self.guarded = self.guarded.wrapping_add(1);
+            self.last_event = event;
+        }
+    }
+
+    /// (hard resyncs done, resyncs held back by a guard, the last event [voice position, target, master clock, kind]) for the log.
+    pub fn resync_info(&self) -> (u32, u32, [f32; 4]) {
+        (self.resyncs, self.guarded, self.last_event)
     }
 
     pub fn mix_into_at(&mut self, out: &mut [f32], now: Instant) {
@@ -633,6 +696,52 @@ mod tests {
         let err = v.audible_position_s() as f64 - (100.0 + 2.0);
         assert!(err.abs() < 0.3, "after the jump the voice is {err:.3} s off");
         assert!(v.last_resync.is_some());
+    }
+
+    #[test]
+    fn a_master_clock_that_goes_odd_near_the_end_does_not_make_the_voice_replay_earlier_audio() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.load(Box::new(Song::new(440.0, 20.0)), 1.0, false, Some(1.0));
+        let t = run_slaved(&mut v, 18.5, base, 0.0, |t| t, 1.0);   // 1.5 s of song left
+        assert_eq!(v.resync_info().0, 0);
+        // the picture's clock falls back to 5 s (the sort of thing a CDG's end of graphics can do)
+        let t = run_slaved(&mut v, 1.0, base, t, |_| 5.0, 1.0);
+        let (resyncs, guarded, last) = v.resync_info();
+        assert_eq!(resyncs, 0, "no seek back");
+        assert_eq!(guarded, 1, "held back once for the whole episode");
+        assert_eq!(last[3], 1.0, "recorded as held back near the end");
+        assert!(v.audible_position_s() > 18.0, "the voice kept playing forward, at {}", v.audible_position_s());
+        let _ = t;
+    }
+
+    #[test]
+    fn a_short_hiccup_of_a_huge_clock_error_is_not_acted_on() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.load(Box::new(Song::new(440.0, 300.0)), 1.0, false, Some(1.0));
+        let t = run_slaved(&mut v, 3.0, base, 0.0, |t| t, 1.0);
+        let t = run_slaved(&mut v, 1.0, base, t, |x| x + 60.0, 1.0);   // the clock is 60 s off for one second...
+        let t = run_slaved(&mut v, 2.0, base, t, |x| x, 1.0);          // ...and comes back
+        let (resyncs, guarded, last) = v.resync_info();
+        assert_eq!(resyncs, 0, "a hiccup shorter than the confirmation time must not move the voice");
+        assert_eq!(guarded, 1);
+        assert_eq!(last[3], 2.0);
+        assert!((v.audible_position_s() as f64 - (t - 0.0)).abs() < 0.5, "still on the song's own timeline");
+    }
+
+    #[test]
+    fn a_moderate_error_in_mid_song_still_resyncs_at_once_and_is_recorded() {
+        let base = Instant::now();
+        let (mut v, _h) = KaraokeVoice::new(RATE);
+        v.load(Box::new(Song::new(440.0, 300.0)), 1.0, false, Some(1.0));
+        let t = run_slaved(&mut v, 3.0, base, 0.0, |t| t, 1.0);
+        let _ = run_slaved(&mut v, 1.0, base, t, |x| x + 1.5, 1.0);   // the master says the song is 1.5 s further on
+        let (resyncs, guarded, last) = v.resync_info();
+        assert_eq!(resyncs, 1);
+        assert_eq!(guarded, 0);
+        assert_eq!(last[3], 0.0);
+        assert!((last[1] - last[0] - 1.5).abs() < 0.3, "from {} to {}", last[0], last[1]);
     }
 
     #[test]

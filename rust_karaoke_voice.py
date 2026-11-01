@@ -149,6 +149,18 @@ class RustKaraokeVoice:
             self._lib.singws_bgm_karaoke_times(self._h, ctypes.byref(pos), ctypes.byref(dur))
         return float(pos.value), float(dur.value)
 
+    def resync_info(self):
+        """How the voice has followed the picture's clock, for the log: (hard resyncs, resyncs held back by a guard, voice position, target,
+        master clock, kind) with kind 0 = resynced, 1 = held back near the end, 2 = held back (a clock jump that did not last).
+        None when the library predates this or the voice is gone."""
+        fn = getattr(self._lib, "singws_bgm_karaoke_resync_info", None) if self._ok() else None
+        if fn is None or not getattr(fn, "argtypes", None):
+            return None
+        counts = (ctypes.c_uint32 * 2)()
+        last = (ctypes.c_float * 4)()
+        fn(self._h, counts, last)
+        return int(counts[0]), int(counts[1]), float(last[0]), float(last[1]), float(last[2]), int(round(last[3]))
+
     def position_seconds(self) -> float:
         return self.times()[0]
 

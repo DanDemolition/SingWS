@@ -168,7 +168,8 @@ def _declare(lib) -> None:
         fn.argtypes = args
         fn.restype = res
     # Symbols added after ABI 3 shipped: a library without them still works (the feature is simply unavailable).
-    for name, (args, res) in {"singws_bgm_set_fade_in_floor_db": ([V, F32], I32)}.items():
+    for name, (args, res) in {"singws_bgm_set_fade_in_floor_db": ([V, F32], I32),
+                              "singws_bgm_karaoke_resync_info": ([V, ctypes.POINTER(U32), ctypes.POINTER(F32)], None)}.items():
         fn = getattr(lib, name, None)
         if fn is not None:
             fn.argtypes = args

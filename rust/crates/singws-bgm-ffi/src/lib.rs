@@ -663,6 +663,31 @@ pub unsafe extern "C" fn singws_bgm_karaoke_times(p: *mut Sys, pos: *mut f32, du
     }
 }
 
+/// How the karaoke voice has followed the picture's clock (diagnostics for the log): `counts` = [hard resyncs, resyncs a guard held back] (2 u32),
+/// `last` = the last event [voice position, target, master clock, kind] (4 f32; kind 0 resynced, 1 held back near the end, 2 held back: clock jump not confirmed).
+///
+/// # Safety
+/// `p` is a live handle; `counts` and `last` are writable (or NULL).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn singws_bgm_karaoke_resync_info(p: *mut Sys, counts: *mut u32, last: *mut f32) {
+    // SAFETY: contract above.
+    if let Some(s) = unsafe { sys(p) } {
+        let snap = &s.0.control.snapshot;
+        // SAFETY: the caller supplies writable pointers (2 u32 and 4 f32).
+        unsafe {
+            if !counts.is_null() {
+                *counts = snap.karaoke_resyncs.load(Relaxed);
+                *counts.add(1) = snap.karaoke_guarded.load(Relaxed);
+            }
+            if !last.is_null() {
+                for i in 0..4 {
+                    *last.add(i) = f32::from_bits(snap.karaoke_last_event[i].load(Relaxed));
+                }
+            }
+        }
+    }
+}
+
 /// `KFLAG_*` bits: loaded 1, playing 2, paused 4, finished 8.
 ///
 /// # Safety
