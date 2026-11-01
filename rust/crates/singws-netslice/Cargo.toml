@@ -1,0 +1,17 @@
+[package]
+name = "singws-netslice"
+version = "0.1.0"
+edition = "2021"
+description = "Stage E step 4: Rust counterparts of small network decisions the app builds in Python (the sync probe's result, ...). Pure functions plus a JSON CLI; the app runs it only as a log-only shadow (setting net_slice_shadow) and never uses its answer. Never opens a socket."
+publish = false
+
+[lib]
+name = "singws_netslice"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-netslice"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }

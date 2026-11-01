@@ -451,7 +451,12 @@ impl Player {
         // With views the picture path is live (vo=libmpv + the renderer); without them the core runs headless (vo=null).
         let renderer = match views {
             Some((out, prev)) if out != 0 && prev != 0 => Some(Renderer::new(Arc::clone(&flags), out, prev)?),
-            _ => None,
+            Some((out, prev)) => {
+                // Both views are required for the picture path; one alone used to leave the core silently headless (vo=null, nothing ever presented).
+                bridge_log!("[bridge] NO PICTURE: output_view={} preview_view={}; both must be non-zero, running headless (vo=null)", out, prev);
+                None
+            }
+            None => None,
         };
         let inner = Arc::new(Inner {
             api,

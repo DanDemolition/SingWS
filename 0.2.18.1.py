@@ -3315,7 +3315,40 @@ def remote_request_song_key(singer: str = "", artist: str = "", title: str = "")
     parts = [norm(singer), norm(artist), norm(title)]
     return "|".join(parts)
 
+_NET_SLICE_SHADOW_ON = False
+
+
 def probe_network_sync_status(
+    base_url: str,
+    tenant: str,
+    api_key: str = "",
+    *,
+    timeout_sec: float = 6.0,
+    requests_module=None,
+) -> dict:
+    """The sync probe. With the Stage E net_slice_shadow on, the same call is observed through a stand-in for `requests` that forwards every call
+    unchanged, and a Rust helper replays the decision log-only (net_slice_shadow.py); the dict returned is always the one computed here."""
+    rec = None
+    if _NET_SLICE_SHADOW_ON and requests_module is None:
+        try:
+            import net_slice_shadow
+            if net_slice_shadow._helper() is not None:
+                rec = net_slice_shadow.RecordingRequests(requests)
+                requests_module = rec
+        except Exception:
+            rec = None
+    result = _probe_network_sync_status_impl(base_url, tenant, api_key, timeout_sec=timeout_sec, requests_module=requests_module)
+    if rec is not None:
+        try:
+            batch = net_slice_shadow.probe_batch(base_url, tenant, api_key, timeout_sec, rec.calls, result)
+            if batch:
+                net_slice_shadow.submit([batch], _diag)
+        except Exception:
+            pass
+    return result
+
+
+def _probe_network_sync_status_impl(
     base_url: str,
     tenant: str,
     api_key: str = "",
@@ -4289,6 +4322,7 @@ DEFAULTS = {
     # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
     # is always the one sent; the relay schema, retries and connection are untouched.
     "relay_msg_shadow": True,
+    "net_slice_shadow": True,
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
@@ -22862,12 +22896,18 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
             except Exception:
                 pass
+        try:
+            import net_slice_shadow
+            global _NET_SLICE_SHADOW_ON
+            _NET_SLICE_SHADOW_ON = net_slice_shadow.enabled(self.settings)
+        except Exception:
+            pass
         self._remote_request_tombstones = self._load_remote_request_tombstones()
         self._deferred_remote_adds = self._load_deferred_remote_adds()
         self._host_request_sync_ops = _load_json_file(
@@ -42056,6 +42096,22 @@ class KaraokeApp(QWidget):
             return None, self._friendly_location_detection_error(f"Auto-detect failed: {e}")
 
     def _session_location_payload(self, allow_auto_detect: bool = True):
+        """The session-location payload. With the Stage E net_slice_shadow on, the payload is also rebuilt by a Rust helper from the settings as they are
+        after this call, log-only (net_slice_shadow.py); the value returned is always the one computed here. An exception propagates exactly as before."""
+        t_before = int(time.time())
+        payload = self._session_location_payload_impl(allow_auto_detect)
+        if _NET_SLICE_SHADOW_ON:
+            try:
+                import net_slice_shadow
+                if net_slice_shadow._helper() is not None:
+                    batch = net_slice_shadow.location_batch(dict(self.settings), payload, t_before, int(time.time()))
+                    if batch:
+                        net_slice_shadow.submit([batch], _diag)
+            except Exception:
+                pass
+        return payload
+
+    def _session_location_payload_impl(self, allow_auto_detect: bool = True):
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = (self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = (self.settings.get("api_key", "") or "").strip()
