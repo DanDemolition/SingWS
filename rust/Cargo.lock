@@ -2245,6 +2245,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-queue-state"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "singws-queue",
+]
+
+[[package]]
 name = "singws-relay"
 version = "0.1.0"
 dependencies = [
