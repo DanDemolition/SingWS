@@ -263,6 +263,7 @@ def main(argv=None):
         joined.write_text(g.text(), encoding="utf-8")
         reports = sr.analyse(sr.read_lines([str(joined)], last_launch_only=not args.all), settings)
         print(sr.render(reports))
+        print(sr.quiet_shadows(sr.read_lines([str(joined)], last_launch_only=not args.all)))
         ll = g.text().splitlines()
         ll = ll if args.all else last_launch(ll)
         kinds = song_kinds(ll)

@@ -329,5 +329,35 @@ class RealFormatTests(unittest.TestCase):
         self.assertIn("disagreement={int(disagreed)}", app)
 
 
+
+class QuietShadows(unittest.TestCase):
+    def rows(self, *lines):
+        return [("log", "21:00:00", tag, msg) for tag, msg in lines]
+
+    def verdicts(self, *lines):
+        text = sr.quiet_shadows(self.rows(*lines))
+        return {t: next(l for l in text.splitlines() if l.strip().startswith(t)) for t in sr.QUIET_TAGS}
+
+    def test_each_state_reads_differently(self):
+        v = self.verdicts(("PLATFORM-SHADOW", "enabled available=1"), ("PLATFORM-SHADOW", "first check clean (x)"),
+                          ("LOGPACK-SHADOW", "enabled available=1"),
+                          ("RELAY-MSG-SHADOW", "enabled available=0"),
+                          ("SCAN-SHADOW", "engine=python"))
+        self.assertIn("RAN, AGREED", v["PLATFORM-SHADOW"])
+        self.assertIn("NOTHING COMPARED YET", v["LOGPACK-SHADOW"])
+        self.assertIn("NO HELPER", v["RELAY-MSG-SHADOW"])
+        self.assertIn("OFF", v["SCAN-SHADOW"])
+
+    def test_old_builds_have_no_launch_line_and_say_so(self):
+        v = self.verdicts()
+        self.assertTrue(all("NO LAUNCH LINE" in line for line in v.values()))
+
+    def test_a_mismatch_and_a_scan_clean_line_are_counted(self):
+        v = self.verdicts(("RELAY-MSG-SHADOW", "enabled available=1"), ("RELAY-MSG-SHADOW", "MISMATCH queue at x"),
+                          ("SCAN-SHADOW", "engine=shadow available=1"), ("SCAN-SHADOW", "clean: 5 tracks identical; index rows=5"))
+        self.assertIn("DISAGREED 1", v["RELAY-MSG-SHADOW"])
+        self.assertIn("RAN, AGREED", v["SCAN-SHADOW"])
+
+
 if __name__ == "__main__":
     unittest.main()

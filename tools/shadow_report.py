@@ -344,6 +344,47 @@ def exit_status(reports, require_all):
     return 0
 
 
+QUIET_TAGS = ("PLATFORM-SHADOW", "LOGPACK-SHADOW", "RELAY-MSG-SHADOW", "SCAN-SHADOW")
+
+
+def quiet_shadows(rows) -> str:
+    """The log-only helper shadows say nothing while everything agrees, so each logs one line per launch (on/off and whether its helper exists)
+    and one when its first check agreed. This turns those lines into one row each, so 'ran and agreed' is told apart from 'never ran'."""
+    info = {t: {"launch": "", "clean": False, "mismatch": 0, "skipped": 0} for t in QUIET_TAGS}
+    for _path, _time, tag, msg in rows:
+        d = info.get(tag)
+        if d is None:
+            continue
+        if msg.startswith(("enabled", "off", "engine=")):
+            d["launch"] = msg
+        elif msg.startswith("first check clean") or msg.startswith("clean:"):
+            d["clean"] = True
+        elif msg.startswith("MISMATCH"):
+            d["mismatch"] += 1
+        elif msg.startswith("skipped"):
+            d["skipped"] += 1
+    out = ["QUIET SHADOWS (log only; Python's answer is always the one used)"]
+    for tag in QUIET_TAGS:
+        d = info[tag]
+        if not d["launch"]:
+            verdict = "NO LAUNCH LINE (build older than 1.0.2.8, or the shadow never started)"
+        elif d["mismatch"]:
+            verdict = f"DISAGREED {d['mismatch']} time(s)"
+        elif d["launch"].startswith("off"):
+            verdict = "OFF"
+        elif "available=0" in d["launch"]:
+            verdict = "NO HELPER (the Rust helper was not found, so nothing was compared)"
+        elif d["clean"]:
+            verdict = "RAN, AGREED"
+        elif d["launch"].startswith("engine=python"):
+            verdict = "OFF (engine=python)"
+        else:
+            verdict = "ENABLED, NOTHING COMPARED YET" + (" (needs a full library scan)" if tag == "SCAN-SHADOW" else " (needs a bug report / publish)" if tag == "LOGPACK-SHADOW" else "")
+        extra = f"  [{d['skipped']} skipped]" if d["skipped"] else ""
+        out.append(f"  {tag:<17} {verdict}{extra}   ({d['launch'] or '-'})")
+    return "\n".join(out)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("logs", nargs="*", help="log files (default: the newest ~/SingWS/logs/singws_*.log)")
@@ -367,6 +408,7 @@ def main(argv=None):
     reports = analyse(read_lines(paths, last_launch_only=not args.all), settings)
     print(f"logs: {', '.join(os.path.basename(p) for p in paths)}  ({'all launches' if args.all else 'last app launch only'})")
     print(render(reports))
+    print(quiet_shadows(read_lines(paths, last_launch_only=not args.all)))
     worst = [r for r in reports if r.verdict in ("DISAGREED", "ERROR")]
     if worst:
         print(f"RESULT: {len(worst)} shadow(s) need attention: {', '.join(r.name for r in worst)}")
