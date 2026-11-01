@@ -371,6 +371,174 @@ class LocationReal(unittest.TestCase):
         self.assertEqual(submitted[0][0][1]["settings"]["session_location_session_id"], stubs[1][1]["session_id"])   # the id the call saved, not the blank one
 
 
+class PostFake:
+    """`requests.post` stand-in: remembers what it was given, answers with a canned JSON object."""
+    def __init__(self, answer=None, exc=None):
+        self.answer, self.exc, self.seen = answer or {"success": True, "count": 1, "ok": True, "stored": True, "emailed": True}, exc, []
+
+    def post(self, url, data=None, files=None, headers=None, timeout=None):
+        self.seen.append((url, data, files, headers, timeout))
+        if self.exc:
+            raise self.exc
+        ans = self.answer
+        return type("R", (), {"status_code": 200, "text": "", "json": lambda self: ans})()
+
+
+class RecordingPostTests(unittest.TestCase):
+    def test_forwards_the_call_and_the_answer_and_describes_files(self):
+        fake = PostFake()
+        rec = ns.RecordingPost(fake)
+        with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as t:
+            t.write("Artist,Title\r\nB\u00e9,x\r\n".encode("utf-8"))
+        try:
+            with open(t.name, "rb") as f:
+                resp = rec.post("http://x/u", data={"a": "1"}, files={"songbook_csv": ("songbook.csv", f, "text/csv"), "z": ("z.zip", b"\x00\x01", "application/zip")},
+                                headers={"h": "v"}, timeout=7)
+                self.assertEqual(f.read(5), b"Artis")       # the app's own handle was not touched
+        finally:
+            os.unlink(t.name)
+        self.assertEqual(resp.json()["count"], 1)
+        self.assertEqual(fake.seen[0][0], "http://x/u")
+        self.assertEqual(fake.seen[0][3], {"h": "v"})
+        c = rec.calls[0]
+        self.assertEqual(c["files"]["songbook_csv"], ["songbook.csv", "Artist,Title\r\nB\u00e9,x\r\n", "text/csv"])
+        self.assertEqual(c["files"]["z"][1], {"len": 2, "sha256": __import__("hashlib").sha256(b"\x00\x01").hexdigest()})
+        self.assertEqual((c["data"], c["headers"], c["timeout"]), ({"a": "1"}, {"h": "v"}, 7))
+
+    def test_an_exception_propagates(self):
+        rec = ns.RecordingPost(PostFake(exc=OSError("down")))
+        with self.assertRaises(OSError):
+            rec.post("http://x/", data={}, files={}, headers={}, timeout=1)
+        self.assertEqual(len(rec.calls), 1)
+
+    def test_other_attributes_are_the_real_modules(self):
+        fake = PostFake()
+        fake.marker = 5
+        self.assertEqual(ns.RecordingPost(fake).marker, 5)
+
+
+class UploadBatches(unittest.TestCase):
+    def test_songbook_batch_declines_odd_tracks_and_wrong_call_counts(self):
+        call = {"url": "u", "data": {}, "files": {}, "headers": {}, "timeout": 180}
+        self.assertIsNone(ns.songbook_batch("b", "t", "k", [{"artist": None, "title": "x"}], [call]))
+        self.assertIsNone(ns.songbook_batch("b", "t", "k", [], []))
+        self.assertIsNone(ns.songbook_batch("b", "t", "k", [], [call, call]))
+        self.assertIsNone(ns.songbook_batch(None, "t", "k", [], [call]))
+        self.assertIsNone(ns.songbook_batch("b", "t", "k", [], [dict(call, unreadable=True)]))
+        self.assertIsNone(ns.songbook_batch("b", "t", "k", [], [dict(call, positional=True)]))
+        self.assertIsNotNone(ns.songbook_batch("b", "t", "k", [{"artist": "a", "title": "t"}, "x", {"title": "only"}], [call]))
+
+    def test_songbook_fold_table_covers_every_string_with_python_semantics(self):
+        call = {"url": "u", "data": {}, "files": {}, "headers": {}, "timeout": 180}
+        req = ns.songbook_batch("b", "t", "k", [{"artist": " \u0130A ", "title": "\u00df"}, {"title": "x"}], [call])[1]
+        self.assertEqual(req["fold"][" \u0130A "], [" \u0130A ".strip(), " \u0130A ".strip().lower()])
+        self.assertEqual(req["fold"]["\u00df"], ["\u00df", "\u00df".lower()])
+        self.assertIn("", req["fold"])
+        self.assertEqual(req["tracks"], [{"artist": " \u0130A ", "title": "\u00df"}, {"title": "x"}])
+
+    def test_support_log_batch_declines_non_text_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "p.zip"
+            pkg.write_bytes(b"abc")
+            call = {"url": "u", "data": {"reason": "r", "app_version": "v", "platform": "p", "session_window": "w"}, "files": {"logs": ["p.zip", {"len": 3, "sha256": "x"}, "application/zip"]},
+                    "headers": {}, "timeout": 30}
+            self.assertIsNotNone(ns.support_log_batch({"base_url": "b", "user": "u", "api_key": "k"}, pkg, [call]))
+            self.assertIsNone(ns.support_log_batch({"base_url": 5}, pkg, [call]))
+            self.assertIsNone(ns.support_log_batch({}, pkg, []))
+            req = ns.support_log_batch({"base_url": "b", "extra": "no"}, pkg, [call])[1]
+            self.assertEqual(req["package"]["len"], 3)
+            self.assertNotIn("extra", req["settings"])
+
+
+@unittest.skipUnless(os.path.exists(CLI), "singws-netslice not built (cd rust && cargo build --release -p singws-netslice)")
+class UploadsReal(unittest.TestCase):
+    def setUp(self):
+        reset()
+        os.environ["SINGWS_NETSLICE_BIN"] = CLI
+        self.lines = []
+
+    def songbook(self, tracks, on=True, key=SECRET, fake=None):
+        a = app()
+        submitted = []
+        real_submit, real_req = ns.submit, a.requests
+        ns.submit = lambda batch, log: submitted.append(batch)
+        a.requests, a._NET_SLICE_SHADOW_ON = fake or PostFake(), on
+        try:
+            th = a.SongbookUploadThread(" example.test/ ", " wsk ", key, tracks)
+            done = []
+            th.done.connect(lambda ok, msg, n: done.append((ok, msg, n)))
+            th.run()
+        finally:
+            ns.submit, a.requests, a._NET_SLICE_SHADOW_ON = real_submit, real_req, False
+        return submitted, done
+
+    def test_songbook_upload_agrees_and_the_app_outcome_is_unchanged(self):
+        tracks = [{"artist": "ABBA", "title": "Dancing, Queen"}, {"artist": "abba", "title": "dancing, queen"}, {"artist": "Beyonc\u00e9", "title": 'Say "hi"'}, "junk", {"artist": "", "title": "x"}]
+        off, done_off = self.songbook(tracks, on=False)
+        on, done_on = self.songbook(tracks, on=True)
+        self.assertEqual(off, [])
+        self.assertEqual(done_off, done_on)
+        self.assertEqual(done_on[0][0], True)
+        self.assertEqual(len(on), 1)
+        self.assertEqual(ns.run_shadow(on[0], self.lines.append), "clean")
+
+    def test_a_wrong_songbook_is_a_mismatch_without_secrets_or_titles(self):
+        on, _ = self.songbook([{"artist": "Secret Artist", "title": "Secret Title"}])
+        name, req, expected = on[0][0]
+        wrong = json.loads(json.dumps(expected))
+        wrong["files"]["songbook_csv"][1] += "x"
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(ns.run_shadow([(name, req, wrong)], self.lines.append), "mismatch")
+        self.assertIn("MISMATCH songbook at $.files.songbook_csv[1]", self.lines[-1])
+        for secret in (SECRET, "Secret", "example.test", "wsk"):
+            self.assertNotIn(secret, self.lines[-1])
+
+    def test_an_upload_failure_still_propagates_to_the_app_with_the_shadow_on(self):
+        on, done = self.songbook([{"artist": "A", "title": "T"}], fake=PostFake(exc=OSError("down")))
+        self.assertEqual(on, [])
+        self.assertEqual(done[0][0], False)
+        self.assertIn("down", done[0][1])
+
+    def support(self, settings, on=True):
+        a = app()
+        submitted = []
+        real_submit, real_req = ns.submit, a.requests
+        ns.submit = lambda batch, log: submitted.append(batch)
+        fake = PostFake()
+        a.requests, a._NET_SLICE_SHADOW_ON = fake, on
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "logs.zip"
+            pkg.write_bytes(b"PK\x03\x04 binary \x00\xff")
+            try:
+                result = a.send_log_package_to_developer(settings, pkg, reason="manual", window="w")
+            finally:
+                ns.submit, a.requests, a._NET_SLICE_SHADOW_ON = real_submit, real_req, False
+        return submitted, result, fake
+
+    def test_support_log_upload_agrees_and_the_app_outcome_is_unchanged(self):
+        settings = {"base_url": "example.test", "user": "wsk", "api_key": SECRET}
+        off, result_off, fake_off = self.support(settings, on=False)
+        on, result_on, fake_on = self.support(settings, on=True)
+        self.assertEqual(off, [])
+        self.assertEqual(result_off, result_on)
+        self.assertEqual(fake_off.seen[0][0], fake_on.seen[0][0])
+        self.assertEqual(len(on), 1)
+        self.assertEqual(ns.run_shadow(on[0], self.lines.append), "clean")
+
+    def test_a_refused_support_log_upload_makes_no_batch(self):
+        on, result, fake = self.support({"base_url": "example.test", "user": "wsk"})
+        self.assertEqual((on, fake.seen, result[0]), ([], [], False))
+
+    def test_a_support_log_difference_never_prints_the_key(self):
+        on, _, _ = self.support({"base_url": "example.test", "user": "wsk", "api_key": SECRET})
+        name, req, expected = on[0][0]
+        wrong = json.loads(json.dumps(expected))
+        wrong["request"]["headers"]["X-API-Key"] = "other"
+        self.assertEqual(ns.run_shadow([(name, req, wrong)], self.lines.append), "mismatch")
+        self.assertIn("MISMATCH support_log at $.request.headers.X-API-Key", self.lines[-1])
+        self.assertNotIn(SECRET, self.lines[-1])
+
+
 class Launch(unittest.TestCase):
     def setUp(self):
         reset()
@@ -393,6 +561,8 @@ class Launch(unittest.TestCase):
         src = (ROOT / "0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"net_slice_shadow": True,', src)
         self.assertIn("payload = self._session_location_payload_impl(allow_auto_detect)", src)
+        self.assertIn("resp = (shadow_post or requests).post(", src)
+        self.assertIn("response = (shadow_post or requests).post(", src)
         self.assertIn('for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow"):', src)
         self.assertIn("_NET_SLICE_SHADOW_ON = net_slice_shadow.enabled(self.settings)", src)
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):

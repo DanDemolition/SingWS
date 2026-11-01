@@ -379,7 +379,7 @@ def quiet_shadows(rows) -> str:
         elif d["launch"].startswith("engine=python"):
             verdict = "OFF (engine=python)"
         else:
-            verdict = "ENABLED, NOTHING COMPARED YET" + (" (needs a full library scan)" if tag == "SCAN-SHADOW" else " (needs a bug report / publish)" if tag == "LOGPACK-SHADOW" else " (needs a Network Sync Check)" if tag == "NET-SLICE-SHADOW" else "")
+            verdict = "ENABLED, NOTHING COMPARED YET" + (" (needs a full library scan)" if tag == "SCAN-SHADOW" else " (needs a bug report / publish)" if tag == "LOGPACK-SHADOW" else " (needs a Network Sync Check, a session-location push or an upload)" if tag == "NET-SLICE-SHADOW" else "")
         extra = f"  [{d['skipped']} skipped]" if d["skipped"] else ""
         out.append(f"  {tag:<17} {verdict}{extra}   ({d['launch'] or '-'})")
     return "\n".join(out)

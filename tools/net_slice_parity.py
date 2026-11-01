@@ -4,7 +4,9 @@
 Oracle = the app module itself. Slice 1: the REAL `_probe_network_sync_status_impl` (the body of `probe_network_sync_status`) runs against a scripted fake
 `requests` module (no socket is ever opened; no real server is contacted) that is wrapped by the PRODUCTION recorder (`net_slice_shadow.RecordingRequests`);
 the helper's request and the comparison are the PRODUCTION `probe_batch` / `compare` (key order, key set and value TYPES). The Rust side must reproduce both the
-result dict and the list of requests (url, params, headers, timeout) Python made. Slice 2: the REAL `KaraokeApp._session_location_payload_impl` runs on a stub app (scripted detection result, settings in a dict); the helper rebuilds
+result dict and the list of requests (url, params, headers, timeout) Python made. Slices 3 and 4: the REAL `SongbookUploadThread.run` and the REAL `send_log_package_to_developer` run against a fake `requests.post` (no socket) through their production hooks
+(`net_slice_shadow.RecordingPost`; the batch the hook submits is captured, then compared); the multipart body `requests` really prepares for the same arguments (random boundary
+included) must equal the bytes the Rust `multipart` op builds. Slice 2: the REAL `KaraokeApp._session_location_payload_impl` runs on a stub app (scripted detection result, settings in a dict); the helper rebuilds
 the payload from the settings AFTER the call (`net_slice_shadow.location_batch`). Corpus: handwritten cases + seeded random scenarios (--cases N).
 Needs the CLI:  cd rust && CARGO_TARGET_DIR=~/.cache/singws-rust-target-netslice cargo build --release -p singws-netslice
   ~/Documents/SingWS/.venv/bin/python tools/net_slice_parity.py [--cases N] [--seed S]       exit 1 on any difference
@@ -205,6 +207,150 @@ def loc_one(st, detect, allow, label):
         fail(f"{label}: {d}")
 
 
+class FakePost:
+    """`requests.post` stand-in: remembers the call, prepares the REAL requests multipart body for it, returns a canned JSON answer."""
+    exceptions = EX
+
+    def __init__(self):
+        self.prepared = None
+
+    def post(self, url, data=None, files=None, headers=None, timeout=None):
+        import requests as real
+        self.prepared = real.Request("POST", url, data=data, files=files, headers=headers).prepare()
+        return FakeResponse(200, "{}", True, "")
+
+
+class _Resp2(FakeResponse):
+    def json(self):
+        return {"success": True, "count": 1, "ok": True, "stored": True, "emailed": True}
+
+
+FakeResponse_json = None
+
+
+def multipart_check(fp, label):
+    """Rust `multipart` against the body requests prepared (boundary taken from its Content-Type)."""
+    prep = fp.prepared
+    boundary = prep.headers["Content-Type"].split("boundary=")[1]
+    body = prep.body if isinstance(prep.body, bytes) else prep.body.encode()
+    fields, files = [], []
+    for part in body.split(b"--" + boundary.encode())[1:-1]:
+        head, _, content = part[2:].partition(b"\r\n\r\n")
+        content = content[:-2]
+        lines = head.decode().split("\r\n")
+        name = lines[0].split('name="')[1].split('"')[0]
+        if "filename=" in lines[0]:
+            fname = lines[0].split('filename="')[1].split('"')[0]
+            ctype = lines[1].split(": ", 1)[1]
+            files.append([name, fname, ctype, content.hex()])
+        else:
+            fields.append([name, content.decode()])
+    answer = shadow.run_helper(Path(CLI), [{"op": "multipart", "boundary": boundary, "fields": fields, "files": files}])[0]
+    tally("multipart_checked")
+    if "unsupported" in answer:
+        tally("multipart_unsupported")
+        return
+    if bytes.fromhex(answer["body_hex"]) != body:
+        fail(f"{label}: multipart body differs (len {len(body)} vs {len(answer['body_hex']) // 2})")
+
+
+NAMES = ["ABBA", "abba", " ABBA ", "Beyonc\u00e9", "BEYONC\u00c9", "\u0130stanbul", "Zed", "a, b", 'q"uote', "line\nbreak", "cr\rhere", "", " ", "x" * 50, "\u00df", "SS", "tab\there", "\u00a0nb\u00a0", "Mot\u00f6rhead", "z"]
+TITLES = ["Dancing Queen", "dancing queen", "Hello, World", 'Say "hi"', "T", "", "  ", "\u00dcber", "uber", "multi\nline", "\u03a3\u03a3", "same"]
+
+
+def songbook_one(rng, label):
+    import net_slice_shadow as nss
+    tracks = []
+    for _ in range(rng.randrange(0, 12)):
+        r = rng.random()
+        if r < 0.06:
+            tracks.append("not a dict")
+            continue
+        t = {}
+        if rng.random() < 0.95:
+            t["artist"] = rng.choice(NAMES)
+        if rng.random() < 0.95:
+            t["title"] = rng.choice(TITLES)
+        if rng.random() < 0.05:
+            t["artist"] = None
+        tracks.append(t)
+    base, tenant, key = rng.choice(BASES[:6]) or "h.test", rng.choice(TENANTS), rng.choice(KEYS)
+    captured, fake = [], FakePost()
+    real_submit, real_req, real_on = nss.submit, APP.requests, APP._NET_SLICE_SHADOW_ON
+    nss.submit = lambda batch, log: captured.append(batch)
+    APP.requests, APP._NET_SLICE_SHADOW_ON = fake, True
+    try:
+        th = APP.SongbookUploadThread(base, tenant, key, tracks)
+        th.run()
+    finally:
+        nss.submit, APP.requests, APP._NET_SLICE_SHADOW_ON = real_submit, real_req, real_on
+    if fake.prepared is None:
+        tally("songbook_no_post")           # no rows from the tracks: the app reads its song index (declined by the shadow)
+        return
+    if not captured:
+        tally("songbook_declined")
+        return
+    name, req, expected = captured[0][0]
+    answer = shadow.run_helper(Path(CLI), [req])[0]
+    if "unsupported" in answer:
+        tally("songbook_unsupported")
+        if not any("\x00" in str(v) for v in tracks):
+            fail(f"{label}: unsupported: {answer['unsupported']}")
+        return
+    tally("songbook_compared")
+    d = shadow.compare(name, expected, answer)
+    if d:
+        fail(f"{label}: {d}")
+    multipart_check(fake, label)
+
+
+def support_one(rng, label):
+    import net_slice_shadow as nss
+    settings = {}
+    if rng.random() < 0.9:
+        settings["base_url"] = rng.choice(BASES[:6])
+    if rng.random() < 0.7:
+        settings["user"] = rng.choice(TENANTS)
+    if rng.random() < 0.4:
+        settings["tenant"] = rng.choice(TENANTS)
+    settings["api_key"] = rng.choice(KEYS)
+    blob = bytes(rng.randrange(256) for _ in range(rng.randrange(0, 300)))
+    d = tempfile.mkdtemp(prefix="net_slice_pkg_")
+    pkg = Path(d) / rng.choice(["logs.zip", "singws last show 2026.zip", "a.zip"])
+    pkg.write_bytes(blob)
+    captured, fake = [], FakePost()
+    real_submit, real_req, real_on = nss.submit, APP.requests, APP._NET_SLICE_SHADOW_ON
+    nss.submit = lambda batch, log: captured.append(batch)
+    APP.requests, APP._NET_SLICE_SHADOW_ON = fake, True
+    try:
+        APP.send_log_package_to_developer(settings, pkg, reason=rng.choice(["manual", "crash"]), window=rng.choice(["", "21:00-01:30"]))
+    finally:
+        nss.submit, APP.requests, APP._NET_SLICE_SHADOW_ON = real_submit, real_req, real_on
+    if fake.prepared is None:
+        # refused before any request: the Rust side must refuse the same settings
+        ans = shadow.run_helper(Path(CLI), [{"op": "support_log", "settings": {k: settings[k] for k in settings}, "reason": "manual", "app_version": "v", "platform": "p", "window": "",
+                                              "package": {"name": pkg.name, "len": len(blob), "sha256": "x"}}])[0]
+        tally("support_refused")
+        if ans.get("request", 1) is not None and "unsupported" not in ans:
+            fail(f"{label}: the app refused but Rust built a request")
+        return
+    if not captured:
+        tally("support_declined")
+        return
+    name, req, expected = captured[0][0]
+    answer = shadow.run_helper(Path(CLI), [req])[0]
+    if "unsupported" in answer:
+        tally("support_unsupported")
+        if all(isinstance(v, str) and v.isascii() for v in settings.values()):
+            fail(f"{label}: unsupported: {answer['unsupported']}")
+        return
+    tally("support_compared")
+    diff = shadow.compare(name, expected, answer)
+    if diff:
+        fail(f"{label}: {diff}")
+    multipart_check(fake, label)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", type=int, default=3000)
@@ -225,6 +371,9 @@ def main():
     for i in range(a.cases):
         st, detect, allow = loc_scenario(rng)
         loc_one(st, detect, allow, f"location case {i} seed {a.seed}")
+    for i in range(max(200, a.cases // 5)):
+        songbook_one(rng, f"songbook case {i} seed {a.seed}")
+        support_one(rng, f"support case {i} seed {a.seed}")
     print("counts:", counts)
     print("IDENTICAL" if not failures else f"{len(failures)} DIFFERENCES")
     return 1 if failures else 0
