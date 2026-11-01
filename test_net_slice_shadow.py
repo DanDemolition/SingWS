@@ -393,7 +393,7 @@ class Launch(unittest.TestCase):
         src = (ROOT / "0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"net_slice_shadow": True,', src)
         self.assertIn("payload = self._session_location_payload_impl(allow_auto_detect)", src)
-        self.assertIn('for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow"):', src)
+        self.assertIn('for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow"):', src)
         self.assertIn("_NET_SLICE_SHADOW_ON = net_slice_shadow.enabled(self.settings)", src)
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):
             text = (ROOT / spec).read_text(encoding="utf-8")
