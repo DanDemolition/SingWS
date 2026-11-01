@@ -180,5 +180,12 @@ class Announce(unittest.TestCase):
         self.assertTrue(all(x.startswith("[SCAN-SHADOW] ") for x in lines))
 
 
+class AppAnnounceHook(unittest.TestCase):
+    def test_the_launch_announcement_uses_the_defaults_for_keys_not_yet_filled_in(self):
+        src = (Path(__file__).resolve().parent / "0.2.18.1.py").read_text()
+        i = src.index('for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow"):')
+        self.assertIn("{**DEFAULTS,", src[i:i + 700])
+
+
 if __name__ == "__main__":
     unittest.main()

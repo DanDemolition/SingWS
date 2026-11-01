@@ -22864,7 +22864,8 @@ class KaraokeApp(QWidget):
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
         for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow"):
             try:
-                __import__(_mod_name).announce(self.settings, _diag)
+                # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
+                __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
             except Exception:
                 pass
         self._remote_request_tombstones = self._load_remote_request_tombstones()
