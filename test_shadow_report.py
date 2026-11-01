@@ -361,7 +361,7 @@ class QuietShadows(unittest.TestCase):
     def test_net_slice_shadow_row_reads_each_state(self):
         self.assertIn("NET-SLICE-SHADOW", sr.QUIET_TAGS)
         v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=1"))
-        self.assertIn("NOTHING COMPARED YET (needs a Network Sync Check)", v["NET-SLICE-SHADOW"])
+        self.assertIn("NOTHING COMPARED YET (needs a Network Sync Check, a session-location push or an upload)", v["NET-SLICE-SHADOW"])
         v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=1"), ("NET-SLICE-SHADOW", "first check clean (the Rust network slices equal the app's)"))
         self.assertIn("RAN, AGREED", v["NET-SLICE-SHADOW"])
         v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=0"))

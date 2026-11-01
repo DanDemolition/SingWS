@@ -292,3 +292,100 @@ def location_batch(settings, payload, t_before: int, t_after: int):
         return ("location", req, {"payload": payload})
     except Exception:  # noqa: BLE001
         return None
+
+
+# ---------------------------------------------------------------- slices 3 and 4: the upload requests (built, never sent by this module)
+
+class RecordingPost:
+    """Stands in for the ``requests`` module at one ``post`` call site: the call is forwarded with the very same arguments and the answer (or the exception) comes
+    back untouched; what was asked is remembered for the shadow. A file part given as bytes is remembered as length + SHA-256, a file object as the text read
+    back from its path (a second, read-only handle: the app's own handle is not touched)."""
+
+    def __init__(self, real):
+        self._real = real
+        self.calls: list[dict] = []
+
+    def post(self, url, *args, **kwargs):
+        rec = {"url": url, "data": kwargs.get("data"), "headers": kwargs.get("headers"), "timeout": kwargs.get("timeout"), "files": None}
+        if args:
+            rec["positional"] = True
+        try:
+            files = {}
+            for name, part in (kwargs.get("files") or {}).items():
+                filename, content, ctype = part
+                if isinstance(content, (bytes, bytearray)):
+                    desc = {"len": len(content), "sha256": hashlib.sha256(bytes(content)).hexdigest()}
+                else:
+                    with open(content.name, "rb") as handle:
+                        desc = handle.read().decode("utf-8")
+                files[name] = [filename, desc, ctype]
+            rec["files"] = files
+        except Exception:  # noqa: BLE001
+            rec["unreadable"] = True
+        self.calls.append(rec)
+        return self._real.post(url, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _fold(strings):
+    out = {}
+    for s in strings:
+        t = s.strip()
+        out[s] = [t, t.lower()]
+    return out
+
+
+def songbook_batch(base_url, tenant, api_key, tracks, calls):
+    """Batch entry for a finished songbook upload call, or None (not the track-list path, odd values, or no/unreadable call)."""
+    try:
+        if len(calls) != 1 or calls[0].get("unreadable") or calls[0].get("positional"):
+            return None
+        if not all(isinstance(v, str) for v in (base_url, tenant, api_key)):
+            return None
+        snap, strings = [], set()
+        for t in list(tracks or []):
+            if not isinstance(t, dict):
+                snap.append(0)
+                continue
+            row = {}
+            for k in ("artist", "title"):
+                if k in t:
+                    if not isinstance(t[k], str):
+                        return None
+                    row[k] = t[k]
+                    strings.add(t[k])
+            strings.add(row.get("artist", ""))
+            strings.add(row.get("title", ""))
+            snap.append(row)
+        if len(snap) > 300_000:
+            return None
+        req = {"op": "songbook", "base_url": base_url, "tenant": tenant, "api_key": api_key, "tracks": snap, "fold": _fold(strings)}
+        c = calls[0]
+        expected = {k: c[k] for k in ("url", "data", "files", "headers", "timeout")}
+        json.dumps(req), json.dumps(expected)
+        return ("songbook", req, expected)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def support_log_batch(settings, package_path, calls):
+    """Batch entry for a finished support-log upload, or None."""
+    try:
+        if len(calls) != 1 or calls[0].get("unreadable") or calls[0].get("positional"):
+            return None
+        c = calls[0]
+        data = c["data"]
+        st = {k: settings[k] for k in ("base_url", "user", "tenant", "api_key") if k in settings}
+        if not all(v is None or isinstance(v, str) for v in st.values()):
+            return None
+        name, desc = next(iter(c["files"].values()))[0], next(iter(c["files"].values()))[1]
+        blob = Path(package_path).read_bytes()
+        req = {"op": "support_log", "settings": st, "reason": data["reason"], "app_version": data["app_version"], "platform": data["platform"], "window": data["session_window"],
+               "package": {"name": Path(package_path).name, "len": len(blob), "sha256": hashlib.sha256(blob).hexdigest()}}
+        expected = {"request": {k: c[k] for k in ("url", "data", "files", "headers", "timeout")}}
+        json.dumps(req), json.dumps(expected)
+        return ("support_log", req, expected)
+    except Exception:  # noqa: BLE001
+        return None

@@ -5,6 +5,8 @@
 //! decision: the requests it would make (url, params, headers, timeout, in order) and the result dict. The shadow compares both with what Python really did.
 //! `location`: `KaraokeApp._session_location_payload` (the payload that registers this laptop's session location). The host hands over the app's settings AFTER the
 //! call (a detection, when it ran, has already been written there) plus the clock; this crate rebuilds the payload (or `null`) from them.
+//! `songbook`: the request `SongbookUploadThread.run` makes (url, form fields, the CSV it writes, headers, timeout), built from the tracks; `support_log`: the support-log
+//! upload request of `send_log_package_to_developer`; `multipart`: the exact multipart/form-data body `requests` builds for a boundary. All three BUILD only, never send.
 //! Anything not modelled (non-ASCII text, a transcript that does not fit the plan) answers `{"unsupported": reason}`, which the shadow skips.
 
 use serde_json::{json, Map, Value};
@@ -15,6 +17,9 @@ pub fn build(req: &Value) -> Value {
     let out = match req.get("op").and_then(Value::as_str) {
         Some("probe") => probe(req),
         Some("location") => location(req),
+        Some("songbook") => songbook(req),
+        Some("support_log") => support_log(req),
+        Some("multipart") => multipart(req),
         Some(other) => Err(format!("unknown op {other}")),
         None => Err("no op".to_string()),
     };
@@ -210,6 +215,131 @@ fn location(req: &Value) -> R<Value> {
         "detected_at": if detected_at != 0 { detected_at } else { now },
         "ttl_minutes": ttl,
     }}))
+}
+
+/// csv.writer (excel dialect, QUOTE_MINIMAL) for one field.
+fn csv_field(f: &str) -> String {
+    if f.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", f.replace('"', "\"\""))
+    } else {
+        f.to_string()
+    }
+}
+
+fn songbook(req: &Value) -> R<Value> {
+    let base = normalize_base(req.get("base_url").and_then(Value::as_str).ok_or("base_url is not text")?);
+    let tenant = req.get("tenant").and_then(Value::as_str).ok_or("tenant is not text")?.trim_matches(py_space).to_string();
+    let key = req.get("api_key").and_then(Value::as_str).ok_or("api_key is not text")?.trim_matches(py_space).to_string();
+    let tracks = req.get("tracks").and_then(Value::as_array).ok_or("tracks is not a list")?;
+    let fold = req.get("fold").and_then(Value::as_object).ok_or("no fold table")?;
+    // (stripped, lowercased) of a raw value, as Python computed them
+    let folded = |raw: &str| -> R<(String, String)> {
+        let f = fold.get(raw).and_then(Value::as_array).ok_or("a value has no fold entry")?;
+        Ok((f.first().and_then(Value::as_str).ok_or("bad fold entry")?.to_string(), f.get(1).and_then(Value::as_str).ok_or("bad fold entry")?.to_string()))
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut rows: Vec<(String, String, String, String)> = Vec::new(); // artist, title, lower artist, lower title
+    for t in tracks {
+        let Some(t) = t.as_object() else { continue }; // not a dict: skipped
+        let get = |k: &str| -> R<String> {
+            match t.get(k) {
+                None => Ok(String::new()),
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(_) => Err(format!("track {k} is not text")),
+            }
+        };
+        let (artist, la) = folded(&get("artist")?)?;
+        let (title, lt) = folded(&get("title")?)?;
+        if artist.is_empty() || title.is_empty() {
+            continue;
+        }
+        if !seen.insert((la.clone(), lt.clone())) {
+            continue;
+        }
+        rows.push((artist, title, la, lt));
+    }
+    rows.sort_by(|a, b| (&a.2, &a.3).cmp(&(&b.2, &b.3)));
+    if rows.is_empty() {
+        return Err("no rows from the tracks (the app would read its song index)".into());
+    }
+    let mut csv = String::from("Artist,Title\r\n");
+    for (a, t, _, _) in &rows {
+        if a.contains('\0') || t.contains('\0') {
+            return Err("NUL in a field".into());
+        }
+        csv.push_str(&format!("{},{}\r\n", csv_field(a), csv_field(t)));
+    }
+    let headers = if key.is_empty() { json!({}) } else { json!({"X-API-Key": key}) };
+    Ok(json!({
+        "url": format!("{base}/api/v1/upload_songbook.php"),
+        "data": {"user": tenant, "tenant": tenant},
+        "files": {"songbook_csv": ["songbook.csv", csv, "text/csv"]},
+        "headers": headers,
+        "timeout": 180,
+    }))
+}
+
+fn opt_text(v: Option<&Value>) -> R<String> {
+    match v {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err("a setting is not text".into()),
+    }
+}
+
+fn support_log(req: &Value) -> R<Value> {
+    if !all_ascii(req.get("settings").unwrap_or(&Value::Null)) {
+        return Err("non-ASCII settings".into());
+    }
+    let st = req.get("settings").filter(|v| v.is_object()).ok_or("no settings")?;
+    let base = normalize_base(&opt_text(st.get("base_url"))?);
+    let user = if st.get("user").is_some() { opt_text(st.get("user"))? } else { opt_text(st.get("tenant"))? };
+    let user = user.trim_matches(py_space).to_string();
+    let key = opt_text(st.get("api_key"))?.trim_matches(py_space).to_string();
+    if base.is_empty() || user.is_empty() || key.is_empty() {
+        return Ok(json!({"request": null, "refusal": "not connected"}));
+    }
+    let package = req.get("package").and_then(Value::as_object).ok_or("no package")?;
+    let name = package.get("name").and_then(Value::as_str).ok_or("package name")?;
+    let text = |k: &str| req.get(k).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("{k} is not text"));
+    Ok(json!({"request": {
+        "url": format!("{base}/api/v1/support_logs.php"),
+        "data": {"user": user, "reason": text("reason")?, "app_version": text("app_version")?, "build_id": text("app_version")?, "platform": text("platform")?, "session_window": text("window")?},
+        "files": {"logs": [name, {"len": package.get("len").cloned().unwrap_or(Value::Null), "sha256": package.get("sha256").cloned().unwrap_or(Value::Null)}, "application/zip"]},
+        "headers": {"X-API-Key": key, "Accept": "application/json"},
+        "timeout": 30,
+    }}))
+}
+
+/// The multipart/form-data body `requests` (urllib3) builds: the data fields first, then the files, each part `--boundary`, headers, a blank line, the content.
+fn multipart(req: &Value) -> R<Value> {
+    let boundary = req.get("boundary").and_then(Value::as_str).ok_or("no boundary")?;
+    let plain = |s: &str| s.bytes().all(|b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\');
+    let mut body: Vec<u8> = Vec::new();
+    for f in req.get("fields").and_then(Value::as_array).ok_or("no fields")? {
+        let (n, v) = (f.get(0).and_then(Value::as_str).ok_or("field name")?, f.get(1).and_then(Value::as_str).ok_or("field value")?);
+        if !plain(n) {
+            return Err("field name needs escaping".into());
+        }
+        body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{n}\"\r\n\r\n").as_bytes());
+        body.extend(v.as_bytes());
+        body.extend(b"\r\n");
+    }
+    for f in req.get("files").and_then(Value::as_array).ok_or("no files")? {
+        let (n, fname, ctype) = (f.get(0).and_then(Value::as_str).ok_or("n")?, f.get(1).and_then(Value::as_str).ok_or("fn")?, f.get(2).and_then(Value::as_str).ok_or("ct")?);
+        if !plain(n) || !plain(fname) {
+            return Err("file name needs escaping".into());
+        }
+        let hex = f.get(3).and_then(Value::as_str).ok_or("content_hex")?;
+        if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("bad hex".into());
+        }
+        body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{n}\"; filename=\"{fname}\"\r\nContent-Type: {ctype}\r\n\r\n").as_bytes());
+        body.extend((0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()));
+        body.extend(b"\r\n");
+    }
+    body.extend(format!("--{boundary}--\r\n").as_bytes());
+    Ok(json!({"body_hex": body.iter().map(|b| format!("{b:02x}")).collect::<String>()}))
 }
 
 fn int_status(status: &Value) -> Option<i64> {
@@ -600,6 +730,61 @@ mod tests {
         let ok = build(&json!({"op": "location", "settings": st, "now": 5, "source_override": "manual_fallback"}));
         assert_eq!(ok["payload"]["location_source"], "manual_fallback");
         assert!(build(&json!({"op": "location", "settings": st, "now": 5, "source_override": "other"})).get("unsupported").is_some());
+    }
+
+    fn tracks_req(tracks: Value, fold: Value, key: &str) -> Value {
+        json!({"op": "songbook", "base_url": " b.test/ ", "tenant": " wsk ", "api_key": key, "tracks": tracks, "fold": fold})
+    }
+
+    #[test]
+    fn songbook_rows_are_deduped_sorted_and_csv_quoted() {
+        let tracks = json!([{"artist": "Zed", "title": "A, B"}, {"artist": " abba ", "title": "Hi \"x\""}, {"artist": "ABBA", "title": "hi \"X\""}, "skip", {"artist": "", "title": "t"}, {"title": "no artist"}, {"artist": "Beyonce", "title": "Line\nBreak"}]);
+        let fold = json!({"Zed": ["Zed", "zed"], "A, B": ["A, B", "a, b"], " abba ": ["abba", "abba"], "Hi \"x\"": ["Hi \"x\"", "hi \"x\""], "ABBA": ["ABBA", "abba"], "hi \"X\"": ["hi \"X\"", "hi \"x\""],
+                          "": ["", ""], "t": ["t", "t"], "no artist": ["no artist", "no artist"], "Beyonce": ["Beyonce", "beyonce"], "Line\nBreak": ["Line\nBreak", "line\nbreak"]});
+        let out = build(&tracks_req(tracks, fold, " k "));
+        assert_eq!(out["url"], "https://b.test/api/v1/upload_songbook.php");
+        assert_eq!(out["data"], json!({"user": "wsk", "tenant": "wsk"}));
+        assert_eq!(out["headers"], json!({"X-API-Key": "k"}));
+        assert_eq!(out["timeout"], 180);
+        assert_eq!(out["files"]["songbook_csv"][2], "text/csv");
+        assert_eq!(out["files"]["songbook_csv"][1], "Artist,Title\r\nabba,\"Hi \"\"x\"\"\"\r\nBeyonce,\"Line\nBreak\"\r\nZed,\"A, B\"\r\n");
+        assert_eq!(build(&tracks_req(json!([{"artist": "Zed", "title": "t"}]), json!({"Zed": ["Zed", "zed"], "t": ["t", "t"]}), ""))["headers"], json!({}));
+    }
+
+    #[test]
+    fn songbook_declines_what_it_cannot_model() {
+        assert!(build(&tracks_req(json!([]), json!({}), "k")).get("unsupported").is_some());
+        assert!(build(&tracks_req(json!([{"artist": 5, "title": "t"}]), json!({}), "k")).get("unsupported").is_some());
+        assert!(build(&tracks_req(json!([{"artist": "a", "title": "t"}]), json!({}), "k")).get("unsupported").is_some());
+    }
+
+    fn log_req(settings: Value) -> Value {
+        json!({"op": "support_log", "settings": settings, "reason": "manual", "app_version": "1.0", "platform": "Darwin arm64 14.0", "window": "w",
+               "package": {"name": "p.zip", "len": 5, "sha256": "ab"}})
+    }
+
+    #[test]
+    fn support_log_request_and_refusal() {
+        let out = build(&log_req(json!({"base_url": "b.test/", "tenant": " wsk ", "api_key": " k "})));
+        let r = &out["request"];
+        assert_eq!(r["url"], "https://b.test/api/v1/support_logs.php");
+        assert_eq!(r["data"], json!({"user": "wsk", "reason": "manual", "app_version": "1.0", "build_id": "1.0", "platform": "Darwin arm64 14.0", "session_window": "w"}));
+        assert_eq!(r["files"]["logs"], json!(["p.zip", {"len": 5, "sha256": "ab"}, "application/zip"]));
+        assert_eq!(r["headers"], json!({"X-API-Key": "k", "Accept": "application/json"}));
+        assert_eq!(r["timeout"], 30);
+        assert_eq!(build(&log_req(json!({"base_url": "b.test", "api_key": "k"})))["request"], Value::Null);
+        assert_eq!(build(&log_req(json!({"base_url": "", "user": "u", "api_key": "k"})))["request"], Value::Null);
+        assert_eq!(build(&log_req(json!({"base_url": "b", "user": "u", "api_key": " "})))["request"], Value::Null);
+        assert_eq!(build(&log_req(json!({"base_url": "b", "user": "", "tenant": "t", "api_key": "k"})))["request"], Value::Null);
+    }
+
+    #[test]
+    fn multipart_layout() {
+        let out = build(&json!({"op": "multipart", "boundary": "BB", "fields": [["user", "u"], ["a", ""]], "files": [["f", "x.csv", "text/csv", "0a0d"]]}));
+        let hex = out["body_hex"].as_str().unwrap();
+        let bytes: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert_eq!(text, "--BB\r\nContent-Disposition: form-data; name=\"user\"\r\n\r\nu\r\n--BB\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n\r\n--BB\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x.csv\"\r\nContent-Type: text/csv\r\n\r\n\n\r\r\n--BB--\r\n");
     }
 
     #[test]

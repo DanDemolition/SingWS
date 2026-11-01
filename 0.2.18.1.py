@@ -1465,14 +1465,28 @@ class SongbookUploadThread(QThread):
 
             self.progress_text.emit(f"Uploading {len(rows):,} songs to the server...")
             headers = {"X-API-Key": self.api_key} if self.api_key else {}
+            shadow_post = None
+            try:
+                import net_slice_shadow
+                if _NET_SLICE_SHADOW_ON and net_slice_shadow._helper() is not None:
+                    shadow_post = net_slice_shadow.RecordingPost(requests)   # forwards the call unchanged; log-only comparison (net_slice_shadow.py)
+            except Exception:
+                shadow_post = None
             with open(tmp_path, "rb") as f:
-                resp = requests.post(
+                resp = (shadow_post or requests).post(
                     f"{self.base_url}/api/v1/upload_songbook.php",
                     data={"user": self.tenant, "tenant": self.tenant},
                     files={"songbook_csv": ("songbook.csv", f, "text/csv")},
                     headers=headers,
                     timeout=180,
                 )
+            if shadow_post is not None:
+                try:
+                    batch = net_slice_shadow.songbook_batch(self.base_url, self.tenant, self.api_key, self.tracks, shadow_post.calls)
+                    if batch:
+                        net_slice_shadow.submit([batch], _diag)
+                except Exception:
+                    pass
 
             try:
                 data = resp.json()
@@ -2730,11 +2744,25 @@ def send_log_package_to_developer(settings: dict, package_path: Path, *, reason:
             "build_id": APP_VERSION, "platform": f"{platform.system()} {platform.machine()} {platform.mac_ver()[0]}".strip(),
             "session_window": window,
         }
-        response = requests.post(
+        shadow_post = None
+        try:
+            import net_slice_shadow
+            if _NET_SLICE_SHADOW_ON and net_slice_shadow._helper() is not None:
+                shadow_post = net_slice_shadow.RecordingPost(requests)   # forwards the call unchanged; log-only comparison (net_slice_shadow.py)
+        except Exception:
+            shadow_post = None
+        response = (shadow_post or requests).post(
             f"{config['base']}/api/v1/support_logs.php", data=data,
             files={"logs": (name, Path(package_path).read_bytes(), "application/zip")},
             headers={"X-API-Key": config["key"], "Accept": "application/json"}, timeout=30,
         )
+        if shadow_post is not None:
+            try:
+                batch = net_slice_shadow.support_log_batch(settings, package_path, shadow_post.calls)
+                if batch:
+                    net_slice_shadow.submit([batch], _diag)
+            except Exception:
+                pass
         try:
             body = response.json()
         except Exception:
