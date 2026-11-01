@@ -41,10 +41,18 @@ class RustEvidenceDefaultsTests(unittest.TestCase):
 
     def test_after_the_marker_the_operator_choices_are_respected(self):
         saved = {k: False for k in self.mod._RUST_EVIDENCE_FLAGS}
-        saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True})
+        saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True, "waitlist_snapshot_default_on_migrated": True})
         before = dict(saved)
         self.assertFalse(self.mod._migrate_rust_evidence_defaults(saved))
         self.assertEqual(saved, before)
+
+    def test_the_waitlist_snapshot_migration_leaves_the_evidence_choices_alone(self):
+        saved = {k: False for k in self.mod._RUST_EVIDENCE_FLAGS}
+        saved.update({"shell_commands": "off", "rust_evidence_defaults_migrated": True, "waitlist_snapshot": False})
+        self.assertTrue(self.mod._migrate_rust_evidence_defaults(saved))      # only the one new one-time step runs
+        self.assertIs(saved["waitlist_snapshot"], True)
+        self.assertTrue(all(saved[k] is False for k in self.mod._RUST_EVIDENCE_FLAGS), "the operator's evidence choices stay as they were")
+        self.assertEqual(saved["shell_commands"], "off")
 
     def test_apply_and_dry_run_are_never_downgraded(self):
         for mode in ("apply", "dry_run", " Apply "):
