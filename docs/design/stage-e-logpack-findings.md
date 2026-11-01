@@ -25,12 +25,12 @@ package is the one built and uploaded. Nothing here sends anything or touches th
   follows 3.14 (the dev venv). Such a file name does not occur in practice.
 - Selection: `days` is clamped to 1-30, mtime `>=` cutoff, then ordered by (mtime, name), as the app does before merging.
 
-## Findings about the Python redactor (NOT changed: scope was parity)
+## Redactor gap found and closed (operator approved, 2026-10-31)
 
-`_sanitize_log_text` does not redact a **quoted** value: `password = 'hunter2'`, `secret="x"`, `{"api_key": "abc"}`, `'password':'abc'` all pass
-through, because the value class `[^\s,'"&]+` cannot start with a quote. JSON-style logging of a secret would therefore leave it readable. Also
-`pin`, `key` and `secret` match inside longer words (`shopping=cart`, `monkey=banana` become `...=***`), which over-redacts harmlessly. Whether to
-widen the patterns is the operator's call; the Rust crate must change together with Python, and the parity tool will then show any gap.
+`_sanitize_log_text` did not redact a **quoted** value (`password = 'hunter2'`, `{"api_key": "abc"}`): the value class `[^\s,'"&]+` cannot start with a
+quote. A read-only, count-only scan of the real logs (1.2M lines) found 0 such lines, so nothing has leaked in practice. Python and Rust were widened
+together: a new first pattern redacts everything up to the closing quote (or the end of the line if it never closes), and the keyword may now be
+followed by a quote (`"token": 123`). Unquoted behaviour is unchanged. `pin`, `key` and `secret` still match inside longer words (harmless over-redaction).
 
 ## Verified
 

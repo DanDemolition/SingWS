@@ -113,6 +113,15 @@ M = [
     (LIB, 'return Package { error: format!("no_text:{}", files[i].name), ..Default::default() };', "continue;", None),
     (LIB, "Package { text: Some(sanitize(&(header + &show.concat()))),", "Package { text: Some(header + &show.concat()),", None),
     (LIB, "let (first, end, length) = last_show_slice(&lines);\n    let show = &lines[first..end];", "let (first, end, length) = (0, lines.len(), last_show_slice(&lines).2);\n    let show = &lines[first..end];", None),
+    # --- quoted values (p0) and the optional quote after a keyword
+    (LIB, "let a = sub(&sub(text, p0), p1);", "let a = sub(text, p1);", None),
+    (LIB, "while e < t.len() && t[e] != q && t[e] != '\\r' && t[e] != '\\n' {", "while e < t.len() && t[e] != q && t[e] != '\\n' {", None),
+    (LIB, "while e < t.len() && t[e] != q && t[e] != '\\r' && t[e] != '\\n' {", "while e < t.len() && t[e] != '\\r' && t[e] != '\\n' {", None),
+    (LIB, "while e < t.len() && t[e] != q && t[e] != '\\r' && t[e] != '\\n' {", "while e < t.len() && t[e] != q {", None),
+    (LIB, "let q = *t.get(j).filter(|&&c| c == '\"' || c == '\\'')?;", "let q = '\"';", None),
+    (LIB, "    let start = j + 1;\n    let mut e = start;", "    let start = j;\n    let mut e = start;", None),
+    (LIB, "    let mut j = keyword(t, i)?;\n    if j < t.len() && (t[j] == '\"' || t[j] == '\\'') {\n        j += 1;\n    }\n    j = skip_space(t, j);\n    if j >= t.len() || (t[j] != ':' && t[j] != '=') {\n        return None;\n    }\n    j = skip_space(t, j + 1);\n    let q", "    let mut j = keyword(t, i)?;\n    j = skip_space(t, j);\n    if j >= t.len() || (t[j] != ':' && t[j] != '=') {\n        return None;\n    }\n    j = skip_space(t, j + 1);\n    let q", None),
+    (LIB, "    let mut j = keyword(t, i)?;\n    if j < t.len() && (t[j] == '\"' || t[j] == '\\'') {\n        j += 1;\n    }\n    j = skip_space(t, j);\n    if j >= t.len() || (t[j] != ':' && t[j] != '=') {\n        return None;\n    }\n    j = skip_space(t, j + 1);\n    let start = j;", "    let mut j = keyword(t, i)?;\n    j = skip_space(t, j);\n    if j >= t.len() || (t[j] != ':' && t[j] != '=') {\n        return None;\n    }\n    j = skip_space(t, j + 1);\n    let start = j;", None),
     # --- the CLI
     (MAIN, '"extras": extras.iter().map(|e| sanitize(e)).collect::<Vec<_>>(),', '"extras": extras.iter().map(|e| e.clone()).collect::<Vec<_>>(),', None),
     (MAIN, "universal_newlines(&String::from_utf8_lossy(&b))", "String::from_utf8_lossy(&b).into_owned()", None),
