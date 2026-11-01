@@ -63,6 +63,7 @@ pub enum Command {
     Stop,
     SetMasterVolume(f32),
     SlideMasterVolume { volume: f32, ms: u32 },
+    SetFadeInFloorDb(f32),
     SetPrimaryNorm(f32),
     SetSecondaryNorm(f32),
     Preload { deck: Box<dyn DeckSource>, norm: f32 },
@@ -261,6 +262,7 @@ impl RtEngine {
             Command::Stop => e.stop(),
             Command::SetMasterVolume(v) => e.set_master_volume(v),
             Command::SlideMasterVolume { volume, ms } => e.slide_master_volume(volume, ms),
+            Command::SetFadeInFloorDb(db) => e.set_fade_in_floor_db(db),
             Command::SetPrimaryNorm(f) => e.set_primary_normalize_gain(f),
             Command::SetSecondaryNorm(f) => e.set_secondary_normalize_gain(f),
             Command::Preload { deck, norm } => {

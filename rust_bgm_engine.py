@@ -167,6 +167,12 @@ def _declare(lib) -> None:
         fn = getattr(lib, name)
         fn.argtypes = args
         fn.restype = res
+    # Symbols added after ABI 3 shipped: a library without them still works (the feature is simply unavailable).
+    for name, (args, res) in {"singws_bgm_set_fade_in_floor_db": ([V, F32], I32)}.items():
+        fn = getattr(lib, name, None)
+        if fn is not None:
+            fn.argtypes = args
+            fn.restype = res
 
 
 def available() -> bool:
@@ -355,6 +361,15 @@ class RustBackgroundEngine:
         self.master_volume = _clamp01(volume)
         if self._ok():
             self._lib.singws_bgm_set_master_volume(self._h, float(self.master_volume))
+
+    def set_fade_in_floor_db(self, db: float) -> bool:
+        """Where a master fade IN from silence starts, in dB (-60 = the BASS curve, the default; clamped to -60..-20 in the engine).
+        Returns False when the loaded library predates the setting (nothing changes)."""
+        self.fade_in_floor_db = float(db)
+        fn = getattr(self._lib, "singws_bgm_set_fade_in_floor_db", None) if self._ok() else None
+        if fn is None or not getattr(fn, "argtypes", None):
+            return False
+        return int(fn(self._h, float(db))) != 0   # the command wrappers return 1 when the command was queued
 
     def slide_master_volume(self, volume: float, duration_ms: int):
         self.master_volume = _clamp01(volume)

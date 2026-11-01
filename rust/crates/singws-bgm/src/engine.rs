@@ -104,11 +104,18 @@ impl VolumeSlide {
         self.frames_left = 0;
     }
     pub(crate) fn slide_to(&mut self, target: f32, frames: u64) {
+        self.slide_to_from(target, frames, Self::FLOOR);
+    }
+    /// Like `slide_to`, but a slide that starts BELOW `start_floor` (a fade in from silence) starts at `start_floor` instead of the -60 dB BASS
+    /// floor, so the first moments are already audible. The end of a slide to silence still uses the -60 dB floor. `start_floor` is clamped
+    /// to [-60 dB, -20 dB]; with `start_floor == FLOOR` this is exactly the old behaviour.
+    pub(crate) fn slide_to_from(&mut self, target: f32, frames: u64, start_floor: f32) {
         if frames == 0 || (target - self.gain).abs() < 1.0e-9 {
             self.set(target);
             return;
         }
-        let from = self.gain.max(Self::FLOOR);
+        let start_floor = start_floor.clamp(Self::FLOOR, 0.1);
+        let from = self.gain.max(start_floor);
         let to = target.max(Self::FLOOR);
         self.target = target;
         self.frames_left = frames;
@@ -221,6 +228,8 @@ pub struct Engine {
     secondary: Option<Deck>,
     crossfade: Option<Crossfade>,
     master: VolumeSlide,
+    /// Linear gain a master fade IN from silence starts at (default = the -60 dB BASS floor; see `set_fade_in_floor_db`).
+    fade_in_floor: f32,
     playing: bool,
     effects: Vec<Box<dyn Effect>>,
     scratch_a: Vec<f32>,
@@ -248,6 +257,7 @@ impl Engine {
             secondary: None,
             crossfade: None,
             master: VolumeSlide::new(0.8),
+            fade_in_floor: VolumeSlide::FLOOR,
             playing: false,
             effects: Vec::new(),
             scratch_a: vec![0.0; MAX_BLOCK_FRAMES * 2],
@@ -381,7 +391,12 @@ impl Engine {
     }
     pub fn slide_master_volume(&mut self, v: f32, duration_ms: u32) {
         let frames = (duration_ms as f64 / 1000.0 * self.rate as f64) as u64;
-        self.master.slide_to(clamp_volume(v), frames);
+        self.master.slide_to_from(clamp_volume(v), frames, self.fade_in_floor);
+    }
+    /// Where a master fade in from silence starts, in dB (-60 = the BASS curve, the default; up to -20). Fades to silence are unaffected.
+    pub fn set_fade_in_floor_db(&mut self, db: f32) {
+        let db = if db.is_finite() { db.clamp(-60.0, -20.0) } else { -60.0 };
+        self.fade_in_floor = 10f32.powf(db / 20.0).max(VolumeSlide::FLOOR);
     }
     pub fn master_volume(&self) -> f32 {
         self.master.target
@@ -650,6 +665,91 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    // ---- fade-in start floor ---------------------------------------------------------------------------------------
+    fn db(g: f32) -> f32 {
+        20.0 * g.log10()
+    }
+
+    #[test]
+    fn a_fade_in_from_silence_starts_at_the_bass_floor_by_default() {
+        let mut v = VolumeSlide::new(0.0);
+        v.slide_to(0.75, 48_000 * 3);
+        let first = v.next();
+        assert!((db(first) + 60.0).abs() < 0.1, "first sample of the old curve is about -60 dB, was {} dB", db(first));
+        // halfway in time = halfway in dB between -60 and the target
+        let mut mid = 0.0;
+        for _ in 0..(48_000 * 3 / 2 - 1) {
+            mid = v.next();
+        }
+        let expect = (-60.0 + (db(0.75) + 60.0) / 2.0) as f32;
+        assert!((db(mid) - expect).abs() < 0.2, "{} vs {}", db(mid), expect);
+    }
+
+    #[test]
+    fn a_raised_fade_in_floor_starts_audible_and_ends_at_the_same_level() {
+        let mut v = VolumeSlide::new(0.0);
+        v.slide_to_from(0.75, 48_000 * 3, 0.01); // -40 dB
+        let first = v.next();
+        assert!((db(first) + 40.0).abs() < 0.1, "was {} dB", db(first));
+        let mut last = first;
+        for _ in 0..(48_000 * 3 - 1) {
+            last = v.next();
+        }
+        assert!((last - 0.75).abs() < 1e-6, "ends exactly on the target");
+        // with a -40 dB floor the -25 dB (below final) point comes at 1.0 s, with the -60 dB floor at 1.7 s
+        let mut a = VolumeSlide::new(0.0);
+        a.slide_to_from(0.75, 48_000 * 3, 0.01);
+        let mut b = VolumeSlide::new(0.0);
+        b.slide_to(0.75, 48_000 * 3);
+        let at = |s: &mut VolumeSlide, secs: f32| {
+            let mut g = 0.0;
+            for _ in 0..(secs * 48_000.0) as usize {
+                g = s.next();
+            }
+            db(g) - db(0.75)
+        };
+        let (la, lb) = (at(&mut a, 1.0), at(&mut b, 1.0));
+        assert!((la + 25.0).abs() < 0.6, "raised floor is about -25 dB under the final level after 1 s, was {la}");
+        assert!(lb < -37.0, "the old curve is still far below audibility after 1 s, was {lb}");
+    }
+
+    #[test]
+    fn a_raised_fade_in_floor_never_changes_a_fade_out() {
+        for floor in [VolumeSlide::FLOOR, 0.01, 0.1] {
+            let mut v = VolumeSlide::new(0.75);
+            v.slide_to_from(0.0, 48_000, floor);
+            let mut g = 1.0;
+            for _ in 0..48_000 {
+                g = v.next();
+            }
+            assert_eq!(g, 0.0, "a fade to silence ends in silence");
+        }
+    }
+
+    #[test]
+    fn the_engine_clamps_and_ignores_nonsense_fade_in_floors() {
+        let mut e = Engine::new(48_000);
+        assert_eq!(e.fade_in_floor, VolumeSlide::FLOOR);
+        e.set_fade_in_floor_db(-40.0);
+        assert!((db(e.fade_in_floor) + 40.0).abs() < 0.01);
+        e.set_fade_in_floor_db(-90.0);
+        assert_eq!(e.fade_in_floor, VolumeSlide::FLOOR, "below -60 dB is clamped to the BASS floor");
+        e.set_fade_in_floor_db(-5.0);
+        assert!((db(e.fade_in_floor) + 20.0).abs() < 0.01, "above -20 dB is clamped");
+        e.set_fade_in_floor_db(f32::NAN);
+        assert_eq!(e.fade_in_floor, VolumeSlide::FLOOR);
+    }
+
+    #[test]
+    fn the_engine_master_fade_in_uses_the_raised_floor() {
+        let mut e = Engine::new(48_000);
+        e.set_master_volume(0.0);
+        e.set_fade_in_floor_db(-40.0);
+        e.slide_master_volume(0.75, 3000);
+        let g = e.master.next();
+        assert!((db(g) + 40.0).abs() < 0.2, "was {} dB", db(g));
+    }
+
     use super::*;
 
     const RATE: u32 = 48_000;

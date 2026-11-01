@@ -90,6 +90,43 @@ class QueueCardTests(unittest.TestCase):
         self.assertEqual(len(set(rows)), 1, f"a line shows between the name row and the first song: {rows}")
         self.assertGreater(top.height(), 0)
 
+    def test_a_skipped_or_unnumbered_singer_name_lines_up_with_their_songs(self):
+        """A singer shown as '— Name' (skipped, or no song) has no number chip, but their name must start where their songs start, not 36 px further left."""
+        from PyQt6.QtCore import Qt
+        m = self.m
+        L, R, K, P = [int(Qt.ItemDataRole.UserRole) + n for n in (20, 21, 30, 33)]
+        rows = [{"kind": "singer", "roles": {L: "1. Alice", R: "", K: "singer", P: ""}, "height": 34},
+                {"kind": "song", "roles": {L: "\u2022 Queen \u2022 Radio Ga Ga", R: "03:20", K: "song", P: ""}, "height": 31},
+                {"kind": "singer", "roles": {L: "\u2014 Bob", R: "SKIPPED", K: "singer", P: ""}, "height": 34},
+                {"kind": "song", "roles": {L: "\u2022 Queen \u2022 Radio Ga Ga", R: "SKIP  03:20", K: "song", P: ""}, "height": 31}]
+        view = m.QueueListView()
+        model = m.QueueListModel(view)
+        model.setRows(rows)
+        view.setModel(model)
+        d = m.QueueCardDelegate(L, R, K, P, parent=view)
+        view.setItemDelegate(d)
+        d.attach(view)
+        view.setSpacing(0)
+        view.setStyleSheet("QListView { background: #0a1422; border: none; }")
+        view.resize(520, 700)
+        view.show()
+        self.app.processEvents()
+        img = view.viewport().grab().toImage()
+
+        def first_text_x(row, start=8):
+            r = view.visualRect(model.index(row, 0))
+            for x in range(r.left() + start, r.left() + 200):
+                for y in range(r.top() + 6, r.bottom() - 4):
+                    c = img.pixelColor(x, y)
+                    if c.red() > 110 and c.green() > 110:        # text on the dark ground (cards and chips are far dimmer)
+                        return x
+            return None
+        alice, alice_song = first_text_x(0, 44), first_text_x(1)      # past the number chip
+        bob, bob_song = first_text_x(2), first_text_x(3)
+        self.assertIsNotNone(bob)
+        self.assertLessEqual(abs(alice - alice_song), 5, "numbered singer and their song line up (unchanged)")
+        self.assertLessEqual(abs(bob - bob_song), 5, f"the skipped singer's name starts at x={bob} but their song at x={bob_song}")
+
     def test_a_singer_with_no_song_has_a_dimmer_name(self):
         view, model, d = self.build([0, 2])
         img = view.viewport().grab().toImage()

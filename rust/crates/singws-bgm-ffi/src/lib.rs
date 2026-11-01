@@ -289,6 +289,7 @@ macro_rules! f32_cmd {
     };
 }
 f32_cmd!(singws_bgm_set_master_volume, SetMasterVolume);
+f32_cmd!(singws_bgm_set_fade_in_floor_db, SetFadeInFloorDb);
 f32_cmd!(singws_bgm_set_primary_norm, SetPrimaryNorm);
 f32_cmd!(singws_bgm_set_secondary_norm, SetSecondaryNorm);
 f32_cmd!(singws_bgm_seek, Seek);

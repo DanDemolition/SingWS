@@ -4441,6 +4441,9 @@ DEFAULTS = {
     # Seconds BEFORE the scanned end of a karaoke song's audio at which the background music starts fading in (0 = wait for the end of the
     # audio plus the end-silence hold, the old behaviour). Audio-only; the song itself still ends by the lyric-aware rules.
     "bgm_overlap_before_audio_end_sec": 2.0,
+    # Where the background music's fade IN from silence starts, in dB (the engine clamps it to -60..-20). -60 = the curve measured on the old BASS
+    # engine (the first ~1.5 s of a 3 s fade are nearly inaudible); about -40 makes the music audible sooner and the climb gentler. Read at launch.
+    "bgm_fade_in_floor_db": -60.0,
     "karaoke_allow_early_silence_trim": False, # advanced: may end karaoke early after sustained trailing silence
     "end_silence_trim_enabled": False,     # CDG/ZIP/MP4: optional early trim; off to preserve complete endings
     "end_silence_trim_threshold_sec": 2.5, # sustained low audio before intelligent karaoke early-end
@@ -5200,6 +5203,15 @@ class BackgroundMusicPlayer(QObject):
         if getattr(self, "_bgm_engine", None) is None:
             return
         parent = self.parent()
+        try:
+            _host_settings = getattr(parent, "settings", None) if parent is not None else None
+            _setter = getattr(self._bgm_engine, "set_fade_in_floor_db", None)
+            if isinstance(_host_settings, dict) and callable(_setter):
+                _floor = float(_host_settings.get("bgm_fade_in_floor_db", -60.0))
+                if _setter(_floor) and _floor != -60.0:
+                    _diag(f"[BG-ENGINE] fade-in start floor {_floor:g} dB (bgm_fade_in_floor_db)")
+        except Exception:
+            pass
         # Attach the BGM 10-band graphic EQ ONLY in advanced mode. Simple
         # Audio Mode (default) leaves the EQ out of the chain entirely.
         try:
@@ -17344,9 +17356,9 @@ class QueueCardDelegate(QStyledItemDelegate):
         if kind == "singer":
             m = re.match(r"^\s*(\d+)\.\s*(.*)$", left)
             num, name = (m.group(1), m.group(2)) if m else ("", left.lstrip("\u2014 ").strip() or left)
-            x0 = left_rect.left()
-            if num:
-                x0 += 36                                  # chip (30) + gap (10), chip sits 4px left of the text edge
+            # chip (30) + gap (10), chip sits 4px left of the text edge. A singer with no number (skipped, or no song: "— Name") has no chip but keeps
+            # the same indent, so the name lines up with their song rows (which are always indented the same) instead of hanging 36px to the left.
+            x0 = left_rect.left() + 36
             bfont = QFont(font)
             bfont.setPixelSize(14)         # the singer's name: 14px bold
             bfont.setBold(True)
