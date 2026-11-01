@@ -3,6 +3,8 @@
 //! `probe`: `probe_network_sync_status(base_url, tenant, api_key, timeout_sec)` in 0.2.18.1.py. Its Python code asks `requests` for up to five URLs and
 //! turns the answers into one result dict. Here the host (Python) hands over the inputs plus what each call ANSWERED (a transcript); this crate replays the
 //! decision: the requests it would make (url, params, headers, timeout, in order) and the result dict. The shadow compares both with what Python really did.
+//! `location`: `KaraokeApp._session_location_payload` (the payload that registers this laptop's session location). The host hands over the app's settings AFTER the
+//! call (a detection, when it ran, has already been written there) plus the clock; this crate rebuilds the payload (or `null`) from them.
 //! Anything not modelled (non-ASCII text, a transcript that does not fit the plan) answers `{"unsupported": reason}`, which the shadow skips.
 
 use serde_json::{json, Map, Value};
@@ -12,6 +14,7 @@ type R<T> = Result<T, String>;
 pub fn build(req: &Value) -> Value {
     let out = match req.get("op").and_then(Value::as_str) {
         Some("probe") => probe(req),
+        Some("location") => location(req),
         Some(other) => Err(format!("unknown op {other}")),
         None => Err("no op".to_string()),
     };
@@ -122,6 +125,93 @@ impl Probe<'_> {
     }
 }
 
+/// `_network_normalize_base_url`: strip, drop trailing slashes, add https:// when there is no scheme.
+fn normalize_base(raw: &str) -> String {
+    let base = raw.trim_matches(py_space).trim_end_matches('/').to_string();
+    if !base.is_empty() && !base.contains("://") { format!("https://{base}") } else { base }
+}
+
+/// Python `float(text)` for ASCII text without underscores (those, and anything Rust would read differently, are declined by the caller).
+fn py_float(t: &str) -> Option<f64> {
+    if t.contains('_') {
+        return None;
+    }
+    t.parse::<f64>().ok()
+}
+
+fn setting_str(settings: &Value, key: &str) -> R<String> {
+    match settings.get(key) {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(format!("setting {key} is not text")),
+    }
+}
+
+fn location(req: &Value) -> R<Value> {
+    if !all_ascii(req) {
+        return Err("non-ASCII text".into());
+    }
+    let st = req.get("settings").filter(|v| v.is_object()).ok_or("no settings")?;
+    let now = req.get("now").and_then(Value::as_i64).ok_or("no now")?;
+    let base_url = normalize_base(&setting_str(st, "base_url")?);
+    // settings.get("user", settings.get("tenant", "")): a present "user" wins, even when empty
+    let tenant = if st.get("user").is_some() { setting_str(st, "user")? } else { setting_str(st, "tenant")? };
+    let tenant = tenant.trim_matches(py_space).to_string();
+    let api_key = setting_str(st, "api_key")?.trim_matches(py_space).to_string();
+    let lat_raw = setting_str(st, "session_location_latitude")?.trim_matches(py_space).to_string();
+    let lng_raw = setting_str(st, "session_location_longitude")?.trim_matches(py_space).to_string();
+    let mut source = setting_str(st, "session_location_source")?.trim_matches(py_space).to_string();
+    if source.is_empty() {
+        source = "manual".to_string();
+    }
+    if let Some(o) = req.get("source_override") {
+        // the one local override the app makes without saving it: detection failed and the saved coordinates were used
+        if o != &json!("manual_fallback") {
+            return Err("unknown source override".into());
+        }
+        source = "manual_fallback".to_string();
+    }
+    let accuracy_raw = setting_str(st, "session_location_accuracy_meters")?.trim_matches(py_space).to_string();
+    let detected_at = match st.get("session_location_detected_at") {
+        None | Some(Value::Null) => 0,
+        Some(v) => v.as_i64().ok_or("detected_at is not an integer")?,
+    };
+    if lat_raw.contains('_') || lng_raw.contains('_') || accuracy_raw.contains('_') {
+        return Err("underscore in a number".into());
+    }
+    let (Some(lat), Some(lng)) = (py_float(&lat_raw), py_float(&lng_raw)) else { return Ok(json!({"payload": null})) };
+    if !((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lng)) {
+        return Ok(json!({"payload": null}));
+    }
+    let session_id = setting_str(st, "session_location_session_id")?.trim_matches(py_space).to_string();
+    if session_id.is_empty() {
+        return Err("the app saves a session id before it returns".into());
+    }
+    let ttl = match st.get("session_location_ttl_minutes") {
+        None | Some(Value::Null) => 720,
+        Some(v) => v.as_i64().ok_or("ttl is not an integer")?,
+    };
+    let ttl = if ttl == 0 { 720 } else { ttl };
+    let ttl = ttl.min(1440).max(5);
+    let accuracy = if accuracy_raw.is_empty() {
+        Value::Null
+    } else {
+        json!(py_float(&accuracy_raw).ok_or("accuracy is not a number")?)
+    };
+    Ok(json!({"payload": {
+        "base_url": base_url,
+        "tenant": tenant,
+        "api_key": api_key,
+        "session_id": session_id,
+        "latitude": lat,
+        "longitude": lng,
+        "location_source": source,
+        "accuracy_meters": accuracy,
+        "detected_at": if detected_at != 0 { detected_at } else { now },
+        "ttl_minutes": ttl,
+    }}))
+}
+
 fn int_status(status: &Value) -> Option<i64> {
     status.as_i64()
 }
@@ -130,8 +220,7 @@ fn probe(req: &Value) -> R<Value> {
     if !all_ascii(req) {
         return Err("non-ASCII text".into());
     }
-    let base_in = text(req, "base_url")?.trim_matches(py_space).trim_end_matches('/').to_string();
-    let base = if !base_in.is_empty() && !base_in.contains("://") { format!("https://{base_in}") } else { base_in };
+    let base = normalize_base(text(req, "base_url")?);
     let user = text(req, "tenant")?.trim_matches(py_space).to_string();
     let key = text(req, "api_key")?.trim_matches(py_space).to_string();
     let timeout = match req.get("timeout_sec") {
@@ -451,6 +540,66 @@ mod tests {
         let mut r = good("k");
         r.as_object_mut().unwrap().remove("now");
         assert!(build(&r).get("unsupported").is_some());
+    }
+
+    fn loc(extra: Value) -> Value {
+        let mut st = json!({"base_url": " example.test/ ", "user": " wsk ", "api_key": " k ", "session_location_latitude": "40.5", "session_location_longitude": "-73.25",
+                            "session_location_source": "auto_detected", "session_location_accuracy_meters": "12.5", "session_location_detected_at": 1700000000,
+                            "session_location_session_id": "abc123", "session_location_ttl_minutes": 60});
+        for (k, v) in extra.as_object().unwrap() {
+            st[k] = v.clone();
+        }
+        build(&json!({"op": "location", "settings": st, "now": 1800000000}))
+    }
+
+    #[test]
+    fn the_location_payload_is_built_from_the_saved_settings() {
+        let p = &loc(json!({}))["payload"];
+        assert_eq!(p["base_url"], "https://example.test");
+        assert_eq!(p["tenant"], "wsk");
+        assert_eq!(p["api_key"], "k");
+        assert_eq!(p["latitude"], 40.5);
+        assert_eq!(p["longitude"], -73.25);
+        assert_eq!(p["location_source"], "auto_detected");
+        assert_eq!(p["accuracy_meters"], 12.5);
+        assert_eq!(p["detected_at"], 1700000000);
+        assert_eq!(p["ttl_minutes"], 60);
+        let keys: Vec<&String> = p.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["base_url", "tenant", "api_key", "session_id", "latitude", "longitude", "location_source", "accuracy_meters", "detected_at", "ttl_minutes"]);
+    }
+
+    #[test]
+    fn location_defaults_clamps_and_rejections() {
+        assert_eq!(loc(json!({"session_location_detected_at": 0}))["payload"]["detected_at"], 1800000000);
+        assert_eq!(loc(json!({"session_location_detected_at": null}))["payload"]["detected_at"], 1800000000);
+        assert_eq!(loc(json!({"session_location_source": "  "}))["payload"]["location_source"], "manual");
+        assert_eq!(loc(json!({"session_location_accuracy_meters": ""}))["payload"]["accuracy_meters"], Value::Null);
+        assert_eq!(loc(json!({"session_location_ttl_minutes": 0}))["payload"]["ttl_minutes"], 720);
+        assert_eq!(loc(json!({"session_location_ttl_minutes": 2}))["payload"]["ttl_minutes"], 5);
+        assert_eq!(loc(json!({"session_location_ttl_minutes": 99999}))["payload"]["ttl_minutes"], 1440);
+        assert_eq!(loc(json!({"session_location_latitude": "90"}))["payload"]["latitude"], 90.0);
+        assert_eq!(loc(json!({"session_location_latitude": "90.000001"}))["payload"], Value::Null);
+        assert_eq!(loc(json!({"session_location_longitude": "-180"}))["payload"]["longitude"], -180.0);
+        assert_eq!(loc(json!({"session_location_longitude": "180.5"}))["payload"], Value::Null);
+        assert_eq!(loc(json!({"session_location_latitude": "nan"}))["payload"], Value::Null);
+        assert_eq!(loc(json!({"session_location_latitude": ""}))["payload"], Value::Null);
+        assert_eq!(loc(json!({"session_location_longitude": "x"}))["payload"], Value::Null);
+        assert_eq!(loc(json!({"user": "", "tenant": "t"}))["payload"]["tenant"], "");
+        let mut st = json!({"tenant": "t2", "session_location_latitude": "1", "session_location_longitude": "2", "session_location_session_id": "s"});
+        st["base_url"] = json!("b.test");
+        assert_eq!(build(&json!({"op": "location", "settings": st, "now": 5}))["payload"]["tenant"], "t2");
+        assert!(loc(json!({"session_location_session_id": " "})).get("unsupported").is_some());
+        assert!(loc(json!({"session_location_latitude": "1_0"})).get("unsupported").is_some());
+        assert!(loc(json!({"session_location_ttl_minutes": "60"})).get("unsupported").is_some());
+        assert!(loc(json!({"session_location_latitude": 5})).get("unsupported").is_some());
+    }
+
+    #[test]
+    fn a_failed_detection_is_the_only_source_override() {
+        let st = json!({"session_location_latitude": "1", "session_location_longitude": "2", "session_location_session_id": "s"});
+        let ok = build(&json!({"op": "location", "settings": st, "now": 5, "source_override": "manual_fallback"}));
+        assert_eq!(ok["payload"]["location_source"], "manual_fallback");
+        assert!(build(&json!({"op": "location", "settings": st, "now": 5, "source_override": "other"})).get("unsupported").is_some());
     }
 
     #[test]

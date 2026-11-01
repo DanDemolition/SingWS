@@ -250,6 +250,127 @@ class RealHelper(unittest.TestCase):
             a._NET_SLICE_SHADOW_ON = False
 
 
+class LocStub:
+    def __init__(self, settings, detect=(None, "denied")):
+        self.settings, self._detect = settings, detect
+        self.saved = 0
+
+    def _detect_current_device_location(self, timeout_sec=15.0):
+        return self._detect
+
+    def save_settings(self):
+        self.saved += 1
+
+
+def loc_settings(**extra):
+    st = {"base_url": "example.test/", "user": "wsk", "api_key": SECRET, "session_location_latitude": "40.5", "session_location_longitude": "-73.25",
+          "session_location_source": "manual", "session_location_accuracy_meters": "9.5", "session_location_detected_at": 1700000000,
+          "session_location_session_id": "sess1", "session_location_ttl_minutes": 60, "session_location_auto_detect": False}
+    st.update(extra)
+    return st
+
+
+class LocationBatch(unittest.TestCase):
+    def test_declines_values_the_helper_does_not_model(self):
+        for bad in ({"session_location_latitude": 40.5}, {"api_key": 5}, {"session_location_ttl_minutes": "60"}, {"session_location_detected_at": True}):
+            self.assertIsNone(ns.location_batch(loc_settings(**bad), {}, 1, 2), bad)
+
+    def test_a_failed_detection_label_is_passed_as_the_only_override(self):
+        payload = {"location_source": "manual_fallback", "detected_at": 1700000000}
+        name, req, expected = ns.location_batch(loc_settings(), payload, 10, 20)
+        self.assertEqual(req["source_override"], "manual_fallback")
+        self.assertEqual(expected, {"payload": payload})
+        self.assertNotIn("source_override", ns.location_batch(loc_settings(), {"location_source": "manual", "detected_at": 1700000000}, 10, 20)[1])
+
+    def test_a_clock_stamp_inside_the_call_window_is_the_apps_own_now(self):
+        payload = {"location_source": "manual", "detected_at": 15}
+        req = ns.location_batch(loc_settings(session_location_detected_at=0), payload, 10, 20)[1]
+        self.assertEqual(req["now"], 15)
+        req = ns.location_batch(loc_settings(session_location_detected_at=0), {"location_source": "manual", "detected_at": 99}, 10, 20)[1]
+        self.assertEqual(req["now"], 20)          # outside the window: the helper's own answer will differ and be reported
+        req = ns.location_batch(loc_settings(), {"location_source": "manual", "detected_at": 15}, 10, 20)[1]
+        self.assertEqual(req["now"], 20)          # a saved detected_at is used as is
+        self.assertEqual(ns.location_batch(loc_settings(), None, 10, 20)[2], {"payload": None})
+
+    def test_only_the_keys_the_app_reads_are_sent_and_only_those_present(self):
+        st = loc_settings(unrelated="x")
+        del st["user"]
+        req = ns.location_batch(st, None, 1, 2)[1]
+        self.assertNotIn("unrelated", req["settings"])
+        self.assertNotIn("user", req["settings"])
+        self.assertNotIn("session_location_auto_detect", req["settings"])
+
+
+@unittest.skipUnless(os.path.exists(CLI), "singws-netslice not built (cd rust && cargo build --release -p singws-netslice)")
+class LocationReal(unittest.TestCase):
+    def setUp(self):
+        reset()
+        os.environ["SINGWS_NETSLICE_BIN"] = CLI
+        self.lines = []
+
+    def payload(self, settings, detect=(None, "denied"), allow=True):
+        import time
+        stub = LocStub(settings, detect)
+        t0 = int(time.time())
+        payload = app().KaraokeApp._session_location_payload_impl(stub, allow)
+        return ns.location_batch(dict(stub.settings), payload, t0, int(time.time())), payload
+
+    def test_saved_coordinates_agree(self):
+        batch, payload = self.payload(loc_settings())
+        self.assertEqual(payload["tenant"], "wsk")
+        self.assertEqual(ns.run_shadow([batch], self.lines.append), "clean")
+
+    def test_a_detection_that_ran_agrees(self):
+        det = ({"latitude": 12.3456789, "longitude": -45.6789012, "source": "auto_detected", "accuracy_meters": 8.76, "detected_at": 1700000001}, "")
+        batch, payload = self.payload(loc_settings(session_location_auto_detect=True, session_location_detected_at=0), det)
+        self.assertEqual(payload["location_source"], "auto_detected")
+        self.assertEqual(ns.run_shadow([batch], self.lines.append), "clean")
+
+    def test_a_failed_detection_with_saved_coordinates_agrees(self):
+        batch, payload = self.payload(loc_settings(session_location_auto_detect=True, session_location_detected_at=0))
+        self.assertEqual(payload["location_source"], "manual_fallback")
+        self.assertEqual(ns.run_shadow([batch], self.lines.append), "clean")
+
+    def test_no_session_id_yet_and_out_of_range_coordinates_agree(self):
+        batch, payload = self.payload(loc_settings(session_location_session_id=""))
+        self.assertEqual(len(payload["session_id"]), 32)
+        self.assertEqual(ns.run_shadow([batch], self.lines.append), "clean")
+        batch, payload = self.payload(loc_settings(session_location_latitude="95"))
+        self.assertIsNone(payload)
+        self.assertEqual(ns.run_shadow([batch], self.lines.append), "clean")
+
+    def test_a_different_payload_is_a_mismatch_that_never_prints_the_key_or_coordinates(self):
+        batch, payload = self.payload(loc_settings())
+        wrong = dict(payload, latitude=41.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(ns.run_shadow([(batch[0], batch[1], {"payload": wrong})], self.lines.append), "mismatch")
+        self.assertIn("MISMATCH location at $.payload.latitude", self.lines[-1])
+        for secret in (SECRET, "40.5", "41.5", "example.test", "sess1"):
+            self.assertNotIn(secret, self.lines[-1])
+
+    def test_the_app_wrapper_returns_the_impl_value_and_hands_the_after_settings_to_the_shadow(self):
+        a = app()
+        submitted = []
+        real = ns.submit
+        ns.submit = lambda batch, log: submitted.append(batch)
+        stubs = []
+        try:
+            for on in (False, True):
+                a._NET_SLICE_SHADOW_ON = on
+                stub = LocStub(loc_settings(session_location_session_id=""))
+                stub._session_location_payload_impl = lambda allow, stub=stub: a.KaraokeApp._session_location_payload_impl(stub, allow)
+                stubs.append((stub, a.KaraokeApp._session_location_payload(stub)))
+        finally:
+            ns.submit = real
+            a._NET_SLICE_SHADOW_ON = False
+        self.assertIsInstance(stubs[1][1], dict)
+        self.assertEqual({k: v for k, v in stubs[0][1].items() if k != "session_id"}, {k: v for k, v in stubs[1][1].items() if k != "session_id"})
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0][0][0], "location")
+        self.assertEqual(submitted[0][0][2]["payload"], stubs[1][1])
+        self.assertEqual(submitted[0][0][1]["settings"]["session_location_session_id"], stubs[1][1]["session_id"])   # the id the call saved, not the blank one
+
+
 class Launch(unittest.TestCase):
     def setUp(self):
         reset()
@@ -271,6 +392,7 @@ class Launch(unittest.TestCase):
         self.assertFalse(ns.enabled({"net_slice_shadow": False}))
         src = (ROOT / "0.2.18.1.py").read_text(encoding="utf-8")
         self.assertIn('"net_slice_shadow": True,', src)
+        self.assertIn("payload = self._session_location_payload_impl(allow_auto_detect)", src)
         self.assertIn('for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow"):', src)
         self.assertIn("_NET_SLICE_SHADOW_ON = net_slice_shadow.enabled(self.settings)", src)
         for spec in ("SingWS-arm64.spec", "SingWS-x86_64.spec"):

@@ -42095,6 +42095,22 @@ class KaraokeApp(QWidget):
             return None, self._friendly_location_detection_error(f"Auto-detect failed: {e}")
 
     def _session_location_payload(self, allow_auto_detect: bool = True):
+        """The session-location payload. With the Stage E net_slice_shadow on, the payload is also rebuilt by a Rust helper from the settings as they are
+        after this call, log-only (net_slice_shadow.py); the value returned is always the one computed here. An exception propagates exactly as before."""
+        t_before = int(time.time())
+        payload = self._session_location_payload_impl(allow_auto_detect)
+        if _NET_SLICE_SHADOW_ON:
+            try:
+                import net_slice_shadow
+                if net_slice_shadow._helper() is not None:
+                    batch = net_slice_shadow.location_batch(dict(self.settings), payload, t_before, int(time.time()))
+                    if batch:
+                        net_slice_shadow.submit([batch], _diag)
+            except Exception:
+                pass
+        return payload
+
+    def _session_location_payload_impl(self, allow_auto_detect: bool = True):
         base_url = _network_normalize_base_url(self.settings.get("base_url", ""))
         tenant = (self.settings.get("user", self.settings.get("tenant", "")) or "").strip()
         api_key = (self.settings.get("api_key", "") or "").strip()

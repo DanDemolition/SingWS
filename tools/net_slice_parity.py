@@ -4,7 +4,8 @@
 Oracle = the app module itself. Slice 1: the REAL `_probe_network_sync_status_impl` (the body of `probe_network_sync_status`) runs against a scripted fake
 `requests` module (no socket is ever opened; no real server is contacted) that is wrapped by the PRODUCTION recorder (`net_slice_shadow.RecordingRequests`);
 the helper's request and the comparison are the PRODUCTION `probe_batch` / `compare` (key order, key set and value TYPES). The Rust side must reproduce both the
-result dict and the list of requests (url, params, headers, timeout) Python made. Corpus: handwritten cases + seeded random scenarios (--cases N).
+result dict and the list of requests (url, params, headers, timeout) Python made. Slice 2: the REAL `KaraokeApp._session_location_payload_impl` runs on a stub app (scripted detection result, settings in a dict); the helper rebuilds
+the payload from the settings AFTER the call (`net_slice_shadow.location_batch`). Corpus: handwritten cases + seeded random scenarios (--cases N).
 Needs the CLI:  cd rust && CARGO_TARGET_DIR=~/.cache/singws-rust-target-netslice cargo build --release -p singws-netslice
   ~/Documents/SingWS/.venv/bin/python tools/net_slice_parity.py [--cases N] [--seed S]       exit 1 on any difference
 """
@@ -133,6 +134,77 @@ def one(args, script, label):
         fail(f"{label}: {d}")
 
 
+class LocStub:
+    """What `_session_location_payload_impl` touches: settings, the detector, save_settings and a runtime-state __dict__."""
+
+    def __init__(self, settings, detect):
+        self.settings, self._detect = settings, detect
+
+    def _detect_current_device_location(self, timeout_sec=15.0):
+        return self._detect
+
+    def save_settings(self):
+        pass
+
+
+LATS = ["40.5", "-73.25", "90", "90.000001", "-90", "180", "-90.5", "", "x", "nan", "inf", "-inf", "1e1", "1_0", "+5", ".5", "5.", "0x10", "1e", "  12.5  ",
+        "infinity", "-0", "0.0000001", "1e400", "\u0661\u0662"]
+LNGS = ["-73.25", "180", "-180", "180.0001", "", "y", "nan", "1e2", "2_0", "+1", "  7 ", "0"]
+
+
+def loc_scenario(rng):
+    st = {}
+    if rng.random() < 0.9:
+        st["base_url"] = rng.choice(BASES)
+    if rng.random() < 0.7:
+        st["user"] = rng.choice(TENANTS + [None])
+    if rng.random() < 0.5:
+        st["tenant"] = rng.choice(TENANTS)
+    st["api_key"] = rng.choice(KEYS + [None])
+    st["session_location_latitude"] = rng.choice(LATS)
+    st["session_location_longitude"] = rng.choice(LNGS)
+    st["session_location_source"] = rng.choice(["", "manual", "auto_detected", " gps ", None, "manual_fallback"])
+    st["session_location_accuracy_meters"] = rng.choice(["", "5", "12.5", "1e2", " 7.25 ", "x", None, "3_0"])
+    st["session_location_detected_at"] = rng.choice([0, None, 1700000000, int(__import__("time").time()) - 10, int(__import__("time").time()) - 1000])
+    st["session_location_session_id"] = rng.choice(["", "abc", " x ", "a" * 32])
+    if rng.random() < 0.8:
+        st["session_location_ttl_minutes"] = rng.choice([None, 0, 2, 5, 60, 720, 5000, -3, 1440])
+    st["session_location_auto_detect"] = rng.random() < 0.6
+    detect = rng.choice([({"latitude": 12.3456789, "longitude": -45.6789012, "source": "auto_detected", "accuracy_meters": 8.76, "detected_at": 1700000001}, ""),
+                         ({"latitude": 1.0, "longitude": 2.0, "source": "", "accuracy_meters": None}, ""), (None, "denied"), (None, "")])
+    return st, detect, rng.random() < 0.8
+
+
+def loc_one(st, detect, allow, label):
+    import time as _t
+    stub = LocStub(dict(st), detect)
+    t0 = int(_t.time())
+    try:
+        payload = APP.KaraokeApp._session_location_payload_impl(stub, allow)
+    except Exception:
+        tally("loc_python_raised")
+        return
+    batch = shadow.location_batch(dict(stub.settings), payload, t0, int(_t.time()))
+    if batch is None:
+        tally("loc_no_batch")
+        return
+    name, req, expected = batch
+    answer = shadow.run_helper(Path(CLI), [req])[0]
+    if "unsupported" in answer:
+        tally("loc_unsupported")
+        tally("loc_unsupported: " + answer["unsupported"][:40])
+        txt = json.dumps(req, ensure_ascii=False)
+        why = answer["unsupported"]
+        if txt.isascii() and "_" not in json.dumps(req["settings"]) and "accuracy is not" not in why:
+            fail(f"{label}: unsupported on a plain case: {why}")
+        return
+    d = shadow.compare(name, expected, answer)
+    tally("loc_compared")
+    tally("loc_payload" if payload else "loc_none")
+    if d:
+        fail(f"{label}: {d}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cases", type=int, default=3000)
@@ -150,6 +222,9 @@ def main():
     for i in range(a.cases):
         args, script = scenario(rng)
         one(args, script, f"case {i} seed {a.seed}")
+    for i in range(a.cases):
+        st, detect, allow = loc_scenario(rng)
+        loc_one(st, detect, allow, f"location case {i} seed {a.seed}")
     print("counts:", counts)
     print("IDENTICAL" if not failures else f"{len(failures)} DIFFERENCES")
     return 1 if failures else 0

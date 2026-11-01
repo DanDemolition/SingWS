@@ -255,3 +255,40 @@ def probe_batch(base_url, tenant, api_key, timeout_sec, calls, result):
         return ("probe", req, {"result": result, "calls": plan})
     except Exception:  # noqa: BLE001
         return None
+
+
+# ---------------------------------------------------------------- slice 2: _session_location_payload
+
+LOCATION_KEYS = ("base_url", "user", "tenant", "api_key", "session_location_latitude", "session_location_longitude", "session_location_source",
+                 "session_location_accuracy_meters", "session_location_detected_at", "session_location_session_id", "session_location_ttl_minutes")
+_TEXT_KEYS = ("base_url", "user", "tenant", "api_key", "session_location_latitude", "session_location_longitude", "session_location_source",
+              "session_location_accuracy_meters", "session_location_session_id")
+
+
+def location_batch(settings, payload, t_before: int, t_after: int):
+    """The batch entry for one finished ``_session_location_payload`` call, from the settings AS THEY ARE AFTER the call (a detection that ran has already
+    written its fix there), or None when a value is not plain text/number (the app would have coerced it in ways the helper does not model)."""
+    try:
+        st = {}
+        for k in LOCATION_KEYS:
+            if k not in settings:
+                continue
+            v = settings[k]
+            if k in _TEXT_KEYS and not (v is None or isinstance(v, str)):
+                return None
+            if k in ("session_location_detected_at", "session_location_ttl_minutes") and not (v is None or (isinstance(v, int) and not isinstance(v, bool))):
+                return None
+            st[k] = v
+        req = {"op": "location", "settings": st, "now": int(t_after)}
+        if payload is not None:
+            if not isinstance(payload, dict):
+                return None
+            if payload.get("location_source") == "manual_fallback":
+                req["source_override"] = "manual_fallback"   # a failed detection: the app used the saved coordinates and did not save this label
+            at = payload.get("detected_at")
+            if not st.get("session_location_detected_at") and isinstance(at, int) and t_before <= at <= t_after:
+                req["now"] = at                               # the app stamped "now" itself
+        json.dumps(req), json.dumps(payload)
+        return ("location", req, {"payload": payload})
+    except Exception:  # noqa: BLE001
+        return None
