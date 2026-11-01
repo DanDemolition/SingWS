@@ -344,7 +344,7 @@ def exit_status(reports, require_all):
     return 0
 
 
-QUIET_TAGS = ("PLATFORM-SHADOW", "LOGPACK-SHADOW", "RELAY-MSG-SHADOW", "SCAN-SHADOW", "NET-SLICE-SHADOW", "QUEUE-STATE-SHADOW")
+QUIET_TAGS = ("PLATFORM-SHADOW", "LOGPACK-SHADOW", "RELAY-MSG-SHADOW", "SCAN-SHADOW", "NET-SLICE-SHADOW", "QUEUE-STATE-SHADOW", "UPDATE-SHADOW")
 
 
 def quiet_shadows(rows) -> str:
@@ -379,7 +379,7 @@ def quiet_shadows(rows) -> str:
         elif d["launch"].startswith("engine=python"):
             verdict = "OFF (engine=python)"
         else:
-            verdict = "ENABLED, NOTHING COMPARED YET" + (" (needs a full library scan)" if tag == "SCAN-SHADOW" else " (needs a bug report / publish)" if tag == "LOGPACK-SHADOW" else " (needs a Network Sync Check, a session-location push or an upload)" if tag == "NET-SLICE-SHADOW" else " (needs a server reconcile with a plain request row; at most one check per 30 s)" if tag == "QUEUE-STATE-SHADOW" else "")
+            verdict = "ENABLED, NOTHING COMPARED YET" + (" (needs a full library scan)" if tag == "SCAN-SHADOW" else " (needs a bug report / publish)" if tag == "LOGPACK-SHADOW" else " (needs a Network Sync Check, a session-location push or an upload)" if tag == "NET-SLICE-SHADOW" else " (needs a server reconcile with a plain request row; at most one check per 30 s)" if tag == "QUEUE-STATE-SHADOW" else " (needs an update check: Settings > Updates)" if tag == "UPDATE-SHADOW" else "")
         extra = f"  [{d['skipped']} skipped]" if d["skipped"] else ""
         out.append(f"  {tag:<17} {verdict}{extra}   ({d['launch'] or '-'})")
     return "\n".join(out)
