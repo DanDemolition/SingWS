@@ -101,7 +101,7 @@ HAND = [
 ]
 KEYWORDS = ["api_key", "api-key", "apikey", "x-api-key", "token", "password", "passwd", "secret", "pin", "key", "Authorization: Bearer"]
 VALUES = ["abc", "a.b-c_d", "x" * 40, "p@ss w0rd", "é中", "a,b", "a'b", "a\"b", "a&b", "a\tb", "", "'", "\"q\"", "=", ":", "***"]
-SEPS = ["=", ":", " = ", ": ", "\t=\t", "==", " ", "", "= ", " :"]
+SEPS = ["=", ":", " = ", ": ", "=\"", ": \"", "\": \"", "' = '", "\"='", "\t=\t", "==", " ", "", "= ", " :"]
 
 
 def rnd_case(r, s):

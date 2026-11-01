@@ -2490,7 +2490,9 @@ def analyze_loudness_async(audio_path: str):
 
 
 _LOG_SECRET_PATTERNS = [
-    (re.compile(r"(?i)(api[_-]?key|x-api-key|token|password|passwd|secret|pin)(\s*[:=]\s*)([^\s,'\"&]+)"), r"\1\2***"),
+    # A QUOTED value ("password = 'x y'", {"api_key": "abc"}): everything up to the closing quote, or the end of the line if it never closes.
+    (re.compile(r"(?i)((?:api[_-]?key|x-api-key|token|password|passwd|secret|pin)[\"']?\s*[:=]\s*([\"']))[^\r\n]*?(?=\2|[\r\n]|\Z)"), r"\1***"),
+    (re.compile(r"(?i)(api[_-]?key|x-api-key|token|password|passwd|secret|pin)([\"']?\s*[:=]\s*)([^\s,'\"&]+)"), r"\1\2***"),
     (re.compile(r"(?i)(token=)([^&\s]+)"), r"\1***"),
     (re.compile(r"(?i)(key=)([^&\s]+)"), r"\1***"),
     (re.compile(r"(?i)(Authorization:\s*Bearer\s+)([^\s]+)"), r"\1***"),

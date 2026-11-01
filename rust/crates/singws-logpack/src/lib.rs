@@ -75,9 +75,33 @@ fn keyword(t: &[char], i: usize) -> Option<usize> {
     None
 }
 
-/// `(kw)(\s*[:=]\s*)([^\s,'"&]+)` -> start of the value and its end.
+/// A QUOTED value: `(kw)(["']?\s*[:=]\s*(["']))[^\r\n]*?(?=\2|[\r\n]|\Z)` -> the text between the quotes (to the closing quote, or the end of the line).
+fn p0(t: &[char], i: usize) -> Option<(usize, usize)> {
+    let mut j = keyword(t, i)?;
+    if j < t.len() && (t[j] == '"' || t[j] == '\'') {
+        j += 1;
+    }
+    j = skip_space(t, j);
+    if j >= t.len() || (t[j] != ':' && t[j] != '=') {
+        return None;
+    }
+    j = skip_space(t, j + 1);
+    let q = *t.get(j).filter(|&&c| c == '"' || c == '\'')?;
+    let start = j + 1;
+    let mut e = start;
+    while e < t.len() && t[e] != q && t[e] != '\r' && t[e] != '\n' {
+        e += 1;
+    }
+    Some((start, e))
+}
+
+/// `(kw)(["']?\s*[:=]\s*)([^\s,'"&]+)` -> start of the value and its end.
 fn p1(t: &[char], i: usize) -> Option<(usize, usize)> {
-    let mut j = skip_space(t, keyword(t, i)?);
+    let mut j = keyword(t, i)?;
+    if j < t.len() && (t[j] == '"' || t[j] == '\'') {
+        j += 1;
+    }
+    j = skip_space(t, j);
     if j >= t.len() || (t[j] != ':' && t[j] != '=') {
         return None;
     }
@@ -135,7 +159,7 @@ fn sub(text: &str, find: impl Fn(&[char], usize) -> Option<(usize, usize)>) -> S
 
 /// `_sanitize_log_text`: the four patterns applied one after the other.
 pub fn sanitize(text: &str) -> String {
-    let a = sub(text, p1);
+    let a = sub(&sub(text, p0), p1);
     let b = sub(&a, |t, i| p_eq(t, i, "token="));
     let c = sub(&b, |t, i| p_eq(t, i, "key="));
     sub(&c, p_bearer)
@@ -377,6 +401,11 @@ mod tests {
         assert_eq!(sanitize("X-API-Key: SECRET,rest"), "X-API-Key: ***,rest");
         assert_eq!(sanitize("x-api-key:abc"), "x-api-key:***");
         assert_eq!(sanitize("password = hunter2"), "password = ***");
+        assert_eq!(sanitize("password = 'hunter 2' next"), "password = '***' next");
+        assert_eq!(sanitize("{\"api_key\": \"abc\", \"u\": 1}"), "{\"api_key\": \"***\", \"u\": 1}");
+        assert_eq!(sanitize("secret='open\nnext"), "secret='***\nnext");
+        assert_eq!(sanitize("\"token\": 123}"), "\"token\": ***");
+        assert_eq!(sanitize("pin: \"it's\""), "pin: \"***\"");
         assert_eq!(sanitize("pin=1234 passwd=x secret:y"), "pin=*** passwd=*** secret:***");
         assert_eq!(sanitize("https://h/a?token=abc&u=1"), "https://h/a?token=***&u=1");
         assert_eq!(sanitize("https://h/a?key=abc&b=2"), "https://h/a?key=***&b=2");
@@ -386,10 +415,9 @@ mod tests {
 
     #[test]
     fn leaves_what_the_patterns_do_not_cover() {
-        for s in ["plain", "token", "token=", "token = ", "Authorization: Bearer", "Authorization:Bearer ", "pinning: x", "key=&", "password = 'quoted'", "secret=\"q\""] {
+        for s in ["plain", "token", "token=", "token = ", "Authorization: Bearer", "Authorization:Bearer ", "pinning: x", "key=&"] {
             assert_eq!(sanitize(s), s, "{s}");
         }
-        // Python's own gaps, copied on purpose: a quoted value is not redacted by pattern 1 (its value class excludes quotes).
         assert_eq!(sanitize("api key=abc"), "api key=***"); // only the bare `key=` pattern fires
         assert_eq!(sanitize("token=,"), "token=***"); // pattern 1 stops at the comma, pattern 2 takes it
     }
