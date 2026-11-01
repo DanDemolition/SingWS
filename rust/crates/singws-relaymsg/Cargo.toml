@@ -1,0 +1,18 @@
+[package]
+name = "singws-relaymsg"
+version = "0.1.0"
+edition = "2021"
+description = "Stage E: the Rust counterpart of the host's outgoing relay message builders (playback_tick, state, queue, chat in _publish_host_state_ws). Pure functions plus a JSON CLI; the app runs it only as a log-only shadow (setting relay_msg_shadow) and never uses its answer."
+publish = false
+
+[lib]
+name = "singws_relaymsg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-relaymsg"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "preserve_order"] }
+sha1 = "0.10.7"

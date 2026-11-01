@@ -4278,6 +4278,10 @@ DEFAULTS = {
     # Stage E shadow: after a bug-report log package is built, a separate low-priority process (singws-logpack, Rust) rebuilds the same last-show log text
     # from the same inputs and [LOGPACK-SHADOW] logs ONLY a difference (never log text). The Python package is always the one used; nothing is sent by this.
     "logpack_shadow": True,
+    # Stage E shadow: every ~30 s the host relay messages this app just sent (playback_tick, state, queue, chat) are rebuilt by a separate low-priority process
+    # (a Rust helper) from a snapshot of the same inputs, and [RELAY-MSG-SHADOW] logs ONLY a difference (never chat text, names or ids). The message the app built
+    # is always the one sent; the relay schema, retries and connection are untouched.
+    "relay_msg_shadow": True,
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
@@ -29191,6 +29195,15 @@ class KaraokeApp(QWidget):
         except Exception:
             return
         playback = state.get("playback", {}) if isinstance(state, dict) else {}
+        # Stage E shadow (log-only, see relay_msg_shadow.py): remembers what this publish sends, once per ~30 s; the message sent is never altered.
+        shadow_rec = None
+        try:
+            import relay_msg_shadow
+            shadow_rec = relay_msg_shadow.Recorder.start(self)
+            if shadow_rec is not None:
+                worker = shadow_rec.wrap(worker)  # forwards every send_json unchanged, then remembers the message
+        except Exception:
+            shadow_rec = None
         # Frequent lightweight tick for smooth position.
         worker.send_json({
             "type": "playback_tick",
@@ -29242,6 +29255,11 @@ class KaraokeApp(QWidget):
                     worker.send_json({"type": "chat", "user": full["user"], "chat": self._shell_chat_summary(), "updated_at": int(time.time())})
                 except Exception:
                     pass
+        if shadow_rec is not None:
+            try:
+                relay_msg_shadow.finish(shadow_rec, state, APP_VERSION, logging.info)
+            except Exception:
+                pass
 
     def fetch_remote_requests_once(self, reason: str = "relay"):
         """Fetch active remote requests from get_requests_v2.php in a background thread.
