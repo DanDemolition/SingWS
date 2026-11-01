@@ -116,6 +116,7 @@ pub struct State {
     queue: Vec<Singer>,
     tombs: BTreeMap<u64, Tomb>,
     removed: BTreeSet<u64>,
+    handled: BTreeSet<u64>,
     next_uid: u64,
     singer_alias: HashMap<u64, usize>,
     next_local: usize,
@@ -161,6 +162,7 @@ impl State {
             queue: Vec::new(),
             tombs: BTreeMap::new(),
             removed: BTreeSet::new(),
+            handled: BTreeSet::new(),
             next_uid: 1,
             singer_alias: HashMap::new(),
             next_local: 0,
@@ -376,6 +378,9 @@ impl State {
         }
         entry.skipped = false;
         if self.find_duplicate(&entry) {
+            if let Some(r) = entry.rid {
+                self.handled.insert(r); // _mark_waiting_for_add_duplicate_accepted
+            }
             return true;
         }
         self.cleanup_duplicate_songs();
@@ -766,7 +771,7 @@ impl State {
         json!({
             "queue": singers,
             "rotation": {"mode": self.cur.mode, "locked": false},
-            "waitlist": {}, "removed_tonight": {}, "handled_waitlist_ids": [],
+            "waitlist": {}, "removed_tonight": {}, "handled_waitlist_ids": self.handled.iter().collect::<Vec<_>>(),
             "tombstones": tombs, "removed_ids": self.removed.iter().collect::<Vec<_>>(),
             "deferred_remote_adds": 0, "lifecycle": life,
         })

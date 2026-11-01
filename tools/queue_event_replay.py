@@ -578,8 +578,8 @@ SINGERS = ["Ada", "Bob", "Cy", "Dee", "Eve", "Flo"]
 TITLES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet"]
 
 
-def _req(rid, singer, title, artist="Band"):
-    return {"request_id": rid, "singer": singer, "artist": artist, "title": title, "key": 0, "tempo": 0}
+def _req(rid, singer, title, artist="Band", key=0, tempo=0):
+    return {"request_id": rid, "singer": singer, "artist": artist, "title": title, "key": key, "tempo": tempo}
 
 
 def _waiting(rid, singer, title):
@@ -620,6 +620,23 @@ def adversarial_cases() -> dict[str, list[dict]]:
         "waitlist_removed_stays_removed_across_restart": [dict(cfg, waitlist=True), {"op": "remote_arrive", "requests": [_waiting(1001, "Ada", "Alpha")]},
                                                           {"op": "waitlist_remove", "request_id": 1001}, {"op": "restart"},
                                                           {"op": "remote_arrive", "requests": [_waiting(1001, "Ada", "Alpha")]}],
+        "empty_slot_expires_at_exactly_180s": [cfg, {"op": "remote_arrive", "requests": [a1, b1]}, {"op": "remove_song", "entry": "R1001"}, {"op": "tick", "seconds": 177},
+                                               {"op": "add_song", "singer": "Zed", "title": "Probe"}, {"op": "remote_arrive", "requests": [b1]}, {"op": "tick", "seconds": 200},
+                                               {"op": "remote_arrive", "requests": [b1]}],
+        "restart_resets_runtime_settings_to_the_initial_config": [{"op": "config", "queue_mode": "rotation", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]},
+                                                                  {"op": "restart"}, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [b1]},
+                                                                  {"op": "restart"}, {"op": "remote_arrive", "requests": [b1]}],
+        "limit_boundary_two": [dict(cfg, limit_pending_max=2), {"op": "remote_arrive", "requests": [a1, a2, _req(1004, "Ada", "Delta")]}, {"op": "add_song", "singer": "Ada", "title": "HostOver"},
+                               {"op": "remote_arrive", "requests": [_req(1005, "Ada", "Echo")]}, {"op": "remove_song", "entry": "R1001"}, {"op": "remote_arrive", "requests": [_req(1005, "Ada", "Echo")]}],
+        "limit_above_twenty_is_clamped": [dict(cfg, limit_pending_max=25), {"op": "remote_arrive", "requests": [_req(2000 + i, "Ada", f"Song{i}") for i in range(22)]}],
+        "intake_counts_inflate_on_duplicate_rows": [dict(cfg, limit_pending_max=2), {"op": "remote_arrive", "requests": [a1, a1, _req(1004, "Ada", "Delta")]},
+                                                    {"op": "remote_arrive", "requests": [_req(1004, "Ada", "Delta")]}],
+        "singer_name_case_and_spacing_share_one_row": [cfg, {"op": "remote_arrive", "requests": [_req(1001, "ada", "Alpha"), _req(1002, "ADA", "Bravo"), _req(1003, " Ada ", "Charlie")]},
+                                                       {"op": "add_song", "singer": "aDA", "title": "Local"}],
+        "relist_updates_key_and_tempo": [cfg, {"op": "remote_arrive", "requests": [a1, a2]}, {"op": "remote_arrive", "requests": [dict(a1, key=3, tempo=10), dict(a2, key=-2, tempo=-40)]},
+                                         {"op": "remote_arrive", "requests": [dict(a1, tempo=99)]}],
+        "classic_mode_basics": [dict(cfg, queue_mode="classic"), {"op": "remote_arrive", "requests": [a1, b1, a2]}, {"op": "remove_song", "entry": "R1003"}, {"op": "remove_song", "entry": "R1001"},
+                                {"op": "add_song", "singer": "Cy", "title": "Local"}, {"op": "move_singer", "singer": "S3", "where": "top"}, {"op": "rotation_advance", "singer": "S1"}],
         "accepting_off_blocks_new_arrivals": [cfg, {"op": "config", "requests_accepting": False}, {"op": "remote_arrive", "requests": [a1]},
                                               {"op": "config", "requests_accepting": True}, {"op": "remote_arrive", "requests": [a1]}],
     }
@@ -668,14 +685,16 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             batch = []
             for _i in range(rng.randint(1, 3)):
                 next_rid += 1
-                r = _req(next_rid, rng.choice(SINGERS), rng.choice(TITLES))
+                r = _req(next_rid, rng.choice(SINGERS), rng.choice(TITLES), key=rng.choice([0, 0, 2, -3]), tempo=rng.choice([0, 0, 10, -20]))
+                if profile == "core" and rng.random() < 0.2:
+                    r["singer"] = rng.choice([r["singer"].lower(), r["singer"].upper()])
                 if wl and rng.random() < 0.4:
                     r = dict(r, state="waiting", pending_reason="rotation_full")
                 arrived.append(r)
                 batch.append(r)
             emit({"op": "remote_arrive", "requests": batch})
         elif pick == "relist" and arrived:
-            emit({"op": "remote_arrive", "requests": [dict(r) for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 5)))]})
+            emit({"op": "remote_arrive", "requests": [dict(r, key=rng.choice([r["key"], 1]), tempo=rng.choice([r["tempo"], 5])) for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 5)))]})
         elif pick == "add_local":
             emit({"op": "add_song", "singer": rng.choice(SINGERS), "title": rng.choice(TITLES) + str(rng.randint(1, 3))})
         elif pick == "tick":
