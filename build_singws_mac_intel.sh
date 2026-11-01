@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # A forgotten rust/build_dsp.sh ships a stale Rust library (1.0.2.4 did); refuse to build one.
 python3 tools/check_native_libs_fresh.py --arch x86_64 --require || { echo "!! the Rust DSP library is stale or missing: run ./rust/build_dsp.sh first"; exit 1; }
+# The log-package shadow helper (optional, bundled when present): rebuilt every time so it never ships stale. A failure only skips the shadow.
+./rust/build_logpack.sh || echo "!! could not build the singws-logpack helper; logpack_shadow will be skipped in this build"
 
 APP_NAME="SingWS"
 ENTRY="0.2.18.1.py"
