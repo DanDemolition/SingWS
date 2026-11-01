@@ -3,18 +3,21 @@
 # its own SINGWS_HOME; it never touches /Applications/SingWS.app, /Applications/SingWS Shell.app or ~/SingWS. It launches the Rust shell in --selfcheck
 # mode through LaunchServices (so TCC sees the bundle, not this terminal), which loads the video bridge + BGM engine in-process, hands two Qt Quick
 # windows to the bridge, plays ~5 s through the BGM engine headless, and writes a report.
-#   Usage: spike_host.sh [--arch arm64|x86_64|both] [--out DIR] [--no-build]
+#   Usage: spike_host.sh [--arch arm64|x86_64|both] [--out DIR] [--no-build] [--play SONG.cdg]
+#   --play: after the selfcheck, also run the SECOND spike (`singws-shell --play-demo SONG.cdg SONG.mp3`, see docs/design/stage-e-no-python-host-spike-2.md):
+#   a real CDG+MP3 song through the Rust video bridge and the Rust karaoke voice, HEADLESS audio (silent), ~45 s; the song files are only read.
 #   Needs: the Qt kit (build_shell.sh), native/mpv_runtime/artifacts/<arch>/Frameworks, ffmpeg (test media), the local signing identity.
 #   Opens two small windows for ~10 s. Opens NO permission prompt by design (no capture, no AX, headless audio); if macOS shows one, do not click it
 #   and tell whoever runs this.
 set -e
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
-ARCHS=(); OUT=""; BUILD=1
+ARCHS=(); OUT=""; BUILD=1; PLAY=""
 while [[ $# -gt 0 ]]; do case "$1" in
   --arch) [[ "$2" == both ]] && ARCHS=(arm64 x86_64) || ARCHS=("$2"); shift 2;;
   --out) OUT="$2"; shift 2;;
   --no-build) BUILD=0; shift;;
+  --play) PLAY="$2"; shift 2;;
   *) echo "unknown argument $1" >&2; exit 2;; esac; done
 [[ ${#ARCHS[@]} -gt 0 ]] || ARCHS=("$(uname -m)")
 [[ -n "$OUT" ]] || OUT="$(mktemp -d "${TMPDIR:-/tmp}/singws-spike.XXXXXX")"
@@ -58,8 +61,12 @@ for ARCH in $ARCHS; do
 </dict></plist>
 P
   # libmpv + its dependencies (the bridge finds it through ../Frameworks; no SINGWS_LIBMPV override is used)
-  cp -R "$ROOT/native/mpv_runtime/artifacts/$ARCH/Frameworks/." "$A/Contents/Frameworks/"
-  rm -f "$A/Contents/Frameworks/SHA256SUMS" "$A/Contents/Frameworks/libsingws_mpv_bridge.dylib"   # a loose text file fails strict signing; the Objective-C bridge is not used
+  # copy ONLY dylibs: a loose text file (SHA256SUMS) in Contents/Frameworks fails strict signing ("main executable failed strict validation");
+  # the Objective-C bridge is not used by the Rust host
+  for D in "$ROOT/native/mpv_runtime/artifacts/$ARCH/Frameworks/"*.dylib; do
+    [[ "$(basename "$D")" == libsingws_mpv_bridge.dylib ]] || cp -p "$D" "$A/Contents/Frameworks/"
+  done
+  [[ -z "$(find "$A/Contents/Frameworks" -type f ! -name '*.dylib')" ]] || { echo "Contents/Frameworks holds a non-dylib file" >&2; exit 3; }
   QML_COPY="$(mktemp -d)/qml"; cp -R crates/singws-shell/qml "$QML_COPY"   # qmlimportscanner skips dot-folder paths such as .claude worktrees
   "$QT_ROOT/bin/macdeployqt" "$A" -qmldir="$QML_COPY" >/dev/null 2>&1 || true
   [[ -d "$A/Contents/Resources/qml/QtQuick/Controls" ]] || { echo "macdeployqt bundled no QML imports" >&2; exit 3; }
@@ -72,6 +79,15 @@ P
   RC=0
   open -n -W --arch $ARCH --env SINGWS_HOME="$H" --stdout "$OUT/stdout-$ARCH.txt" --stderr "$OUT/stderr-$ARCH.txt" "$A" \
     --args --selfcheck --selfcheck-report "$J" --selfcheck-video "$OUT/test.mp4" --selfcheck-audio "$AUDIO" || RC=$?
+
+  if [[ -n "$PLAY" ]]; then
+    MP3="${PLAY%.cdg}.mp3"; PJ="$OUT/playdemo-$ARCH.json"; rm -f "$PJ" "$OUT/frame-$ARCH.rgba"
+    [[ -f "$PLAY" && -f "$MP3" ]] || { echo "--play needs SONG.cdg and SONG.mp3 side by side" >&2; exit 2; }
+    PRC=0
+    open -n -W --arch $ARCH --env SINGWS_HOME="$H" --stdout "$OUT/play-stdout-$ARCH.txt" --stderr "$OUT/play-stderr-$ARCH.txt" "$A" \
+      --args --play-demo "$PLAY" "$MP3" --play-demo-report "$PJ" --play-demo-frame "$OUT/frame-$ARCH.rgba" || PRC=$?
+    echo; echo "play-demo $ARCH exit $PRC, report $([[ -f $PJ ]] && echo "$PJ" || echo MISSING)" | tee -a "$REPORT"
+  fi
 
   # --- identity / TCC evidence ---
   E="$A/Contents/MacOS/SingWS Spike"

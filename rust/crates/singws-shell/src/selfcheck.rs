@@ -54,7 +54,7 @@ fn native_id(title: &std::ffi::CStr) -> u64 {
 }
 
 /// What AppKit says about a native view handed to the bridge: read-only questions through the Objective-C runtime (no shim code of our own).
-fn ns_view_state(view: usize) -> Value {
+pub(crate) fn ns_view_state(view: usize) -> Value {
     use std::ffi::{c_char, c_void, CStr};
     unsafe extern "C" {
         fn sel_registerName(n: *const c_char) -> *mut c_void;

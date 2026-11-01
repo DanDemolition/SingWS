@@ -3,6 +3,8 @@ mod cdg_demo;
 mod chat_panel;
 mod video_demo;
 mod idle_panel;
+mod karaoke_proto;
+mod play_demo;
 mod placement_panel;
 mod selfcheck;
 mod control_panel;
@@ -27,12 +29,14 @@ fn main() {
     unsafe { std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Basic") };
     // `--selfcheck` is the no-Python host spike (rust/spike_host.sh): it loads SelfCheck.qml instead of the shell and writes a report.
     let selfcheck = selfcheck::configure(std::env::args().skip(1));
+    // `--play-demo VIDEO AUDIO` is the second spike: a CDG song through the Rust bridge + Rust karaoke voice (docs/design/stage-e-no-python-host-spike-2.md).
+    let play_demo = play_demo::configure(std::env::args().skip(1));
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
     if let Some(mut engine) = engine.as_mut() {
         // the karaoke-display demo's picture source (image://cdg/<ms>); harmless when --display-demo is not given
         unsafe { singws_cdg_install_provider(engine.as_mut().get_unchecked_mut() as *mut _ as *mut core::ffi::c_void) };
-        let page = if selfcheck { "SelfCheck" } else { "Main" };
+        let page = if play_demo { "PlayDemo" } else if selfcheck { "SelfCheck" } else { "Main" };
         engine.load(&QUrl::from(format!("qrc:/qt/qml/com/singws/shell/qml/{page}.qml").as_str()));
     }
     if let Some(app) = app.as_mut() {
