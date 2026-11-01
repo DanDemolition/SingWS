@@ -212,9 +212,25 @@ class InTheApp(unittest.TestCase):
         files = [{"name": n, "mtime": t, "text": captured["texts"].get(n)} for n, t in ls.list_logs(self.logs)]
         payload = {"days": 7, "now": captured["now"], "files": files, "extras": [{"name": "extra", "text": t} for t in captured["extra_texts"]]}
         lines = []
+        ls._clean_noted = False
         self.assertEqual(ls.run_shadow(payload, captured["py"], lines.append, helper=Path(CLI)), "clean", lines)
-        self.assertEqual(lines, [])
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith("[LOGPACK-SHADOW] first check clean"), lines)
+
+
+class Announce(unittest.TestCase):
+    def test_announce_says_whether_it_is_on_and_whether_the_helper_is_there(self):
+        from unittest import mock
+        lines = []
+        with mock.patch.object(ls, "find_helper", return_value=None):
+            self.assertEqual(ls.announce({"logpack_shadow": True}, lines.append), "enabled available=0")
+        with mock.patch.object(ls, "find_helper", return_value=Path("/x/h")):
+            self.assertEqual(ls.announce({"logpack_shadow": True}, lines.append), "enabled available=1")
+        self.assertEqual(ls.announce({"logpack_shadow": False}, lines.append), "off (logpack_shadow=false)")
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(x.startswith("[LOGPACK-SHADOW] ") for x in lines))
 
 
 if __name__ == "__main__":
     unittest.main()
+

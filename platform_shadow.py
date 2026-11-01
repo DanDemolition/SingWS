@@ -99,6 +99,27 @@ def run_probe(probe: Path) -> dict:
     return json.loads(proc.stdout)
 
 
+_clean_noted = False
+
+
+def _note_clean(say, what: str) -> None:
+    """Once per launch: the first comparison that ran and agreed. Without it a silent log cannot tell 'ran and agreed' from 'never ran'."""
+    global _clean_noted
+    if not _clean_noted:
+        _clean_noted = True
+        say(f"first check clean ({what})")
+
+
+def announce(settings, log) -> str:
+    """One line per launch: is this shadow on, and is its helper there (a quiet shadow otherwise says nothing when everything agrees)."""
+    try:
+        text = f"enabled available={int(find_probe() is not None)}" if enabled(settings) else "off (platform_shadow=false)"
+        log(f"[PLATFORM-SHADOW] {text}")
+        return text
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def run_shadow(settings, keep_awake, log, probe: Path | None = None, py_state=python_state) -> str:
     """One comparison. Returns ``clean``, ``mismatch`` or ``skipped`` (for tests)."""
     def say(text):
@@ -120,6 +141,7 @@ def run_shadow(settings, keep_awake, log, probe: Path | None = None, py_state=py
             return "skipped"
         diffs = compare_state(before, after, rs, bool((settings or {}).get("keep_mac_awake", True)))
         if not diffs:
+            _note_clean(say, "frontmost app, accessibility trust and keep-awake agree")
             return "clean"
         fresh = [d for d in diffs if d not in _seen]
         _seen.update(diffs)
@@ -134,6 +156,7 @@ def run_shadow(settings, keep_awake, log, probe: Path | None = None, py_state=py
 def start(settings, keep_awake, log) -> threading.Thread | None:
     """Called once by the app after launch set-up. Returns the daemon thread (None when the shadow is off)."""
     try:
+        announce(settings, log)
         if not enabled(settings):
             return None
         thread = threading.Thread(target=run_shadow, args=(dict(settings), keep_awake, log), name="platform-shadow", daemon=True)

@@ -427,5 +427,29 @@ class RealHelper(unittest.TestCase):
         self.assertTrue(all("unsupported" in o for o in out))
 
 
+class AnnounceAndFirstClean(unittest.TestCase):
+    def test_announce_says_whether_it_is_on_and_whether_the_helper_is_there(self):
+        from unittest import mock
+        lines = []
+        with mock.patch.object(rs, "_helper", return_value=None):
+            self.assertEqual(rs.announce({"relay_msg_shadow": True}, lines.append), "enabled available=0")
+        with mock.patch.object(rs, "_helper", return_value=Path("/x/h")):
+            self.assertEqual(rs.announce({"relay_msg_shadow": True}, lines.append), "enabled available=1")
+        self.assertEqual(rs.announce({"relay_msg_shadow": False}, lines.append), "off (relay_msg_shadow=false)")
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(x.startswith("[RELAY-MSG-SHADOW] ") for x in lines))
+
+    def test_the_first_clean_batch_is_noted_once(self):
+        from unittest import mock
+        rs._clean_noted = False
+        lines = []
+        batch = [("queue", {"x": 1}, "e")]
+        with mock.patch.object(rs, "run_helper", return_value=["e"]), mock.patch.object(rs, "compare", return_value=None):
+            self.assertEqual(rs.run_shadow(batch, lines.append, helper=Path("/x/h")), "clean")
+            self.assertEqual(rs.run_shadow(batch, lines.append, helper=Path("/x/h")), "clean")
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("[RELAY-MSG-SHADOW] first check clean"))
+
+
 if __name__ == "__main__":
     unittest.main()

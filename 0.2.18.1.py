@@ -4190,14 +4190,21 @@ _RUST_EVIDENCE_FLAGS = ("queue_shadow", "plan_shadow", "settings_shadow", "store
 def _migrate_rust_evidence_defaults(settings) -> bool:
     """One time per profile: switch the Rust evidence collectors on (they used to default off, and saved profiles persist the old values).
     shell_commands moves from "off" to "dry_run" but "apply" (or "dry_run") is never touched. Returns True when it changed anything."""
-    if bool(settings.get("rust_evidence_defaults_migrated", False)):
-        return False
-    for key in _RUST_EVIDENCE_FLAGS:
-        settings[key] = True
-    if str(settings.get("shell_commands", "off") or "off").strip().lower() == "off":
-        settings["shell_commands"] = "dry_run"
-    settings["rust_evidence_defaults_migrated"] = True
-    return True
+    changed = False
+    if not bool(settings.get("rust_evidence_defaults_migrated", False)):
+        for key in _RUST_EVIDENCE_FLAGS:
+            settings[key] = True
+        if str(settings.get("shell_commands", "off") or "off").strip().lower() == "off":
+            settings["shell_commands"] = "dry_run"
+        settings["rust_evidence_defaults_migrated"] = True
+        changed = True
+    # One time (2026-11-01): `waitlist_snapshot` defaulted to OFF until 1.0.2.6, so saved profiles persisted False and the Rust shell's Waitlist tab
+    # stayed empty. Turn it on once; a profile can switch it off again afterwards and the choice is kept.
+    if not bool(settings.get("waitlist_snapshot_default_on_migrated", False)):
+        settings["waitlist_snapshot"] = True
+        settings["waitlist_snapshot_default_on_migrated"] = True
+        changed = True
+    return changed
 
 
 DEFAULTS = {
@@ -4291,6 +4298,7 @@ DEFAULTS = {
     "start_drive": True,
     # Read-only waitlist snapshot for the Rust shell: whenever the waiting-for-add view would refresh, write waitlist_snapshot.json (the waiting, pending and
     # removed-tonight requests plus the app's own "already in the queue" and "first turn tonight" answers). The app never reads it back. Default on.
+    "waitlist_snapshot_default_on_migrated": False,  # one-time: the saved `waitlist_snapshot` False (the old default) was switched on once
     "waitlist_snapshot": True,
     # Read-only status snapshot for the Rust shell's Status and Diagnostics pages: whenever the header or the ETA line refreshes, write status_snapshot.json (the
     # header's connection / diagnostics words, the queue summary inputs and the pre-show check facts). The app never reads it back. Default on.
@@ -22853,6 +22861,12 @@ class KaraokeApp(QWidget):
             platform_shadow.start(self.settings, getattr(self, "_mac_keep_awake", None), _diag)
         except Exception:
             pass
+        # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow"):
+            try:
+                __import__(_mod_name).announce(self.settings, _diag)
+            except Exception:
+                pass
         self._remote_request_tombstones = self._load_remote_request_tombstones()
         self._deferred_remote_adds = self._load_deferred_remote_adds()
         self._host_request_sync_ops = _load_json_file(

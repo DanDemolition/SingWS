@@ -167,5 +167,18 @@ class RustScanParity(unittest.TestCase):
         self.assertGreater(scan_parity.counts.get("zip", 0), 0)
 
 
+class Announce(unittest.TestCase):
+    def test_announce_names_the_engine_and_the_helper(self):
+        from unittest import mock
+        lines = []
+        with mock.patch.object(scan_shadow, "find_helper", return_value=None):
+            self.assertEqual(scan_shadow.announce({"scan_engine": "shadow"}, lines.append), "engine=shadow available=0")
+        with mock.patch.object(scan_shadow, "find_helper", return_value=Path("/x/h")):
+            self.assertEqual(scan_shadow.announce({"scan_engine": "shadow"}, lines.append), "engine=shadow available=1")
+        self.assertEqual(scan_shadow.announce({"scan_engine": "python"}, lines.append), "engine=python")
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(x.startswith("[SCAN-SHADOW] ") for x in lines))
+
+
 if __name__ == "__main__":
     unittest.main()

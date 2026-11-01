@@ -104,6 +104,18 @@ def compare_results(py: dict, rs: dict, limit: int = 5) -> list[str]:
     return out[: limit + 6]
 
 
+def announce(settings, log) -> str:
+    """One line per launch: which scan engine is selected and whether the Rust scan helper is there. The comparison itself only runs after a
+    FULL library scan, so a quiet log otherwise cannot tell 'no full scan yet' from 'the helper is missing'."""
+    try:
+        engine = effective_engine(settings)
+        text = f"engine={engine}" + (f" available={int(find_helper() is not None)}" if engine == "shadow" else "")
+        log(f"[SCAN-SHADOW] {text}")
+        return text
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def run_shadow(result: dict, request: dict, log) -> str:
     """Run the helper and log the verdict. Returns the verdict word (for tests)."""
     def say(text):

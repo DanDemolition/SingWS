@@ -99,6 +99,28 @@ def run_helper(helper: Path, payload: dict) -> dict:
     return json.loads(proc.stdout)
 
 
+_clean_noted = False
+
+
+def _note_clean(say, what: str) -> None:
+    """Once per launch: the first comparison that ran and agreed. Without it a silent log cannot tell 'ran and agreed' from 'never ran'."""
+    global _clean_noted
+    if not _clean_noted:
+        _clean_noted = True
+        say(f"first check clean ({what})")
+
+
+def announce(settings, log) -> str:
+    """One line per launch: is this shadow on, and is its helper there. The package is only built when a bug report is made, so without this a
+    quiet log cannot tell 'nothing to compare yet' from 'the helper is missing'."""
+    try:
+        text = f"enabled available={int(find_helper() is not None)}" if enabled(settings) else "off (logpack_shadow=false)"
+        log(f"[LOGPACK-SHADOW] {text}")
+        return text
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def run_shadow(payload: dict, py: dict, log, helper: Path | None = None) -> str:
     """One comparison. Returns ``clean``, ``mismatch`` or ``skipped`` (for tests)."""
     def say(text):
@@ -114,6 +136,7 @@ def run_shadow(payload: dict, py: dict, log, helper: Path | None = None) -> str:
         rs = run_helper(helper, payload)
         diffs = compare(py, rs)
         if not diffs:
+            _note_clean(say, "the Rust package equals the app's")
             return "clean"
         fresh = [d for d in diffs if d not in _seen]
         _seen.update(diffs)

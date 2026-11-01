@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import platform_shadow as ps
 
@@ -85,6 +86,7 @@ class Compare(unittest.TestCase):
 class RunShadow(unittest.TestCase):
     def setUp(self):
         ps._seen.clear()
+        ps._clean_noted = False
         self.lines = []
         self.tmp = tempfile.mkdtemp()
 
@@ -92,9 +94,21 @@ class RunShadow(unittest.TestCase):
         probe = fake_probe(self.tmp, reply, kw.pop("exit_code", 0))
         return ps.run_shadow({"keep_mac_awake": True}, None, self.lines.append, probe=probe, py_state=lambda ka: dict(GOOD_PY))
 
-    def test_clean_logs_nothing(self):
+    def test_clean_logs_one_first_check_note_per_launch_and_then_nothing(self):
         self.assertEqual(self.run_with(GOOD_RS), "clean")
-        self.assertEqual(self.lines, [])
+        self.assertEqual(len(self.lines), 1)
+        self.assertTrue(self.lines[0].startswith("[PLATFORM-SHADOW] first check clean"), self.lines)
+        self.assertEqual(self.run_with(GOOD_RS), "clean")
+        self.assertEqual(len(self.lines), 1, "the note appears once")
+
+    def test_announce_says_whether_it_is_on_and_whether_the_helper_is_there(self):
+        lines = []
+        with mock.patch.object(ps, "find_probe", return_value=None):
+            self.assertEqual(ps.announce({"platform_shadow": True}, lines.append), "enabled available=0")
+        with mock.patch.object(ps, "find_probe", return_value=Path("/x/probe")):
+            self.assertEqual(ps.announce({"platform_shadow": True}, lines.append), "enabled available=1")
+        self.assertEqual(ps.announce({"platform_shadow": False}, lines.append), "off (platform_shadow=false)")
+        self.assertEqual(lines, ["[PLATFORM-SHADOW] enabled available=0", "[PLATFORM-SHADOW] enabled available=1", "[PLATFORM-SHADOW] off (platform_shadow=false)"])
 
     def test_mismatch_logs_once_per_session(self):
         reply = dict(GOOD_RS, ax_trusted=False)

@@ -329,6 +329,27 @@ def run_helper(helper: Path, requests: list[dict]) -> list:
     return out
 
 
+_clean_noted = False
+
+
+def _note_clean(say, what: str) -> None:
+    """Once per launch: the first comparison that ran and agreed. Without it a silent log cannot tell 'ran and agreed' from 'never ran'."""
+    global _clean_noted
+    if not _clean_noted:
+        _clean_noted = True
+        say(f"first check clean ({what})")
+
+
+def announce(settings, log) -> str:
+    """One line per launch: is this shadow on, and is its helper there (a missing helper is otherwise skipped without a word)."""
+    try:
+        text = f"enabled available={int(_helper() is not None)}" if enabled(settings) else "off (relay_msg_shadow=false)"
+        log(f"[RELAY-MSG-SHADOW] {text}")
+        return text
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def run_shadow(batch: list[tuple[str, dict, str]], log, helper: Path | None = None) -> str:
     """One comparison batch. Returns ``clean``, ``mismatch`` or ``skipped`` (for tests)."""
     def say(text):
@@ -344,6 +365,7 @@ def run_shadow(batch: list[tuple[str, dict, str]], log, helper: Path | None = No
         answers = run_helper(helper, [req for _k, req, _e in batch])
         diffs = [d for (kind, _r, expected), rust in zip(batch, answers) if (d := compare(kind, expected, rust))]
         if not diffs:
+            _note_clean(say, "the Rust host relay messages equal the app's")
             return "clean"
         for d in diffs:
             if d in _seen:

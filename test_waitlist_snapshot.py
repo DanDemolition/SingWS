@@ -179,5 +179,24 @@ class WaitlistSnapshot(unittest.TestCase):
         self.assertNotIn("WAITLIST_SNAPSHOT_PATH.read", source)
 
 
+class MigrationTests(unittest.TestCase):
+    def test_a_profile_that_saved_the_old_default_off_is_switched_on_once(self):
+        m = base.load_main_module()
+        s = {"rust_evidence_defaults_migrated": True, "waitlist_snapshot": False}
+        self.assertTrue(m._migrate_rust_evidence_defaults(s))
+        self.assertIs(s["waitlist_snapshot"], True)
+        self.assertIs(s["waitlist_snapshot_default_on_migrated"], True)
+        s["waitlist_snapshot"] = False                      # the operator turns it off again later: that choice is kept
+        self.assertFalse(m._migrate_rust_evidence_defaults(s))
+        self.assertIs(s["waitlist_snapshot"], False)
+
+    def test_a_fresh_profile_ends_up_on_and_does_not_touch_other_choices(self):
+        m = base.load_main_module()
+        s = {"shell_commands": "apply"}
+        m._migrate_rust_evidence_defaults(s)
+        self.assertIs(s["waitlist_snapshot"], True)
+        self.assertEqual(s["shell_commands"], "apply")
+
+
 if __name__ == "__main__":
     unittest.main()
