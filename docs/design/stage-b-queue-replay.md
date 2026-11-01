@@ -124,3 +124,33 @@ nothing, a reorder that does nothing, a removal that forgets its tombstone. An u
 No Rust implementation plugged in; `complete_song` removal and `restart` persistence are harness models (documented above); the
 log extractor is a coverage probe; the sample show folder named in the brief (`~/Downloads/singws-show-20261101-0135`) did not exist,
 so extraction was run on copies of `~/SingWS/logs/singws_2026-10-23.log` and `..-25.log` (read, copied to a scratch dir, not modified).
+
+## M1: the Rust queue-state machine (`rust/crates/singws-queue-state`)
+
+Pure state machine driven by this event schema, same canonical snapshot, logical clock. CLI: `singws-queue-state [--init CONFIG_JSON]` (JSON lines in,
+`{"result","snapshot"}` lines out). Reuses `singws-queue` (`titles_conflict`) for the tombstone rule. Build:
+`cd rust && CARGO_TARGET_DIR=~/.cache/singws-rust-target-replay cargo build --release -p singws-queue-state`. Parity:
+`python tools/queue_event_replay.py parity [--seeds N] [--stream FILE]` (Python `PythonImpl` vs `RustImpl`); test `test_queue_state_parity.py`;
+mutation `tools/mutate_queue_state.py` (Python reference cached once; 72 mutants: 52 killed, 20 documented equivalent, 0 surviving).
+
+**Result:** IDENTICAL on every in-scope adversarial case (`core_cases()`, 22), 150 seeded `core` streams (60-80 events) and a stream extracted from
+two real logs (20 events). One real difference was found and fixed in Rust: a duplicate arrival of a queued request id marks that id handled
+(`handled_waitlist_ids`, via `_mark_waiting_for_add_duplicate_accepted`).
+
+**Declared scope.** Modelled: classic and rotation queues without lock; host add, remove song/singer, move, skip, rotation_advance, complete,
+restart; remote arrivals (tombstone admission and id reuse, removed-id memory, singer match by case/space-insensitive name, song cap incl. the
+intake-count inflation by duplicate rows, accepting, duplicate ids, key/tempo update, wire-order song ordering), empty-slot flags and their 180 s expiry,
+restart resetting settings to the initial merged config. NOT modelled (Rust answers `unsupported` or ignores the row; the generator's `core`
+profile avoids them): waitlist ops and `state: waiting` rows, duets, rotation lock, server-terminal rows, `sort_order`/order timestamps, singer
+ids/sessions, deferred adds, rename-merge, `round_sung` ever becoming true, song-level skip. Python stays authoritative.
+
+**Quirks the port had to reproduce** (each is a documented Python behaviour): restart resets runtime settings to the INITIAL merged config
+(not the latest `config`); duplicate rows in one batch inflate the intake count, so a later row of the same singer can be refused though the live
+count is lower; a host add may exceed the cap but remote rows may not; emptied singers are kept in the queue (never deleted by reconcile).
+
+## M2 (log-only app shadow): not started, and why
+The app has no event stream: queue state changes in many places that neither the harness nor the Rust model cover (drag reorder, undo, rename/merge,
+waitlist, library-match failures, deferred adds, duets, locks). A shadow fed by hooks on a few call sites would report false mismatches all night;
+one fed by state snapshots needs an `init`-from-snapshot op in Rust plus complete event capture. Prerequisites, in order: model the waitlist and
+duets; add `init`/load from a snapshot to the CLI; list every queue mutator and decide capture or exclusion for each; then the hook, the helper bundling
+(`rust/build_queue_state.sh`, specs, .gitignore, build scripts) and the QUIET SHADOWS row.
