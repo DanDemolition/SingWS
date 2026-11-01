@@ -2348,6 +2348,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singws-update"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "singws-video"
 version = "0.1.0"
 dependencies = [

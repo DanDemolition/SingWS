@@ -61,6 +61,11 @@ relaymsg_bin = project_root / "native" / "singws_relaymsg" / "arm64" / "singws-r
 if relaymsg_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{relaymsg_bin}'"):
     binaries.append((str(relaymsg_bin), "."))
 
+# Rust update rules (rust/build_update.sh). Optional: without it update_shadow is silently skipped.
+update_bin = project_root / "native" / "singws_update" / "arm64" / "singws-update"
+if update_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{update_bin}'"):
+    binaries.append((str(update_bin), "."))
+
 # Rust queue-state machine (rust/build_queue_state.sh). Optional: without it queue_state_shadow is silently skipped.
 queue_state_bin = project_root / "native" / "singws_queue_state" / "arm64" / "singws-queue-state"
 if queue_state_bin.is_file() and "arm64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{queue_state_bin}'"):
@@ -95,6 +100,7 @@ for helper in (
     "relay_msg_shadow.py",
     "net_slice_shadow.py",
     "queue_state_shadow.py",
+    "update_shadow.py",
     "start_shadow.py",
     "settings_shadow.py",
     "store_shadow.py",
@@ -219,6 +225,7 @@ a = Analysis(
         'relay_msg_shadow',
         'net_slice_shadow',
         'queue_state_shadow',
+        'update_shadow',
         'start_shadow',
         'settings_shadow',
         'store_shadow',
