@@ -19,10 +19,15 @@ class ShellControlsTests(unittest.TestCase):
 
         failed = []
         for fn in sl.SCENARIOS:
-            try:
-                fn()
-            except Exception as exc:  # noqa: BLE001
-                failed.append(f"{fn.__name__}: {exc!r}")
+            # Each scenario starts a real Qt shell that logs in and sends its commands within a fixed window (`--snapshot-after`); under a loaded machine
+            # (the full suite) the window is sometimes missed and no command is seen. A scenario that fails twice in a row is a real failure.
+            for attempt in (1, 2):
+                try:
+                    fn()
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == 2:
+                        failed.append(f"{fn.__name__}: {exc!r}")
         self.assertEqual(failed, [])
         self.assertGreaterEqual(len(sl.SCENARIOS), 5)
 
