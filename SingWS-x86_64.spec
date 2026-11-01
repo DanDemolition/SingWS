@@ -61,6 +61,11 @@ relaymsg_bin = project_root / "native" / "singws_relaymsg" / "x86_64" / "singws-
 if relaymsg_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{relaymsg_bin}'"):
     binaries.append((str(relaymsg_bin), "."))
 
+# Rust queue-state machine (rust/build_queue_state.sh). Optional: without it queue_state_shadow is silently skipped.
+queue_state_bin = project_root / "native" / "singws_queue_state" / "x86_64" / "singws-queue-state"
+if queue_state_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{queue_state_bin}'"):
+    binaries.append((str(queue_state_bin), "."))
+
 # Rust network slices (rust/build_netslice.sh). Optional: without it net_slice_shadow is silently skipped.
 netslice_bin = project_root / "native" / "singws_netslice" / "x86_64" / "singws-netslice"
 if netslice_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{netslice_bin}'"):
@@ -89,6 +94,7 @@ for helper in (
     "logpack_shadow.py",
     "relay_msg_shadow.py",
     "net_slice_shadow.py",
+    "queue_state_shadow.py",
     "start_shadow.py",
     "settings_shadow.py",
     "store_shadow.py",
@@ -217,6 +223,7 @@ a = Analysis(
         'logpack_shadow',
         'relay_msg_shadow',
         'net_slice_shadow',
+        'queue_state_shadow',
         'start_shadow',
         'settings_shadow',
         'store_shadow',

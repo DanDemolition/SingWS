@@ -148,9 +148,20 @@ ids/sessions, deferred adds, rename-merge, `round_sung` ever becoming true, song
 (not the latest `config`); duplicate rows in one batch inflate the intake count, so a later row of the same singer can be refused though the live
 count is lower; a host add may exceed the cap but remote rows may not; emptied singers are kept in the queue (never deleted by reconcile).
 
-## M2 (log-only app shadow): not started, and why
-The app has no event stream: queue state changes in many places that neither the harness nor the Rust model cover (drag reorder, undo, rename/merge,
-waitlist, library-match failures, deferred adds, duets, locks). A shadow fed by hooks on a few call sites would report false mismatches all night;
-one fed by state snapshots needs an `init`-from-snapshot op in Rust plus complete event capture. Prerequisites, in order: model the waitlist and
-duets; add `init`/load from a snapshot to the CLI; list every queue mutator and decide capture or exclusion for each; then the hook, the helper bundling
-(`rust/build_queue_state.sh`, specs, .gitignore, build scripts) and the QUIET SHADOWS row.
+## M2: `queue_state_shadow` (log-only, `queue_state_shadow.py`)
+
+A full event-stream shadow is not possible (the app has many unmodelled mutators), so the shadow checks ONE operation, the server reconcile, and
+resynchronises from the app's real state before every check, which is why unmodelled edits can never count as disagreements:
+`_reconcile_remote_requests` carries a decorator (`_queue_state_shadowed`; the only change to app code besides the setting, the launch announce and the
+specs). When a check is due (at most one per 30 s, setting `queue_state_shadow`, default True, helper present) it snapshots the queue, tombstones, removed-id and
+handled-id sets BEFORE, runs the reconcile unchanged, snapshots AFTER, and a daemon thread asks `singws-queue-state` (nice 10) to `load` the before-state
+and apply the same rows (`remote_arrive` with the app's clock). Only structure is compared: singers (name, flags, empty-slot flag), per song
+(request id, key, tempo, skipped), tombstone ids and status, removed ids, handled ids. Python's queue is always the one used; every call is wrapped.
+
+Not checked (silently): waitlist setting on, any waiting/failed/terminal/delivered row, `sort_order` or order fields, duet singer names, KaraFun
+rows, async or deferred intake, rotation lock, a clear window, and any reconcile during which the waitlist, attention, unmatched or deferred sets
+changed (that is how library-match failures are recognised). Log lines (grep `QUEUE-STATE-SHADOW`): `enabled available=0/1` at launch, `first check
+clean (...)` once, `MISMATCH <path>: app=<summary> rust=<summary>` (lengths/hashes only, never names or titles; each distinct difference once, at most 20),
+`skipped: <reason>`. `tools/shadow_report.py` has a QUIET SHADOWS row. Bundling: `rust/build_queue_state.sh` (both archs), both specs, `.gitignore`, both
+`build_singws_mac_*.sh`. Honest limit: tested against the Python harness world, not a show; real rows carry fields (singer ids, sessions, library
+metadata) the model ignores, so the first real mismatches may be model gaps rather than app bugs. Read them with that in mind.
