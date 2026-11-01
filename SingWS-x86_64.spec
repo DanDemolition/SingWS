@@ -51,6 +51,11 @@ logpack_bin = project_root / "native" / "singws_logpack" / "x86_64" / "singws-lo
 if logpack_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{logpack_bin}'"):
     binaries.append((str(logpack_bin), "."))
 
+# Rust library-scan helper (rust/build_scan.sh). Optional: without it the scan shadow reports "helper not found" after a full scan.
+scan_bin = project_root / "native" / "singws_scan" / "x86_64" / "singws-scan-cli"
+if scan_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{scan_bin}'"):
+    binaries.append((str(scan_bin), "."))
+
 # Rust host relay message builders (rust/build_relaymsg.sh). Optional: without it relay_msg_shadow is silently skipped.
 relaymsg_bin = project_root / "native" / "singws_relaymsg" / "x86_64" / "singws-relaymsg"
 if relaymsg_bin.is_file() and "x86_64" in subprocess.getoutput(f"/usr/bin/lipo -archs '{relaymsg_bin}'"):
@@ -342,8 +347,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'SingWS',
         'CFBundleDisplayName': 'SingWS',
-        'CFBundleShortVersionString': '1.0.2.7',
-        'CFBundleVersion': '1.0.2.7',
+        'CFBundleShortVersionString': '1.0.2.8',
+        'CFBundleVersion': '1.0.2.8',
         'LSMinimumSystemVersion': '12.3',
         'NSHighResolutionCapable': True,
         'NSAppleEventsUsageDescription': (

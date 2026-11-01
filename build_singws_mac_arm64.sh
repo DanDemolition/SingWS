@@ -7,6 +7,9 @@ cd "$(dirname "$0")"
 python3 tools/check_native_libs_fresh.py --arch arm64 --require || { echo "!! the Rust DSP library is stale or missing: run ./rust/build_dsp.sh first"; exit 1; }
 # The log-package shadow helper (optional, bundled when present): rebuilt every time so it never ships stale. A failure only skips the shadow.
 ./rust/build_logpack.sh || echo "!! could not build the singws-logpack helper; logpack_shadow will be skipped in this build"
+./rust/build_mac.sh || echo "!! could not build the singws-mac-probe helper; platform_shadow will be skipped in this build"
+./rust/build_relaymsg.sh || echo "!! could not build the singws-relaymsg helper; relay_msg_shadow will be skipped in this build"
+./rust/build_scan.sh || echo "!! could not build the singws-scan-cli helper; the scan shadow will report helper-not-found in this build"
 
 # A Python.org framework extracted for a portable build cannot live at its
 # installer path under /Library.  Carry the explicit shim through this shell;
