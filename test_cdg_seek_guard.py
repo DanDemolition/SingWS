@@ -37,6 +37,16 @@ class GuardTests(unittest.TestCase):
     def test_a_quiet_stretch_in_the_middle_is_not_a_tail(self):
         self.assertIsNone(g.terminal_gap(build([0, 3000, 6000, 6300, 6600, 6900])))
 
+    def test_a_long_quiet_stretch_in_the_middle_is_a_dead_zone_but_a_short_one_is_not(self):
+        self.assertEqual(g.dead_zones(build([0, 600, 3000, 3001, 6000, 6300, 6600, 6900])), [(600 / 300.0, 3000 / 300.0), (3001 / 300.0, 6000 / 300.0)])
+        self.assertEqual(g.dead_zones(build([0, 300, 600, 900, 1200])), [])
+
+    def test_several_zones_each_clamp_to_their_own_start(self):
+        zones = [(100.0, 130.0), (200.0, 260.0)]
+        self.assertEqual(g.clamp_seek(zones, 230.0), 200.0)
+        self.assertEqual(g.clamp_seek(zones, 115.0), 100.0)
+        self.assertEqual(g.clamp_seek(zones, 150.0), 150.0)
+
     def test_seek_target_moves_back_only_inside_the_gap(self):
         gap = (100.0, 130.0)
         self.assertEqual(g.clamp_seek(gap, 90.0), 90.0)
@@ -59,7 +69,7 @@ class GuardTests(unittest.TestCase):
 
     @unittest.skipUnless((DISC.with_suffix(".cdg")).exists(), "the Let Down disc is not on this machine")
     def test_the_real_disc_has_the_documented_gap(self):
-        gap = g.load_gap(DISC.with_suffix(".cdg"))
+        gap = g.load_gap(DISC.with_suffix(".cdg"))[-1]
         self.assertAlmostEqual(gap[0], 278.03, places=1)
         self.assertAlmostEqual(gap[1], 300.50, places=1)
 

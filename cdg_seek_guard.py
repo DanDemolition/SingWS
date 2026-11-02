@@ -3,11 +3,12 @@
 A CDG picture only has frames where the file has a command packet. When the last frame before the final one is more than MIN_GAP_SECONDS earlier, an
 exact seek into that gap makes mpv wait for the first frame after the target, which is the final one: the picture jumps to the end and the song ends
 (docs/design/stage-e-no-python-host-spike-2.md). Clamping the seek target to the last frame before the gap keeps picture and sound together.
-Rust twin: singws-cdg `terminal_gap`.
+Rust twin: singws-cdg `dead_zones`.
 """
 PACKET_BYTES = 24
 PACKETS_PER_SECOND = 300.0
 MIN_GAP_SECONDS = 1.0
+MID_GAP_SECONDS = 5.0   # a quiet stretch inside the song counts from this length (an ordinary page change is well under it)
 _COMMAND = 9
 _MASK = 0x3F
 _TILE_BLOCK = 6
@@ -37,16 +38,29 @@ def terminal_gap(data: bytes):
     return None
 
 
-def clamp_seek(gap, seconds: float) -> float:
-    """The seek target to use: inside the gap it moves back to the last frame before it."""
-    if gap is not None and gap[0] < seconds < gap[1]:
-        return gap[0]
+def dead_zones(data: bytes):
+    """Every stretch where a seek would jump ahead: each frame-less stretch longer than MID_GAP_SECONDS, plus the terminal gap (see `terminal_gap`)."""
+    times = frame_times(data)
+    zones = [(a, b) for a, b in zip(times, times[1:]) if b - a > MID_GAP_SECONDS]
+    tail = terminal_gap(data)
+    if tail is not None and tail not in zones:
+        zones.append(tail)
+    return sorted(zones)
+
+
+def clamp_seek(zones, seconds: float) -> float:
+    """The seek target to use: inside a dead zone it moves back to the last frame before it. `zones` is a list of (before, after), a single pair, or None."""
+    if zones and isinstance(zones[0], float):
+        zones = [zones]
+    for before, after in zones or ():
+        if before < seconds < after:
+            return before
     return seconds
 
 
 def load_gap(path):
     try:
         with open(path, "rb") as fh:
-            return terminal_gap(fh.read())
+            return dead_zones(fh.read())
     except Exception:
         return None

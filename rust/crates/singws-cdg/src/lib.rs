@@ -637,12 +637,25 @@ pub fn terminal_gap(data: &[u8]) -> Option<(f64, f64)> {
     None
 }
 
-/// The seek target to use: inside the gap it moves back to the last frame before it.
-pub fn clamp_seek(gap: Option<(f64, f64)>, seconds: f64) -> f64 {
-    match gap {
-        Some((before, after)) if seconds > before && seconds < after => before,
-        _ => seconds,
+/// A frame-less stretch inside the song counts from this length (twin of `cdg_seek_guard.MID_GAP_SECONDS`).
+pub const MID_GAP_SECONDS: f64 = 5.0;
+
+/// Every stretch where a seek would jump ahead: each frame-less stretch longer than `MID_GAP_SECONDS`, plus the terminal gap.
+pub fn dead_zones(data: &[u8]) -> Vec<(f64, f64)> {
+    let times = frame_times(data);
+    let mut zones: Vec<(f64, f64)> = times.windows(2).filter(|w| w[1] - w[0] > MID_GAP_SECONDS).map(|w| (w[0], w[1])).collect();
+    if let Some(tail) = terminal_gap(data) {
+        if !zones.contains(&tail) {
+            zones.push(tail);
+        }
     }
+    zones.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    zones
+}
+
+/// The seek target to use: inside a dead zone it moves back to the last frame before it.
+pub fn clamp_seek(zones: &[(f64, f64)], seconds: f64) -> f64 {
+    zones.iter().find(|(before, after)| seconds > *before && seconds < *after).map_or(seconds, |(before, _)| *before)
 }
 
 /// A whole CDG file with seek by time.
@@ -737,13 +750,21 @@ mod tests {
 
     #[test]
     fn clamp_moves_back_only_inside_the_gap() {
-        let g = Some((100.0, 130.0));
-        assert_eq!(clamp_seek(g, 90.0), 90.0);
-        assert_eq!(clamp_seek(g, 100.0), 100.0);
-        assert_eq!(clamp_seek(g, 115.0), 100.0);
-        assert_eq!(clamp_seek(g, 130.0), 130.0);
-        assert_eq!(clamp_seek(g, 200.0), 200.0);
-        assert_eq!(clamp_seek(None, 115.0), 115.0);
+        let g = [(100.0, 130.0), (200.0, 260.0)];
+        assert_eq!(clamp_seek(&g, 90.0), 90.0);
+        assert_eq!(clamp_seek(&g, 100.0), 100.0);
+        assert_eq!(clamp_seek(&g, 115.0), 100.0);
+        assert_eq!(clamp_seek(&g, 130.0), 130.0);
+        assert_eq!(clamp_seek(&g, 230.0), 200.0);
+        assert_eq!(clamp_seek(&g, 300.0), 300.0);
+        assert_eq!(clamp_seek(&[], 115.0), 115.0);
+    }
+
+    #[test]
+    fn a_long_quiet_stretch_in_the_middle_is_a_dead_zone_but_a_short_one_is_not() {
+        let z = dead_zones(&built(&[0, 600, 3000, 3001, 6000, 6300, 6600, 6900]));
+        assert_eq!(z, vec![(600.0 / 300.0, 3000.0 / 300.0), (3001.0 / 300.0, 6000.0 / 300.0)]);
+        assert!(dead_zones(&built(&[0, 300, 600, 900, 1200])).is_empty());
     }
 
     fn solid(w: usize, h: usize, rgb: [u8; 3]) -> Vec<u8> {
@@ -1361,7 +1382,7 @@ mod tests {
     fn the_let_down_disc_has_the_documented_tail_when_it_is_on_this_machine() {
         let path = std::path::Path::new(&std::env::var("HOME").unwrap_or_default()).join("Music/Karaoke/Karaoke Library/CC - Radiohead - Let Down.cdg");
         let Ok(data) = std::fs::read(path) else { return };
-        let (before, after) = terminal_gap(&data).expect("tail");
+        let (before, after) = *dead_zones(&data).last().expect("tail");
         assert!((before - 278.03).abs() < 0.05 && (after - 300.50).abs() < 0.05, "{before} {after}");
     }
 

@@ -434,7 +434,7 @@ impl qobject::PlayDemo {
         record("bridge_create", true, json!({"video": o.video, "audio": o.audio, "render_thread": singws_video::singws_bridge_render_thread_active(h) != 0}));
 
         let mut proto = Protocol::new(picture, Some(EngineVoice(sys as usize)));
-        proto.seek_gap = std::fs::read(&o.video).ok().and_then(|d| singws_cdg::terminal_gap(&d));
+        proto.seek_gap = std::fs::read(&o.video).map(|d| singws_cdg::dead_zones(&d)).unwrap_or_default();
         record("seek_gap", true, json!({"gap": proto.seek_gap}));
         let now = epoch.elapsed().as_secs_f64();
         proto.start(now, 0.0);
