@@ -15,7 +15,8 @@ Exit being measured (RUST_APP_LOGIC_PLAN.md:272-279): *the signed application co
 |---|---|
 | 1. `singws-mac` platform shim | not started |
 | **2. `singws-scan` library scan** | **BUILT, tested, mutation-tested; nothing runs it by default** (section 3a below) |
-| 3. one-process spike bundle | not started |
+| 3. one-process spike bundle | **DONE twice** (2026-10-31, 2026-11-01): `stage-e-no-python-host-spike.md` (one Rust process hosts the Qt Quick shell, the Rust video bridge and the Rust music engine; a locally signed bundle keeps a stable code identity and a real Accessibility grant survived a re-sign) and `stage-e-no-python-host-spike-2.md` (a Rust host plays a real CDG+MP3 song with picture, voice, seek, pause, natural end). What is still unmeasured needs the operator: a real sound card, the physical Intel Mac, the audience/TV window and its stacking (rules 4 and 6), Screen Recording grant and ScreenCaptureKit from the Rust host. |
+| 2b. queue-state (Stage B) | modelled in `singws-queue-state` and shadowed; NOT modelled: waitlist, duets, rotation lock, server-terminal rows, sort_order, deferred adds, rename-merge (see its header) |
 
 ## 0. The one-paragraph answer
 
