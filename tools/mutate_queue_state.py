@@ -48,8 +48,8 @@ M = [
     ("            if counts.get(&k).copied().unwrap_or(0) >= self.cur.active_limit() {\n                continue;\n            }\n            if !self.cur.accepting {", "            if !self.cur.accepting {", None),
     ("            if !self.cur.accepting {\n                continue;\n            }", "", None),
     ("                *counts.entry(k).or_insert(0) += 1;\n            }\n        }\n        // server key", "            }\n        }\n        // server key", None),
-    ("            if existing.contains(&r.rid) {\n                continue;\n            }\n            let k = name_key(&r.singer);", "            let k = name_key(&r.singer);", "a request already queued is a duplicate and the add path ignores it"),
-    ("        if self.find_duplicate(&entry) {\n            if let Some(r) = entry.rid {\n                self.handled.insert(r); // _mark_waiting_for_add_duplicate_accepted\n            }\n            return true;\n        }", "", "the post-add cleanup removes the second copy of the same request id (the handled-id side effect is covered by the intake_counts case)"),
+    ("            if existing.contains(&r.rid) || waiting_ids.contains(&r.rid) {\n                continue;\n            }\n            let k = name_key(&r.singer);", "            let k = name_key(&r.singer);", "a request already queued is a duplicate and the add path ignores it"),
+    ("        if self.find_duplicate(&entry) {\n            if let Some(r) = entry.rid {\n                self.handled.insert(r); // _mark_waiting_for_add_duplicate_accepted: handled, and off the waitlist\n                self.waitlist.remove(&r);\n            }\n            return true;\n        }", "", "the post-add cleanup removes the second copy of the same request id (the handled-id side effect is covered by the intake_counts case)"),
     ("            if remote {\n                self.cleanup_duplicate_songs();\n            }\n            return true;", "            return true;", "the reconcile ends with a cleanup pass"),
     ("                if e.skipped || e.identity().0 == 2 || seen.insert(e.identity()) {", "                if e.skipped || e.identity().0 == 2 || !seen.insert(e.identity()) { keep.push(e); continue; } if true {", "duplicates are also rejected by find_duplicate before they are added"),
     ("        if self.cur.rotation() {\n            self.recompute_round_state();\n            let mut ins", "        if false {\n            self.recompute_round_state();\n            let mut ins", None),
@@ -103,6 +103,48 @@ M = [
     # aliases
     ("                let n = self.singer_alias.len() + 1;", "                let n = self.singer_alias.len();", None),
     ("        let ok = self.add_song(singer, entry, false);\n        if !ok {\n            self.next_local -= 1;\n        }", "        let ok = self.add_song(singer, entry, false);", "a host add is never refused in the corpus (the operator bypasses the cap)"),
+    # waitlist
+    ("            waitlist: cfg.get(\"waitlist\").or_else(|| cfg.get(\"use_waiting_for_add\")).map(truthy).unwrap_or(false),", "            waitlist: false,", None),
+    ("        if let Some(v) = ev.get(\"waitlist\") {\n            self.cur.waitlist = truthy(v);\n        }", "", None),
+    ("                self.waitlist.remove(&r);\n            }\n            return true;", "            }\n            return true;", "a waitlist entry never coexists with a queued entry of the same id: every poll rebuilds the waitlist first and drops queued ids, and waitlist_add removes the entry on success"),
+    ("            self.waitlist.retain(|_, r| !first_truthy_str(r, &[\"attention_reason\"]).trim().is_empty());\n            return;", "            return;", None),
+    ("            self.waitlist.retain(|_, r| !first_truthy_str(r, &[\"attention_reason\"]).trim().is_empty());", "            self.waitlist.clear();", "no row in the corpus carries an attention_reason, so retaining none equals clearing"),
+    ("            if non_actionable(row) {\n                self.handled.insert(rid);\n                continue;\n            }", "            if non_actionable(row) {\n                continue;\n            }", None),
+    ("            if local_ids.contains(&rid) {\n                self.handled.insert(rid);\n                continue;\n            }", "            if local_ids.contains(&rid) {\n                continue;\n            }", None),
+    ("            if self.handled.contains(&rid) {\n                continue;\n            }\n            candidates", "            candidates", None),
+    ("            if !is_waiting_row(row) {\n                continue;\n            }\n            if local_ids", "            if local_ids", None),
+    ("        self.waitlist = candidates;", "        for (k, v) in candidates { self.waitlist.insert(k, v); }", None),
+    ("            if is_waiting_row(row) {\n                continue; // held", "            if false {\n                continue; // held", None),
+    ("            if existing.contains(&r.rid) || waiting_ids.contains(&r.rid) {", "            if existing.contains(&r.rid) {", None),
+    ("        let waiting_ids: BTreeSet<u64> = self.waitlist.keys().copied().collect();", "        let waiting_ids: BTreeSet<u64> = BTreeSet::new();", None),
+    ("    if matches!(state.as_str(), \"waiting\" | \"failed\" | \"failed_needs_review\") {\n        return false;\n    }\n    let sent", "    let sent", None),
+    ("    if matches!(state.as_str(), \"active\" | \"delivered\" | \"completed\" | \"sung\" | \"removed\" | \"skipped\") {\n        return true;\n    }", "", "the corpus never sends these lifecycle states on non-terminal rows"),
+    ("    if sent {\n        return true;\n    }\n    [\"added_at\"", "    [\"added_at\"", None),
+    ("[\"added_at\", \"queued_at\", \"completed_at\", \"removed_at\"].iter().any(|k| to_f64(row.get(*k)).map(|f| f > 0.0).unwrap_or(false))", "false", None),
+    ("        return !matches!(sync.as_str(), \"\" | \"pending\" | \"pending_desktop_sync\");", "        return false;", "state accepted is not in the corpus"),
+    ("    !first_truthy_str(row, &[\"pending_reason\", \"last_error\", \"attention_reason\"]).trim().is_empty()", "false", None),
+    ("        if self.find_duplicate(&entry) {", "        if false && self.find_duplicate(&entry) {", "same as the earlier find_duplicate mutant: the post-add cleanup removes the copy"),
+    ("        if is_duet(&singer) || singer.is_empty() || title.is_empty() {\n            return (false, \"unsupported\".into());", "        if false {\n            return (false, \"unsupported\".into());", "duets, empty singers and empty titles are not in the corpus"),
+    ("        if counts.get(&name_key(&singer)).copied().unwrap_or(0) >= self.cur.active_limit() {\n            return (false, \"not_added\".into());\n        }", "", "add_song enforces the same cap for remote rows and answers not_added"),
+    ("        let tempo = int(\"tempo\").clamp(-30, 30);", "        let tempo = int(\"tempo\");", "waitlist rows in the corpus never carry a tempo beyond 30"),
+    ("        let key = int(\"key\");", "        let key = 0;", None),
+    ("        self.handled.insert(rid);\n        self.waitlist.remove(&rid);\n        (true, \"added\"", "        self.waitlist.remove(&rid);\n        (true, \"added\"", None),
+    ("        self.waitlist.remove(&rid);\n        (true, \"added\"", "        (true, \"added\"", None),
+    ("            return (false, \"unknown_waitlist_request\".into());\n        };\n        let rid = rid as u64;\n        if req.get(\"replacement_track\")", "            return (false, \"unknown_waitlist_request\".into());\n        };\n        let rid = rid as u64;\n        let _ = 0; if req.get(\"replacement_track\")", "no-op rewrite guard"),
+    ("            o.insert(\"state\".into(), json!(\"removed\"));\n            o.insert(\"removal_reason\"", "            o.insert(\"removal_reason\"", None),
+    ("        self.removed_tonight.insert(rid, item);\n        self.handled.insert(rid);", "        self.removed_tonight.insert(rid, item);", None),
+    ("        self.removed_tonight.insert(rid, item);\n        self.handled.insert(rid);", "        self.handled.insert(rid);", None),
+    ("        self.tombstone(rid, &entry, &row_str(&req, \"singer\"), \"waiting_for_add_cleared\", \"removed\");", "", None),
+    ("        self.tombstone(rid, &entry, &row_str(&req, \"singer\"), \"waiting_for_add_cleared\", \"removed\");\n        self.waitlist.remove(&rid);\n        (true, \"removed\"", "        self.tombstone(rid, &entry, &row_str(&req, \"singer\"), \"waiting_for_add_cleared\", \"removed\");\n        (true, \"removed\"", None),
+    ("            o.insert(\"state\".into(), json!(\"waiting\"));", "", None),
+    ("            o.insert(\"pending_status\".into(), json!(\"Restored by host\"));", "", "pending_status is not part of the snapshot view"),
+    ("        self.waitlist.insert(rid, restored);\n        self.removed_tonight.remove(&rid);", "        self.waitlist.insert(rid, restored);", None),
+    ("        self.handled.remove(&rid);\n        self.removed.remove(&rid);\n        self.tombs.remove(&rid);\n        (true, \"restored\"", "        self.removed.remove(&rid);\n        self.tombs.remove(&rid);\n        (true, \"restored\"", None),
+    ("        self.handled.remove(&rid);\n        self.removed.remove(&rid);\n        self.tombs.remove(&rid);", "        self.handled.remove(&rid);\n        self.tombs.remove(&rid);", None),
+    ("        self.removed.remove(&rid);\n        self.tombs.remove(&rid);\n        (true, \"restored\"", "        self.removed.remove(&rid);\n        (true, \"restored\"", None),
+    ("            } else if self.waitlist.contains_key(&rid) {\n                \"waitlisted\"", "            } else if false {\n                \"waitlisted\"", None),
+    (".chain(self.waitlist.keys()).chain(self.removed_tonight.keys())", ".chain(self.waitlist.keys())", None),
+    ("        self.cur = self.init.clone();\n        self.removed", "        self.cur = self.init.clone();\n        self.waitlist.clear();\n        self.removed", "the restart rule the harness mirrors keeps the persisted waitlist; clearing it differs only when a waitlist survives a restart: covered by the adversarial restart case"),
 ]
 
 
@@ -117,13 +159,13 @@ import json, sys
 sys.path.insert(0, "tools")
 import queue_event_replay as q
 q.load_app_module()
-streams = list(q.core_cases().values()) + [q.generate_stream(i, 60, "core") for i in range(%d)]
+streams = list(q.core_cases().values()) + [q.generate_stream(i, 60, "core") for i in range(%d)] + [q.generate_stream(i, 60, "full") for i in range(%d)]
 out = []
 for s in streams:
     steps = q.run_stream(q.PythonImpl(), s)
     out.append({"events": s, "lines": [q.canonical(x) for x in steps]})
 print("REF" + json.dumps(out))
-''' % SEEDS
+''' % (SEEDS, SEEDS * 2)
     p = subprocess.run([PY, "-c", code], capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, SINGWS_HOME=os.popen("mktemp -d").read().strip(), QT_QPA_PLATFORM="offscreen", SINGWS_SKIP_GSTREAMER_INIT_FOR_TESTS="1"))
     for line in p.stdout.splitlines():
         if line.startswith("REF"):

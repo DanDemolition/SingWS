@@ -7,8 +7,11 @@
 //!   modelled   classic and rotation queues (no lock), host add / remove song / remove singer / move / skip / rotation_advance / complete,
 //!              remote arrivals (admission via `singws-queue::titles_conflict`, tombstones, removed-id memory, singer match by name,
 //!              song limit, accepting, duplicate request ids, wire-order song ordering), empty rotation slots with expiry, restart.
-//!   NOT        the waitlist (`waitlist_*` ops, `state: waiting` rows, `use_waiting_for_add`), duets ("A & B"), rotation lock, rows with a
-//!              server-terminal state, `sort_order` / order timestamps, singer ids / sessions, deferred adds, rename-merge.
+//!              the waitlist: `waitlist_add` / `waitlist_remove` / `waitlist_restore`, `waiting` / failed rows (rebuilt from every arrival exactly like
+//!              `_set_waiting_for_add_requests`), `use_waiting_for_add`, handled ids, the removed-tonight list (+ `waitlist_evening_key`).
+//!   NOT        duets ("A & B"), rotation lock, rows with a server-terminal state, `sort_order` / order timestamps, singer ids / sessions, deferred
+//!              adds, rename-merge. Waitlist: stale-by-timestamp purge, replacement tracks, the attention list (`_remote_attention_requests`, i.e. a
+//!              library-match or insert failure), the song-info edit/replace dialogs.
 //!              Such input answers `{"ok":false,"code":"unsupported"}` or is ignored exactly as documented per op, so a parity run on it
 //!              is expected to differ and the Python comparer reports where.
 use serde_json::{json, Map, Value};
@@ -33,6 +36,7 @@ struct Settings {
     mode: String,
     limit: i64,
     accepting: bool,
+    waitlist: bool,
 }
 
 impl Settings {
@@ -41,6 +45,7 @@ impl Settings {
             mode: cfg.get("queue_mode").and_then(Value::as_str).unwrap_or("rotation").to_string(),
             limit: cfg.get("limit_pending_max").and_then(Value::as_i64).unwrap_or(20),
             accepting: cfg.get("requests_accepting").and_then(Value::as_bool).unwrap_or(true),
+            waitlist: cfg.get("waitlist").or_else(|| cfg.get("use_waiting_for_add")).map(truthy).unwrap_or(false),
         }
     }
     fn rotation(&self) -> bool {
@@ -117,6 +122,8 @@ pub struct State {
     tombs: BTreeMap<u64, Tomb>,
     removed: BTreeSet<u64>,
     handled: BTreeSet<u64>,
+    waitlist: BTreeMap<u64, Value>,
+    removed_tonight: BTreeMap<u64, Value>,
     next_uid: u64,
     singer_alias: HashMap<u64, usize>,
     next_local: usize,
@@ -152,6 +159,141 @@ fn is_duet(name: &str) -> bool {
         || lower.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "and" || w == "with")
 }
 
+
+/// Python truthiness of a JSON value (`bool(x)`).
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// `str(x)` for the JSON values a request row carries.
+fn pystr(v: &Value) -> String {
+    match v {
+        Value::Null => "None".into(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => if *b { "True".into() } else { "False".into() },
+        other => other.to_string(),
+    }
+}
+
+/// `str(row.get(key, ""))`.
+fn row_str(row: &Value, key: &str) -> String {
+    row.get(key).map(pystr).unwrap_or_default()
+}
+
+/// `str(a or b or ... or "")`: the first truthy value, as text.
+fn first_truthy_str(row: &Value, keys: &[&str]) -> String {
+    for k in keys {
+        if let Some(v) = row.get(*k) {
+            if truthy(v) {
+                return pystr(v);
+            }
+        }
+    }
+    String::new()
+}
+
+/// `float(x or 0)`; None when Python would raise.
+fn to_f64(v: Option<&Value>) -> Option<f64> {
+    match v {
+        None => Some(0.0),
+        Some(x) if !truthy(x) => Some(0.0),
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+        Some(Value::Bool(b)) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// `int(req.get("request_id") or req.get("id") or 0)`.
+fn request_id_of(row: &Value) -> i64 {
+    for k in ["request_id", "id"] {
+        if let Some(v) = row.get(k) {
+            if truthy(v) {
+                return match v {
+                    Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)).unwrap_or(0),
+                    Value::String(s) => s.trim().parse::<i64>().unwrap_or(0),
+                    Value::Bool(b) => *b as i64,
+                    _ => 0,
+                };
+            }
+        }
+    }
+    0
+}
+
+fn state_of(row: &Value, keys: &[&str]) -> String {
+    first_truthy_str(row, keys).trim().to_lowercase()
+}
+
+/// `_remote_request_is_non_actionable`: the server row has left host-actionable intake.
+fn non_actionable(row: &Value) -> bool {
+    if !row.is_object() {
+        return false;
+    }
+    let state = state_of(row, &["state", "status"]);
+    if matches!(state.as_str(), "waiting" | "failed" | "failed_needs_review") {
+        return false;
+    }
+    let sent = row.get("sent").map(truthy).unwrap_or(false) || row.get("delivered").map(truthy).unwrap_or(false);
+    if state == "accepted" {
+        if sent {
+            return true;
+        }
+        let sync = first_truthy_str(row, &["desktop_sync_status"]).trim().to_lowercase();
+        return !matches!(sync.as_str(), "" | "pending" | "pending_desktop_sync");
+    }
+    if matches!(state.as_str(), "active" | "delivered" | "completed" | "sung" | "removed" | "skipped") {
+        return true;
+    }
+    if sent {
+        return true;
+    }
+    ["added_at", "queued_at", "completed_at", "removed_at"].iter().any(|k| to_f64(row.get(*k)).map(|f| f > 0.0).unwrap_or(false))
+}
+
+/// `_is_waiting_for_add_request`.
+fn is_waiting_row(row: &Value) -> bool {
+    if !row.is_object() || non_actionable(row) {
+        return false;
+    }
+    let state = state_of(row, &["state"]);
+    if matches!(state.as_str(), "waiting" | "failed" | "failed_needs_review") {
+        return true;
+    }
+    !first_truthy_str(row, &["pending_reason", "last_error", "attention_reason"]).trim().is_empty()
+}
+
+/// `_waitlist_evening_key`: `(now - 6 h).strftime("%Y-%m-%d")` for a LOCAL wall-clock time given as seconds since 1970-01-01 00:00 local
+/// (the caller adds the UTC offset; the model has no clock or timezone of its own). Used to decide whether a saved removed-tonight list
+/// still belongs to this evening.
+pub fn waitlist_evening_key(local_epoch_secs: i64) -> String {
+    let days = (local_epoch_secs - 6 * 3600).div_euclid(86_400);
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `_load_waitlist_removed_tonight`: a saved list is kept only when its evening and tenant match the current ones.
+pub fn removed_tonight_still_valid(saved_evening: &str, saved_tenant: &str, now_evening: &str, tenant: &str) -> bool {
+    saved_evening == now_evening && saved_tenant == tenant
+}
+
 impl State {
     pub fn new(init: &Value) -> State {
         let s = Settings::from(init);
@@ -163,6 +305,8 @@ impl State {
             tombs: BTreeMap::new(),
             removed: BTreeSet::new(),
             handled: BTreeSet::new(),
+            waitlist: BTreeMap::new(),
+            removed_tonight: BTreeMap::new(),
             next_uid: 1,
             singer_alias: HashMap::new(),
             next_local: 0,
@@ -215,7 +359,10 @@ impl State {
             "rotation_advance" => self.op_rotation_advance(ev),
             "complete_song" => self.op_complete_song(ev),
             "restart" => self.op_restart(),
-            _ => (false, "unsupported".into()), // waitlist_* : not modelled
+            "waitlist_add" => self.op_waitlist_add(ev),
+            "waitlist_remove" => self.op_waitlist_remove(ev),
+            "waitlist_restore" => self.op_waitlist_restore(ev),
+            _ => (false, "unsupported".into()),
         };
         (ok, code)
     }
@@ -383,7 +530,8 @@ impl State {
         entry.skipped = false;
         if self.find_duplicate(&entry) {
             if let Some(r) = entry.rid {
-                self.handled.insert(r); // _mark_waiting_for_add_duplicate_accepted
+                self.handled.insert(r); // _mark_waiting_for_add_duplicate_accepted: handled, and off the waitlist
+                self.waitlist.remove(&r);
             }
             return true;
         }
@@ -437,6 +585,9 @@ impl State {
         if let Some(v) = ev.get("requests_accepting").and_then(Value::as_bool) {
             self.cur.accepting = v;
         }
+        if let Some(v) = ev.get("waitlist") {
+            self.cur.waitlist = truthy(v);
+        }
         ROUTE_OK.into_pair()
     }
 
@@ -463,6 +614,9 @@ impl State {
     fn op_remote_arrive(&mut self, ev: &Value) -> (bool, String) {
         self.prune_expired_slots();
         let rows = ev.get("requests").and_then(Value::as_array).cloned().unwrap_or_default();
+        let local_ids: BTreeSet<u64> = self.queue.iter().flat_map(|s| s.songs.iter().filter_map(|e| e.rid)).collect();
+        self.set_waiting(&rows, &local_ids);
+        let waiting_ids: BTreeSet<u64> = self.waitlist.keys().copied().collect();
         struct Req {
             rid: u64,
             singer: String,
@@ -481,8 +635,8 @@ impl State {
             let rid = rid as u64;
             let state = o.get("state").and_then(Value::as_str).unwrap_or("").trim().to_lowercase();
             let terminal = matches!(state.as_str(), "removed" | "completed" | "sung") || o.get("removed_at").is_some() || o.get("completed_at").is_some();
-            if terminal || state == "waiting" || state == "failed" || state == "failed_needs_review" {
-                continue; // server-terminal and waitlist rows are not modelled
+            if terminal {
+                continue; // server-terminal rows are not modelled
             }
             let title = o.get("title").and_then(Value::as_str).unwrap_or("").trim().to_string();
             // admission, in the app's order: tombstone first, then the removed-id memory
@@ -498,8 +652,11 @@ impl State {
             if self.removed.contains(&rid) {
                 continue; // terminal title memory is empty in this model: stale row ignored
             }
-            if o.get("sent").and_then(Value::as_bool).unwrap_or(false) || o.get("delivered").and_then(Value::as_bool).unwrap_or(false) {
-                continue; // non-actionable and not in the local queue (checked below only by id; kept simple)
+            if is_waiting_row(row) {
+                continue; // held for the host: the waitlist itself was rebuilt above
+            }
+            if non_actionable(row) && !local_ids.contains(&rid) {
+                continue; // left host intake and not in the local queue: historical
             }
             let singer = o.get("singer").and_then(Value::as_str).unwrap_or("").trim().to_string();
             if singer.is_empty() {
@@ -535,7 +692,7 @@ impl State {
         self.cleanup_duplicate_songs();
         let mut counts = self.live_counts();
         for r in &normalized {
-            if existing.contains(&r.rid) {
+            if existing.contains(&r.rid) || waiting_ids.contains(&r.rid) {
                 continue;
             }
             let k = name_key(&r.singer);
@@ -601,6 +758,125 @@ impl State {
         }
         self.cleanup_duplicate_songs();
         ROUTE_OK.into_pair()
+    }
+
+    /// `_set_waiting_for_add_requests` (the part that changes modelled state): with the waitlist on, the pending list is REPLACED by the
+    /// waiting rows of this poll that are not queued and not handled; with it off only entries carrying an `attention_reason` survive.
+    fn set_waiting(&mut self, rows: &[Value], local_ids: &BTreeSet<u64>) {
+        if !self.cur.waitlist {
+            self.waitlist.retain(|_, r| !first_truthy_str(r, &["attention_reason"]).trim().is_empty());
+            return;
+        }
+        let mut candidates: BTreeMap<u64, Value> = BTreeMap::new();
+        for row in rows {
+            if !row.is_object() {
+                continue;
+            }
+            let rid = request_id_of(row);
+            if rid <= 0 {
+                continue;
+            }
+            let rid = rid as u64;
+            let state = state_of(row, &["state"]);
+            let ts = |k: &str| to_f64(row.get(k)).map(|f| f.trunc() as i64).unwrap_or(0);
+            if matches!(state.as_str(), "removed" | "skipped" | "completed" | "sung") || ts("completed_at") > 0 || ts("removed_at") > 0 {
+                continue; // terminal rows only feed the server-side purge
+            }
+            if non_actionable(row) {
+                self.handled.insert(rid);
+                continue;
+            }
+            if !is_waiting_row(row) {
+                continue;
+            }
+            if local_ids.contains(&rid) {
+                self.handled.insert(rid);
+                continue;
+            }
+            if self.handled.contains(&rid) {
+                continue;
+            }
+            candidates.insert(rid, row.clone());
+        }
+        self.waitlist = candidates;
+    }
+
+    fn op_waitlist_add(&mut self, ev: &Value) -> (bool, String) {
+        let rid = ev.get("request_id").and_then(Value::as_i64).unwrap_or(0);
+        let Some(req) = (rid > 0).then(|| self.waitlist.get(&(rid as u64)).cloned()).flatten() else {
+            return (false, "unknown_waitlist_request".into());
+        };
+        let rid = rid as u64;
+        if req.get("replacement_track").map(truthy).unwrap_or(false) {
+            return (false, "unsupported".into());
+        }
+        let singer = row_str(&req, "singer").trim().to_string();
+        let artist = row_str(&req, "artist").trim().to_string();
+        let title = row_str(&req, "title").trim().to_string();
+        if is_duet(&singer) || singer.is_empty() || title.is_empty() {
+            return (false, "unsupported".into()); // duets and the library-match failure path (attention list) are not modelled
+        }
+        let int = |k: &str| to_f64(req.get(k)).map(|f| f as i64).unwrap_or(0);
+        let key = int("key");
+        let tempo = int("tempo").clamp(-30, 30);
+        self.prune_expired_slots();
+        // process_external_request: the cap first (waitlisted rows do not count towards it), then the add itself
+        let counts = self.live_counts();
+        if counts.get(&name_key(&singer)).copied().unwrap_or(0) >= self.cur.active_limit() {
+            return (false, "not_added".into());
+        }
+        let entry = Entry { rid: Some(rid), local: None, artist: artist.clone(), title: title.clone(), song_info: format!("/lib/{artist}-{title}.zip"), key, tempo: Some(100 + tempo), skipped: false };
+        if !self.add_song(&singer, entry, true) {
+            return (false, "not_added".into());
+        }
+        self.handled.insert(rid);
+        self.waitlist.remove(&rid);
+        (true, "added".into())
+    }
+
+    fn op_waitlist_remove(&mut self, ev: &Value) -> (bool, String) {
+        let rid = ev.get("request_id").and_then(Value::as_i64).unwrap_or(0);
+        let Some(req) = (rid > 0).then(|| self.waitlist.get(&(rid as u64)).cloned()).flatten() else {
+            return (false, "unknown_waitlist_request".into());
+        };
+        let rid = rid as u64;
+        let mut item = req.clone();
+        if let Some(o) = item.as_object_mut() {
+            o.insert("request_id".into(), json!(rid));
+            o.insert("state".into(), json!("removed"));
+            o.insert("removal_reason".into(), json!("waiting_for_add_cleared"));
+            o.insert("_removed_tonight".into(), json!(true));
+        }
+        self.removed_tonight.insert(rid, item);
+        self.handled.insert(rid);
+        let entry = Entry { rid: Some(rid), local: None, artist: row_str(&req, "artist"), title: row_str(&req, "title"), song_info: String::new(), key: 0, tempo: None, skipped: false };
+        self.tombstone(rid, &entry, &row_str(&req, "singer"), "waiting_for_add_cleared", "removed");
+        self.waitlist.remove(&rid);
+        (true, "removed".into())
+    }
+
+    fn op_waitlist_restore(&mut self, ev: &Value) -> (bool, String) {
+        let rid = ev.get("request_id").and_then(Value::as_i64).unwrap_or(0);
+        let Some(req) = (rid > 0).then(|| self.removed_tonight.get(&(rid as u64)).cloned()).flatten() else {
+            return (false, "unknown_removed_request".into());
+        };
+        let rid = rid as u64;
+        let mut restored = req;
+        if let Some(o) = restored.as_object_mut() {
+            for k in ["_removed_tonight", "removed_at", "removed_by", "removal_reason", "completed_at"] {
+                o.remove(k);
+            }
+            o.insert("state".into(), json!("waiting"));
+            o.insert("pending_status".into(), json!("Restored by host"));
+            let reason = first_truthy_str(&Value::Object(o.clone()), &["pending_reason"]);
+            o.insert("pending_reason".into(), json!(if reason.is_empty() { "host_restored".to_string() } else { reason }));
+        }
+        self.waitlist.insert(rid, restored);
+        self.removed_tonight.remove(&rid);
+        self.handled.remove(&rid);
+        self.removed.remove(&rid);
+        self.tombs.remove(&rid);
+        (true, "restored".into())
     }
 
     fn op_remove_song(&mut self, ev: &Value) -> (bool, String) {
@@ -738,6 +1014,8 @@ impl State {
         self.tombs.clear();
         self.removed.clear();
         self.handled.clear();
+        self.waitlist.clear();
+        self.removed_tonight.clear();
         self.singer_alias.clear();
         self.next_uid = 1;
         self.next_local = 0;
@@ -779,6 +1057,16 @@ impl State {
         }
         self.removed = ev.get("removed").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
         self.handled = ev.get("handled").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+        for (field, target) in [("waitlist", &mut self.waitlist), ("removed_tonight", &mut self.removed_tonight)] {
+            if let Some(a) = ev.get(field).and_then(Value::as_array) {
+                for row in a {
+                    let rid = request_id_of(row);
+                    if rid > 0 {
+                        target.insert(rid as u64, row.clone());
+                    }
+                }
+            }
+        }
         ROUTE_OK.into_pair()
     }
 
@@ -810,26 +1098,35 @@ impl State {
                        "round_sung": s.round_sung, "rotation_marker": s.marker, "temporary_empty_slot": s.temp_empty, "songs": songs})
             })
             .collect();
+        let view = |m: &BTreeMap<u64, Value>| -> Value {
+            let mut o = Map::new();
+            for (rid, r) in m {
+                o.insert(rid.to_string(), json!({"singer": row_str(r, "singer"), "artist": row_str(r, "artist"), "title": row_str(r, "title"), "state": row_str(r, "state")}));
+            }
+            Value::Object(o)
+        };
         let mut tombs = Map::new();
         for (rid, t) in &self.tombs {
             tombs.insert(rid.to_string(), json!({"status": t.status, "removal_reason": t.reason, "removed_by": "host", "singer_name": t.singer, "artist": t.artist, "title": t.title}));
         }
         let mut life = Map::new();
-        let ids: BTreeSet<u64> = in_queue.keys().chain(self.tombs.keys()).copied().collect();
+        let ids: BTreeSet<u64> = in_queue.keys().chain(self.tombs.keys()).chain(self.waitlist.keys()).chain(self.removed_tonight.keys()).copied().collect();
         for rid in ids {
             let state = if in_queue.contains_key(&rid) {
                 "in_queue"
-            } else if matches!(self.tombs[&rid].status.as_str(), "completed" | "sung") {
-                "completed"
+            } else if let Some(t) = self.tombs.get(&rid) {
+                if matches!(t.status.as_str(), "completed" | "sung") { "completed" } else { "removed" }
+            } else if self.waitlist.contains_key(&rid) {
+                "waitlisted"
             } else {
-                "removed"
+                "removed_tonight"
             };
             life.insert(rid.to_string(), json!({"state": state, "copies_in_queue": in_queue.get(&rid).map(Vec::len).unwrap_or(0)}));
         }
         json!({
             "queue": singers,
             "rotation": {"mode": self.cur.mode, "locked": false},
-            "waitlist": {}, "removed_tonight": {}, "handled_waitlist_ids": self.handled.iter().collect::<Vec<_>>(),
+            "waitlist": view(&self.waitlist), "removed_tonight": view(&self.removed_tonight), "handled_waitlist_ids": self.handled.iter().collect::<Vec<_>>(),
             "tombstones": tombs, "removed_ids": self.removed.iter().collect::<Vec<_>>(),
             "deferred_remote_adds": 0, "lifecycle": life,
         })
@@ -842,5 +1139,52 @@ trait IntoPair {
 impl IntoPair for (bool, &str) {
     fn into_pair(self) -> (bool, String) {
         (self.0, self.1.to_string())
+    }
+}
+
+#[cfg(test)]
+mod waitlist_tests {
+    use super::*;
+
+    #[test]
+    fn evening_key_groups_after_midnight_with_the_previous_evening() {
+        // 2026-11-02 05:59:59 local still belongs to the 11-01 evening; 06:00:00 starts 11-02
+        let day = 20_759i64 * 86_400; // 2026-11-02 00:00 (days since 1970-01-01)
+        assert_eq!(waitlist_evening_key(day + 5 * 3600 + 3599), "2026-11-01");
+        assert_eq!(waitlist_evening_key(day + 6 * 3600), "2026-11-02");
+        assert_eq!(waitlist_evening_key(day + 23 * 3600), "2026-11-02");
+        // leap day and year boundary
+        assert_eq!(waitlist_evening_key(951_782_400 + 7 * 3600), "2000-02-29"); // 2000-02-29 07:00
+        assert_eq!(waitlist_evening_key(946_684_800 + 3600), "1999-12-31");
+    }
+
+    #[test]
+    fn removed_tonight_needs_same_evening_and_tenant() {
+        assert!(removed_tonight_still_valid("2026-11-01", "wsk", "2026-11-01", "wsk"));
+        assert!(!removed_tonight_still_valid("2026-10-31", "wsk", "2026-11-01", "wsk"));
+        assert!(!removed_tonight_still_valid("2026-11-01", "a", "2026-11-01", "b"));
+    }
+
+    #[test]
+    fn waiting_rules() {
+        assert!(is_waiting_row(&json!({"state": "waiting", "sent": true})));
+        assert!(is_waiting_row(&json!({"state": "pending", "pending_reason": "x"})));
+        assert!(!is_waiting_row(&json!({"state": "pending", "pending_reason": "  "})));
+        assert!(!is_waiting_row(&json!({"state": "delivered", "pending_reason": "x"})));
+        assert!(non_actionable(&json!({"state": "accepted", "sent": 1})));
+        assert!(!non_actionable(&json!({"state": "accepted"})));
+        assert!(non_actionable(&json!({"state": "pending", "added_at": 5})));
+    }
+
+    #[test]
+    fn add_remove_restore_roundtrip() {
+        let mut st = State::new(&json!({"waitlist": true}));
+        let row = json!({"request_id": 9, "singer": "Ada", "artist": "B", "title": "T", "state": "waiting"});
+        st.apply(&json!({"op": "remote_arrive", "requests": [row]}));
+        assert_eq!(st.apply(&json!({"op": "waitlist_remove", "request_id": 9})), (true, "removed".into()));
+        assert_eq!(st.apply(&json!({"op": "waitlist_remove", "request_id": 9})), (false, "unknown_waitlist_request".into()));
+        assert_eq!(st.apply(&json!({"op": "waitlist_restore", "request_id": 9})), (true, "restored".into()));
+        assert_eq!(st.apply(&json!({"op": "waitlist_add", "request_id": 9})), (true, "added".into()));
+        assert!(st.snapshot()["waitlist"].as_object().unwrap().is_empty());
     }
 }

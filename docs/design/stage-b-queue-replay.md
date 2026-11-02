@@ -165,3 +165,58 @@ clean (...)` once, `MISMATCH <path>: app=<summary> rust=<summary>` (lengths/hash
 `skipped: <reason>`. `tools/shadow_report.py` has a QUIET SHADOWS row. Bundling: `rust/build_queue_state.sh` (both archs), both specs, `.gitignore`, both
 `build_singws_mac_*.sh`. Honest limit: tested against the Python harness world, not a show; real rows carry fields (singer ids, sessions, library
 metadata) the model ignores, so the first real mismatches may be model gaps rather than app bugs. Read them with that in mind.
+
+## M3: the waitlist in the Rust model (Stage B step 2)
+
+The Rust model now covers `waitlist_add`, `waitlist_remove`, `waitlist_restore`, `waiting`/failed rows, `use_waiting_for_add` (event key `waitlist`),
+the handled-id set and the removed-tonight list. `tools/queue_event_replay.py parity` runs ALL adversarial cases plus seeded streams (profile `full`
+by default; it toggles the setting, re-lists rows in other shapes, reuses ids, sends stale ids) and they come out identical step by step.
+Oracle: the real `_waitlist_add_request`, `_waitlist_remove_request`, `_waitlist_restore_request`, `process_external_request`,
+`_set_waiting_for_add_requests` and the reconcile loop. Mutation: `tools/mutate_queue_state.py` (waitlist mutants added).
+
+### Rules found (0.2.18.1.py as of this commit)
+
+1. **The waitlist is rebuilt by every poll.** `_reconcile_remote_requests` calls `_set_waiting_for_add_requests(rows)` first, before the queue adds.
+   With `use_waiting_for_add` ON it REPLACES `_waiting_for_add_requests` with the candidates of this poll: a row that is a terminal state
+   (removed/skipped/completed/sung or a removed_at/completed_at stamp) is only a server-purge hint; a non-actionable row (see 3) puts its id in
+   `handled`; a non-waiting row is ignored; a row whose id is queued puts the id in `handled`; a row whose id is already `handled` is dropped;
+   everything else is a candidate (the last row for an id wins). With the setting OFF only entries that carry an `attention_reason` survive.
+2. **A row is "waiting" (`_is_waiting_for_add_request`)** when it is not non-actionable and either its `state` is waiting/failed/failed_needs_review
+   or the first truthy of `pending_reason`/`last_error`/`attention_reason` is non-blank (so a `pending` row with a pending_reason is waitlisted).
+3. **Non-actionable (`_remote_request_is_non_actionable`)**: waiting/failed states never are, whatever `sent`/`delivered` say; `accepted` only with a
+   transport ack or a desktop_sync_status other than ""/pending/pending_desktop_sync; active/delivered/completed/sung/removed/skipped always; then
+   any `sent`/`delivered`; then a positive added_at/queued_at/completed_at/removed_at.
+4. **In the reconcile loop a waiting row** passes tombstone and removed-id admission first (a title conflict retires the tombstone, exactly as for
+   a normal row), then is held (never queued). A non-waiting row whose id is on the (new) waitlist is not queued either (`rid in waiting_ids`).
+5. **`waitlist_add`** (`process_external_request`): the song cap is checked first with live counts (waitlisted rows do NOT count; a blocked add
+   changes nothing and answers `not_added`, it never enters the waitlist), then the normal remote add (`_add_song_to_queue`, remote). On success the
+   id goes into `handled` and leaves the waitlist. The "already queued" suppression cannot fire for the request itself (its own id is excluded).
+6. **`waitlist_remove`**: archives the row into removed-tonight (state `removed`), adds the id to `handled`, writes a tombstone (reason
+   `waiting_for_add_cleared`, status removed) and the removed-id memory, deletes it from the waitlist.
+7. **`waitlist_restore`**: puts the archived row back as state `waiting` (pending_status "Restored by host", pending_reason kept or `host_restored`),
+   removes it from removed-tonight, `handled`, the removed-id set and the tombstones. It does not look at the waitlist setting.
+8. **`_mark_waiting_for_add_duplicate_accepted`** (an add that finds the same request id already queued) also drops the id from the waitlist.
+9. **Evening key**: `(now - 6 h)` as `%Y-%m-%d`; the removed-tonight file is used after a restart only if evening AND tenant match. Modelled as the
+   pure `waitlist_evening_key(local_epoch_secs)` / `removed_tonight_still_valid` (unit-tested, no clock in the model). The replay harness stubs
+   the save, so its restart keeps the list, as does the Rust restart.
+10. Snapshot additions: `waitlist` / `removed_tonight` map id -> {singer, artist, title, state}; lifecycle states `waitlisted` and `removed_tonight`.
+   The `load` event may carry `waitlist` / `removed_tonight` row arrays and `settings.waitlist`.
+
+### Surprises (reported, NOT changed)
+
+- A relisted id is blocked from the waitlist forever once it is in `handled`, even if the server reuses the id for a different song: the reconcile
+  loop retires the tombstone on a title conflict, but `_set_waiting_for_add_requests` runs first and `handled` is never cleared except by restore.
+- A waitlist entry created by `waitlist_restore` disappears at the next poll unless the server lists the row again (the rebuild replaces the dict);
+  it is then in no list at all (tombstone dropped, removed-tonight popped).
+- A request the host removed from the queue (tombstone) that the server later lists as `waiting` is not stopped by the tombstone in
+  `_set_waiting_for_add_requests` (only `handled` stops it), so it can reappear on the waitlist.
+- A `pending` row with a `pending_reason` is treated as waiting (silently held when the waitlist setting is off: neither queued nor listed).
+- Rows in `pending` that carry `sent`/`delivered` are skipped by the Rust model entirely but Python still refreshes key/tempo for ones already
+  queued (older gap, outside this step).
+
+### Still not modelled
+
+Duets, rotation lock, server-terminal rows (the server-side purge and `_remote_terminal_titles`), `sort_order` / order timestamps, deferred adds,
+rename-merge (`_alias_mapped_request`), stale-by-timestamp waitlist purge, `replacement_track` adds, the attention list (library-match and
+insert failures; `waitlist_add` with an empty singer/title answers `unsupported`), evening-key reload on a real restart. `queue_state_shadow.py` is
+unchanged: it still skips any poll with the waitlist setting on or a waiting row, so nothing about the waitlist runs in a show.

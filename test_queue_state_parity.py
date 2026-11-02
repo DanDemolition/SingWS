@@ -41,10 +41,15 @@ class QueueStateParityTests(unittest.TestCase):
         stream, _cov = qr.extract_stream([str(log)])
         self.check("log", stream)
 
-    def test_waitlist_ops_are_declared_unsupported(self):
+    def test_seeded_waitlist_streams_are_identical(self):
+        for seed in range(40):
+            self.check(f"waitlist-seed{seed}", qr.generate_stream(seed, 60, "full"))
+
+    def test_waitlist_ops_and_unknown_ops(self):
         impl = qr.RustImpl(BIN)
         impl.reset({})
-        self.assertEqual(impl.apply({"op": "waitlist_add", "request_id": 5}), {"ok": False, "code": "unsupported"})
+        self.assertEqual(impl.apply({"op": "waitlist_add", "request_id": 5}), {"ok": False, "code": "unknown_waitlist_request"})
+        self.assertEqual(impl.apply({"op": "waitlist_restore", "request_id": 5}), {"ok": False, "code": "unknown_removed_request"})
         self.assertEqual(impl.apply({"op": "nonsense"}), {"ok": False, "code": "unknown_op"})
 
     def test_rust_helper_is_deterministic(self):

@@ -648,8 +648,9 @@ def uses_waitlist(stream) -> bool:
 
 
 def core_cases() -> dict[str, list[dict]]:
-    """The adversarial cases inside the Rust model's declared scope (no waitlist)."""
-    return {k: v for k, v in adversarial_cases().items() if not uses_waitlist(v)}
+    """The adversarial cases inside the Rust model's declared scope. The waitlist is modelled since Stage B step 2, so this is every case
+    (``uses_waitlist`` is kept for callers that want to tell the two apart)."""
+    return dict(adversarial_cases())
 
 
 def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[dict]:
@@ -681,6 +682,10 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
         if snap["removed_tonight"] and profile != "core":
             choices += ["wl_restore"]
         choices += ["restart", "stale_ref"]
+        if profile != "core":  # waitlist pressure: re-lists in other shapes, toggling the setting, stale ids, id reuse
+            choices += ["wl_relist", "wl_relist", "wl_as_pending", "wl_flip", "wl_stale", "wl_reuse", "wl_flags", "wl_add_hot", "wl_both", "wl_both"]
+            if snap["waitlist"]:
+                choices += ["wl_add_hot"] * 2
         pick = rng.choice(choices)
         if pick == "arrive":
             batch = []
@@ -720,6 +725,31 @@ def generate_stream(seed: int, length: int = 40, profile: str = "full") -> list[
             emit({"op": "waitlist_remove", "request_id": int(rng.choice(sorted(snap["waitlist"])))})
         elif pick == "wl_restore" and snap["removed_tonight"]:
             emit({"op": "waitlist_restore", "request_id": int(rng.choice(sorted(snap["removed_tonight"])))})
+        elif pick == "wl_relist" and arrived:
+            # any earlier row again, as a waiting row (the server keeps listing what the host has not decided)
+            emit({"op": "remote_arrive", "requests": [dict(r, state="waiting", pending_reason=rng.choice(["rotation_full", "host_not_accepting", "singer_limit_waitlist"])) for r in rng.sample(arrived, min(len(arrived), rng.randint(1, 4)))]})
+        elif pick == "wl_as_pending" and arrived:
+            # the row stops being 'waiting' (server accepted it, or a pending_reason without a state)
+            r = rng.choice(arrived)
+            emit({"op": "remote_arrive", "requests": [dict(r, state=rng.choice(["pending", "accepted", "failed", "failed_needs_review", "", "delivered", "active"]), pending_reason=rng.choice(["", "x"]), **rng.choice([{}, {"sent": True}, {"added_at": 7}, {"queued_at": 3}]))]})
+        elif pick == "wl_both" and arrived:
+            # the same id twice in one poll: held as waiting AND offered as a normal row
+            r = rng.choice(arrived)
+            emit({"op": "remote_arrive", "requests": [dict(r, state="waiting", pending_reason="rotation_full"), dict(r)]})
+        elif pick == "wl_flip":
+            wl = not wl
+            emit({"op": "config", "waitlist": wl})
+        elif pick == "wl_stale":
+            emit({"op": rng.choice(["waitlist_add", "waitlist_remove", "waitlist_restore"]), "request_id": rng.choice([999999, 5001])})
+        elif pick == "wl_reuse" and arrived:
+            # an old id comes back for a different song, as a waiting row
+            r = rng.choice(arrived)
+            emit({"op": "remote_arrive", "requests": [dict(r, title=rng.choice(TITLES) + "X", artist="Other", state="waiting", pending_reason="rotation_full")]})
+        elif pick == "wl_flags" and arrived:
+            r = rng.choice(arrived)
+            emit({"op": "remote_arrive", "requests": [dict(r, state="waiting", pending_reason="rotation_full", **rng.choice([{"sent": True}, {"delivered": 1}, {"added_at": 7}, {}]))]})  # lifecycle state outranks transport flags
+        elif pick == "wl_add_hot" and snap["waitlist"]:
+            emit({"op": "waitlist_add", "request_id": int(rng.choice(sorted(snap["waitlist"])))})
         elif pick == "restart":
             emit({"op": "restart"})
         elif pick == "stale_ref":
@@ -821,7 +851,7 @@ def main(argv=None):
     c = sub.add_parser("corpus"); c.add_argument("--seeds", type=int, default=20); c.add_argument("--length", type=int, default=40)
     c.add_argument("--fingerprint", action="store_true", help="print only a hash of all snapshots (compare across PYTHONHASHSEED values)")
     q = sub.add_parser("parity", help="Python vs Rust over the in-scope corpus"); q.add_argument("--seeds", type=int, default=100); q.add_argument("--length", type=int, default=40)
-    q.add_argument("--profile", default="core", choices=["core", "full"]); q.add_argument("--stream", help="also compare this JSONL stream (e.g. from extract)")
+    q.add_argument("--profile", default="full", choices=["core", "full"]); q.add_argument("--stream", help="also compare this JSONL stream (e.g. from extract)")
     p = sub.add_parser("play"); p.add_argument("file")
     x = sub.add_parser("extract"); x.add_argument("logs", nargs="+"); x.add_argument("--out")
     args = ap.parse_args(argv)
@@ -843,7 +873,7 @@ def main(argv=None):
         return 1 if bad else 0
     if args.cmd == "parity":
         bad = 0
-        streams = list(core_cases().items() if args.profile == "core" else adversarial_cases().items())
+        streams = list(core_cases().items())
         streams += [(f"seed{i}", generate_stream(i, args.length, args.profile)) for i in range(args.seeds)]
         if args.stream:
             streams.append(("stream:" + args.stream, [json.loads(l) for l in Path(args.stream).read_text().splitlines() if l.strip()]))
