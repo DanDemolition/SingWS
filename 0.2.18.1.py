@@ -1173,6 +1173,9 @@ class IndexBuildThread(QThread):
             self.done.emit(False, f"Import failed: {e}")
 
 
+_UPDATE_SHADOW_ON = True
+
+
 def _version_key(value: str) -> tuple:
     parts = []
     for part in re.split(r"[^0-9]+", str(value or "").lstrip("vV")):
@@ -1311,6 +1314,15 @@ class GitHubUpdateWorker(QThread):
             "source": "manifest",
         }
 
+    def _update_shadow(self, kind: str, payload, info) -> None:
+        """Log-only (update_shadow.py): never alters ``info``; every failure is swallowed."""
+        try:
+            if _UPDATE_SHADOW_ON:
+                import update_shadow
+                update_shadow.observe(kind, payload, info, self.current_version, _diag)
+        except Exception:
+            pass
+
     def _download_asset(self, info: dict) -> dict:
         asset = dict(info.get("asset") or {})
         url = str(asset.get("browser_download_url") or "")
@@ -1371,9 +1383,11 @@ class GitHubUpdateWorker(QThread):
             try:
                 manifest = self._fetch_release_manifest()
                 info = self._manifest_info(manifest)
+                self._update_shadow("manifest_info", manifest, info)
             except Exception as manifest_error:
                 release = self._fetch_latest_release()
                 info = self._release_info(release)
+                self._update_shadow("release_info", release, info)
                 info["manifest_error"] = str(manifest_error)
                 info["source"] = "github_api"
             _perf_log_if_slow("github_update_check", (time.perf_counter() - started) * 1000.0)
@@ -4351,6 +4365,13 @@ DEFAULTS = {
     # is always the one sent; the relay schema, retries and connection are untouched.
     "relay_msg_shadow": True,
     "net_slice_shadow": True,
+    # Stage B shadow: around each server reconcile (at most one per ~30 s) a separate low-priority process (Rust singws-queue-state) is handed the queue as it was before and
+    # the rows the server sent, and [QUEUE-STATE-SHADOW] logs ONLY a structural difference from the queue the app actually ended up with (no names or titles). Python's queue is
+    # always the one used; reconciles the Rust model does not cover (waitlist, duets, KaraFun, async intake, lock) are not checked.
+    "queue_state_shadow": True,
+    # Stage E shadow: after the update check decides whether an update is available, a separate low-priority process (a Rust helper) is given the same manifest/release,
+    # version and machine and [UPDATE-SHADOW] logs ONLY a different answer. The app's own decision is always the one used; the helper has no network or file code.
+    "update_shadow": True,
     # Stage A5 step 9 shadow: the whole start plan (pick, route, transport arguments, published artist and title) from one Rust call, compared with what play_next_file
     # actually did. LOGS disagreements only (START-SHADOW MISMATCH plan); the app's own start is never changed. Skipped when the library is missing or a call is slow.
     "plan_shadow_live": True,
@@ -22648,6 +22669,32 @@ class SoundboardStrip(QWidget):
                 pass
 
 
+
+def _queue_state_shadowed(fn):
+    """Stage B shadow hook (see queue_state_shadow.py): snapshots before and after a reconcile when a check is due; log-only, every call swallowed, the
+    reconcile's own result and exceptions pass through unchanged."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, reqs, *args, **kwargs):
+        rec = None
+        try:
+            import queue_state_shadow
+            rec = queue_state_shadow.begin(self, reqs)
+        except Exception:
+            rec = None
+        try:
+            return fn(self, reqs, *args, **kwargs)
+        finally:
+            if rec is not None:
+                try:
+                    queue_state_shadow.finish(rec, self, _diag)
+                except Exception:
+                    pass
+
+    return wrapper
+
+
 class KaraokeApp(QWidget):
     # Session undo implementation is shared as a small command mixin.  Keeping
     # aliases here makes the API explicit on the main app without changing its
@@ -22924,12 +22971,18 @@ class KaraokeApp(QWidget):
         except Exception:
             pass
         # One line each so a quiet shadow can be told apart from one that is off or whose helper is missing (they log nothing when all agrees).
-        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow"):
+        for _mod_name in ("logpack_shadow", "relay_msg_shadow", "scan_shadow", "net_slice_shadow", "queue_state_shadow", "update_shadow"):
             try:
                 # DEFAULTS are filled into self.settings later in __init__, so merge them here or a fresh profile would announce the wrong engine
                 __import__(_mod_name).announce({**DEFAULTS, **(self.settings if isinstance(self.settings, dict) else {})}, _diag)
             except Exception:
                 pass
+        try:
+            import update_shadow
+            global _UPDATE_SHADOW_ON
+            _UPDATE_SHADOW_ON = update_shadow.enabled(self.settings)
+        except Exception:
+            pass
         try:
             import net_slice_shadow
             global _NET_SLICE_SHADOW_ON
@@ -63582,6 +63635,7 @@ class KaraokeApp(QWidget):
 
         threading.Thread(target=send, daemon=True).start()
 
+    @_queue_state_shadowed
     def _reconcile_remote_requests(self, reqs, *, update_waitlist: bool = True):
         _perf_t0 = time.perf_counter()
         # A successful poll is also our reconnect signal. Retry durable host

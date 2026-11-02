@@ -189,13 +189,17 @@ impl State {
         let op = ev.get("op").and_then(Value::as_str).unwrap_or("");
         let known = [
             "config", "tick", "add_song", "remote_arrive", "remove_song", "remove_singer", "move_singer", "move_song", "skip_singer",
-            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "restart",
+            "rotation_advance", "complete_song", "waitlist_add", "waitlist_remove", "waitlist_restore", "restart", "load",
         ];
         if !known.contains(&op) {
             return (false, "unknown_op".into());
         }
-        self.clock += 1.0;
+        match ev.get("now").and_then(Value::as_f64) {
+            Some(now) if op != "load" => self.clock = now, // live shadow: the app's own clock
+            _ => self.clock += 1.0,
+        }
         let (ok, code) = match op {
+            "load" => self.op_load(ev),
             "config" => self.op_config(ev),
             "tick" => {
                 self.clock += ev.get("seconds").and_then(Value::as_f64).unwrap_or(1.0);
@@ -722,6 +726,60 @@ impl State {
         }
         self.queue[si].has_sung = true;
         (true, "completed".into())
+    }
+
+    /// Replace the whole state with a snapshot taken from the running app (the live shadow resynchronises before every checked event, so changes
+    /// made by operations this model does not see never count as disagreements).
+    fn op_load(&mut self, ev: &Value) -> (bool, String) {
+        let st = Settings::from(ev.get("settings").unwrap_or(&Value::Null));
+        self.init = st.clone();
+        self.cur = st;
+        self.queue.clear();
+        self.tombs.clear();
+        self.removed.clear();
+        self.handled.clear();
+        self.singer_alias.clear();
+        self.next_uid = 1;
+        self.next_local = 0;
+        let f = |v: &Value, k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+        for sv in ev.get("queue").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let mut songs = Vec::new();
+            for e in sv.get("songs").and_then(Value::as_array).cloned().unwrap_or_default() {
+                let rid = e.get("rid").and_then(Value::as_u64);
+                let local = if rid.is_none() {
+                    self.next_local += 1;
+                    Some(self.next_local)
+                } else {
+                    None
+                };
+                let text = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                songs.push(Entry { rid, local, artist: text("artist"), title: text("title"), song_info: text("song_info"), key: e.get("key").and_then(Value::as_i64).unwrap_or(0), tempo: e.get("tempo").and_then(Value::as_i64), skipped: f(&e, "skipped") });
+            }
+            let uid = self.next_uid;
+            self.next_uid += 1;
+            self.queue.push(Singer {
+                uid,
+                name: sv.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                skipped: f(&sv, "skipped"),
+                has_sung: f(&sv, "has_sung"),
+                round_sung: f(&sv, "round_sung"),
+                marker: f(&sv, "rotation_marker"),
+                temp_empty: f(&sv, "temp_empty"),
+                until: sv.get("until").and_then(Value::as_f64).unwrap_or(0.0),
+                songs,
+            });
+        }
+        if let Some(t) = ev.get("tombstones").and_then(Value::as_object) {
+            for (k, v) in t {
+                if let Ok(rid) = k.parse::<u64>() {
+                    let text = |f: &str| v.get(f).and_then(Value::as_str).unwrap_or("").to_string();
+                    self.tombs.insert(rid, Tomb { status: text("status"), reason: text("reason"), singer: text("singer"), artist: text("artist"), title: text("title") });
+                }
+            }
+        }
+        self.removed = ev.get("removed").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+        self.handled = ev.get("handled").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+        ROUTE_OK.into_pair()
     }
 
     fn op_restart(&mut self) -> (bool, String) {

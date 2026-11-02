@@ -1,0 +1,17 @@
+[package]
+name = "singws-update"
+version = "0.1.0"
+edition = "2021"
+description = "Stage E: the update decision rules of the app (version key, newer-than, preferred asset, release/manifest info) as pure functions plus a JSON CLI. Log-only shadow (setting update_shadow): Python's answer is always the one used; no network, no files."
+publish = false
+
+[lib]
+name = "singws_update"
+path = "src/lib.rs"
+
+[[bin]]
+name = "singws-update"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }

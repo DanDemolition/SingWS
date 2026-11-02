@@ -358,6 +358,32 @@ class QuietShadows(unittest.TestCase):
         self.assertIn("DISAGREED 1", v["RELAY-MSG-SHADOW"])
         self.assertIn("RAN, AGREED", v["SCAN-SHADOW"])
 
+    def test_queue_state_shadow_row_reads_each_state(self):
+        self.assertIn("QUEUE-STATE-SHADOW", sr.QUIET_TAGS)
+        v = self.verdicts(("QUEUE-STATE-SHADOW", "enabled available=1"))
+        self.assertIn("NOTHING COMPARED YET (needs a server reconcile", v["QUEUE-STATE-SHADOW"])
+        v = self.verdicts(("QUEUE-STATE-SHADOW", "enabled available=1"), ("QUEUE-STATE-SHADOW", "first check clean (the Rust queue rules reproduce the app's reconcile)"))
+        self.assertIn("RAN, AGREED", v["QUEUE-STATE-SHADOW"])
+        v = self.verdicts(("QUEUE-STATE-SHADOW", "enabled available=0"))
+        self.assertIn("NO HELPER", v["QUEUE-STATE-SHADOW"])
+        v = self.verdicts(("QUEUE-STATE-SHADOW", "off (queue_state_shadow=false)"))
+        self.assertIn("OFF", v["QUEUE-STATE-SHADOW"])
+        v = self.verdicts(("QUEUE-STATE-SHADOW", "enabled available=1"), ("QUEUE-STATE-SHADOW", "MISMATCH $.queue: app=len=2 rust=len=3"))
+        self.assertIn("DISAGREED 1", v["QUEUE-STATE-SHADOW"])
+
+    def test_update_shadow_row_reads_each_state(self):
+        self.assertIn("UPDATE-SHADOW", sr.QUIET_TAGS)
+        v = self.verdicts(("UPDATE-SHADOW", "enabled available=1"))
+        self.assertIn("NOTHING COMPARED YET (needs an update check", v["UPDATE-SHADOW"])
+        v = self.verdicts(("UPDATE-SHADOW", "enabled available=1"), ("UPDATE-SHADOW", "first check clean (the Rust update rules reproduce the app's decision)"))
+        self.assertIn("RAN, AGREED", v["UPDATE-SHADOW"])
+        v = self.verdicts(("UPDATE-SHADOW", "enabled available=0"))
+        self.assertIn("NO HELPER", v["UPDATE-SHADOW"])
+        v = self.verdicts(("UPDATE-SHADOW", "off (update_shadow=false)"))
+        self.assertIn("OFF", v["UPDATE-SHADOW"])
+        v = self.verdicts(("UPDATE-SHADOW", "enabled available=1"), ("UPDATE-SHADOW", "MISMATCH manifest_info at $.available: app=True rust=False"))
+        self.assertIn("DISAGREED 1", v["UPDATE-SHADOW"])
+
     def test_net_slice_shadow_row_reads_each_state(self):
         self.assertIn("NET-SLICE-SHADOW", sr.QUIET_TAGS)
         v = self.verdicts(("NET-SLICE-SHADOW", "enabled available=1"))

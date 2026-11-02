@@ -86,6 +86,12 @@ native/singws_scan/*/singws-scan-cli
 # Built host relay message helper; produced by rust/build_relaymsg.sh
 native/singws_relaymsg/*/singws-relaymsg
 
+# Built update-rules helper; produced by rust/build_update.sh
+native/singws_update/*/singws-update
+
+# Built queue-state helper; produced by rust/build_queue_state.sh
+native/singws_queue_state/*/singws-queue-state
+
 # Built network slices helper; produced by rust/build_netslice.sh
 native/singws_netslice/*/singws-netslice
 native/singws_bgm/
